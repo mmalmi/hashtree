@@ -40,4 +40,4 @@ nsec1abc123... default
 nsec1xyz789... work
 ```
 
-Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).
+Part of [hashtree-rs](https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree).

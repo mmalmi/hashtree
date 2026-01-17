@@ -26,4 +26,4 @@ Uses Nostr kind 30078 (NIP-78) events to store tree references:
 - `d` tag: tree name
 - Content: JSON with root hash, optional encryption key
 
-Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).
+Part of [hashtree-rs](https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree).
