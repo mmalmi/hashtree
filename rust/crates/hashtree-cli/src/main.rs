@@ -163,6 +163,18 @@ enum Commands {
     },
     /// List users you follow
     Following,
+    /// Show or update your Nostr profile
+    Profile {
+        /// Set display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Set about/bio
+        #[arg(long)]
+        about: Option<String>,
+        /// Set profile picture URL
+        #[arg(long)]
+        picture: Option<String>,
+    },
     /// Push content to file servers (Blossom)
     Push {
         /// CID (hash or hash:key) to push
@@ -1101,6 +1113,9 @@ async fn main() -> Result<()> {
         Commands::Following => {
             list_following(&data_dir).await?;
         }
+        Commands::Profile { name, about, picture } => {
+            update_profile(name, about, picture).await?;
+        }
         Commands::Push { cid: cid_input, server } => {
             use hashtree_core::to_hex;
 
@@ -1605,6 +1620,115 @@ async fn follow_user(data_dir: &PathBuf, npub_str: &str, follow: bool) -> Result
     }
 
     println!("Published contact list to {} relays", success_count);
+    Ok(())
+}
+
+/// Show or update Nostr profile (kind 0)
+async fn update_profile(
+    name: Option<String>,
+    about: Option<String>,
+    picture: Option<String>,
+) -> Result<()> {
+    use nostr::{EventBuilder, Kind, Keys, JsonUtil, ClientMessage, Filter};
+    use nostr::nips::nip19::ToBech32;
+    use nostr_sdk::{ClientBuilder, EventSource};
+    use tokio_tungstenite::connect_async;
+    use futures::sink::SinkExt;
+    use std::time::Duration;
+
+    // Load config for relay list
+    let config = Config::load()?;
+
+    // Ensure nsec exists
+    let (nsec_str, _) = ensure_keys_string()?;
+    let keys = Keys::parse(&nsec_str).context("Failed to parse nsec")?;
+    let npub = keys.public_key().to_bech32()?;
+
+    // Check if we're just showing the profile (no args)
+    let is_show_only = name.is_none() && about.is_none() && picture.is_none();
+
+    // Fetch existing profile
+    let client = ClientBuilder::default().build();
+    for relay in &config.nostr.relays {
+        let _ = client.add_relay(relay).await;
+    }
+    client.connect().await;
+
+    let filter = Filter::new()
+        .author(keys.public_key())
+        .kind(Kind::Metadata)
+        .limit(1);
+
+    let timeout = Duration::from_secs(5);
+    let events = tokio::time::timeout(
+        timeout,
+        client.get_events_of(vec![filter], EventSource::relays(None))
+    ).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    let _ = client.disconnect().await;
+
+    // Parse existing profile or start fresh
+    let mut profile: serde_json::Map<String, serde_json::Value> = events
+        .into_iter()
+        .next()
+        .and_then(|e| serde_json::from_str(&e.content).ok())
+        .unwrap_or_default();
+
+    if is_show_only {
+        // Just display current profile
+        println!("Profile: {}\n", npub);
+        if let Some(n) = profile.get("name").and_then(|v| v.as_str()) {
+            println!("  name:    {}", n);
+        }
+        if let Some(n) = profile.get("display_name").and_then(|v| v.as_str()) {
+            println!("  display: {}", n);
+        }
+        if let Some(a) = profile.get("about").and_then(|v| v.as_str()) {
+            println!("  about:   {}", a);
+        }
+        if let Some(p) = profile.get("picture").and_then(|v| v.as_str()) {
+            println!("  picture: {}", p);
+        }
+        if profile.is_empty() {
+            println!("  (no profile set)");
+        }
+        return Ok(());
+    }
+
+    // Update fields
+    if let Some(n) = name {
+        profile.insert("name".to_string(), serde_json::Value::String(n.clone()));
+        profile.insert("display_name".to_string(), serde_json::Value::String(n));
+    }
+    if let Some(a) = about {
+        profile.insert("about".to_string(), serde_json::Value::String(a));
+    }
+    if let Some(p) = picture {
+        profile.insert("picture".to_string(), serde_json::Value::String(p));
+    }
+
+    // Build and sign kind 0 event
+    let content = serde_json::to_string(&profile)?;
+    let event = EventBuilder::new(Kind::Metadata, &content, [])
+        .to_event(&keys)
+        .context("Failed to sign profile event")?;
+
+    let event_json = ClientMessage::event(event).as_json();
+
+    // Publish to relays
+    let mut success_count = 0;
+    for relay in &config.nostr.relays {
+        match connect_async(relay).await {
+            Ok((mut ws, _)) => {
+                if ws.send(tokio_tungstenite::tungstenite::Message::Text(event_json.clone().into())).await.is_ok() {
+                    success_count += 1;
+                }
+                let _ = ws.close(None).await;
+            }
+            Err(_) => {}
+        }
+    }
+
+    println!("Profile updated, published to {} relays", success_count);
     Ok(())
 }
 
