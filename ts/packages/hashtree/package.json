@@ -32,8 +32,10 @@
     "storage",
     "browser"
   ],
-  "author": "",
+  "author": "Martti Malmi",
   "license": "MIT",
+  "repository": "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree",
+  "homepage": "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree",
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
     "@nostr-dev-kit/ndk": "^3.0.0-beta.66",

@@ -6,9 +6,9 @@ resolver = "2"
 version = "0.2.3"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/mmalmi/hashtree"
-homepage = "https://github.com/mmalmi/hashtree"
-authors = ["Martti Malmi <mmalmi@gmail.com>"]
+repository = "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree"
+homepage = "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree"
+authors = ["Martti Malmi"]
 
 [workspace.dependencies]
 # Core

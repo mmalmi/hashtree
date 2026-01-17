@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Iris - Content-addressed file storage on Nostr"
 authors = ["Martti Malmi"]
 license = "MIT"
-repository = "https://github.com/mmalmi/hashtree"
+repository = "https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree"
 edition = "2021"
 rust-version = "1.77.2"
 
