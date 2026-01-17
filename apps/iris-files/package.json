@@ -25,8 +25,11 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "test:e2e": "playwright test",
+    "test:e2e:fast": "E2E_FAST=1 playwright test",
+    "test:e2e:slow": "playwright test e2e/yjs-collaboration.spec.ts e2e/livestream-viewer.spec.ts",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:iris": "playwright test --config=playwright.iris.config.ts",
+    "test:tauri": "wdio run wdio.tauri.conf.ts",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix"
   },
