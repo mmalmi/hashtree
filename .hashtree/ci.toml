@@ -1,0 +1,5 @@
+# Trusted CI runners for this repository
+# Results from these runners will be displayed in the UI
+
+[[runners]]
+npub = "npub1tsrng9wsz55988794jucdf3cgmh065e29sgevt8t8wqc687r7p9suu35fu"
