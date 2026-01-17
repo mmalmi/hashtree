@@ -17,7 +17,8 @@ use axum::{
 };
 use hashtree_blossom::{BlossomClient, BlossomStore};
 use hashtree_core::{
-    from_hex, is_tree_node, nhash_decode, to_hex, Cid, HashTree, HashTreeConfig, Store, StoreError,
+    decode_tree_node, decrypt_chk, from_hex, is_tree_node, nhash_decode, to_hex, Cid, HashTree,
+    HashTreeConfig, Store, StoreError,
 };
 use hashtree_fs::FsBlobStore;
 use hashtree_resolver::{
@@ -500,12 +501,32 @@ impl HtreeState {
     }
 
     /// Get the total size of a file without loading all its content
+    /// Handles encrypted files by decrypting the root node to read the tree structure
     async fn get_file_size(&self, cid: &Cid) -> Result<u64, HtreeError> {
-        let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
-
-        tree.get_size(&cid.hash)
+        // Get raw data from store
+        let data = self
+            .store
+            .get(&cid.hash)
             .await
-            .map_err(|e| HtreeError::Store(e.to_string()))
+            .map_err(|e| HtreeError::Store(e.to_string()))?
+            .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))?;
+
+        // Decrypt if key is present
+        let data = if let Some(key) = &cid.key {
+            decrypt_chk(&data, key).map_err(|e| HtreeError::Store(e.to_string()))?
+        } else {
+            data
+        };
+
+        // If not a tree node, return raw size
+        if !is_tree_node(&data) {
+            return Ok(data.len() as u64);
+        }
+
+        // Parse tree node and sum children's sizes
+        let node = decode_tree_node(&data).map_err(|e| HtreeError::Store(e.to_string()))?;
+        let total: u64 = node.links.iter().map(|link| link.size).sum();
+        Ok(total)
     }
 
     /// Resolve nhash to Cid and mime type (without reading content)
