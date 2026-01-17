@@ -7,7 +7,14 @@
  * 2. Repo Viewer - follows the runner, fetches CI status via WebRTC/Blossom
  */
 import { test, expect, type Page } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, followUser, waitForAppReady, ensureLoggedIn, navigateToPublicFolder, useLocalRelay, waitForRelayConnected } from './test-utils';
+import { setupPageErrorHandler, disableOthersPool, followUser, waitForAppReady, ensureLoggedIn, navigateToPublicFolder, useLocalRelay, waitForRelayConnected, evaluateWithRetry, getTestRelayUrl } from './test-utils';
+import { spawn, execSync, type ChildProcess } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { nip19, generateSecretKey, getPublicKey } from 'nostr-tools';
+import { acquireRustLock, releaseRustLock } from './rust-lock.js';
 
 // Run tests serially to avoid WebRTC conflicts
 test.describe.configure({ mode: 'serial' });
@@ -42,6 +49,11 @@ const SAMPLE_CI_RESULT = {
   ],
 };
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const HASHTREE_RS_DIR = path.resolve(__dirname, '../../../rust');
+const HASHTREE_CI_DIR = path.resolve(__dirname, '../../../../hashtree-ci');
+
 // Setup fresh user with cleared storage
 async function setupFreshUser(page: Page): Promise<void> {
   await page.goto('http://localhost:5173');
@@ -60,6 +72,74 @@ async function setupFreshUser(page: Page): Promise<void> {
   await waitForAppReady(page);
   await useLocalRelay(page);
   await waitForRelayConnected(page, 30000);
+}
+
+function hasRustToolchain(): boolean {
+  try {
+    execSync('cargo --version', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureBinary(binaryPath: string, buildCommand: string, cwd: string): string | null {
+  try {
+    if (fs.existsSync(binaryPath)) return binaryPath;
+    execSync(buildCommand, { cwd, stdio: 'inherit' });
+    return binaryPath;
+  } catch (err) {
+    console.log(`Failed to build ${binaryPath}:`, err);
+    return null;
+  }
+}
+
+function buildHashtreeConfig(relayUrl: string, blossomUrl: string, dataDir: string, runnerNpub: string): string {
+  return `
+[network]
+relays = ["${relayUrl}"]
+blossom_servers = ["${blossomUrl}"]
+
+[nostr]
+relays = ["${relayUrl}"]
+allowed_npubs = ["${runnerNpub}"]
+
+[blossom]
+servers = ["${blossomUrl}"]
+read_servers = ["${blossomUrl}"]
+write_servers = ["${blossomUrl}"]
+
+[server]
+public_writes = true
+enable_webrtc = false
+stun_port = 0
+
+[storage]
+data_dir = "${dataDir}"
+max_size_gb = 1
+`.trimStart();
+}
+
+function writeRunnerConfig(configDir: string, nsec: string): void {
+  const runnerDir = path.join(configDir, 'hashtree-ci');
+  fs.mkdirSync(runnerDir, { recursive: true });
+  const content = `
+[runner]
+name = "e2e-runner"
+nsec = "${nsec}"
+tags = ["linux"]
+`.trimStart();
+  fs.writeFileSync(path.join(runnerDir, 'runner.toml'), content);
+}
+
+async function configureLocalBlossom(page: Page, blossomUrl: string): Promise<void> {
+  await evaluateWithRetry(page, async (url) => {
+    const configure = (window as unknown as { __configureBlossomServers?: (servers: unknown[]) => void }).__configureBlossomServers;
+    if (!configure) {
+      throw new Error('__configureBlossomServers not found');
+    }
+    configure([{ url, read: true, write: true }]);
+  }, blossomUrl);
 }
 
 async function getNpubFromPage(page: Page): Promise<string> {
@@ -424,5 +504,295 @@ test.describe('CI Status Display', () => {
     // Verify the module exports the expected functions
     expect(moduleLoads.hasCreateCIStatusStore).toBe(true);
     expect(moduleLoads.hasParseCIConfig).toBe(true);
+  });
+
+  test('htci publishes CI status and logs that render in git view', async ({ page }, testInfo) => {
+    test.slow();
+    test.setTimeout(180000);
+
+    if (!hasRustToolchain()) {
+      test.skip(true, 'Rust toolchain not available');
+      return;
+    }
+
+    if (!fs.existsSync(path.join(HASHTREE_RS_DIR, 'Cargo.toml'))) {
+      test.skip(true, 'hashtree rust workspace not available');
+      return;
+    }
+
+    if (!fs.existsSync(path.join(HASHTREE_CI_DIR, 'Cargo.toml'))) {
+      test.skip(true, 'hashtree-ci workspace not available');
+      return;
+    }
+
+    let lockFd: number | null = null;
+    let htreeProcess: ChildProcess | null = null;
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'htci-e2e-'));
+    const xdgConfigDir = path.join(tempDir, 'xdg-config');
+    const xdgDataDir = path.join(tempDir, 'xdg-data');
+    const hashtreeDir = path.join(tempDir, '.hashtree');
+    const dataDir = path.join(tempDir, 'htree-data');
+
+    const relayUrl = getTestRelayUrl();
+    const blossomPort = 18780 + (Number.isFinite(testInfo.workerIndex) ? testInfo.workerIndex : 0);
+    const blossomUrl = `http://127.0.0.1:${blossomPort}`;
+
+    const secretKey = generateSecretKey();
+    const runnerPubkey = getPublicKey(secretKey);
+    const runnerNpub = nip19.npubEncode(runnerPubkey);
+    const runnerNsec = nip19.nsecEncode(secretKey);
+
+    const configToml = buildHashtreeConfig(relayUrl, blossomUrl, dataDir, runnerNpub);
+
+    fs.mkdirSync(hashtreeDir, { recursive: true });
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(xdgConfigDir, { recursive: true });
+    fs.mkdirSync(xdgDataDir, { recursive: true });
+    fs.writeFileSync(path.join(hashtreeDir, 'config.toml'), configToml);
+    writeRunnerConfig(xdgConfigDir, runnerNsec);
+
+    lockFd = await acquireRustLock(180000);
+
+    try {
+      const htreeBin = ensureBinary(
+        path.join(HASHTREE_RS_DIR, 'target/release/htree'),
+        'cargo build --release -p hashtree-cli',
+        HASHTREE_RS_DIR
+      );
+      if (!htreeBin) {
+        throw new Error('htree binary unavailable');
+      }
+
+      const htciBin = ensureBinary(
+        path.join(HASHTREE_CI_DIR, 'target/release/htci'),
+        'cargo build --release -p ci-runner',
+        HASHTREE_CI_DIR
+      );
+      if (!htciBin) {
+        throw new Error('htci binary unavailable');
+      }
+
+      const htreeEnv = {
+        ...process.env,
+        HOME: tempDir,
+        HTREE_CONFIG_DIR: hashtreeDir,
+        RUST_LOG: 'info',
+      };
+
+      htreeProcess = spawn(htreeBin, ['start', '--addr', `127.0.0.1:${blossomPort}`], {
+        env: htreeEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('htree start timeout')), 30000);
+        const onData = (data: Buffer) => {
+          const text = data.toString();
+          if (text.includes('Web UI') || text.includes('WebRTC') || text.includes('listening') || text.includes('Listening')) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        };
+        htreeProcess?.stdout?.on('data', onData);
+        htreeProcess?.stderr?.on('data', onData);
+        htreeProcess?.on('error', (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+        htreeProcess?.on('exit', (code) => {
+          if (code && code !== 0) {
+            clearTimeout(timeout);
+            reject(new Error(`htree exited with code ${code}`));
+          }
+        });
+      });
+
+      setupPageErrorHandler(page);
+      await page.goto('/');
+
+      await page.evaluate(async () => {
+        const dbs = await indexedDB.databases();
+        for (const db of dbs) {
+          if (db.name) indexedDB.deleteDatabase(db.name);
+        }
+        localStorage.clear();
+        sessionStorage.clear();
+      });
+
+      await page.reload();
+      await waitForAppReady(page, 60000);
+      await disableOthersPool(page);
+      await useLocalRelay(page);
+      await waitForRelayConnected(page, 30000);
+      await configureLocalBlossom(page, blossomUrl);
+      await navigateToPublicFolder(page, { timeoutMs: 60000 });
+
+      const repoName = `htci-test-${Date.now()}`;
+      await page.getByRole('button', { name: 'New Folder' }).click();
+      const folderInput = page.locator('input[placeholder="Folder name..."]');
+      await folderInput.waitFor({ timeout: 5000 });
+      await folderInput.fill(repoName);
+      await page.click('button:has-text("Create")');
+      await expect(page.locator('.fixed.inset-0.bg-black')).not.toBeVisible({ timeout: 10000 });
+
+      const repoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: repoName }).first();
+      await expect(repoLink).toBeVisible({ timeout: 15000 });
+      await repoLink.click();
+      await page.waitForURL(new RegExp(repoName), { timeout: 10000 });
+
+      const ciConfigResult = await page.evaluate(async ({ runnerNpub }) => {
+        const { getTree, LinkType } = await import('/src/store.ts');
+        const { autosaveIfOwn } = await import('/src/nostr.ts');
+        const { getCurrentRootCid } = await import('/src/actions/route.ts');
+        const { getRouteSync } = await import('/src/stores/index.ts');
+
+        const tree = getTree();
+        let rootCid = getCurrentRootCid();
+        if (!rootCid) return { error: 'no root cid' };
+
+        const route = getRouteSync();
+        const basePath = route.path;
+
+        const ciToml = `[ci]\n[[ci.runners]]\nnpub = "${runnerNpub}"\nname = "e2e-runner"\n`;
+        const readme = '# CI Runner Test\n';
+
+        const { cid: ciCid, size: ciSize } = await tree.putFile(new TextEncoder().encode(ciToml));
+        const { cid: readmeCid, size: readmeSize } = await tree.putFile(new TextEncoder().encode(readme));
+
+        const { cid: hashtreeDirCid } = await tree.putDirectory([
+          { name: 'ci.toml', cid: ciCid, size: ciSize, type: LinkType.Blob },
+        ]);
+
+        rootCid = await tree.setEntry(rootCid, basePath, '.hashtree', hashtreeDirCid, 0, LinkType.Dir);
+        rootCid = await tree.setEntry(rootCid, basePath, 'README.md', readmeCid, readmeSize, LinkType.Blob);
+        autosaveIfOwn(rootCid);
+
+        return { success: true };
+      }, { runnerNpub });
+
+      if (ciConfigResult?.error) {
+        throw new Error(`Failed to write ci.toml: ${ciConfigResult.error}`);
+      }
+
+      const gitInitBtn = page.getByRole('button', { name: 'Git Init' });
+      await expect(gitInitBtn).toBeVisible({ timeout: 15000 });
+      await gitInitBtn.click();
+      await expect(gitInitBtn).not.toBeVisible({ timeout: 30000 });
+
+      await expect(page.locator('[title="No uncommitted changes"]')).toBeVisible({ timeout: 30000 });
+
+      const repoInfoHandle = await page.waitForFunction(async () => {
+        const { getTree } = await import('/src/store.ts');
+        const { getCurrentRootCid } = await import('/src/actions/route.ts');
+        const { getRouteSync } = await import('/src/stores/index.ts');
+        const { getHead } = await import('/src/utils/git.ts');
+        const nostrStore = (window as any).__nostrStore;
+
+        const tree = getTree();
+        const rootCid = getCurrentRootCid();
+        const route = getRouteSync();
+        if (!rootCid || !route.treeName) return null;
+
+        const resolved = route.path.length > 0
+          ? await tree.resolvePath(rootCid, route.path)
+          : { cid: rootCid };
+
+        if (!resolved?.cid) return null;
+
+        const commit = await getHead(resolved.cid);
+        if (!commit) return null;
+
+        const repoPath = route.path.length > 0
+          ? `${route.treeName}/${route.path.join('/')}`
+          : route.treeName;
+
+        return {
+          ownerNpub: nostrStore?.getState?.().npub || '',
+          repoPath,
+          commit,
+        };
+      }, undefined, { timeout: 30000 });
+
+      const repoInfo = await repoInfoHandle.jsonValue();
+
+      const localRepo = path.join(tempDir, 'ci-local-repo');
+      fs.mkdirSync(path.join(localRepo, '.github', 'workflows'), { recursive: true });
+      const logMarker = `CI_LOG_MARKER_${Date.now()}`;
+      const workflow = `
+name: CI
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo
+        run: echo "${logMarker}"
+      - name: Done
+        run: echo "DONE"
+`.trimStart();
+      fs.writeFileSync(path.join(localRepo, '.github', 'workflows', 'ci.yml'), workflow);
+      fs.writeFileSync(path.join(localRepo, 'README.md'), 'ci local repo');
+      execSync('git init', { cwd: localRepo, stdio: 'ignore' });
+      execSync('git config user.email "test@test.com"', { cwd: localRepo, stdio: 'ignore' });
+      execSync('git config user.name "Test User"', { cwd: localRepo, stdio: 'ignore' });
+      execSync('git add -A', { cwd: localRepo, stdio: 'ignore' });
+      execSync('git commit -m "Initial commit"', { cwd: localRepo, stdio: 'ignore' });
+
+      const htciEnv = {
+        ...process.env,
+        HOME: tempDir,
+        XDG_CONFIG_HOME: xdgConfigDir,
+        XDG_DATA_HOME: xdgDataDir,
+        HTREE_CONFIG_DIR: hashtreeDir,
+        RUST_LOG: 'info',
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(
+          htciBin,
+          [
+            'run',
+            '--repo', localRepo,
+            '--owner-npub', repoInfo.ownerNpub,
+            '--repo-path', repoInfo.repoPath,
+            '--workflow', 'ci.yml',
+            '--commit', repoInfo.commit,
+          ],
+          { env: htciEnv, stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+
+        const onExit = (code: number | null) => {
+          if (code && code !== 0) {
+            reject(new Error(`htci exited with code ${code}`));
+            return;
+          }
+          resolve();
+        };
+
+        proc.on('error', reject);
+        proc.on('exit', onExit);
+      });
+
+      const badge = page.locator('button[title="View CI runs"] [data-testid="ci-status-badge"][data-ci-status="success"]');
+      await expect(badge).toBeVisible({ timeout: 60000 });
+
+      await page.locator('button[title="View CI runs"]').click();
+      const modal = page.locator('[data-testid="ci-runs-modal-backdrop"]').first();
+      await expect(modal).toBeVisible({ timeout: 10000 });
+      const logPre = page.locator('pre').filter({ hasText: logMarker }).first();
+      await expect(logPre).toContainText(logMarker, { timeout: 60000 });
+    } finally {
+      if (htreeProcess) {
+        htreeProcess.kill('SIGTERM');
+        htreeProcess = null;
+      }
+      if (lockFd !== null) {
+        releaseRustLock(lockFd);
+        lockFd = null;
+      }
+      if (tempDir && fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
   });
 });
