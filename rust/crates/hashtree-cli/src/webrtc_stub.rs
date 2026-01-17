@@ -20,6 +20,8 @@ pub struct PeerEntry {
     pub peer_id: PeerId,
     pub peer: Option<DummyPeer>,
     pub pool: PeerPool,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
 }
 
 /// Peer ID stub
@@ -73,6 +75,11 @@ impl WebRTCState {
     /// Request from peers - always returns None when P2P is disabled
     pub async fn request_from_peers(&self, _hash: &str) -> Option<Vec<u8>> {
         None
+    }
+
+    /// Get bandwidth stats - always returns zeros when P2P is disabled
+    pub fn get_bandwidth(&self) -> (u64, u64) {
+        (0, 0)
     }
 }
 

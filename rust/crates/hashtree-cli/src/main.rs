@@ -1343,6 +1343,12 @@ fn format_daemon_status(status: &serde_json::Value, include_header: bool) -> Str
             if let Some(dc) = webrtc.get("with_data_channel") {
                 lines.push(format!("  With data channel: {}", dc));
             }
+            if let Some(sent) = webrtc.get("bytes_sent").and_then(|b| b.as_u64()) {
+                lines.push(format!("  Bytes sent: {}", format_bytes(sent)));
+            }
+            if let Some(received) = webrtc.get("bytes_received").and_then(|b| b.as_u64()) {
+                lines.push(format!("  Bytes received: {}", format_bytes(received)));
+            }
         } else {
             lines.push("  Enabled: no".to_string());
         }
@@ -1852,11 +1858,23 @@ async fn list_peers(addr: &str) -> Result<()> {
 
         let profile_name = fetch_profile_name(relays, pubkey_hex).await;
 
-        if let Some(name) = profile_name {
-            println!("  {} ({})", npub, name);
+        // Get bandwidth stats
+        let bytes_sent = peer.get("bytes_sent").and_then(|b| b.as_u64()).unwrap_or(0);
+        let bytes_received = peer.get("bytes_received").and_then(|b| b.as_u64()).unwrap_or(0);
+
+        let name_part = if let Some(name) = profile_name {
+            format!(" ({})", name)
         } else {
-            println!("  {}", npub);
-        }
+            String::new()
+        };
+
+        let bandwidth_part = if bytes_sent > 0 || bytes_received > 0 {
+            format!(" [↑{} ↓{}]", format_bytes(bytes_sent), format_bytes(bytes_received))
+        } else {
+            String::new()
+        };
+
+        println!("  {}{}{}", npub, name_part, bandwidth_part);
     }
 
     if !follows.is_empty() {

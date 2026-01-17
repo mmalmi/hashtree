@@ -55,12 +55,18 @@ pub struct PeerEntry {
     pub last_seen: Instant,
     pub peer: Option<Peer>,
     pub pool: PeerPool,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
 }
 
 /// Shared state for WebRTC manager
 pub struct WebRTCState {
     pub peers: RwLock<HashMap<String, PeerEntry>>,
     pub connected_count: std::sync::atomic::AtomicUsize,
+    /// Total bytes sent across all peers (cumulative)
+    pub bytes_sent: std::sync::atomic::AtomicU64,
+    /// Total bytes received across all peers (cumulative)
+    pub bytes_received: std::sync::atomic::AtomicU64,
 }
 
 impl WebRTCState {
@@ -68,6 +74,32 @@ impl WebRTCState {
         Self {
             peers: RwLock::new(HashMap::new()),
             connected_count: std::sync::atomic::AtomicUsize::new(0),
+            bytes_sent: std::sync::atomic::AtomicU64::new(0),
+            bytes_received: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Get current bandwidth stats (bytes sent/received)
+    pub fn get_bandwidth(&self) -> (u64, u64) {
+        (
+            self.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+            self.bytes_received.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Record bytes sent (global + per-peer)
+    pub async fn record_sent(&self, peer_id: &str, bytes: u64) {
+        self.bytes_sent.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        if let Some(entry) = self.peers.write().await.get_mut(peer_id) {
+            entry.bytes_sent += bytes;
+        }
+    }
+
+    /// Record bytes received (global + per-peer)
+    pub async fn record_received(&self, peer_id: &str, bytes: u64) {
+        self.bytes_received.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        if let Some(entry) = self.peers.write().await.get_mut(peer_id) {
+            entry.bytes_received += bytes;
         }
     }
 
@@ -144,10 +176,13 @@ impl WebRTCState {
                 htl: MAX_HTL,
             };
             if let Ok(wire) = encode_request(&req) {
+                let wire_len = wire.len() as u64;
                 if dc.send(&bytes::Bytes::from(wire)).await.is_ok() {
+                    self.record_sent(&peer_id, wire_len).await;
                     // Wait 500ms for response from this peer
                     match tokio::time::timeout(std::time::Duration::from_millis(500), rx).await {
                         Ok(Ok(Some(data))) => {
+                            self.record_received(&peer_id, data.len() as u64).await;
                             debug!("Got response from peer {} for {}", peer_id, &hash_hex[..8.min(hash_hex.len())]);
                             return Some(data);
                         }
@@ -892,6 +927,8 @@ impl WebRTCManager {
                     last_seen: Instant::now(),
                     peer: None,
                     pool,
+                    bytes_sent: 0,
+                    bytes_received: 0,
                 },
             );
         }
@@ -1033,6 +1070,8 @@ impl WebRTCManager {
                     last_seen: Instant::now(),
                     peer: Some(peer),
                     pool,
+                    bytes_sent: 0,
+                    bytes_received: 0,
                 },
             );
         }
