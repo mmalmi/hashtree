@@ -63,6 +63,217 @@ importers:
         specifier: ^8.18.3
         version: 8.18.3
 
+  ../apps/iris-files:
+    dependencies:
+      '@ffmpeg/core':
+        specifier: 0.12.6
+        version: 0.12.6
+      '@ffmpeg/ffmpeg':
+        specifier: ^0.12.15
+        version: 0.12.15
+      '@ffmpeg/util':
+        specifier: ^0.12.2
+        version: 0.12.2
+      '@msgpack/msgpack':
+        specifier: ^3.1.2
+        version: 3.1.2
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.0.1
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.0.0
+      '@scure/bip39':
+        specifier: ^2.0.0
+        version: 2.0.1
+      '@tiptap/core':
+        specifier: ^2.26.2
+        version: 2.27.1(@tiptap/pm@2.27.1)
+      '@tiptap/extension-collaboration':
+        specifier: ^2.26.2
+        version: 2.27.1(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))(@tiptap/pm@2.27.1)(y-prosemirror@1.3.7(prosemirror-model@1.25.4)(prosemirror-state@1.4.4)(prosemirror-view@1.41.4)(y-protocols@1.0.6(yjs@13.6.27))(yjs@13.6.27))
+      '@tiptap/extension-collaboration-cursor':
+        specifier: ^2.26.2
+        version: 2.26.2(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))(y-prosemirror@1.3.7(prosemirror-model@1.25.4)(prosemirror-state@1.4.4)(prosemirror-view@1.41.4)(y-protocols@1.0.6(yjs@13.6.27))(yjs@13.6.27))
+      '@tiptap/extension-image':
+        specifier: ^2.27.1
+        version: 2.27.1(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))
+      '@tiptap/extension-placeholder':
+        specifier: ^2.26.2
+        version: 2.27.1(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))(@tiptap/pm@2.27.1)
+      '@tiptap/pm':
+        specifier: ^2.26.2
+        version: 2.27.1
+      '@tiptap/starter-kit':
+        specifier: ^2.26.2
+        version: 2.27.1
+      coco-cashu-core:
+        specifier: file:../../ts/vendor/coco-cashu-core
+        version: file:vendor/coco-cashu-core(typescript@5.9.3)
+      coco-cashu-indexeddb:
+        specifier: file:../../ts/vendor/coco-cashu-indexeddb
+        version: file:vendor/coco-cashu-indexeddb(coco-cashu-core@file:vendor/coco-cashu-core(typescript@5.9.3))(typescript@5.9.3)
+      dexie:
+        specifier: ^4.2.1
+        version: 4.2.1
+      dompurify:
+        specifier: ^3.3.1
+        version: 3.3.1
+      emulators:
+        specifier: ^8.3.9
+        version: 8.3.9
+      emulators-ui:
+        specifier: ^0.73.9
+        version: 0.73.9
+      fflate:
+        specifier: ^0.8.2
+        version: 0.8.2
+      hashtree:
+        specifier: workspace:*
+        version: link:../../ts/packages/hashtree
+      hashtree-index:
+        specifier: workspace:*
+        version: link:../../ts/packages/hashtree-index
+      jsqr:
+        specifier: ^1.4.0
+        version: 1.4.0
+      leaflet:
+        specifier: ^1.9.4
+        version: 1.9.4
+      marked:
+        specifier: ^15.0.0
+        version: 15.0.12
+      minidenticons:
+        specifier: ^4.2.1
+        version: 4.2.1
+      ndk:
+        specifier: workspace:*
+        version: link:../../ts/packages/ndk
+      ndk-cache:
+        specifier: workspace:*
+        version: link:../../ts/packages/ndk-cache
+      nostr-social-graph:
+        specifier: ^1.0.33
+        version: 1.0.33
+      nostr-tools:
+        specifier: ^2.18.2
+        version: 2.18.2(typescript@5.9.3)
+      nostr-wasm:
+        specifier: ^0.1.0
+        version: 0.1.0
+      qrcode:
+        specifier: ^1.5.4
+        version: 1.5.4
+      wasm-git:
+        specifier: ^0.0.13
+        version: 0.0.13
+      yjs:
+        specifier: ^13.6.27
+        version: 13.6.27
+    devDependencies:
+      '@iconify-json/lucide':
+        specifier: ^1.2.75
+        version: 1.2.77
+      '@playwright/test':
+        specifier: ^1.49.0
+        version: 1.57.0
+      '@sveltejs/vite-plugin-svelte':
+        specifier: ^5.0.3
+        version: 5.1.1(svelte@5.45.6)(vite@6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0))
+      '@tauri-apps/api':
+        specifier: ^2.5.0
+        version: 2.9.1
+      '@tauri-apps/cli':
+        specifier: ^2.6.0
+        version: 2.9.6
+      '@tauri-apps/plugin-autostart':
+        specifier: ^2
+        version: 2.5.1
+      '@tauri-apps/plugin-dialog':
+        specifier: ^2
+        version: 2.4.2
+      '@tauri-apps/plugin-notification':
+        specifier: ^2
+        version: 2.3.3
+      '@tauri-apps/plugin-opener':
+        specifier: ^2
+        version: 2.5.2
+      '@tauri-apps/plugin-os':
+        specifier: ^2
+        version: 2.3.2
+      '@tsconfig/svelte':
+        specifier: ^5.0.4
+        version: 5.0.6
+      '@types/dompurify':
+        specifier: ^3.2.0
+        version: 3.2.0
+      '@types/leaflet':
+        specifier: ^1.9.14
+        version: 1.9.21
+      '@types/qrcode':
+        specifier: ^1.5.6
+        version: 1.5.6
+      '@typescript-eslint/eslint-plugin':
+        specifier: ^8.48.0
+        version: 8.48.1(@typescript-eslint/parser@8.48.1(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.3))(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.3)
+      '@typescript-eslint/parser':
+        specifier: ^8.48.0
+        version: 8.48.1(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.3)
+      '@unocss/preset-icons':
+        specifier: ^66.5.9
+        version: 66.5.10
+      '@unocss/preset-typography':
+        specifier: ^66.5.9
+        version: 66.5.10
+      eslint:
+        specifier: ^9.39.1
+        version: 9.39.1(jiti@2.6.1)
+      eslint-plugin-svelte:
+        specifier: ^3.13.1
+        version: 3.13.1(eslint@9.39.1(jiti@2.6.1))(svelte@5.45.6)
+      globals:
+        specifier: ^16.5.0
+        version: 16.5.0
+      html2canvas:
+        specifier: ^1.4.1
+        version: 1.4.1
+      open-props:
+        specifier: ^1.7.16
+        version: 1.7.17
+      rollup-plugin-visualizer:
+        specifier: ^6.0.5
+        version: 6.0.5(rollup@2.79.2)
+      svelte:
+        specifier: ^5.16.0
+        version: 5.45.6
+      svelte-check:
+        specifier: ^4.1.4
+        version: 4.3.4(picomatch@4.0.3)(svelte@5.45.6)(typescript@5.9.3)
+      svelte-eslint-parser:
+        specifier: ^1.4.1
+        version: 1.4.1(svelte@5.45.6)
+      svelte-render-scan:
+        specifier: ^1.1.0
+        version: 1.1.0(svelte@5.45.6)
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.3
+      unocss:
+        specifier: ^66.5.9
+        version: 66.5.10(postcss@8.5.6)(vite@6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0))
+      vite:
+        specifier: ^6.0.0
+        version: 6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0)
+      vite-plugin-pwa:
+        specifier: ^1.2.0
+        version: 1.2.0(vite@6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0))(workbox-build@7.4.0(@types/babel__core@7.20.5))(workbox-window@7.4.0)
+      workbox-precaching:
+        specifier: ^7.4.0
+        version: 7.4.0
+      workbox-window:
+        specifier: ^7.4.0
+        version: 7.4.0
+
   packages/hashtree:
     dependencies:
       '@msgpack/msgpack':
@@ -140,199 +351,6 @@ importers:
       vitest:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@24.10.1)(happy-dom@15.11.7)(jsdom@26.1.0)(terser@5.44.1)
-
-  packages/iris-files:
-    dependencies:
-      '@ffmpeg/core':
-        specifier: 0.12.6
-        version: 0.12.6
-      '@ffmpeg/ffmpeg':
-        specifier: ^0.12.15
-        version: 0.12.15
-      '@ffmpeg/util':
-        specifier: ^0.12.2
-        version: 0.12.2
-      '@msgpack/msgpack':
-        specifier: ^3.1.2
-        version: 3.1.2
-      '@noble/hashes':
-        specifier: ^2.0.1
-        version: 2.0.1
-      '@scure/base':
-        specifier: ^2.0.0
-        version: 2.0.0
-      '@scure/bip39':
-        specifier: ^2.0.0
-        version: 2.0.1
-      '@tiptap/core':
-        specifier: ^2.26.2
-        version: 2.27.1(@tiptap/pm@2.27.1)
-      '@tiptap/extension-collaboration':
-        specifier: ^2.26.2
-        version: 2.27.1(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))(@tiptap/pm@2.27.1)(y-prosemirror@1.3.7(prosemirror-model@1.25.4)(prosemirror-state@1.4.4)(prosemirror-view@1.41.4)(y-protocols@1.0.6(yjs@13.6.27))(yjs@13.6.27))
-      '@tiptap/extension-collaboration-cursor':
-        specifier: ^2.26.2
-        version: 2.26.2(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))(y-prosemirror@1.3.7(prosemirror-model@1.25.4)(prosemirror-state@1.4.4)(prosemirror-view@1.41.4)(y-protocols@1.0.6(yjs@13.6.27))(yjs@13.6.27))
-      '@tiptap/extension-image':
-        specifier: ^2.27.1
-        version: 2.27.1(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))
-      '@tiptap/extension-placeholder':
-        specifier: ^2.26.2
-        version: 2.27.1(@tiptap/core@2.27.1(@tiptap/pm@2.27.1))(@tiptap/pm@2.27.1)
-      '@tiptap/pm':
-        specifier: ^2.26.2
-        version: 2.27.1
-      '@tiptap/starter-kit':
-        specifier: ^2.26.2
-        version: 2.27.1
-      coco-cashu-core:
-        specifier: file:../../vendor/coco-cashu-core
-        version: file:vendor/coco-cashu-core(typescript@5.9.3)
-      coco-cashu-indexeddb:
-        specifier: file:../../vendor/coco-cashu-indexeddb
-        version: file:vendor/coco-cashu-indexeddb(coco-cashu-core@file:vendor/coco-cashu-core(typescript@5.9.3))(typescript@5.9.3)
-      dexie:
-        specifier: ^4.2.1
-        version: 4.2.1
-      dompurify:
-        specifier: ^3.3.1
-        version: 3.3.1
-      emulators:
-        specifier: ^8.3.9
-        version: 8.3.9
-      emulators-ui:
-        specifier: ^0.73.9
-        version: 0.73.9
-      fflate:
-        specifier: ^0.8.2
-        version: 0.8.2
-      hashtree:
-        specifier: workspace:*
-        version: link:../hashtree
-      hashtree-index:
-        specifier: workspace:*
-        version: link:../hashtree-index
-      jsqr:
-        specifier: ^1.4.0
-        version: 1.4.0
-      leaflet:
-        specifier: ^1.9.4
-        version: 1.9.4
-      marked:
-        specifier: ^15.0.0
-        version: 15.0.12
-      minidenticons:
-        specifier: ^4.2.1
-        version: 4.2.1
-      ndk:
-        specifier: workspace:*
-        version: link:../ndk
-      ndk-cache:
-        specifier: workspace:*
-        version: link:../ndk-cache
-      nostr-social-graph:
-        specifier: ^1.0.33
-        version: 1.0.33
-      nostr-tools:
-        specifier: ^2.18.2
-        version: 2.18.2(typescript@5.9.3)
-      nostr-wasm:
-        specifier: ^0.1.0
-        version: 0.1.0
-      qrcode:
-        specifier: ^1.5.4
-        version: 1.5.4
-      wasm-git:
-        specifier: ^0.0.13
-        version: 0.0.13
-      yjs:
-        specifier: ^13.6.27
-        version: 13.6.27
-    devDependencies:
-      '@iconify-json/lucide':
-        specifier: ^1.2.75
-        version: 1.2.77
-      '@playwright/test':
-        specifier: ^1.49.0
-        version: 1.57.0
-      '@sveltejs/vite-plugin-svelte':
-        specifier: ^5.0.3
-        version: 5.1.1(svelte@5.45.6)(vite@6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0))
-      '@tauri-apps/api':
-        specifier: ^2.5.0
-        version: 2.9.1
-      '@tauri-apps/cli':
-        specifier: ^2.6.0
-        version: 2.9.6
-      '@tauri-apps/plugin-autostart':
-        specifier: ^2
-        version: 2.5.1
-      '@tauri-apps/plugin-dialog':
-        specifier: ^2
-        version: 2.4.2
-      '@tauri-apps/plugin-notification':
-        specifier: ^2
-        version: 2.3.3
-      '@tauri-apps/plugin-opener':
-        specifier: ^2
-        version: 2.5.2
-      '@tauri-apps/plugin-os':
-        specifier: ^2
-        version: 2.3.2
-      '@tsconfig/svelte':
-        specifier: ^5.0.4
-        version: 5.0.6
-      '@types/dompurify':
-        specifier: ^3.2.0
-        version: 3.2.0
-      '@types/leaflet':
-        specifier: ^1.9.14
-        version: 1.9.21
-      '@types/qrcode':
-        specifier: ^1.5.6
-        version: 1.5.6
-      '@unocss/preset-icons':
-        specifier: ^66.5.9
-        version: 66.5.10
-      '@unocss/preset-typography':
-        specifier: ^66.5.9
-        version: 66.5.10
-      html2canvas:
-        specifier: ^1.4.1
-        version: 1.4.1
-      open-props:
-        specifier: ^1.7.16
-        version: 1.7.17
-      rollup-plugin-visualizer:
-        specifier: ^6.0.5
-        version: 6.0.5(rollup@2.79.2)
-      svelte:
-        specifier: ^5.16.0
-        version: 5.45.6
-      svelte-check:
-        specifier: ^4.1.4
-        version: 4.3.4(picomatch@4.0.3)(svelte@5.45.6)(typescript@5.9.3)
-      svelte-render-scan:
-        specifier: ^1.1.0
-        version: 1.1.0(svelte@5.45.6)
-      typescript:
-        specifier: ^5.3.0
-        version: 5.9.3
-      unocss:
-        specifier: ^66.5.9
-        version: 66.5.10(postcss@8.5.6)(vite@6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0))
-      vite:
-        specifier: ^6.0.0
-        version: 6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0)
-      vite-plugin-pwa:
-        specifier: ^1.2.0
-        version: 1.2.0(vite@6.4.1(@types/node@24.10.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0))(workbox-build@7.4.0(@types/babel__core@7.20.5))(workbox-window@7.4.0)
-      workbox-precaching:
-        specifier: ^7.4.0
-        version: 7.4.0
-      workbox-window:
-        specifier: ^7.4.0
-        version: 7.4.0
 
   packages/ndk:
     dependencies:

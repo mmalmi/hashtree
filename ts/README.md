@@ -20,7 +20,7 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 - [`packages/hashtree`](packages/hashtree) - Core merkle tree library
 - [`packages/hashtree-dexie`](packages/hashtree-dexie) - IndexedDB/Dexie storage adapter
 - [`packages/hashtree-index`](packages/hashtree-index) - B-Tree and index structures for hashtree
-- [`packages/iris-files`](packages/iris-files) - Web app with Nostr integration (Iris Files + Iris Video)
+- [`../apps/iris-files`](../apps/iris-files) - Web/desktop app with Nostr integration (Iris Files + Iris Video)
 - [`packages/ndk`](packages/ndk) - Nostr SDK used by the apps
 - [`packages/ndk-cache`](packages/ndk-cache) - Cache layer for NDK
 
@@ -124,7 +124,7 @@ Falls back to Blossom servers when data isn't found on peers or WebRTC isn't ava
 Iris Files can be built as a native desktop app using [Tauri](https://tauri.app/):
 
 ```bash
-cd packages/iris-files
+cd ../apps/iris-files
 
 # Install dependencies
 pnpm install

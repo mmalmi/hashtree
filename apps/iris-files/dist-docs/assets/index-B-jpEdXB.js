@@ -1,0 +1,1 @@
+async function n(r,e={},a){return window.__TAURI_INTERNALS__.invoke(r,e,a)}async function t(){return await n("plugin:autostart|is_enabled")}async function s(){await n("plugin:autostart|enable")}async function i(){await n("plugin:autostart|disable")}export{i as disable,s as enable,t as isEnabled};

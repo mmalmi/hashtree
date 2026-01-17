@@ -47,7 +47,7 @@ export const config: Options.Testrunner = {
       'tauri:options': {
         application: path.resolve(
           __dirname,
-          'packages/iris-files/src-tauri/target/release/iris'
+          '../apps/iris-files/src-tauri/target/release/iris'
         ),
       },
     } as WebdriverIO.Capabilities,

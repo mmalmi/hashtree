@@ -1,0 +1,61 @@
+[package]
+name = "iris"
+version = "0.1.0"
+description = "Iris - Content-addressed file storage on Nostr"
+authors = ["Martti Malmi"]
+license = "MIT"
+repository = "https://github.com/mmalmi/hashtree"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.3.0", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tauri = { version = "2.6", features = ["tray-icon", "unstable"] }
+tauri-plugin-os = "2"
+tauri-plugin-opener = "2.5"
+tauri-plugin-dialog = "2.4"
+tauri-plugin-notification = "2"
+
+# Hashtree dependencies for native /htree protocol handling
+hashtree-core = { path = "../../../rust/crates/hashtree-core" }
+hashtree-fs = { path = "../../../rust/crates/hashtree-fs" }
+hashtree-blossom = { path = "../../../rust/crates/hashtree-blossom", features = ["store"] }
+hashtree-resolver = { path = "../../../rust/crates/hashtree-resolver", features = ["nostr"] }
+hashtree-webrtc = { path = "../../../rust/crates/hashtree-webrtc" }
+tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
+nostr-sdk = { version = "0.35", default-features = false }
+nostrdb = { git = "https://github.com/mmalmi/nostrdb-rs" }
+hex = "0.4"
+base64 = "0.22"
+async-trait = "0.1"
+thiserror = "1.0"
+parking_lot = "0.12"
+lru = "0.12"
+once_cell = "1.19"
+uuid = { version = "1.0", features = ["v4"] }
+percent-encoding = "2.3"
+axum = { version = "0.8", features = ["macros", "ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+futures = "0.3"
+heed = "0.20"
+bincode = "1.3"
+dirs = "5"
+
+[dev-dependencies]
+tauri = { version = "2.6", features = ["test"] }
+tempfile = "3"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2"

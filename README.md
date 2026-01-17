@@ -2,10 +2,12 @@
 
 Content-addressed filesystem on Nostr. Merkle roots can be published to get mutable `npub/tree/path` addresses. Data is chunked, optionally encrypted by default (CHK), and works with Blossom-compatible storage and WebRTC fetches.
 
-## Implementations
+## Structure
 
-- `ts/` - TypeScript/JavaScript SDKs and web apps (Iris Files + Iris Video). See [`ts/README.md`](ts/README.md).
+- `ts/` - TypeScript/JavaScript SDK packages. See [`ts/README.md`](ts/README.md).
 - `rust/` - Rust CLI/daemon, git remote helper, and crates. See [`rust/README.md`](rust/README.md).
+- `apps/` - Applications (web + desktop)
+  - `iris-files/` - Iris Files app (Tauri desktop + web). See [`apps/iris-files/README.md`](apps/iris-files/README.md).
 
 ## Design highlights
 

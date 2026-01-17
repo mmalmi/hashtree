@@ -31,8 +31,8 @@
     "test:e2e:fast": "E2E_FAST=1 playwright test",
     "test:e2e:slow": "playwright test e2e/yjs-collaboration.spec.ts e2e/livestream-viewer.spec.ts",
     "test:tauri": "wdio run wdio.tauri.conf.ts",
-    "lint": "eslint packages/hashtree/src packages/iris-files/src",
-    "lint:fix": "eslint packages/hashtree/src packages/iris-files/src --fix",
+    "lint": "eslint packages/hashtree/src && pnpm --filter iris-files lint",
+    "lint:fix": "eslint packages/hashtree/src --fix && pnpm --filter iris-files lint:fix",
     "maps:crawl": "pnpm --filter hashtree build && node scripts/maps/crawl-tiles.js"
   },
   "devDependencies": {

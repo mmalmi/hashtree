@@ -38,7 +38,7 @@ pnpm run test:e2e # E2E tests
 
 ## Structure
 - `packages/hashtree` - Core library
-- `packages/iris-files` - Web app (Iris Files)
+- `../apps/iris-files` - Web/desktop app (Iris Files)
 - `e2e/` - Playwright tests
 
 ## Design

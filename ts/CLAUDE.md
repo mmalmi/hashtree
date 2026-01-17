@@ -14,7 +14,7 @@ pnpm run test:e2e # E2E tests
 
 ## Structure
 - `packages/hashtree` - Core library
-- `packages/iris-files` - Web app (Iris Files)
+- `../apps/iris-files` - Web/desktop app (Iris Files)
 - `e2e/` - Playwright tests
 
 ## Design
@@ -73,5 +73,5 @@ When build, lint, and relevant tests pass, commit the changes without asking.
 
 ## Tauri
 - Build: `pnpm tauri:build`, Dev: `pnpm tauri:dev`
-- Rust tests: `cd packages/iris-files/src-tauri && cargo test` (includes htree integration tests)
+- Rust tests: `cd ../apps/iris-files/src-tauri && cargo test` (includes htree integration tests)
 - E2E tests: `DISPLAY=:99 pnpm test:tauri` (requires Xvfb: `Xvfb :99 -screen 0 1920x1080x24 &`)

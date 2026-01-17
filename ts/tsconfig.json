@@ -12,6 +12,6 @@
   },
   "references": [
     { "path": "./packages/hashtree" },
-    { "path": "./packages/iris-files" }
+    { "path": "../apps/iris-files" }
   ]
 }
