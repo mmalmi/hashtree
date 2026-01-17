@@ -1629,11 +1629,9 @@ async fn update_profile(
     about: Option<String>,
     picture: Option<String>,
 ) -> Result<()> {
-    use nostr::{EventBuilder, Kind, Keys, JsonUtil, ClientMessage, Filter};
+    use nostr::{EventBuilder, Kind, Keys, Filter};
     use nostr::nips::nip19::ToBech32;
     use nostr_sdk::{ClientBuilder, EventSource};
-    use tokio_tungstenite::connect_async;
-    use futures::sink::SinkExt;
     use std::time::Duration;
 
     // Load config for relay list
@@ -1653,6 +1651,9 @@ async fn update_profile(
         let _ = client.add_relay(relay).await;
     }
     client.connect().await;
+
+    // Wait for relay connections to establish
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let filter = Filter::new()
         .author(keys.public_key())
@@ -1679,9 +1680,6 @@ async fn update_profile(
         if let Some(n) = profile.get("name").and_then(|v| v.as_str()) {
             println!("  name:    {}", n);
         }
-        if let Some(n) = profile.get("display_name").and_then(|v| v.as_str()) {
-            println!("  display: {}", n);
-        }
         if let Some(a) = profile.get("about").and_then(|v| v.as_str()) {
             println!("  about:   {}", a);
         }
@@ -1696,8 +1694,7 @@ async fn update_profile(
 
     // Update fields
     if let Some(n) = name {
-        profile.insert("name".to_string(), serde_json::Value::String(n.clone()));
-        profile.insert("display_name".to_string(), serde_json::Value::String(n));
+        profile.insert("name".to_string(), serde_json::Value::String(n));
     }
     if let Some(a) = about {
         profile.insert("about".to_string(), serde_json::Value::String(a));
@@ -1712,23 +1709,32 @@ async fn update_profile(
         .to_event(&keys)
         .context("Failed to sign profile event")?;
 
-    let event_json = ClientMessage::event(event).as_json();
-
-    // Publish to relays
-    let mut success_count = 0;
+    // Reuse the client we already have connected for publishing
+    let client = ClientBuilder::default().build();
     for relay in &config.nostr.relays {
-        match connect_async(relay).await {
-            Ok((mut ws, _)) => {
-                if ws.send(tokio_tungstenite::tungstenite::Message::Text(event_json.clone().into())).await.is_ok() {
-                    success_count += 1;
-                }
-                let _ = ws.close(None).await;
+        let _ = client.add_relay(relay).await;
+    }
+    client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Publish using nostr_sdk
+    match client.send_event(event).await {
+        Ok(output) => {
+            let success_count = output.success.len();
+            let failed_count = output.failed.len();
+            if success_count > 0 {
+                println!("Profile updated, published to {} relays", success_count);
             }
-            Err(_) => {}
+            if failed_count > 0 {
+                eprintln!("Failed to publish to {} relays", failed_count);
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to publish profile: {}", e);
         }
     }
 
-    println!("Profile updated, published to {} relays", success_count);
+    let _ = client.disconnect().await;
     Ok(())
 }
 
