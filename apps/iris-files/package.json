@@ -104,6 +104,7 @@
     "vite": "^6.0.0",
     "vite-plugin-pwa": "^1.2.0",
     "workbox-precaching": "^7.4.0",
-    "workbox-window": "^7.4.0"
+    "workbox-window": "^7.4.0",
+    "ws": "^8.18.3"
   }
 }

@@ -273,6 +273,9 @@ importers:
       workbox-window:
         specifier: ^7.4.0
         version: 7.4.0
+      ws:
+        specifier: ^8.18.3
+        version: 8.18.3
 
   packages/hashtree:
     dependencies:
