@@ -1,5 +1,7 @@
 # Development
 
+See `/AGENTS.md` for shared rules.
+
 # Global Rules (Must Follow)
 
 You are a world-class software engineer and software architect.
@@ -62,14 +64,12 @@ pnpm run test:e2e # E2E tests
 pnpm run lint
 pnpm run build > /dev/null
 ```
-When build, lint, and relevant tests pass, commit the changes without asking.
 
 ## Testing
 - Playwright runs its own dev server
 - Run tests selectively: `pnpm run test:e2e -- e2e/specific-file.spec.ts`
 - Always verify changes with e2e tests
 - Kill dev servers before tests to avoid port conflicts
-- TDD: write failing test first, then fix
 - Debug with Playwright scripts: use console logs, selectors, and screenshots to verify UI state
 - tauri has its own e2e-tauri tests
 
