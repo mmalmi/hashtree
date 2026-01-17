@@ -1,0 +1,21 @@
+[package]
+name = "hashtree-s3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "S3 storage backend for hashtree with non-blocking uploads"
+
+[dependencies]
+hashtree-core.workspace = true
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+tracing = "0.1"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }

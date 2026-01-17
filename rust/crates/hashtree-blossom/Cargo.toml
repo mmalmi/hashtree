@@ -1,0 +1,41 @@
+[package]
+name = "hashtree-blossom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Blossom protocol client for hashtree - upload/download blobs with NIP-98 auth"
+
+[dependencies]
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Nostr for auth signing
+nostr.workspace = true
+
+# Async
+tokio = { version = "1", features = ["time"] }
+futures = "0.3"
+
+# Crypto
+sha2.workspace = true
+
+# Utils
+hex.workspace = true
+thiserror.workspace = true
+tracing = "0.1"
+base64 = "0.22"
+
+# Core hashtree types (optional - for Store trait impl)
+hashtree-core = { workspace = true, optional = true }
+hashtree-config = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+
+[features]
+default = ["config"]
+config = ["hashtree-config"]
+store = ["hashtree-core", "async-trait"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "rt-multi-thread", "macros"] }

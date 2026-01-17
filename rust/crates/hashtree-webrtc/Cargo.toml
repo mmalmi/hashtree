@@ -1,0 +1,32 @@
+[package]
+name = "hashtree-webrtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "WebRTC P2P transport for hashtree using Nostr relay signaling"
+keywords = ["merkle", "webrtc", "p2p", "nostr", "hashtree"]
+
+[dependencies]
+hashtree-core.workspace = true
+webrtc.workspace = true
+nostr-sdk.workspace = true
+tokio.workspace = true
+futures.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+hex.workspace = true
+bytes = "1.0"
+lru.workspace = true
+rand = "0.8"
+rmp-serde = "1.3"
+serde_bytes = "0.11.19"
+lazy_static = "1.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "rt-multi-thread", "macros"] }
+hashtree-sim = { path = "../hashtree-sim" }

@@ -1,0 +1,73 @@
+[package]
+name = "git-remote-htree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Git remote helper for hashtree - push/pull git repos via nostr and hashtree"
+
+[lib]
+name = "git_remote_htree"
+path = "src/lib.rs"
+
+[[bin]]
+name = "git-remote-htree"
+path = "src/main.rs"
+
+[dependencies]
+# Content-addressed storage
+hashtree-core.workspace = true
+hashtree-fs.workspace = true
+hashtree-lmdb = { workspace = true, optional = true }
+hashtree-config.workspace = true
+
+# Nostr
+nostr.workspace = true
+nostr-sdk.workspace = true
+secp256k1 = { version = "0.29", features = ["global-context"] }
+
+# Blossom client
+hashtree-blossom = { workspace = true, features = ["store"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Utilities
+anyhow.workspace = true
+async-trait.workspace = true
+futures = "0.3"
+flate2 = "1"
+hex.workspace = true
+libc = "0.2"
+sha1 = "0.10"
+sha2.workspace = true
+getrandom = "0.3"
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# CLI
+clap.workspace = true
+
+# TLS crypto provider
+rustls = { version = "0.23", features = ["ring"] }
+
+[features]
+default = []
+lmdb = ["dep:hashtree-lmdb"]
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-tungstenite = "0.24"
+hashtree-lmdb.workspace = true
+reqwest = { version = "0.12", features = ["blocking"] }
+
+[[bench]]
+name = "git_storage"
+harness = false

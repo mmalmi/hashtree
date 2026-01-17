@@ -1,0 +1,54 @@
+{
+  "name": "hashtree",
+  "version": "0.1.0",
+  "description": "Simple content-addressed merkle tree with KV storage",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker/worker.d.ts",
+      "import": "./dist/worker/worker.js"
+    }
+  },
+  "sideEffects": [
+    "./src/worker/worker.ts",
+    "./dist/worker/worker.js"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "merkle",
+    "content-addressed",
+    "hash",
+    "tree",
+    "storage",
+    "browser"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2",
+    "@nostr-dev-kit/ndk": "^3.0.0-beta.66",
+    "@noble/hashes": "^2.0.1",
+    "@scure/base": "^2.0.0",
+    "dexie": "^4.0.11",
+    "nostr-social-graph": "^1.0.33",
+    "nostr-tools": "^2.18.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "happy-dom": "^15.0.0",
+    "playwright": "^1.57.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0",
+    "ws": "^8.18.3"
+  }
+}

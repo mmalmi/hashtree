@@ -1,0 +1,276 @@
+/**
+ * E2E test for direct navigation to tree URLs with cross-context data transfer
+ *
+ * IMPORTANT: Cross-context data transfer requires WebRTC connections between peers.
+ *
+ * These tests verify that:
+ * - Tree root is received via Nostr relay
+ * - WebRTC signaling works (peer discovery)
+ * - Data can be fetched when connections are established
+ */
+import { test, expect, type Page } from './fixtures';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, useLocalRelay, waitForAppReady, waitForFollowInWorker, presetLocalRelayInDB } from './test-utils.js';
+
+async function initUser(page: Page): Promise<{ npub: string; pubkeyHex: string }> {
+  setupPageErrorHandler(page);
+  await page.goto('http://localhost:5173');
+  await presetLocalRelayInDB(page);
+  await page.reload();
+  await disableOthersPool(page);
+  await useLocalRelay(page);
+  await waitForAppReady(page);
+  await navigateToPublicFolder(page);
+
+  await page.waitForFunction(() => (window as any).__getMyPubkey?.(), { timeout: 15000 });
+  const pubkeyHex = await page.evaluate(() => (window as any).__getMyPubkey?.() ?? null);
+  const url = page.url();
+  const npubMatch = url.match(/npub1[a-z0-9]+/);
+  if (!pubkeyHex || !npubMatch) {
+    throw new Error('Could not determine user identity');
+  }
+  return { npub: npubMatch[0], pubkeyHex };
+}
+
+async function waitForPeerConnection(page: Page, pubkeyHex: string, timeoutMs: number = 60000): Promise<void> {
+  await page.waitForFunction(
+    async (pk: string) => {
+      const adapter = (window as any).__workerAdapter;
+      if (!adapter) return false;
+      const stats = await adapter.getPeerStats();
+      return stats.some((peer: { connected?: boolean; pubkey?: string }) => peer.connected && peer.pubkey === pk);
+    },
+    pubkeyHex,
+    { timeout: timeoutMs, polling: 500 }
+  );
+}
+
+test.describe.serial('Direct Tree Navigation', () => {
+  test('can access file from second context via WebRTC', { timeout: 120000 }, async ({ browser }) => {
+    test.slow();
+
+    const context1 = await browser.newContext();
+    const page1 = await context1.newPage();
+    const user1 = await initUser(page1);
+
+    // Create a folder and file
+    await page1.getByRole('button', { name: 'New Folder' }).click();
+    const folderInput = page1.locator('input[placeholder="Folder name..."]');
+    await folderInput.waitFor({ timeout: 5000 });
+    await folderInput.fill('webrtc-nav-test');
+    await page1.click('button:has-text("Create")');
+    await expect(page1.locator('.fixed.inset-0.bg-black')).not.toBeVisible({ timeout: 10000 });
+
+    const folderLink = page1.locator('[data-testid="file-list"] a').filter({ hasText: 'webrtc-nav-test' }).first();
+    await expect(folderLink).toBeVisible({ timeout: 15000 });
+    await folderLink.click();
+    await page1.waitForURL(/webrtc-nav-test/, { timeout: 10000 });
+
+    // Create file via tree API
+    await page1.evaluate(async () => {
+      const { getTree, LinkType } = await import('/src/store.ts');
+      const { autosaveIfOwn } = await import('/src/nostr.ts');
+      const { getCurrentRootCid } = await import('/src/actions/route.ts');
+      const { getRouteSync } = await import('/src/stores/index.ts');
+      const route = getRouteSync();
+      const tree = getTree();
+      let rootCid = getCurrentRootCid();
+      if (!rootCid) return;
+      const content = new TextEncoder().encode('Hello from WebRTC test!');
+      const { cid, size } = await tree.putFile(content);
+      rootCid = await tree.setEntry(rootCid, route.path, 'test.txt', cid, size, LinkType.Blob);
+      autosaveIfOwn(rootCid);
+    });
+
+    await expect(page1.locator('[data-testid="file-list"] a').filter({ hasText: 'test.txt' })).toBeVisible({ timeout: 15000 });
+    const fileUrl = page1.url().replace(/\/$/, '') + '/test.txt';
+    console.log('[test] File URL:', fileUrl);
+
+    // Flush publishes to relay
+    await page1.evaluate(async () => {
+      const { flushPendingPublishes } = await import('/src/treeRootCache.ts');
+      await flushPendingPublishes();
+    });
+
+    const context2 = await browser.newContext();
+    const page2 = await context2.newPage();
+    const user2 = await initUser(page2);
+
+    // Follow each other without navigating away
+    await page1.waitForFunction(() => (window as any).__testHelpers?.followPubkey);
+    await page2.waitForFunction(() => (window as any).__testHelpers?.followPubkey);
+    await page1.evaluate((pk: string) => (window as any).__testHelpers?.followPubkey?.(pk), user2.pubkeyHex);
+    await page2.evaluate((pk: string) => (window as any).__testHelpers?.followPubkey?.(pk), user1.pubkeyHex);
+    await waitForFollowInWorker(page1, user2.pubkeyHex);
+    await waitForFollowInWorker(page2, user1.pubkeyHex);
+    await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
+    await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
+    await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+
+    await page2.goto(fileUrl);
+    await expect(page2).toHaveURL(/webrtc-nav-test\/test\.txt/, { timeout: 15000 });
+    await waitForAppReady(page2);
+
+    await waitForFollowInWorker(page2, user1.pubkeyHex);
+    await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
+    await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
+    await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+
+    const fileRouteState = await page2.evaluate(async () => {
+      const { currentPath } = await import('/src/lib/router.svelte');
+      const { routeStore, currentDirCidStore, isViewingFileStore, directoryEntriesStore, treeRootStore } = await import('/src/stores/index.ts');
+      let pathValue = '';
+      let routeValue: any = null;
+      let rootCid: any = null;
+      let dirCid: any = null;
+      let isViewingFile = false;
+      let entriesCount = 0;
+      const unsubPath = currentPath.subscribe((v: string) => { pathValue = v; });
+      const unsubRoute = routeStore.subscribe((v: any) => { routeValue = v; });
+      const unsubRoot = treeRootStore.subscribe((v: any) => { rootCid = v; });
+      const unsubDir = currentDirCidStore.subscribe((v: any) => { dirCid = v; });
+      const unsubView = isViewingFileStore.subscribe((v: boolean) => { isViewingFile = v; });
+      const unsubEntries = directoryEntriesStore.subscribe((v: any) => { entriesCount = v.entries?.length ?? 0; });
+      unsubPath();
+      unsubRoute();
+      unsubRoot();
+      unsubDir();
+      unsubView();
+      unsubEntries();
+      return { hash: window.location.hash, pathValue, routeValue, rootCid, dirCid, isViewingFile, entriesCount };
+    });
+    console.log('[test] file route state:', JSON.stringify(fileRouteState));
+
+    await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await expect(page2.locator('pre').filter({ hasText: 'Hello from WebRTC test!' })).toBeVisible({ timeout: 60000 });
+
+    await context2.close();
+    await context1.close();
+  });
+
+  test('can access directory listing from second context via WebRTC', { timeout: 120000 }, async ({ browser }) => {
+    test.slow();
+
+    const context1 = await browser.newContext();
+    const page1 = await context1.newPage();
+    const user1 = await initUser(page1);
+
+    // Create folder
+    await page1.getByRole('button', { name: 'New Folder' }).click();
+    const folderInput = page1.locator('input[placeholder="Folder name..."]');
+    await folderInput.waitFor({ timeout: 5000 });
+    await folderInput.fill('webrtc-dir-test');
+    await page1.click('button:has-text("Create")');
+    await expect(page1.locator('.fixed.inset-0.bg-black')).not.toBeVisible({ timeout: 10000 });
+
+    const folderLink = page1.locator('[data-testid="file-list"] a').filter({ hasText: 'webrtc-dir-test' }).first();
+    await expect(folderLink).toBeVisible({ timeout: 15000 });
+    await folderLink.click();
+    await page1.waitForURL(/webrtc-dir-test/, { timeout: 10000 });
+
+    // Create files
+    await page1.evaluate(async () => {
+      const { getTree, LinkType } = await import('/src/store.ts');
+      const { autosaveIfOwn } = await import('/src/nostr.ts');
+      const { getCurrentRootCid } = await import('/src/actions/route.ts');
+      const { getRouteSync } = await import('/src/stores/index.ts');
+      const route = getRouteSync();
+      const tree = getTree();
+      let rootCid = getCurrentRootCid();
+      if (!rootCid) return;
+
+      const content1 = new TextEncoder().encode('File 1');
+      const { cid: cid1, size: size1 } = await tree.putFile(content1);
+      rootCid = await tree.setEntry(rootCid, route.path, 'file1.txt', cid1, size1, LinkType.Blob);
+
+      const content2 = new TextEncoder().encode('File 2');
+      const { cid: cid2, size: size2 } = await tree.putFile(content2);
+      rootCid = await tree.setEntry(rootCid, route.path, 'file2.txt', cid2, size2, LinkType.Blob);
+
+      autosaveIfOwn(rootCid);
+    });
+
+    await expect(page1.locator('[data-testid="file-list"] a').filter({ hasText: 'file1.txt' })).toBeVisible({ timeout: 15000 });
+    const dirUrl = page1.url();
+    console.log('[test] Dir URL:', dirUrl);
+
+    await page1.evaluate(async () => {
+      const { flushPendingPublishes } = await import('/src/treeRootCache.ts');
+      await flushPendingPublishes();
+    });
+
+    const context2 = await browser.newContext();
+    const page2 = await context2.newPage();
+    const user2 = await initUser(page2);
+
+    await page1.waitForFunction(() => (window as any).__testHelpers?.followPubkey);
+    await page2.waitForFunction(() => (window as any).__testHelpers?.followPubkey);
+    await page1.evaluate((pk: string) => (window as any).__testHelpers?.followPubkey?.(pk), user2.pubkeyHex);
+    await page2.evaluate((pk: string) => (window as any).__testHelpers?.followPubkey?.(pk), user1.pubkeyHex);
+    await waitForFollowInWorker(page1, user2.pubkeyHex);
+    await waitForFollowInWorker(page2, user1.pubkeyHex);
+    await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
+    await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
+
+    await page2.goto(dirUrl);
+    await expect(page2).toHaveURL(/webrtc-dir-test/, { timeout: 15000 });
+    await waitForAppReady(page2);
+    await disableOthersPool(page2);
+    await useLocalRelay(page2);
+
+    await waitForFollowInWorker(page2, user1.pubkeyHex);
+    await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
+    await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
+
+    const dirRouteState = await page2.evaluate(async () => {
+      const { currentPath } = await import('/src/lib/router.svelte');
+      const { routeStore, currentDirCidStore, isViewingFileStore, directoryEntriesStore, treeRootStore } = await import('/src/stores/index.ts');
+      let pathValue = '';
+      let routeValue: any = null;
+      let rootCid: any = null;
+      let dirCid: any = null;
+      let isViewingFile = false;
+      let entriesCount = 0;
+      const unsubPath = currentPath.subscribe((v: string) => { pathValue = v; });
+      const unsubRoute = routeStore.subscribe((v: any) => { routeValue = v; });
+      const unsubRoot = treeRootStore.subscribe((v: any) => { rootCid = v; });
+      const unsubDir = currentDirCidStore.subscribe((v: any) => { dirCid = v; });
+      const unsubView = isViewingFileStore.subscribe((v: boolean) => { isViewingFile = v; });
+      const unsubEntries = directoryEntriesStore.subscribe((v: any) => { entriesCount = v.entries?.length ?? 0; });
+      unsubPath();
+      unsubRoute();
+      unsubRoot();
+      unsubDir();
+      unsubView();
+      unsubEntries();
+      return { hash: window.location.hash, pathValue, routeValue, rootCid, dirCid, isViewingFile, entriesCount };
+    });
+    console.log('[test] dir route state:', JSON.stringify(dirRouteState));
+
+    await page2.waitForFunction(async () => {
+      const { getTree } = await import('/src/store.ts');
+      const { getCurrentRootCid } = await import('/src/actions/route.ts');
+      const { getRouteSync } = await import('/src/stores/index.ts');
+      const tree = getTree();
+      const rootCid = getCurrentRootCid();
+      if (!rootCid) return false;
+      const route = getRouteSync();
+      const resolved = await tree.resolvePath(rootCid, route.path);
+      if (!resolved) return false;
+      const entries = await tree.listDirectory(resolved.cid);
+      const names = entries.map((entry) => entry.name);
+      return names.includes('file1.txt') && names.includes('file2.txt');
+    }, null, { timeout: 90000 });
+
+    await context2.close();
+    await context1.close();
+  });
+});

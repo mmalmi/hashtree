@@ -1,0 +1,58 @@
+{
+  "name": "hashtree-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "HashTree monorepo",
+  "packageManager": "pnpm@10.23.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "wrtc",
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "build": "pnpm --filter hashtree build && pnpm --filter iris-files build",
+    "build:hashtree": "pnpm --filter hashtree build",
+    "build:web": "pnpm --filter iris-files build",
+    "build:docs": "pnpm --filter iris-files build:docs",
+    "build:maps": "pnpm --filter iris-files build:maps",
+    "dev": "pnpm --filter iris-files dev",
+    "dev:docs": "pnpm --filter iris-files dev:docs",
+    "dev:video": "pnpm --filter iris-files dev:video",
+    "dev:maps": "pnpm --filter iris-files dev:maps",
+    "tauri": "pnpm --filter iris-files tauri",
+    "tauri:dev": "pnpm --filter iris-files tauri:dev",
+    "tauri:build": "pnpm --filter iris-files tauri:build",
+    "test": "pnpm --filter hashtree test",
+    "test:watch": "pnpm --filter hashtree test:watch",
+    "test:e2e": "playwright test",
+    "test:e2e:fast": "E2E_FAST=1 playwright test",
+    "test:e2e:slow": "playwright test e2e/yjs-collaboration.spec.ts e2e/livestream-viewer.spec.ts",
+    "test:tauri": "wdio run wdio.tauri.conf.ts",
+    "lint": "eslint packages/hashtree/src packages/iris-files/src",
+    "lint:fix": "eslint packages/hashtree/src packages/iris-files/src --fix",
+    "maps:crawl": "pnpm --filter hashtree build && node scripts/maps/crawl-tiles.js"
+  },
+  "devDependencies": {
+    "@esbuild/linux-arm64": "^0.27.0",
+    "@playwright/test": "^1.57.0",
+    "@rollup/rollup-linux-arm64-gnu": "^4.53.3",
+    "@rollup/rollup-linux-x64-gnu": "^4.53.3",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "@wdio/cli": "^9.22.0",
+    "@wdio/local-runner": "^9.22.0",
+    "@wdio/mocha-framework": "^9.22.0",
+    "@wdio/spec-reporter": "^9.20.0",
+    "eslint": "^9.39.1",
+    "eslint-plugin-svelte": "^3.13.1",
+    "globals": "^16.5.0",
+    "nostr-tools": "^2.18.2",
+    "svelte-eslint-parser": "^1.4.1",
+    "typescript": "^5.3.0",
+    "ws": "^8.18.3"
+  }
+}

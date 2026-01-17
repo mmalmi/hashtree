@@ -1,0 +1,30 @@
+[package]
+name = "hashtree-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Simulation tools for hashtree P2P protocols"
+publish = false
+
+[dependencies]
+# Core hashtree crates
+hashtree-core.workspace = true
+hashtree-webrtc = { path = "../hashtree-webrtc" }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Simulation
+rand = "0.8"
+
+# Async runtime
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "net"] }
+
+# WebSocket relay for testing
+axum = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]

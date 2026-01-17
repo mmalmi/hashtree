@@ -1,0 +1,35 @@
+[package]
+name = "hashtree-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Simple content-addressed merkle tree with KV storage"
+keywords = ["merkle", "content-addressed", "hash", "tree", "storage"]
+
+[dependencies]
+sha2.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+serde_json.workspace = true
+hex.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+bech32 = "0.11"
+
+# Encryption
+aes-gcm = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "rt-multi-thread", "macros"] }
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "builder"
+harness = false

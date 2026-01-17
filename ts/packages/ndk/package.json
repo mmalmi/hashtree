@@ -1,0 +1,31 @@
+{
+  "name": "ndk",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "description": "NDK fork for HashTree - Nostr Development Kit",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./workers/sig-verification": "./src/workers/sig-verification.ts"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts && tsup src/workers/sig-verification.ts --format esm --dts -d dist/workers",
+    "test": "vitest run",
+    "test:watch": "vitest watch"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.8.0",
+    "@noble/hashes": "^1.8.0",
+    "@scure/base": "^2.0.0",
+    "debug": "^4.3.7",
+    "light-bolt11-decoder": "^3.2.0",
+    "nostr-tools": "^2.18.2",
+    "tseep": "^1.3.1",
+    "typescript-lru-cache": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/debug": "^4.1.12"
+  }
+}

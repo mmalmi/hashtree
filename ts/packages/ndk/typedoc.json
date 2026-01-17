@@ -1,0 +1,22 @@
+{
+    "entryPoints": ["src/index.ts"],
+    "out": "typedoc-docs",
+    "name": "NDK",
+    "exclude": ["**/*.test.ts"],
+    // "plugin": ["typedoc-plugin-rename-defaults"],
+    "theme": "default",
+    "excludeExternals": true,
+    "excludePrivate": true,
+    "excludeProtected": true,
+    "categorizeByGroup": true,
+    "tsconfig": "./tsconfig.typedoc.json",
+    "navigationLinks": {
+        "Github": "https://github.com/nostr-dev-kit/ndk",
+        "NDK CLI": "https://github.com/nostr-dev-kit/ndk-cli",
+        "NDK Svelte Components": "https://github.com/nostr-dev-kit/ndk/ndk-svelte-components"
+    },
+    "navigation": {
+        "includeGroups": true
+    },
+    "customCss": "./docs-styles.css"
+}

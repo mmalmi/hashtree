@@ -1,0 +1,9 @@
+# hashtree-ci configuration
+# Defines which runners' CI results to display in the UI
+
+[ci]
+# Runners whose results to show (anyone can run CI; this just defines whose results we display)
+[[ci.runners]]
+npub = "npub1tsrng9wsz55988794jucdf3cgmh065e29sgevt8t8wqc687r7p9suu35fu"
+name = "hashtree-ci-runner"
+tags = ["linux", "x64"]

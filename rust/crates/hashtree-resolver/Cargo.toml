@@ -1,0 +1,21 @@
+[package]
+name = "hashtree-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Root resolver for hashtree - maps human-readable keys to merkle root hashes"
+
+[dependencies]
+hashtree-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+# Nostr resolver
+nostr-sdk = { workspace = true, optional = true }
+
+[features]
+default = []
+nostr = ["nostr-sdk"]

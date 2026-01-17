@@ -1,0 +1,12 @@
+[package]
+name = "hashtree-config"
+version.workspace = true
+edition.workspace = true
+description = "Shared configuration for hashtree tools"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+serde.workspace = true
+toml.workspace = true

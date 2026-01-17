@@ -1,0 +1,2 @@
+- TDD. No flaky tests. Commit when tests pass.
+- Use `TestRelay`/`TestServer` for local tests, `#[ignore]` for external infra only.

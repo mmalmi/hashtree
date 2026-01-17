@@ -1,0 +1,205 @@
+[
+  {
+    "name": "sha256_empty",
+    "input": {
+      "type": "blob",
+      "data": ""
+    },
+    "expected": {
+      "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  {
+    "name": "sha256_hello_world",
+    "input": {
+      "type": "blob",
+      "data": "68656c6c6f20776f726c64"
+    },
+    "expected": {
+      "hash": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    }
+  },
+  {
+    "name": "sha256_binary",
+    "input": {
+      "type": "blob",
+      "data": "0102030405"
+    },
+    "expected": {
+      "hash": "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0"
+    }
+  },
+  {
+    "name": "tree_node_empty",
+    "input": {
+      "type": "tree_node",
+      "node": {
+        "links": []
+      }
+    },
+    "expected": {
+      "hash": "0218ed9a4fbb0993757f17e5d08d089cb0c6ac851928ba1ba82d337d76c41c0c",
+      "msgpack": "82a16c90a17402"
+    }
+  },
+  {
+    "name": "tree_node_single_link",
+    "input": {
+      "type": "tree_node",
+      "node": {
+        "links": [
+          {
+            "hash": "abababababababababababababababababababababababababababababababab",
+            "name": "test.txt",
+            "size": 100
+          }
+        ]
+      }
+    },
+    "expected": {
+      "hash": "16121fa792b3afc72ec8bfc1dc85060518b6adba1429973ecc12891165cbe67e",
+      "msgpack": "82a16c9184a168c420ababababababababababababababababababababababababababababababababa16ea8746573742e747874a17364a17400a17402"
+    }
+  },
+  {
+    "name": "tree_node_multiple_links",
+    "input": {
+      "type": "tree_node",
+      "node": {
+        "links": [
+          {
+            "hash": "0101010101010101010101010101010101010101010101010101010101010101",
+            "name": "a.txt",
+            "size": 10
+          },
+          {
+            "hash": "0202020202020202020202020202020202020202020202020202020202020202",
+            "name": "b.txt",
+            "size": 20
+          },
+          {
+            "hash": "0303030303030303030303030303030303030303030303030303030303030303",
+            "name": "c.txt",
+            "size": 30
+          }
+        ],
+        "totalSize": 60
+      }
+    },
+    "expected": {
+      "hash": "b7ef4b5ddd74431fafadc311e571ad18dc95852fc1cd6d3acc3d6d2de0b90cd8",
+      "msgpack": "82a16c9384a168c4200101010101010101010101010101010101010101010101010101010101010101a16ea5612e747874a1730aa1740084a168c4200202020202020202020202020202020202020202020202020202020202020202a16ea5622e747874a17314a1740084a168c4200303030303030303030303030303030303030303030303030303030303030303a16ea5632e747874a1731ea17400a17402"
+    }
+  },
+  {
+    "name": "tree_node_with_link_meta",
+    "input": {
+      "type": "tree_node",
+      "node": {
+        "links": [
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "size": 0,
+            "meta": {
+              "author": "test",
+              "version": 1
+            }
+          }
+        ]
+      }
+    },
+    "expected": {
+      "hash": "0926c4d5e4825c7e8eb91b93a62051417be9266238e23a35b0d01c5a2cecd9f2",
+      "msgpack": "82a16c9184a168c420cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcda16d82a6617574686f72a474657374a776657273696f6e01a17300a17400a17402"
+    }
+  },
+  {
+    "name": "tree_node_unnamed_links",
+    "input": {
+      "type": "tree_node",
+      "node": {
+        "links": [
+          {
+            "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size": 100
+          },
+          {
+            "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "size": 50
+          }
+        ],
+        "totalSize": 150
+      }
+    },
+    "expected": {
+      "hash": "559b726c38295aa0ecbbaef43d438cc86dd63324a0c3e9426dc5f1d0285f483f",
+      "msgpack": "82a16c9283a168c420aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa17364a1740083a168c420bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbba17332a17400a17401"
+    }
+  },
+  {
+    "name": "small_file",
+    "input": {
+      "type": "file",
+      "data": "48656c6c6f2c20486173685472656521"
+    },
+    "expected": {
+      "hash": "e4d92419ef93bd9513d79551b09d72dc2c5663d832c84d1c1558bdf690969831",
+      "size": 16
+    }
+  },
+  {
+    "name": "chunked_file",
+    "input": {
+      "type": "file",
+      "data": "546869732069732061206c6f6e676572206d65737361676520746861742077696c6c206265206368756e6b65642e"
+    },
+    "expected": {
+      "hash": "ad69855b81e1c421cba8ef4bc02c0b1d90180ed0586e79cadb789ad9c4902622",
+      "size": 46
+    }
+  },
+  {
+    "name": "chk_empty",
+    "input": {
+      "type": "blob",
+      "data": ""
+    },
+    "expected": {
+      "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ciphertext": "7cd161ae8406d82cdf553c1100d012db"
+    }
+  },
+  {
+    "name": "chk_hello",
+    "input": {
+      "type": "blob",
+      "data": "68656c6c6f"
+    },
+    "expected": {
+      "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      "ciphertext": "c65308d9c8649ff1c59820d0b3a030db34ad00f92d"
+    }
+  },
+  {
+    "name": "chk_binary",
+    "input": {
+      "type": "blob",
+      "data": "0102030405"
+    },
+    "expected": {
+      "hash": "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+      "ciphertext": "ccda50aa92b688834e3bbefe531dc17574deb4c8a8"
+    }
+  },
+  {
+    "name": "chk_longer",
+    "input": {
+      "type": "blob",
+      "data": "546869732069732061206c6f6e676572206d65737361676520666f722074657374696e672043484b20656e6372797074696f6e20696e7465726f7065726162696c6974792e"
+    },
+    "expected": {
+      "hash": "c6c3cdfd45f3161235b73e23090f2621c9af64514cd6aab0f77af347e8c161e3",
+      "ciphertext": "80550b15be16a63e9ed12b09b00004a4e42b33331cf15d87a6b05637cfa7b04da1906c90ec12a526c626f75105c60769cbcf9ee669c059ce710b3f80f143ca2368b91f821874edb19da6f77f98b3ca46d0edf7d1e0"
+    }
+  }
+]

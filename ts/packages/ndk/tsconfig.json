@@ -1,0 +1,28 @@
+{
+    "compilerOptions": {
+        "baseUrl": ".",
+        "target": "ESNext",
+        "module": "ESNext",
+        "composite": false,
+        "declaration": true,
+        "declarationMap": true,
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "inlineSources": false,
+        "isolatedModules": true,
+        "moduleResolution": "bundler",
+        "noUnusedLocals": false,
+        "noUnusedParameters": false,
+        "preserveWatchOutput": true,
+        "skipLibCheck": true,
+        "strict": true,
+        "types": ["node", "vitest/globals"],
+        "allowJs": true,
+        "checkJs": true,
+        "lib": ["dom", "dom.iterable", "esnext"],
+        "emitDeclarationOnly": true,
+        "outDir": "lib"
+    },
+    "include": ["src/**/*", "test/**/*"],
+    "exclude": ["dist", "node_modules", "lib", "docs", "**/*.test.ts"]
+}

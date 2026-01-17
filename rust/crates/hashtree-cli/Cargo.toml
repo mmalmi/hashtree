@@ -1,0 +1,102 @@
+[package]
+name = "hashtree-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Hashtree daemon and CLI - content-addressed storage with P2P sync"
+default-run = "htree"
+
+[[bin]]
+name = "htree"
+path = "src/main.rs"
+
+[[bin]]
+name = "git-remote-htree"
+path = "src/git_remote.rs"
+
+[dependencies]
+# Git remote helper
+git-remote-htree = { version = "0.2.1", path = "../git-remote-htree" }
+
+# Core hashtree crates
+hashtree-core.workspace = true
+hashtree-fs.workspace = true
+hashtree-lmdb = { workspace = true, optional = true }
+hashtree-blossom.workspace = true
+hashtree-config.workspace = true
+hashtree-resolver = { workspace = true, features = ["nostr"] }
+hashtree-webrtc = { workspace = true, optional = true }
+
+# AWS S3 (optional)
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+
+# Storage (heed needed for metadata databases)
+heed.workspace = true
+tempfile.workspace = true
+
+# HTTP/Web
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# Nostr
+nostr.workspace = true
+nostr-sdk.workspace = true
+
+# WebRTC (optional, for P2P)
+webrtc = { version = "0.11", optional = true }
+webrtc-stun = { version = "0.1", optional = true }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures = "0.3"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_bytes = "0.11"
+rmp-serde = "1.3"
+
+# Async traits
+async-trait.workspace = true
+
+# Utilities
+anyhow.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+sha2.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+base64 = "0.22"
+rand = "0.8"
+secp256k1 = { version = "0.29", features = ["global-context"] }
+lru.workspace = true
+
+# CLI
+clap.workspace = true
+dirs = "5"
+toml.workspace = true
+ignore = "0.4"
+
+# HTTP client for Blossom
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+
+# TLS crypto provider
+rustls = { version = "0.23", features = ["ring"] }
+
+[features]
+default = ["p2p"]
+p2p = ["dep:hashtree-webrtc", "dep:webrtc", "dep:webrtc-stun"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+lmdb = ["dep:hashtree-lmdb"]
+
+[dev-dependencies]
+tempfile.workspace = true
+walkdir = "2"
+nostr.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,141 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      coco-cashu-core:
+        specifier: file:../../vendor/coco-cashu-core
+        version: file:../../vendor/coco-cashu-core(typescript@5.9.3)
+      coco-cashu-indexeddb:
+        specifier: file:../../vendor/coco-cashu-indexeddb
+        version: file:../../vendor/coco-cashu-indexeddb(coco-cashu-core@file:../../vendor/coco-cashu-core(typescript@5.9.3))(typescript@5.9.3)
+      hashtree:
+        specifier: workspace:*
+        version: link:../hashtree
+      hashtree-dexie:
+        specifier: workspace:*
+        version: link:../hashtree-dexie
+      wasm-git:
+        specifier: ^0.0.13
+        version: 0.0.13
+    devDependencies:
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.3
+
+packages:
+
+  '@cashu/cashu-ts@2.8.1':
+    resolution: {integrity: sha512-4HO3LC3VqiMs0K7ccQdfSs3l1wJNL0VuE8ZQ6zAfMsoeKRwswA1eC5BaGFrEDv7PcPqjliE/RBRw3+1Hz/SmsA==}
+    engines: {node: '>=22.4.0'}
+
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/curves@2.0.1':
+    resolution: {integrity: sha512-vs1Az2OOTBiP4q0pwjW5aF0xp9n4MxVrmkFBxc6EKZc6ddYx5gaZiAsZoq0uRRXWbi3AT/sBqn05eRPtn1JCPw==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@2.0.1':
+    resolution: {integrity: sha512-XlOlEbQcE9fmuXxrVTXCTlG2nlRXa9Rj3rr5Ue/+tX+nmkgbX720YHh0VR3hBF9xDvwnb8D2shVGOwNx+ulArw==}
+    engines: {node: '>= 20.19.0'}
+
+  '@scure/base@1.2.6':
+    resolution: {integrity: sha512-g/nm5FgUa//MCj1gV09zTJTaM6KBAHqLN907YVQqf7zC49+DcO4B1so4ZX07Ef10Twr6nuqYEH9GEggFXA4Fmg==}
+
+  '@scure/base@2.0.0':
+    resolution: {integrity: sha512-3E1kpuZginKkek01ovG8krQ0Z44E3DHPjc5S2rjJw9lZn3KSQOs8S7wqikF/AH7iRanHypj85uGyxk0XAyC37w==}
+
+  '@scure/bip32@1.7.0':
+    resolution: {integrity: sha512-E4FFX/N3f4B80AKWp5dP6ow+flD1LQZo/w8UnLGYZO674jS6YnYeepycOOksv+vLPSpgN35wgKgy+ybfTb2SMw==}
+
+  '@scure/bip32@2.0.1':
+    resolution: {integrity: sha512-4Md1NI5BzoVP+bhyJaY3K6yMesEFzNS1sE/cP+9nuvE7p/b0kx9XbpDHHFl8dHtufcbdHRUUQdRqLIPHN/s7yA==}
+
+  coco-cashu-core@file:../../vendor/coco-cashu-core:
+    resolution: {directory: ../../vendor/coco-cashu-core, type: directory}
+    peerDependencies:
+      typescript: ^5
+
+  coco-cashu-indexeddb@file:../../vendor/coco-cashu-indexeddb:
+    resolution: {directory: ../../vendor/coco-cashu-indexeddb, type: directory}
+    peerDependencies:
+      coco-cashu-core: 1.1.2-rc.29
+      typescript: ^5
+
+  dexie@4.2.1:
+    resolution: {integrity: sha512-Ckej0NS6jxQ4Po3OrSQBFddayRhTCic2DoCAG5zacOfOVB9P2Q5Xc5uL/nVa7ZVs+HdMnvUPzLFCB/JwpB6Csg==}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  wasm-git@0.0.13:
+    resolution: {integrity: sha512-+tXBed4anOsBIX94omuuabzDTrhQDh5sNsgD7Ezq9nuvM9aK8XfDADK0MWOmkMdSrXCaU1YKzWtTErRFvfwdWg==}
+
+snapshots:
+
+  '@cashu/cashu-ts@2.8.1':
+    dependencies:
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
+      '@scure/bip32': 1.7.0
+
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
+  '@noble/curves@2.0.1':
+    dependencies:
+      '@noble/hashes': 2.0.1
+
+  '@noble/hashes@1.8.0': {}
+
+  '@noble/hashes@2.0.1': {}
+
+  '@scure/base@1.2.6': {}
+
+  '@scure/base@2.0.0': {}
+
+  '@scure/bip32@1.7.0':
+    dependencies:
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
+      '@scure/base': 1.2.6
+
+  '@scure/bip32@2.0.1':
+    dependencies:
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+      '@scure/base': 2.0.0
+
+  coco-cashu-core@file:../../vendor/coco-cashu-core(typescript@5.9.3):
+    dependencies:
+      '@cashu/cashu-ts': 2.8.1
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+      '@scure/bip32': 2.0.1
+      typescript: 5.9.3
+
+  coco-cashu-indexeddb@file:../../vendor/coco-cashu-indexeddb(coco-cashu-core@file:../../vendor/coco-cashu-core(typescript@5.9.3))(typescript@5.9.3):
+    dependencies:
+      coco-cashu-core: file:../../vendor/coco-cashu-core(typescript@5.9.3)
+      dexie: 4.2.1
+      typescript: 5.9.3
+
+  dexie@4.2.1: {}
+
+  typescript@5.9.3: {}
+
+  wasm-git@0.0.13: {}

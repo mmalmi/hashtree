@@ -1,0 +1,65 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.2"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mmalmi/hashtree-rs"
+homepage = "https://github.com/mmalmi/hashtree-rs"
+authors = ["Martti Malmi <mmalmi@gmail.com>"]
+
+[workspace.dependencies]
+# Core
+sha2 = "0.10"
+rmp-serde = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+async-trait = "0.1"
+thiserror = "1.0"
+
+# WebRTC transport
+webrtc = "0.11"
+nostr-sdk = { version = "0.35", default-features = false, features = ["nip44"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
+futures = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
+
+# Internal (path for local dev, version for publishing)
+hashtree-core = { version = "0.2.1", path = "crates/hashtree-core" }
+hashtree-lmdb = { version = "0.2.1", path = "crates/hashtree-lmdb" }
+hashtree-s3 = { version = "0.2.1", path = "crates/hashtree-s3" }
+hashtree-blossom = { version = "0.2.1", path = "crates/hashtree-blossom" }
+hashtree-sim = { version = "0.2.1", path = "crates/hashtree-sim" }
+hashtree-resolver = { version = "0.2.1", path = "crates/hashtree-resolver" }
+hashtree-config = { version = "0.2.1", path = "crates/hashtree-config" }
+hashtree-fs = { version = "0.2.1", path = "crates/hashtree-fs" }
+hashtree-webrtc = { version = "0.2.1", path = "crates/hashtree-webrtc" }
+
+# AWS S3
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+
+# Storage
+heed = "0.20"
+tempfile = "3"
+
+# HTTP/Web
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# Nostr
+nostr = { version = "0.35", features = ["nip44"] }
+
+# Utilities
+anyhow = "1"
+dirs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+bytes = "1.0"
+toml = "0.8"
+lru = "0.12"

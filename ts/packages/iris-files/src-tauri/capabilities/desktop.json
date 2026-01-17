@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/2",
+  "identifier": "desktop",
+  "description": "Desktop-specific capabilities for Iris Files",
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["main"],
+  "permissions": [
+    "autostart:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
+}
