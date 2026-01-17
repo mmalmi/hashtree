@@ -176,6 +176,12 @@ enum Commands {
         #[command(subcommand)]
         command: StorageCommands,
     },
+    /// Show connected P2P peers
+    Peer {
+        /// Daemon address (default: 127.0.0.1:8080)
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1232,9 +1238,29 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Peer { addr } => {
+            list_peers(&addr).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Format bytes in human-readable form
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 /// Convert unix timestamp to human-readable string
@@ -1277,7 +1303,7 @@ fn format_daemon_status(status: &serde_json::Value, include_header: bool) -> Str
             lines.push(format!("  Pinned DAGs: {}", pinned));
         }
         if let Some(bytes) = storage.get("total_bytes").and_then(|b| b.as_u64()) {
-            lines.push(format!("  Total size: {} bytes ({:.2} KB)", bytes, bytes as f64 / 1024.0));
+            lines.push(format!("  Total size: {}", format_bytes(bytes)));
         }
     }
 
@@ -1615,6 +1641,146 @@ async fn list_following(data_dir: &PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// List connected peers with optional profile resolution
+async fn list_peers(addr: &str) -> Result<()> {
+    use nostr::nips::nip19::ToBech32;
+    use nostr::PublicKey;
+
+    let url = format!("http://{}/api/peers", addr);
+    let resp = match reqwest::get(&url).await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("Daemon returned error: {}", r.status());
+            return Ok(());
+        }
+        Err(_) => {
+            eprintln!("Daemon not running at {}", addr);
+            eprintln!("Start with: htree start");
+            return Ok(());
+        }
+    };
+
+    let data: serde_json::Value = resp.json().await?;
+
+    if !data.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false) {
+        println!("WebRTC is not enabled");
+        return Ok(());
+    }
+
+    let peers = data.get("peers").and_then(|p| p.as_array());
+    let Some(peers) = peers else {
+        println!("No peers");
+        return Ok(());
+    };
+
+    // Collect connected peers
+    let connected: Vec<_> = peers.iter()
+        .filter(|p| {
+            p.get("state")
+                .and_then(|s| s.as_str())
+                .map(|s| s.eq_ignore_ascii_case("connected"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if connected.is_empty() {
+        println!("No connected peers (total: {})", peers.len());
+        return Ok(());
+    }
+
+    println!("Connected peers ({}/{}):\n", connected.len(), peers.len());
+
+    // Load config for relays
+    let config = Config::load()?;
+
+    // Group peers by pool
+    let follows: Vec<_> = connected.iter()
+        .filter(|p| p.get("pool").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("follows")).unwrap_or(false))
+        .collect();
+    let others: Vec<_> = connected.iter()
+        .filter(|p| !p.get("pool").and_then(|s| s.as_str()).map(|s| s.eq_ignore_ascii_case("follows")).unwrap_or(false))
+        .collect();
+
+    // Helper to print peer with profile
+    async fn print_peer(peer: &serde_json::Value, relays: &[String]) {
+        let pubkey_hex = peer.get("pubkey").and_then(|p| p.as_str()).unwrap_or("");
+
+        let npub = if let Ok(pk) = PublicKey::from_hex(pubkey_hex) {
+            pk.to_bech32().unwrap_or_else(|_| pubkey_hex.to_string())
+        } else {
+            pubkey_hex.to_string()
+        };
+
+        let profile_name = fetch_profile_name(relays, pubkey_hex).await;
+
+        if let Some(name) = profile_name {
+            println!("  {} ({})", npub, name);
+        } else {
+            println!("  {}", npub);
+        }
+    }
+
+    if !follows.is_empty() {
+        println!("Follows:");
+        for peer in follows {
+            print_peer(peer, &config.nostr.relays).await;
+        }
+        if !others.is_empty() {
+            println!();
+        }
+    }
+
+    if !others.is_empty() {
+        println!("Other:");
+        for peer in others {
+            print_peer(peer, &config.nostr.relays).await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch profile name from Nostr relays (5s timeout)
+async fn fetch_profile_name(relays: &[String], pubkey_hex: &str) -> Option<String> {
+    use nostr::{Filter, Kind, PublicKey};
+    use nostr_sdk::{ClientBuilder, EventSource};
+    use std::time::Duration;
+
+    let pk = PublicKey::from_hex(pubkey_hex).ok()?;
+
+    // Create client with relays
+    let client = ClientBuilder::default().build();
+    for relay in relays {
+        let _ = client.add_relay(relay).await;
+    }
+    client.connect().await;
+
+    // Fetch kind 0 profile
+    let filter = Filter::new()
+        .author(pk)
+        .kind(Kind::Metadata)
+        .limit(1);
+
+    let timeout = Duration::from_secs(5);
+    let events = tokio::time::timeout(
+        timeout,
+        client.get_events_of(vec![filter], EventSource::relays(None))
+    ).await.ok()?.ok()?;
+    let _ = client.disconnect().await;
+
+    // Parse profile JSON
+    let event = events.into_iter().next()?;
+    let profile: serde_json::Value = serde_json::from_str(&event.content).ok()?;
+
+    // Try display_name, then name, then username
+    profile.get("display_name")
+        .or_else(|| profile.get("name"))
+        .or_else(|| profile.get("username"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Push content to Blossom servers
