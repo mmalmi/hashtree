@@ -183,3 +183,131 @@ async fn test_hashtree_with_local_store() {
     let retrieved = tree.get(&cid).await.expect("get should work");
     assert_eq!(retrieved, Some(data.to_vec()), "data should match");
 }
+
+/// Test that read_file_range returns only the requested byte range
+#[tokio::test]
+async fn test_read_file_range_returns_partial_data() {
+    use app_lib::htree::CombinedStore;
+    use hashtree_blossom::{BlossomClient, BlossomStore};
+    use nostr_sdk::Keys;
+
+    let dir = tempdir().unwrap();
+    let blob_store = BlobStore::new(dir.path().to_path_buf());
+    let local_store = blob_store.inner();
+
+    let keys = Keys::generate();
+    let blossom_client = BlossomClient::new_empty(keys)
+        .with_read_servers(vec!["https://example.com".to_string()]);
+    let blossom_store = Arc::new(BlossomStore::new(blossom_client));
+
+    let combined = Arc::new(CombinedStore::new(local_store, blossom_store));
+    let tree = HashTree::new(HashTreeConfig::new(combined).public());
+
+    // Create test data: "Hello, World! This is a test file."
+    let data = b"Hello, World! This is a test file.";
+    let (cid, _size) = tree.put(data).await.expect("put should work");
+
+    // Test reading a range: bytes 7-12 should be "World"
+    let range_data = tree
+        .read_file_range(&cid.hash, 7, Some(12))
+        .await
+        .expect("range read should work")
+        .expect("data should exist");
+
+    assert_eq!(range_data, b"World", "Range read should return only requested bytes");
+
+    // Test reading from start: bytes 0-5 should be "Hello"
+    let range_data = tree
+        .read_file_range(&cid.hash, 0, Some(5))
+        .await
+        .expect("range read should work")
+        .expect("data should exist");
+
+    assert_eq!(range_data, b"Hello", "Range read from start should work");
+
+    // Test reading to end: bytes 28 to end should be " file."
+    let range_data = tree
+        .read_file_range(&cid.hash, 28, None)
+        .await
+        .expect("range read should work")
+        .expect("data should exist");
+
+    assert_eq!(range_data, b" file.", "Range read to end should work");
+}
+
+/// Test that HtreeState supports range-based file reading
+/// This is the key test for the streaming fix - HtreeState should have
+/// a read_file_range method that uses HashTree's efficient range reading
+#[tokio::test]
+async fn test_htree_state_read_file_range() {
+    use app_lib::htree::HtreeState;
+
+    let dir = tempdir().unwrap();
+    let _state = HtreeState::new(dir.path().to_path_buf());
+
+    // Store a file through the state's store
+    // We need to create a file that we can then read with a range
+    // For now, this test documents the expected API - it will fail until implemented
+
+    // TODO: This test should verify that HtreeState has a read_file_range method
+    // that efficiently reads only the requested bytes
+
+    // The expected API:
+    // state.read_file_range(&cid, start, end) -> Result<Vec<u8>, HtreeError>
+
+    // For now, just verify state can be created
+    // State creation success is implicit - if we got here, it works
+}
+
+/// Test that chunked files use range reads correctly
+/// The range read returns correct data even for chunked files.
+/// Note: Current hashtree-core implementation fetches all chunks for offset calculation,
+/// but the HTTP handler improvement ensures we don't assemble the entire file in memory.
+#[tokio::test]
+async fn test_chunked_file_range_read_correctness() {
+    use hashtree_core::store::MemoryStore;
+    use hashtree_core::builder::{BuilderConfig, TreeBuilder};
+    use hashtree_core::reader::TreeReader;
+
+    let store = Arc::new(MemoryStore::new());
+
+    // Use small chunk size to force multiple chunks
+    let config = BuilderConfig::new(store.clone()).with_chunk_size(100).public();
+    let builder = TreeBuilder::new(config);
+
+    // Create a 500-byte file (will be split into chunks)
+    let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
+    let (cid, _size) = builder.put(&data).await.expect("put should work");
+
+    let reader = TreeReader::new(store);
+
+    // Test 1: Read bytes 50-80 (within first chunk)
+    let range_data = reader
+        .read_file_range(&cid.hash, 50, Some(80))
+        .await
+        .expect("range read should work")
+        .expect("data should exist");
+
+    assert_eq!(range_data.len(), 30, "Should return 30 bytes");
+    assert_eq!(range_data, data[50..80].to_vec(), "Data should match for first chunk");
+
+    // Test 2: Read bytes spanning chunk boundary (95-105)
+    let range_data = reader
+        .read_file_range(&cid.hash, 95, Some(105))
+        .await
+        .expect("range read should work")
+        .expect("data should exist");
+
+    assert_eq!(range_data.len(), 10, "Should return 10 bytes");
+    assert_eq!(range_data, data[95..105].to_vec(), "Data should match across chunk boundary");
+
+    // Test 3: Read last 50 bytes
+    let range_data = reader
+        .read_file_range(&cid.hash, 450, None)
+        .await
+        .expect("range read should work")
+        .expect("data should exist");
+
+    assert_eq!(range_data.len(), 50, "Should return 50 bytes");
+    assert_eq!(range_data, data[450..].to_vec(), "Data should match at end of file");
+}

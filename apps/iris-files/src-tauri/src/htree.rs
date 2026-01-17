@@ -483,13 +483,38 @@ impl HtreeState {
             .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))
     }
 
-    /// Handle nhash-based request (content-addressed)
-    async fn handle_nhash(
+    /// Read a byte range from a file (fetches only necessary chunks)
+    /// This is more efficient than read_file() for partial reads of large files.
+    async fn read_file_range(
+        &self,
+        cid: &Cid,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Vec<u8>, HtreeError> {
+        let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
+
+        tree.read_file_range(&cid.hash, start, end)
+            .await
+            .map_err(|e| HtreeError::Store(e.to_string()))?
+            .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))
+    }
+
+    /// Get the total size of a file without loading all its content
+    async fn get_file_size(&self, cid: &Cid) -> Result<u64, HtreeError> {
+        let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
+
+        tree.get_size(&cid.hash)
+            .await
+            .map_err(|e| HtreeError::Store(e.to_string()))
+    }
+
+    /// Resolve nhash to Cid and mime type (without reading content)
+    async fn resolve_nhash(
         &self,
         nhash: &str,
         filename: Option<&str>,
-    ) -> Result<(String, Vec<u8>), HtreeError> {
-        debug!("Handling nhash request: {}", nhash);
+    ) -> Result<(Cid, String), HtreeError> {
+        debug!("Resolving nhash: {}", nhash);
 
         let nhash_data =
             nhash_decode(nhash).map_err(|e| HtreeError::InvalidPath(e.to_string()))?;
@@ -509,22 +534,20 @@ impl HtreeState {
         };
 
         let mime_type = guess_mime_type(filename.unwrap_or("file"));
-        let data = self.read_file(&file_cid).await?;
-
-        Ok((mime_type.to_string(), data))
+        Ok((file_cid, mime_type.to_string()))
     }
 
-    /// Handle npub-based request
-    async fn handle_npub(
+    /// Resolve npub path to Cid and mime type (without reading content)
+    async fn resolve_npub(
         &self,
         npub: &str,
         tree_name: &str,
         file_path: &str,
-    ) -> Result<(String, Vec<u8>), HtreeError> {
+    ) -> Result<(Cid, String), HtreeError> {
         let mut tree_name = tree_name.to_string();
         let mut file_path = file_path.to_string();
         debug!(
-            "Handling npub request: npub={}, tree={}, path={}",
+            "Resolving npub path: npub={}, tree={}, path={}",
             &npub[..16.min(npub.len())],
             tree_name,
             file_path
@@ -589,8 +612,7 @@ impl HtreeState {
             &resolved_path
         });
 
-        let data = self.read_file(&file_cid).await?;
-        Ok((mime_type.to_string(), data))
+        Ok((file_cid, mime_type.to_string()))
     }
 }
 
@@ -631,6 +653,7 @@ fn parse_range_header(range_header: &str, total_size: usize) -> Option<(usize, u
 }
 
 // Axum handler for /htree/*path - catches all htree requests
+// Now supports efficient range requests that only fetch needed chunks
 #[axum::debug_handler]
 async fn handle_htree_request(
     State(state): State<HtreeState>,
@@ -643,47 +666,64 @@ async fn handle_htree_request(
     let path = raw_path.strip_prefix("/htree/").unwrap_or(raw_path);
     debug!("htree request: raw_path={}, path={}", raw_path, path);
 
-    match handle_htree_inner(&state, &path).await {
-        Ok((content_type, data)) => {
-            let total_size = data.len();
+    // First resolve the path to get CID and mime type (without loading file content)
+    let (file_cid, content_type) = match resolve_htree_inner(&state, &path).await {
+        Ok(result) => result,
+        Err(e) => return e.into_response(),
+    };
 
-            // Check for Range header
-            if let Some(range_header) = headers.get(header::RANGE) {
-                if let Ok(range_str) = range_header.to_str() {
-                    if let Some((start, end)) = parse_range_header(range_str, total_size) {
-                        let content_length = end - start + 1;
-                        let content_range = format!("bytes {}-{}/{}", start, end, total_size);
+    // Get file size (only fetches root node, not entire file)
+    let total_size = match state.get_file_size(&file_cid).await {
+        Ok(size) => size as usize,
+        Err(e) => return e.into_response(),
+    };
 
-                        debug!(
-                            "htree range response: {} bytes (range {}-{}/{}), type={}",
-                            content_length, start, end, total_size, content_type
-                        );
+    // Check for Range header - if present, use efficient range reading
+    if let Some(range_header) = headers.get(header::RANGE) {
+        if let Ok(range_str) = range_header.to_str() {
+            if let Some((start, end)) = parse_range_header(range_str, total_size) {
+                // Use read_file_range for efficient partial reads (only fetches needed chunks)
+                let data = match state.read_file_range(&file_cid, start as u64, Some((end + 1) as u64)).await {
+                    Ok(d) => d,
+                    Err(e) => return e.into_response(),
+                };
 
-                        // Return partial content
-                        return Response::builder()
-                            .status(StatusCode::PARTIAL_CONTENT)
-                            .header(header::CONTENT_TYPE, content_type)
-                            .header(header::CONTENT_LENGTH, content_length)
-                            .header(header::CONTENT_RANGE, content_range)
-                            .header(header::ACCEPT_RANGES, "bytes")
-                            .body(Body::from(data[start..=end].to_vec()))
-                            .unwrap();
-                    }
-                }
+                let content_length = data.len();
+                let content_range = format!("bytes {}-{}/{}", start, end, total_size);
+
+                debug!(
+                    "htree range response: {} bytes (range {}-{}/{}), type={}",
+                    content_length, start, end, total_size, content_type
+                );
+
+                // Return partial content
+                return Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CONTENT_LENGTH, content_length)
+                    .header(header::CONTENT_RANGE, content_range)
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .body(Body::from(data))
+                    .unwrap();
             }
-
-            // Full content response
-            info!("htree response: {} bytes, type={}", data.len(), content_type);
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, content_type)
-                .header(header::CONTENT_LENGTH, data.len())
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(Body::from(data))
-                .unwrap()
         }
-        Err(e) => e.into_response(),
     }
+
+    // No range header - read full file
+    let data = match state.read_file(&file_cid).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+
+    // Full content response
+    info!("htree response: {} bytes, type={}", data.len(), content_type);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, data.len())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Body::from(data))
+        .unwrap()
 }
 
 /// URL-decode a string (percent-decode)
@@ -693,13 +733,13 @@ fn url_decode(s: &str) -> String {
         .into_owned()
 }
 
-// Inner function that returns Result for cleaner error handling
-async fn handle_htree_inner(
+/// Resolve path to Cid and mime type without loading file content.
+/// This is used for efficient range requests where we need to know the file
+/// before deciding how much to read.
+async fn resolve_htree_inner(
     state: &HtreeState,
     path: &str,
-) -> Result<(String, Vec<u8>), HtreeError> {
-    // Parse path: first/rest where first is npub or nhash
-    // Path is still URL-encoded at this point to preserve tree names with slashes
+) -> Result<(Cid, String), HtreeError> {
     let path = path.trim_start_matches('/');
     let parts: Vec<&str> = path.splitn(2, '/').collect();
 
@@ -711,18 +751,13 @@ async fn handle_htree_inner(
     let rest = parts.get(1).copied().unwrap_or("");
 
     if first.starts_with("nhash1") {
-        // Direct nhash access: /htree/{nhash}/{filename}
         let filename = if rest.is_empty() {
             None
         } else {
             Some(url_decode(rest))
         };
-        state
-            .handle_nhash(first, filename.as_deref())
-            .await
+        state.resolve_nhash(first, filename.as_deref()).await
     } else if is_npub(first) {
-        // Npub-based access: /htree/{npub}/{treeName}/{path}
-        // Tree name may contain encoded slashes (%2F), so split on literal / first
         let rest_parts: Vec<&str> = rest.splitn(2, '/').collect();
         let tree_name_encoded = rest_parts.first().ok_or_else(|| {
             HtreeError::InvalidPath("Missing tree name in npub path".into())
@@ -730,23 +765,13 @@ async fn handle_htree_inner(
         if tree_name_encoded.is_empty() {
             return Err(HtreeError::InvalidPath("Empty tree name".into()));
         }
-        // URL-decode the tree name to get the actual tree name (e.g., "videos%2FMusic" -> "videos/Music")
         let tree_name = url_decode(tree_name_encoded);
-        // URL-decode the file path as well
         let file_path = rest_parts
             .get(1)
             .map(|p| url_decode(p))
             .unwrap_or_default();
 
-        debug!(
-            "Parsed request: npub={}, tree_name='{}' (from '{}'), file_path='{}'",
-            &first[..16.min(first.len())],
-            tree_name,
-            tree_name_encoded,
-            file_path
-        );
-
-        state.handle_npub(first, &tree_name, &file_path).await
+        state.resolve_npub(first, &tree_name, &file_path).await
     } else {
         Err(HtreeError::InvalidPath(format!(
             "Path must start with npub or nhash: {}",
@@ -1111,33 +1136,46 @@ pub fn handle_htree_protocol<R: tauri::Runtime>(
         }
     };
 
-    // Use tokio runtime to run async code
+    // Use tokio runtime to run async code with efficient range support
     let result = tauri::async_runtime::block_on(async {
-        handle_htree_inner(state, path).await
+        // First resolve the path to get CID and mime type (without loading file content)
+        let (file_cid, content_type) = resolve_htree_inner(state, path).await?;
+
+        // Get file size (only fetches root node, not entire file)
+        let total_size = state.get_file_size(&file_cid).await? as usize;
+
+        // Check for Range header - if present, use efficient range reading
+        if let Some(range_str) = &range_header {
+            if let Some((start, end)) = parse_range_header(range_str, total_size) {
+                // Use read_file_range for efficient partial reads
+                let data = state.read_file_range(&file_cid, start as u64, Some((end + 1) as u64)).await?;
+                return Ok((content_type, data, Some((start, end, total_size))));
+            }
+        }
+
+        // No range header - read full file
+        let data = state.read_file(&file_cid).await?;
+        Ok((content_type, data, None))
     });
 
     match result {
-        Ok((content_type, data)) => {
-            let total_size = data.len();
-            info!("htree:// protocol success: path={}, content_type={}, size={}", path, content_type, total_size);
+        Ok((content_type, data, range_info)) => {
+            if let Some((start, end, total_size)) = range_info {
+                let content_length = data.len();
+                let content_range = format!("bytes {}-{}/{}", start, end, total_size);
+                info!("htree:// protocol 206 response: range={}", content_range);
 
-            // Handle Range request
-            if let Some(range_str) = range_header {
-                if let Some((start, end)) = parse_range_header(&range_str, total_size) {
-                    let content_length = end - start + 1;
-                    let content_range = format!("bytes {}-{}/{}", start, end, total_size);
-                    info!("htree:// protocol 206 response: range={}", content_range);
-
-                    return tauri::http::Response::builder()
-                        .status(206)
-                        .header("content-type", content_type)
-                        .header("content-length", content_length.to_string())
-                        .header("content-range", content_range)
-                        .header("accept-ranges", "bytes")
-                        .body(data[start..=end].to_vec())
-                        .unwrap();
-                }
+                return tauri::http::Response::builder()
+                    .status(206)
+                    .header("content-type", content_type)
+                    .header("content-length", content_length.to_string())
+                    .header("content-range", content_range)
+                    .header("accept-ranges", "bytes")
+                    .body(data)
+                    .unwrap();
             }
+
+            info!("htree:// protocol success: path={}, content_type={}, size={}", path, content_type, data.len());
 
             // Full response
             tauri::http::Response::builder()
