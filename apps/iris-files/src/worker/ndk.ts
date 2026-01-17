@@ -299,6 +299,56 @@ export function closeNdk(): void {
 }
 
 /**
+ * Update relays dynamically
+ * Disconnects old relays and connects to new ones
+ */
+export async function setRelays(relays: string[]): Promise<void> {
+  if (!ndk?.pool) {
+    console.warn('[Worker NDK] Cannot setRelays - NDK not initialized');
+    return;
+  }
+
+  console.log('[Worker NDK] Updating relays:', relays);
+
+  try {
+    // Disconnect all current relays
+    for (const relay of ndk.pool.relays.values()) {
+      try {
+        relay.disconnect();
+      } catch (e) {
+        console.warn('[Worker NDK] Error disconnecting relay:', e);
+      }
+    }
+
+    // Clear the relay pool
+    ndk.pool.relays.clear();
+
+    // Add new relays
+    for (const url of relays) {
+      try {
+        ndk.addExplicitRelay(url);
+      } catch (e) {
+        console.warn('[Worker NDK] Error adding relay:', url, e);
+      }
+    }
+
+    // Reconnect with timeout
+    const connectPromise = ndk.connect();
+    const timeoutPromise = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error('Connect timeout')), 10000)
+    );
+
+    await Promise.race([connectPromise, timeoutPromise]).catch(e => {
+      console.warn('[Worker NDK] Connect timeout/error, proceeding anyway:', e);
+    });
+
+    console.log('[Worker NDK] Relays updated, connected to', relays.length, 'relays');
+  } catch (e) {
+    console.error('[Worker NDK] Error in setRelays:', e);
+  }
+}
+
+/**
  * Get relay stats
  */
 export function getRelayStats(): { url: string; connected: boolean; eventsReceived: number; eventsSent: number }[] {

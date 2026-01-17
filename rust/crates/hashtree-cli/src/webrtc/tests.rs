@@ -72,7 +72,7 @@ fn test_peer_direction_display() {
     assert_eq!(PeerDirection::Outbound.to_string(), "outbound");
 }
 
-// Wire format tests for ts interop
+// Wire format tests for hashtree-ts interop
 #[test]
 fn test_wire_format_request_encode_decode() {
     let req = DataRequest {
@@ -119,7 +119,7 @@ fn test_wire_format_response_encode_decode() {
 
 #[test]
 fn test_wire_format_constants() {
-    // These must match ts constants
+    // These must match hashtree-ts constants
     assert_eq!(MSG_TYPE_REQUEST, 0x00);
     assert_eq!(MSG_TYPE_RESPONSE, 0x01);
 }

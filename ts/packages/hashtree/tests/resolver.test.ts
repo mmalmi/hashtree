@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import { spawn, type ChildProcess } from 'child_process';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import NDK, { NDKEvent, NDKPrivateKeySigner, type NDKFilter, type NDKSubscriptionOptions } from '@nostr-dev-kit/ndk';
 import { nip19, generateSecretKey, getPublicKey } from 'nostr-tools';
@@ -23,7 +24,15 @@ let relayProcess: ChildProcess | null = null;
 
 async function startLocalRelay(): Promise<void> {
   return new Promise((resolve, reject) => {
-    const relayPath = join(__dirname, '../../../e2e/relay/index.js');
+    const relayPathCandidates = [
+      join(__dirname, '../../../e2e/relay/index.js'),
+      join(__dirname, '../../../../apps/iris-files/e2e/relay/index.js'),
+    ];
+    const relayPath = relayPathCandidates.find((candidate) => existsSync(candidate));
+    if (!relayPath) {
+      reject(new Error(`Relay module not found. Checked: ${relayPathCandidates.join(', ')}`));
+      return;
+    }
     relayProcess = spawn('node', [relayPath], {
       env: { ...process.env, RELAY_PORT: String(TEST_RELAY_PORT) },
       stdio: ['pipe', 'pipe', 'pipe'],

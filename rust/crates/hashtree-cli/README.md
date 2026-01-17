@@ -40,6 +40,9 @@ htree following                         # List followed users
 
 # Daemon
 htree start                             # Start P2P daemon
+htree start --daemon                    # Start in background
+htree start --daemon --log-file /var/log/hashtree.log
+htree stop                              # Stop background daemon
 htree status                            # Check daemon status
 ```
 
@@ -63,4 +66,4 @@ nsec1abc123... default
 nsec1xyz789... work
 ```
 
-Part of [hashtree](https://github.com/mmalmi/hashtree).
+Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).

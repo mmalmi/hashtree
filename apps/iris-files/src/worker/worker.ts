@@ -26,6 +26,7 @@ import {
   getRelayStats as getNdkRelayStats,
   republishTrees,
   republishTree,
+  setRelays as ndkSetRelays,
 } from './ndk';
 import { initIdentity, setIdentity, clearIdentity } from './identity';
 import {
@@ -61,6 +62,7 @@ import {
   sendWebRTCSignaling,
   setupWebRTCSignalingSubscription,
   handleWebRTCSignalingEvent,
+  resubscribeWebRTCSignaling,
 } from './webrtcSignaling';
 // Worker state
 let tree: HashTree | null = null;
@@ -577,6 +579,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         console.log('[Worker] Storage limit set to', Math.round(storageMaxBytes / 1024 / 1024), 'MB');
         // Run eviction check immediately when limit changes
         runEvictionCheck();
+        respond({ type: 'void', id: msg.id });
+        break;
+
+      // Relay configuration
+      case 'setRelays':
+        await ndkSetRelays(msg.relays);
+        // Re-subscribe to WebRTC signaling on new relays
+        resubscribeWebRTCSignaling();
+        console.log('[Worker] Relays updated to', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
         break;
 

@@ -1,4 +1,4 @@
-//! WebRTC signaling types compatible with iris-client and ts
+//! WebRTC signaling types compatible with iris-client and hashtree-ts
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -169,7 +169,7 @@ pub struct CandidateMessage {
     pub peer_id: String,
 }
 
-/// Batched ICE candidates message (ts extension)
+/// Batched ICE candidates message (hashtree-ts extension)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidatesMessage {
     #[serde(rename = "type")]

@@ -14,7 +14,7 @@
 
 import { test, expect } from './fixtures';
 import { spawn, execSync, type ChildProcess } from 'child_process';
-import { enableOthersPool, ensureLoggedIn, setupPageErrorHandler, useLocalRelay, waitForAppReady, getTestRelayUrl, getCrosslangPort } from './test-utils.js';
+import { enableOthersPool, ensureLoggedIn, setupPageErrorHandler, useLocalRelay, waitForAppReady, waitForRelayConnected, getTestRelayUrl, getCrosslangPort } from './test-utils.js';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { nip19, generateSecretKey, getPublicKey } from 'nostr-tools';
@@ -105,6 +105,19 @@ test.describe('Cross-Language Sync', () => {
     const localRelay = getTestRelayUrl();
     const crosslangPort = getCrosslangPort(testInfo.workerIndex);
 
+    // Set up console logging early to capture relay/worker messages
+    page.on('console', msg => {
+      const text = msg.text();
+      if (text.includes('WebRTC') || text.includes('Peer') ||
+          text.includes('connected') || text.includes('Connection') ||
+          text.includes('relay') || text.includes('Relay') ||
+          text.includes('[Worker') || text.includes('setRelays') ||
+          text.includes('useLocalRelay') || text.includes('NDK') ||
+          text.includes('Signaling') || text.includes('hello')) {
+        console.log(`[TS] ${text}`);
+      }
+    });
+
     // Pre-generate Rust keypair so TS can follow it immediately on startup
     const rustKeys = generateKeypair();
     console.log(`[Pre-gen] Rust npub: ${rustKeys.npub.slice(0, 20)}...`);
@@ -123,6 +136,7 @@ test.describe('Cross-Language Sync', () => {
       await ensureLoggedIn(page, 20000);
       await useLocalRelay(page);
       await enableOthersPool(page, 2);
+      await waitForRelayConnected(page, 20000);
 
       // Page ready - navigateToPublicFolder handles waiting
 
@@ -173,18 +187,13 @@ test.describe('Cross-Language Sync', () => {
           await adapter.setFollows([rustPubkey]);
           console.log('[TS] Set follows to include Rust:', rustPubkey.slice(0, 16));
 
-          // Small delay to ensure worker processed setFollows
-          await new Promise(r => setTimeout(r, 100));
-
-          // 2. Broadcast hello to trigger peer discovery with updated follows
-          await adapter.sendHello();
-          console.log('[TS] Hello broadcasted');
-
-          // 3. Update settings for future store creations
+          // 2. Update settings for future store creations
           if (settingsStore) {
             settingsStore.setNetworkSettings({ relays: [localRelay] });
           }
 
+          // NOTE: Don't send hello here - rust isn't started yet!
+          // Hello will be sent after rust is ready.
           return { success: true };
         } catch (e) {
           return { success: false, reason: String(e) };
@@ -211,15 +220,6 @@ test.describe('Cross-Language Sync', () => {
           CROSSLANG_PORT: String(crosslangPort),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      // Log browser console for Rust peer events
-      page.on('console', msg => {
-        const text = msg.text();
-        if (text.includes('WebRTC') || text.includes('Peer') ||
-            text.includes('connected') || text.includes('Connection')) {
-          console.log(`[TS] ${text}`);
-        }
       });
 
       // Capture Rust output
@@ -255,24 +255,28 @@ test.describe('Cross-Language Sync', () => {
       console.log(`[Rust] Ready! Content hash: ${contentHash!.slice(0, 16)}...`);
 
       // ===== STEP 4: Wait for WebRTC connection =====
+      // Now that rust is ready and listening, send hello to trigger peer discovery
+      console.log('[TS] Sending initial hello now that rust is ready...');
+      await page.evaluate(async () => {
+        const adapter = (window as any).__getWorkerAdapter?.();
+        if (adapter?.sendHello) await adapter.sendHello();
+      });
+
       console.log('[TS] Waiting for WebRTC connection to Rust peer...');
 
       let connectedToRust = false;
-      for (let i = 0; i < 30; i++) {
-        await page.waitForTimeout(2000);
+      let lastPeerInfo: {
+        total: number;
+        connected: number;
+        rustPeer: { state: string; pool?: string } | null;
+        allPeers: Array<{ pk?: string; state: string; pool?: string }>;
+      } | null = null;
 
-        // Periodically broadcast hello to ensure peer discovery
-        if (i % 5 === 0) {
-          await page.evaluate(async () => {
-            const adapter = (window as any).__getWorkerAdapter?.();
-            if (adapter?.sendHello) await adapter.sendHello();
-          });
-        }
-
+      await expect.poll(async () => {
         const peerInfo = await page.evaluate(async (rustPk) => {
-          // Get peers directly from worker adapter (not UI store which may be stale)
           const adapter = (window as any).__getWorkerAdapter?.();
           if (!adapter) return { total: 0, connected: 0, rustPeer: null, allPeers: [] };
+          if (adapter.sendHello) await adapter.sendHello();
           const peers = await adapter.getPeerStats?.() || [];
           const rustPeer = peers.find((p: any) => p.pubkey === rustPk);
           return {
@@ -283,13 +287,14 @@ test.describe('Cross-Language Sync', () => {
           };
         }, rustKeys.pubkeyHex);
 
-        console.log(`[TS] Check ${i + 1}: ${peerInfo.connected}/${peerInfo.total} peers, Rust: ${JSON.stringify(peerInfo.rustPeer)}, all: ${JSON.stringify(peerInfo.allPeers)}`);
+        lastPeerInfo = peerInfo;
+        console.log(`[TS] WebRTC check: ${peerInfo.connected}/${peerInfo.total} peers, Rust: ${JSON.stringify(peerInfo.rustPeer)}, all: ${JSON.stringify(peerInfo.allPeers)}`);
+        return peerInfo.rustPeer?.state ?? 'missing';
+      }, { timeout: 60000, intervals: [2000] }).toBe('connected');
 
-        if (peerInfo.rustPeer?.state === 'connected') {
-          connectedToRust = true;
-          console.log('[TS] Connected to Rust peer!');
-          break;
-        }
+      connectedToRust = lastPeerInfo?.rustPeer?.state === 'connected';
+      if (connectedToRust) {
+        console.log('[TS] Connected to Rust peer!');
       }
 
       // ===== STEP 5: Request content via WebRTC =====

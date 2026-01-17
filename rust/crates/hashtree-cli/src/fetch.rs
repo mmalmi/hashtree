@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use hashtree_blossom::BlossomClient;
+use hashtree_config::detect_local_daemon_url;
 use hashtree_core::{decode_tree_node, to_hex};
 use nostr::Keys;
 use std::collections::VecDeque;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
+use crate::config::Config as CliConfig;
 use crate::storage::HashtreeStore;
 use crate::webrtc::WebRTCState;
 
@@ -49,6 +51,7 @@ impl Fetcher {
         let keys = Keys::generate();
         let blossom = BlossomClient::new(keys)
             .with_timeout(config.blossom_timeout);
+        let blossom = with_local_daemon_read(blossom);
 
         Self { config, blossom }
     }
@@ -57,6 +60,7 @@ impl Fetcher {
     pub fn with_keys(config: FetchConfig, keys: Keys) -> Self {
         let blossom = BlossomClient::new(keys)
             .with_timeout(config.blossom_timeout);
+        let blossom = with_local_daemon_read(blossom);
 
         Self { config, blossom }
     }
@@ -297,4 +301,19 @@ impl Fetcher {
             .await
             .map_err(|e| anyhow::anyhow!("Blossom upload failed: {}", e))
     }
+}
+
+fn with_local_daemon_read(blossom: BlossomClient) -> BlossomClient {
+    let bind_address = CliConfig::load().ok().map(|cfg| cfg.server.bind_address);
+    let local_url = detect_local_daemon_url(bind_address.as_deref());
+    let Some(local_url) = local_url else {
+        return blossom;
+    };
+
+    let mut servers = blossom.read_servers().to_vec();
+    if servers.iter().any(|server| server == &local_url) {
+        return blossom;
+    }
+    servers.insert(0, local_url);
+    blossom.with_read_servers(servers)
 }

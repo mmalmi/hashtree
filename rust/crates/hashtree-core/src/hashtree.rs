@@ -1,7 +1,7 @@
 //! HashTree - Unified merkle tree operations
 //!
 //! Single struct for creating, reading, and editing content-addressed merkle trees.
-//! Mirrors the ts HashTree class API.
+//! Mirrors the hashtree-ts HashTree class API.
 
 use std::pin::Pin;
 use std::sync::Arc;

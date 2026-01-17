@@ -3,7 +3,7 @@
 //! Handles WebRTC connection establishment, data channel communication,
 //! and the request/response protocol for hash-based data exchange.
 //!
-//! Wire protocol (compatible with ts):
+//! Wire protocol (compatible with hashtree-ts):
 //! - Request:  [0x00][msgpack: {h: bytes32, htl?: u8}]
 //! - Response: [0x01][msgpack: {h: bytes32, d: bytes, i?: u32, n?: u32}]
 
@@ -54,7 +54,7 @@ pub enum PeerError {
     NotFound,
 }
 
-/// Default LRU cache sizes (matching ts)
+/// Default LRU cache sizes (matching hashtree-ts)
 const THEIR_REQUESTS_SIZE: usize = 200;
 
 /// Fragment reassembly timeout constants (for future use)
@@ -130,8 +130,8 @@ async fn forward_via_channel(
 /// - `pending_requests`: requests WE sent TO this peer (awaiting response)
 /// - `their_requests`: requests THEY sent TO US that we couldn't fulfill
 ///
-/// This matches the ts Peer architecture.
-/// Wire protocol is binary MessagePack compatible with ts.
+/// This matches the hashtree-ts Peer architecture.
+/// Wire protocol is binary MessagePack compatible with hashtree-ts.
 pub struct Peer<S: Store> {
     /// Remote peer identifier
     pub remote_id: PeerId,
@@ -144,10 +144,10 @@ pub struct Peer<S: Store> {
     /// Pending ICE candidates (before remote description set)
     pending_candidates: Arc<RwLock<Vec<RTCIceCandidateInit>>>,
     /// Requests WE sent TO this peer, keyed by hash hex string
-    /// Similar to ts: ourRequests = new Map<string, PendingRequest>()
+    /// Similar to hashtree-ts: ourRequests = new Map<string, PendingRequest>()
     pending_requests: Arc<RwLock<HashMap<String, PendingRequest>>>,
     /// Requests THEY sent TO US that we couldn't fulfill locally
-    /// Keyed by hash hex string, similar to ts:
+    /// Keyed by hash hex string, similar to hashtree-ts:
     /// theirRequests = new LRUCache<string, TheirRequest>(THEIR_REQUESTS_SIZE)
     their_requests: Arc<RwLock<LruCache<String, TheirRequest>>>,
     /// Pending fragment reassemblies, keyed by hash hex string
@@ -202,7 +202,7 @@ impl<S: Store + 'static> Peer<S> {
             .with_interceptor_registry(registry)
             .build();
 
-        // Configure ICE servers (matches ts)
+        // Configure ICE servers (matches hashtree-ts)
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec![
@@ -380,7 +380,7 @@ impl<S: Store + 'static> Peer<S> {
     }
 
     /// Setup handlers for a data channel
-    /// Uses binary MessagePack protocol compatible with ts
+    /// Uses binary MessagePack protocol compatible with hashtree-ts
     async fn setup_data_channel_handlers(
         dc: Arc<RTCDataChannel>,
         pending_requests: Arc<RwLock<HashMap<String, PendingRequest>>>,
@@ -509,7 +509,7 @@ impl<S: Store + 'static> Peer<S> {
                             }
                         }
 
-                        // Not found - stay silent (ts behavior)
+                        // Not found - stay silent (hashtree-ts behavior)
                         // Keep in their_requests for potential later push
                         {
                             let mut their_reqs = their_requests.write().await;
@@ -826,7 +826,7 @@ impl<S: Store + 'static> Peer<S> {
     }
 
     /// Request data by hash with specified HTL
-    /// Uses binary MessagePack protocol compatible with ts
+    /// Uses binary MessagePack protocol compatible with hashtree-ts
     pub async fn request_with_htl(&self, hash: &Hash, htl: u8) -> Result<Option<Vec<u8>>, PeerError> {
         let state = *self.state.read().await;
         if state != PeerState::Ready {

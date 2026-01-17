@@ -550,6 +550,7 @@ export async function presetProductionRelaysInDB(page: any) {
  */
 export async function useLocalRelay(page: any) {
   await waitForTestHelpers(page);
+  await waitForWorkerAdapter(page);
   const localRelay = getTestRelayUrl();
   await evaluateWithRetry(page, async (relay) => {
     // Update settings store for future store creations
@@ -563,6 +564,16 @@ export async function useLocalRelay(page: any) {
     const store = (window as unknown as { webrtcStore?: { setRelays?: (relays: string[]) => void } }).webrtcStore;
     if (store && typeof store.setRelays === 'function') {
       store.setRelays([relay]);
+    }
+
+    // Directly update worker's NDK relays via worker adapter
+    const getWorkerAdapter = (window as any).__getWorkerAdapter;
+    if (getWorkerAdapter) {
+      const adapter = getWorkerAdapter();
+      if (adapter?.setRelays) {
+        console.log('[useLocalRelay] Syncing relay to worker:', relay);
+        await adapter.setRelays([relay]);
+      }
     }
   }, localRelay);
 }

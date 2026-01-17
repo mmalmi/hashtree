@@ -29,4 +29,4 @@ let data = store.get(&hash).await?;
 - Compatible with S3-compatible services (MinIO, Cloudflare R2, etc.)
 - Optional feature in hashtree-cli: `cargo install hashtree-cli --features s3`
 
-Part of [hashtree](https://github.com/mmalmi/hashtree).
+Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).

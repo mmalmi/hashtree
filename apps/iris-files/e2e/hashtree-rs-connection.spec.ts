@@ -9,7 +9,7 @@ import { test, expect } from './fixtures';
 import { spawn, execSync, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { enableOthersPool, ensureLoggedIn, setupPageErrorHandler, useLocalRelay, waitForAppReady, getTestRelayUrl, getCrosslangPort } from './test-utils.js';
+import { enableOthersPool, ensureLoggedIn, setupPageErrorHandler, useLocalRelay, waitForAppReady, waitForRelayConnected, getTestRelayUrl, getCrosslangPort } from './test-utils.js';
 import { acquireRustLock, releaseRustLock } from './rust-lock.js';
 import { generateSecretKey, getPublicKey } from 'nostr-tools';
 import { fileURLToPath } from 'url';
@@ -62,6 +62,7 @@ test.describe('hashtreeRs WebRTC Connection', () => {
     await ensureLoggedIn(page, 20000);
     await useLocalRelay(page);
     await enableOthersPool(page, 2);
+    await waitForRelayConnected(page, 20000);
 
     // Wait for WebRTC test helpers to be initialized
     await page.waitForFunction(() => typeof (window as any).runWebRTCTest === 'function', { timeout: 10000 });
@@ -95,7 +96,8 @@ test.describe('hashtreeRs WebRTC Connection', () => {
         if (!adapter?.setFollows) return { ok: false, reason: 'no worker adapter' };
 
         await adapter.setFollows([rustPubkey]);
-        await adapter.sendHello?.();
+        // NOTE: Don't send hello here - rust isn't started yet!
+        // Hello will be sent after rust is ready.
         return { ok: true, retries };
       }, hashtreeRsPubkey);
 
@@ -184,19 +186,21 @@ test.describe('hashtreeRs WebRTC Connection', () => {
         exitPromise,
       ]);
 
-      let connectedToRust = false;
-      for (let i = 0; i < 60; i++) {
-        await page.waitForTimeout(2000);
-        if (i % 3 === 0) {
-          await page.evaluate(async () => {
-            const adapter = (window as any).__getWorkerAdapter?.();
-            await adapter?.sendHello?.();
-          });
-        }
+      // Now that rust is ready and listening, send hello to trigger peer discovery
+      console.log('[TS] Sending initial hello now that rust is ready...');
+      await page.evaluate(async () => {
+        const adapter = (window as any).__getWorkerAdapter?.();
+        await adapter?.sendHello?.();
+      });
 
+      let connectedToRust = false;
+      let lastPeerInfo: { connected: boolean; peers: Array<{ pk?: string; connected?: boolean; pool?: string }> } | null = null;
+
+      await expect.poll(async () => {
         const peerInfo = await page.evaluate(async (rustPubkey) => {
           const adapter = (window as any).__getWorkerAdapter?.();
           if (!adapter?.getPeerStats) return { connected: false, peers: [] as any[] };
+          await adapter?.sendHello?.();
           const peers = await adapter.getPeerStats();
           const rustPeer = peers.find((p: { pubkey?: string }) => p.pubkey === rustPubkey);
           return {
@@ -209,13 +213,12 @@ test.describe('hashtreeRs WebRTC Connection', () => {
           };
         }, hashtreeRsPubkey);
 
-        console.log(`[TS] Check ${i + 1}: rust connected=${peerInfo.connected}, peers=${JSON.stringify(peerInfo.peers)}`);
-        if (peerInfo.connected) {
-          connectedToRust = true;
-          break;
-        }
-      }
+        lastPeerInfo = peerInfo;
+        console.log(`[TS] WebRTC check: rust connected=${peerInfo.connected}, peers=${JSON.stringify(peerInfo.peers)}`);
+        return peerInfo.connected;
+      }, { timeout: 120000, intervals: [2000] }).toBe(true);
 
+      connectedToRust = lastPeerInfo?.connected ?? false;
       expect(connectedToRust).toBe(true);
 
       const content = await page.evaluate(async (hashHex) => {

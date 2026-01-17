@@ -25,4 +25,4 @@ let data = store.get(&hash)?;
 - ACID transactions
 - Crash-resistant
 
-Part of [hashtree](https://github.com/mmalmi/hashtree).
+Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).

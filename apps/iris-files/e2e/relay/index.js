@@ -51,7 +51,10 @@ const namespaces = new Map()
 
 function getNamespace(url) {
   if (!url) return '/'
-  const path = url.split('?')[0] || '/'
+  let path = url.split('?')[0] || '/'
+  if (path !== '/' && path.endsWith('/')) {
+    path = path.replace(/\/+$/, '')
+  }
   return path === '' ? '/' : path
 }
 

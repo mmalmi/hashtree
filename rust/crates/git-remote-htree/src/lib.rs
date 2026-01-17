@@ -185,7 +185,7 @@ fn run() -> Result<()> {
            config.blossom.write_servers.len());
 
     // Check for local daemon and use it if available
-    let daemon_url = detect_local_daemon();
+    let daemon_url = detect_local_daemon(Some(&config.server.bind_address));
     if let Some(ref url) = daemon_url {
         debug!("Local daemon detected at {}", url);
         // Prepend local daemon to read servers for cascade fetching
@@ -342,21 +342,8 @@ pub fn generate_secret_key() -> [u8; 32] {
 
 /// Detect if local htree daemon is running
 /// Returns the daemon URL if available
-fn detect_local_daemon() -> Option<String> {
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    // Try to connect to the default daemon port
-    let addr = "127.0.0.1:8080";
-
-    // Use a short timeout for probing
-    match TcpStream::connect_timeout(
-        &addr.parse().ok()?,
-        Duration::from_millis(100),
-    ) {
-        Ok(_) => Some(format!("http://{}", addr)),
-        Err(_) => None,
-    }
+fn detect_local_daemon(bind_address: Option<&str>) -> Option<String> {
+    hashtree_config::detect_local_daemon_url(bind_address)
 }
 
 #[cfg(test)]
@@ -520,7 +507,7 @@ mod tests {
     fn test_detect_local_daemon_not_running() {
         // When no daemon is running on port 8080, should return None
         // This test assumes port 8080 is not in use during testing
-        let result = detect_local_daemon();
+        let result = detect_local_daemon(None);
         // Can't assert None because a daemon might be running
         // Just verify it doesn't panic and returns valid result
         if let Some(url) = result {
@@ -537,18 +524,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        // Our detect function only checks 8080, so this won't be detected
-        // This test just verifies the TCP probe logic works
         drop(listener);
-
-        // After dropping, connection should fail
-        use std::net::TcpStream;
-        use std::time::Duration;
         let addr = format!("127.0.0.1:{}", port);
-        let result = TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(100),
-        );
-        assert!(result.is_err());
+        let result = detect_local_daemon(Some(&addr));
+        assert!(result.is_none());
     }
 }

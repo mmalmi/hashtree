@@ -373,6 +373,38 @@ pub fn get_data_dir() -> PathBuf {
     PathBuf::from(&config.storage.data_dir)
 }
 
+/// Detect a local hashtree daemon on localhost and return its Blossom base URL.
+pub fn detect_local_daemon_url(bind_address: Option<&str>) -> Option<String> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let port = local_daemon_port(bind_address);
+    if port == 0 {
+        return None;
+    }
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = Duration::from_millis(100);
+    TcpStream::connect_timeout(&addr, timeout).ok()?;
+    Some(format!("http://127.0.0.1:{}", port))
+}
+
+fn local_daemon_port(bind_address: Option<&str>) -> u16 {
+    let default_port = 8080;
+    let Some(addr) = bind_address else {
+        return default_port;
+    };
+    if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
+        return sock.port();
+    }
+    if let Some((_, port_str)) = addr.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return port;
+        }
+    }
+    default_port
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +491,35 @@ nsec1ghi789
         assert_eq!(entries[1].alias, Some("work".to_string()));
         assert_eq!(entries[2].secret, "nsec1ghi789");
         assert_eq!(entries[2].alias, None);
+    }
+
+    #[test]
+    fn test_local_daemon_port_default() {
+        assert_eq!(local_daemon_port(None), 8080);
+    }
+
+    #[test]
+    fn test_local_daemon_port_parses_ipv4() {
+        assert_eq!(local_daemon_port(Some("127.0.0.1:9090")), 9090);
+    }
+
+    #[test]
+    fn test_local_daemon_port_parses_anyhost() {
+        assert_eq!(local_daemon_port(Some("0.0.0.0:7070")), 7070);
+    }
+
+    #[test]
+    fn test_local_daemon_port_parses_ipv6() {
+        assert_eq!(local_daemon_port(Some("[::1]:6060")), 6060);
+    }
+
+    #[test]
+    fn test_local_daemon_port_parses_hostname() {
+        assert_eq!(local_daemon_port(Some("localhost:5050")), 5050);
+    }
+
+    #[test]
+    fn test_local_daemon_port_invalid() {
+        assert_eq!(local_daemon_port(Some("localhost")), 8080);
     }
 }

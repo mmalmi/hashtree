@@ -21,4 +21,4 @@ Enables direct peer-to-peer data transfer between hashtree nodes using WebRTC da
 
 Used internally by `hashtree-cli` when running `htree start`. The daemon manages WebRTC connections and responds to blob requests from peers.
 
-Part of [hashtree](https://github.com/mmalmi/hashtree).
+Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).

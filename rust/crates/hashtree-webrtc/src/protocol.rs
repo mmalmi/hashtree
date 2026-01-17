@@ -1,6 +1,6 @@
 //! Wire protocol for hashtree WebRTC data exchange
 //!
-//! Compatible with ts wire format:
+//! Compatible with hashtree-ts wire format:
 //! - Request:  [0x00][msgpack: {h: bytes32, htl?: u8}]
 //! - Response: [0x01][msgpack: {h: bytes32, d: bytes, i?: u32, n?: u32}]
 //!
@@ -52,7 +52,7 @@ pub enum DataMessage {
 }
 
 /// Encode a request message to wire format
-/// Uses named/map encoding for compatibility with ts and to support optional fields
+/// Uses named/map encoding for compatibility with hashtree-ts and to support optional fields
 pub fn encode_request(req: &DataRequest) -> Vec<u8> {
     let body = rmp_serde::to_vec_named(req).expect("Failed to encode request");
     let mut result = Vec::with_capacity(1 + body.len());
@@ -62,7 +62,7 @@ pub fn encode_request(req: &DataRequest) -> Vec<u8> {
 }
 
 /// Encode a response message to wire format
-/// Uses named/map encoding for compatibility with ts and to support optional fields
+/// Uses named/map encoding for compatibility with hashtree-ts and to support optional fields
 pub fn encode_response(res: &DataResponse) -> Vec<u8> {
     let body = rmp_serde::to_vec_named(res).expect("Failed to encode response");
     let mut result = Vec::with_capacity(1 + body.len());

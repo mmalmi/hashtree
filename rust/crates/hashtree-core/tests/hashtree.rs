@@ -1,6 +1,6 @@
 //! Extensive tests for HashTree - unified merkle tree operations
 //!
-//! Tests matching and exceeding ts test coverage
+//! Tests matching and exceeding hashtree-ts test coverage
 
 use std::collections::HashMap;
 use std::sync::Arc;

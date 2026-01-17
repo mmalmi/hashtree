@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/mmalmi/hashtree"
@@ -28,15 +28,15 @@ futures = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 
 # Internal (path for local dev, version for publishing)
-hashtree-core = { version = "0.2.1", path = "crates/hashtree-core" }
-hashtree-lmdb = { version = "0.2.1", path = "crates/hashtree-lmdb" }
-hashtree-s3 = { version = "0.2.1", path = "crates/hashtree-s3" }
-hashtree-blossom = { version = "0.2.1", path = "crates/hashtree-blossom" }
-hashtree-sim = { version = "0.2.1", path = "crates/hashtree-sim" }
-hashtree-resolver = { version = "0.2.1", path = "crates/hashtree-resolver" }
-hashtree-config = { version = "0.2.1", path = "crates/hashtree-config" }
-hashtree-fs = { version = "0.2.1", path = "crates/hashtree-fs" }
-hashtree-webrtc = { version = "0.2.1", path = "crates/hashtree-webrtc" }
+hashtree-core = { version = "0.2.3", path = "crates/hashtree-core" }
+hashtree-lmdb = { version = "0.2.3", path = "crates/hashtree-lmdb" }
+hashtree-s3 = { version = "0.2.3", path = "crates/hashtree-s3" }
+hashtree-blossom = { version = "0.2.3", path = "crates/hashtree-blossom" }
+hashtree-sim = { version = "0.2.3", path = "crates/hashtree-sim" }
+hashtree-resolver = { version = "0.2.3", path = "crates/hashtree-resolver" }
+hashtree-config = { version = "0.2.3", path = "crates/hashtree-config" }
+hashtree-fs = { version = "0.2.3", path = "crates/hashtree-fs" }
+hashtree-webrtc = { version = "0.2.3", path = "crates/hashtree-webrtc" }
 
 # AWS S3
 aws-sdk-s3 = "1"

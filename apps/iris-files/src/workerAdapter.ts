@@ -911,6 +911,19 @@ export class WorkerAdapter {
     } as WorkerRequest);
   }
 
+  /**
+   * Update relay URLs dynamically.
+   * Disconnects old relays and connects to new ones.
+   */
+  async setRelays(relays: string[]): Promise<void> {
+    const id = generateRequestId();
+    await this.request<{ error?: string }>({
+      type: 'setRelays',
+      id,
+      relays,
+    } as WorkerRequest);
+  }
+
   // ============================================================================
   // Public API - Media Streaming
   // ============================================================================

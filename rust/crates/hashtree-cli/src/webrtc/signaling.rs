@@ -1,6 +1,6 @@
 //! WebRTC signaling over Nostr relays
 //!
-//! Protocol (compatible with ts):
+//! Protocol (compatible with hashtree-ts):
 //! - All signaling uses ephemeral kind 25050
 //! - Hello messages: #l: "hello" tag, broadcast for peer discovery (unencrypted)
 //! - Directed signaling (offer, answer, candidate, candidates): NIP-17 style
@@ -360,7 +360,7 @@ impl WebRTCManager {
     }
 
     /// Check if we should initiate connection (tie-breaking)
-    /// Lower UUID initiates - same as iris-client/ts
+    /// Lower UUID initiates - same as iris-client/hashtree-ts
     fn should_initiate(&self, their_uuid: &str) -> bool {
         self.my_peer_id.uuid < their_uuid.to_string()
     }
@@ -693,7 +693,7 @@ impl WebRTCManager {
         let raw_msg: serde_json::Value = serde_json::from_str(content)?;
         let msg_type = raw_msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Support ts format: { type, peerId, targetPeerId, sdp/candidate/candidates }
+        // Support hashtree-ts format: { type, peerId, targetPeerId, sdp/candidate/candidates }
         if raw_msg.get("targetPeerId").is_some() {
             let target_peer = raw_msg
                 .get("targetPeerId")

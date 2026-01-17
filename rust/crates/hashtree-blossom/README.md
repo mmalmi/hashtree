@@ -30,4 +30,4 @@ let data = client.download("https://blossom.example.com", &hash).await?;
 let exists = client.has("https://blossom.example.com", &hash).await?;
 ```
 
-Part of [hashtree](https://github.com/mmalmi/hashtree).
+Part of [hashtree-rs](https://github.com/mmalmi/hashtree-rs).

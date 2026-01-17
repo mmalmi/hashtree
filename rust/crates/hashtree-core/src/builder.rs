@@ -15,7 +15,7 @@ use crate::types::{Cid, DirEntry, Hash, Link, LinkType, TreeNode};
 
 use crate::crypto::{encrypt_chk, EncryptionKey};
 
-/// Default chunk size: 2MB (optimized for blossom uploads, matches ts)
+/// Default chunk size: 2MB (optimized for blossom uploads, matches hashtree-ts)
 pub const DEFAULT_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 
 /// BEP52 chunk size: 16KB

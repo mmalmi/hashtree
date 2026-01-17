@@ -95,9 +95,11 @@ impl NostrRootResolver {
     }
 
     /// Parse a key into pubkey and tree name
+    /// Tree names may contain slashes (e.g., "videos/Music")
     fn parse_key(key: &str) -> Result<(PublicKey, String), ResolverError> {
-        let parts: Vec<&str> = key.split('/').collect();
-        if parts.len() != 2 {
+        // Use splitn(2) to split only on first '/' - tree names can contain '/'
+        let parts: Vec<&str> = key.splitn(2, '/').collect();
+        if parts.len() != 2 || parts[1].is_empty() {
             return Err(ResolverError::InvalidKey(format!(
                 "Key must be in format 'npub.../treename', got: {}",
                 key
@@ -194,7 +196,7 @@ impl NostrRootResolver {
     /// subscribes and waits until a Cid is found. Caller should apply their
     /// own timeout if needed (e.g., via `tokio::time::timeout`).
     ///
-    /// This matches the behavior of ts NostrRootResolver.
+    /// This matches the behavior of hashtree-ts NostrRootResolver.
     pub async fn resolve_wait(&self, key: &str) -> Result<Cid, ResolverError> {
         // First try a quick resolve
         if let Some(cid) = self.resolve(key).await? {
@@ -224,8 +226,14 @@ impl RootResolver for NostrRootResolver {
         let filter = Filter::new()
             .kind(Kind::Custom(HASHTREE_KIND))
             .author(pubkey)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), vec![tree_name.clone()])
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![HASHTREE_LABEL]);
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                vec![tree_name.clone()],
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                vec![HASHTREE_LABEL],
+            );
 
         // Fetch events from relays
         let source = EventSource::relays(Some(self.config.resolve_timeout));
@@ -266,14 +274,24 @@ impl RootResolver for NostrRootResolver {
         }
     }
 
-    async fn resolve_shared(&self, key: &str, share_secret: &[u8; 32]) -> Result<Option<Cid>, ResolverError> {
+    async fn resolve_shared(
+        &self,
+        key: &str,
+        share_secret: &[u8; 32],
+    ) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
 
         let filter = Filter::new()
             .kind(Kind::Custom(HASHTREE_KIND))
             .author(pubkey)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), vec![tree_name.clone()])
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![HASHTREE_LABEL]);
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                vec![tree_name.clone()],
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                vec![HASHTREE_LABEL],
+            );
 
         let source = EventSource::relays(Some(self.config.resolve_timeout));
         let events = self
@@ -330,8 +348,14 @@ impl RootResolver for NostrRootResolver {
         let filter = Filter::new()
             .kind(Kind::Custom(HASHTREE_KIND))
             .author(pubkey)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), vec![tree_name.clone()])
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![HASHTREE_LABEL]);
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                vec![tree_name.clone()],
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                vec![HASHTREE_LABEL],
+            );
 
         // Store subscription state
         {
@@ -354,9 +378,7 @@ impl RootResolver for NostrRootResolver {
         // Spawn subscription handler
         let client = self.client.clone();
         tokio::spawn(async move {
-            let sub_id = client
-                .subscribe(vec![filter], None)
-                .await;
+            let sub_id = client.subscribe(vec![filter], None).await;
 
             if sub_id.is_err() {
                 return;
@@ -424,7 +446,10 @@ impl RootResolver for NostrRootResolver {
 
         // Add key tag if present
         if let Some(key) = cid.key {
-            tags.push(Tag::custom(TagKind::Custom(TAG_KEY.into()), vec![hex::encode(key)]));
+            tags.push(Tag::custom(
+                TagKind::Custom(TAG_KEY.into()),
+                vec![hex::encode(key)],
+            ));
         }
 
         // Content is empty - all data in tags
@@ -450,7 +475,12 @@ impl RootResolver for NostrRootResolver {
         Ok(!output.failed.is_empty() || !output.success.is_empty())
     }
 
-    async fn publish_shared(&self, key: &str, cid: &Cid, share_secret: &[u8; 32]) -> Result<bool, ResolverError> {
+    async fn publish_shared(
+        &self,
+        key: &str,
+        cid: &Cid,
+        share_secret: &[u8; 32],
+    ) -> Result<bool, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
 
         let my_pubkey = self.pubkey().ok_or(ResolverError::NotAuthorized)?;
@@ -471,7 +501,10 @@ impl RootResolver for NostrRootResolver {
         if let Some(key) = cid.key {
             let encrypted_key = encrypt(&key, share_secret)
                 .map_err(|e| ResolverError::Other(format!("Encryption error: {}", e)))?;
-            tags.push(Tag::custom(TagKind::Custom(TAG_ENCRYPTED_KEY.into()), vec![hex::encode(encrypted_key)]));
+            tags.push(Tag::custom(
+                TagKind::Custom(TAG_ENCRYPTED_KEY.into()),
+                vec![hex::encode(encrypted_key)],
+            ));
         }
 
         let event = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags);
@@ -499,7 +532,10 @@ impl RootResolver for NostrRootResolver {
         let filter = Filter::new()
             .kind(Kind::Custom(HASHTREE_KIND))
             .author(pubkey)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![HASHTREE_LABEL]);
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                vec![HASHTREE_LABEL],
+            );
 
         let source = EventSource::relays(Some(self.config.resolve_timeout));
         let events = self

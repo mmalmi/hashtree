@@ -18,6 +18,7 @@ const HELLO_TAG = 'hello';
 const MAX_EVENT_AGE_SEC = 30; // Ignore hellos older than this (3 hello intervals)
 
 let webrtc: WebRTCController | null = null;
+let signalingPubkey: string | null = null;
 
 function normalizeSignalingMessage(raw: unknown, senderPubkey: string): SignalingMessage | null {
   if (!raw || typeof raw !== 'object' || !('type' in raw)) return null;
@@ -141,9 +142,13 @@ export async function sendWebRTCSignaling(
  * and route webrtc-* subscriptions to handleWebRTCSignalingEvent.
  */
 export function setupWebRTCSignalingSubscription(myPubkey: string): void {
+  signalingPubkey = myPubkey;
   const since = Math.floor((Date.now() - MAX_EVENT_AGE_SEC * 1000) / 1000);
 
+  console.log('[WebRTC Signaling] Setting up subscriptions for', myPubkey.slice(0, 16), 'since', since);
+
   // Subscribe to hello messages (broadcast discovery)
+  console.log('[WebRTC Signaling] Creating webrtc-hello subscription');
   ndkSubscribe('webrtc-hello', [
     {
       kinds: [SIGNALING_KIND],
@@ -153,6 +158,7 @@ export function setupWebRTCSignalingSubscription(myPubkey: string): void {
   ]);
 
   // Subscribe to directed signaling (offers/answers to us)
+  console.log('[WebRTC Signaling] Creating webrtc-directed subscription');
   ndkSubscribe('webrtc-directed', [
     {
       kinds: [SIGNALING_KIND],
@@ -160,6 +166,22 @@ export function setupWebRTCSignalingSubscription(myPubkey: string): void {
       since,
     },
   ]);
+
+  console.log('[WebRTC Signaling] Subscriptions setup complete');
+}
+
+/**
+ * Re-subscribe to WebRTC signaling after relay change.
+ * Call this after setRelays to ensure subscriptions work on new relays.
+ */
+export function resubscribeWebRTCSignaling(): void {
+  if (!signalingPubkey) {
+    console.warn('[WebRTC Signaling] Cannot resubscribe - no pubkey set');
+    return;
+  }
+  console.log('[WebRTC Signaling] Resubscribing with pubkey:', signalingPubkey.slice(0, 16));
+  setupWebRTCSignalingSubscription(signalingPubkey);
+  console.log('[WebRTC Signaling] Resubscription complete');
 }
 
 /**

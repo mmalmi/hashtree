@@ -112,7 +112,7 @@ function syncRelays(): void {
   const adapter = getWorkerAdapter();
   if (!adapter) return;
 
-  // Only Tauri adapter supports setRelays
+  // Both WorkerAdapter and TauriWorkerAdapter now support setRelays
   if (!('setRelays' in adapter)) return;
 
   const settings = get(settingsStore);
@@ -124,7 +124,7 @@ function syncRelays(): void {
   lastRelaysHash = relaysHash;
 
   console.log('[WorkerInit] Syncing relays to worker:', relays.length, 'relays');
-  (adapter as TauriWorkerAdapter).setRelays(relays);
+  (adapter as { setRelays: (relays: string[]) => void }).setRelays(relays);
 }
 
 let lastStorageMaxBytesHash = '';
