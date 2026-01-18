@@ -958,7 +958,9 @@ async fn handle_webview_event(
         }
     };
 
-    if !nip07_state.validate_token(&request.origin, session_token) {
+    // For webview events (navigate, location), we just need to verify the token
+    // came from a webview we created - the origin may have changed after navigation
+    if !nip07_state.is_valid_token(session_token) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Invalid session token" })),
