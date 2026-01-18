@@ -779,6 +779,7 @@ export function createTreeRootStore(): Readable<CID | null> {
       }
 
       treeRootStore.set(cid(hash, decryptedKey));
+      void cacheTreeRootInTauri(resolverKey, hash, decryptedKey);
       logHtreeDebug('treeRoot:set', {
         resolverKey,
         visibility: visibility ?? null,

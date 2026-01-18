@@ -32,7 +32,7 @@
   });
 </script>
 
-<div class="relative bg-surface-2 overflow-hidden {className}">
+<div class="relative bg-surface-3 overflow-hidden {className}">
   {#if src && !imageError}
     <img
       {src}
@@ -43,7 +43,7 @@
     />
   {:else}
     <div class="absolute inset-0 flex items-center justify-center">
-      <span class="i-lucide-video text-text-3 {iconSize}"></span>
+      <span class="i-lucide-video text-text-2 {iconSize}"></span>
     </div>
   {/if}
 

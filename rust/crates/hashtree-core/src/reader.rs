@@ -188,7 +188,161 @@ impl<S: Store> TreeReader<S> {
     /// - `start`: Starting byte offset (inclusive)
     /// - `end`: Ending byte offset (exclusive), or None to read to end
     ///
-    /// For unencrypted content only - encrypted range reads not yet supported.
+    /// Handles both encrypted and unencrypted content based on whether CID has a key.
+    pub async fn get_range(
+        &self,
+        cid: &Cid,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, ReaderError> {
+        if let Some(key) = cid.key {
+            self.get_encrypted_range(&cid.hash, &key, start, end).await
+        } else {
+            self.read_file_range(&cid.hash, start, end).await
+        }
+    }
+
+    /// Read encrypted content range by hash and key
+    async fn get_encrypted_range(
+        &self,
+        hash: &Hash,
+        key: &EncryptionKey,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, ReaderError> {
+        let encrypted_data = match self.store.get(hash).await.map_err(|e| ReaderError::Store(e.to_string()))? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Decrypt the root data
+        let decrypted = decrypt_chk(&encrypted_data, key)
+            .map_err(|e| ReaderError::Decryption(e.to_string()))?;
+
+        // Check if it's a tree node
+        if !is_tree_node(&decrypted) {
+            // Single chunk - just slice it
+            let start_idx = start as usize;
+            let end_idx = end.map(|e| e as usize).unwrap_or(decrypted.len());
+            if start_idx >= decrypted.len() {
+                return Ok(Some(vec![]));
+            }
+            let end_idx = end_idx.min(decrypted.len());
+            return Ok(Some(decrypted[start_idx..end_idx].to_vec()));
+        }
+
+        // It's a tree - assemble only the needed range
+        let node = decode_tree_node(&decrypted)?;
+        let range_data = self.assemble_encrypted_chunks_range(&node, start, end).await?;
+        Ok(Some(range_data))
+    }
+
+    /// Assemble only the encrypted chunks needed for a byte range
+    async fn assemble_encrypted_chunks_range(
+        &self,
+        node: &TreeNode,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Vec<u8>, ReaderError> {
+        // Calculate total size from link sizes
+        let total_size: u64 = node.links.iter().map(|l| l.size).sum();
+        let actual_end = end.unwrap_or(total_size).min(total_size);
+
+        if start >= actual_end {
+            return Ok(vec![]);
+        }
+
+        let mut result = Vec::with_capacity((actual_end - start) as usize);
+        let mut position = 0u64;
+        let mut bytes_collected = 0u64;
+        let max_bytes = actual_end - start;
+
+        for link in &node.links {
+            if bytes_collected >= max_bytes {
+                break;
+            }
+
+            let link_size = link.size;
+
+            // Skip chunks entirely before start
+            if link_size > 0 && position + link_size <= start {
+                position += link_size;
+                continue;
+            }
+
+            // Fetch and decrypt this chunk
+            let chunk_key = link.key.ok_or(ReaderError::MissingKey)?;
+
+            let encrypted_child = self
+                .store
+                .get(&link.hash)
+                .await
+                .map_err(|e| ReaderError::Store(e.to_string()))?
+                .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
+
+            let decrypted = decrypt_chk(&encrypted_child, &chunk_key)
+                .map_err(|e| ReaderError::Decryption(e.to_string()))?;
+
+            if is_tree_node(&decrypted) {
+                // Intermediate tree node - recurse
+                let child_node = decode_tree_node(&decrypted)?;
+                let child_start = if start > position { start - position } else { 0 };
+                let child_end = if actual_end > position {
+                    Some(actual_end - position)
+                } else {
+                    Some(0)
+                };
+                let child_data = Box::pin(self.assemble_encrypted_chunks_range(&child_node, child_start, child_end)).await?;
+                if !child_data.is_empty() {
+                    let take = ((max_bytes - bytes_collected) as usize).min(child_data.len());
+                    result.extend_from_slice(&child_data[..take]);
+                    bytes_collected += take as u64;
+                }
+                position += link_size;
+            } else {
+                // Leaf chunk
+                let chunk_start = position;
+                let chunk_end = position + decrypted.len() as u64;
+                position = chunk_end;
+
+                if chunk_end <= start {
+                    continue;
+                }
+
+                // Calculate slice bounds within this chunk
+                let slice_start = if start > chunk_start {
+                    (start - chunk_start) as usize
+                } else {
+                    0
+                };
+                let slice_end = if actual_end < chunk_end {
+                    (actual_end - chunk_start) as usize
+                } else {
+                    decrypted.len()
+                };
+
+                if slice_start < slice_end {
+                    let take = ((max_bytes - bytes_collected) as usize).min(slice_end - slice_start);
+                    result.extend_from_slice(&decrypted[slice_start..slice_start + take]);
+                    bytes_collected += take as u64;
+                }
+            }
+
+            // Early exit if we've collected enough
+            if position >= actual_end {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Read a byte range from a file (fetches only necessary chunks)
+    ///
+    /// - `start`: Starting byte offset (inclusive)
+    /// - `end`: Ending byte offset (exclusive), or None to read to end
+    ///
+    /// For unencrypted content only - use `get_range()` for unified access.
     pub async fn read_file_range(
         &self,
         hash: &Hash,
@@ -1017,5 +1171,64 @@ mod tests {
         let result = reader.read_file_range(&cid.hash, 100, Some(101)).await.unwrap().unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_range_encrypted_small() {
+        let store = make_store();
+        // Encrypted by default (no .public())
+        let builder = TreeBuilder::new(BuilderConfig::new(store.clone()));
+        let reader = TreeReader::new(store);
+
+        let data = b"Hello, encrypted World!";
+        let (cid, _size) = builder.put(data).await.unwrap();
+
+        // Should have a key for encrypted content
+        assert!(cid.key.is_some());
+
+        // Read middle portion
+        let result = reader.get_range(&cid, 7, Some(16)).await.unwrap();
+        assert_eq!(result, Some(b"encrypted".to_vec()));
+
+        // Read from start
+        let result = reader.get_range(&cid, 0, Some(5)).await.unwrap();
+        assert_eq!(result, Some(b"Hello".to_vec()));
+
+        // Read to end
+        let result = reader.get_range(&cid, 17, None).await.unwrap();
+        assert_eq!(result, Some(b"World!".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_get_range_encrypted_chunked() {
+        let store = make_store();
+        // Small chunk size to force chunking, encrypted
+        let config = BuilderConfig::new(store.clone()).with_chunk_size(100);
+        let builder = TreeBuilder::new(config);
+        let reader = TreeReader::new(store);
+
+        // Create 350 bytes of sequential data
+        let mut data = vec![0u8; 350];
+        for i in 0..data.len() {
+            data[i] = (i % 256) as u8;
+        }
+
+        let (cid, _size) = builder.put(&data).await.unwrap();
+        assert!(cid.key.is_some()); // Encrypted
+
+        // Read bytes 50-150 (spans chunk boundary at 100)
+        let result = reader.get_range(&cid, 50, Some(150)).await.unwrap().unwrap();
+        assert_eq!(result.len(), 100);
+        assert_eq!(result, data[50..150].to_vec());
+
+        // Read bytes 200-300
+        let result = reader.get_range(&cid, 200, Some(300)).await.unwrap().unwrap();
+        assert_eq!(result.len(), 100);
+        assert_eq!(result, data[200..300].to_vec());
+
+        // Read last 50 bytes
+        let result = reader.get_range(&cid, 300, None).await.unwrap().unwrap();
+        assert_eq!(result.len(), 50);
+        assert_eq!(result, data[300..].to_vec());
     }
 }

@@ -506,7 +506,7 @@ impl HtreeState {
     }
 
     /// Read a byte range from a file (fetches only necessary chunks)
-    /// This is more efficient than read_file() for partial reads of large files.
+    /// Handles both encrypted and unencrypted content.
     async fn read_file_range(
         &self,
         cid: &Cid,
@@ -515,7 +515,7 @@ impl HtreeState {
     ) -> Result<Vec<u8>, HtreeError> {
         let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
 
-        tree.read_file_range(&cid.hash, start, end)
+        tree.get_range(cid, start, end)
             .await
             .map_err(|e| HtreeError::Store(e.to_string()))?
             .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))
