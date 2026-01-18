@@ -167,6 +167,160 @@ impl<S: Store> HashTree<S> {
         }
     }
 
+    /// Get a range of bytes by Cid (handles decryption automatically)
+    ///
+    /// - `start`: Starting byte offset (inclusive)
+    /// - `end`: Ending byte offset (exclusive), or None to read to end
+    ///
+    /// This is more efficient than get() for partial reads of large files.
+    pub async fn get_range(
+        &self,
+        cid: &Cid,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, HashTreeError> {
+        if let Some(key) = cid.key {
+            self.get_encrypted_range(&cid.hash, &key, start, end).await
+        } else {
+            self.read_file_range(&cid.hash, start, end).await
+        }
+    }
+
+    /// Get encrypted content range by hash and key
+    async fn get_encrypted_range(
+        &self,
+        hash: &Hash,
+        key: &[u8; 32],
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, HashTreeError> {
+        let encrypted_data = match self.store.get(hash).await.map_err(|e| HashTreeError::Store(e.to_string()))? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Decrypt the root data
+        let decrypted = decrypt_chk(&encrypted_data, key)
+            .map_err(|e| HashTreeError::Decryption(e.to_string()))?;
+
+        // Check if it's a tree node
+        if !is_tree_node(&decrypted) {
+            // Single chunk - just slice it
+            let start_idx = start as usize;
+            let end_idx = end.map(|e| e as usize).unwrap_or(decrypted.len());
+            if start_idx >= decrypted.len() {
+                return Ok(Some(vec![]));
+            }
+            let end_idx = end_idx.min(decrypted.len());
+            return Ok(Some(decrypted[start_idx..end_idx].to_vec()));
+        }
+
+        // It's a tree - assemble only the needed range
+        let node = decode_tree_node(&decrypted)?;
+        let range_data = self.assemble_encrypted_chunks_range(&node, start, end).await?;
+        Ok(Some(range_data))
+    }
+
+    /// Assemble only the encrypted chunks needed for a byte range
+    async fn assemble_encrypted_chunks_range(
+        &self,
+        node: &TreeNode,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Vec<u8>, HashTreeError> {
+        // Calculate total size from link sizes
+        let total_size: u64 = node.links.iter().map(|l| l.size).sum();
+        let actual_end = end.unwrap_or(total_size).min(total_size);
+
+        if start >= actual_end {
+            return Ok(vec![]);
+        }
+
+        let mut result = Vec::with_capacity((actual_end - start) as usize);
+        let mut position = 0u64;
+        let mut bytes_collected = 0u64;
+        let max_bytes = actual_end - start;
+
+        for link in &node.links {
+            if bytes_collected >= max_bytes {
+                break;
+            }
+
+            let link_size = link.size;
+
+            // Skip chunks entirely before start
+            if link_size > 0 && position + link_size <= start {
+                position += link_size;
+                continue;
+            }
+
+            // Fetch and decrypt this chunk
+            let chunk_key = link.key.ok_or_else(|| HashTreeError::Decryption("Missing encryption key".into()))?;
+
+            let encrypted_child = self
+                .store
+                .get(&link.hash)
+                .await
+                .map_err(|e| HashTreeError::Store(e.to_string()))?
+                .ok_or_else(|| HashTreeError::MissingChunk(to_hex(&link.hash)))?;
+
+            let decrypted = decrypt_chk(&encrypted_child, &chunk_key)
+                .map_err(|e| HashTreeError::Decryption(e.to_string()))?;
+
+            if is_tree_node(&decrypted) {
+                // Intermediate tree node - recurse
+                let child_node = decode_tree_node(&decrypted)?;
+                let child_start = if start > position { start - position } else { 0 };
+                let child_end = if actual_end > position {
+                    Some(actual_end - position)
+                } else {
+                    Some(0)
+                };
+                let child_data = Box::pin(self.assemble_encrypted_chunks_range(&child_node, child_start, child_end)).await?;
+                if !child_data.is_empty() {
+                    let take = ((max_bytes - bytes_collected) as usize).min(child_data.len());
+                    result.extend_from_slice(&child_data[..take]);
+                    bytes_collected += take as u64;
+                }
+                position += link_size;
+            } else {
+                // Leaf chunk
+                let chunk_start = position;
+                let chunk_end = position + decrypted.len() as u64;
+                position = chunk_end;
+
+                if chunk_end <= start {
+                    continue;
+                }
+
+                // Calculate slice bounds within this chunk
+                let slice_start = if start > chunk_start {
+                    (start - chunk_start) as usize
+                } else {
+                    0
+                };
+                let slice_end = if actual_end < chunk_end {
+                    (actual_end - chunk_start) as usize
+                } else {
+                    decrypted.len()
+                };
+
+                if slice_start < slice_end {
+                    let take = ((max_bytes - bytes_collected) as usize).min(slice_end - slice_start);
+                    result.extend_from_slice(&decrypted[slice_start..slice_start + take]);
+                    bytes_collected += take as u64;
+                }
+            }
+
+            // Early exit if we've collected enough
+            if position >= actual_end {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Store content from an async reader (streaming put)
     ///
     /// Reads data in chunks and builds a merkle tree incrementally.

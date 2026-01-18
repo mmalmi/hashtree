@@ -485,7 +485,7 @@ impl HtreeState {
     }
 
     /// Read a byte range from a file (fetches only necessary chunks)
-    /// This is more efficient than read_file() for partial reads of large files.
+    /// Handles both encrypted and unencrypted content.
     async fn read_file_range(
         &self,
         cid: &Cid,
@@ -494,7 +494,7 @@ impl HtreeState {
     ) -> Result<Vec<u8>, HtreeError> {
         let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
 
-        tree.read_file_range(&cid.hash, start, end)
+        tree.get_range(cid, start, end)
             .await
             .map_err(|e| HtreeError::Store(e.to_string()))?
             .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))
@@ -703,7 +703,7 @@ async fn handle_htree_request(
     if let Some(range_header) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_header.to_str() {
             if let Some((start, end)) = parse_range_header(range_str, total_size) {
-                // Use read_file_range for efficient partial reads (only fetches needed chunks)
+                // Use read_file_range which handles both encrypted and unencrypted content
                 let data = match state.read_file_range(&file_cid, start as u64, Some((end + 1) as u64)).await {
                     Ok(d) => d,
                     Err(e) => return e.into_response(),
@@ -1168,7 +1168,7 @@ pub fn handle_htree_protocol<R: tauri::Runtime>(
         // Check for Range header - if present, use efficient range reading
         if let Some(range_str) = &range_header {
             if let Some((start, end)) = parse_range_header(range_str, total_size) {
-                // Use read_file_range for efficient partial reads
+                // read_file_range handles both encrypted and unencrypted content
                 let data = state.read_file_range(&file_cid, start as u64, Some((end + 1) as u64)).await?;
                 return Ok((content_type, data, Some((start, end, total_size))));
             }
