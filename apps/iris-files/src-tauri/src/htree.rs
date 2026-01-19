@@ -17,8 +17,7 @@ use axum::{
 };
 use hashtree_blossom::{BlossomClient, BlossomStore};
 use hashtree_core::{
-    decode_tree_node, decrypt_chk, from_hex, is_tree_node, nhash_decode, to_hex, Cid, HashTree,
-    HashTreeConfig, Store, StoreError,
+    from_hex, is_tree_node, nhash_decode, to_hex, Cid, HashTree, HashTreeConfig, Store, StoreError,
 };
 use hashtree_fs::FsBlobStore;
 use hashtree_resolver::{
@@ -506,7 +505,7 @@ impl HtreeState {
     }
 
     /// Read a byte range from a file (fetches only necessary chunks)
-    /// Handles both encrypted and unencrypted content.
+    /// This is more efficient than read_file() for partial reads of large files.
     async fn read_file_range(
         &self,
         cid: &Cid,
@@ -515,39 +514,19 @@ impl HtreeState {
     ) -> Result<Vec<u8>, HtreeError> {
         let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
 
-        tree.get_range(cid, start, end)
+        tree.read_file_range(&cid.hash, start, end)
             .await
             .map_err(|e| HtreeError::Store(e.to_string()))?
             .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))
     }
 
     /// Get the total size of a file without loading all its content
-    /// Handles encrypted files by decrypting the root node to read the tree structure
     async fn get_file_size(&self, cid: &Cid) -> Result<u64, HtreeError> {
-        // Get raw data from store
-        let data = self
-            .store
-            .get(&cid.hash)
+        let tree = HashTree::new(HashTreeConfig::new(self.store.clone()));
+
+        tree.get_size(&cid.hash)
             .await
-            .map_err(|e| HtreeError::Store(e.to_string()))?
-            .ok_or_else(|| HtreeError::FileNotFound(to_hex(&cid.hash)))?;
-
-        // Decrypt if key is present
-        let data = if let Some(key) = &cid.key {
-            decrypt_chk(&data, key).map_err(|e| HtreeError::Store(e.to_string()))?
-        } else {
-            data
-        };
-
-        // If not a tree node, return raw size
-        if !is_tree_node(&data) {
-            return Ok(data.len() as u64);
-        }
-
-        // Parse tree node and sum children's sizes
-        let node = decode_tree_node(&data).map_err(|e| HtreeError::Store(e.to_string()))?;
-        let total: u64 = node.links.iter().map(|link| link.size).sum();
-        Ok(total)
+            .map_err(|e| HtreeError::Store(e.to_string()))
     }
 
     /// Resolve nhash to Cid and mime type (without reading content)
@@ -958,9 +937,7 @@ async fn handle_webview_event(
         }
     };
 
-    // For webview events (navigate, location), we just need to verify the token
-    // came from a webview we created - the origin may have changed after navigation
-    if !nip07_state.is_valid_token(session_token) {
+    if !nip07_state.validate_token(&request.origin, session_token) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Invalid session token" })),

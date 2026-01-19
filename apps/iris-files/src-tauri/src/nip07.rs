@@ -196,15 +196,12 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
     }});
   }}
 
-  function handleMouseButton(e) {{
-    // button 3 = back, button 4 = forward (X1/X2 mouse buttons)
+  function handleMouseUp(e) {{
     if (e.button === 3) {{
       e.preventDefault();
-      e.stopPropagation();
       sendNavigate('back');
     }} else if (e.button === 4) {{
       e.preventDefault();
-      e.stopPropagation();
       sendNavigate('forward');
     }}
   }}
@@ -255,13 +252,8 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
   }}
 
   const captureOptions = {{ capture: true }};
-  // Listen for mouse back/forward on multiple events for cross-platform compatibility
-  window.addEventListener('mouseup', handleMouseButton, captureOptions);
-  window.addEventListener('pointerup', handleMouseButton, captureOptions);
-  window.addEventListener('auxclick', handleMouseButton, captureOptions);
-  document.addEventListener('mouseup', handleMouseButton, captureOptions);
-  document.addEventListener('pointerup', handleMouseButton, captureOptions);
-  document.addEventListener('auxclick', handleMouseButton, captureOptions);
+  window.addEventListener('mouseup', handleMouseUp, captureOptions);
+  document.addEventListener('mouseup', handleMouseUp, captureOptions);
   window.addEventListener('keydown', handleKeyDown, captureOptions);
   document.addEventListener('keydown', handleKeyDown, captureOptions);
 
@@ -372,11 +364,6 @@ impl Nip07State {
             .get(origin)
             .map(|t| t == token)
             .unwrap_or(false)
-    }
-
-    /// Check if a token is valid for any origin (used for benign events like navigate)
-    pub fn is_valid_token(&self, token: &str) -> bool {
-        self.session_tokens.read().values().any(|t| t == token)
     }
 
     /// Clear the session token for an origin
