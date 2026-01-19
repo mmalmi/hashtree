@@ -1151,7 +1151,11 @@ pub fn handle_htree_protocol<R: tauri::Runtime>(
         .next()
         .unwrap_or(path_with_query);
 
-    let range_header = request.headers().get("range").and_then(|v| v.to_str().ok());
+    let range_header = request
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     info!("htree:// protocol request: raw_path={}, path={}", raw_path, path);
 
@@ -1171,7 +1175,8 @@ pub fn handle_htree_protocol<R: tauri::Runtime>(
         // First resolve the path to get CID and mime type (without loading file content)
         let (file_cid, content_type) = resolve_htree_inner(state, path).await?;
 
-        let (data, range_info) = read_range_or_full(state, &file_cid, range_header).await?;
+        let (data, range_info) =
+            read_range_or_full(state, &file_cid, range_header.as_deref()).await?;
         Ok((content_type, data, range_info))
     });
 
