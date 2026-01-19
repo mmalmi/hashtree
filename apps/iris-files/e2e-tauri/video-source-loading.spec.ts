@@ -355,18 +355,25 @@ describe('Video source loading in Tauri', () => {
         try {
           const headResponse = await fetch(videoUrl, { method: 'HEAD' });
           let rangeStatus = null;
+          let rangeContentRange = null;
+          let rangeLength = null;
           if (headResponse.status === 200) {
             const rangeResponse = await fetch(videoUrl, {
               method: 'GET',
               headers: { Range: 'bytes=0-1024' },
             });
             rangeStatus = rangeResponse.status;
+            rangeContentRange = rangeResponse.headers.get('content-range');
+            const rangeBuffer = await rangeResponse.arrayBuffer();
+            rangeLength = rangeBuffer.byteLength;
           }
 
           return {
             url: videoUrl,
             headStatus: headResponse.status,
             rangeStatus,
+            rangeContentRange,
+            rangeLength,
             error: null,
           };
         } catch (e) {
@@ -381,6 +388,8 @@ describe('Video source loading in Tauri', () => {
       // Check if Range requests work (important for video streaming)
       if (httpTest.rangeStatus !== null) {
         expect(httpTest.rangeStatus).toBe(206);
+        expect(httpTest.rangeContentRange).toMatch(/^bytes 0-1024\/\d+$/);
+        expect(httpTest.rangeLength).toBe(1025);
       }
     }
   });

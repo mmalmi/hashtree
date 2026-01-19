@@ -1,6 +1,6 @@
 # Agent Guidelines
 
-TDD. No flaky tests. Commit when tests pass.
+See `/AGENTS.md` for shared rules.
 
 Local tests use `TestRelay`/`TestServer` - no network deps. `#[ignore]` for external infra only.
 

@@ -620,11 +620,24 @@ pub async fn daemon_status(
             .filter(|e| e.state == ConnectionState::Connected
                 && e.peer.as_ref().map(|p| p.has_data_channel()).unwrap_or(false))
             .count();
+        let (bytes_sent, bytes_received) = webrtc_state.get_bandwidth();
+        // Per-peer stats
+        let peer_stats: Vec<_> = peers.values()
+            .map(|e| json!({
+                "peer_id": e.peer_id.short(),
+                "pubkey": e.peer_id.pubkey.clone(),
+                "bytes_sent": e.bytes_sent,
+                "bytes_received": e.bytes_received,
+            }))
+            .collect();
         json!({
             "enabled": true,
             "total_peers": peers.len(),
             "connected": connected,
             "with_data_channel": with_data_channel,
+            "bytes_sent": bytes_sent,
+            "bytes_received": bytes_received,
+            "peers": peer_stats,
         })
     } else {
         json!({"enabled": false})
