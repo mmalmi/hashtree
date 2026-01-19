@@ -306,15 +306,13 @@
   $effect(() => {
     if (!isTauri()) return;
 
-    function handleMouseButton(e: MouseEvent | PointerEvent) {
-      // Mouse button 3 = back, button 4 = forward (X1/X2 mouse buttons)
+    function handleMouseUp(e: MouseEvent) {
+      // Mouse button 3 = back, button 4 = forward
       if (e.button === 3) {
         e.preventDefault();
-        e.stopPropagation();
         goBack();
       } else if (e.button === 4) {
         e.preventDefault();
-        e.stopPropagation();
         goForward();
       }
     }
@@ -335,17 +333,11 @@
       }
     }
 
-    // Use capture phase to ensure we get the event before any child handlers can stop it
-    const captureOptions = { capture: true };
-    window.addEventListener('mouseup', handleMouseButton, captureOptions);
-    window.addEventListener('pointerup', handleMouseButton, captureOptions);
-    window.addEventListener('auxclick', handleMouseButton, captureOptions);
+    window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
-      window.removeEventListener('mouseup', handleMouseButton, captureOptions);
-      window.removeEventListener('pointerup', handleMouseButton, captureOptions);
-      window.removeEventListener('auxclick', handleMouseButton, captureOptions);
+      window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('keydown', handleKeyDown);
     };
   });

@@ -47,15 +47,15 @@
   });
 
   function formatRate(bytesPerSec: number): string {
-    if (bytesPerSec < 1024) return `${Math.round(bytesPerSec).toString().padStart(5)}  B/s`;
-    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1).padStart(5)} kB/s`;
-    return `${(bytesPerSec / (1024 * 1024)).toFixed(1).padStart(5)} MB/s`;
+    if (bytesPerSec < 1024) return `${Math.round(bytesPerSec).toString().padStart(4)} B/s`;
+    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1).padStart(4)} kB/s`;
+    return `${(bytesPerSec / (1024 * 1024)).toFixed(1).padStart(4)} MB/s`;
   }
 </script>
 
 <a
   href="#/settings/p2p"
-  class="flex flex-col items-end text-xs no-underline font-mono leading-tight w-20"
+  class="flex flex-col items-end text-xs no-underline font-mono leading-tight w-24 whitespace-nowrap"
   title="Upload: {formatRate(rates.up)}, Download: {formatRate(rates.down)}"
 >
   <span class="flex items-center gap-0.5" class:text-green-400={rates.up > 0} class:text-text-3={rates.up === 0}>
