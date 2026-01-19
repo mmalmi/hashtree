@@ -27,4 +27,12 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros
 axum = { workspace = true }
 futures = { workspace = true }
 
+# Optional dependencies for nostr integration tests
+hashtree-resolver = { path = "../hashtree-resolver", optional = true, features = ["nostr"] }
+nostr-sdk = { workspace = true, optional = true }
+
+[features]
+default = []
+nostr = ["dep:hashtree-resolver", "dep:nostr-sdk"]
+
 [dev-dependencies]

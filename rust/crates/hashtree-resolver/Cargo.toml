@@ -22,4 +22,3 @@ default = []
 nostr = ["nostr-sdk"]
 
 [dev-dependencies]
-hashtree-sim.workspace = true
