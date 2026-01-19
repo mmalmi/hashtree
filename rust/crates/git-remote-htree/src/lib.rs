@@ -199,7 +199,8 @@ fn run() -> Result<()> {
     }
 
     // Create helper and run protocol
-    let mut helper = RemoteHelper::new(&pubkey, &repo_name, signing_key, url_secret, is_private, config)?;
+    let mut helper =
+        RemoteHelper::new(&pubkey, &repo_name, signing_key, url_secret, is_private, config)?;
 
     // Read commands from stdin, write responses to stdout
     let stdin = std::io::stdin();

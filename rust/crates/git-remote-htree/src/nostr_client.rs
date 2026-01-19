@@ -415,7 +415,8 @@ impl NostrClient {
             .kind(Kind::Custom(KIND_APP_DATA))
             .author(author)
             .custom_tag(SingleLetterTag::lowercase(Alphabet::D), vec![repo_name])
-            .limit(1);
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![LABEL_HASHTREE])
+            .limit(50);
 
         debug!("Querying relays for repo {} events", repo_name);
 

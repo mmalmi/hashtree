@@ -124,8 +124,6 @@ pub struct RemoteHelper {
     is_private: bool,
     /// Start time for current operation (for conditional verbose logging)
     op_start: Option<Instant>,
-    /// Allow updating the currently checked-out branch during fetch
-    update_head_ok: bool,
 }
 
 #[derive(Debug)]
@@ -175,7 +173,6 @@ impl RemoteHelper {
             url_secret,
             is_private,
             op_start: None,
-            update_head_ok: false,
         })
     }
 
@@ -247,9 +244,7 @@ impl RemoteHelper {
                 if let Some(arg) = arg {
                     let mut parts = arg.split_whitespace();
                     let name = parts.next().unwrap_or("");
-                    let value = parts.next().unwrap_or("");
                     if name == "update-head-ok" {
-                        self.update_head_ok = value.is_empty() || value == "true" || value == "1";
                         return Ok(Some(vec!["ok".to_string()]));
                     }
                 }
@@ -293,21 +288,11 @@ impl RemoteHelper {
         for (name, sha) in &refs {
             self.remote_refs.insert(name.clone(), sha.clone());
             if name == "HEAD" {
-                // HEAD is a symref - check for actual target branch
+                // HEAD can be a symref or a direct SHA.
                 if let Some(target_branch) = sha.strip_prefix("ref: ") {
-                    // Symbolic ref (e.g., "ref: refs/heads/main")
-                    if let Some(target_sha) = refs.get(target_branch) {
-                        lines.push(format!("@{} HEAD", target_branch));
-                        lines.push(format!("{} HEAD", target_sha));
-                    }
-                } else if let Some((branch, target)) = refs
-                    .get("refs/heads/main")
-                    .map(|t| ("refs/heads/main", t))
-                    .or_else(|| refs.get("refs/heads/master").map(|t| ("refs/heads/master", t)))
-                {
-                    // Direct SHA in HEAD, find the matching branch
-                    lines.push(format!("@{} HEAD", branch));
-                    lines.push(format!("{} HEAD", target));
+                    lines.push(format!("@{} HEAD", target_branch));
+                } else {
+                    lines.push(format!("{} HEAD", sha));
                 }
             } else {
                 lines.push(format!("{} {}", sha, name));
@@ -338,28 +323,13 @@ impl RemoteHelper {
         Ok(())
     }
 
-    fn current_head_ref(&self) -> Result<Option<String>> {
-        let output = Command::new("git")
-            .args(["symbolic-ref", "-q", "HEAD"])
-            .output()
-            .context("Failed to run git symbolic-ref")?;
-
-        if !output.status.success() {
-            return Ok(None);
-        }
-
-        let head_ref = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if head_ref.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(head_ref))
-        }
-    }
-
     /// Execute queued fetch operations
     fn execute_fetch(&mut self) -> Result<()> {
         self.start_op(); // Start timing for conditional verbose logging
         info!("Fetching {} refs", self.fetch_specs.len());
+        for spec in &self.fetch_specs {
+            debug!(sha = %spec.sha, name = %spec.name, "Queued fetch");
+        }
 
         // Get the cached root hash from nostr (set during list command)
         let root_hash = self.nostr.get_cached_root_hash(&self.repo_name).cloned();
@@ -399,34 +369,6 @@ impl RemoteHelper {
             }
         } else {
             bail!("No root hash found for repository - cannot fetch");
-        }
-
-        // Update local refs to point to the fetched commits
-        // Use git update-ref since git sets GIT_DIR for the remote helper
-        if !self.update_head_ok {
-            if let Some(head_ref) = self.current_head_ref()? {
-                for spec in &self.fetch_specs {
-                    if spec.name == head_ref {
-                        bail!(
-                            "Refusing to update checked-out branch {} without update-head-ok",
-                            head_ref
-                        );
-                    }
-                }
-            }
-        }
-        for spec in &self.fetch_specs {
-            let output = Command::new("git")
-                .args(["update-ref", &spec.name, &spec.sha])
-                .output()
-                .context("Failed to run git update-ref")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to update ref {}: {}", spec.name, stderr);
-            } else {
-                debug!("Updated {} -> {}", spec.name, &spec.sha[..12]);
-            }
         }
 
         self.fetch_specs.clear();
@@ -731,66 +673,26 @@ impl RemoteHelper {
         Ok(existing)
     }
 
-    /// Write loose object to local git object store
-    /// The data is zlib-compressed loose object format - decompress and use git hash-object
+    /// Write loose object to local git object store.
+    /// The data is zlib-compressed loose object format.
     fn write_git_object(&self, oid: &str, data: &[u8]) -> Result<()> {
-        use flate2::read::ZlibDecoder;
-        use std::io::Read;
-
         // Git objects are stored as .git/objects/xx/yy... where xx is first 2 chars
         if oid.len() < 3 {
             bail!("Invalid object id: {}", oid);
         }
 
-        // Decompress the zlib data to get the raw git object (header + content)
-        let mut decoder = ZlibDecoder::new(data);
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)
-            .context("Failed to decompress git object")?;
+        let git_dir = std::env::var("GIT_DIR").unwrap_or_else(|_| ".git".to_string());
+        let (dir_name, file_name) = oid.split_at(2);
+        let obj_dir = std::path::Path::new(&git_dir).join("objects").join(dir_name);
+        std::fs::create_dir_all(&obj_dir).context("Failed to create object directory")?;
 
-        // Parse git object format: "<type> <size>\0<content>"
-        let null_pos = decompressed.iter().position(|&b| b == 0)
-            .context("Invalid git object: no null byte")?;
-
-        let header = std::str::from_utf8(&decompressed[..null_pos])
-            .context("Invalid git object header")?;
-
-        let content = &decompressed[null_pos + 1..];
-
-        // Parse header to get type
-        let parts: Vec<&str> = header.split(' ').collect();
-        if parts.len() != 2 {
-            bail!("Invalid git object header: {}", header);
-        }
-        let obj_type = parts[0];
-
-        // Use git hash-object to write the object - this works during clone
-        // because git sets GIT_DIR for the remote helper
-        let mut child = Command::new("git")
-            .args(["hash-object", "-w", "-t", obj_type, "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to spawn git hash-object")?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin.write_all(content)?;
+        let obj_path = obj_dir.join(file_name);
+        if obj_path.exists() {
+            return Ok(());
         }
 
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git hash-object failed: {}", stderr);
-        }
-
-        let written_oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if written_oid != oid {
-            warn!("Object hash mismatch: expected {}, got {}", oid, written_oid);
-        }
-
-        debug!("Wrote git object {} via hash-object", oid);
+        std::fs::write(&obj_path, data).context("Failed to write git object")?;
+        debug!("Wrote git object {} as loose object", oid);
         Ok(())
     }
 
