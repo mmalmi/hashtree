@@ -64,9 +64,13 @@ export function getRefResolver(): RefResolver {
         const ndkFilter: NDKFilter = {
           kinds: filter.kinds,
           authors: filter.authors,
-          '#d': filter['#d'],
-          '#l': filter['#l'],
         };
+        if (filter['#d']) {
+          ndkFilter['#d'] = filter['#d'];
+        }
+        if (filter['#l']) {
+          ndkFilter['#l'] = filter['#l'];
+        }
         const opts: NDKSubscriptionOptions = {
           closeOnEose: false,
           // Use ONLY_RELAY to ensure we get fresh data, not stale cache

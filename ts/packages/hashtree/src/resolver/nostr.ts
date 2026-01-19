@@ -68,19 +68,74 @@ export interface ParsedTreeVisibility {
   selfEncryptedLinkKey?: string;
 }
 
+interface LegacyContentPayload {
+  hash?: string;
+  key?: string;
+  visibility?: TreeVisibility;
+  encryptedKey?: string;
+  keyId?: string;
+  selfEncryptedKey?: string;
+  selfEncryptedLinkKey?: string;
+}
+
+function hasLabel(event: NostrEvent, label: string): boolean {
+  return event.tags.some(tag => tag[0] === 'l' && tag[1] === label);
+}
+
+function hasAnyLabel(event: NostrEvent): boolean {
+  return event.tags.some(tag => tag[0] === 'l');
+}
+
+function parseLegacyContent(event: NostrEvent): LegacyContentPayload | null {
+  const content = event.content?.trim();
+  if (!content) return null;
+
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object') {
+      const payload = parsed as Record<string, unknown>;
+      return {
+        hash: typeof payload.hash === 'string' ? payload.hash : undefined,
+        key: typeof payload.key === 'string' ? payload.key : undefined,
+        visibility: typeof payload.visibility === 'string' ? payload.visibility as TreeVisibility : undefined,
+        encryptedKey: typeof payload.encryptedKey === 'string' ? payload.encryptedKey : undefined,
+        keyId: typeof payload.keyId === 'string' ? payload.keyId : undefined,
+        selfEncryptedKey: typeof payload.selfEncryptedKey === 'string' ? payload.selfEncryptedKey : undefined,
+        selfEncryptedLinkKey: typeof payload.selfEncryptedLinkKey === 'string' ? payload.selfEncryptedLinkKey : undefined,
+      };
+    }
+  } catch {
+    // Ignore JSON parse errors.
+  }
+
+  if (/^[0-9a-fA-F]{64}$/.test(content)) {
+    return { hash: content };
+  }
+
+  return null;
+}
+
 /**
  * Parse hash and visibility info from a nostr event
  * Supports all visibility levels: public, link-visible, private
  */
 function parseHashAndVisibility(event: NostrEvent): ParsedTreeVisibility | null {
   const hashTag = event.tags.find(t => t[0] === 'hash')?.[1];
-  if (!hashTag) return null;
+  const legacyContent = hashTag ? null : parseLegacyContent(event);
+  const hash = hashTag ?? legacyContent?.hash;
+  if (!hash) return null;
 
-  const key = event.tags.find(t => t[0] === 'key')?.[1];
-  const encryptedKey = event.tags.find(t => t[0] === 'encryptedKey')?.[1];
-  const keyId = event.tags.find(t => t[0] === 'keyId')?.[1];
-  const selfEncryptedKey = event.tags.find(t => t[0] === 'selfEncryptedKey')?.[1];
-  const selfEncryptedLinkKey = event.tags.find(t => t[0] === 'selfEncryptedLinkKey')?.[1];
+  const keyTag = event.tags.find(t => t[0] === 'key')?.[1];
+  const encryptedKeyTag = event.tags.find(t => t[0] === 'encryptedKey')?.[1];
+  const keyIdTag = event.tags.find(t => t[0] === 'keyId')?.[1];
+  const selfEncryptedKeyTag = event.tags.find(t => t[0] === 'selfEncryptedKey')?.[1];
+  const selfEncryptedLinkKeyTag = event.tags.find(t => t[0] === 'selfEncryptedLinkKey')?.[1];
+
+  const key = keyTag ?? legacyContent?.key;
+  const encryptedKey = encryptedKeyTag ?? legacyContent?.encryptedKey;
+  const keyId = keyIdTag ?? legacyContent?.keyId;
+  const selfEncryptedKey = selfEncryptedKeyTag ?? legacyContent?.selfEncryptedKey;
+  const selfEncryptedLinkKey = selfEncryptedLinkKeyTag ?? legacyContent?.selfEncryptedLinkKey;
 
   let visibility: TreeVisibility;
   if (encryptedKey) {
@@ -91,10 +146,10 @@ function parseHashAndVisibility(event: NostrEvent): ParsedTreeVisibility | null 
     // Only selfEncryptedKey (no encryptedKey) means private
     visibility = 'private';
   } else {
-    visibility = 'public';
+    visibility = legacyContent?.visibility ?? 'public';
   }
 
-  return { hash: hashTag, visibility, key, encryptedKey, keyId, selfEncryptedKey, selfEncryptedLinkKey };
+  return { hash, visibility, key, encryptedKey, keyId, selfEncryptedKey, selfEncryptedLinkKey };
 }
 
 /**
@@ -211,11 +266,11 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
             kinds: [30078],
             authors: [pubkey],
             '#d': [treeName],
-            '#l': ['hashtree'],
           },
           (event) => {
             const dTag = event.tags.find(t => t[0] === 'd')?.[1];
             if (dTag !== treeName) return;
+            if (hasAnyLabel(event) && !hasLabel(event, 'hashtree')) return;
 
             const hashAndKey = parseHashAndKey(event);
             if (!hashAndKey) return;
@@ -286,11 +341,11 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
             kinds: [30078],
             authors: [pubkey],
             '#d': [treeName],
-            '#l': ['hashtree'],
           },
           (event) => {
             const dTag = event.tags.find(t => t[0] === 'd')?.[1];
             if (dTag !== treeName) return;
+            if (hasAnyLabel(event) && !hasLabel(event, 'hashtree')) return;
 
             const subEntry = subscriptions.get(key);
             if (!subEntry) return;

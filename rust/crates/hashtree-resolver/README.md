@@ -24,6 +24,9 @@ println!("Root hash: {}", entry.root_hash);
 
 Uses Nostr kind 30078 (NIP-78) events to store tree references:
 - `d` tag: tree name
-- Content: JSON with root hash, optional encryption key
+- `l` tag: `hashtree` label (for filtering)
+- `hash` tag: content hash
+- `key` tag: CHK decryption key (optional, public)
+- `encrypted_key` tag: encrypted key (optional, shared)
 
 Part of [hashtree-rs](https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree).

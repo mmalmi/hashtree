@@ -129,7 +129,7 @@ impl NostrRelayTransport {
         my_peer_id: &str,
         my_pubkey: &str,
         keys: &Keys,
-        debug: bool,
+        _debug: bool,
     ) -> Option<SignalingMessage> {
         // Helper to get tag value
         let get_tag = |name: &str| -> Option<String> {

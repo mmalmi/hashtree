@@ -15,6 +15,7 @@ use crate::{ResolverEntry, ResolverError, RootResolver};
 use async_trait::async_trait;
 use hashtree_core::{from_hex, to_hex, Cid};
 use nostr_sdk::prelude::*;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +56,47 @@ const TAG_HASH: &str = "hash";
 const TAG_KEY: &str = "key";
 #[allow(dead_code)]
 const TAG_ENCRYPTED_KEY: &str = "encrypted_key";
+
+fn has_label(event: &Event, label: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let tag_vec = tag.as_slice();
+        tag_vec.len() >= 2 && tag_vec[0].as_str() == "l" && tag_vec[1].as_str() == label
+    })
+}
+
+fn has_any_label(event: &Event) -> bool {
+    event.tags.iter().any(|tag| {
+        let tag_vec = tag.as_slice();
+        tag_vec.len() >= 1 && tag_vec[0].as_str() == "l"
+    })
+}
+
+fn is_hashtree_event(event: &Event) -> bool {
+    has_label(event, HASHTREE_LABEL) || !has_any_label(event)
+}
+
+fn parse_legacy_content(content: &str) -> Option<(String, Option<String>)> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(hash) = value.get("hash").and_then(|v| v.as_str()) {
+            let key = value
+                .get("key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Some((hash.to_string(), key));
+        }
+    }
+
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some((trimmed.to_string(), None));
+    }
+
+    None
+}
 
 /// Subscription state
 struct Subscription {
@@ -136,6 +178,15 @@ impl NostrRootResolver {
             }
         }
 
+        if hash_hex.is_none() {
+            if let Some((legacy_hash, legacy_key)) = parse_legacy_content(&event.content) {
+                hash_hex = Some(legacy_hash);
+                if key_hex.is_none() {
+                    key_hex = legacy_key;
+                }
+            }
+        }
+
         // hash is required
         let hash = from_hex(&hash_hex?).ok()?;
 
@@ -167,6 +218,12 @@ impl NostrRootResolver {
                     "encrypted_key" => encrypted_key_hex = Some(tag_vec[1].clone()),
                     _ => {}
                 }
+            }
+        }
+
+        if hash_hex.is_none() {
+            if let Some((legacy_hash, _legacy_key)) = parse_legacy_content(&event.content) {
+                hash_hex = Some(legacy_hash);
             }
         }
 
@@ -229,10 +286,6 @@ impl RootResolver for NostrRootResolver {
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
                 vec![tree_name.clone()],
-            )
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                vec![HASHTREE_LABEL],
             );
 
         // Fetch events from relays
@@ -258,6 +311,10 @@ impl RootResolver for NostrRootResolver {
             });
 
             if d_tag.as_deref() != Some(&tree_name) {
+                continue;
+            }
+
+            if !is_hashtree_event(event) {
                 continue;
             }
 
@@ -287,10 +344,6 @@ impl RootResolver for NostrRootResolver {
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
                 vec![tree_name.clone()],
-            )
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                vec![HASHTREE_LABEL],
             );
 
         let source = EventSource::relays(Some(self.config.resolve_timeout));
@@ -313,6 +366,10 @@ impl RootResolver for NostrRootResolver {
             });
 
             if d_tag.as_deref() != Some(&tree_name) {
+                continue;
+            }
+
+            if !is_hashtree_event(event) {
                 continue;
             }
 
@@ -351,10 +408,6 @@ impl RootResolver for NostrRootResolver {
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
                 vec![tree_name.clone()],
-            )
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                vec![HASHTREE_LABEL],
             );
 
         // Store subscription state
@@ -399,6 +452,10 @@ impl RootResolver for NostrRootResolver {
                     });
 
                     if d_tag.as_deref() != Some(&tree_name_clone) {
+                        continue;
+                    }
+
+                    if !is_hashtree_event(&event) {
                         continue;
                     }
 

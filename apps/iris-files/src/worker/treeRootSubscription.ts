@@ -72,15 +72,22 @@ export function unsubscribeFromTreeRoots(pubkeyHex: string): void {
  * Handle incoming tree root event (kind 30078 with #l=hashtree)
  * Called from worker.ts event router
  */
+function hasLabel(event: SignedEvent, label: string): boolean {
+  return event.tags.some(tag => tag[0] === 'l' && tag[1] === label);
+}
+
+function hasAnyLabel(event: SignedEvent): boolean {
+  return event.tags.some(tag => tag[0] === 'l');
+}
+
 export async function handleTreeRootEvent(event: SignedEvent): Promise<void> {
   // Extract tree name from #d tag
   const dTag = event.tags.find(t => t[0] === 'd');
   if (!dTag || !dTag[1]) return;
   const treeName = dTag[1];
 
-  // Check #l tag is 'hashtree'
-  const lTag = event.tags.find(t => t[0] === 'l');
-  if (!lTag || lTag[1] !== 'hashtree') return;
+  // Accept unlabeled legacy events, ignore other labeled apps.
+  if (hasAnyLabel(event) && !hasLabel(event, 'hashtree')) return;
 
   // Parse content - should contain hash and optional encrypted data
   let contentData: {
@@ -140,8 +147,8 @@ export async function handleTreeRootEvent(event: SignedEvent): Promise<void> {
  */
 export function isTreeRootEvent(event: SignedEvent): boolean {
   if (event.kind !== 30078) return false;
-  const lTag = event.tags.find(t => t[0] === 'l');
-  return lTag?.[1] === 'hashtree';
+  if (hasLabel(event, 'hashtree')) return true;
+  return !hasAnyLabel(event);
 }
 
 /**

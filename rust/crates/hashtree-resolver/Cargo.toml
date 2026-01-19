@@ -12,6 +12,7 @@ hashtree-core.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
+serde_json.workspace = true
 
 # Nostr resolver
 nostr-sdk = { workspace = true, optional = true }
@@ -19,3 +20,6 @@ nostr-sdk = { workspace = true, optional = true }
 [features]
 default = []
 nostr = ["nostr-sdk"]
+
+[dev-dependencies]
+hashtree-sim.workspace = true
