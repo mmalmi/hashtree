@@ -24,6 +24,8 @@
   import IssuesView from './Git/IssuesView.svelte';
   import PullRequestDetailView from './Git/PullRequestDetailView.svelte';
   import IssueDetailView from './Git/IssueDetailView.svelte';
+  import ReleasesView from './Git/ReleasesView.svelte';
+  import ReleaseDetailView from './Git/ReleaseDetailView.svelte';
   import CommitView from './Git/CommitView.svelte';
   import BranchCompareView from './Git/BranchCompareView.svelte';
   import MergeView from './Git/MergeView.svelte';
@@ -47,13 +49,13 @@
     { pattern: '/:id', component: UserRoute },
   ];
 
-  // Check for ?tab=pulls or ?tab=issues query param (NIP-34 git repo views)
-  // Also check for ?id= to show individual PR/Issue detail views
+  // Check for ?tab=pulls, ?tab=issues, or ?tab=releases query param (repo views)
+  // Also check for ?id= to show individual detail views
   // This allows PR/Issues views without interfering with actual directory names
-  function parseNip34Query(fullHash: string): { tab: 'pulls' | 'issues'; id?: string } | null {
+  function parseRepoTabQuery(fullHash: string): { tab: 'pulls' | 'issues' | 'releases'; id?: string } | null {
     const params = getQueryParamsFromHash(fullHash);
     const tab = params.get('tab');
-    if (tab === 'pulls' || tab === 'issues') {
+    if (tab === 'pulls' || tab === 'issues' || tab === 'releases') {
       const id = params.get('id') || undefined;
       return { tab, id };
     }
@@ -96,8 +98,8 @@
   // Subscribe to full hash for query param detection
   let fullHash = $derived($currentFullHash);
 
-  // Check for NIP-34 tab query param (?tab=pulls or ?tab=issues) and optional id
-  let nip34Query = $derived(parseNip34Query(fullHash));
+  // Check for repo tab query param (?tab=pulls, ?tab=issues, ?tab=releases) and optional id
+  let repoTabQuery = $derived(parseRepoTabQuery(fullHash));
 
   // Check for commit query param (?commit=<hash>)
   let commitHash = $derived(parseCommitQuery(fullHash));
@@ -138,14 +140,18 @@
     <BranchCompareView npub={route.params.npub} repoName={repoPath || route.params.treeName} baseBranch={compareQuery.base} headBranch={compareQuery.head} />
   {:else if commitHash && route.params.npub && route.params.treeName}
     <CommitView npub={route.params.npub} repoName={repoPath || route.params.treeName} {commitHash} />
-  {:else if nip34Query?.tab === 'pulls' && nip34Query.id && route.params.npub && route.params.treeName}
-    <PullRequestDetailView npub={route.params.npub} repoName={repoPath} prId={nip34Query.id} />
-  {:else if nip34Query?.tab === 'issues' && nip34Query.id && route.params.npub && route.params.treeName}
-    <IssueDetailView npub={route.params.npub} repoName={repoPath} issueId={nip34Query.id} />
-  {:else if nip34Query?.tab === 'pulls' && route.params.npub && route.params.treeName}
+  {:else if repoTabQuery?.tab === 'pulls' && repoTabQuery.id && route.params.npub && route.params.treeName}
+    <PullRequestDetailView npub={route.params.npub} repoName={repoPath} prId={repoTabQuery.id} />
+  {:else if repoTabQuery?.tab === 'issues' && repoTabQuery.id && route.params.npub && route.params.treeName}
+    <IssueDetailView npub={route.params.npub} repoName={repoPath} issueId={repoTabQuery.id} />
+  {:else if repoTabQuery?.tab === 'releases' && repoTabQuery.id && route.params.npub && route.params.treeName}
+    <ReleaseDetailView npub={route.params.npub} repoName={repoPath} releaseId={repoTabQuery.id} />
+  {:else if repoTabQuery?.tab === 'pulls' && route.params.npub && route.params.treeName}
     <PullRequestsView npub={route.params.npub} repoName={repoPath} />
-  {:else if nip34Query?.tab === 'issues' && route.params.npub && route.params.treeName}
+  {:else if repoTabQuery?.tab === 'issues' && route.params.npub && route.params.treeName}
     <IssuesView npub={route.params.npub} repoName={repoPath} />
+  {:else if repoTabQuery?.tab === 'releases' && route.params.npub && route.params.treeName}
+    <ReleasesView npub={route.params.npub} repoName={repoPath} />
   {:else if route.component === HomeRoute}
     <HomeRoute />
   {:else if route.component === SettingsLayout}

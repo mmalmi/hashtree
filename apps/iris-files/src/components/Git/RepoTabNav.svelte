@@ -1,24 +1,32 @@
 <script lang="ts">
   /**
-   * Tab navigation for repository views (Code, Pull Requests, Issues)
-   * Uses query params (?tab=pulls, ?tab=issues) to avoid conflicts with actual directory names
+   * Tab navigation for repository views (Code, Pull Requests, Issues, Releases)
+   * Uses query params (?tab=pulls, ?tab=issues, ?tab=releases) to avoid conflicts with directory names
    */
+  import { routeStore } from '../../stores';
   interface Props {
     npub: string;
     repoName: string;
-    activeTab: 'code' | 'pulls' | 'issues';
+    activeTab: 'code' | 'pulls' | 'issues' | 'releases';
   }
 
   let { npub, repoName, activeTab }: Props = $props();
+  let route = $derived($routeStore);
 
   const tabs = [
     { id: 'code', label: 'Code', icon: 'i-lucide-code', query: '' },
     { id: 'pulls', label: 'Pull Requests', icon: 'i-lucide-git-pull-request', query: '?tab=pulls' },
     { id: 'issues', label: 'Issues', icon: 'i-lucide-circle-dot', query: '?tab=issues' },
+    { id: 'releases', label: 'Releases', icon: 'i-lucide-tag', query: '?tab=releases' },
   ] as const;
 
   function getHref(tab: typeof tabs[number]): string {
-    return `#/${npub}/${repoName}${tab.query}`;
+    const linkKey = route.params.get('k');
+    if (!linkKey) {
+      return `#/${npub}/${repoName}${tab.query}`;
+    }
+    const separator = tab.query ? '&' : '?';
+    return `#/${npub}/${repoName}${tab.query}${separator}k=${linkKey}`;
   }
 </script>
 

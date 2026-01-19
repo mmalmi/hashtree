@@ -34,6 +34,7 @@
   import UnsavedChangesModal from './components/Modals/UnsavedChangesModal.svelte';
   import NewPullRequestModal from './components/Git/NewPullRequestModal.svelte';
   import NewIssueModal from './components/Git/NewIssueModal.svelte';
+  import ReleaseModal from './components/Git/ReleaseModal.svelte';
   import BlossomPushModal from './components/Modals/BlossomPushModal.svelte';
 
   // Handle fullscreen mode from URL
@@ -117,6 +118,7 @@
   <UnsavedChangesModal />
   <NewPullRequestModal />
   <NewIssueModal />
+  <ReleaseModal />
   <BlossomPushModal />
   <CIRunsModal />
   <Toast />
