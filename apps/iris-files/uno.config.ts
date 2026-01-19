@@ -6,8 +6,6 @@ export default defineConfig({
     'animate-pulse-live',
     'animate-pulse-bg',
     'animate-fade-in',
-    // Video thumbnail aspect ratio
-    'aspect-video',
     // YjsDocument toolbar icons
     'i-lucide-bold',
     'i-lucide-italic',
