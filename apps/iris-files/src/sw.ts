@@ -96,6 +96,7 @@ function handleWorkerMessage(event: MessageEvent): void {
       const headers = new Headers(pending.headers);
       headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
       headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+      headers.set('Access-Control-Allow-Origin', '*');
 
       pending.resolve(new Response(readable, {
         status: pending.status,
@@ -318,8 +319,9 @@ async function serveFileViaClients(request: FileRequest): Promise<Response> {
     cleanup();
     // Add cross-origin headers for embedding in iframes (required when main page has COEP)
     const headers = new Headers(data.headers);
-    headers.set('Cross-Origin-Resource-Policy', 'same-origin');
+    headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
     headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+    headers.set('Access-Control-Allow-Origin', '*');
     return new Response(data.body, {
       status: data.status,
       headers,
@@ -386,6 +388,7 @@ async function serveFileViaClients(request: FileRequest): Promise<Response> {
   // Allow sandboxed iframe origins ("null") to load scripts/styles from /htree.
   headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
   headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+  headers.set('Access-Control-Allow-Origin', '*');
   return new Response(stream, {
     status: data.status,
     headers,
