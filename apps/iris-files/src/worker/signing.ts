@@ -22,6 +22,64 @@ export function setResponseSender(fn: (msg: unknown) => void) {
   postResponse = fn;
 }
 
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+function normalizeTagValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  if (value == null) return '';
+  if (value instanceof Uint8Array) return bytesToHex(value);
+  if (ArrayBuffer.isView(value)) {
+    return bytesToHex(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  }
+  if (value instanceof ArrayBuffer) return bytesToHex(new Uint8Array(value));
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function sanitizeTags(tags: unknown): string[][] {
+  if (!Array.isArray(tags)) return [];
+
+  let needsSanitize = false;
+  for (const tag of tags) {
+    if (!Array.isArray(tag)) {
+      needsSanitize = true;
+      break;
+    }
+    for (const value of tag) {
+      if (typeof value !== 'string') {
+        needsSanitize = true;
+        break;
+      }
+    }
+    if (needsSanitize) break;
+  }
+
+  if (!needsSanitize) return tags as string[][];
+
+  const sanitized: string[][] = [];
+  for (const tag of tags) {
+    if (!Array.isArray(tag)) continue;
+    const normalized: string[] = [];
+    for (const value of tag) {
+      normalized.push(normalizeTagValue(value));
+    }
+    sanitized.push(normalized);
+  }
+  return sanitized;
+}
+
 // ============================================================================
 // Signing
 // ============================================================================
@@ -32,6 +90,7 @@ export function setResponseSender(fn: (msg: unknown) => void) {
  * - For extension login: delegates to main thread via NIP-07
  */
 export async function signEvent(template: EventTemplate): Promise<SignedEvent> {
+  template.tags = sanitizeTags(template.tags ?? []);
   const secretKey = getSecretKey();
   if (secretKey) {
     const event = finalizeEvent(template, secretKey);
@@ -58,6 +117,7 @@ export async function signEvent(template: EventTemplate): Promise<SignedEvent> {
  * Synchronous sign (only works with nsec, falls back to ephemeral)
  */
 export function signEventSync(template: EventTemplate): SignedEvent {
+  template.tags = sanitizeTags(template.tags ?? []);
   const secretKey = getSecretKey() || getEphemeralSecretKey();
   if (!secretKey) {
     throw new Error('No signing key available');

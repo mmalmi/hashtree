@@ -74,6 +74,64 @@ export type NDKRawEvent = {
     sig: string;
 };
 
+function bytesToHex(bytes: Uint8Array): string {
+    let hex = "";
+    for (const byte of bytes) {
+        hex += byte.toString(16).padStart(2, "0");
+    }
+    return hex;
+}
+
+function normalizeTagValue(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+        return String(value);
+    }
+    if (value == null) return "";
+    if (value instanceof Uint8Array) return bytesToHex(value);
+    if (ArrayBuffer.isView(value)) {
+        return bytesToHex(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    }
+    if (value instanceof ArrayBuffer) return bytesToHex(new Uint8Array(value));
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
+}
+
+function sanitizeTags(tags: NDKTag[]): NDKTag[] {
+    if (!Array.isArray(tags)) return [];
+
+    let needsSanitize = false;
+    for (const tag of tags as unknown as unknown[]) {
+        if (!Array.isArray(tag)) {
+            needsSanitize = true;
+            break;
+        }
+        for (const value of tag as unknown[]) {
+            if (typeof value !== "string") {
+                needsSanitize = true;
+                break;
+            }
+        }
+        if (needsSanitize) break;
+    }
+
+    if (!needsSanitize) return tags;
+
+    const sanitized: NDKTag[] = [];
+    for (const tag of tags as unknown as unknown[]) {
+        if (!Array.isArray(tag)) continue;
+        const normalized: string[] = [];
+        for (const value of tag as unknown[]) {
+            normalized.push(normalizeTagValue(value));
+        }
+        sanitized.push(normalized);
+    }
+    return sanitized;
+}
+
 /**
  * NDKEvent is the basic building block of NDK; most things
  * you do with NDK will revolve around writing or consuming NDKEvents.
@@ -331,7 +389,7 @@ export class NDKEvent extends EventEmitter {
 
         const { content, tags } = await this.generateTags(opts);
         this.content = content || "";
-        this.tags = tags;
+        this.tags = sanitizeTags(tags);
 
         try {
             this.id = this.getEventHash();
@@ -548,8 +606,9 @@ export class NDKEvent extends EventEmitter {
             }
         }
 
-        // If no relays configured (worker-only mode), return early - transport plugin handles it
-        if (this.ndk.pool.relays.size === 0) {
+        // If no relays configured (worker-only mode) and no relaySet provided, return early
+        // - transport plugin handles it.
+        if (this.ndk.pool.relays.size === 0 && (!relaySet || relaySet.size === 0)) {
             return new Set<NDKRelay>();
         }
 
