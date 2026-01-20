@@ -22,6 +22,7 @@
   import ZipPreview from './ZipPreview.svelte';
   import DosBox from './DosBox.svelte';
   import { TreeRow } from '../ui';
+  import FileGitBar from '../Git/FileGitBar.svelte';
 
   let route = $derived($routeStore);
   let rootCid = $derived($treeRootStore);
@@ -50,6 +51,52 @@
   let resolvingPath = $derived($resolvingPathStore);
   let hasFile = $derived(isViewingFile && lastSegment);
   let urlFileName = $derived(hasFile ? lastSegment : null);
+
+  // Git repo detection - check if we're viewing a file in a git repo
+  // Check for .git in parent directory entries or git root from URL param
+  let hasGitDir = $derived(entries.some(e => e.name === '.git' && e.type === LinkType.Dir));
+  let gitRootFromUrl = $derived(route.params.get('g'));
+  let isInGitRepo = $derived(hasGitDir || gitRootFromUrl !== null);
+
+  // Resolve git root CID
+  let gitRootCid = $state<typeof currentDirCid>(null);
+
+  $effect(() => {
+    if (hasGitDir && currentDirCid) {
+      // We're at the git root - use current directory CID
+      gitRootCid = currentDirCid;
+    } else if (gitRootFromUrl !== null && rootCid) {
+      // We're in a subdirectory - resolve gitRoot path to get CID
+      const tree = getTree();
+      const pathParts = gitRootFromUrl === '' ? [] : gitRootFromUrl.split('/');
+
+      let cancelled = false;
+      (async () => {
+        try {
+          if (pathParts.length === 0) {
+            if (!cancelled) gitRootCid = rootCid;
+          } else {
+            const result = await tree.resolvePath(rootCid, pathParts.join('/'));
+            if (!cancelled && result) {
+              gitRootCid = result.cid;
+            }
+          }
+        } catch {
+          if (!cancelled) gitRootCid = null;
+        }
+      })();
+      return () => { cancelled = true; };
+    } else {
+      gitRootCid = null;
+    }
+  });
+
+  // Subpath for file (path from git root to file's parent directory)
+  let fileSubpath = $derived.by(() => {
+    if (!isInGitRepo || urlPath.length <= 1) return undefined;
+    // Path without the filename
+    return urlPath.slice(0, -1).join('/');
+  });
 
   // For video streaming: compute effective tree name by absorbing path segments
   // Non-encoded URLs like /#/npub/videos/videoName/video.webm parse as:
@@ -740,6 +787,16 @@
         {/if}
       </div>
     </div>
+    {/if}
+
+    <!-- Git file bar - shows commit info when viewing a file in a git repo -->
+    {#if isInGitRepo && gitRootCid && urlFileName && !isFullscreen}
+      <FileGitBar
+        {gitRootCid}
+        fileName={urlFileName}
+        subpath={fileSubpath}
+        {canEdit}
+      />
     {/if}
 
     <!-- Content -->
