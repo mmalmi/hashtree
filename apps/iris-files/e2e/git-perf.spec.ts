@@ -10,7 +10,7 @@ test.describe('Git performance', () => {
     page.on('console', msg => {
       const text = msg.text();
       allLogs.push(text);
-      if (text.includes('[git perf]') || text.includes('[git]')) {
+      if (text.includes('[git perf]') || text.includes('[git]') || text.includes('getCommitCountFast')) {
         perfLogs.push(text);
         console.log(text);
       }
@@ -33,23 +33,40 @@ test.describe('Git performance', () => {
     console.log('Waiting for file commit info (file last commits)...');
     const startTime = Date.now();
 
-    // Poll until we see the completion log
+    // Poll until we see both completion logs
     let attempts = 0;
+    let fileCommitsTime = '';
+    let commitCountTime = '';
+
     while (attempts < 180) { // 180 * 500ms = 90 seconds
-      const completionLog = perfLogs.find(log => log.includes('getFileLastCommits completed'));
-      if (completionLog) {
-        // Extract time from log like "getFileLastCommits completed in 3707 ms"
-        const match = completionLog.match(/completed in (\d+) ms/);
-        if (match) {
-          console.log(`\nFile commit info completed in: ${match[1]}ms`);
+      // Check for file last commits completion
+      if (!fileCommitsTime) {
+        const fileLog = perfLogs.find(log => log.includes('getFileLastCommits completed'));
+        if (fileLog) {
+          const match = fileLog.match(/completed in (\d+) ms/);
+          if (match) fileCommitsTime = match[1];
         }
-        break;
       }
+
+      // Check for commit count completion
+      if (!commitCountTime) {
+        const countLog = perfLogs.find(log => log.includes('getCommitCountFast completed'));
+        if (countLog) {
+          const match = countLog.match(/completed in (\d+) ms/);
+          if (match) commitCountTime = match[1];
+        }
+      }
+
+      // Exit when we have both (or timeout)
+      if (fileCommitsTime && commitCountTime) break;
+
       await page.waitForTimeout(500);
       attempts++;
     }
 
     const loadTime = Date.now() - startTime;
+    console.log(`\nFile commit info completed in: ${fileCommitsTime || 'N/A'}ms`);
+    console.log(`Commit count completed in: ${commitCountTime || 'N/A'}ms`);
     console.log(`Total wait time: ${loadTime}ms`);
 
     // Print all perf logs
