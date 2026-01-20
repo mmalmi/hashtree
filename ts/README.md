@@ -143,6 +143,25 @@ Features:
 
 Requirements: [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) (Rust, platform-specific deps)
 
+## Web Viewer
+
+Browse content and git repos at [files.iris.to](https://files.iris.to), for example [hashtree/ts](https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree/ts).
+
+Apps can be loaded directly via `nhash` or `npub/path` URLs, bypassing web servers, DNS, SSL certificates, and CDNs entirely. Content is fetched from the P2P network and Blossom servers by hash, verified locally.
+
+## CI Integration
+
+[hashtree-ci](https://files.iris.to/#/npub1xndmdgymsf4a34rzr7346vp8qcptxf75pjqweh8naa8rklgxpfqqmfjtce/hashtree-ci) runs CI jobs for hashtree repos. Results are shown in the git UI - commit history displays pass/fail badges similar to GitHub Actions.
+
+Configure trusted runners in `.hashtree/ci.toml`:
+
+```toml
+[ci]
+[[ci.runners]]
+npub = "npub1..."
+name = "my-runner"
+```
+
 ## Development
 
 From `ts/`:
