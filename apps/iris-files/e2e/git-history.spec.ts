@@ -885,6 +885,175 @@ test.describe('Git history features', () => {
     }
   });
 
+  test('git history modal should infinite scroll to load more commits', { timeout: 120000 }, async ({ page }) => {
+    test.slow(); // Creating 60 commits and uploading large repo takes time
+    page.setDefaultTimeout(60000);
+
+    await navigateToPublicFolder(page);
+
+    // Create a git repo with many commits (more than initial load of 50)
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const { execSync } = await import('child_process');
+    const os = await import('os');
+
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'git-infinite-scroll-test-'));
+
+    try {
+      // Initialize git repo
+      execSync('git init', { cwd: tmpDir });
+      execSync('git config user.email "test@example.com"', { cwd: tmpDir });
+      execSync('git config user.name "Test User"', { cwd: tmpDir });
+
+      // Create 60 commits (more than initial load of 50)
+      for (let i = 1; i <= 60; i++) {
+        await fs.writeFile(path.join(tmpDir, `file${i}.txt`), `Content ${i}\n`);
+        execSync('git add .', { cwd: tmpDir });
+        execSync(`git commit -m "Commit ${i}"`, { cwd: tmpDir });
+      }
+
+      // Read all files
+      interface FileEntry { type: 'file'; path: string; content: number[]; }
+      interface DirEntry { type: 'dir'; path: string; }
+      type Entry = FileEntry | DirEntry;
+
+      const getAllEntries = async (dir: string, base = ''): Promise<Entry[]> => {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        const result: Entry[] = [];
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          const relativePath = base ? `${base}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) {
+            result.push({ type: 'dir', path: relativePath });
+            result.push(...await getAllEntries(fullPath, relativePath));
+          } else {
+            const content = await fs.readFile(fullPath);
+            result.push({ type: 'file', path: relativePath, content: Array.from(content) });
+          }
+        }
+        return result;
+      };
+
+      const allEntries = await getAllEntries(tmpDir);
+      const allFiles = allEntries.filter((e): e is FileEntry => e.type === 'file');
+      const allDirs = allEntries.filter((e): e is DirEntry => e.type === 'dir').map(d => d.path);
+
+      // Upload repo to hashtree
+      const rootCidHex = await page.evaluate(async ({ files, dirs }) => {
+        const { getTree, LinkType } = await import('/src/store.ts');
+        const { autosaveIfOwn } = await import('/src/nostr.ts');
+        const { getCurrentRootCid } = await import('/src/actions/route.ts');
+        const { getRouteSync } = await import('/src/stores/index.ts');
+
+        const tree = getTree();
+        const route = getRouteSync();
+        const rootCid = getCurrentRootCid();
+        if (!rootCid) return null;
+
+        // Create the git repo directory
+        let repoCid = (await tree.putDirectory([])).cid;
+
+        // Create directories
+        const dirPaths = new Set<string>(dirs);
+        for (const file of files) {
+          const parts = file.path.split('/');
+          for (let i = 1; i < parts.length; i++) {
+            dirPaths.add(parts.slice(0, i).join('/'));
+          }
+        }
+        const sortedDirs = Array.from(dirPaths).sort((a, b) =>
+          a.split('/').length - b.split('/').length
+        );
+
+        for (const dir of sortedDirs) {
+          const parts = dir.split('/');
+          const name = parts.pop()!;
+          const { cid: emptyDir } = await tree.putDirectory([]);
+          repoCid = await tree.setEntry(repoCid, parts, name, emptyDir, 0, LinkType.Dir);
+        }
+
+        // Add files
+        for (const file of files) {
+          const parts = file.path.split('/');
+          const name = parts.pop()!;
+          const data = new Uint8Array(file.content);
+          const { cid: fileCid, size } = await tree.putFile(data);
+          repoCid = await tree.setEntry(repoCid, parts, name, fileCid, size, LinkType.Blob);
+        }
+
+        // Add to current directory
+        const newRootCid = await tree.setEntry(rootCid, route.path, 'infinite-scroll-repo', repoCid, 0, LinkType.Dir);
+        autosaveIfOwn(newRootCid);
+
+        // Return repoCid hash for verification
+        return Array.from(repoCid.hash).map(b => b.toString(16).padStart(2, '0')).join('');
+      }, { files: allFiles, dirs: allDirs });
+
+      expect(rootCidHex).not.toBeNull();
+
+      // Navigate to the repo folder
+      const repoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'infinite-scroll-repo' }).first();
+      await expect(repoLink).toBeVisible({ timeout: 15000 });
+      await repoLink.click();
+      await page.waitForURL(/infinite-scroll-repo/, { timeout: 10000 });
+
+      // Click the commits button to open the git history modal
+      const commitsButton = page.locator('button:has-text("commits"), button:has(.i-lucide-history)').first();
+      await expect(commitsButton).toBeVisible({ timeout: 15000 });
+      await commitsButton.click();
+
+      // Wait for the modal to appear
+      const modal = page.locator('[data-testid="git-history-modal"]');
+      await expect(modal).toBeVisible({ timeout: 10000 });
+
+      // Wait for initial commits to load
+      await page.waitForFunction(() => {
+        const commits = document.querySelectorAll('[data-testid="git-history-modal"] [class*="timeline"]');
+        // Or count commit items by looking for commit hashes (7 char hex)
+        const commitItems = document.querySelectorAll('[data-testid="git-history-modal"] .font-mono');
+        return commitItems.length > 0;
+      }, { timeout: 15000 });
+
+      // Get initial commit count (should be 50)
+      const initialCount = await page.evaluate(() => {
+        // Count timeline dots which represent commits
+        const dots = document.querySelectorAll('[data-testid="git-history-modal"] .rounded-full.bg-accent, [data-testid="git-history-modal"] .rounded-full.bg-success');
+        return dots.length;
+      });
+
+      // Initial load should be 50 commits
+      expect(initialCount).toBe(50);
+
+      // Scroll to the bottom of the modal content
+      const scrollContainer = modal.locator('.overflow-auto');
+      await scrollContainer.evaluate((el) => {
+        el.scrollTo({ top: el.scrollHeight, behavior: 'instant' });
+      });
+
+      // Wait for more commits to load automatically (infinite scroll behavior)
+      // This should trigger without clicking a "Load more" button
+      await page.waitForFunction(() => {
+        const dots = document.querySelectorAll('[data-testid="git-history-modal"] .rounded-full.bg-accent, [data-testid="git-history-modal"] .rounded-full.bg-success');
+        return dots.length > 50;
+      }, { timeout: 15000 });
+
+      // Verify we now have all 60 commits loaded
+      const finalCount = await page.evaluate(() => {
+        const dots = document.querySelectorAll('[data-testid="git-history-modal"] .rounded-full.bg-accent, [data-testid="git-history-modal"] .rounded-full.bg-success');
+        return dots.length;
+      });
+
+      expect(finalCount).toBe(60);
+
+      // Verify the "Load more" button is NOT visible (we're using infinite scroll, not button)
+      const loadMoreButton = modal.locator('button:has-text("Load more")');
+      await expect(loadMoreButton).not.toBeVisible();
+
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test('wasm-git should not spam console with git output', { timeout: 30000 }, async ({ page }) => {
     // Capture ALL console messages to check for git output spam
     const consoleLogs: string[] = [];

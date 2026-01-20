@@ -33,6 +33,7 @@
   import { getErrorMessage } from '../../utils/errorMessage';
   import CIStatusBadge from '../Git/CIStatusBadge.svelte';
   import { open as openCIRunsModal } from './CIRunsModal.svelte';
+  import InfiniteScroll from '../InfiniteScroll.svelte';
 
   // Get route info for building commit view URLs
   let route = $derived($routeStore);
@@ -361,120 +362,110 @@
               </div>
             </div>
           {/if}
-          <div class="flex flex-col">
-            {#each logState.commits as commit, i (commit.oid)}
-              {@const isHead = commit.oid === logState.headOid}
-              {@const ciStatus = ciStatusByCommit.get(commit.oid) ?? null}
-              <div class="flex gap-3 pb-4 {i < logState.commits.length - 1 || hasMoreCommits ? 'b-b-1 b-b-solid b-b-surface-3 mb-4' : ''} {isHead ? 'bg-accent/5 -mx-4 px-4 py-3 rounded-lg' : ''}">
-                <!-- Timeline dot -->
-                <div class="flex flex-col items-center shrink-0">
-                  <div class="w-3 h-3 rounded-full {isHead ? 'bg-success ring-2 ring-success/30' : 'bg-accent'}"></div>
-                  {#if i < logState.commits.length - 1 || hasMoreCommits}
-                    <div class="w-0.5 flex-1 bg-surface-3 mt-1"></div>
-                  {/if}
-                </div>
+          <InfiniteScroll onLoadMore={loadMoreCommits} loading={loadingMore || !hasMoreCommits}>
+              <div class="flex flex-col">
+                {#each logState.commits as commit, i (commit.oid)}
+                  {@const isHead = commit.oid === logState.headOid}
+                  {@const ciStatus = ciStatusByCommit.get(commit.oid) ?? null}
+                  <div class="flex gap-3 pb-4 {i < logState.commits.length - 1 || hasMoreCommits ? 'b-b-1 b-b-solid b-b-surface-3 mb-4' : ''} {isHead ? 'bg-accent/5 -mx-4 px-4 py-3 rounded-lg' : ''}">
+                    <!-- Timeline dot -->
+                    <div class="flex flex-col items-center shrink-0">
+                      <div class="w-3 h-3 rounded-full {isHead ? 'bg-success ring-2 ring-success/30' : 'bg-accent'}"></div>
+                      {#if i < logState.commits.length - 1 || hasMoreCommits}
+                        <div class="w-0.5 flex-1 bg-surface-3 mt-1"></div>
+                      {/if}
+                    </div>
 
-                <!-- Commit info -->
-                <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2 mb-1">
-                    <span class="font-medium text-text-1 truncate" title={commit.message}>
-                      {getCommitTitle(commit.message)}
-                    </span>
-                    {#if ciStatus?.status}
-                      <button
-                        class="btn-circle btn-ghost"
-                        onclick={(event) => handleCIClick(commit.oid, event)}
-                        title="View CI runs"
-                      >
-                        <CIStatusBadge status={ciStatus.status} compact />
-                      </button>
-                    {/if}
-                    {#if isHead}
-                      <span class="shrink-0 text-xs font-medium px-1.5 py-0.5 rounded bg-success/20 text-success flex items-center gap-1">
-                        <span class="i-lucide-circle-dot text-[10px]"></span>
-                        HEAD
-                      </span>
-                    {/if}
-                  </div>
-                  <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-3">
-                    {#if route.npub && repoName}
-                      <a
-                        href="#/{route.npub}/{repoName}?commit={commit.oid}"
-                        onclick={close}
-                        class="font-mono bg-surface-2 px-1.5 py-0.5 rounded text-xs hover:bg-accent hover:text-white transition-colors"
-                        title="View commit diff"
-                      >
-                        {shortHash(commit.oid)}
-                      </a>
-                    {:else}
-                      <span class="font-mono bg-surface-2 px-1.5 py-0.5 rounded text-xs">
-                        {shortHash(commit.oid)}
-                      </span>
-                    {/if}
-                    <span class="flex items-center gap-1">
-                      <span class="i-lucide-user text-xs"></span>
-                      {commit.author}
-                    </span>
-                    <span class="flex items-center gap-1">
-                      <span class="i-lucide-clock text-xs"></span>
-                      {formatDate(commit.timestamp)}
-                    </span>
-                  </div>
-                </div>
-
-                <!-- Action button -->
-                <div class="shrink-0">
-                  {#if target.canEdit && target.onCheckout}
-                    {#if isHead}
-                      <span class="text-xs text-text-3 px-2 py-1">Current</span>
-                    {:else}
-                      <button
-                        onclick={() => handleCheckout(commit.oid)}
-                        disabled={checkoutInProgress !== null}
-                        class="btn-ghost px-2 py-1 text-xs flex items-center gap-1"
-                        title="Checkout this commit (replaces working directory)"
-                      >
-                        {#if checkoutInProgress === commit.oid}
-                          <span class="i-lucide-loader-2 animate-spin"></span>
-                        {:else}
-                          <span class="i-lucide-git-branch-plus"></span>
+                    <!-- Commit info -->
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2 mb-1">
+                        <span class="font-medium text-text-1 truncate" title={commit.message}>
+                          {getCommitTitle(commit.message)}
+                        </span>
+                        {#if ciStatus?.status}
+                          <button
+                            class="btn-circle btn-ghost"
+                            onclick={(event) => handleCIClick(commit.oid, event)}
+                            title="View CI runs"
+                          >
+                            <CIStatusBadge status={ciStatus.status} compact />
+                          </button>
                         {/if}
-                        Checkout
-                      </button>
-                    {/if}
-                  {:else}
-                    <button
-                      onclick={() => handleBrowse(commit.oid)}
-                      class="btn-ghost px-2 py-1 text-xs flex items-center gap-1"
-                      title="Browse files at this commit"
-                    >
-                      <span class="i-lucide-external-link"></span>
-                      Browse
-                    </button>
-                  {/if}
-                </div>
-              </div>
-            {/each}
+                        {#if isHead}
+                          <span class="shrink-0 text-xs font-medium px-1.5 py-0.5 rounded bg-success/20 text-success flex items-center gap-1">
+                            <span class="i-lucide-circle-dot text-[10px]"></span>
+                            HEAD
+                          </span>
+                        {/if}
+                      </div>
+                      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-3">
+                        {#if route.npub && repoName}
+                          <a
+                            href="#/{route.npub}/{repoName}?commit={commit.oid}"
+                            onclick={close}
+                            class="font-mono bg-surface-2 px-1.5 py-0.5 rounded text-xs hover:bg-accent hover:text-white transition-colors"
+                            title="View commit diff"
+                          >
+                            {shortHash(commit.oid)}
+                          </a>
+                        {:else}
+                          <span class="font-mono bg-surface-2 px-1.5 py-0.5 rounded text-xs">
+                            {shortHash(commit.oid)}
+                          </span>
+                        {/if}
+                        <span class="flex items-center gap-1">
+                          <span class="i-lucide-user text-xs"></span>
+                          {commit.author}
+                        </span>
+                        <span class="flex items-center gap-1">
+                          <span class="i-lucide-clock text-xs"></span>
+                          {formatDate(commit.timestamp)}
+                        </span>
+                      </div>
+                    </div>
 
-            <!-- Load more button -->
-            {#if hasMoreCommits}
-              <div class="flex justify-center pt-2">
-                <button
-                  onclick={loadMoreCommits}
-                  disabled={loadingMore}
-                  class="btn-ghost px-4 py-2 text-sm flex items-center gap-2"
-                >
-                  {#if loadingMore}
-                    <span class="i-lucide-loader-2 animate-spin"></span>
-                    Loading...
-                  {:else}
-                    <span class="i-lucide-chevrons-down"></span>
-                    Load more commits
-                  {/if}
-                </button>
+                    <!-- Action button -->
+                    <div class="shrink-0">
+                      {#if target.canEdit && target.onCheckout}
+                        {#if isHead}
+                          <span class="text-xs text-text-3 px-2 py-1">Current</span>
+                        {:else}
+                          <button
+                            onclick={() => handleCheckout(commit.oid)}
+                            disabled={checkoutInProgress !== null}
+                            class="btn-ghost px-2 py-1 text-xs flex items-center gap-1"
+                            title="Checkout this commit (replaces working directory)"
+                          >
+                            {#if checkoutInProgress === commit.oid}
+                              <span class="i-lucide-loader-2 animate-spin"></span>
+                            {:else}
+                              <span class="i-lucide-git-branch-plus"></span>
+                            {/if}
+                            Checkout
+                          </button>
+                        {/if}
+                      {:else}
+                        <button
+                          onclick={() => handleBrowse(commit.oid)}
+                          class="btn-ghost px-2 py-1 text-xs flex items-center gap-1"
+                          title="Browse files at this commit"
+                        >
+                          <span class="i-lucide-external-link"></span>
+                          Browse
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+
+                <!-- Loading indicator -->
+                {#if loadingMore}
+                  <div class="flex justify-center py-4">
+                    <span class="i-lucide-loader-2 animate-spin text-text-3"></span>
+                  </div>
+                {/if}
               </div>
-            {/if}
-          </div>
+          </InfiniteScroll>
         {/if}
       </div>
 

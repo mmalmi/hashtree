@@ -527,7 +527,7 @@
       class="flex items-center gap-1.5 text-sm text-text-2 hover:text-accent bg-transparent b-0 cursor-pointer"
     >
       <span class="i-lucide-history text-text-3"></span>
-      <span>{commits.length > 0 ? `${commits.length} commits` : 'Commits'}</span>
+      <span>{commits.length > 0 ? `${commits.length}${commits.length >= 50 ? '+' : ''} commits` : 'Commits'}</span>
     </button>
 
     <!-- Code dropdown (clone instructions) - rightmost -->
