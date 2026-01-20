@@ -70,7 +70,7 @@ test.describe('Git branch comparison and merge', () => {
 
     // Should not hang - either shows error or "No differences" (wasm-git silently handles missing branches)
     // The key is that the page finishes loading and shows the compare view, not that it hangs forever
-    await expect(page.locator('text=No differences between branches').or(page.locator('.i-lucide-alert-circle'))).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('text=No differences between branches').or(page.locator('.i-lucide-alert-circle'))).toBeVisible({ timeout: 30000 });
   });
 
   test('compare URL navigates to comparison view', { timeout: 60000 }, async ({ page }) => {

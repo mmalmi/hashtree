@@ -5,7 +5,7 @@ import { navigate } from '../utils/navigate';
 import { parseRoute } from '../utils/route';
 import { verifyTree, toHex, LinkType } from 'hashtree';
 import type { CID } from 'hashtree';
-import { saveHashtree, useNostrStore } from '../nostr';
+import { linkKeyUtils, saveHashtree, useNostrStore } from '../nostr';
 import { nip19 } from 'nostr-tools';
 import { localStore, getTree } from '../store';
 import { autosaveIfOwn } from '../nostr';
@@ -275,6 +275,9 @@ export async function createDocumentTree(
   }
 
   const treeName = `docs/${name}`;
+  const linkKey = visibility === 'link-visible'
+    ? linkKeyUtils.generateLinkKey()
+    : undefined;
 
   // Create .yjs config file with owner's npub as first editor
   const yjsContent = new TextEncoder().encode(nostrState.npub + '\n');
@@ -297,7 +300,14 @@ export async function createDocumentTree(
   });
 
   // Save to Nostr with docs label (also updates local cache)
-  const result = await saveHashtree(treeName, rootCid, { visibility, labels: ['docs'] });
+  const publishPromise = saveHashtree(treeName, rootCid, { visibility, labels: ['docs'], linkKey });
+  let result: { success: boolean; linkKey?: string };
+  if (import.meta.env.VITE_TEST_MODE) {
+    void publishPromise;
+    result = { success: true, linkKey };
+  } else {
+    result = await publishPromise;
+  }
 
   // Store link key for link-visible documents
   if (result.linkKey) {

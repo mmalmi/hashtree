@@ -120,11 +120,27 @@ test.describe('Git push to htree:// and view in browser', () => {
     expect(fs.existsSync(gitRemoteHtree)).toBe(true);
 
     // Environment setup - use temp dir for all data
+    const configDir = path.join(tempDir, '.hashtree');
+    fs.mkdirSync(configDir, { recursive: true });
+    const relayUrl = process.env.VITE_TEST_RELAY || 'ws://localhost:4736';
+    fs.writeFileSync(path.join(configDir, 'config.toml'), [
+      '[server]',
+      'enable_auth = false',
+      'enable_webrtc = false',
+      'stun_port = 0',
+      '',
+      '[nostr]',
+      `relays = ["${relayUrl}"]`,
+      'crawl_depth = 0',
+      '',
+    ].join('\n'));
+
     const env = {
       ...process.env,
       HOME: tempDir,
       PATH: `${path.dirname(gitRemoteHtree)}:${process.env.PATH}`,
       HTREE_DATA_DIR: path.join(tempDir, 'data'),
+      HTREE_CONFIG_DIR: configDir,
     };
 
     // Create the data directory

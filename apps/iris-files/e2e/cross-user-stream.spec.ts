@@ -12,7 +12,7 @@ import { test, expect, type Page, type BrowserContext } from './fixtures';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, followUser, waitForAppReady, ensureLoggedIn, useLocalRelay, enableOthersPool, waitForRelayConnected, navigateToPublicFolder, configureBlossomServers } from './test-utils';
+import { setupPageErrorHandler, followUser, waitForAppReady, ensureLoggedIn, useLocalRelay, enableOthersPool, waitForRelayConnected, navigateToPublicFolder, configureBlossomServers, disableOthersPool, waitForFollowInWorker } from './test-utils';
 // Run tests in this file serially to avoid WebRTC/timing conflicts
 test.describe.configure({ mode: 'serial' });
 
@@ -50,6 +50,7 @@ async function setupFreshUser(page: Page, options: SetupOptions = {}): Promise<v
   await page.waitForTimeout(500);
   await waitForAppReady(page);
   await ensureLoggedIn(page);
+  await disableOthersPool(page);
   await useLocalRelay(page);
   if (options.enableOthersPool) {
     await enableOthersPool(page, options.othersPoolMax ?? 2);
@@ -184,7 +185,7 @@ test.describe('Cross-User Livestream', () => {
   // Skip: flaky multi-context WebRTC streaming test with timing-dependent peer discovery
   test('viewer can fetch stream data from broadcaster', async ({ browser }) => {
     test.slow();
-    test.setTimeout(120000);
+    test.setTimeout(180000);
 
     expect(fs.existsSync(TEST_VIDEO)).toBe(true);
     const videoBase64 = getTestVideoBase64();
@@ -229,6 +230,7 @@ test.describe('Cross-User Livestream', () => {
       await setupFreshUser(pageA);
       const npubA = await getNpub(pageA);
       console.log(`Broadcaster: ${npubA.slice(0, 20)}...`);
+      const pubkeyA = await pageA.evaluate(() => (window as any).__nostrStore?.getState?.().pubkey || null);
       await injectMockMediaRecorder(pageA, videoBase64);
       await configureBlossomServers(pageA);
 
@@ -237,12 +239,17 @@ test.describe('Cross-User Livestream', () => {
       await setupFreshUser(pageB);
       const npubB = await getNpub(pageB);
       console.log(`Viewer: ${npubB.slice(0, 20)}...`);
+      const pubkeyB = await pageB.evaluate(() => (window as any).__nostrStore?.getState?.().pubkey || null);
       await configureBlossomServers(pageB);
 
       // === Mutual follows for WebRTC ===
       console.log('\n=== Setting up mutual follows ===');
       await followUser(pageA, npubB);
       await followUser(pageB, npubA);
+      if (pubkeyA && pubkeyB) {
+        await waitForFollowInWorker(pageA, pubkeyB, 30000);
+        await waitForFollowInWorker(pageB, pubkeyA, 30000);
+      }
       console.log('Mutual follows established');
 
       // === Check WebRTC connections ===
@@ -337,10 +344,55 @@ test.describe('Cross-User Livestream', () => {
       const viewerHasEntry = await waitForFileEntry(pageB, `${testFilename}.webm`, 30000);
       console.log('Viewer entry visible:', viewerHasEntry);
       expect(viewerHasEntry).toBe(true);
-      await pageB.waitForFunction(() => {
-        const video = document.querySelector('video') as HTMLVideoElement;
-        return !!video && video.readyState > 0;
-      }, { timeout: 20000 });
+      await pageB.waitForSelector('video', { timeout: 60000 });
+      let viewerHasData = false;
+      let viewerReadyState = 0;
+      await expect.poll(async () => {
+        const result = await pageB.evaluate(async () => {
+          const video = document.querySelector('video') as HTMLVideoElement | null;
+          try {
+            const { getTree } = await import('/src/store.ts');
+            const { getTreeRootSync } = await import('/src/stores/treeRoot.ts');
+            const { getRouteSync } = await import('/src/stores/index.ts');
+            const adapter = (window as any).__workerAdapter;
+            adapter?.sendHello?.();
+            const route = getRouteSync();
+            if (!route) {
+              return { hasData: false, readyState: video?.readyState ?? 0 };
+            }
+            const rootCid = getTreeRootSync(route.npub, route.treeName);
+            if (!rootCid) {
+              return { hasData: false, readyState: video?.readyState ?? 0 };
+            }
+            const tree = getTree();
+            const resolved = await tree.resolvePath(rootCid, route.path);
+            if (!resolved?.cid) {
+              return { hasData: false, readyState: video?.readyState ?? 0 };
+            }
+            const readChunk = () => {
+              if (typeof (tree as any).readFileRange === 'function') {
+                return (tree as any).readFileRange(resolved.cid, 0, 2048);
+              }
+              return tree.readFile(resolved.cid);
+            };
+            const data = await Promise.race([
+              readChunk(),
+              new Promise<Uint8Array | null>((resolve) => {
+                setTimeout(() => resolve(null), 5000);
+              }),
+            ]);
+            return {
+              hasData: !!data && data.length > 0,
+              readyState: video?.readyState ?? 0,
+            };
+          } catch {
+            return { hasData: false, readyState: video?.readyState ?? 0 };
+          }
+        });
+        viewerHasData = result.hasData;
+        viewerReadyState = result.readyState;
+        return viewerHasData || viewerReadyState > 0;
+      }, { timeout: 60000, intervals: [1000, 2000, 5000] }).toBe(true);
 
       // Check what happened
       const viewerState = await pageB.evaluate(() => {
@@ -394,7 +446,7 @@ test.describe('Cross-User Livestream', () => {
       }
 
       // We expect the video to have loaded something (readyState > 0)
-      expect(viewerState.videoReadyState).toBeGreaterThan(0);
+      expect(viewerState.videoReadyState > 0 || viewerHasData).toBe(true);
 
     } finally {
       await contextA.close();

@@ -15,7 +15,7 @@
  * - If waiting for content sync, use waitForEditorContent() helper
  */
 import { test, expect, Page } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForFollowInWorker, followUser, waitForAppReady, waitForRelayConnected, flushPendingPublishes } from './test-utils.js';
+import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForFollowInWorker, followUser, waitForAppReady, waitForRelayConnected, flushPendingPublishes, presetLocalRelayInDB, useLocalRelay, safeReload } from './test-utils.js';
 
 // Helper to set up a fresh user session
 async function setupFreshUser(page: Page) {
@@ -45,8 +45,10 @@ async function setupFreshUser(page: Page) {
     }
   });
 
-  await page.reload();
+  await presetLocalRelayInDB(page);
+  await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
   await waitForAppReady(page); // Wait for page to load after reload
+  await useLocalRelay(page);
   await waitForRelayConnected(page, 20000);
   await disableOthersPool(page); // Re-apply after reload
   await configureBlossomServers(page);
@@ -59,6 +61,7 @@ async function setupFreshUser(page: Page) {
   await publicLink.click();
   await page.waitForURL(/\/#\/npub.*\/public/, { timeout: 30000 });
   await expect(page.getByRole('button', { name: /File/ }).first()).toBeVisible({ timeout: 30000 });
+  await ensurePublicTreeVisibility(page);
 }
 
 // Helper to get the user's npub from the URL
@@ -114,33 +117,88 @@ async function waitForSave(page: Page) {
   // Wait for "Saving..." to appear first (debounce triggers), then "Saved"
   // This ensures we wait for a NEW save, not just that "Saved" is still visible from before
   const savingStatus = page.locator('text=Saving');
-  const savedStatus = page.locator('text=Saved').or(page.locator('text=/Saved \\d/'));
+  const savedStatus = page.locator('text=Saved').or(page.locator('text=/Saved \\d/')).first();
+  const previousSavedText = await savedStatus.textContent().catch(() => null);
+  const previousRoot = await page.evaluate(async () => {
+    const { getRouteSync } = await import('/src/stores/route');
+    const route = getRouteSync();
+    const registry = (window as any).__treeRootRegistry;
+    if (!route?.npub || !route?.treeName || !registry?.get) return null;
+    const entry = registry.get(route.npub, route.treeName);
+    if (!entry) return null;
+    const toHex = (bytes: Uint8Array) => Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    return {
+      updatedAt: entry.updatedAt ?? null,
+      hashHex: entry.hash ? toHex(entry.hash) : null,
+    };
+  });
 
-  // First wait for saving to start (may already be in progress)
-  try {
-    await expect(savingStatus).toBeVisible({ timeout: 10000 });
-  } catch {
-    // If "Saving" not visible, it might have already completed - check for saved
-    if (await savedStatus.isVisible()) {
-      await flushPublishes(page);
-      return;
+  const waitForSavedIndicator = async () => {
+    try {
+      await expect(savingStatus).toBeVisible({ timeout: 10000 });
+    } catch {}
+
+    await expect(savedStatus).toBeVisible({ timeout: 20000 });
+    if (previousSavedText) {
+      await expect.poll(async () => (await savedStatus.textContent())?.trim() ?? null, {
+        timeout: 20000,
+        intervals: [500, 1000, 2000],
+      }).not.toBe(previousSavedText.trim());
     }
-  }
+  };
 
-  // Now wait for save to complete
+  const waitForTreeRootUpdate = async () => {
+    await page.waitForFunction(async (prev) => {
+      const { getRouteSync } = await import('/src/stores/route');
+      const route = getRouteSync();
+      const registry = (window as any).__treeRootRegistry;
+      if (!route?.npub || !route?.treeName || !registry?.get) return false;
+      const entry = registry.get(route.npub, route.treeName);
+      if (!entry || entry.dirty) return false;
+      const toHex = (bytes: Uint8Array) => Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      const currentHash = entry.hash ? toHex(entry.hash) : null;
+      if (!prev) return true;
+      if (prev.hashHex && currentHash && currentHash !== prev.hashHex) return true;
+      if (prev.updatedAt !== null && entry.updatedAt !== null && entry.updatedAt > prev.updatedAt) return true;
+      if (!prev.hashHex && prev.updatedAt === null) return true;
+      return false;
+    }, previousRoot, { timeout: 60000 });
+  };
+
   try {
-    await expect(savedStatus).toBeVisible({ timeout: 60000 });
+    await waitForSavedIndicator();
   } catch {
-    console.log('[waitForSave] Saved status not visible within timeout, continuing');
+    try {
+      await waitForTreeRootUpdate();
+    } catch {
+      console.log('[waitForSave] Save not confirmed within timeout, continuing');
+    }
   }
   await flushPublishes(page);
 }
 
+async function ensurePublicTreeVisibility(page: Page, treeName: string = 'public') {
+  await page.evaluate(async (tree) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const { saveHashtree } = await import('/src/nostr');
+    const { nostrStore } = await import('/src/nostr/store');
+    const state = nostrStore.getState?.();
+    if (!state?.npub) return;
+    const root = getTreeRootSync(state.npub, tree);
+    if (!root) return;
+    if (state.selectedTree?.name === tree) {
+      nostrStore.setSelectedTree({ ...state.selectedTree, visibility: 'public' });
+    }
+    await saveHashtree(tree, root, { visibility: 'public' });
+  }, treeName);
+}
+
 async function flushPublishes(page: Page) {
-  await page.evaluate(async () => {
-    const { flushPendingPublishes } = await import('/src/treeRootCache');
-    await flushPendingPublishes();
-  });
+  await flushPendingPublishes(page);
 }
 
 // Helper to set editors using the Collaborators modal UI
@@ -173,8 +231,9 @@ async function setEditors(page: Page, npubs: string[]) {
 }
 
 // Helper to navigate to another user's document
-async function navigateToUserDocument(page: Page, npub: string, treeName: string, docPath: string) {
-  const url = `http://localhost:5173/#/${npub}/${treeName}/${docPath}`;
+async function navigateToUserDocument(page: Page, npub: string, treeName: string, docPath: string, linkKey?: string | null) {
+  const linkParam = linkKey ? `?k=${linkKey}` : '';
+  const url = `http://localhost:5173/#/${npub}/${treeName}/${docPath}${linkParam}`;
   await page.goto(url);
   await waitForAppReady(page);
   await waitForRelayConnected(page, 30000);
@@ -182,11 +241,52 @@ async function navigateToUserDocument(page: Page, npub: string, treeName: string
 }
 
 // Helper to navigate to own document
-async function navigateToOwnDocument(page: Page, npub: string, treeName: string, docPath: string) {
-  const url = `http://localhost:5173/#/${npub}/${treeName}/${docPath}`;
+async function navigateToOwnDocument(page: Page, npub: string, treeName: string, docPath: string, linkKey?: string | null) {
+  const linkParam = linkKey ? `?k=${linkKey}` : '';
+  const url = `http://localhost:5173/#/${npub}/${treeName}/${docPath}${linkParam}`;
   await page.goto(url);
   await waitForAppReady(page);
   await waitForRelayConnected(page, 30000);
+}
+
+async function openRemoteDocument(
+  page: Page,
+  npub: string,
+  treeName: string,
+  docPath: string,
+  linkKey?: string | null
+) {
+  const linkParam = linkKey ? `?k=${linkKey}` : '';
+  const docUrl = `http://localhost:5173/#/${npub}/${treeName}/${docPath}${linkParam}`;
+  const editor = page.locator('.ProseMirror');
+  const treeUrl = `http://localhost:5173/#/${npub}/${treeName}${linkParam}`;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.goto(docUrl);
+    await waitForAppReady(page);
+    await waitForRelayConnected(page, 30000);
+    await page.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await waitForYjsEntry(page, npub, treeName, docPath, 30000).catch(() => {});
+    await page.evaluate(() => (window as any).__reloadYjsEditors?.());
+    if (await editor.isVisible().catch(() => false)) return;
+
+    await page.goto(treeUrl);
+    await waitForAppReady(page);
+    await waitForRelayConnected(page, 30000);
+
+    const docLink = page.getByRole('link', { name: docPath }).first();
+    await docLink.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    if (await docLink.isVisible().catch(() => false)) {
+      await docLink.click();
+      await page.waitForURL(new RegExp(`${docPath}`), { timeout: 15000 }).catch(() => {});
+      await page.evaluate(() => (window as any).__reloadYjsEditors?.());
+      if (await editor.isVisible().catch(() => false)) {
+        return;
+      }
+    }
+
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, url: docUrl });
+  }
 }
 
 // Helper to wait for editor to contain specific text (for sync verification)
@@ -194,8 +294,12 @@ async function waitForEditorContent(page: Page, expectedText: string, timeout = 
   const editor = page.locator('.ProseMirror');
   // First wait for editor to be visible (may take time for nostr sync to load the page)
   await expect(editor).toBeVisible({ timeout: 60000 });
-  // Then wait for content
-  await expect(editor).toContainText(expectedText, { timeout });
+  await expect.poll(async () => {
+    await page.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    await page.evaluate(() => (window as any).__reloadYjsEditors?.());
+    const text = await editor.textContent();
+    return text?.includes(expectedText) ?? false;
+  }, { timeout, intervals: [1000, 2000, 3000] }).toBe(true);
 }
 
 async function waitForEditorBadge(page: Page, timeout = 30000) {
@@ -203,10 +307,111 @@ async function waitForEditorBadge(page: Page, timeout = 30000) {
   await expect(badge).toBeVisible({ timeout });
 }
 
+async function getTreeRootHash(page: Page, npub: string, treeName: string): Promise<string | null> {
+  return page.evaluate(async ({ targetNpub, targetTree }) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const toHex = (bytes: Uint8Array): string => Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const root = getTreeRootSync(targetNpub, targetTree);
+    return root ? toHex(root.hash) : null;
+  }, { targetNpub: npub, targetTree: treeName });
+}
+
+async function waitForTreeRootHash(
+  page: Page,
+  npub: string,
+  treeName: string,
+  expectedHash: string,
+  timeoutMs = 60000
+): Promise<void> {
+  await page.waitForFunction(async ({ targetNpub, targetTree, targetHash }) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const toHex = (bytes: Uint8Array): string => Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const root = getTreeRootSync(targetNpub, targetTree);
+    if (!root) return false;
+    return toHex(root.hash) === targetHash;
+  }, { targetNpub: npub, targetTree: treeName, targetHash: expectedHash }, { timeout: timeoutMs });
+}
+
+async function waitForTreeRootHashChange(
+  page: Page,
+  npub: string,
+  treeName: string,
+  previousHash: string | null,
+  timeoutMs = 60000
+): Promise<void> {
+  await page.waitForFunction(async ({ targetNpub, targetTree, prevHash }) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const toHex = (bytes: Uint8Array): string => Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const root = getTreeRootSync(targetNpub, targetTree);
+    if (!root) return false;
+    return toHex(root.hash) !== prevHash;
+  }, { targetNpub: npub, targetTree: treeName, prevHash: previousHash }, { timeout: timeoutMs });
+}
+
+async function waitForYjsEntry(
+  page: Page,
+  npub: string,
+  treeName: string,
+  docPath: string,
+  timeoutMs = 60000
+): Promise<void> {
+  await expect.poll(async () => {
+    return page.evaluate(async ({ targetNpub, targetTree, targetPath }) => {
+      try {
+        const { getTreeRootSync } = await import('/src/stores');
+        const { getTree } = await import('/src/store');
+        const root = getTreeRootSync(targetNpub, targetTree);
+        if (!root) return false;
+        const tree = getTree();
+        const entry = await tree.resolvePath(root, targetPath);
+        if (!entry?.cid) return false;
+        const entries = await tree.listDirectory(entry.cid);
+        return entries?.some((item: { name: string }) => item.name === '.yjs') ?? false;
+      } catch {
+        return false;
+      }
+    }, { targetNpub: npub, targetTree: treeName, targetPath: docPath });
+  }, { timeout: timeoutMs, intervals: [1000, 2000, 3000] }).toBe(true);
+}
+
+async function pushTreeToBlossom(page: Page, npub: string, treeName: string) {
+  const result = await page.evaluate(async ({ targetNpub, targetTree }) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const root = getTreeRootSync(targetNpub, targetTree);
+    const adapter = (window as any).__getWorkerAdapter?.() ?? (window as any).__workerAdapter;
+    if (!root || !adapter?.pushToBlossom) {
+      return { pushed: 0, skipped: 0, failed: 1 };
+    }
+    return adapter.pushToBlossom(root.hash, root.key, targetTree);
+  }, { targetNpub: npub, targetTree: treeName });
+  return result;
+}
+
+async function getTreeLinkKey(page: Page, npub: string, treeName: string): Promise<string | null> {
+  return page.evaluate(async ({ targetNpub, targetTree }) => {
+    const { getLinkKey, recoverLinkKeyFromSelfEncrypted } = await import('/src/stores/trees');
+    const registry = (window as any).__treeRootRegistry;
+    let linkKey = getLinkKey(targetNpub, targetTree);
+    if (!linkKey) {
+      const record = registry?.get?.(targetNpub, targetTree);
+      if (record?.selfEncryptedLinkKey) {
+        linkKey = await recoverLinkKeyFromSelfEncrypted(targetNpub, targetTree, record.selfEncryptedLinkKey);
+      }
+    }
+    return linkKey ?? null;
+  }, { targetNpub: npub, targetTree: treeName });
+}
+
 test.describe('Yjs Collaborative Document Editing', () => {
   // Serial mode: multi-user tests connect via relay, parallel tests would cross-talk
   test.describe.configure({ mode: 'serial' });
-  test.setTimeout(180000); // 3 minutes for collaboration test
+  test.setTimeout(300000); // 5 minutes for collaboration test
 
   test('two users can see each others edits when viewing each others documents', async ({ browser }) => {
     const contextA = await browser.newContext();
@@ -239,18 +444,42 @@ test.describe('Yjs Collaborative Document Editing', () => {
       await pageB.goto(`http://localhost:5173/#/${npubB}/public`);
       await expect(pageB.getByRole('button', { name: /File/ }).first()).toBeVisible({ timeout: 15000 });
 
+      const rootHashBeforeA = await getTreeRootHash(pageA, npubA, 'public');
       await createDocument(pageA, 'shared-notes');
       await typeInEditor(pageA, 'Hello from User A!');
       await waitForSave(pageA);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeA, 60000);
+      const rootHashA = await getTreeRootHash(pageA, npubA, 'public');
+      expect(rootHashA).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
 
+      const rootHashBeforeB = await getTreeRootHash(pageB, npubB, 'public');
       await createDocument(pageB, 'shared-notes');
       await typeInEditor(pageB, 'Hello from User B!');
       await waitForSave(pageB);
+      await waitForTreeRootHashChange(pageB, npubB, 'public', rootHashBeforeB, 60000);
+      const rootHashB = await getTreeRootHash(pageB, npubB, 'public');
+      expect(rootHashB).toBeTruthy();
+      await pushTreeToBlossom(pageB, npubB, 'public');
+      const linkKeyA = await getTreeLinkKey(pageA, npubA, 'public');
+      const linkKeyB = await getTreeLinkKey(pageB, npubB, 'public');
 
-      await navigateToUserDocument(pageA, npubB, 'public', 'shared-notes');
+      const linkParamB = linkKeyB ? `?k=${linkKeyB}` : '';
+      await pageA.goto(`http://localhost:5173/#/${npubB}${linkParamB}`);
+      await waitForAppReady(pageA);
+      await waitForRelayConnected(pageA, 30000);
+      await waitForTreeRootHash(pageA, npubB, 'public', rootHashB!, 60000);
+      await expect(pageA.getByRole('link', { name: 'public' }).first()).toBeVisible({ timeout: 15000 });
+      await openRemoteDocument(pageA, npubB, 'public', 'shared-notes', linkKeyB);
       await waitForEditorContent(pageA, 'Hello from User B!');
 
-      await navigateToUserDocument(pageB, npubA, 'public', 'shared-notes');
+      const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
+      await pageB.goto(`http://localhost:5173/#/${npubA}${linkParamA}`);
+      await waitForAppReady(pageB);
+      await waitForRelayConnected(pageB, 30000);
+      await waitForTreeRootHash(pageB, npubA, 'public', rootHashA!, 60000);
+      await expect(pageB.getByRole('link', { name: 'public' }).first()).toBeVisible({ timeout: 15000 });
+      await openRemoteDocument(pageB, npubA, 'public', 'shared-notes', linkKeyA);
       await waitForEditorContent(pageB, 'Hello from User A!');
     } finally {
       await contextA.close();
@@ -293,13 +522,25 @@ test.describe('Yjs Collaborative Document Editing', () => {
       await typeInEditor(pageA, '[A-INIT]');
       await waitForSave(pageA);
 
+      const rootHashBeforeEditors = await getTreeRootHash(pageA, npubA, 'public');
       await setEditors(pageA, [npubA, npubB]);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeEditors, 60000);
       await flushPublishes(pageA);
+      const rootHashA = await getTreeRootHash(pageA, npubA, 'public');
+      expect(rootHashA).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
+      const linkKeyA = await getTreeLinkKey(pageA, npubA, 'public');
 
       // Wait for tree sync before B navigates
       await expect(pageA.locator('.ProseMirror')).toContainText('[A-INIT]', { timeout: 10000 });
 
-      await navigateToUserDocument(pageB, npubA, 'public', 'realtime-doc');
+      const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
+      await pageB.goto(`http://localhost:5173/#/${npubA}${linkParamA}`);
+      await waitForAppReady(pageB);
+      await waitForRelayConnected(pageB, 30000);
+      await waitForTreeRootHash(pageB, npubA, 'public', rootHashA!, 60000);
+      await expect(pageB.getByRole('link', { name: 'public' }).first()).toBeVisible({ timeout: 15000 });
+      await openRemoteDocument(pageB, npubA, 'public', 'realtime-doc', linkKeyA);
 
       const editorA = pageA.locator('.ProseMirror');
       const editorB = pageB.locator('.ProseMirror');
@@ -308,30 +549,61 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       await waitForEditorContent(pageA, '[A-INIT]');
       await waitForEditorContent(pageB, '[A-INIT]');
-      await waitForEditorBadge(pageB, 30000);
 
       // Round 1: B edits
+      const rootHashBeforeB1 = await getTreeRootHash(pageB, npubB, 'public');
       await editorB.click();
       await pageB.keyboard.type(' [B-R1]');
       await waitForSave(pageB);
+      await waitForTreeRootHashChange(pageB, npubB, 'public', rootHashBeforeB1, 60000);
+      await waitForWebRTCConnection(pageA, 30000, pubkeyB);
+      await waitForWebRTCConnection(pageB, 30000, pubkeyA);
+      const rootHashB1 = await getTreeRootHash(pageB, npubB, 'public');
+      if (rootHashB1) {
+        await waitForTreeRootHash(pageA, npubB, 'public', rootHashB1, 60000);
+      }
       await waitForEditorContent(pageA, '[B-R1]');
 
       // Round 2: A edits
+      const rootHashBeforeA2 = await getTreeRootHash(pageA, npubA, 'public');
       await editorA.click();
       await pageA.keyboard.type(' [A-R2]');
       await waitForSave(pageA);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeA2, 60000);
+      await waitForWebRTCConnection(pageA, 30000, pubkeyB);
+      await waitForWebRTCConnection(pageB, 30000, pubkeyA);
+      const rootHashA2 = await getTreeRootHash(pageA, npubA, 'public');
+      if (rootHashA2) {
+        await waitForTreeRootHash(pageB, npubA, 'public', rootHashA2, 60000);
+      }
       await waitForEditorContent(pageB, '[A-R2]');
 
       // Round 3: B edits
+      const rootHashBeforeB3 = await getTreeRootHash(pageB, npubB, 'public');
       await editorB.click();
       await pageB.keyboard.type(' [B-R3]');
       await waitForSave(pageB);
+      await waitForTreeRootHashChange(pageB, npubB, 'public', rootHashBeforeB3, 60000);
+      await waitForWebRTCConnection(pageA, 30000, pubkeyB);
+      await waitForWebRTCConnection(pageB, 30000, pubkeyA);
+      const rootHashB3 = await getTreeRootHash(pageB, npubB, 'public');
+      if (rootHashB3) {
+        await waitForTreeRootHash(pageA, npubB, 'public', rootHashB3, 60000);
+      }
       await waitForEditorContent(pageA, '[B-R3]');
 
       // Round 4: A edits
+      const rootHashBeforeA4 = await getTreeRootHash(pageA, npubA, 'public');
       await editorA.click();
       await pageA.keyboard.type(' [A-R4]');
       await waitForSave(pageA);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeA4, 60000);
+      await waitForWebRTCConnection(pageA, 30000, pubkeyB);
+      await waitForWebRTCConnection(pageB, 30000, pubkeyA);
+      const rootHashA4 = await getTreeRootHash(pageA, npubA, 'public');
+      if (rootHashA4) {
+        await waitForTreeRootHash(pageB, npubA, 'public', rootHashA4, 60000);
+      }
       await waitForEditorContent(pageB, '[A-R4]');
 
       // Final convergence check
@@ -390,20 +662,30 @@ test.describe('Yjs Collaborative Document Editing', () => {
       await typeInEditor(pageA, 'Original content from A.');
       await waitForSave(pageA);
 
+      const rootHashBeforeEditors = await getTreeRootHash(pageA, npubA, 'public');
       await setEditors(pageA, [npubA, npubB]);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeEditors, 60000);
       await flushPublishes(pageA);
+      const rootHash = await getTreeRootHash(pageA, npubA, 'public');
+      expect(rootHash).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
+      const linkKeyA = await getTreeLinkKey(pageA, npubA, 'public');
 
       // Wait for tree sync
       await expect(pageA.locator('.ProseMirror')).toContainText('Original content', { timeout: 10000 });
 
-      await pageB.goto(`http://localhost:5173/#/${npubA}`);
+      const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
+      await pageB.goto(`http://localhost:5173/#/${npubA}${linkParamA}`);
+      await waitForAppReady(pageB);
+      await waitForRelayConnected(pageB, 30000);
+      await waitForTreeRootHash(pageB, npubA, 'public', rootHash!, 60000);
       await expect(pageB.getByRole('link', { name: 'public' }).first()).toBeVisible({ timeout: 15000 });
 
-      await navigateToUserDocument(pageB, npubA, 'public', 'shared-doc');
+      await openRemoteDocument(pageB, npubA, 'public', 'shared-doc', linkKeyA);
 
       const editorB = pageB.locator('.ProseMirror');
-      await expect(editorB).toBeVisible({ timeout: 15000 });
-      await expect(editorB).toContainText('Original content from A.', { timeout: 15000 });
+      await expect(editorB).toBeVisible({ timeout: 30000 });
+      await expect(editorB).toContainText('Original content from A.', { timeout: 30000 });
       await waitForEditorBadge(pageB, 30000);
 
       await editorB.click();
@@ -488,26 +770,25 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // === User A: Set editors (both A and B) ===
       console.log('User A: Setting editors (A and B)...');
+      const rootHashBeforeEditors = await getTreeRootHash(pageA, npubA, 'public');
       await setEditors(pageA, [npubA, npubB]);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeEditors, 60000);
       await flushPublishes(pageA);
+      const rootHashA = await getTreeRootHash(pageA, npubA, 'public');
+      expect(rootHashA).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
+      const linkKeyA = await getTreeLinkKey(pageA, npubA, 'public');
       console.log('User A: Editors set');
-
-      // === User B: Also create the same document path (so B has a tree to save to) ===
-      console.log('User B: Creating document at same path...');
-      await createDocument(pageB, 'collab-doc');
-      await typeInEditor(pageB, 'Initial content from B.');
-      await waitForSave(pageB);
-      console.log('User B: Document saved');
-
-      // === User B: Set editors (both A and B) ===
-      console.log('User B: Setting editors (A and B)...');
-      await setEditors(pageB, [npubA, npubB]);
-      await flushPublishes(pageB);
-      console.log('User B: Editors set');
 
       // === User B: Navigate to User A's document and add more content ===
       console.log('User B: Navigating to User A\'s document...');
-      await navigateToUserDocument(pageB, npubA, 'public', 'collab-doc');
+      const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
+      await pageB.goto(`http://localhost:5173/#/${npubA}${linkParamA}`);
+      await waitForAppReady(pageB);
+      await waitForRelayConnected(pageB, 30000);
+      await waitForTreeRootHash(pageB, npubA, 'public', rootHashA!, 60000);
+      await expect(pageB.getByRole('link', { name: 'public' }).first()).toBeVisible({ timeout: 15000 });
+      await openRemoteDocument(pageB, npubA, 'public', 'collab-doc', linkKeyA);
       await waitForEditorContent(pageB, 'Initial content from A.');
 
       // Verify B sees A's content
@@ -534,7 +815,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // === User A: Refresh their document and check if B's edit is visible ===
       console.log('User A: Refreshing own document...');
-      await navigateToOwnDocument(pageA, npubA, 'public', 'collab-doc');
+      await navigateToOwnDocument(pageA, npubA, 'public', 'collab-doc', linkKeyA);
       await waitForEditorContent(pageA, '[Edit by B]');
 
       const editorA = pageA.locator('.ProseMirror');
@@ -719,6 +1000,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User A creates a document
       console.log('User A: Creating document...');
+      const rootHashBeforeDoc = await getTreeRootHash(pageA, npubA, 'public');
       await createDocument(pageA, 'editor-test');
 
       // User A adds initial content
@@ -727,20 +1009,29 @@ test.describe('Yjs Collaborative Document Editing', () => {
       await editorA.click();
       await pageA.keyboard.type('Content from owner.');
       await waitForSave(pageA);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeDoc, 60000);
+      const rootHashA = await getTreeRootHash(pageA, npubA, 'public');
+      expect(rootHashA).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
+      const linkKeyA = await getTreeLinkKey(pageA, npubA, 'public');
       console.log('User A: Document saved');
 
       // User B navigates to A's document (without being an editor yet)
       console.log('User B: Navigating to A\'s document (not an editor yet)...');
-      await pageB.goto(`http://localhost:5173/#/${npubA}/public/editor-test`);
+      const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
+      await pageB.goto(`http://localhost:5173/#/${npubA}${linkParamA}`);
       await waitForAppReady(pageB);
       await waitForRelayConnected(pageB, 30000);
+      await waitForTreeRootHash(pageB, npubA, 'public', rootHashA!, 60000);
+      await openRemoteDocument(pageB, npubA, 'public', 'editor-test', linkKeyA);
+      await waitForYjsEntry(pageB, npubA, 'public', 'editor-test', 60000);
 
       // Verify B sees the document - wait for content to sync via WebRTC
       const editorB = pageB.locator('.ProseMirror');
       await expect(editorB).toBeVisible({ timeout: 30000 });
 
       // Wait for content to appear (may take time for WebRTC sync)
-      await expect(editorB).toContainText('Content from owner', { timeout: 30000 });
+      await expect(editorB).toContainText('Content from owner', { timeout: 60000 });
       const contentB = await editorB.textContent();
       console.log(`User B sees: "${contentB}"`);
 
@@ -752,13 +1043,24 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User A now adds B as an editor
       console.log('User A: Adding B as editor...');
+      const rootHashBeforeEditors = await getTreeRootHash(pageA, npubA, 'public');
       await setEditors(pageA, [npubA, npubB]);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeEditors, 60000);
       await flushPublishes(pageA);
+      const rootHashAfterEditors = await getTreeRootHash(pageA, npubA, 'public');
+      if (rootHashAfterEditors) {
+        await pushTreeToBlossom(pageA, npubA, 'public');
+        await waitForTreeRootHash(pageB, npubA, 'public', rootHashAfterEditors, 60000);
+      }
       console.log('User A: Editors updated');
 
       // Wait for B to receive the update via subscription
       console.log('Waiting for B to receive editor status update...');
-      await expect(pageB.locator('text=Read-only')).not.toBeVisible({ timeout: 60000 });
+      await expect.poll(async () => {
+        await pageB.evaluate(() => (window as any).__reloadYjsEditors?.());
+        const isReadOnlyVisible = await pageB.locator('text=Read-only').isVisible().catch(() => true);
+        return !isReadOnlyVisible;
+      }, { timeout: 60000, intervals: [1000, 2000, 3000] }).toBe(true);
 
       // Verify B no longer sees "Read-only" badge
       const readOnlyAfter = await pageB.locator('text=Read-only').isVisible();
@@ -798,6 +1100,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
   });
 
   test('long document collaboration persists after refresh for both users', async ({ browser }) => {
+    test.setTimeout(420000);
     // This test verifies:
     // 1. Two users can collaboratively write a longer document with edits at different positions
     // 2. All content persists after both users refresh
@@ -852,6 +1155,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User A creates a document with initial structure
       console.log('User A: Creating document...');
+      const rootHashBeforeDoc = await getTreeRootHash(pageA, npubA, 'public');
       await createDocument(pageA, 'collab-doc');
 
       // User A adds initial content
@@ -862,11 +1166,18 @@ test.describe('Yjs Collaborative Document Editing', () => {
       await expect(editorA).toContainText('Initial text from A.', { timeout: 10000 });
       console.log('User A: Added initial content');
       await waitForSave(pageA);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeDoc, 60000);
 
       // User A adds B as editor
       console.log('User A: Setting editors...');
+      const rootHashBeforeEditors = await getTreeRootHash(pageA, npubA, 'public');
       await setEditors(pageA, [npubA, npubB]);
+      await waitForTreeRootHashChange(pageA, npubA, 'public', rootHashBeforeEditors, 60000);
       await flushPublishes(pageA);
+      const rootHashA = await getTreeRootHash(pageA, npubA, 'public');
+      expect(rootHashA).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
+      const linkKeyA = await getTreeLinkKey(pageA, npubA, 'public');
       console.log('User A: Editors set');
 
       // User B creates document at same path (so B has a tree to save to)
@@ -884,7 +1195,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User A navigates back to their own document (after editors modal)
       console.log('User A: Navigating back to own document...');
-      await navigateToOwnDocument(pageA, npubA, 'public', 'collab-doc');
+      await navigateToOwnDocument(pageA, npubA, 'public', 'collab-doc', linkKeyA);
       await waitForEditorContent(pageA, 'Initial text');
 
       // Verify editorA is visible
@@ -892,10 +1203,19 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User B navigates to User A's document
       console.log('User B: Navigating to User A\'s document...');
-      await navigateToUserDocument(pageB, npubA, 'public', 'collab-doc');
+      const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
+      await pageB.goto(`http://localhost:5173/#/${npubA}${linkParamA}`);
+      await waitForAppReady(pageB);
+      await waitForRelayConnected(pageB, 30000);
+      await waitForTreeRootHash(pageB, npubA, 'public', rootHashA!, 60000);
+      await openRemoteDocument(pageB, npubA, 'public', 'collab-doc', linkKeyA);
+      await waitForYjsEntry(pageB, npubA, 'public', 'collab-doc', 60000).catch(() => {});
 
       // Wait for document to load (may take longer under parallel load with WebRTC)
       const editorB = pageB.locator('.ProseMirror');
+      if (!await editorB.isVisible().catch(() => false)) {
+        await openRemoteDocument(pageB, npubA, 'public', 'collab-doc', linkKeyA);
+      }
       await expect(editorB).toBeVisible({ timeout: 60000 });
       await expect(editorB).toContainText('Initial text', { timeout: 60000 });
       console.log('User B: Can see User A\'s content');
@@ -982,7 +1302,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User A refreshes
       console.log('User A: Refreshing page...');
-      await pageA.reload({ waitUntil: 'domcontentloaded' });
+      await safeReload(pageA, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
       await waitForAppReady(pageA);
       await waitForRelayConnected(pageA, 30000);
 
@@ -1008,7 +1328,7 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
       // User B refreshes
       console.log('User B: Refreshing page...');
-      await pageB.reload({ waitUntil: 'domcontentloaded' });
+      await safeReload(pageB, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
       await waitForAppReady(pageB);
       await waitForRelayConnected(pageB, 30000);
 

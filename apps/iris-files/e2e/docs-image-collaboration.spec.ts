@@ -7,7 +7,7 @@
  * 3. Images use /htree/ service worker URLs (not blob URLs)
  */
 import { test, expect, Page } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForRelayConnected, waitForAppReady, clearAllStorage, navigateToPublicFolder } from './test-utils.js';
+import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForRelayConnected, waitForAppReady, clearAllStorage, navigateToPublicFolder, safeReload, flushPendingPublishes, waitForFollowInWorker } from './test-utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -83,6 +83,18 @@ async function waitForTreeRootHash(
   }, { targetNpub: npub, targetTree: treeName, targetHash: expectedHash }, { timeout: timeoutMs });
 }
 
+async function pushTreeToBlossom(page: Page, npub: string, treeName: string) {
+  await page.evaluate(async ({ targetNpub, targetTree }) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const root = getTreeRootSync(targetNpub, targetTree);
+    const adapter = (window as any).__getWorkerAdapter?.() ?? (window as any).__workerAdapter;
+    if (!root || !adapter?.pushToBlossom) {
+      return { pushed: 0, skipped: 0, failed: 1 };
+    }
+    return adapter.pushToBlossom(root.hash, root.key, targetTree);
+  }, { targetNpub: npub, targetTree: treeName });
+}
+
 // Helper to set up a fresh user session
 async function setupFreshUser(page: Page) {
   setupPageErrorHandler(page);
@@ -94,11 +106,7 @@ async function setupFreshUser(page: Page) {
   // Clear storage for fresh state (including OPFS)
   await clearAllStorage(page, { clearOpfs: true });
 
-  try {
-    await page.reload();
-  } catch {
-    await page.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' });
-  }
+  await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, url: 'http://localhost:5173' });
   await waitForAppReady(page); // Wait for page to load after reload
   await disableOthersPool(page);
   await configureBlossomServers(page);
@@ -112,6 +120,12 @@ async function getNpub(page: Page): Promise<string> {
   const match = url.match(/npub1[a-z0-9]+/);
   if (!match) throw new Error('Could not find npub in URL');
   return match[0];
+}
+
+async function getPubkeyHex(page: Page): Promise<string> {
+  const pubkey = await page.evaluate(() => (window as any).__nostrStore?.getState?.().pubkey || null);
+  if (!pubkey) throw new Error('Could not find pubkey in nostr store');
+  return pubkey;
 }
 
 // Helper to create a document with a given name
@@ -224,12 +238,14 @@ test.describe('Document Image Collaboration', () => {
       console.log('Setting up User A...');
       await setupFreshUser(pageA);
       const npubA = await getNpub(pageA);
+      const pubkeyA = await getPubkeyHex(pageA);
       console.log(`User A npub: ${npubA.slice(0, 20)}...`);
 
       // === Setup User B ===
       console.log('Setting up User B...');
       await setupFreshUser(pageB);
       const npubB = await getNpub(pageB);
+      const pubkeyB = await getPubkeyHex(pageB);
       console.log(`User B npub: ${npubB.slice(0, 20)}...`);
 
       // === Users follow each other (required for WebRTC) ===
@@ -237,11 +253,13 @@ test.describe('Document Image Collaboration', () => {
       await followUser(pageA, npubB);
       console.log('User B: Following User A...');
       await followUser(pageB, npubA);
+      await waitForFollowInWorker(pageA, pubkeyB, 30000);
+      await waitForFollowInWorker(pageB, pubkeyA, 30000);
 
       // Wait for WebRTC connection
       console.log('Waiting for WebRTC connection...');
-      await waitForWebRTCConnection(pageA, 30000);
-      await waitForWebRTCConnection(pageB, 30000);
+      await waitForWebRTCConnection(pageA, 30000, pubkeyB);
+      await waitForWebRTCConnection(pageB, 30000, pubkeyA);
       console.log('WebRTC connected');
 
       // Navigate back to public folders
@@ -292,13 +310,11 @@ test.describe('Document Image Collaboration', () => {
       await waitForTreeRootChange(pageA, rootHashBeforeImage);
       const rootHashAfterImage = await getTreeRootHash(pageA);
       expect(rootHashAfterImage).toBeTruthy();
+      await pushTreeToBlossom(pageA, npubA, 'public');
       console.log('User A: Image inserted and saved');
 
       // Ensure latest root is published before User B loads the document
-      await pageA.evaluate(async () => {
-        const { flushPendingPublishes } = await import('/src/treeRootCache');
-        await flushPendingPublishes();
-      });
+      await flushPendingPublishes(pageA);
 
       // Verify image is visible in User A's editor
       const imageA = editorA.locator('img');
@@ -309,6 +325,15 @@ test.describe('Document Image Collaboration', () => {
       console.log(`User A image src: ${srcA}`);
       expect(srcA).toContain('/htree/');
       expect(srcA).not.toContain('attachments:');
+      let attachmentFilename: string | null = null;
+      if (srcA) {
+        const resolved = new URL(srcA, 'http://localhost:5173');
+        const marker = '/attachments/';
+        const idx = resolved.pathname.indexOf(marker);
+        if (idx >= 0) {
+          attachmentFilename = decodeURIComponent(resolved.pathname.slice(idx + marker.length));
+        }
+      }
 
       // Allow sync to propagate via relay/WebRTC
       console.log('Waiting for sync to propagate...');
@@ -329,7 +354,45 @@ test.describe('Document Image Collaboration', () => {
       // === Key test: User B should see the image ===
       console.log('User B: Checking for image...');
       const imageB = editorB.locator('img');
-      await expect(imageB).toBeVisible({ timeout: 60000 });
+      if (attachmentFilename) {
+        try {
+          await expect.poll(async () => {
+            await pageB.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+            return pageB.evaluate(async ({ targetNpub, targetTree, targetDoc, targetFile }) => {
+              const { getTreeRootSync } = await import('/src/stores');
+              const { getTree } = await import('/src/store');
+              const rootCid = getTreeRootSync(targetNpub, targetTree);
+              if (!rootCid) return false;
+              const tree = getTree();
+              const entry = await tree.resolvePath(rootCid, `${targetDoc}/attachments/${targetFile}`);
+              if (!entry?.cid) return false;
+              const readChunk = () => {
+                if (typeof (tree as any).readFileRange === 'function') {
+                  return (tree as any).readFileRange(entry.cid, 0, 2048);
+                }
+                return tree.readFile(entry.cid);
+              };
+              const data = await Promise.race([
+                readChunk(),
+                new Promise<Uint8Array | null>((resolve) => {
+                  setTimeout(() => resolve(null), 5000);
+                }),
+              ]);
+              return !!data && data.length > 0;
+            }, { targetNpub: npubA, targetTree: 'public', targetDoc: 'image-collab-test', targetFile: attachmentFilename });
+          }, { timeout: 120000, intervals: [1000, 2000, 3000] }).toBe(true);
+        } catch (err) {
+          console.warn('[docs-image-collab] Attachment prefetch timed out:', err instanceof Error ? err.message : err);
+        }
+      }
+
+      await expect.poll(async () => {
+        const count = await imageB.count().catch(() => 0);
+        if (!count) {
+          await pageB.evaluate(() => (window as any).__reloadYjsEditors?.());
+        }
+        return count > 0;
+      }, { timeout: 120000, intervals: [1000, 2000, 3000] }).toBe(true);
 
       // Verify the image src resolves correctly (uses /htree/ URL)
       const srcB = await imageB.getAttribute('src');

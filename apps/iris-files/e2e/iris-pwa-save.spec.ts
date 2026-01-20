@@ -9,8 +9,7 @@ const __dirname = dirname(__filename);
 
 // Serve the test PWA fixture
 let server: ReturnType<typeof createServer>;
-const PWA_PORT = 9876;
-const PWA_URL = `http://localhost:${PWA_PORT}`;
+let pwaUrl = '';
 
 test.beforeAll(async () => {
   const fixtureDir = join(__dirname, 'fixtures/test-pwa');
@@ -49,7 +48,15 @@ test.beforeAll(async () => {
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(PWA_PORT, resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, () => {
+      const address = server.address();
+      if (address && typeof address === 'object') {
+        pwaUrl = `http://localhost:${address.port}`;
+      }
+      resolve();
+    });
+  });
 });
 
 test.afterAll(async () => {
@@ -65,7 +72,7 @@ test.describe('PWA Save to Hashtree', () => {
 
     // Enter the test PWA URL in the address bar
     const addressBar = page.locator('input[placeholder="Search or enter address"]');
-    await addressBar.fill(PWA_URL);
+    await addressBar.fill(pwaUrl);
     await addressBar.press('Enter');
 
     // Wait for iframe to load
@@ -84,7 +91,7 @@ test.describe('PWA Save to Hashtree', () => {
     await page.goto('/iris.html');
 
     const addressBar = page.locator('input[placeholder="Search or enter address"]');
-    await addressBar.fill(PWA_URL);
+    await addressBar.fill(pwaUrl);
     await addressBar.press('Enter');
 
     // Wait for iframe
@@ -106,7 +113,7 @@ test.describe('PWA Save to Hashtree', () => {
     await page.goto('/iris.html');
 
     const addressBar = page.locator('input[placeholder="Search or enter address"]');
-    await addressBar.fill(PWA_URL);
+    await addressBar.fill(pwaUrl);
     await addressBar.press('Enter');
 
     // Wait for iframe
@@ -138,7 +145,7 @@ test.describe('PWA Save to Hashtree', () => {
     await page.goto('/iris.html');
 
     const addressBar = page.locator('input[placeholder="Search or enter address"]');
-    await addressBar.fill(PWA_URL);
+    await addressBar.fill(pwaUrl);
     await addressBar.press('Enter');
 
     // Wait for iframe and click star

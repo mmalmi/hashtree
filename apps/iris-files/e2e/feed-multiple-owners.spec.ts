@@ -2,7 +2,7 @@ import { test, expect } from './fixtures';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import WebSocket from 'ws';
 import { createHash } from 'crypto';
-import { setupPageErrorHandler, disableOthersPool, ensureLoggedIn, waitForRelayConnected, useLocalRelay } from './test-utils';
+import { setupPageErrorHandler, disableOthersPool, ensureLoggedIn, waitForRelayConnected, useLocalRelay, presetLocalRelayInDB, safeReload, waitForAppReady, clearAllStorage } from './test-utils';
 import { BOOTSTRAP_SECKEY_HEX, FOLLOW_SECKEY_HEX } from './nostr-test-keys';
 
 let relayUrl = '';
@@ -103,6 +103,11 @@ test('new user feed shows videos from multiple owners', async ({ page }) => {
   await seedFeedVideos(suffix);
 
   await page.goto('/video.html#/');
+  await waitForAppReady(page);
+  await clearAllStorage(page);
+  await presetLocalRelayInDB(page);
+  await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, url: 'http://localhost:5173/video.html#/' });
+  await waitForAppReady(page);
   await disableOthersPool(page);
   await useLocalRelay(page);
   await ensureLoggedIn(page);

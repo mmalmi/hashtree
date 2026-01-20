@@ -9,13 +9,13 @@
  * - Data can be fetched when connections are established
  */
 import { test, expect, type Page } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, useLocalRelay, waitForAppReady, waitForFollowInWorker, presetLocalRelayInDB } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, useLocalRelay, waitForAppReady, waitForFollowInWorker, presetLocalRelayInDB, safeReload, flushPendingPublishes } from './test-utils.js';
 
 async function initUser(page: Page): Promise<{ npub: string; pubkeyHex: string }> {
   setupPageErrorHandler(page);
   await page.goto('http://localhost:5173');
   await presetLocalRelayInDB(page);
-  await page.reload();
+  await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
   await disableOthersPool(page);
   await useLocalRelay(page);
   await waitForAppReady(page);
@@ -44,9 +44,21 @@ async function waitForPeerConnection(page: Page, pubkeyHex: string, timeoutMs: n
   );
 }
 
+async function waitForTreeRoot(page: Page, npub: string, treeName: string, timeoutMs: number = 60000): Promise<void> {
+  await page.waitForFunction(
+    async ({ targetNpub, targetTree }) => {
+      const { getTreeRootSync } = await import('/src/stores');
+      return !!getTreeRootSync(targetNpub, targetTree);
+    },
+    { targetNpub: npub, targetTree: treeName },
+    { timeout: timeoutMs }
+  );
+}
+
 test.describe.serial('Direct Tree Navigation', () => {
   test('can access file from second context via WebRTC', { timeout: 120000 }, async ({ browser }) => {
     test.slow();
+    test.setTimeout(180000);
 
     const context1 = await browser.newContext();
     const page1 = await context1.newPage();
@@ -86,10 +98,7 @@ test.describe.serial('Direct Tree Navigation', () => {
     console.log('[test] File URL:', fileUrl);
 
     // Flush publishes to relay
-    await page1.evaluate(async () => {
-      const { flushPendingPublishes } = await import('/src/treeRootCache.ts');
-      await flushPendingPublishes();
-    });
+    await flushPendingPublishes(page1);
 
     const context2 = await browser.newContext();
     const page2 = await context2.newPage();
@@ -107,6 +116,7 @@ test.describe.serial('Direct Tree Navigation', () => {
     await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
     await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
     await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+    await waitForTreeRoot(page2, user1.npub, 'public', 60000);
 
     await page2.goto(fileUrl);
     await expect(page2).toHaveURL(/webrtc-nav-test\/test\.txt/, { timeout: 15000 });
@@ -146,7 +156,17 @@ test.describe.serial('Direct Tree Navigation', () => {
 
     await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
     await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
-    await expect(page2.locator('pre').filter({ hasText: 'Hello from WebRTC test!' })).toBeVisible({ timeout: 60000 });
+    const contentLocator = page2.locator('pre').filter({ hasText: 'Hello from WebRTC test!' });
+    await page2.goto(fileUrl);
+    await page2.waitForURL(/webrtc-nav-test\/test\.txt/, { timeout: 15000 }).catch(() => {});
+    await expect.poll(async () => {
+      await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+      const visible = await contentLocator.isVisible().catch(() => false);
+      if (!visible) {
+        await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+      }
+      return visible;
+    }, { timeout: 120000, intervals: [1000, 2000, 5000] }).toBe(true);
 
     await context2.close();
     await context1.close();
@@ -198,10 +218,7 @@ test.describe.serial('Direct Tree Navigation', () => {
     const dirUrl = page1.url();
     console.log('[test] Dir URL:', dirUrl);
 
-    await page1.evaluate(async () => {
-      const { flushPendingPublishes } = await import('/src/treeRootCache.ts');
-      await flushPendingPublishes();
-    });
+    await flushPendingPublishes(page1);
 
     const context2 = await browser.newContext();
     const page2 = await context2.newPage();

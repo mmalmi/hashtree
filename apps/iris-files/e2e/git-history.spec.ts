@@ -757,7 +757,9 @@ test.describe('Git history features', () => {
     }
   });
 
-  test('getFileLastCommits should use cache for repeated calls', { timeout: 60000 }, async ({ page }) => {
+  test('getFileLastCommits should use cache for repeated calls', { timeout: 120000 }, async ({ page }) => {
+    test.setTimeout(120000);
+    page.setDefaultTimeout(60000);
     await navigateToPublicFolder(page);
 
     // Create a real git repo with commits
@@ -1054,7 +1056,9 @@ test.describe('Git history features', () => {
     }
   });
 
-  test('wasm-git should not spam console with git output', { timeout: 30000 }, async ({ page }) => {
+  test('wasm-git should not spam console with git output', { timeout: 120000 }, async ({ page }) => {
+    test.setTimeout(120000);
+    page.setDefaultTimeout(60000);
     // Capture ALL console messages to check for git output spam
     const consoleLogs: string[] = [];
     page.on('console', msg => {

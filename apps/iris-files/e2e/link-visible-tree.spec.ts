@@ -94,9 +94,16 @@ async function waitForTreePublished(page: any, npub: string, treeName: string, t
   );
 }
 
+async function waitForTreeRoot(page: any, npub: string, treeName: string, timeoutMs: number = 60000): Promise<void> {
+  await page.evaluate(async ({ targetNpub, targetTree, timeout }) => {
+    const { waitForTreeRoot } = await import('/src/stores');
+    await waitForTreeRoot(targetNpub, targetTree, timeout);
+  }, { targetNpub: npub, targetTree: treeName, timeout: timeoutMs });
+}
+
 test.describe('Link-visible Tree Visibility', () => {
   // Increase timeout for all tests since new user setup now creates 3 default folders
-  test.setTimeout(60000);
+  test.setTimeout(120000);
 
   test.beforeEach(async ({ page }) => {
     setupPageErrorHandler(page);
@@ -290,25 +297,13 @@ test.describe('Link-visible Tree Visibility', () => {
         .or(followBtn2.and(page2.locator('[disabled]')))
     ).toBeVisible({ timeout: 10000 });
 
-    // Verify page2 can see page1's link-visible tree in the tree list before navigating
-    // This confirms the resolver has synced
-    const treeLink = page2.getByRole('link', { name: treeName });
-    await expect(treeLink).toBeVisible({ timeout: 30000 });
-
-    // Click on the tree to navigate into it (won't have ?k= param)
-    await treeLink.click();
-    await page2.waitForURL(new RegExp(`#/${npub}/${treeName}`), { timeout: 30000 });
-
-    // Get current URL and add ?k= param via navigation
-    const currentUrl = page2.url();
-
-    // If URL doesn't have ?k=, navigate with full page reload to get fresh resolver state
-    if (!currentUrl.includes('?k=')) {
-      const fullUrlWithKey = `http://localhost:5173/#/${npub}/${treeName}?k=${kParam}`;
-      await page2.goto(fullUrlWithKey);
-      await disableOthersPool(page2);
-      await configureBlossomServers(page2);
-    }
+    const fullUrlWithKey = `http://localhost:5173/#/${npub}/${treeName}?k=${kParam}`;
+    await page2.goto(fullUrlWithKey);
+    await waitForAppReady(page2, 60000);
+    await waitForRelayConnected(page2, 30000);
+    await disableOthersPool(page2);
+    await configureBlossomServers(page2);
+    await waitForTreeRoot(page2, npub, treeName, 60000);
 
     // Now look for the file
     const fileLink = page2.locator(`[data-testid="file-list"] >> text=shared.txt`);
@@ -364,6 +359,7 @@ test.describe('Link-visible Tree Visibility', () => {
       await waitForAppReady(page2, 60000);
       await disableOthersPool(page2);
       await configureBlossomServers(page2);
+      await waitForTreeRoot(page2, npub, treeName, 60000);
 
       // Should see "Link Required" message
       await expect(page2.getByText('Link Required')).toBeVisible({ timeout: 45000 });

@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, waitForAppReady, ensureLoggedIn, clearAllStorage } from './test-utils.js';
+import { setupPageErrorHandler, disableOthersPool, waitForAppReady, ensureLoggedIn, clearAllStorage, safeReload } from './test-utils.js';
 
 // Helper to navigate to accounts page
 async function navigateToAccountsPage(page: any) {
@@ -38,7 +38,7 @@ test.describe('Multi-Account Management', () => {
     await disableOthersPool(page); // Prevent WebRTC cross-talk from parallel tests
 
     await clearAllStorage(page, { clearOpfs: true });
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page, 60000); // Wait for page to load after reload
     await disableOthersPool(page); // Re-apply after reload
     await ensureLoggedIn(page, 30000);
@@ -214,7 +214,7 @@ test.describe('Multi-Account Management', () => {
     await expect(page.locator('.rounded-lg.bg-surface-1').first()).toBeVisible({ timeout: 5000 });
 
     // Reload the page
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page, 60000);
 
     // Navigate back to accounts page

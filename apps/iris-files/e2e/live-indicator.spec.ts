@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder, goToTreeList } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, goToTreeList, safeReload, waitForAppReady } from './test-utils.js';
 
 // Helper to create tree and navigate into it
 async function createAndEnterTree(page: any, name: string) {
@@ -27,7 +27,7 @@ async function createFile(page: any, name: string, content: string = '') {
 }
 
 test.describe('LIVE Indicator', () => {
-  test.setTimeout(60000);
+  test.setTimeout(180000);
 
   test.beforeEach(async ({ page }) => {
     setupPageErrorHandler(page);
@@ -43,10 +43,10 @@ test.describe('LIVE Indicator', () => {
       sessionStorage.clear();
     });
 
-    await page.reload();
-    await page.waitForTimeout(500);
-    // Page ready - navigateToPublicFolder handles waiting
-    await navigateToPublicFolder(page);
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await waitForAppReady(page, 60000);
+    // Page ready - skip relay requirement for local-only operations
+    await navigateToPublicFolder(page, { requireRelay: false });
   });
 
   test('should show LIVE badge when file is recently changed', async ({ page }) => {

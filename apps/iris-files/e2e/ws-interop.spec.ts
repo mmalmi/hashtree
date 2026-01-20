@@ -264,7 +264,18 @@ test.describe('rust WebSocket Integration', () => {
     // Create isolated config dir with auth disabled
     configDir = execSync('mktemp -d').toString().trim();
     const configPath = path.join(configDir, 'config.toml');
-    fs.writeFileSync(configPath, '[server]\nenable_auth = false\n', 'utf8');
+    const relayUrl = process.env.VITE_TEST_RELAY || 'ws://localhost:4736';
+    fs.writeFileSync(configPath, [
+      '[server]',
+      'enable_auth = false',
+      'enable_webrtc = false',
+      'stun_port = 0',
+      '',
+      '[nostr]',
+      `relays = ["${relayUrl}"]`,
+      'crawl_depth = 0',
+      '',
+    ].join('\n'), 'utf8');
 
     // Start rust server
     console.log('Starting rust server...');
@@ -288,7 +299,7 @@ test.describe('rust WebSocket Integration', () => {
 
     // Wait for server to start (longer timeout for initial compilation)
     let serverReady = false;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 120; i++) {
       await new Promise(r => setTimeout(r, 1000));
       try {
         const response = await fetch(`${HTTP_URL}/api/stats`);
@@ -303,7 +314,7 @@ test.describe('rust WebSocket Integration', () => {
     }
 
     if (!serverReady) {
-      throw new Error('rust server failed to start within 60 seconds');
+      throw new Error('rust server failed to start within 120 seconds');
     }
   });
 

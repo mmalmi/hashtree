@@ -11,7 +11,7 @@
  * Pool configuration: others.max = 0 so only followed users connect.
  */
 import { test, expect, type Page } from './fixtures';
-import { waitForAppReady, waitForRelayConnected, waitForWebRTCConnection } from './test-utils.js';
+import { waitForAppReady, waitForRelayConnected, waitForWebRTCConnection, evaluateWithRetry } from './test-utils.js';
 
 test.describe('WebRTC Request Forwarding', () => {
   test.setTimeout(180000);
@@ -180,7 +180,7 @@ test.describe('WebRTC Request Forwarding', () => {
    * Store content in a peer's local IDB store and return the hash
    */
   async function storeContent(page: Page, content: string): Promise<string> {
-    return page.evaluate(async (text) => {
+    return evaluateWithRetry(page, async (text) => {
       const encoder = new TextEncoder();
       const data = encoder.encode(text);
 

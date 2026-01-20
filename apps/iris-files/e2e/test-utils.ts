@@ -18,7 +18,7 @@ export function setupPageErrorHandler(page: any) {
   });
 }
 
-async function waitForTestHelpers(page: any, timeoutMs: number = 20000) {
+async function waitForTestHelpers(page: any, timeoutMs: number = 60000) {
   await page.waitForFunction(
     () => (window as any).__testHelpersReady === true,
     undefined,
@@ -26,7 +26,7 @@ async function waitForTestHelpers(page: any, timeoutMs: number = 20000) {
   );
 }
 
-async function waitForWorkerAdapter(page: any, timeoutMs: number = 20000) {
+async function waitForWorkerAdapter(page: any, timeoutMs: number = 60000) {
   await page.waitForFunction(
     () => {
       const win = window as any;
@@ -64,10 +64,37 @@ export async function evaluateWithRetry<T, R>(
  * Wait for the app to be ready (header visible).
  * Call this after page.reload() before calling disableOthersPool or configureBlossomServers.
  */
-export async function waitForAppReady(page: any, timeoutMs: number = 30000) {
+export async function waitForAppReady(page: any, timeoutMs: number = 60000) {
   await page.waitForLoadState('domcontentloaded').catch(() => {});
   await expect(page.locator('header').first()).toBeVisible({ timeout: timeoutMs });
   await waitForTestHelpers(page, timeoutMs);
+  await waitForWorkerAdapter(page, timeoutMs).catch(() => {});
+}
+
+export async function safeReload(
+  page: any,
+  options?: { waitUntil?: 'domcontentloaded' | 'load' | 'networkidle'; timeoutMs?: number; retries?: number; url?: string }
+): Promise<void> {
+  const waitUntil = options?.waitUntil ?? 'domcontentloaded';
+  const timeoutMs = options?.timeoutMs ?? 60000;
+  const retries = options?.retries ?? 2;
+  const targetUrl = options?.url ?? page.url();
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      await page.reload({ waitUntil, timeout: timeoutMs });
+      return;
+    } catch {
+      try {
+        await page.goto(targetUrl, { waitUntil, timeout: timeoutMs });
+        return;
+      } catch (err) {
+        if (attempt === retries - 1) {
+          throw err;
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -234,7 +261,7 @@ export async function goToTreeList(page: any) {
  */
 export async function disableOthersPool(page: any) {
   await waitForTestHelpers(page);
-  await waitForWorkerAdapter(page);
+  await waitForWorkerAdapter(page).catch(() => {});
   await page.waitForFunction(() => {
     const win = window as any;
     return !!win.__setPoolSettings || !!win.__settingsStore;
@@ -595,7 +622,6 @@ export async function configureBlossomServers(page: any) {
     configure([
       { url: 'https://upload.iris.to', read: false, write: true },
       { url: 'https://cdn.iris.to', read: true, write: false },
-      { url: 'https://hashtree.iris.to', read: true, write: false },
     ]);
   }, undefined);
 }

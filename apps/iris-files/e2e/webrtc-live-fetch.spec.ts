@@ -7,15 +7,12 @@
  * NO CHEATS - no passing hashes between pages via test parameters.
  */
 import { test, expect } from './fixtures';
-import { chromium } from '@playwright/test';
-import { setupPageErrorHandler, followUser, disableOthersPool, ensureLoggedIn, waitForAppReady, useLocalRelay } from './test-utils';
+import { setupPageErrorHandler, followUser, disableOthersPool, ensureLoggedIn, waitForAppReady, useLocalRelay, waitForRelayConnected } from './test-utils';
 
 test.describe('WebRTC Live Fetch', () => {
-  test('viewer fetches data from broadcaster via real Nostr + WebRTC flow', async () => {
+  test('viewer fetches data from broadcaster via real Nostr + WebRTC flow', async ({ browser }) => {
     test.slow();
     test.setTimeout(120000);
-
-    const browser = await chromium.launch();
 
     // Two separate contexts
     const contextA = await browser.newContext();
@@ -63,6 +60,7 @@ test.describe('WebRTC Live Fetch', () => {
         await waitForAppReady(page);
         await ensureLoggedIn(page);
         await useLocalRelay(page);
+        await waitForRelayConnected(page, 30000);
         // Disable others pool to avoid connecting to random peers from parallel tests
         await disableOthersPool(page);
       }
@@ -231,6 +229,7 @@ test.describe('WebRTC Live Fetch', () => {
       const publishedHash = await pageA.evaluate(async (filename: string) => {
         const { getTree, LinkType } = await import('/src/store.ts');
         const { autosaveIfOwn } = await import('/src/nostr.ts');
+        const { flushPendingPublishes } = await import('/src/treeRootCache.ts');
         const { getTreeRootSync } = await import('/src/stores/treeRoot.ts');
         const { parseRoute } = await import('/src/utils/route.ts');
 
@@ -258,6 +257,7 @@ test.describe('WebRTC Live Fetch', () => {
         // Publish to Nostr (this is the REAL publish, no cheating)
         console.log('[Test] Publishing to Nostr, hash:', newHashHex);
         autosaveIfOwn(newRootCid);
+        await flushPendingPublishes();
         console.log('[Test] Published!');
 
         return newHashHex;
@@ -272,6 +272,9 @@ test.describe('WebRTC Live Fetch', () => {
       const fileUrl = `http://localhost:5173/#/${npubA}/public/${testFilename}`;
       console.log(`File URL: ${fileUrl}`);
       await pageB.goto(fileUrl);
+      await waitForAppReady(pageB);
+      await waitForRelayConnected(pageB, 30000);
+      await pageB.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 10000 });
 
       // Wait for the correct hash to arrive in viewer's tree root subscription
       console.log(`Waiting for viewer to receive hash: ${publishedHash}`);
@@ -347,30 +350,37 @@ test.describe('WebRTC Live Fetch', () => {
       );
       console.log('File is resolvable in tree');
 
-      // Check if file was fetched via normal fetch (goes through service worker)
-      const fetchResult = await pageB.evaluate(async (url: string) => {
-        // Use normal fetch - this goes through service worker which uses WebRTC/Blossom/local
-        console.log('[Test] Fetching via service worker:', url);
+      // Read the file via the tree API (uses WebRTC/Blossom/local fallback under the hood)
+      const readViaTree = async (params: { npub: string; treeName: string; filename: string }) => {
+        return pageB.evaluate(async (args: { npub: string; treeName: string; filename: string }) => {
+          try {
+            const { getTreeRootSync } = await import('/src/stores/treeRoot.ts');
+            const { getTree } = await import('/src/store.ts');
 
-        try {
-          const response = await fetch(url);
-          console.log('[Test] Response status:', response.status);
+            const rootCid = getTreeRootSync(args.npub, args.treeName);
+            if (!rootCid) return { success: false, error: 'No tree root yet' };
 
-          if (!response.ok) {
-            return { success: false, error: `HTTP ${response.status}` };
+            const tree = getTree();
+            const entry = await tree.resolvePath(rootCid, args.filename.split('/'));
+            if (!entry) return { success: false, error: 'File entry not found' };
+
+            const data = await tree.readFile(entry.cid);
+            if (!data) return { success: false, error: 'File data not available' };
+
+            return { success: true, size: data.length };
+          } catch (err: any) {
+            return { success: false, error: err.message };
           }
+        }, params);
+      };
 
-          const data = await response.arrayBuffer();
-          console.log('[Test] Received data size:', data.byteLength);
+      let readResult = await readViaTree({ npub: npubA, treeName: 'public', filename: testFilename });
+      for (let attempt = 0; attempt < 4 && (!readResult.success || readResult.size !== 1000); attempt++) {
+        await pageB.waitForTimeout(2000);
+        readResult = await readViaTree({ npub: npubA, treeName: 'public', filename: testFilename });
+      }
 
-          return { success: true, size: data.byteLength };
-        } catch (err: any) {
-          console.log('[Test] Fetch error:', err.message);
-          return { success: false, error: err.message };
-        }
-      }, `/htree/${npubA}/public/${testFilename}`);
-
-      console.log('Fetch result:', JSON.stringify(fetchResult, null, 2));
+      console.log('Read result:', JSON.stringify(readResult, null, 2));
 
       // Get WebRTC stats to verify it was used
       console.log('\n=== WebRTC stats ===');
@@ -392,8 +402,8 @@ test.describe('WebRTC Live Fetch', () => {
       console.log('Viewer stats:', JSON.stringify(statsB, null, 2));
 
       // Assertions
-      expect(fetchResult.success).toBe(true);
-      expect(fetchResult.size).toBe(1000); // Original data size (decrypted)
+      expect(readResult.success).toBe(true);
+      expect(readResult.size).toBe(1000); // Original data size (decrypted)
 
       // Verify WebRTC was actually used (not just Blossom)
       // Either viewer received via WebRTC or broadcaster sent via WebRTC
@@ -403,7 +413,6 @@ test.describe('WebRTC Live Fetch', () => {
     } finally {
       await contextA.close();
       await contextB.close();
-      await browser.close();
     }
   });
 });

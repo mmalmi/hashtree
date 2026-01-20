@@ -20,8 +20,8 @@ test.describe('Native git operations', () => {
     await page.goto(url);
     await disableOthersPool(page);
 
-    await expect(page.locator('td:has-text("packages")').first()).toBeVisible({ timeout: 45000 });
-    await expect(page.locator('td:has-text("package.json")').first()).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('td:has-text("apps")').first()).toBeVisible({ timeout: 45000 });
+    await expect(page.locator('td:has-text("README.md")').first()).toBeVisible({ timeout: 10000 });
 
     // Wait for commit info to load (should show author name, not "Loading commit info...")
     // The native implementation should load quickly without wasm copy
@@ -50,7 +50,7 @@ test.describe('Native git operations', () => {
     await page.goto(url);
     await disableOthersPool(page);
 
-    await expect(page.locator('td:has-text("packages")').first()).toBeVisible({ timeout: 45000 });
+    await expect(page.locator('td:has-text("apps")').first()).toBeVisible({ timeout: 45000 });
 
     // Get file commit info for files - look for relative time indicators
     // Files should show "X days ago", "X hours ago", etc. from the native getFileLastCommitsNative

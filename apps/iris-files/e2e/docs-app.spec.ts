@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForAppReady, ensureLoggedIn } from './test-utils';
+import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForAppReady, ensureLoggedIn, safeReload, flushPendingPublishes } from './test-utils';
 
 async function waitForTreeRootChange(page: any, previousRoot: string | null, timeoutMs: number = 30000) {
   await page.waitForFunction(
@@ -15,6 +15,25 @@ async function waitForTreeRootChange(page: any, previousRoot: string | null, tim
     previousRoot,
     { timeout: timeoutMs }
   );
+}
+
+async function waitForYjsEntry(page: any, timeoutMs: number = 60000) {
+  await expect.poll(async () => {
+    return page.evaluate(async () => {
+      const { getTreeRootSync } = await import('/src/stores');
+      const { getTree } = await import('/src/store');
+      const { getRouteSync } = await import('/src/stores/route');
+      const route = getRouteSync();
+      if (!route.npub || !route.treeName) return false;
+      const rootCid = getTreeRootSync(route.npub, route.treeName);
+      if (!rootCid) return false;
+      const tree = getTree();
+      const entry = await tree.resolvePath(rootCid, route.path);
+      if (!entry?.cid) return false;
+      const entries = await tree.listDirectory(entry.cid);
+      return entries?.some((item: { name: string }) => item.name === '.yjs') ?? false;
+    });
+  }, { timeout: timeoutMs, intervals: [1000, 2000, 3000] }).toBe(true);
 }
 
 test.describe('Iris Docs App', () => {
@@ -96,19 +115,30 @@ test.describe('Iris Docs App', () => {
     await editor.type('Hello persistence test!');
     await expect(editor).toContainText('Hello persistence test!', { timeout: 15000 });
     await waitForTreeRootChange(page, rootBefore, 60000);
+    await flushPendingPublishes(page);
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page, 60000);
     await page.waitForFunction(
       () => (window as any).__nostrStore?.getState?.().pubkey?.length === 64,
       undefined,
       { timeout: 60000 }
     );
+    await page.waitForFunction(
+      () => typeof (window as any).__getTreeRoot === 'function' && !!(window as any).__getTreeRoot?.(),
+      undefined,
+      { timeout: 60000 }
+    ).catch(() => {});
+    await waitForYjsEntry(page, 90000);
 
     const editorAfterReload = page.locator('.ProseMirror');
     await expect(editorAfterReload).toBeVisible({ timeout: 60000 });
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 60000 });
-    await expect(editorAfterReload).toContainText('Hello persistence test!', { timeout: 60000 });
+    await expect.poll(async () => {
+      await page.evaluate(() => (window as any).__reloadYjsEditors?.());
+      const text = await editorAfterReload.textContent();
+      return text?.includes('Hello persistence test!') ?? false;
+    }, { timeout: 120000, intervals: [1000, 2000, 3000] }).toBe(true);
 
     await page.evaluate(() => window.location.hash = '#/');
 
@@ -167,7 +197,8 @@ test.describe('Iris Docs App', () => {
     await page.locator('[role="button"]:has-text("New Document")').click();
 
     const docName = `Edit Persist Test ${Date.now()}`;
-    const encodedDocPath = encodeURIComponent(`docs/${docName}`);
+    const treeName = `docs/${docName}`;
+    const encodedDocPath = encodeURIComponent(treeName);
     await page.locator('input[placeholder="Document name..."]').fill(docName);
     await page.getByRole('button', { name: 'Create' }).click();
 
@@ -179,11 +210,12 @@ test.describe('Iris Docs App', () => {
     await editor.type('Initial content.');
     await expect(editor).toContainText('Initial content.', { timeout: 15000 });
     await waitForTreeRootChange(page, rootBeforeInitial, 60000);
+    await flushPendingPublishes(page);
 
     await page.evaluate(() => window.location.hash = '#/');
     await expect(page.locator('[role="button"]:has-text("New Document")')).toBeVisible({ timeout: 30000 });
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page);
     await waitForAppReady(page);
     await expect(page.locator('[role="button"]:has-text("New Document")')).toBeVisible({ timeout: 30000 });
@@ -194,17 +226,68 @@ test.describe('Iris Docs App', () => {
 
     await page.waitForURL(url => url.toString().includes(encodedDocPath), { timeout: 30000 });
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
-    await expect(page.locator('.ProseMirror')).toContainText('Initial content.', { timeout: 30000 });
+    await waitForYjsEntry(page, 90000);
+    await expect.poll(async () => {
+      await page.evaluate(() => (window as any).__reloadYjsEditors?.());
+      const text = await page.locator('.ProseMirror').textContent();
+      return text?.includes('Initial content.') ?? false;
+    }, { timeout: 90000, intervals: [1000, 2000, 3000] }).toBe(true);
 
     const editor2 = page.locator('.ProseMirror');
-    const rootBeforeUpdate = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
+    const previousEntry = await page.evaluate((name) => {
+      const nostrStore = (window as any).__nostrStore;
+      const npub = nostrStore?.getState?.().npub;
+      const registry = (window as any).__treeRootRegistry;
+      const entry = registry?.get?.(npub, name as string);
+      if (!entry) return { updatedAt: null, hashHex: null };
+
+      const toHex = (bytes: Uint8Array) => {
+        let out = '';
+        for (const byte of bytes) {
+          out += byte.toString(16).padStart(2, '0');
+        }
+        return out;
+      };
+      return { updatedAt: entry.updatedAt ?? null, hashHex: entry.hash ? toHex(entry.hash) : null };
+    }, treeName);
     await editor2.click();
     await editor2.press('End');
     await editor2.type(' Added more content.');
     await expect(editor2).toContainText('Added more content.', { timeout: 15000 });
-    await waitForTreeRootChange(page, rootBeforeUpdate, 60000);
+    await page.waitForFunction(
+      (payload) => {
+        const { treeName: name, previous } = payload as { treeName: string; previous: { updatedAt: number | null; hashHex: string | null } };
+        const nostrStore = (window as any).__nostrStore;
+        const npub = nostrStore?.getState?.().npub;
+        if (!npub) return false;
+        const registry = (window as any).__treeRootRegistry;
+        const entry = registry?.get?.(npub, name);
+        if (!entry) return false;
 
-    await page.reload();
+        const toHex = (bytes: Uint8Array) => {
+          let out = '';
+          for (const byte of bytes) {
+            out += byte.toString(16).padStart(2, '0');
+          }
+          return out;
+        };
+        const currentHash = entry.hash ? toHex(entry.hash) : null;
+        const prevHash = previous?.hashHex ?? null;
+        const prevUpdatedAt = previous?.updatedAt ?? null;
+
+        if (prevHash && currentHash && currentHash !== prevHash) {
+          return entry.dirty === false;
+        }
+        if (prevUpdatedAt !== null && entry.updatedAt !== null && entry.updatedAt > prevUpdatedAt) {
+          return entry.dirty === false;
+        }
+        return false;
+      },
+      { treeName, previous: previousEntry },
+      { timeout: 60000 }
+    );
+
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page);
 
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
@@ -266,12 +349,12 @@ test.describe('Iris Docs App', () => {
       const treeName = treeNameMatch ? decodeURIComponent(treeNameMatch[1]) : null;
       expect(treeName).toBeTruthy();
       await page1.waitForFunction(
-        async (docTreeName) => {
+        (docTreeName) => {
           const nostrStore = (window as any).__nostrStore;
           const npub = nostrStore?.getState()?.npub;
           if (!npub) return false;
-          const { getLocalRootEntry } = await import('/src/treeRootCache');
-          const entry = getLocalRootEntry(npub, docTreeName as string);
+          const registry = (window as any).__treeRootRegistry;
+          const entry = registry?.get?.(npub, docTreeName as string);
           return !!entry && entry.dirty === false;
         },
         treeName,
@@ -316,7 +399,7 @@ test.describe('Iris Docs App', () => {
     await expect(page.locator('[role="button"]:has-text("New Document")')).toBeVisible({ timeout: 15000 });
 
     try {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     } catch {
       await page.goto('/docs.html#/', { waitUntil: 'domcontentloaded' });
     }

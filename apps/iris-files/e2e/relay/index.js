@@ -176,6 +176,7 @@ wss.on('connection', (socket, req) => {
   })
 })
 
-server.listen(PORT, () => {
+const HOST = process.env.TEST_RELAY_HOST || '127.0.0.1'
+server.listen(PORT, HOST, () => {
   log(`[test-relay] Running on ws://localhost:${PORT}`)
 })

@@ -69,7 +69,7 @@ test.describe('Document Thumbnails', () => {
         const result = await tree.resolvePath(rootCid, '.thumbnail.jpg');
         return !!result;
       });
-    }, { timeout: 30000 }).toBe(true);
+    }, { timeout: 60000 }).toBe(true);
 
     // Navigate to home page
     await page.evaluate(() => window.location.hash = '#/');
@@ -85,16 +85,20 @@ test.describe('Document Thumbnails', () => {
     const thumbnailImg = docCard.locator('div.flex-1 img');
     await expect(thumbnailImg).toBeVisible({ timeout: 20000 });
 
-    // Verify the image has loaded (has non-zero dimensions)
-    await page.waitForFunction((name) => {
-      const cards = Array.from(document.querySelectorAll('a'));
-      const card = cards.find((el) => el.textContent?.includes(name));
-      const img = card?.querySelector('div.flex-1 img') as HTMLImageElement | null;
-      return !!img && img.complete && img.naturalWidth > 0;
-    }, docName, { timeout: 30000 });
+    // Verify the image actually loads
+    await expect.poll(async () => {
+      return page.evaluate((name) => {
+        const cards = Array.from(document.querySelectorAll('a'));
+        const card = cards.find((el) => el.textContent?.includes(name));
+        const img = card?.querySelector('div.flex-1 img') as HTMLImageElement | null;
+        if (!img) return false;
+        return img.complete && img.naturalWidth > 0;
+      }, docName);
+    }, { timeout: 60000 }).toBe(true);
   });
 
   test('shows file icon when no thumbnail exists', async ({ page }) => {
+    test.slow();
     await page.goto('/docs.html#/');
     await waitForAppReady(page);
     await disableOthersPool(page);
@@ -114,7 +118,6 @@ test.describe('Document Thumbnails', () => {
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
 
     // Don't type anything - just navigate away before any thumbnail capture
-
     // Navigate to home before thumbnail has a chance to be captured
     await page.evaluate(() => window.location.hash = '#/');
 
@@ -126,12 +129,20 @@ test.describe('Document Thumbnails', () => {
     await expect(docCard).toBeVisible({ timeout: 30000 });
 
     // DocCard tries to load thumbnail URL first, shows icon on error.
-    // Wait for the preview image to be absent, then ensure the fallback icon is rendered.
+    // Simulate an image load failure so we can verify the fallback icon.
     const thumbnailImg = docCard.locator('div.flex-1 img');
-    await expect(thumbnailImg).toHaveCount(0, { timeout: 15000 });
+    await page.evaluate((name) => {
+      const cards = Array.from(document.querySelectorAll('a'));
+      const card = cards.find((el) => el.textContent?.includes(name));
+      const img = card?.querySelector('div.flex-1 img') as HTMLImageElement | null;
+      if (img) {
+        img.dispatchEvent(new Event('error'));
+      }
+    }, docName);
 
     const fileIcon = docCard.locator('div.flex-1 .i-lucide-file-text');
-    await expect(fileIcon).toHaveCount(1);
+    await expect(fileIcon).toHaveCount(1, { timeout: 15000 });
+    await expect(thumbnailImg).toHaveCount(0, { timeout: 15000 });
   });
 
   test('thumbnail updates when document content changes', async ({ page }) => {

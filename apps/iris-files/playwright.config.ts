@@ -32,12 +32,13 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0, // Retry once on CI to handle flaky tests
   workers,
   reporter: 'list',
-  timeout: 30000, // 30s global timeout for parallel stability
-  expect: { timeout: 10000 }, // 10s for expect assertions
+  timeout: 60000, // 60s global timeout for parallel stability
+  expect: { timeout: 20000 }, // 20s for expect assertions
   use: {
     baseURL: 'http://localhost:5173',
     trace: 'off',
-    actionTimeout: 10000,
+    actionTimeout: 20000,
+    navigationTimeout: 60000,
     launchOptions: {
       args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
     },

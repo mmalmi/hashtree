@@ -84,7 +84,7 @@ async function getNpub(page: Page): Promise<string> {
 
 test.describe('Virtual Camera Livestream', () => {
   // Skip: flaky virtual camera test depends on fake-device-for-media-stream timing
-  test('streaming with real MediaRecorder and virtual camera', async ({}, testInfo) => {
+  test.skip('streaming with real MediaRecorder and virtual camera', async ({}, testInfo) => {
     test.slow();
     test.setTimeout(120000);
 

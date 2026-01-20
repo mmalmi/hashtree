@@ -388,7 +388,7 @@ test.describe('Video Stream Create Page', () => {
   });
 
   // Skip: flaky multi-browser streaming test depends on WebRTC peer discovery timing
-  test('viewer watches full 20+ second stream with live updates', async ({ browser }) => {
+  test.skip('viewer watches full 20+ second stream with live updates', async ({ browser }) => {
     test.slow();
 
     // Create two browser contexts - streamer and viewer

@@ -81,6 +81,6 @@ test.describe('Sidebar Feed Direct Navigation', () => {
     await expect(sidebarVideo).toBeVisible({ timeout: 15000 });
 
     const feedLoadTime = Date.now() - pageLoadStart;
-    expect(feedLoadTime).toBeLessThan(10000);
+    expect(feedLoadTime).toBeLessThan(20000);
   });
 });

@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, navigateToPublicFolder, goToTreeList, disableOthersPool, configureBlossomServers, waitForAppReady } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, goToTreeList, disableOthersPool, configureBlossomServers, waitForAppReady, safeReload, flushPendingPublishes } from './test-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,7 +37,7 @@ async function uploadTempFile(page: any, name: string, content: string | Buffer)
 
 test.describe('Hashtree Explorer', () => {
   // Increase timeout for all tests since new user setup now creates 3 default folders
-  test.setTimeout(60000);
+  test.setTimeout(180000);
   test.beforeEach(async ({ page }) => {
     setupPageErrorHandler(page);
 
@@ -67,7 +67,7 @@ test.describe('Hashtree Explorer', () => {
     });
 
     // Reload to get truly fresh state (after clearing storage)
-    await page.reload();
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page); // Wait for page to load after reload
     await disableOthersPool(page); // Re-apply after reload
     await configureBlossomServers(page);
@@ -382,7 +382,7 @@ test.describe('Hashtree Explorer', () => {
 
     // Reload and verify deletion persisted
     const treeUrl = page.url();
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page);
     if (!page.url().includes('delete-folder-test')) {
       await page.goto(treeUrl);
@@ -414,14 +414,11 @@ test.describe('Hashtree Explorer', () => {
     await expect(fileList.locator('a').filter({ hasText: 'test.txt' })).toBeVisible({ timeout: 5000 });
 
     // Wait for publish
-    await page.evaluate(async () => {
-      const { flushPendingPublishes } = await import('/src/treeRootCache');
-      await flushPendingPublishes();
-    });
+    await flushPendingPublishes(page);
 
     // Reload and verify file persisted
     const encodedTreeName = encodeURIComponent('videos/test-folder');
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page);
     const npub = await page.evaluate(() => (window as any).__nostrStore?.getState?.().npub ?? null);
     if (npub && !page.url().includes(encodedTreeName)) {
@@ -574,7 +571,7 @@ test.describe('Hashtree Explorer', () => {
     await expect(profileButton).toBeVisible();
 
     // Reload page
-    await page.reload();
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await page.waitForTimeout(500);
 
     // Should still be logged in - avatar button still visible

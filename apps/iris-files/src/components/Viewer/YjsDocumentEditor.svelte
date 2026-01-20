@@ -113,6 +113,28 @@
 
   // Track previous collaborators to detect changes
   let prevCollaboratorsKey = '';
+  let prevYjsEntryCid = '';
+  let prevDirCid = '';
+
+  // Reload editors list when .yjs file changes (e.g., collaborators updated)
+  $effect(() => {
+    const cidKey = yjsEntry
+      ? `${toHex(yjsEntry.cid.hash)}:${yjsEntry.cid.key ? toHex(yjsEntry.cid.key) : ''}`
+      : '';
+    if (!cidKey || cidKey === prevYjsEntryCid) return;
+    prevYjsEntryCid = cidKey;
+    void loadEditors();
+  });
+
+  $effect(() => {
+    const cidKey = dirCid
+      ? `${toHex(dirCid.hash)}:${dirCid.key ? toHex(dirCid.key) : ''}`
+      : '';
+    if (!cidKey || cidKey === prevDirCid) return;
+    prevDirCid = cidKey;
+    void loadEditors();
+  });
+
 
   // Reactively update subscriptions when collaborators change
   $effect(() => {
@@ -418,17 +440,32 @@
 
   // Load editors from .yjs file
   async function loadEditors() {
-    if (yjsEntry) {
-    }
-
-    if (!yjsEntry) {
-      collaborators = [];
-      return;
-    }
-
     try {
       const tree = getTree();
-      const data = await tree.readFile(yjsEntry.cid);
+      let docDirCid = dirCid;
+
+      if (!docDirCid && route.treeName && targetNpub) {
+        const root = getTreeRootSync(targetNpub, route.treeName);
+        if (root) {
+          const resolved = await tree.resolvePath(root, route.path);
+          docDirCid = resolved?.cid;
+        }
+      }
+
+      if (!docDirCid) {
+        collaborators = [];
+        return;
+      }
+
+      const docEntries = await tree.listDirectory(docDirCid);
+      const yjsConfigEntry = docEntries.find(e => e.name === '.yjs' && e.type !== LinkType.Dir);
+
+      if (!yjsConfigEntry) {
+        collaborators = [];
+        return;
+      }
+
+      const data = await tree.readFile(yjsConfigEntry.cid);
       if (data) {
         const text = new TextDecoder().decode(data);
         collaborators = text.split('\n').filter(line => line.trim().startsWith('npub1'));
@@ -508,6 +545,10 @@
   }
 
   onMount(async () => {
+    if (import.meta.env.VITE_TEST_MODE) {
+      (window as any).__reloadYjsEditors = () => loadEditors();
+    }
+
     // Load editors
     await loadEditors();
 

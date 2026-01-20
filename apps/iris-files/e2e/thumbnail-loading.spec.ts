@@ -54,7 +54,7 @@ test.describe('Thumbnail Loading', () => {
     const hasCards = await page.waitForFunction(
       () => document.querySelectorAll('[href*="npub"]').length > 0,
       undefined,
-      { timeout: 30000 }
+      { timeout: 60000 }
     ).then(() => true).catch(() => false);
 
     if (hasCards) return;
@@ -63,7 +63,7 @@ test.describe('Thumbnail Loading', () => {
     await page.waitForFunction(
       () => document.querySelectorAll('[href*="npub"]').length > 0,
       undefined,
-      { timeout: 60000 }
+      { timeout: 90000 }
     );
   }
 
@@ -123,7 +123,7 @@ test.describe('Thumbnail Loading', () => {
       const stats = await getVisibleThumbnailStats();
       const resolved = stats.loaded + stats.placeholder;
       return stats.total > 0 && stats.error === 0 && resolved > 0;
-    }, { timeout: 60000 }).toBe(true);
+    }, { timeout: 120000 }).toBe(true);
 
     // Check ONLY the thumbnail area (.aspect-video) for visible cards
     // This avoids counting Avatar images as thumbnails

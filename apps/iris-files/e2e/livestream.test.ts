@@ -7,7 +7,7 @@ import { setupPageErrorHandler, navigateToPublicFolder, useLocalRelay, waitForRe
 test.describe.configure({ mode: 'serial' });
 
 // Increase timeout for livestream tests
-test.setTimeout(60000);
+test.setTimeout(120000);
 
 test.describe('Livestream Video Stability', () => {
 

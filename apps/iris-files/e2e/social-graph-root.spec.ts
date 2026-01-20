@@ -255,6 +255,8 @@ test.describe('Social graph root', () => {
     await useLocalRelay(page);
     await waitForRelayConnected(page, 30000);
     await ensureLoggedIn(page, 20000);
+    await page.waitForFunction(() => (window as any).__testHelpers?.followPubkey, { timeout: 10000 });
+    await page.evaluate((pk) => (window as any).__testHelpers?.followPubkey?.(pk), FOLLOW_PUBKEY);
 
     // Wait for login
     await page.waitForFunction(() => {
@@ -264,6 +266,11 @@ test.describe('Social graph root', () => {
 
     // Navigate directly to bootstrap user's profile
     await page.goto(`/#/${BOOTSTRAP_NPUB}`);
+    await waitForRelayConnected(page, 30000);
+    await page.evaluate(async (pubkey) => {
+      const { fetchUserFollowers } = await import('/src/utils/socialGraph');
+      fetchUserFollowers(pubkey);
+    }, BOOTSTRAP_PUBKEY);
 
     // Wait for profile to load - "Known Followers" should appear
     await page.waitForSelector('text=Known Followers', { timeout: 15000 });
