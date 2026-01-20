@@ -11,8 +11,8 @@ test.describe('Git file bar', () => {
     const gitBar = page.locator('[data-testid="git-file-bar"]');
     await expect(gitBar).toBeVisible({ timeout: 60000 });
 
-    // Should have a link/button to view history
-    await expect(gitBar.locator('button, a').filter({ hasText: /history/i })).toBeVisible();
+    // Should have a history button (icon only)
+    await expect(gitBar.locator('button[title*="history" i]')).toBeVisible();
 
     // Should show relative time (e.g., "2 days ago", "3 months ago")
     await expect(gitBar.getByText(/\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago/i)).toBeVisible();
@@ -27,8 +27,8 @@ test.describe('Git file bar', () => {
     const gitBar = page.locator('[data-testid="git-file-bar"]');
     await expect(gitBar).toBeVisible({ timeout: 60000 });
 
-    // Click history button
-    await gitBar.locator('button, a').filter({ hasText: /history/i }).click();
+    // Click history button (icon only)
+    await gitBar.locator('button[title*="history" i]').click();
 
     // Should open history modal
     await expect(page.locator('[data-testid="git-history-modal"]')).toBeVisible({ timeout: 10000 });

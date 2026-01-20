@@ -86,10 +86,9 @@
     <button
       onclick={openHistory}
       class="btn-ghost text-xs px-2 py-1"
-      title="View file history"
+      title="View commit history"
     >
-      <span class="i-lucide-history text-sm mr-1"></span>
-      History
+      <span class="i-lucide-history text-sm"></span>
     </button>
   </div>
 {:else if loading}

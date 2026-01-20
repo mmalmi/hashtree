@@ -23,10 +23,23 @@ export interface CommitInfo {
   parent: string[];
 }
 
+// Cache for git info stores by CID
+const gitInfoStoreCache = new Map<string, Readable<GitInfo>>();
+
 /**
  * Create a store to detect if a directory is a git repo and get basic info
+ * Cached by CID to avoid re-fetching when navigating within the same repo
  */
 export function createGitInfoStore(dirCid: CID | null): Readable<GitInfo> {
+  if (!dirCid) {
+    return { subscribe: writable<GitInfo>({ isRepo: false, currentBranch: null, branches: [], loading: false }).subscribe };
+  }
+
+  const cacheKey = dirCid.toString();
+  if (gitInfoStoreCache.has(cacheKey)) {
+    return gitInfoStoreCache.get(cacheKey)!;
+  }
+
   const { subscribe, set } = writable<GitInfo>({
     isRepo: false,
     currentBranch: null,
@@ -34,39 +47,49 @@ export function createGitInfoStore(dirCid: CID | null): Readable<GitInfo> {
     loading: true,
   });
 
-  if (!dirCid) {
-    set({ isRepo: false, currentBranch: null, branches: [], loading: false });
-  } else {
-    // Check if it's a git repo
-    isGitRepo(dirCid).then(async (isRepo) => {
-      if (!isRepo) {
-        set({ isRepo: false, currentBranch: null, branches: [], loading: false });
-        return;
-      }
+  const store = { subscribe };
 
-      try {
-        const { branches, currentBranch } = await getBranches(dirCid);
-        set({
-          isRepo: true,
-          currentBranch,
-          branches,
-          loading: false,
-        });
-      } catch (err) {
-        console.error('Error getting git branches:', err);
-        set({ isRepo: true, currentBranch: null, branches: [], loading: false });
-      }
-    }).catch((err) => {
-      console.error('Error checking git repo:', err);
+  // Cache and start loading
+  gitInfoStoreCache.set(cacheKey, store);
+
+  // Check if it's a git repo
+  isGitRepo(dirCid).then(async (isRepo) => {
+    if (!isRepo) {
       set({ isRepo: false, currentBranch: null, branches: [], loading: false });
-    });
-  }
+      return;
+    }
 
-  return { subscribe };
+    try {
+      const { branches, currentBranch } = await getBranches(dirCid);
+      set({
+        isRepo: true,
+        currentBranch,
+        branches,
+        loading: false,
+      });
+    } catch (err) {
+      console.error('Error getting git branches:', err);
+      set({ isRepo: true, currentBranch: null, branches: [], loading: false });
+    }
+  }).catch((err) => {
+    console.error('Error checking git repo:', err);
+    set({ isRepo: false, currentBranch: null, branches: [], loading: false });
+  });
+
+  return store;
 }
+
+// Cache for git log stores by CID:depth
+const gitLogStoreCache = new Map<string, Readable<{
+  commits: CommitInfo[];
+  headOid: string | null;
+  loading: boolean;
+  error: string | null;
+}>>();
 
 /**
  * Create a store to get commit history for a git repo
+ * Cached by CID:depth to avoid re-fetching when navigating within the same repo
  */
 export function createGitLogStore(dirCid: CID | null, depth = 20): Readable<{
   commits: CommitInfo[];
@@ -74,6 +97,15 @@ export function createGitLogStore(dirCid: CID | null, depth = 20): Readable<{
   loading: boolean;
   error: string | null;
 }> {
+  if (!dirCid) {
+    return { subscribe: writable({ commits: [], headOid: null, loading: false, error: null }).subscribe };
+  }
+
+  const cacheKey = `${dirCid.toString()}:${depth}`;
+  if (gitLogStoreCache.has(cacheKey)) {
+    return gitLogStoreCache.get(cacheKey)!;
+  }
+
   const store = writable<{
     commits: CommitInfo[];
     headOid: string | null;
@@ -87,9 +119,11 @@ export function createGitLogStore(dirCid: CID | null, depth = 20): Readable<{
   });
   const { subscribe, set } = store;
 
-  if (!dirCid) {
-    set({ commits: [], headOid: null, loading: false, error: null });
-  } else {
+  // Cache immediately
+  const cachedStore = { subscribe };
+  gitLogStoreCache.set(cacheKey, cachedStore);
+
+  {
     const MAX_RETRIES = 60;
     const RETRY_DELAY_MS = 1500;
     let retryCount = 0;
@@ -150,7 +184,7 @@ export function createGitLogStore(dirCid: CID | null, depth = 20): Readable<{
     load();
   }
 
-  return { subscribe };
+  return cachedStore;
 }
 
 /**
