@@ -6,6 +6,7 @@
   import { routeStore, treeRootStore, createTreesStore } from '../../stores';
   import { createReleasesStore, buildReleaseTreeName, type ReleaseSummary } from '../../stores/releases';
   import { nostrStore } from '../../nostr';
+  import { SvelteURLSearchParams } from 'svelte/reactivity';
   import { open as openReleaseModal } from './ReleaseModal.svelte';
   import RepoTabNav from './RepoTabNav.svelte';
   import FileBrowser from '../FileBrowser.svelte';
@@ -79,7 +80,7 @@
 
   function getReleaseHref(release: ReleaseSummary): string {
     const linkKey = route.params.get('k');
-    const query = new URLSearchParams();
+    const query = new SvelteURLSearchParams();
     if (linkKey) query.set('k', linkKey);
     query.set('tab', 'releases');
     query.set('id', release.id);

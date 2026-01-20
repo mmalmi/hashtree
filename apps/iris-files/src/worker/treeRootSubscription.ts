@@ -138,7 +138,6 @@ export function subscribeToTreeRoots(pubkeyHex: string): () => void {
   ndkSubscribe(subId, [{
     kinds: [30078],
     authors: [pubkeyHex],
-    '#l': ['hashtree'],
   }]);
 
   return () => unsubscribeFromTreeRoots(pubkeyHex);

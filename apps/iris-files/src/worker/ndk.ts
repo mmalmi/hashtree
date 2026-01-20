@@ -26,7 +26,7 @@ let wasmVerifier: WasmVerifier | null = null;
 let wasmLoading = false;
 
 // Event callbacks
-let onEventCallback: ((subId: string, event: SignedEvent) => void) | null = null;
+let onEventCallback: ((subId: string, event: SignedEvent) => void | Promise<void>) | null = null;
 let onEoseCallback: ((subId: string) => void) | null = null;
 
 // Active subscriptions
@@ -161,7 +161,7 @@ export function getNdk(): NDK | null {
 /**
  * Set event callback
  */
-export function setOnEvent(callback: (subId: string, event: SignedEvent) => void): void {
+export function setOnEvent(callback: (subId: string, event: SignedEvent) => void | Promise<void>): void {
   onEventCallback = callback;
 }
 
@@ -218,7 +218,11 @@ export function subscribe(subId: string, filters: NostrFilter[]): void {
       created_at: event.created_at!,
       sig: event.sig!,
     };
-    onEventCallback?.(subId, signedEvent);
+    if (onEventCallback) {
+      Promise.resolve(onEventCallback(subId, signedEvent)).catch((err) => {
+        console.warn('[Worker NDK] onEvent callback failed:', err);
+      });
+    }
   });
 
   sub.on('eose', () => {
@@ -269,7 +273,9 @@ export async function publish(event: SignedEvent): Promise<void> {
       const filters = (sub as unknown as { filters?: NDKFilter[] }).filters || [];
       for (const filter of filters) {
         if (matchFilter(filter, event)) {
-          onEventCallback(subId, event);
+          Promise.resolve(onEventCallback(subId, event)).catch((err) => {
+            console.warn('[Worker NDK] onEvent callback failed:', err);
+          });
           break; // Only dispatch once per subscription
         }
       }

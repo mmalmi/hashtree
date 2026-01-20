@@ -25,6 +25,7 @@ import type {
 import { generateRequestId } from 'hashtree';
 import { WebRTCProxy } from './webrtcProxy';
 import { getErrorMessage } from './utils/errorMessage';
+import type { TreeRootInfo } from './worker/protocol';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -168,6 +169,7 @@ export class WorkerAdapter {
         case 'peerStats':
         case 'relayStats':
         case 'storageStats':
+        case 'treeRootInfo':
           this.resolvePending(msg.id, msg);
           break;
 
@@ -1002,6 +1004,50 @@ export class WorkerAdapter {
       hash,
       key,
       visibility,
+    } as WorkerRequest);
+  }
+
+  async getTreeRootInfo(npub: string, treeName: string): Promise<TreeRootInfo | null> {
+    const id = generateRequestId();
+    const response = await this.request<{ record?: TreeRootInfo; error?: string }>({
+      type: 'getTreeRootInfo',
+      id,
+      npub,
+      treeName,
+    } as WorkerRequest);
+    if (response.error) throw new Error(response.error);
+    return response.record ?? null;
+  }
+
+  async mergeTreeRootKey(npub: string, treeName: string, hash: Uint8Array, key: Uint8Array): Promise<boolean> {
+    const id = generateRequestId();
+    const response = await this.request<{ value?: boolean; error?: string }>({
+      type: 'mergeTreeRootKey',
+      id,
+      npub,
+      treeName,
+      hash,
+      key,
+    } as WorkerRequest);
+    if (response.error) throw new Error(response.error);
+    return response.value ?? false;
+  }
+
+  async subscribeTreeRoots(pubkey: string): Promise<void> {
+    const id = generateRequestId();
+    await this.request<{ error?: string }>({
+      type: 'subscribeTreeRoots',
+      id,
+      pubkey,
+    } as WorkerRequest);
+  }
+
+  async unsubscribeTreeRoots(pubkey: string): Promise<void> {
+    const id = generateRequestId();
+    await this.request<{ error?: string }>({
+      type: 'unsubscribeTreeRoots',
+      id,
+      pubkey,
     } as WorkerRequest);
   }
 

@@ -395,13 +395,24 @@ export default class NDKCacheAdapterDexie implements NDKCacheAdapter {
         }
 
         if (addEvent) {
+            let serializedEvent: string;
+            try {
+                serializedEvent = event.serialize(this.saveSig, true);
+            } catch (error) {
+                this.debug("Failed to serialize event for cache: %O", {
+                    id: event.id,
+                    kind: event.kind,
+                    error,
+                });
+                return;
+            }
             const eventData: Event = {
                 id: event.tagId(),
                 pubkey: event.pubkey,
                 kind: event.kind,
                 createdAt: event.created_at ?? Date.now(),
                 relay: relay?.url,
-                event: event.serialize(this.saveSig, true),
+                event: serializedEvent,
             };
 
             if (this.saveSig && event.sig) {

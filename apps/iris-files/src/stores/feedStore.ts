@@ -10,7 +10,6 @@ import { getFollows as getSocialGraphFollows } from '../utils/socialGraph';
 import { getWorkerAdapter, waitForWorkerAdapter } from '../lib/workerInit';
 import { DEFAULT_BOOTSTRAP_PUBKEY, DEFAULT_VIDEO_FEED_PUBKEYS } from '../utils/constants';
 import { fromHex } from 'hashtree';
-import { updateSubscriptionCache } from './treeRoot';
 import { orderFeedWithInterleaving } from '../utils/feedOrder';
 import { clearDeletedVideo, getDeletedVideoTimestamp, recordDeletedVideo } from './videoDeletes';
 import { isHtreeDebugEnabled, logHtreeDebug } from '../lib/htreeDebug';
@@ -374,9 +373,6 @@ export async function fetchFeedVideos(): Promise<void> {
         const keyTag = event.tags.find(t => t[0] === 'key')?.[1];
         const hash = fromHex(hashTag);
         const encKey = keyTag ? fromHex(keyTag) : undefined;
-
-        // Pre-populate tree root cache so SW can resolve thumbnails
-        updateSubscriptionCache(`${ownerNpub}/${dTag}`, hash, encKey);
 
         seenVideos.set(key, {
           href: `#/${ownerNpub}/${encodeURIComponent(dTag)}`,

@@ -25,6 +25,7 @@ interface CachedRoot {
   encryptedKey?: string;   // For link-visible trees
   keyId?: string;          // For link-visible trees
   selfEncryptedKey?: string; // For private trees
+  selfEncryptedLinkKey?: string; // For link-visible trees
 }
 
 // In-memory LRU cache for fast lookups (limited to 1000 entries to prevent memory leak)
@@ -145,6 +146,38 @@ export async function setCachedRoot(
 }
 
 /**
+ * Merge a decrypted key into an existing cache entry (if hash matches).
+ */
+export async function mergeCachedRootKey(
+  npub: string,
+  treeName: string,
+  hash: Uint8Array,
+  key: Uint8Array
+): Promise<boolean> {
+  const cacheKey = `${npub}/${treeName}`;
+
+  const cached = await getCachedRootInfo(npub, treeName);
+  if (!cached) return false;
+  if (cached.key) return false;
+  if (!hashEquals(cached.hash, hash)) return false;
+
+  const merged: CachedRoot = {
+    ...cached,
+    key,
+  };
+
+  memoryCache.set(cacheKey, merged);
+
+  if (store) {
+    const storageKey = await makeStorageKey(npub, treeName);
+    const data = encode(merged);
+    await store.put(storageKey, new Uint8Array(data));
+  }
+
+  return true;
+}
+
+/**
  * Remove a cached tree root
  */
 export async function removeCachedRoot(npub: string, treeName: string): Promise<void> {
@@ -207,4 +240,12 @@ export function getCacheStats(): { memoryEntries: number } {
   return {
     memoryEntries: memoryCache.size,
   };
+}
+
+function hashEquals(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }

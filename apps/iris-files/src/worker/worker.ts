@@ -14,8 +14,8 @@ import { DexieStore } from '../../../../ts/packages/hashtree/src/store/dexie';
 import { BlossomStore } from '../../../../ts/packages/hashtree/src/store/blossom';
 import { FallbackStore } from '../../../../ts/packages/hashtree/src/store/fallback';
 import type { WorkerRequest, WorkerResponse, WorkerConfig, SignedEvent, WebRTCCommand, BlossomUploadProgress, BlossomServerStatus } from './protocol';
-import { initTreeRootCache, getCachedRoot, setCachedRoot, clearMemoryCache } from './treeRootCache';
-import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback } from './treeRootSubscription';
+import { initTreeRootCache, getCachedRoot, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
+import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
 import {
   initNdk,
   closeNdk,
@@ -43,6 +43,7 @@ import Dexie from 'dexie';
 import { LRUCache } from '../utils/lruCache';
 import { getErrorMessage } from '../utils/errorMessage';
 import { DEFAULT_BOOTSTRAP_PUBKEY } from '../utils/constants';
+import { nip19 } from 'nostr-tools';
 
 // Dexie database for social graph persistence
 class SocialGraphDB extends Dexie {
@@ -74,6 +75,7 @@ let webrtc: WebRTCController | null = null;
 let webrtcStarted = false;
 let _config: WorkerConfig | null = null;
 const WEBRTC_REQUEST_TIMEOUT_MS = 5000;
+const treeRootSubscriptionRefs = new Map<string, number>();
 
 // Storage quota management
 let storageMaxBytes = 1024 * 1024 * 1024; // Default 1GB
@@ -506,6 +508,18 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       case 'setTreeRootCache':
         await handleSetTreeRootCache(msg.id, msg.npub, msg.treeName, msg.hash, msg.key, msg.visibility);
         break;
+      case 'getTreeRootInfo':
+        await handleGetTreeRootInfo(msg.id, msg.npub, msg.treeName);
+        break;
+      case 'mergeTreeRootKey':
+        await handleMergeTreeRootKey(msg.id, msg.npub, msg.treeName, msg.hash, msg.key);
+        break;
+      case 'subscribeTreeRoots':
+        await handleSubscribeTreeRoots(msg.id, msg.pubkey);
+        break;
+      case 'unsubscribeTreeRoots':
+        await handleUnsubscribeTreeRoots(msg.id, msg.pubkey);
+        break;
 
       // Nostr (TODO: Phase 2)
       case 'subscribe':
@@ -753,7 +767,16 @@ async function handleInit(id: string, cfg: WorkerConfig) {
     console.log('[Worker] NDK initialized with', cfg.relays.length, 'relays');
 
     // Set up unified event handler for all subscriptions
-    setOnEvent((subId, event) => {
+    setOnEvent(async (subId, event) => {
+      const isTreeRoot = isTreeRootEvent(event);
+      if (isTreeRoot) {
+        try {
+          await handleTreeRootEvent(event);
+        } catch (err) {
+          console.warn('[Worker] Failed to handle tree root event:', err);
+        }
+      }
+
       // Forward to main thread
       respond({ type: 'event', subId, event });
 
@@ -765,13 +788,6 @@ async function handleInit(id: string, cfg: WorkerConfig) {
       // Route to SocialGraph handler (all socialgraph-* subscriptions)
       if (subId.startsWith('socialgraph-') && event.kind === KIND_CONTACTS) {
         handleSocialGraphEvent(event);
-      }
-
-      // Route to tree root handler (kind 30078 with #l=hashtree)
-      if (isTreeRootEvent(event)) {
-        handleTreeRootEvent(event).catch(err => {
-          console.warn('[Worker] Failed to handle tree root event:', err);
-        });
       }
     });
 
@@ -1210,7 +1226,7 @@ async function handleResolveRoot(id: string, npub: string, path?: string) {
     // Look up in cache
     const cachedCid = await getCachedRoot(npub, treeName);
     if (!cachedCid) {
-      // Not in cache - main thread should subscribe via Nostr
+      // Not in cache - main thread should request tree root subscription
       respond({ type: 'cid', id, cid: undefined });
       return;
     }
@@ -1247,6 +1263,114 @@ async function handleSetTreeRootCache(
   } catch (err) {
     respond({ type: 'void', id, error: getErrorMessage(err) });
   }
+}
+
+async function handleGetTreeRootInfo(id: string, npub: string, treeName: string) {
+  try {
+    const cached = await getCachedRootInfo(npub, treeName);
+    if (!cached) {
+      respond({ type: 'treeRootInfo', id });
+      return;
+    }
+
+    respond({
+      type: 'treeRootInfo',
+      id,
+      record: {
+        hash: cached.hash,
+        key: cached.key,
+        visibility: cached.visibility,
+        updatedAt: cached.updatedAt,
+        encryptedKey: cached.encryptedKey,
+        keyId: cached.keyId,
+        selfEncryptedKey: cached.selfEncryptedKey,
+        selfEncryptedLinkKey: cached.selfEncryptedLinkKey,
+      },
+    });
+  } catch (err) {
+    respond({ type: 'treeRootInfo', id, error: getErrorMessage(err) });
+  }
+}
+
+async function handleMergeTreeRootKey(
+  id: string,
+  npub: string,
+  treeName: string,
+  hash: Uint8Array,
+  key: Uint8Array
+) {
+  try {
+    const merged = await mergeCachedRootKey(npub, treeName, hash, key);
+    respond({ type: 'bool', id, value: merged });
+  } catch (err) {
+    respond({ type: 'bool', id, value: false, error: getErrorMessage(err) });
+  }
+}
+
+async function handleSubscribeTreeRoots(id: string, pubkey: string) {
+  try {
+    const normalized = normalizePubkey(pubkey);
+    if (!normalized) {
+      respond({ type: 'void', id, error: 'Invalid pubkey' });
+      return;
+    }
+
+    const count = treeRootSubscriptionRefs.get(normalized) ?? 0;
+    treeRootSubscriptionRefs.set(normalized, count + 1);
+
+    if (count === 0) {
+      subscribeToTreeRoots(normalized);
+    }
+
+    respond({ type: 'void', id });
+  } catch (err) {
+    respond({ type: 'void', id, error: getErrorMessage(err) });
+  }
+}
+
+async function handleUnsubscribeTreeRoots(id: string, pubkey: string) {
+  try {
+    const normalized = normalizePubkey(pubkey);
+    if (!normalized) {
+      respond({ type: 'void', id, error: 'Invalid pubkey' });
+      return;
+    }
+
+    const count = treeRootSubscriptionRefs.get(normalized);
+    if (!count) {
+      respond({ type: 'void', id });
+      return;
+    }
+
+    if (count <= 1) {
+      treeRootSubscriptionRefs.delete(normalized);
+      unsubscribeFromTreeRoots(normalized);
+    } else {
+      treeRootSubscriptionRefs.set(normalized, count - 1);
+    }
+
+    respond({ type: 'void', id });
+  } catch (err) {
+    respond({ type: 'void', id, error: getErrorMessage(err) });
+  }
+}
+
+function normalizePubkey(pubkey: string): string | null {
+  if (pubkey.startsWith('npub1')) {
+    try {
+      const decoded = nip19.decode(pubkey);
+      if (decoded.type !== 'npub') return null;
+      return decoded.data as string;
+    } catch {
+      return null;
+    }
+  }
+
+  if (pubkey.length === 64) {
+    return pubkey;
+  }
+
+  return null;
 }
 
 // ============================================================================

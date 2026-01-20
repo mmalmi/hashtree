@@ -448,6 +448,29 @@ class TreeRootRegistryImpl {
   }
 
   /**
+   * Merge a decrypted key into an existing record without changing updatedAt/source.
+   * Returns true if the record was updated.
+   */
+  mergeKey(
+    npub: string,
+    treeName: string,
+    hash: Hash,
+    key: Hash
+  ): boolean {
+    const cacheKey = this.makeKey(npub, treeName);
+    const existing = this.records.get(cacheKey);
+    if (!existing) return false;
+
+    if (toHex(existing.hash) !== toHex(hash)) return false;
+    if (existing.key) return false;
+
+    existing.key = key;
+    this.persistence.save(cacheKey, existing);
+    this.notify(cacheKey, existing);
+    return true;
+  }
+
+  /**
    * Set record from worker (Nostr subscription routed through worker)
    * Similar to setFromResolver but source is 'worker'
    */

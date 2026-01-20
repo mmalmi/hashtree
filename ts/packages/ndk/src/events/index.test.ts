@@ -262,6 +262,15 @@ describe("NDKEvent", () => {
             expect(nostrEvent).toHaveProperty("id");
         });
 
+        it("sanitizes non-string tag values before serialization", async () => {
+            const badTag = { alias: "alice" } as unknown as string;
+            event.tags = [["p", user1.pubkey, "", badTag]];
+
+            const nostrEvent = await event.toNostrEvent();
+
+            expect(nostrEvent.tags[0][3]).toEqual(JSON.stringify({ alias: "alice" }));
+        });
+
         describe("mentions", () => {
             it("handles NIP-27 mentions", async () => {
                 event.content = "hello nostr:npub1l2vyh47mk2p0qlsku7hg0vn29faehy9hy34ygaclpn66ukqp3afqutajft!";

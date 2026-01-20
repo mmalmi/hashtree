@@ -3,15 +3,15 @@
    * VideoHome - Home page for video.iris.to
    * YouTube-style home with horizontal sections and infinite feed
    */
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { nip19 } from 'nostr-tools';
   import { ndk, nostrStore } from '../../nostr';
+  import { getWorkerAdapter, waitForWorkerAdapter } from '../../lib/workerInit';
   import { recentsStore, clearRecentsByPrefix, type RecentItem } from '../../stores/recents';
   import { createFollowsStore } from '../../stores';
   import { detectPlaylistForCard, getCachedPlaylistInfo } from '../../stores/playlist';
   import { indexVideo } from '../../stores/searchIndex';
-  import { updateSubscriptionCache } from '../../stores/treeRoot';
   import {
     videosByKey,
     socialVideosByKey,
@@ -36,6 +36,24 @@
   import VideoCard from './VideoCard.svelte';
   import PlaylistCard from './PlaylistCard.svelte';
   import type { VideoItem } from './types';
+
+  let workerReady = $state(!!getWorkerAdapter());
+
+  onMount(() => {
+    let active = true;
+    if (!workerReady) {
+      waitForWorkerAdapter(10000).then((adapter) => {
+        if (!active) return;
+        if (!adapter) {
+          console.warn('[VideoHome] Worker not ready - subscribing anyway');
+        }
+        workerReady = true;
+      });
+    }
+    return () => {
+      active = false;
+    };
+  });
 
   /** Encode tree name for use in URL path */
   function encodeTreeNameForUrl(treeName: string): string {
@@ -195,6 +213,7 @@
   // Fetch fallback follow list when needed (via subscription, not fetchEvents which hangs)
   let fallbackSub: { stop: () => void } | null = null;
   $effect(() => {
+    if (!workerReady) return;
     if (usingFallback && !fallbackFetched) {
       fallbackFetched = true;
       let latestTimestamp = 0;
@@ -265,6 +284,7 @@
   let socialSubUnsub: (() => void) | null = null;
 
   $effect(() => {
+    if (!workerReady) return;
     // Track effectiveFollows to trigger re-run when it changes (includes fallback)
     const currentFollows = effectiveFollows;
     // Track userPubkey to include own videos
@@ -377,9 +397,6 @@
       const hash = fromHex(hashTag);
       const encKey = keyTag ? fromHex(keyTag) : undefined;
 
-      // Pre-populate tree root cache so SW can resolve thumbnails
-      updateSubscriptionCache(`${ownerNpub}/${dTag}`, hash, encKey);
-
       const title = dTag.slice(7); // Remove 'videos/' prefix
       videosByKey.set(key, {
         key,
@@ -417,6 +434,7 @@
 
   // Subscribe to liked and commented videos from self + followed users
   $effect(() => {
+    if (!workerReady) return;
     const currentFollows = effectiveFollows;
     const myPubkey = userPubkey;
     // Clean up previous subscription

@@ -28,6 +28,7 @@
   import { createGitLogStore, type CommitInfo } from '../../stores/git';
   import { createCIStatusStore, loadCIConfig, type CIStatus, type CIConfig } from '../../stores/ci';
   import type { Readable } from 'svelte/store';
+  import { SvelteSet } from 'svelte/reactivity';
   import { routeStore } from '../../stores';
   import { nhashEncode } from 'hashtree';
   import { checkoutCommit, getBranches } from '../../utils/git';
@@ -70,7 +71,7 @@
 
   // Deduplicate commits by OID (can happen with merge commits in history)
   let uniqueCommits = $derived(() => {
-    const seen = new Set<string>();
+    const seen = new SvelteSet<string>();
     return allCommits.filter(c => {
       if (seen.has(c.oid)) return false;
       seen.add(c.oid);

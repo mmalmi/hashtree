@@ -18,12 +18,6 @@
   import { setActivePlaceInHash } from './lib/mapsUrl';
   import MapsRouter from './components/Maps/MapsRouter.svelte';
 
-  const isDev = import.meta.env.DEV;
-  let RenderScan: typeof import('svelte-render-scan').RenderScan | null = $state(null);
-  if (isDev) {
-    import('svelte-render-scan').then(m => RenderScan = m.RenderScan);
-  }
-
   // Header display settings
   let showBandwidth = $derived($settingsStore.pools.showBandwidth ?? false);
   let showConnectivity = $derived($settingsStore.pools.showConnectivity ?? true);
@@ -88,7 +82,4 @@
 
   <!-- Modals -->
   <Toast />
-  {#if RenderScan}
-    <RenderScan initialEnabled={false} />
-  {/if}
 </div>

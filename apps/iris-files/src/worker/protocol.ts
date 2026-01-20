@@ -19,6 +19,17 @@ export type {
 // Tree visibility levels
 export type TreeVisibility = 'public' | 'link-visible' | 'private';
 
+export interface TreeRootInfo {
+  hash: Uint8Array;
+  key?: Uint8Array;
+  visibility: TreeVisibility;
+  updatedAt: number;
+  encryptedKey?: string;
+  keyId?: string;
+  selfEncryptedKey?: string;
+  selfEncryptedLinkKey?: string;
+}
+
 // Extended PeerStats with pool classification (iris-files specific)
 export interface PeerStats {
   peerId: string;
@@ -58,8 +69,12 @@ export type WorkerRequest =
   | { type: 'listDir'; id: string; cid: CID }
   | { type: 'resolveRoot'; id: string; npub: string; path?: string }
 
-  // Tree root cache (push from main thread registry)
+  // Tree root cache and subscriptions
   | { type: 'setTreeRootCache'; id: string; npub: string; treeName: string; hash: Uint8Array; key?: Uint8Array; visibility: TreeVisibility }
+  | { type: 'getTreeRootInfo'; id: string; npub: string; treeName: string }
+  | { type: 'mergeTreeRootKey'; id: string; npub: string; treeName: string; hash: Uint8Array; key: Uint8Array }
+  | { type: 'subscribeTreeRoots'; id: string; pubkey: string }
+  | { type: 'unsubscribeTreeRoots'; id: string; pubkey: string }
 
   // Nostr subscriptions
   | { type: 'subscribe'; id: string; filters: NostrFilter[] }
@@ -175,6 +190,7 @@ export type WorkerResponse =
 
   // Tree root updates (worker → main thread notification)
   | { type: 'treeRootUpdate'; npub: string; treeName: string; hash: Uint8Array; key?: Uint8Array; visibility: TreeVisibility; updatedAt: number; encryptedKey?: string; keyId?: string; selfEncryptedKey?: string; selfEncryptedLinkKey?: string }
+  | { type: 'treeRootInfo'; id: string; record?: TreeRootInfo; error?: string }
 
   // SocialGraph responses
   | { type: 'socialGraphInit'; id: string; version: number; size: number; error?: string }

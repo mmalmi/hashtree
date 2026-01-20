@@ -8,15 +8,17 @@
  *
  * Data flow:
  * - Local writes -> TreeRootRegistry (via treeRootCache.ts)
- * - Resolver events -> TreeRootRegistry (via setFromResolver)
- * - UI/SW reads -> TreeRootRegistry (via get/resolve)
+ * - Web: worker tree-root events -> TreeRootRegistry (via setFromWorker)
+ * - Tauri: resolver events -> TreeRootRegistry (via setFromResolver)
+ * - UI reads -> TreeRootRegistry (via get/resolve)
  */
 import { writable, get, type Readable } from 'svelte/store';
 import { fromHex, toHex, cid, visibilityHex } from 'hashtree';
-import type { CID, SubscribeVisibilityInfo, Hash } from 'hashtree';
+import type { CID, SubscribeVisibilityInfo, Hash, TreeVisibility } from 'hashtree';
 import { routeStore, parseRouteFromHash } from './route';
 import { getRefResolver, getResolverKey } from '../refResolver';
 import { nostrStore, decrypt } from '../nostr';
+import { npubToPubkey } from '../nostr/trees';
 import { logHtreeDebug } from '../lib/htreeDebug';
 import { isTauri } from '../tauri';
 import { treeRootRegistry } from '../TreeRootRegistry';
@@ -81,6 +83,7 @@ function getVisibilityInfoFromRegistry(key: string): SubscribeVisibilityInfo | u
 }
 
 const tauriRootCache = new Map<string, string>();
+const workerKeyMergeCache = new Map<string, string>();
 
 async function cacheTreeRootInTauri(key: string, hash: Hash, encryptionKey?: Hash): Promise<void> {
   if (!isTauri()) return;
@@ -114,13 +117,104 @@ async function cacheTreeRootInTauri(key: string, hash: Hash, encryptionKey?: Has
   }
 }
 
+async function mergeTreeRootKeyToWorker(
+  npub: string,
+  treeName: string,
+  hash: Hash,
+  key: Hash
+): Promise<boolean> {
+  try {
+    const { getWorkerAdapter, waitForWorkerAdapter } = await import('../lib/workerInit');
+    const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(2000);
+    if (!adapter || !('mergeTreeRootKey' in adapter)) return false;
+    return await adapter.mergeTreeRootKey(npub, treeName, hash, key);
+  } catch (err) {
+    console.warn('[treeRoot] Failed to merge tree root key in worker:', err);
+    return false;
+  }
+}
+
+async function ensureWorkerTreeRootSubscription(npub: string): Promise<boolean> {
+  if (isTauri()) return false;
+
+  try {
+    const { getWorkerAdapter, waitForWorkerAdapter } = await import('../lib/workerInit');
+    const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(2000);
+    if (!adapter || !('subscribeTreeRoots' in adapter)) return false;
+
+    const pubkey = npubToPubkey(npub) ?? npub;
+    await adapter.subscribeTreeRoots(pubkey);
+    return true;
+  } catch (err) {
+    console.warn('[treeRoot] Failed to subscribe worker to tree roots:', err);
+    return false;
+  }
+}
+
+async function unsubscribeWorkerTreeRootSubscription(npub: string): Promise<void> {
+  if (isTauri()) return;
+
+  try {
+    const { getWorkerAdapter } = await import('../lib/workerInit');
+    const adapter = getWorkerAdapter();
+    if (!adapter || !('unsubscribeTreeRoots' in adapter)) return;
+
+    const pubkey = npubToPubkey(npub) ?? npub;
+    await adapter.unsubscribeTreeRoots(pubkey);
+  } catch (err) {
+    console.warn('[treeRoot] Failed to unsubscribe worker from tree roots:', err);
+  }
+}
+
+async function hydrateTreeRootFromWorker(npub: string, treeName: string): Promise<boolean> {
+  if (isTauri()) return false;
+
+  try {
+    const { getWorkerAdapter, waitForWorkerAdapter } = await import('../lib/workerInit');
+    const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(2000);
+    if (!adapter || !('getTreeRootInfo' in adapter)) return false;
+
+    const record = await adapter.getTreeRootInfo(npub, treeName);
+    if (!record) return false;
+
+    treeRootRegistry.setFromWorker(npub, treeName, record.hash, record.updatedAt, {
+      key: record.key,
+      visibility: record.visibility,
+      encryptedKey: record.encryptedKey,
+      keyId: record.keyId,
+      selfEncryptedKey: record.selfEncryptedKey,
+      selfEncryptedLinkKey: record.selfEncryptedLinkKey,
+    });
+    return true;
+  } catch (err) {
+    console.warn('[treeRoot] Failed to hydrate tree root from worker:', err);
+    return false;
+  }
+}
+
 /**
- * Update the subscription cache directly (called from treeRootCache on local writes)
- * @deprecated This is now handled by TreeRootRegistry - kept for backward compatibility
+ * Update the subscription cache directly (called from feed subscriptions).
+ * Keeps backward compatibility while updating the registry for UI consumers.
  */
-export function updateSubscriptionCache(key: string, hash: Hash, encryptionKey?: Hash): void {
-  // Note: The registry is already updated by treeRootCache.ts via setLocal()
-  // This function now just notifies listeners and updates Tauri cache
+export function updateSubscriptionCache(
+  key: string,
+  hash: Hash,
+  encryptionKey?: Hash,
+  options?: { updatedAt?: number; visibility?: TreeVisibility }
+): void {
+  const slashIndex = key.indexOf('/');
+  if (slashIndex > 0 && slashIndex < key.length - 1) {
+    const npub = key.slice(0, slashIndex);
+    const treeName = key.slice(slashIndex + 1);
+    const visibility = options?.visibility ?? treeRootRegistry.getVisibility(npub, treeName) ?? 'public';
+    const updatedAt = options?.updatedAt ?? Math.floor(Date.now() / 1000);
+    treeRootRegistry.setFromExternal(npub, treeName, hash, 'prefetch', {
+      key: encryptionKey,
+      visibility,
+      updatedAt,
+    });
+
+  }
 
   let state = subscriptionState.get(key);
   if (!state) {
@@ -188,6 +282,22 @@ async function startResolverSubscription(
     state.unsubscribe = null;
   }
 
+  const slashIndex = key.indexOf('/');
+  if (slashIndex <= 0 || slashIndex >= key.length - 1) return;
+  const npub = key.slice(0, slashIndex);
+  const treeName = key.slice(slashIndex + 1);
+
+  if (!isTauri()) {
+    const subscribed = await ensureWorkerTreeRootSubscription(npub);
+    const hydrated = await hydrateTreeRootFromWorker(npub, treeName);
+    if (subscribed || hydrated) {
+      state.unsubscribe = () => {
+        void unsubscribeWorkerTreeRootSubscription(npub);
+      };
+      return;
+    }
+  }
+
   const resolver = getRefResolver();
   state.unsubscribe = resolver.subscribe(key, (resolvedCid, visibilityInfo) => {
     console.log('[treeRoot] Resolver callback for', key, {
@@ -198,10 +308,6 @@ async function startResolverSubscription(
     if (entry) {
       // Update registry with resolver data (only if newer)
       if (resolvedCid?.hash) {
-        const slashIndex = key.indexOf('/');
-        const npub = key.slice(0, slashIndex);
-        const treeName = key.slice(slashIndex + 1);
-        // Use current time as updatedAt - the resolver doesn't provide created_at in subscribe callback
         const updatedAt = Math.floor(Date.now() / 1000);
 
         treeRootRegistry.setFromResolver(npub, treeName, resolvedCid.hash, updatedAt, {
@@ -778,6 +884,22 @@ export function createTreeRootStore(): Readable<CID | null> {
         return;
       }
 
+      const slashIndex = resolverKey.indexOf('/');
+      if (slashIndex > 0 && slashIndex < resolverKey.length - 1) {
+        const npub = resolverKey.slice(0, slashIndex);
+        const treeName = resolverKey.slice(slashIndex + 1);
+        if (decryptedKey) {
+          treeRootRegistry.mergeKey(npub, treeName, hash, decryptedKey);
+          const signature = `${toHex(hash)}:${toHex(decryptedKey)}`;
+          if (workerKeyMergeCache.get(resolverKey) !== signature) {
+            const merged = await mergeTreeRootKeyToWorker(npub, treeName, hash, decryptedKey);
+            if (merged) {
+              workerKeyMergeCache.set(resolverKey, signature);
+            }
+          }
+        }
+      }
+
       treeRootStore.set(cid(hash, decryptedKey));
       logHtreeDebug('treeRoot:set', {
         resolverKey,
@@ -815,7 +937,14 @@ export function getTreeRootSync(npub: string | null | undefined, treeName: strin
   // Check registry first
   const record = treeRootRegistry.getByKey(key);
   if (record?.hash) {
-    return cid(record.hash, record.key);
+    if (record.key) {
+      return cid(record.hash, record.key);
+    }
+    const state = subscriptionState.get(key);
+    if (state?.decryptedKey) {
+      return cid(record.hash, state.decryptedKey);
+    }
+    return cid(record.hash);
   }
 
   // Fallback to subscription state for decrypted key

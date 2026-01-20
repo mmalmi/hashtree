@@ -9,8 +9,10 @@ import type { HashTree } from '../../../../ts/packages/hashtree/src/hashtree';
 import type { CID } from '../types';
 import type { MediaRequestByCid, MediaRequestByPath, MediaResponse } from './protocol';
 import { getCachedRoot } from './treeRootCache';
+import { subscribeToTreeRoots } from './treeRootSubscription';
 import { getErrorMessage } from '../utils/errorMessage';
 import { nhashDecode } from '../../../../ts/packages/hashtree/src/nhash';
+import { nip19 } from 'nostr-tools';
 
 // Thumbnail filename patterns to look for (in priority order)
 const THUMBNAIL_PATTERNS = ['thumbnail.jpg', 'thumbnail.webp', 'thumbnail.png', 'thumbnail.jpeg'];
@@ -46,6 +48,8 @@ interface SwFileResponse {
 
 // Timeout for considering a stream "done" (no updates)
 const LIVE_STREAM_TIMEOUT = 10000; // 10 seconds
+const ROOT_WAIT_TIMEOUT_MS = 15000;
+const ROOT_WAIT_INTERVAL_MS = 200;
 
 // Chunk size for streaming to media port
 const MEDIA_CHUNK_SIZE = 256 * 1024; // 256KB chunks - matches videoChunker's firstChunkSize
@@ -163,11 +167,8 @@ async function handleMediaRequestByPath(req: MediaRequestByPath): Promise<void> 
     const filePath = pathParts.slice(1).join('/');
 
     // Resolve npub to current CID
-    let cid = await getCachedRoot(npub, treeName);
-
+    let cid = await waitForCachedRoot(npub, treeName);
     if (!cid) {
-      // Not in cache - try to resolve via Nostr subscription
-      // For now, just return error. Full implementation would subscribe and wait.
       mediaPort.postMessage({
         type: 'error',
         requestId,
@@ -371,8 +372,7 @@ async function handleSwFileRequest(req: SwFileRequest): Promise<void> {
       }
     } else if (npub && treeName) {
       // Npub-based request - resolve through cached root
-      const rootCid = await getCachedRoot(npub, treeName);
-
+      const rootCid = await waitForCachedRoot(npub, treeName);
       if (!rootCid) {
         sendSwError(requestId, 404, 'Tree not found');
         return;
@@ -426,6 +426,36 @@ async function handleSwFileRequest(req: SwFileRequest): Promise<void> {
     });
   } catch (err) {
     sendSwError(requestId, 500, getErrorMessage(err));
+  }
+}
+
+async function waitForCachedRoot(npub: string, treeName: string): Promise<CID | null> {
+  let cached = await getCachedRoot(npub, treeName);
+  if (cached) return cached;
+
+  const pubkey = decodeNpubToPubkey(npub);
+  if (pubkey) {
+    subscribeToTreeRoots(pubkey);
+  }
+
+  const deadline = Date.now() + ROOT_WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, ROOT_WAIT_INTERVAL_MS));
+    cached = await getCachedRoot(npub, treeName);
+    if (cached) return cached;
+  }
+
+  return null;
+}
+
+function decodeNpubToPubkey(npub: string): string | null {
+  if (!npub.startsWith('npub1')) return null;
+  try {
+    const decoded = nip19.decode(npub);
+    if (decoded.type !== 'npub') return null;
+    return decoded.data as string;
+  } catch {
+    return null;
   }
 }
 
