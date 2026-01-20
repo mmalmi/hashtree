@@ -346,12 +346,10 @@ async function findInPack(
 function applyDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
   let pos = 0;
 
-  // Read base size (variable length)
-  let baseSize = 0;
+  // Skip base size (variable length encoded, not needed for our purposes)
   let shift = 0;
   while (pos < delta.length) {
     const byte = delta[pos++];
-    baseSize |= (byte & 0x7f) << shift;
     shift += 7;
     if (!(byte & 0x80)) break;
   }
@@ -624,6 +622,7 @@ async function preloadCommitsFromPacks(
 
     for (const idxFile of idxFiles) {
       const packName = idxFile.name.replace('.idx', '.pack');
+
       const idx = await loadPackIndex(tree, gitDirCid, idxFile.name);
       if (!idx) continue;
 
@@ -645,8 +644,8 @@ async function preloadCommitsFromPacks(
         }
       }
     }
-  } catch {
-    // Ignore errors
+  } catch (err) {
+    console.error('[git] preloadCommitsFromPacks error:', err);
   }
 
   commitCache.set(cacheKey, objects);
@@ -1261,15 +1260,136 @@ function parseGitTree(content: Uint8Array): Array<{ mode: string; name: string; 
 /**
  * Get tree entries for a git tree object
  */
+// Global cache for tree entries by sha (trees are immutable)
+const treeEntriesCache = new Map<string, Map<string, { hash: string; mode: string }>>();
+
+// Cache for individual path lookups in a tree
+const treePathCache = new Map<string, Map<string, { hash: string; mode: string } | 'dir' | null>>();
+
+/**
+ * Get a specific entry from a git tree by path (much faster than walking entire tree)
+ */
+async function getTreeEntryAtPath(
+  tree: ReturnType<typeof getTree>,
+  gitDirCid: CID,
+  treeSha: string,
+  path: string,
+  preloadedObjects?: Map<string, { type: string; content: Uint8Array }>
+): Promise<{ hash: string; mode: string } | 'dir' | null> {
+  const pathCache = treePathCache.get(treeSha) || new Map();
+
+  if (pathCache.has(path)) {
+    return pathCache.get(path)!;
+  }
+
+  const getObject = async (sha: string) => {
+    if (preloadedObjects) {
+      const obj = preloadedObjects.get(sha);
+      if (obj) return obj;
+    }
+    return readGitObject(tree, gitDirCid, sha);
+  };
+
+  const parts = path.split('/');
+  let currentSha = treeSha;
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const obj = await getObject(currentSha);
+    if (!obj || obj.type !== 'tree') {
+      pathCache.set(path, null);
+      treePathCache.set(treeSha, pathCache);
+      return null;
+    }
+
+    const entries = parseGitTree(obj.content);
+    const entry = entries.find(e => e.name === part);
+    if (!entry) {
+      pathCache.set(path, null);
+      treePathCache.set(treeSha, pathCache);
+      return null;
+    }
+
+    if (i === parts.length - 1) {
+      // Found the target
+      const result = entry.mode === '40000' ? 'dir' : { hash: entry.hash, mode: entry.mode };
+      pathCache.set(path, result);
+      treePathCache.set(treeSha, pathCache);
+      return result;
+    }
+
+    // Must be a directory to continue
+    if (entry.mode !== '40000') {
+      pathCache.set(path, null);
+      treePathCache.set(treeSha, pathCache);
+      return null;
+    }
+    currentSha = entry.hash;
+  }
+
+  pathCache.set(path, null);
+  treePathCache.set(treeSha, pathCache);
+  return null;
+}
+
+/**
+ * Get the tree SHA for a subtree at a given path
+ */
+async function getSubtreeSha(
+  tree: ReturnType<typeof getTree>,
+  gitDirCid: CID,
+  treeSha: string,
+  path: string,
+  preloadedObjects?: Map<string, { type: string; content: Uint8Array }>
+): Promise<string | null> {
+  if (!path) return treeSha;
+
+  const getObject = async (sha: string) => {
+    if (preloadedObjects) {
+      const obj = preloadedObjects.get(sha);
+      if (obj) return obj;
+    }
+    return readGitObject(tree, gitDirCid, sha);
+  };
+
+  const parts = path.split('/');
+  let currentSha = treeSha;
+
+  for (const part of parts) {
+    const obj = await getObject(currentSha);
+    if (!obj || obj.type !== 'tree') return null;
+
+    const entries = parseGitTree(obj.content);
+    const entry = entries.find(e => e.name === part);
+    if (!entry || entry.mode !== '40000') return null;
+    currentSha = entry.hash;
+  }
+
+  return currentSha;
+}
+
 async function getGitTreeEntries(
   tree: ReturnType<typeof getTree>,
   gitDirCid: CID,
-  treeSha: string
+  treeSha: string,
+  preloadedObjects?: Map<string, { type: string; content: Uint8Array }>
 ): Promise<Map<string, { hash: string; mode: string }>> {
+  // Check cache first
+  const cached = treeEntriesCache.get(treeSha);
+  if (cached) return cached;
+
   const result = new Map<string, { hash: string; mode: string }>();
 
+  const getObject = async (sha: string) => {
+    if (preloadedObjects) {
+      const obj = preloadedObjects.get(sha);
+      if (obj) return obj;
+    }
+    return readGitObject(tree, gitDirCid, sha);
+  };
+
   const walkGitTree = async (sha: string, prefix: string): Promise<void> => {
-    const obj = await readGitObject(tree, gitDirCid, sha);
+    const obj = await getObject(sha);
     if (!obj || obj.type !== 'tree') return;
 
     const entries = parseGitTree(obj.content);
@@ -1286,23 +1406,29 @@ async function getGitTreeEntries(
   };
 
   await walkGitTree(treeSha, '');
+
+  // Cache the result
+  treeEntriesCache.set(treeSha, result);
   return result;
 }
 
 /**
  * Get last commit info for each file/directory by tracing through commit history
  * Native implementation - no wasm-git needed
- * For directories, returns the commit where any file inside was last changed
+ * Uses path-based lookups to avoid walking entire trees (O(depth) vs O(files) per path)
  */
 export async function getFileLastCommits(
   rootCid: CID,
   filenames: string[],
   subpath?: string
 ): Promise<Map<string, { oid: string; message: string; timestamp: number }>> {
+  const startTime = performance.now();
   const htree = getTree();
   const result = new Map<string, { oid: string; message: string; timestamp: number }>();
 
-  if (filenames.length === 0) return result;
+  if (filenames.length === 0) {
+    return result;
+  }
 
   // Check for .git directory
   const gitDirResult = await htree.resolvePath(rootCid, '.git');
@@ -1311,6 +1437,9 @@ export async function getFileLastCommits(
   }
 
   try {
+    // Preload all objects from pack files (single network fetch)
+    const preloadedObjects = await preloadCommitsFromPacks(htree, gitDirResult.cid);
+
     // Build full paths to search for (files and directories)
     const targetNames = filenames.filter(f => f !== '.git');
     const targetPaths = new Map<string, string>(); // fullPath -> filename
@@ -1323,113 +1452,147 @@ export async function getFileLastCommits(
     const headSha = await getHead(rootCid);
     if (!headSha) return result;
 
+    // Helper to get object from cache or fetch
+    const getObject = async (sha: string) => {
+      const cached = preloadedObjects.get(sha);
+      if (cached) return cached;
+      return readGitObject(htree, gitDirResult.cid, sha);
+    };
+
     // Walk through commits, comparing each with its parent to find when files changed
     const visited = new Set<string>();
     const queue = [headSha];
     const foundEntries = new Set<string>();
-    const treeCache = new Map<string, Map<string, { hash: string; mode: string }>>();
+
+    // Cache for path lookups: commitTreeSha:path -> hash or 'dir' or null
+    const pathLookupCache = new Map<string, { hash: string; mode: string } | 'dir' | null>();
+
+    // Helper to get path entry with caching
+    const getPathEntry = async (treeSha: string, path: string) => {
+      const cacheKey = `${treeSha}:${path}`;
+      if (pathLookupCache.has(cacheKey)) {
+        return pathLookupCache.get(cacheKey)!;
+      }
+      const entry = await getTreeEntryAtPath(htree, gitDirResult.cid, treeSha, path, preloadedObjects);
+      pathLookupCache.set(cacheKey, entry);
+      return entry;
+    };
+
+    // Helper to get subtree SHA with caching
+    const subtreeShaCache = new Map<string, string | null>();
+    const getSubtree = async (treeSha: string, path: string) => {
+      const cacheKey = `${treeSha}:${path}`;
+      if (subtreeShaCache.has(cacheKey)) {
+        return subtreeShaCache.get(cacheKey)!;
+      }
+      const sha = await getSubtreeSha(htree, gitDirResult.cid, treeSha, path, preloadedObjects);
+      subtreeShaCache.set(cacheKey, sha);
+      return sha;
+    };
+
+    // For loose object repos, batch load commits in parallel
+    const BATCH_SIZE = 20;
 
     while (queue.length > 0 && foundEntries.size < targetPaths.size) {
-      const sha = queue.shift()!;
-      if (visited.has(sha)) continue;
-      visited.add(sha);
-
-      const obj = await readGitObject(htree, gitDirResult.cid, sha);
-      if (!obj || obj.type !== 'commit') continue;
-
-      const commit = parseCommit(obj.content);
-      if (!commit) continue;
-
-      // Get tree for this commit
-      let currentTree = treeCache.get(sha);
-      if (!currentTree) {
-        currentTree = await getGitTreeEntries(htree, gitDirResult.cid, commit.tree);
-        treeCache.set(sha, currentTree);
+      // Take a batch of commits to process
+      const batch: string[] = [];
+      while (batch.length < BATCH_SIZE && queue.length > 0 && foundEntries.size < targetPaths.size) {
+        const sha = queue.shift()!;
+        if (!visited.has(sha)) {
+          visited.add(sha);
+          batch.push(sha);
+        }
       }
+      if (batch.length === 0) break;
 
-      // Get parent tree (or empty if initial commit)
-      let parentTree: Map<string, { hash: string; mode: string }>;
-      if (commit.parents.length > 0) {
-        const parentSha = commit.parents[0];
-        let cached = treeCache.get(parentSha);
-        if (!cached) {
-          const parentObj = await readGitObject(htree, gitDirResult.cid, parentSha);
-          if (parentObj && parentObj.type === 'commit') {
-            const parentCommit = parseCommit(parentObj.content);
-            if (parentCommit) {
-              cached = await getGitTreeEntries(htree, gitDirResult.cid, parentCommit.tree);
-              treeCache.set(parentSha, cached);
-            }
+      // Load all commits in parallel
+      const commitObjs = await Promise.all(batch.map(sha => getObject(sha)));
+      const commits = batch.map((sha, i) => {
+        const obj = commitObjs[i];
+        if (!obj || obj.type !== 'commit') return null;
+        const parsed = parseCommit(obj.content);
+        if (!parsed) return null;
+        return { sha, commit: parsed };
+      }).filter((c): c is { sha: string; commit: ReturnType<typeof parseCommit> & {} } => c !== null);
+
+      // Load parent commits to get their tree SHAs
+      const parentShas = commits.flatMap(c => c.commit.parents).filter(p => !visited.has(p));
+      const parentObjs = await Promise.all(parentShas.map(sha => getObject(sha)));
+      const parentCommitMap = new Map<string, ReturnType<typeof parseCommit>>();
+      parentShas.forEach((sha, i) => {
+        const obj = parentObjs[i];
+        if (obj && obj.type === 'commit') {
+          const parsed = parseCommit(obj.content);
+          if (parsed) {
+            parentCommitMap.set(sha, parsed);
           }
         }
-        parentTree = cached || new Map();
-      } else {
-        // Initial commit - parent is empty tree
-        parentTree = new Map();
-      }
+      });
 
-      // Compare this commit with its parent to find changes
-      for (const [targetPath, filename] of targetPaths) {
-        if (foundEntries.has(targetPath)) continue;
+      // Now process each commit
+      for (const { sha, commit } of commits) {
+        if (foundEntries.size >= targetPaths.size) break;
 
-        // Check if this is a file (exact match)
-        const currentFile = currentTree.get(targetPath);
-        const parentFile = parentTree.get(targetPath);
-
-        if (currentFile && (!parentFile || currentFile.hash !== parentFile.hash)) {
-          // File was added or modified in this commit
-          result.set(filename, {
-            oid: sha,
-            message: commit.message,
-            timestamp: commit.timestamp,
-          });
-          foundEntries.add(targetPath);
-          continue;
-        }
-
-        // Check if this is a directory (any file under it changed)
-        const dirPrefix = targetPath + '/';
-        let dirChanged = false;
-
-        // Check for added/modified files
-        for (const [filePath, fileInfo] of currentTree) {
-          if (filePath.startsWith(dirPrefix)) {
-            const parentFileInfo = parentTree.get(filePath);
-            if (!parentFileInfo || parentFileInfo.hash !== fileInfo.hash) {
-              dirChanged = true;
-              break;
-            }
+        let parentTreeSha: string | null = null;
+        if (commit.parents.length > 0) {
+          const parentCommit = parentCommitMap.get(commit.parents[0]);
+          if (parentCommit) {
+            parentTreeSha = parentCommit.tree;
           }
         }
 
-        // Check for deleted files under directory
-        if (!dirChanged) {
-          for (const filePath of parentTree.keys()) {
-            if (filePath.startsWith(dirPrefix) && !currentTree.has(filePath)) {
-              dirChanged = true;
-              break;
+        // Compare each target path using path-based lookups (not full tree walks)
+        for (const [targetPath, filename] of targetPaths) {
+          if (foundEntries.has(targetPath)) continue;
+
+          // Get entry at this path in current commit
+          const currentEntry = await getPathEntry(commit.tree, targetPath);
+
+          if (currentEntry === null) {
+            // Path doesn't exist in current commit, skip
+            continue;
+          }
+
+          if (currentEntry === 'dir') {
+            // It's a directory - compare subtree SHAs instead of walking all files
+            const currentSubtreeSha = await getSubtree(commit.tree, targetPath);
+            const parentSubtreeSha = parentTreeSha ? await getSubtree(parentTreeSha, targetPath) : null;
+
+            if (currentSubtreeSha && currentSubtreeSha !== parentSubtreeSha) {
+              // Directory was added or modified
+              result.set(filename, {
+                oid: sha,
+                message: commit.message,
+                timestamp: commit.timestamp,
+              });
+              foundEntries.add(targetPath);
+            }
+          } else {
+            // It's a file - compare file hashes
+            const parentEntry = parentTreeSha ? await getPathEntry(parentTreeSha, targetPath) : null;
+
+            if (!parentEntry || parentEntry === 'dir' || currentEntry.hash !== parentEntry.hash) {
+              // File was added or modified (or was a dir before, now a file)
+              result.set(filename, {
+                oid: sha,
+                message: commit.message,
+                timestamp: commit.timestamp,
+              });
+              foundEntries.add(targetPath);
             }
           }
         }
 
-        if (dirChanged) {
-          result.set(filename, {
-            oid: sha,
-            message: commit.message,
-            timestamp: commit.timestamp,
-          });
-          foundEntries.add(targetPath);
+        // Add parents to queue
+        for (const parent of commit.parents) {
+          if (!visited.has(parent)) {
+            queue.push(parent);
+          }
         }
-      }
+      } // end for commit in commits
+    } // end while queue
 
-      // Add parents to queue
-      for (const parent of commit.parents) {
-        if (!visited.has(parent)) {
-          queue.push(parent);
-        }
-      }
-    }
-
+    console.log(`[git perf] getFileLastCommits completed in ${(performance.now() - startTime).toFixed(0)} ms`);
     return result;
   } catch (err) {
     console.error('[git] getFileLastCommits failed:', err);

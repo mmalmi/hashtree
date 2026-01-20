@@ -52,10 +52,9 @@ When build, lint, and relevant tests pass, commit the changes without asking.
 
 ## Testing
 - E2E tests are in `../apps/iris-files/e2e/`
-- Playwright runs its own dev server
+- **Do NOT run `pnpm run dev`** - Playwright starts its own dev server automatically
 - Run tests selectively: `cd ../apps/iris-files && pnpm run test:e2e -- e2e/specific-file.spec.ts`
 - Always verify changes with e2e tests
-- Kill dev servers before tests to avoid port conflicts
 - TDD: write failing test first, then fix
 
 ### Relays
