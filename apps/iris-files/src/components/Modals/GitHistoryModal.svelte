@@ -62,6 +62,15 @@
     error: null,
   });
   let loadingMore = $state(false);
+  // Deduplicate commits by OID (can happen with merge commits in history)
+  let uniqueCommits = $derived(() => {
+    const seen = new Set<string>();
+    return logState.commits.filter(c => {
+      if (seen.has(c.oid)) return false;
+      seen.add(c.oid);
+      return true;
+    });
+  });
   let hasMoreCommits = $derived(logState.commits.length >= currentDepth && !logState.loading);
 
   // Branch info for detached HEAD detection
@@ -364,14 +373,15 @@
           {/if}
           <InfiniteScroll onLoadMore={loadMoreCommits} loading={loadingMore || !hasMoreCommits}>
               <div class="flex flex-col">
-                {#each logState.commits as commit, i (commit.oid)}
+                {#each uniqueCommits() as commit, i (commit.oid)}
                   {@const isHead = commit.oid === logState.headOid}
                   {@const ciStatus = ciStatusByCommit.get(commit.oid) ?? null}
-                  <div class="flex gap-3 pb-4 {i < logState.commits.length - 1 || hasMoreCommits ? 'b-b-1 b-b-solid b-b-surface-3 mb-4' : ''} {isHead ? 'bg-accent/5 -mx-4 px-4 py-3 rounded-lg' : ''}">
+                  {@const commitsArray = uniqueCommits()}
+                  <div class="flex gap-3 pb-4 {i < commitsArray.length - 1 || hasMoreCommits ? 'b-b-1 b-b-solid b-b-surface-3 mb-4' : ''} {isHead ? 'bg-accent/5 -mx-4 px-4 py-3 rounded-lg' : ''}">
                     <!-- Timeline dot -->
                     <div class="flex flex-col items-center shrink-0">
                       <div class="w-3 h-3 rounded-full {isHead ? 'bg-success ring-2 ring-success/30' : 'bg-accent'}"></div>
-                      {#if i < logState.commits.length - 1 || hasMoreCommits}
+                      {#if i < commitsArray.length - 1 || hasMoreCommits}
                         <div class="w-0.5 flex-1 bg-surface-3 mt-1"></div>
                       {/if}
                     </div>
@@ -472,7 +482,7 @@
       <!-- Footer -->
       <div class="flex justify-between items-center p-4 b-t-1 b-t-solid b-t-surface-3">
         <span class="text-sm text-text-3">
-          {logState.commits.length} commit{logState.commits.length !== 1 ? 's' : ''}
+          {uniqueCommits().length} commit{uniqueCommits().length !== 1 ? 's' : ''}
         </span>
         <button onclick={close} class="btn-ghost">Close</button>
       </div>
