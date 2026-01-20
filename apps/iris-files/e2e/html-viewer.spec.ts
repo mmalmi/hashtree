@@ -8,7 +8,7 @@
  * 4. Resources from subdirectories are accessible
  */
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, useLocalRelay } from './test-utils.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -17,11 +17,11 @@ async function ensureFolderView(page: any) {
   const fileList = page.locator('[data-testid="file-list"]');
   const backToFolder = page.getByRole('link', { name: 'Back to folder' });
   if (await backToFolder.isVisible().catch(() => false)) {
-    await backToFolder.click();
+    await backToFolder.click({ force: true });
   } else {
     try {
       await backToFolder.waitFor({ state: 'visible', timeout: 2000 });
-      await backToFolder.click();
+      await backToFolder.click({ force: true });
     } catch {
       // No-op: we stayed in folder view.
     }
@@ -269,6 +269,7 @@ h1 { color: rgb(0, 255, 255); }
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(cssPath);
 
+      await ensureFolderView(page);
       await expect(page.locator('[data-testid="file-list"] a:has-text("style.css")')).toBeVisible({ timeout: 10000 });
 
       // Go back to parent directory (click on ".." link)
@@ -283,6 +284,7 @@ h1 { color: rgb(0, 255, 255); }
 
       // Wait for file list to show index.html
       const fileList = page.locator('[data-testid="file-list"]');
+      await ensureFolderView(page);
       await expect(fileList.locator('a:has-text("index.html")')).toBeVisible({ timeout: 10000 });
 
       // Click on HTML file in file list
@@ -296,6 +298,94 @@ h1 { color: rgb(0, 255, 255); }
       // Cleanup temp files
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  test('should load root-relative assets from uploaded app build', async ({ page }) => {
+    setupPageErrorHandler(page);
+    await page.goto('/');
+    await disableOthersPool(page);
+    await useLocalRelay(page);
+    await navigateToPublicFolder(page, { timeoutMs: 60000, requireRelay: false });
+
+    const appDir = `absolute-app-${Date.now()}`;
+    const cssContent = `
+body { background-color: rgb(12, 34, 56); }
+#status { color: rgb(200, 10, 10); }
+`;
+    const jsContent = `
+window.addEventListener('load', () => {
+  const el = document.getElementById('status');
+  if (el) {
+    el.textContent = 'App loaded';
+    document.body.setAttribute('data-loaded', 'true');
+  }
+});
+`;
+    const logoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
+    const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Absolute Assets App</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <h1>Absolute Assets App</h1>
+  <div id="status">Loading...</div>
+  <img id="logo" src="/assets/logo.png" alt="logo">
+  <script src="/assets/app.js"></script>
+</body>
+</html>`;
+
+    const files = [
+      { relativePath: `${appDir}/index.html`, content: htmlContent, type: 'text/html' },
+      { relativePath: `${appDir}/assets/app.css`, content: cssContent, type: 'text/css' },
+      { relativePath: `${appDir}/assets/app.js`, content: jsContent, type: 'application/javascript' },
+      { relativePath: `${appDir}/assets/logo.png`, content: logoBase64, type: 'image/png', encoding: 'base64' },
+    ];
+
+    await page.evaluate(async (payload) => {
+      const { uploadFilesWithPaths } = await import('/src/stores/upload.ts');
+      const filesWithPaths = payload.map((entry) => {
+        const name = entry.relativePath.split('/').pop() || 'file';
+        const data = entry.encoding === 'base64'
+          ? Uint8Array.from(atob(entry.content), (c) => c.charCodeAt(0))
+          : entry.content;
+        const file = new File([data], name, { type: entry.type });
+        return { file, relativePath: entry.relativePath };
+      });
+      await uploadFilesWithPaths(filesWithPaths);
+    }, files);
+
+    const folderLink = page.locator('[data-testid="file-list"] a').filter({ hasText: appDir }).first();
+    await expect(folderLink).toBeVisible({ timeout: 15000 });
+
+    const url = page.url();
+    const npubMatch = url.match(/npub1[a-z0-9]+/);
+    expect(npubMatch).toBeTruthy();
+    const targetPath = `${npubMatch![0]}/public/${appDir}/index.html`;
+
+    const searchInput = page.locator('input[type="search"], input[placeholder*="Search"]').first();
+    await expect(searchInput).toBeVisible({ timeout: 5000 });
+    await searchInput.fill(targetPath);
+    await searchInput.press('Enter');
+
+    await page.waitForURL(new RegExp(`${appDir}.*index\\.html`), { timeout: 15000 });
+
+    const iframe = page.frameLocator('iframe');
+    await expect(iframe.locator('#status')).toHaveText('App loaded', { timeout: 15000 });
+
+    const background = await iframe.locator('body').evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(background).toBe('rgb(12, 34, 56)');
+
+    const logoInfo = await iframe.locator('#logo').evaluate((img: HTMLImageElement) => ({
+      src: img.getAttribute('src'),
+      resolvedSrc: img.src,
+      currentSrc: img.currentSrc,
+      complete: img.complete,
+      naturalWidth: img.naturalWidth,
+    }));
+    expect(logoInfo.naturalWidth).toBeGreaterThan(0);
   });
 
   // Note: fetch() API doesn't work in sandboxed iframe without allow-same-origin
