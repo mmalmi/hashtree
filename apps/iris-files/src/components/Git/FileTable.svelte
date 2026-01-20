@@ -114,9 +114,7 @@
           </a>
         </td>
         <td class="py-3 px-4 text-right whitespace-nowrap flex items-center justify-end gap-2">
-          {#if ciStatus?.loading}
-            <span class="i-lucide-loader-2 animate-spin text-text-3 text-sm" title="Loading CI status..."></span>
-          {:else if ciStatus?.status}
+          {#if ciStatus?.status}
             <button
               class="btn-circle btn-ghost"
               onclick={handleCIClick}
