@@ -5,6 +5,17 @@
 
 import { logHtreeDebug } from './lib/htreeDebug';
 
+export function hasTauriInvoke(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as {
+    __TAURI_INTERNALS__?: { invoke?: unknown };
+    __TAURI__?: { invoke?: unknown; core?: { invoke?: unknown } };
+  };
+  return typeof w.__TAURI_INTERNALS__?.invoke === 'function'
+    || typeof w.__TAURI__?.core?.invoke === 'function'
+    || typeof w.__TAURI__?.invoke === 'function';
+}
+
 // Check if running in Tauri (desktop app)
 let tauriCheckLogged = false;
 export const isTauri = (): boolean => {
@@ -14,18 +25,8 @@ export const isTauri = (): boolean => {
     '__TAURI__' in window ||
     '__TAURI_IPC__' in window ||
     '__TAURI_METADATA__' in window;
-  if (hasTauriGlobals) {
-    if (!tauriCheckLogged) {
-      tauriCheckLogged = true;
-      logHtreeDebug('tauri:detect', {
-        hasTauriGlobals,
-        protocol: window.location?.protocol || '',
-        userAgent: navigator.userAgent || '',
-        result: true,
-      });
-    }
-    return true;
-  }
+  const hasInvoke = hasTauriInvoke();
+
   // Tauri webviews always use the tauri:// protocol even if globals are hidden.
   const protocol = window.location?.protocol || '';
   const normalizedProtocol = protocol.endsWith(':') ? protocol.slice(0, -1) : protocol;
@@ -34,15 +35,18 @@ export const isTauri = (): boolean => {
   const isTauriHost = hostname === 'tauri.localhost' || hostname.endsWith('.tauri.localhost');
   const userAgent = navigator.userAgent || '';
   const result =
+    (hasTauriGlobals && hasInvoke) ||
     normalizedProtocol === 'tauri' ||
     normalizedProtocol === 'asset' ||
     href.startsWith('tauri://') ||
     isTauriHost ||
     userAgent.includes('Tauri');
+
   if (!tauriCheckLogged) {
     tauriCheckLogged = true;
     logHtreeDebug('tauri:detect', {
       hasTauriGlobals,
+      hasInvoke,
       protocol,
       href,
       hostname,
@@ -52,17 +56,6 @@ export const isTauri = (): boolean => {
     });
   }
   return result;
-};
-
-export const hasTauriInvoke = (): boolean => {
-  if (typeof window === 'undefined') return false;
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke?: unknown };
-    __TAURI__?: { invoke?: unknown; core?: { invoke?: unknown } };
-  };
-  return typeof w.__TAURI_INTERNALS__?.invoke === 'function'
-    || typeof w.__TAURI__?.core?.invoke === 'function'
-    || typeof w.__TAURI__?.invoke === 'function';
 };
 
 // Check if running on macOS (sync check using navigator)

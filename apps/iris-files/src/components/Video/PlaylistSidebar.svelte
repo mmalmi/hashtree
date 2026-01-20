@@ -107,7 +107,7 @@
 {#if playlist && playlist.items.length > 0}
   {#if mobile}
     <!-- Mobile: Horizontal scroll below video -->
-    <div class="rounded-lg overflow-hidden">
+    <div class="rounded-lg overflow-hidden" data-testid="playlist-sidebar">
       <!-- Header -->
       <div class="p-2 flex items-center gap-2">
         <span class="i-lucide-list-video text-accent shrink-0"></span>
@@ -193,7 +193,7 @@
     </div>
   {:else}
     <!-- Desktop: Vertical sidebar -->
-    <div class="rounded-lg overflow-hidden flex flex-col h-full">
+    <div class="rounded-lg overflow-hidden flex flex-col h-full" data-testid="playlist-sidebar">
       <!-- Header -->
       <div class="p-3 border-b border-surface-3">
         <div class="flex items-start justify-between gap-2">
