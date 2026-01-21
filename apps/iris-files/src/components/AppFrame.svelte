@@ -20,12 +20,130 @@
   let isCreating = false;
   let unlistenResize: (() => void) | null = null;
   let unlistenLocation: (() => void) | null = null;
+  let locationListenerPromise: Promise<void> | null = null;
+  let urlPollTimer: ReturnType<typeof setInterval> | null = null;
+  let urlPollInFlight = false;
+  let coreInvokePromise: Promise<typeof import('@tauri-apps/api/core')> | null = null;
+  let hasObservedHashUrl = false;
+
+  function parseUrl(value: string): URL | null {
+    try {
+      return new URL(value);
+    } catch {
+      return null;
+    }
+  }
+
+  function shouldIgnoreLocation(newUrl: string): boolean {
+    if (newUrl.startsWith('about:blank')) return true;
+    const expected = currentWebviewUrl ?? appUrl;
+    if (!expected) return false;
+    const expectedUrl = parseUrl(expected);
+    const nextUrl = parseUrl(newUrl);
+    if (!expectedUrl || !nextUrl) return false;
+    if (
+      expectedUrl.origin === nextUrl.origin &&
+      expectedUrl.pathname === nextUrl.pathname &&
+      expectedUrl.search === nextUrl.search &&
+      expectedUrl.hash &&
+      !nextUrl.hash
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function shouldExitAppForUrl(newUrl: string): boolean {
+    if (!currentWebviewUrl) return false;
+    const current = parseUrl(currentWebviewUrl);
+    const next = parseUrl(newUrl);
+    if (!current || !next) return false;
+    if (!hasObservedHashUrl) return false;
+    if (current.protocol !== 'tauri:') return false;
+    if (!current.hash) return false;
+    if (newUrl.startsWith('about:blank')) return true;
+    return (
+      current.origin === next.origin &&
+      current.pathname === next.pathname &&
+      current.search === next.search &&
+      !next.hash
+    );
+  }
 
   /** Get logical window size (converts from physical pixels using scale factor) */
   async function getLogicalWindowSize(win: Window): Promise<{ width: number; height: number }> {
     const physical = await win.innerSize();
     const scale = await win.scaleFactor();
     return { width: physical.width / scale, height: physical.height / scale };
+  }
+
+  async function ensureLocationListener() {
+    if (!useNativeWebview) return;
+    if (unlistenLocation) return;
+    if (!locationListenerPromise) {
+      locationListenerPromise = (async () => {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlistenLocation = await listen<{ label: string; url: string; source?: string }>('child-webview-location', (event) => {
+          if (event.payload.label !== WEBVIEW_LABEL) return;
+          if (!isAppRoute) return;
+          const newUrl = event.payload.url;
+          if (!newUrl || newUrl === currentWebviewUrl || shouldIgnoreLocation(newUrl)) return;
+          currentWebviewUrl = newUrl;
+          const encodedUrl = encodeURIComponent(newUrl);
+          navigate(`/app/${encodedUrl}`);
+        });
+      })();
+    }
+    await locationListenerPromise;
+    locationListenerPromise = null;
+  }
+
+  async function getCoreInvoke() {
+    if (!coreInvokePromise) {
+      coreInvokePromise = import('@tauri-apps/api/core');
+    }
+    const { invoke } = await coreInvokePromise;
+    return invoke;
+  }
+
+  async function pollWebviewUrl() {
+    if (!useNativeWebview || !webviewLabel || !isAppRoute) return;
+    if (urlPollInFlight) return;
+    urlPollInFlight = true;
+    try {
+      const invoke = await getCoreInvoke();
+      const url = await invoke<string>('webview_current_url', { label: webviewLabel });
+      if (!url || url === currentWebviewUrl) return;
+      if (url.includes('#')) {
+        hasObservedHashUrl = true;
+      }
+      if (shouldExitAppForUrl(url)) {
+        navigate('/');
+        return;
+      }
+      if (shouldIgnoreLocation(url)) return;
+      currentWebviewUrl = url;
+      const encodedUrl = encodeURIComponent(url);
+      navigate(`/app/${encodedUrl}`);
+    } catch (e) {
+      console.warn('[AppFrame] Failed to poll webview URL:', e);
+    } finally {
+      urlPollInFlight = false;
+    }
+  }
+
+  function startUrlPolling() {
+    if (urlPollTimer) return;
+    urlPollTimer = setInterval(() => {
+      void pollWebviewUrl();
+    }, 300);
+  }
+
+  function stopUrlPolling() {
+    if (urlPollTimer) {
+      clearInterval(urlPollTimer);
+      urlPollTimer = null;
+    }
   }
 
   async function createWebview(url: string) {
@@ -38,6 +156,7 @@
 
     // Close existing webview if any
     await destroyWebview();
+    await ensureLocationListener();
 
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -53,6 +172,8 @@
       await mainWebview.setSize({ type: 'Logical', width: windowSize.width, height: TOOLBAR_HEIGHT });
 
       const label = WEBVIEW_LABEL;
+      webviewLabel = label;
+      currentWebviewUrl = url;
 
       // Create webview with NIP-07 support via Rust command
       await invoke('create_nip07_webview', {
@@ -64,9 +185,6 @@
         height: windowSize.height - TOOLBAR_HEIGHT,
       });
 
-      webviewLabel = label;
-      currentWebviewUrl = url;
-
       await new Promise(resolve => setTimeout(resolve, 100));
 
       // Show and focus the webview
@@ -75,6 +193,7 @@
         await childWebview.show();
         await childWebview.setFocus();
       }
+      startUrlPolling();
 
       // Listen for window resize
       unlistenResize = await currentWindow.onResized(async () => {
@@ -92,20 +211,10 @@
         }
       });
 
-      // Listen for navigation events from child webview
-      const { listen } = await import('@tauri-apps/api/event');
-      unlistenLocation = await listen<{ label: string; url: string; source?: string }>('child-webview-location', (event) => {
-        if (event.payload.label === webviewLabel) {
-          if (!isAppRoute) return;
-          const newUrl = event.payload.url;
-          if (!newUrl || newUrl === currentWebviewUrl) return;
-          currentWebviewUrl = newUrl;
-          const encodedUrl = encodeURIComponent(newUrl);
-          navigate(`/app/${encodedUrl}`);
-        }
-      });
     } catch (e) {
       console.error('[AppFrame] Failed to create webview:', e);
+      webviewLabel = null;
+      currentWebviewUrl = null;
     }
     isCreating = false;
     if (pendingUrl && pendingUrl !== currentWebviewUrl) {
@@ -134,6 +243,7 @@
   }
 
   async function destroyWebview() {
+    stopUrlPolling();
     if (unlistenResize) {
       unlistenResize();
       unlistenResize = null;
@@ -163,6 +273,7 @@
       } catch {}
       webviewLabel = null;
       currentWebviewUrl = null;
+      hasObservedHashUrl = false;
       pendingUrl = null;
     }
   }

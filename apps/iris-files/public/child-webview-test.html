@@ -7,28 +7,15 @@
   <body>
     <h1>Child Webview Test</h1>
     <script>
-      function dispatchNav(key) {
-        const isMac = navigator.platform && navigator.platform.toUpperCase().includes('MAC');
-        const event = new KeyboardEvent('keydown', {
-          key,
-          code: key,
-          metaKey: isMac,
-          ctrlKey: !isMac,
-          bubbles: true,
-          cancelable: true,
-        });
-        window.dispatchEvent(event);
-      }
-
       window.addEventListener('load', () => {
         setTimeout(() => {
           history.pushState({ step: 1 }, '', '/child-webview-test.html#/step=1');
         }, 100);
 
-        setTimeout(() => dispatchNav('ArrowLeft'), 400);
-        setTimeout(() => dispatchNav('ArrowRight'), 800);
-        setTimeout(() => dispatchNav('ArrowLeft'), 1200);
-        setTimeout(() => dispatchNav('ArrowLeft'), 1600);
+        setTimeout(() => history.back(), 400);
+        setTimeout(() => history.forward(), 800);
+        setTimeout(() => history.back(), 1200);
+        setTimeout(() => history.back(), 1600);
       });
     </script>
   </body>

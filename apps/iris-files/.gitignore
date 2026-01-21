@@ -3,3 +3,4 @@ dist-iris
 playwright-report/
 test-results/
 e2e/screenshots/
+e2e-tauri/screenshots/

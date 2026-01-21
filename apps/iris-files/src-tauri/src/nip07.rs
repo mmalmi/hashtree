@@ -134,13 +134,50 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
   console.log('[NIP-07] Initializing with server:', SERVER_URL);
   window.__HTREE_SERVER_URL__ = SERVER_URL;
 
-  function getOrigin() {{
-    const origin = window.location.origin;
-    if (!origin || origin === 'null') return 'null';
-    return origin;
+  let invokePromise = null;
+  async function getInvoke() {{
+    if (invokePromise) return invokePromise;
+    invokePromise = (async () => {{
+      const getNow = () =>
+        window.__TAURI_INTERNALS__?.invoke ||
+        window.__TAURI__?.core?.invoke ||
+        window.__TAURI__?.invoke ||
+        null;
+      const immediate = getNow();
+      if (immediate) return immediate;
+      for (let i = 0; i < 20; i++) {{
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const candidate = getNow();
+        if (candidate) return candidate;
+      }}
+      return null;
+    }})();
+    return invokePromise;
   }}
 
-  function postWebviewEvent(payload) {{
+  function getOrigin() {{
+    const origin = window.location.origin;
+    if (origin && origin !== 'null') return origin;
+    const protocol = window.location.protocol || '';
+    const normalizedProtocol = protocol.endsWith(':') ? protocol.slice(0, -1) : protocol;
+    const host = window.location.host || '';
+    if (host) return `${{normalizedProtocol}}://${{host}}`;
+    return normalizedProtocol || 'null';
+  }}
+
+  async function postWebviewEvent(payload) {{
+    try {{
+      const invoke = await getInvoke();
+      if (invoke) {{
+        await invoke('webview_event', {{
+          payload,
+          session_token: SESSION_TOKEN
+        }});
+        return;
+      }}
+    }} catch (error) {{
+      console.warn('[WebviewBridge] Failed to send event via invoke', error);
+    }}
     fetch(NAV_ENDPOINT, {{
       method: 'POST',
       headers: {{
@@ -181,13 +218,11 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
     return result;
   }};
 
-  window.addEventListener('popstate', () => notifyLocation('popstate'));
-  window.addEventListener('hashchange', () => notifyLocation('hashchange'));
-  window.addEventListener('DOMContentLoaded', () => notifyLocation('domcontentloaded'));
-  window.addEventListener('load', () => notifyLocation('load'));
-  queueMicrotask(() => notifyLocation('init'));
+  const historyProto = Object.getPrototypeOf(history) || (typeof History !== 'undefined' ? History.prototype : null);
+  const originalBack = historyProto && typeof historyProto.back === 'function' ? historyProto.back : null;
+  const originalForward = historyProto && typeof historyProto.forward === 'function' ? historyProto.forward : null;
 
-  function sendNavigate(action) {{
+  function notifyNavigate(action) {{
     postWebviewEvent({{
       kind: 'navigate',
       label: WEBVIEW_LABEL,
@@ -196,13 +231,85 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
     }});
   }}
 
+  function scheduleHistoryFallback(action, beforeUrl) {{
+    setTimeout(() => {{
+      if (window.location.href !== beforeUrl) return;
+      notifyNavigate(action);
+      if (action === 'back') {{
+        window.location.href = 'about:blank';
+      }}
+    }}, 300);
+  }}
+
+  function wrapHistory(action, original) {{
+    return function() {{
+      const beforeUrl = window.location.href;
+      const result = original.apply(this, arguments);
+      scheduleHistoryFallback(action, beforeUrl);
+      return result;
+    }};
+  }}
+
+  function setHistoryMethod(target, name, value) {{
+    if (!target) return false;
+    try {{
+      target[name] = value;
+      return true;
+    }} catch {{}}
+    try {{
+      Object.defineProperty(target, name, {{
+        value,
+        configurable: true,
+        writable: true
+      }});
+      return true;
+    }} catch {{}}
+    return false;
+  }}
+
+  if (originalBack) {{
+    const wrappedBack = wrapHistory('back', originalBack);
+    setHistoryMethod(history, 'back', wrappedBack);
+    setHistoryMethod(historyProto, 'back', wrappedBack);
+  }}
+
+  if (originalForward) {{
+    const wrappedForward = wrapHistory('forward', originalForward);
+    setHistoryMethod(history, 'forward', wrappedForward);
+    setHistoryMethod(historyProto, 'forward', wrappedForward);
+  }}
+
+  window.addEventListener('popstate', () => notifyLocation('popstate'));
+  window.addEventListener('hashchange', () => notifyLocation('hashchange'));
+  window.addEventListener('DOMContentLoaded', () => notifyLocation('domcontentloaded'));
+  window.addEventListener('load', () => notifyLocation('load'));
+  queueMicrotask(() => notifyLocation('init'));
+
+  function navigateHistory(action) {{
+    const beforeUrl = window.location.href;
+    if (action === 'back') {{
+      if (originalBack) {{
+        originalBack.call(history);
+      }} else {{
+        history.back();
+      }}
+    }} else if (action === 'forward') {{
+      if (originalForward) {{
+        originalForward.call(history);
+      }} else {{
+        history.forward();
+      }}
+    }}
+    scheduleHistoryFallback(action, beforeUrl);
+  }}
+
   function handleMouseUp(e) {{
     if (e.button === 3) {{
       e.preventDefault();
-      sendNavigate('back');
+      navigateHistory('back');
     }} else if (e.button === 4) {{
       e.preventDefault();
-      sendNavigate('forward');
+      navigateHistory('forward');
     }}
   }}
 
@@ -231,22 +338,22 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
 
     if (e.key === 'BrowserBack') {{
       e.preventDefault();
-      sendNavigate('back');
+      navigateHistory('back');
       return;
     }}
     if (e.key === 'BrowserForward') {{
       e.preventDefault();
-      sendNavigate('forward');
+      navigateHistory('forward');
       return;
     }}
 
     if (modifier && !e.shiftKey && !e.altKey) {{
       if (e.key === 'ArrowLeft') {{
         e.preventDefault();
-        sendNavigate('back');
+        navigateHistory('back');
       }} else if (e.key === 'ArrowRight') {{
         e.preventDefault();
-        sendNavigate('forward');
+        navigateHistory('forward');
       }}
     }}
   }}
@@ -364,6 +471,14 @@ impl Nip07State {
             .get(origin)
             .map(|t| t == token)
             .unwrap_or(false)
+    }
+
+    /// Validate a session token without requiring a specific origin.
+    pub fn validate_any_token(&self, token: &str) -> bool {
+        self.session_tokens
+            .read()
+            .values()
+            .any(|stored| stored == token)
     }
 
     /// Clear the session token for an origin
@@ -698,4 +813,19 @@ pub fn webview_history<R: Runtime>(
         .eval(script)
         .map_err(|e| format!("Failed to navigate history: {}", e))?;
     Ok(())
+}
+
+/// Get the current URL of a child webview.
+#[tauri::command]
+pub fn webview_current_url<R: Runtime>(
+    app: AppHandle<R>,
+    label: String,
+) -> Result<String, String> {
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Webview {} not found", label))?;
+    webview
+        .url()
+        .map(|url| url.to_string())
+        .map_err(|e| format!("Failed to read webview URL: {}", e))
 }

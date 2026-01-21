@@ -904,7 +904,7 @@ async fn handle_nip07_request(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WebviewEventRequest {
+pub struct WebviewEventRequest {
     kind: String,
     label: String,
     origin: String,
@@ -937,7 +937,9 @@ async fn handle_webview_event(
         }
     };
 
-    if !nip07_state.validate_token(&request.origin, session_token) {
+    if !nip07_state.validate_token(&request.origin, session_token)
+        && !nip07_state.validate_any_token(session_token)
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Invalid session token" })),
@@ -1003,6 +1005,59 @@ async fn handle_webview_event(
     }
 
     (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
+#[tauri::command]
+pub async fn webview_event(
+    app: tauri::AppHandle,
+    payload: WebviewEventRequest,
+    session_token: String,
+) -> Result<(), String> {
+    let nip07_state = crate::nip07::get_nip07_state()
+        .ok_or_else(|| "NIP-07 state not initialized".to_string())?;
+
+    if !nip07_state.validate_token(&payload.origin, &session_token)
+        && !nip07_state.validate_any_token(&session_token)
+    {
+        return Err("Invalid session token".to_string());
+    }
+
+    match payload.kind.as_str() {
+        "location" => {
+            let url = payload
+                .url
+                .clone()
+                .ok_or_else(|| "Missing url".to_string())?;
+            let source = payload.source.clone().unwrap_or_else(|| "unknown".to_string());
+            let _ = app.emit(
+                "child-webview-location",
+                json!({
+                    "label": payload.label,
+                    "url": url,
+                    "source": source
+                }),
+            );
+        }
+        "navigate" => {
+            let action = match payload.action.as_deref() {
+                Some("back") => "back",
+                Some("forward") => "forward",
+                _ => return Err("Invalid action".to_string()),
+            };
+            let _ = app.emit(
+                "child-webview-navigate",
+                json!({
+                    "label": payload.label,
+                    "action": action
+                }),
+            );
+        }
+        _ => {
+            return Err("Invalid event kind".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 /// Start the htree HTTP server

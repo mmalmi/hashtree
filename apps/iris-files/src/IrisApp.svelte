@@ -31,10 +31,13 @@
     path: string;
   } | null>(null);
   let webviewHistoryRequestId = $state(0);
+  let lastWebviewHistoryAction = $state<'back' | 'forward' | null>(null);
+  let lastWebviewHistoryAt = $state(0);
 
   // Address bar
   let addressValue = $state('');
   let isAddressFocused = $state(false);
+  let addressInputEl: HTMLInputElement | null = $state(null);
 
   // Bookmark state
   let isSaving = $state(false);
@@ -205,6 +208,8 @@
 
   async function requestWebviewHistory(direction: 'back' | 'forward') {
     try {
+      lastWebviewHistoryAction = direction;
+      lastWebviewHistoryAt = Date.now();
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('webview_history', { label: CHILD_WEBVIEW_LABEL, direction });
     } catch (error) {
@@ -227,6 +232,8 @@
     } else {
       navigate('/');
     }
+    addressInputEl?.blur();
+    isAddressFocused = false;
   }
 
   function getShareableUrl(): string {
@@ -351,10 +358,18 @@
       const { listen } = await import('@tauri-apps/api/event');
       unlistenNavigate = await listen<{ action: string; label?: string }>('child-webview-navigate', (event) => {
         const fromChild = typeof event.payload.label === 'string';
-        if (!fromChild && isEditableTarget(document.activeElement)) return;
-        if (event.payload.action === 'back') {
+        const action = event.payload.action === 'forward' ? 'forward' : 'back';
+        if (fromChild) {
+          if (!isAppRoute || !isTauri()) return;
+          if (pendingWebviewHistory?.direction === action) return;
+          if (lastWebviewHistoryAction === action && Date.now() - lastWebviewHistoryAt < 800) return;
+          scheduleWebviewFallback(action, $currentPath);
+          return;
+        }
+        if (isEditableTarget(document.activeElement)) return;
+        if (action === 'back') {
           goBack();
-        } else if (event.payload.action === 'forward') {
+        } else {
           goForward();
         }
       });
@@ -422,6 +437,7 @@
         <span class="i-lucide-search text-sm text-muted shrink-0"></span>
         <input
           type="text"
+          bind:this={addressInputEl}
           bind:value={addressValue}
           onfocus={() => isAddressFocused = true}
           onblur={() => isAddressFocused = false}

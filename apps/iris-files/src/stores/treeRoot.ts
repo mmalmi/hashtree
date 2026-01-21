@@ -64,7 +64,8 @@ function waitForWorkerReady(): Promise<void> {
 const subscriptionState = new Map<string, {
   decryptedKey: Hash | undefined;
   listeners: Set<(hash: Hash | null, encryptionKey?: Hash, visibilityInfo?: SubscribeVisibilityInfo) => void>;
-  unsubscribe: (() => void) | null;
+  unsubscribeResolver: (() => void) | null;
+  unsubscribeWorker: (() => void) | null;
 }>();
 
 /**
@@ -222,7 +223,8 @@ export function updateSubscriptionCache(
     state = {
       decryptedKey: undefined,
       listeners: new Set(),
-      unsubscribe: null,
+      unsubscribeResolver: null,
+      unsubscribeWorker: null,
     };
     subscriptionState.set(key, state);
   }
@@ -276,10 +278,12 @@ async function startResolverSubscription(
   if (!state) return; // Entry was deleted before worker was ready
 
   // Don't create subscription if one already exists unless forced
-  if (state.unsubscribe) {
+  if (state.unsubscribeResolver || state.unsubscribeWorker) {
     if (!options?.force) return;
-    state.unsubscribe();
-    state.unsubscribe = null;
+    state.unsubscribeResolver?.();
+    state.unsubscribeResolver = null;
+    state.unsubscribeWorker?.();
+    state.unsubscribeWorker = null;
   }
 
   const slashIndex = key.indexOf('/');
@@ -291,7 +295,7 @@ async function startResolverSubscription(
     const subscribed = await ensureWorkerTreeRootSubscription(npub);
     const hydrated = await hydrateTreeRootFromWorker(npub, treeName);
     if (subscribed || hydrated) {
-      state.unsubscribe = () => {
+      state.unsubscribeWorker = () => {
         void unsubscribeWorkerTreeRootSubscription(npub);
       };
       return;
@@ -299,11 +303,7 @@ async function startResolverSubscription(
   }
 
   const resolver = getRefResolver();
-  state.unsubscribe = resolver.subscribe(key, (resolvedCid, visibilityInfo) => {
-    console.log('[treeRoot] Resolver callback for', key, {
-      hasHash: !!resolvedCid?.hash,
-      visibilityInfo: visibilityInfo ? JSON.stringify(visibilityInfo) : 'undefined'
-    });
+  state.unsubscribeResolver = resolver.subscribe(key, (resolvedCid, visibilityInfo) => {
     const entry = subscriptionState.get(key);
     if (entry) {
       // Update registry with resolver data (only if newer)
@@ -323,6 +323,20 @@ async function startResolverSubscription(
       entry.listeners.forEach(listener => listener(resolvedCid?.hash ?? null, resolvedCid?.key, visibilityInfo));
     }
   });
+
+  if (!isTauri()) {
+    void waitForWorkerReady().then(async () => {
+      const active = subscriptionState.get(key);
+      if (!active || active.unsubscribeWorker) return;
+      const subscribed = await ensureWorkerTreeRootSubscription(npub);
+      const hydrated = await hydrateTreeRootFromWorker(npub, treeName);
+      if (subscribed || hydrated) {
+        active.unsubscribeWorker = () => {
+          void unsubscribeWorkerTreeRootSubscription(npub);
+        };
+      }
+    });
+  }
 }
 
 function subscribeToResolver(
@@ -335,7 +349,8 @@ function subscribeToResolver(
     state = {
       decryptedKey: undefined,
       listeners: new Set(),
-      unsubscribe: null,
+      unsubscribeResolver: null,
+      unsubscribeWorker: null,
     };
     subscriptionState.set(key, state);
 
@@ -350,9 +365,6 @@ function subscribeToResolver(
   const record = treeRootRegistry.getByKey(key);
   if (record) {
     const visibilityInfo = getVisibilityInfoFromRegistry(key);
-    console.log('[treeRoot] Immediate callback from registry for', key, {
-      visibilityInfo: visibilityInfo ? JSON.stringify(visibilityInfo) : 'undefined'
-    });
     queueMicrotask(() => callback(record.hash, record.key, visibilityInfo));
   }
 
@@ -364,7 +376,10 @@ function subscribeToResolver(
       // because the data is still valid and may be needed by other components
       // (e.g., DocCard uses getTreeRootSync after the editor unmounts)
       if (cached.listeners.size === 0) {
-        cached.unsubscribe?.();
+        cached.unsubscribeResolver?.();
+        cached.unsubscribeResolver = null;
+        cached.unsubscribeWorker?.();
+        cached.unsubscribeWorker = null;
         // Keep the cached data, just stop the subscription
         // subscriptionState.delete(key);
       }

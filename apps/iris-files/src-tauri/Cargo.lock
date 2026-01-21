@@ -2276,6 +2276,7 @@ dependencies = [
  "async-trait",
  "hashtree-core",
  "nostr-sdk",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
 ]

@@ -30,6 +30,10 @@ let localProbePromise: Promise<boolean> | null = null;
 let prefixReady = false;
 let prefixEpoch = 0;
 
+function allowLocalPrefix(): boolean {
+  return isTauri();
+}
+
 async function probeLocalHtreeServer(baseUrl: string): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   if (localProbePromise) return localProbePromise;
@@ -106,21 +110,29 @@ export function getHtreePrefix(): string {
     }
     return cachedPrefix;
   }
+  const allowLocal = allowLocalPrefix();
   if (cachedPrefix) {
-    return cachedPrefix;
+    if (!isLocalHtreePrefix(cachedPrefix) || allowLocal) {
+      return cachedPrefix;
+    }
+    cachedPrefix = '';
+    prefixReady = false;
+    prefixEpoch = 0;
   }
   if (typeof window !== 'undefined' && window.htree?.htreeBaseUrl) {
     const prefix = window.htree.htreeBaseUrl;
     if (typeof prefix === 'string' && prefix.trim()) {
-      updateCachedPrefix(prefix, 'window.htree');
-      if (!prefixReady && !isLocalHtreePrefix(cachedPrefix)) {
-        notifyPrefixReady('window.htree');
+      const normalized = prefix.trim().replace(/\/$/, '');
+      if (!isLocalHtreePrefix(normalized) || allowLocal) {
+        updateCachedPrefix(normalized, 'window.htree');
+        if (!prefixReady && !isLocalHtreePrefix(cachedPrefix)) {
+          notifyPrefixReady('window.htree');
+        }
+        return cachedPrefix;
       }
-      return cachedPrefix;
     }
   }
-  const tauri = isTauri();
-  if (tauri) {
+  if (allowLocal) {
     const prefix = `http://127.0.0.1:${TAURI_HTREE_PORT}`;
     updateCachedPrefix(prefix, 'tauri');
     return cachedPrefix;
@@ -180,6 +192,9 @@ export async function initHtreePrefix(): Promise<void> {
   const prefix = getHtreePrefix();
   if (prefix && !isLocalHtreePrefix(prefix)) {
     notifyPrefixReady('init');
+    return;
+  }
+  if (!allowLocalPrefix()) {
     return;
   }
 

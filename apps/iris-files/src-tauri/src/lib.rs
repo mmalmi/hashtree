@@ -73,10 +73,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             htree::get_htree_server_url,
             htree::cache_tree_root,
+            htree::webview_event,
             worker::worker_message,
             nip07::create_nip07_webview,
             nip07::navigate_webview,
             nip07::webview_history,
+            nip07::webview_current_url,
             nip07::nip07_request,
             history::record_history_visit,
             history::search_history,
