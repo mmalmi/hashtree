@@ -319,7 +319,7 @@
             <div class="text-xs text-text-3 truncate">{target.repoPath}</div>
           {/if}
         </div>
-        <button onclick={close} class="btn-ghost p-1" aria-label="Close">
+        <button onclick={close} class="btn-circle btn-ghost" aria-label="Close">
           <span class="i-lucide-x text-lg"></span>
         </button>
       </div>
