@@ -6,6 +6,7 @@ import type { CID } from 'hashtree';
 import { isGitRepo, getBranches, getLog, getStatus, getHead } from '../utils/git';
 import type { GitStatusResult } from '../utils/wasmGit';
 import { nostrStore } from '../nostr';
+import { LRUCache } from '../utils/lruCache';
 
 export interface GitInfo {
   isRepo: boolean;
@@ -23,19 +24,19 @@ export interface CommitInfo {
   parent: string[];
 }
 
-// Cache for git info stores by CID
-const gitInfoStoreCache = new Map<string, Readable<GitInfo>>();
+// Cache for git info stores by repoPath:CID (LRU to prevent unbounded growth)
+const gitInfoStoreCache = new LRUCache<string, Readable<GitInfo>>(5);
 
 /**
  * Create a store to detect if a directory is a git repo and get basic info
- * Cached by CID to avoid re-fetching when navigating within the same repo
+ * Cached by repoPath:CID to avoid re-fetching when navigating within the same repo
  */
-export function createGitInfoStore(dirCid: CID | null): Readable<GitInfo> {
+export function createGitInfoStore(dirCid: CID | null, repoPath?: string): Readable<GitInfo> {
   if (!dirCid) {
     return { subscribe: writable<GitInfo>({ isRepo: false, currentBranch: null, branches: [], loading: false }).subscribe };
   }
 
-  const cacheKey = dirCid.toString();
+  const cacheKey = `${repoPath ?? ''}:${dirCid.toString()}`;
   if (gitInfoStoreCache.has(cacheKey)) {
     return gitInfoStoreCache.get(cacheKey)!;
   }
@@ -79,19 +80,19 @@ export function createGitInfoStore(dirCid: CID | null): Readable<GitInfo> {
   return store;
 }
 
-// Cache for git log stores by CID:depth
-const gitLogStoreCache = new Map<string, Readable<{
+// Cache for git log stores by repoPath:CID:depth (LRU to prevent unbounded growth)
+const gitLogStoreCache = new LRUCache<string, Readable<{
   commits: CommitInfo[];
   headOid: string | null;
   loading: boolean;
   error: string | null;
-}>>();
+}>>(5);
 
 /**
  * Create a store to get commit history for a git repo
- * Cached by CID:depth to avoid re-fetching when navigating within the same repo
+ * Cached by repoPath:CID:depth to avoid re-fetching when navigating within the same repo
  */
-export function createGitLogStore(dirCid: CID | null, depth = 20): Readable<{
+export function createGitLogStore(dirCid: CID | null, depth = 20, repoPath?: string): Readable<{
   commits: CommitInfo[];
   headOid: string | null;
   loading: boolean;
@@ -101,7 +102,7 @@ export function createGitLogStore(dirCid: CID | null, depth = 20): Readable<{
     return { subscribe: writable({ commits: [], headOid: null, loading: false, error: null }).subscribe };
   }
 
-  const cacheKey = `${dirCid.toString()}:${depth}`;
+  const cacheKey = `${repoPath ?? ''}:${dirCid.toString()}:${depth}`;
   if (gitLogStoreCache.has(cacheKey)) {
     return gitLogStoreCache.get(cacheKey)!;
   }

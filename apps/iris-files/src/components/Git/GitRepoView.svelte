@@ -39,8 +39,22 @@
   let route = $derived($routeStore);
   let currentPath = $derived(route.path);
 
-  // Create git log store - use gitCid (git root) for log
-  let gitLogStore = $derived(createGitLogStore(gitCid, 50));
+  // Get git root path from route (for subdirectory operations)
+  let gitRootPath = $derived(route.params.get('g'));
+
+  // Full repo path for URLs (treeName + path to git root)
+  // e.g., if treeName is "link" and git root is at "link/my-repo", repoPath is "link/my-repo"
+  let repoPath = $derived.by(() => {
+    const gitPath = gitRootPath !== null
+      ? (gitRootPath === '' ? [] : gitRootPath.split('/'))
+      : currentPath;
+    if (!route.treeName) return '';
+    if (gitPath.length === 0) return route.treeName;
+    return `${route.treeName}/${gitPath.join('/')}`;
+  });
+
+  // Create git log store - use gitCid (git root) for log, keyed by repoPath
+  let gitLogStore = $derived(createGitLogStore(gitCid, 50, repoPath));
   let commits = $state<CommitInfo[]>([]);
   let headOid = $state<string | null>(null);
   let commitsLoading = $state(true);
@@ -267,20 +281,6 @@
 
     parts.push(...parentPath);
     return '#/' + parts.map(encodeURIComponent).join('/') + suffix;
-  });
-
-  // Get git root path from route (for subdirectory operations)
-  let gitRootPath = $derived(route.params.get('g'));
-
-  // Full repo path for URLs (treeName + path to git root)
-  // e.g., if treeName is "link" and git root is at "link/my-repo", repoPath is "link/my-repo"
-  let repoPath = $derived.by(() => {
-    const gitPath = gitRootPath !== null
-      ? (gitRootPath === '' ? [] : gitRootPath.split('/'))
-      : currentPath;
-    if (!route.treeName) return '';
-    if (gitPath.length === 0) return route.treeName;
-    return `${route.treeName}/${gitPath.join('/')}`;
   });
 
   $effect(() => {
