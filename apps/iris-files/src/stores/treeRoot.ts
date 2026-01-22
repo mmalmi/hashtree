@@ -899,6 +899,15 @@ export function createTreeRootStore(): Readable<CID | null> {
         return;
       }
 
+      // Set the store FIRST so UI updates immediately
+      treeRootStore.set(cid(hash, decryptedKey));
+      logHtreeDebug('treeRoot:set', {
+        resolverKey,
+        visibility: visibility ?? null,
+        hasDecryptedKey: !!decryptedKey,
+      });
+
+      // Then merge key to registry and worker in the background (don't block UI)
       const slashIndex = resolverKey.indexOf('/');
       if (slashIndex > 0 && slashIndex < resolverKey.length - 1) {
         const npub = resolverKey.slice(0, slashIndex);
@@ -907,20 +916,15 @@ export function createTreeRootStore(): Readable<CID | null> {
           treeRootRegistry.mergeKey(npub, treeName, hash, decryptedKey);
           const signature = `${toHex(hash)}:${toHex(decryptedKey)}`;
           if (workerKeyMergeCache.get(resolverKey) !== signature) {
-            const merged = await mergeTreeRootKeyToWorker(npub, treeName, hash, decryptedKey);
-            if (merged) {
-              workerKeyMergeCache.set(resolverKey, signature);
-            }
+            // Fire and forget - don't await, let it run in background
+            void mergeTreeRootKeyToWorker(npub, treeName, hash, decryptedKey).then((merged) => {
+              if (merged) {
+                workerKeyMergeCache.set(resolverKey, signature);
+              }
+            });
           }
         }
       }
-
-      treeRootStore.set(cid(hash, decryptedKey));
-      logHtreeDebug('treeRoot:set', {
-        resolverKey,
-        visibility: visibility ?? null,
-        hasDecryptedKey: !!decryptedKey,
-      });
     });
 
     scheduleResolverRetry(resolverKey);
