@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SvelteURL } from 'svelte/reactivity';
+  import { isNHash, isNPath } from 'hashtree';
   import NostrLogin from './components/NostrLogin.svelte';
   import ConnectivityIndicator from './components/ConnectivityIndicator.svelte';
   import BandwidthIndicator from './components/BandwidthIndicator.svelte';
@@ -217,6 +218,14 @@
     }
   }
 
+  // Check if value starts with a hashtree identifier (nhash1, npath1, npub1)
+  // These can have paths like nhash1.../index.html or npub1.../treename/file.txt
+  function isHashtreeIdentifier(value: string): boolean {
+    // Extract the first segment (before any slash)
+    const firstSegment = value.split('/')[0];
+    return isNHash(firstSegment) || isNPath(firstSegment) || (firstSegment.startsWith('npub1') && firstSegment.length >= 63);
+  }
+
   function handleAddressSubmit() {
     const value = addressValue.trim();
     if (value) {
@@ -224,6 +233,9 @@
         navigate(`/app/${encodeURIComponent(value)}`);
       } else if (value.startsWith('/')) {
         navigate(value);
+      } else if (isHashtreeIdentifier(value)) {
+        // nhash1.../path, npath1..., npub1.../treename/path - navigate as internal route
+        navigate(`/${value}`);
       } else if (value.includes('.') && !value.includes(' ')) {
         navigate(`/app/${encodeURIComponent('https://' + value)}`);
       } else {
@@ -441,7 +453,17 @@
           bind:value={addressValue}
           onfocus={() => isAddressFocused = true}
           onblur={() => isAddressFocused = false}
-          onkeydown={(e) => e.key === 'Enter' && handleAddressSubmit()}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') {
+              handleAddressSubmit();
+            } else if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+              // Handle paste explicitly for Tauri compatibility
+              e.preventDefault();
+              navigator.clipboard.readText().then((text) => {
+                addressValue = text;
+              });
+            }
+          }}
           placeholder="Search or enter address"
           class="bg-transparent border-none outline-none text-sm text-text-1 placeholder:text-muted flex-1 text-center"
         />
