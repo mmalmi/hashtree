@@ -368,3 +368,109 @@ async fn test_sign_event_with_tags() {
     let tags = signed.get("tags").and_then(|v| v.as_array()).unwrap();
     assert_eq!(tags.len(), 5, "Should have 5 tags");
 }
+
+// ============================================
+// htree:// URL helper tests
+// ============================================
+
+use app_lib::nip07::{
+    htree_origin_from_nhash, htree_origin_from_npub, htree_url_from_nhash, htree_url_from_npub,
+    parse_htree_host,
+};
+
+#[test]
+fn test_htree_origin_from_nhash() {
+    let origin = htree_origin_from_nhash("nhash1abc123");
+    assert_eq!(origin, "htree://nhash1abc123");
+}
+
+#[test]
+fn test_htree_origin_from_npub() {
+    let origin = htree_origin_from_npub("npub1xyz", "public");
+    assert_eq!(origin, "htree://npub1xyz.public");
+}
+
+#[test]
+fn test_htree_url_from_nhash_no_path() {
+    let url = htree_url_from_nhash("nhash1abc", "");
+    assert_eq!(url, "htree://nhash1abc");
+
+    let url2 = htree_url_from_nhash("nhash1abc", "/");
+    assert_eq!(url2, "htree://nhash1abc");
+}
+
+#[test]
+fn test_htree_url_from_nhash_with_path() {
+    let url = htree_url_from_nhash("nhash1abc", "index.html");
+    assert_eq!(url, "htree://nhash1abc/index.html");
+
+    let url2 = htree_url_from_nhash("nhash1abc", "/path/to/file.js");
+    assert_eq!(url2, "htree://nhash1abc/path/to/file.js");
+}
+
+#[test]
+fn test_htree_url_from_npub_no_path() {
+    let url = htree_url_from_npub("npub1xyz", "public", "");
+    assert_eq!(url, "htree://npub1xyz.public");
+
+    let url2 = htree_url_from_npub("npub1xyz", "public", "/");
+    assert_eq!(url2, "htree://npub1xyz.public");
+}
+
+#[test]
+fn test_htree_url_from_npub_with_path() {
+    let url = htree_url_from_npub("npub1xyz", "public", "index.html");
+    assert_eq!(url, "htree://npub1xyz.public/index.html");
+
+    let url2 = htree_url_from_npub("npub1xyz", "public", "/path/to/file.js");
+    assert_eq!(url2, "htree://npub1xyz.public/path/to/file.js");
+}
+
+#[test]
+fn test_parse_htree_host_nhash() {
+    // htree://nhash1abc.../path → should parse as nhash
+    let result = parse_htree_host("nhash1abc123xyz");
+    assert!(result.is_some());
+    let (nhash, npub, treename) = result.unwrap();
+    assert_eq!(nhash, Some("nhash1abc123xyz".to_string()));
+    assert!(npub.is_none());
+    assert!(treename.is_none());
+}
+
+#[test]
+fn test_parse_htree_host_npub() {
+    // htree://npub1xyz.treename/path → should parse as npub + treename
+    let result = parse_htree_host("npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv.public");
+    assert!(result.is_some());
+    let (nhash, npub, treename) = result.unwrap();
+    assert!(nhash.is_none());
+    assert_eq!(
+        npub,
+        Some("npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv".to_string())
+    );
+    assert_eq!(treename, Some("public".to_string()));
+}
+
+#[test]
+fn test_parse_htree_host_npub_without_treename() {
+    // htree://npub1xyz/path without treename separator
+    let result = parse_htree_host("npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv");
+    assert!(result.is_some());
+    let (nhash, npub, treename) = result.unwrap();
+    assert!(nhash.is_none());
+    assert_eq!(
+        npub,
+        Some("npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv".to_string())
+    );
+    assert!(treename.is_none());
+}
+
+#[test]
+fn test_parse_htree_host_invalid() {
+    // Invalid host that doesn't start with nhash1 or npub1
+    let result = parse_htree_host("localhost");
+    assert!(result.is_none());
+
+    let result2 = parse_htree_host("example.com");
+    assert!(result2.is_none());
+}

@@ -119,6 +119,7 @@ pub fn run() {
             htree::webview_event,
             worker::worker_message,
             nip07::create_nip07_webview,
+            nip07::create_htree_webview,
             nip07::navigate_webview,
             nip07::webview_history,
             nip07::webview_current_url,

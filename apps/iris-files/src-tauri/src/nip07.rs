@@ -16,6 +16,76 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewBuilder, WebviewUrl};
 use tracing::{debug, info};
 
+// ============================================
+// htree:// URL helpers for origin isolation
+// ============================================
+
+/// Construct htree:// origin from nhash (for storage isolation)
+/// Example: "nhash1abc123" → "htree://nhash1abc123"
+pub fn htree_origin_from_nhash(nhash: &str) -> String {
+    format!("htree://{}", nhash)
+}
+
+/// Construct htree:// origin from npub and treename (for storage isolation)
+/// Uses dot separator since "/" isn't valid in hostname
+/// Example: ("npub1xyz", "public") → "htree://npub1xyz.public"
+pub fn htree_origin_from_npub(npub: &str, treename: &str) -> String {
+    format!("htree://{}.{}", npub, treename)
+}
+
+/// Construct htree:// URL from nhash with optional path
+/// Example: ("nhash1abc", "index.html") → "htree://nhash1abc/index.html"
+pub fn htree_url_from_nhash(nhash: &str, path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        format!("htree://{}", nhash)
+    } else {
+        let path = path.trim_start_matches('/');
+        format!("htree://{}/{}", nhash, path)
+    }
+}
+
+/// Construct htree:// URL from npub/treename with optional path
+/// Example: ("npub1xyz", "public", "index.html") → "htree://npub1xyz.public/index.html"
+pub fn htree_url_from_npub(npub: &str, treename: &str, path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        format!("htree://{}.{}", npub, treename)
+    } else {
+        let path = path.trim_start_matches('/');
+        format!("htree://{}.{}/{}", npub, treename, path)
+    }
+}
+
+/// Parse htree:// host to extract nhash or npub/treename
+/// Returns (nhash, npub, treename) where only one of nhash/npub will be Some
+pub fn parse_htree_host(host: &str) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    if host.starts_with("nhash1") {
+        // nhash host: htree://nhash1abc.../path
+        Some((Some(host.to_string()), None, None))
+    } else if host.starts_with("npub1") {
+        // npub host: htree://npub1xyz.treename/path
+        // npub is always 63 chars (npub1 + 58 bech32 chars)
+        if host.len() >= 63 {
+            let npub = &host[..63];
+            let rest = &host[63..];
+            if rest.is_empty() {
+                // No treename separator
+                Some((None, Some(npub.to_string()), None))
+            } else if rest.starts_with('.') && rest.len() > 1 {
+                // Has treename: npub1xyz.treename
+                let treename = &rest[1..];
+                Some((None, Some(npub.to_string()), Some(treename.to_string())))
+            } else {
+                // Invalid format
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 /// Global state for NIP-07 HTTP handler access
 static GLOBAL_NIP07_STATE: OnceCell<Arc<Nip07State>> = OnceCell::new();
 static GLOBAL_WORKER_STATE: OnceCell<Arc<WorkerState>> = OnceCell::new();
@@ -596,6 +666,98 @@ pub async fn create_nip07_webview<R: Runtime>(
     }
 
     info!("[NIP-07] Webview created with session token for {}", origin);
+
+    Ok(())
+}
+
+/// Create a child webview for htree:// content with origin isolation
+///
+/// Each nhash or npub/treename gets its own origin for storage isolation (localStorage, IndexedDB).
+/// The URL format is:
+///   - htree://nhash1abc.../path (origin: htree://nhash1abc...)
+///   - htree://npub1xyz.treename/path (origin: htree://npub1xyz.treename)
+#[tauri::command]
+pub async fn create_htree_webview<R: Runtime>(
+    app: AppHandle<R>,
+    label: String,
+    nhash: Option<String>,
+    npub: Option<String>,
+    treename: Option<String>,
+    path: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    // Validate input: either nhash or (npub + treename) must be provided
+    let (url, origin) = if let Some(nhash) = &nhash {
+        let url = htree_url_from_nhash(nhash, &path);
+        let origin = htree_origin_from_nhash(nhash);
+        (url, origin)
+    } else if let (Some(npub), Some(treename)) = (&npub, &treename) {
+        let url = htree_url_from_npub(npub, treename, &path);
+        let origin = htree_origin_from_npub(npub, treename);
+        (url, origin)
+    } else {
+        return Err("Either nhash or (npub + treename) must be provided".to_string());
+    };
+
+    info!(
+        "[htree] Creating webview {} for {} (origin: {})",
+        label, url, origin
+    );
+
+    // Get htree server URL (for NIP-07 HTTP fallback)
+    let server_url = crate::htree::get_htree_server_url().ok_or("htree server not running")?;
+
+    // Generate session token for this htree:// origin
+    let nip07_state = app
+        .try_state::<Arc<Nip07State>>()
+        .ok_or("Nip07State not found")?;
+    let session_token = nip07_state.new_session(&origin);
+
+    // Generate the initialization script with server URL and token
+    let init_script = generate_nip07_script(&server_url, &session_token, &label);
+
+    let window = app.get_window("main").ok_or("Main window not found")?;
+
+    // Parse the htree:// URL
+    let parsed_url = tauri::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+
+    // Clone for navigation callback
+    let app_for_nav = app.clone();
+    let label_for_nav = label.clone();
+
+    // Create child webview with htree:// URL
+    let webview_builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
+        .initialization_script(&init_script)
+        .auto_resize()
+        .on_navigation(move |nav_url| {
+            let url_str = nav_url.to_string();
+            debug!("[htree] Child webview navigating to: {}", url_str);
+            let _ = app_for_nav.emit(
+                "child-webview-location",
+                serde_json::json!({
+                    "label": label_for_nav,
+                    "url": url_str,
+                    "source": "navigation"
+                }),
+            );
+            true
+        });
+
+    window
+        .add_child(
+            webview_builder,
+            tauri::LogicalPosition::new(x, y),
+            tauri::LogicalSize::new(width, height),
+        )
+        .map_err(|e| format!("Failed to create webview: {}", e))?;
+
+    info!(
+        "[htree] Webview created with session token for origin {}",
+        origin
+    );
 
     Ok(())
 }

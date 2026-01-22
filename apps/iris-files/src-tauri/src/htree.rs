@@ -828,6 +828,33 @@ async fn resolve_htree_inner(
     }
 }
 
+/// Resolve htree:// URL to internal path
+/// Supports both host-based and legacy path-based formats
+pub fn resolve_htree_url_to_path(host: &str, raw_path: &str) -> String {
+    if host.starts_with("nhash1") {
+        // Host-based nhash: htree://nhash1abc.../path → /nhash1abc.../path
+        format!("/{}{}", host, raw_path)
+    } else if host.starts_with("npub1") {
+        // Host-based npub: htree://npub1xyz.treename/path → /npub1xyz/treename/path
+        // npub is always 63 chars (npub1 + 58 bech32 chars)
+        if host.len() > 63 && host.chars().nth(63) == Some('.') {
+            let npub = &host[..63];
+            let treename = &host[64..];
+            format!("/{}/{}{}", npub, treename, raw_path)
+        } else {
+            // npub without treename separator
+            format!("/{}{}", host, raw_path)
+        }
+    } else {
+        // Legacy path-based format: strip /htree/ prefix
+        raw_path
+            .strip_prefix("/htree/")
+            .or_else(|| raw_path.strip_prefix("/htree"))
+            .unwrap_or(raw_path)
+            .to_string()
+    }
+}
+
 /// Global server port - set when server starts
 static SERVER_PORT: once_cell::sync::OnceCell<u16> = once_cell::sync::OnceCell::new();
 static APP_HANDLE: once_cell::sync::OnceCell<AppHandle> = once_cell::sync::OnceCell::new();
@@ -1195,31 +1222,37 @@ pub fn init_htree_state(data_dir: PathBuf) {
 
 /// Handle htree:// URI scheme protocol requests
 /// This is called by Tauri's register_uri_scheme_protocol
+///
+/// Supports two URL formats:
+/// 1. Host-based (for origin isolation):
+///    - htree://nhash1abc.../path/to/file
+///    - htree://npub1xyz.treename/path/to/file
+/// 2. Legacy path-based:
+///    - htree:///htree/nhash1abc.../path
+///    - htree:///htree/npub1xyz/treename/path
 pub fn handle_htree_protocol<R: tauri::Runtime>(
     _ctx: tauri::UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
     let uri = request.uri();
+    let host = uri.host().unwrap_or("");
     let raw_path = uri.path();
 
-    // Strip /htree/ prefix if present (frontend adds it for consistency with web)
-    let path_with_query = raw_path
-        .strip_prefix("/htree/")
-        .or_else(|| raw_path.strip_prefix("/htree"))
-        .unwrap_or(raw_path);
+    // Determine path based on URL format (host-based or legacy path-based)
+    let resolved_path = resolve_htree_url_to_path(host, raw_path);
 
     // Strip query string if present (custom URI schemes may include it in path)
     // Query string might be URL-encoded as %3F
-    let path = path_with_query
+    let path = resolved_path
         .split('?')
         .next()
-        .unwrap_or(path_with_query)
+        .unwrap_or(&resolved_path)
         .split("%3F")
         .next()
-        .unwrap_or(path_with_query)
+        .unwrap_or(&resolved_path)
         .split("%3f")
         .next()
-        .unwrap_or(path_with_query);
+        .unwrap_or(&resolved_path);
 
     let range_header = request
         .headers()
@@ -1325,5 +1358,50 @@ mod tests {
 
         assert_eq!(resolved.hash, file_cid.hash);
         assert_eq!(mime_type, "text/html");
+    }
+
+    #[test]
+    fn test_resolve_htree_url_to_path_nhash_host() {
+        // htree://nhash1abc123/index.html → /nhash1abc123/index.html
+        let path = resolve_htree_url_to_path("nhash1abc123xyz", "/index.html");
+        assert_eq!(path, "/nhash1abc123xyz/index.html");
+    }
+
+    #[test]
+    fn test_resolve_htree_url_to_path_nhash_host_no_path() {
+        // htree://nhash1abc123/ → /nhash1abc123/
+        let path = resolve_htree_url_to_path("nhash1abc123xyz", "/");
+        assert_eq!(path, "/nhash1abc123xyz/");
+    }
+
+    #[test]
+    fn test_resolve_htree_url_to_path_npub_host() {
+        // htree://npub1xyz...58chars.treename/path → /npub1xyz...58chars/treename/path
+        let npub = "npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv";
+        let host = format!("{}.public", npub);
+        let path = resolve_htree_url_to_path(&host, "/index.html");
+        assert_eq!(path, format!("/{}/public/index.html", npub));
+    }
+
+    #[test]
+    fn test_resolve_htree_url_to_path_npub_host_no_path() {
+        let npub = "npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv";
+        let host = format!("{}.myapp", npub);
+        let path = resolve_htree_url_to_path(&host, "/");
+        assert_eq!(path, format!("/{}/myapp/", npub));
+    }
+
+    #[test]
+    fn test_resolve_htree_url_to_path_legacy_format() {
+        // htree:///htree/nhash1abc123/index.html → /nhash1abc123/index.html
+        let path = resolve_htree_url_to_path("", "/htree/nhash1abc123/index.html");
+        assert_eq!(path, "nhash1abc123/index.html");
+    }
+
+    #[test]
+    fn test_resolve_htree_url_to_path_legacy_npub() {
+        // htree:///htree/npub1xyz/treename/index.html → /npub1xyz/treename/index.html
+        let path = resolve_htree_url_to_path("", "/htree/npub1abc/treename/index.html");
+        assert_eq!(path, "npub1abc/treename/index.html");
     }
 }
