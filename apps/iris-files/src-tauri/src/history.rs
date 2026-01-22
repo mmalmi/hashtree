@@ -56,6 +56,11 @@ impl HistoryStore {
                 .open(&history_dir)
                 .map_err(|e| format!("Failed to open history db: {}", e))?
         };
+        if let Ok(cleared) = env.clear_stale_readers() {
+            if cleared > 0 {
+                debug!("Cleared {} stale LMDB readers for history store", cleared);
+            }
+        }
 
         // Open the history database
         let mut wtxn = env

@@ -164,15 +164,24 @@ describe('Address bar navigation', () => {
       });
     };
 
-    const submitAddress = async (value: string) => {
-      await addressInput.click();
-      await addressInput.setValue(value);
-      await browser.keys(['Enter']);
+    const blurActiveElement = async () => {
       await browser.execute(() => {
         (document.activeElement as HTMLElement | null)?.blur?.();
       });
     };
 
+    const submitAddress = async (value: string) => {
+      await addressInput.click();
+      await addressInput.setValue(value);
+      await browser.keys(['Enter']);
+      await blurActiveElement();
+    };
+
+    await browser.execute(() => {
+      if (!['', '#', '#/'].includes(window.location.hash)) {
+        window.location.hash = '#/';
+      }
+    });
     await waitForHome();
 
     await submitAddress('example.com');
@@ -184,15 +193,19 @@ describe('Address bar navigation', () => {
     await waitForAddressValue('example.org');
 
     await browser.keys([modifierKey as string, 'ArrowLeft']);
+    await blurActiveElement();
     await waitForAddressValue('example.com');
 
     await browser.keys([modifierKey as string, 'ArrowRight']);
+    await blurActiveElement();
     await waitForAddressValue('example.org');
 
     await browser.keys([modifierKey as string, 'ArrowLeft']);
+    await blurActiveElement();
     await waitForAddressValue('example.com');
 
     await browser.keys([modifierKey as string, 'ArrowLeft']);
+    await blurActiveElement();
     await waitForHome();
     await browser.waitUntil(async () => {
       const value = await addressInput.getValue();

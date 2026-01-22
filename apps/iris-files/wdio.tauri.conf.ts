@@ -8,6 +8,8 @@
  */
 import type { Options } from '@wdio/types';
 import { spawn, ChildProcess, execSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -16,6 +18,15 @@ const __dirname = path.dirname(__filename);
 
 let tauriDriver: ChildProcess | null = null;
 let weStartedDriver = false;
+let e2eDataDir: string | null = null;
+
+function ensureE2eDataDir(): string {
+  if (e2eDataDir) {
+    return e2eDataDir;
+  }
+  e2eDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'iris-files-tauri-e2e-'));
+  return e2eDataDir;
+}
 
 // Check if tauri-driver is already running
 function isDriverRunning(): boolean {
@@ -66,15 +77,18 @@ export const config: Options.Testrunner = {
 
   // Start tauri-driver before tests (if not already running)
   onPrepare: async function () {
+    const dataDir = ensureE2eDataDir();
+    process.env.HTREE_DATA_DIR = dataDir;
+
     if (isDriverRunning()) {
-      console.log('[tauri-driver] Already running, skipping spawn');
+      console.log(`[tauri-driver] Already running, skipping spawn (HTREE_DATA_DIR=${dataDir})`);
       return;
     }
 
     console.log('[tauri-driver] Starting...');
     tauriDriver = spawn('tauri-driver', ['--port', '4444', '--native-driver', '/usr/bin/WebKitWebDriver'], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, DISPLAY: process.env.DISPLAY || ':99' },
+      env: { ...process.env, DISPLAY: process.env.DISPLAY || ':99', HTREE_DATA_DIR: dataDir },
       detached: false,
     });
     weStartedDriver = true;
@@ -113,6 +127,10 @@ export const config: Options.Testrunner = {
       console.log('[tauri-driver] Stopping...');
       tauriDriver.kill();
       tauriDriver = null;
+    }
+    if (e2eDataDir) {
+      fs.rmSync(e2eDataDir, { recursive: true, force: true });
+      e2eDataDir = null;
     }
   },
 };

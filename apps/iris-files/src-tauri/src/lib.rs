@@ -7,6 +7,7 @@ pub mod worker;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
+use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -143,10 +144,17 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("failed to get app data dir");
+            let data_dir = match std::env::var("HTREE_DATA_DIR") {
+                Ok(dir) if !dir.trim().is_empty() => {
+                    let path = PathBuf::from(dir);
+                    info!("Using HTREE_DATA_DIR override: {:?}", path);
+                    path
+                }
+                _ => app
+                    .path()
+                    .app_data_dir()
+                    .expect("failed to get app data dir"),
+            };
             std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
 
             info!("App data directory: {:?}", data_dir);

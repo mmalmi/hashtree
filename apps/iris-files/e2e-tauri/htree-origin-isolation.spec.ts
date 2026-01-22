@@ -158,42 +158,49 @@ describe('htree:// Origin Isolation', () => {
     await browser.pause(1000);
 
     // Try to invoke without required parameters
-    const result = await browser.execute(async () => {
+    await browser.execute(() => {
       const invoke =
         (window as any).__TAURI_INTERNALS__?.invoke ||
         (window as any).__TAURI__?.core?.invoke;
 
+      (window as any).__htreeInvokeError = '';
+
       if (!invoke) {
-        return { error: 'Tauri invoke not available' };
+        (window as any).__htreeInvokeError = 'Tauri invoke not available';
+        return;
       }
 
-      try {
-        // Missing both nhash and npub+treename - should fail with validation error
-        await invoke('create_htree_webview', {
-          label: 'test-invalid-' + Date.now(),
-          path: '/index.html',
-          x: 0,
-          y: 60,
-          width: 800,
-          height: 600,
+      invoke('create_htree_webview', {
+        label: 'test-invalid-' + Date.now(),
+        path: '/index.html',
+        x: 0,
+        y: 60,
+        width: 800,
+        height: 600,
+      })
+        .then(() => {
+          (window as any).__htreeInvokeError = 'unexpected success';
+        })
+        .catch((e: any) => {
+          (window as any).__htreeInvokeError = String(e);
         });
-        return { success: true, unexpected: 'Should have failed' };
-      } catch (e: any) {
-        const errorStr = String(e);
-        return {
-          error: errorStr,
-          // Should fail with our validation error
-          hasValidationError: errorStr.includes('Either nhash or') ||
-                             errorStr.includes('must be provided'),
-        };
-      }
     });
 
-    console.log('[htree Origin Test] validation error result:', JSON.stringify(result, null, 2));
+    await browser.waitUntil(async () => {
+      const error = await browser.execute(() => (window as any).__htreeInvokeError);
+      return typeof error === 'string' && error.length > 0;
+    }, {
+      timeout: 20000,
+      timeoutMsg: 'Expected create_htree_webview to fail without required params',
+    });
+
+    const errorMessage = await browser.execute(() => (window as any).__htreeInvokeError);
+
+    console.log('[htree Origin Test] validation error message:', errorMessage);
     await takeScreenshot('htree-origin-04-validation');
 
     // Should have our validation error
-    expect((result as any).hasValidationError).toBe(true);
+    expect(errorMessage).toContain('Either nhash or');
   });
 
   it('should handle htree:// protocol URLs for existing content', async () => {
