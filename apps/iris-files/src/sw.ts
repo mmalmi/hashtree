@@ -516,6 +516,22 @@ function addCORPHeader(response: Response): Response {
 }
 
 /**
+ * Add CORS headers for /htree/ responses
+ * Required for sandboxed iframes (opaque origin) to access resources
+ */
+function addCORSHeaders(response: Response): Response {
+  const newHeaders = new Headers(response.headers);
+  newHeaders.set('Access-Control-Allow-Origin', '*');
+  newHeaders.set('Cross-Origin-Resource-Policy', 'cross-origin');
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  });
+}
+
+/**
  * Intercept fetch requests
  */
 self.addEventListener('fetch', (event: FetchEvent) => {
@@ -538,7 +554,7 @@ self.addEventListener('fetch', (event: FetchEvent) => {
       const nhash = pathParts[1];
       const filename = pathParts.slice(2).join('/') || 'file';
       const forceDownload = url.searchParams.get('download') === '1';
-      event.respondWith(createNhashFileResponse(nhash, filename, rangeHeader, forceDownload));
+      event.respondWith(createNhashFileResponse(nhash, filename, rangeHeader, forceDownload).then(addCORSHeaders));
       return;
     }
 
@@ -548,7 +564,7 @@ self.addEventListener('fetch', (event: FetchEvent) => {
       const npub = pathParts[1];
       const treeName = decodeURIComponent(pathParts[2]);
       const filePath = pathParts.slice(3).map(decodeURIComponent).join('/');
-      event.respondWith(createNpubFileResponse(npub, treeName, filePath, rangeHeader));
+      event.respondWith(createNpubFileResponse(npub, treeName, filePath, rangeHeader).then(addCORSHeaders));
       return;
     }
   }

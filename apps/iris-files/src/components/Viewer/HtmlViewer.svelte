@@ -845,7 +845,7 @@
     <iframe
       src={iframeSrc}
       class="flex-1 w-full border-0 bg-white"
-      sandbox="allow-scripts"
+      sandbox="allow-scripts allow-forms"
       title={fileName}
     ></iframe>
   {:else}

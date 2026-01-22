@@ -225,6 +225,18 @@ importers:
       '@unocss/preset-typography':
         specifier: ^66.5.9
         version: 66.5.10
+      '@wdio/cli':
+        specifier: ^9.22.0
+        version: 9.22.0(@types/node@24.10.1)(expect-webdriverio@5.6.1)
+      '@wdio/local-runner':
+        specifier: ^9.22.0
+        version: 9.22.0(@wdio/globals@9.17.0)(webdriverio@9.22.0)
+      '@wdio/mocha-framework':
+        specifier: ^9.22.0
+        version: 9.22.0
+      '@wdio/spec-reporter':
+        specifier: ^9.20.0
+        version: 9.20.0
       eslint:
         specifier: ^9.39.1
         version: 9.39.1(jiti@2.6.1)
@@ -2527,9 +2539,6 @@ packages:
   '@vitest/pretty-format@2.1.9':
     resolution: {integrity: sha512-KhRIdGV2U9HOUzxfiHmY8IFHTdqtOhIzCpd8WRdJiE7D/HUcZVD0EgQCVjm+Q9gkUXWgBvMmTtZgIG48wq7sOQ==}
 
-  '@vitest/pretty-format@4.0.16':
-    resolution: {integrity: sha512-eNCYNsSty9xJKi/UdVD8Ou16alu7AYiS2fCPRs0b1OdhJiV89buAXQLpTbe+X8V9L6qrs9CqyvU7OaAopJYPsA==}
-
   '@vitest/pretty-format@4.0.17':
     resolution: {integrity: sha512-Ah3VAYmjcEdHg6+MwFE17qyLqBHZ+ni2ScKCiW2XrlSBV4H3Z7vYfPfz7CWQ33gyu76oc0Ai36+kgLU3rfF4nw==}
 
@@ -2541,9 +2550,6 @@ packages:
 
   '@vitest/snapshot@2.1.9':
     resolution: {integrity: sha512-oBO82rEjsxLNJincVhLhaxxZdEtV0EFHMK5Kmx5sJ6H9L183dHECjiefOAdnqpIgT5eZwT04PoggUnW88vOBNQ==}
-
-  '@vitest/snapshot@4.0.16':
-    resolution: {integrity: sha512-sf6NcrYhYBsSYefxnry+DR8n3UV4xWZwWxYbCJUt2YdvtqzSPR7VfGrY0zsv090DAbjFZsi7ZaMi1KnSRyK1XA==}
 
   '@vitest/snapshot@4.0.17':
     resolution: {integrity: sha512-npPelD7oyL+YQM2gbIYvlavlMVWUfNNGZPcu0aEUQXt7FXTuqhmgiYupPnAanhKvyP6Srs2pIbWo30K0RbDtRQ==}
@@ -7997,10 +8003,6 @@ snapshots:
     dependencies:
       tinyrainbow: 1.2.0
 
-  '@vitest/pretty-format@4.0.16':
-    dependencies:
-      tinyrainbow: 3.0.3
-
   '@vitest/pretty-format@4.0.17':
     dependencies:
       tinyrainbow: 3.0.3
@@ -8020,12 +8022,6 @@ snapshots:
       '@vitest/pretty-format': 2.1.9
       magic-string: 0.30.21
       pathe: 1.1.2
-
-  '@vitest/snapshot@4.0.16':
-    dependencies:
-      '@vitest/pretty-format': 4.0.16
-      magic-string: 0.30.21
-      pathe: 2.0.3
 
   '@vitest/snapshot@4.0.17':
     dependencies:
@@ -9183,7 +9179,7 @@ snapshots:
 
   expect-webdriverio@5.6.1(@wdio/globals@9.17.0)(@wdio/logger@9.18.0)(webdriverio@9.22.0):
     dependencies:
-      '@vitest/snapshot': 4.0.16
+      '@vitest/snapshot': 4.0.17
       '@wdio/globals': 9.17.0(expect-webdriverio@5.6.1)(webdriverio@9.22.0)
       '@wdio/logger': 9.18.0
       deep-eql: 5.0.2
