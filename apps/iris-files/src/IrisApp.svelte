@@ -453,15 +453,13 @@
           bind:value={addressValue}
           onfocus={() => isAddressFocused = true}
           onblur={() => isAddressFocused = false}
-          onkeydown={(e) => {
-            if (e.key === 'Enter') {
-              handleAddressSubmit();
-            } else if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
-              // Handle paste explicitly for Tauri compatibility
+          onkeydown={(e) => e.key === 'Enter' && handleAddressSubmit()}
+          onpaste={(e) => {
+            // Handle paste via native event for Tauri compatibility
+            const text = e.clipboardData?.getData('text');
+            if (text) {
               e.preventDefault();
-              navigator.clipboard.readText().then((text) => {
-                addressValue = text;
-              });
+              addressValue = text;
             }
           }}
           placeholder="Search or enter address"

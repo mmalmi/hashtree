@@ -27,15 +27,14 @@
     }
   });
 
-  // Build iframe URL: htree server serves /nhash/... paths
+  // Build iframe URL: htree server serves /htree/nhash/... paths
   let iframeSrc = $derived.by(() => {
     if (htreeServerUrl === null) return null;
 
-    // For Tauri: http://localhost:PORT/nhash.../index.html
+    // For Tauri: http://localhost:PORT/htree/nhash.../index.html
     // For web: /htree/nhash.../index.html (handled by SW)
-    const basePath = htreeServerUrl ? htreeServerUrl : '/htree';
     const filePath = subpath ? `/${subpath}` : '/index.html';
-    return `${basePath}/${nhash}${filePath}`;
+    return `${htreeServerUrl}/htree/${nhash}${filePath}`;
   });
 
   function goBack() {
