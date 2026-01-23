@@ -17,19 +17,31 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 
 ## Packages
 
-- [`packages/hashtree`](packages/hashtree) - Core merkle tree library
-- [`packages/hashtree-dexie`](packages/hashtree-dexie) - IndexedDB/Dexie storage adapter
-- [`packages/hashtree-index`](packages/hashtree-index) - B-Tree and index structures for hashtree
+**npm packages:**
+- [`@hashtree/core`](https://www.npmjs.com/package/@hashtree/core) - Core merkle tree library ([source](packages/hashtree))
+- [`@hashtree/dexie`](https://www.npmjs.com/package/@hashtree/dexie) - IndexedDB/Dexie storage adapter ([source](packages/hashtree-dexie))
+- [`@hashtree/index`](https://www.npmjs.com/package/@hashtree/index) - B-Tree index structures ([source](packages/hashtree-index))
+
+**Internal packages:**
 - [`../apps/iris-files`](../apps/iris-files) - Web/desktop app with Nostr integration (Iris Files + Iris Video)
 - [`packages/ndk`](packages/ndk) - Nostr SDK used by the apps
 - [`packages/ndk-cache`](packages/ndk-cache) - Cache layer for NDK
+
+## Installation
+
+```bash
+npm install @hashtree/core
+# Optional:
+npm install @hashtree/dexie  # IndexedDB storage
+npm install @hashtree/index  # B-Tree indexes
+```
 
 ## Storage Backends
 
 The `Store` interface is just `get(hash) → bytes` and `put(hash, bytes)`. Implementations:
 
 - `MemoryStore` - In-memory
-- `DexieStore` - IndexedDB via Dexie (in `hashtree-dexie`)
+- `DexieStore` - IndexedDB via Dexie (in `@hashtree/dexie`)
 - `OpfsStore` - Origin Private File System
 - `BlossomStore` - Remote blossom server
 - `WebRTCStore` - P2P network (fetches from peers)
@@ -42,21 +54,21 @@ import { MemoryStore, HashTree, toHex } from '@hashtree/core';
 const store = new MemoryStore();
 const tree = new HashTree({ store });
 
-// Store a file
+// Store a file (auto-chunked, encrypted by default)
 const data = new TextEncoder().encode('Hello, World!');
-const cid = await tree.put(data);
+const { cid } = await tree.putFile(data);
 console.log('Hash:', toHex(cid.hash));
 
 // Read it back
-const content = await tree.get(cid);
+const content = await tree.readFile(cid);
 
 // Create a directory
-const dirCid = await tree.putDirectory([
-  { name: 'hello.txt', hash: cid.hash, size: cid.size },
+const { cid: dirCid } = await tree.putDirectory([
+  { name: 'hello.txt', ...cid },
 ]);
 
 // List directory
-const entries = await tree.listDirectory(dirCid.hash);
+const entries = await tree.listDirectory(dirCid);
 ```
 
 ## Encryption (CHK)
