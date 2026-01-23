@@ -26,6 +26,10 @@ struct TestServer {
 
 impl TestServer {
     fn new(port: u16, enable_auth: bool) -> Self {
+        Self::new_with_upstream(port, enable_auth, None)
+    }
+
+    fn new_with_upstream(port: u16, enable_auth: bool, upstream_blossom: Option<&str>) -> Self {
         let htree_bin = find_htree_binary();
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let home_dir = TempDir::new().expect("Failed to create home dir");
@@ -35,6 +39,11 @@ impl TestServer {
         std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
         // Create config
+        let upstream_config = if let Some(url) = upstream_blossom {
+            format!("\n[blossom]\nread_servers = [\"{}\"]", url)
+        } else {
+            String::new()
+        };
         let config_content = format!(r#"
 [server]
 enable_auth = {}
@@ -43,7 +52,7 @@ enable_webrtc = false
 
 [nostr]
 relays = []
-"#, enable_auth);
+{}"#, enable_auth, upstream_config);
         std::fs::write(config_dir.join("config.toml"), config_content)
             .expect("Failed to write config");
 
@@ -431,6 +440,118 @@ fn test_cache_control_immutable_header() {
     } else {
         // Skip test if upload failed (may happen in some CI environments)
         println!("Upload failed (possibly auth issue), skipping cache header test");
+    }
+}
+
+/// Test that X-Source header shows upstream source when fetched from upstream blossom
+#[test]
+fn test_x_source_header_upstream() {
+    // Start upstream server (has the blob)
+    let upstream_server = TestServer::new(19009, false);
+
+    // Upload a blob to upstream server with auth
+    let keys = Keys::generate();
+    let auth_header = create_blossom_auth(&keys);
+
+    let test_content = "X-Source upstream test content";
+    let upload_output = Command::new("curl")
+        .arg("-s")
+        .arg("-X").arg("PUT")
+        .arg("-H").arg("Content-Type: text/plain")
+        .arg("-H").arg(format!("Authorization: {}", auth_header))
+        .arg("--data-binary").arg(test_content)
+        .arg(format!("{}/upload", upstream_server.base_url()))
+        .output()
+        .expect("Failed to upload to upstream");
+
+    let upload_response = String::from_utf8_lossy(&upload_output.stdout);
+    println!("Upstream upload response: {}", upload_response);
+
+    let sha256: Option<String> = serde_json::from_str::<serde_json::Value>(&upload_response)
+        .ok()
+        .and_then(|v| v.get("sha256").and_then(|s| s.as_str()).map(|s| s.to_string()));
+
+    if let Some(hash) = sha256 {
+        println!("Uploaded blob hash: {}", hash);
+
+        // Start downstream server with upstream configured (does NOT have the blob locally)
+        let downstream_server = TestServer::new_with_upstream(19010, false, Some(&upstream_server.base_url()));
+
+        // Wait a bit for downstream server to fully start
+        std::thread::sleep(Duration::from_millis(500));
+
+        // GET from downstream should fetch from upstream and include X-Source header
+        // Use -i (include headers) instead of -I (HEAD only) because HEAD doesn't do upstream fallback
+        let get_output = Command::new("curl")
+            .arg("-s")
+            .arg("-i") // Include headers in output
+            .arg(format!("{}/{}", downstream_server.base_url(), hash))
+            .output()
+            .expect("Failed to get blob from downstream");
+
+        let get_response = String::from_utf8_lossy(&get_output.stdout);
+        println!("GET response from downstream: {}", get_response);
+
+        // Should have X-Source header showing upstream source
+        assert!(get_response.to_lowercase().contains("x-source:"),
+            "Response should include X-Source header for localhost requests");
+        assert!(get_response.to_lowercase().contains("x-source: upstream:"),
+            "X-Source header should indicate 'upstream:' source for blobs fetched from upstream server");
+    } else {
+        // Skip test if upload failed (may happen in some CI environments)
+        println!("Upload to upstream failed (possibly auth issue), skipping upstream X-Source header test");
+    }
+}
+
+/// Test that X-Source header is present for localhost requests (local source)
+#[test]
+fn test_x_source_header_local() {
+    let server = TestServer::new(19008, false);
+
+    // Upload a blob with auth header (required even with enable_auth=false for some setups)
+    let keys = Keys::generate();
+    let auth_header = create_blossom_auth(&keys);
+
+    let test_content = "X-Source test content";
+    let upload_output = Command::new("curl")
+        .arg("-s")
+        .arg("-X").arg("PUT")
+        .arg("-H").arg("Content-Type: text/plain")
+        .arg("-H").arg(format!("Authorization: {}", auth_header))
+        .arg("--data-binary").arg(test_content)
+        .arg(format!("{}/upload", server.base_url()))
+        .output()
+        .expect("Failed to upload");
+
+    let upload_response = String::from_utf8_lossy(&upload_output.stdout);
+    println!("Upload response: {}", upload_response);
+
+    let sha256: Option<String> = serde_json::from_str::<serde_json::Value>(&upload_response)
+        .ok()
+        .and_then(|v| v.get("sha256").and_then(|s| s.as_str()).map(|s| s.to_string()));
+
+    if let Some(hash) = sha256 {
+        println!("Uploaded blob hash: {}", hash);
+
+        // GET request from localhost should include X-Source header
+        let get_output = Command::new("curl")
+            .arg("-s")
+            .arg("-i") // Include headers in output
+            .arg(format!("{}/{}", server.base_url(), hash))
+            .output()
+            .expect("Failed to get blob");
+
+        let get_response = String::from_utf8_lossy(&get_output.stdout);
+        println!("GET response: {}", get_response);
+
+        // Should have X-Source: local header for localhost requests
+        assert!(get_response.to_lowercase().contains("x-source:"),
+            "Response should include X-Source header for localhost requests");
+        assert!(get_response.to_lowercase().contains("x-source: local"),
+            "X-Source header should be 'local' for locally stored blobs");
+    } else {
+        // Skip test if upload failed (may happen in some CI environments)
+        println!("Upload failed (possibly auth issue), skipping X-Source header test");
     }
 }
 

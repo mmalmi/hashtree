@@ -69,12 +69,23 @@ pub struct BlossomClient {
 impl BlossomClient {
     /// Create a new client with the given keys
     /// Automatically loads server config from ~/.hashtree/config.toml
+    /// and prioritizes local daemon if running
     #[cfg(feature = "config")]
     pub fn new(keys: Keys) -> Self {
         let config = hashtree_config::Config::load_or_default();
+        let mut read_servers = config.blossom.all_read_servers();
+
+        // Prioritize local daemon if running
+        if let Some(local_url) = hashtree_config::detect_local_daemon_url(Some(&config.server.bind_address)) {
+            if !read_servers.iter().any(|s| s == &local_url) {
+                debug!("Local daemon detected at {}, prioritizing for reads", local_url);
+                read_servers.insert(0, local_url);
+            }
+        }
+
         Self {
             keys,
-            read_servers: config.blossom.all_read_servers(),
+            read_servers,
             write_servers: config.blossom.all_write_servers(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -139,6 +150,16 @@ impl BlossomClient {
             .timeout(timeout)
             .build()
             .unwrap();
+        self
+    }
+
+    /// Set local daemon URL (prioritized for reads)
+    /// The local daemon is prepended to read_servers if not already present
+    pub fn with_local_daemon(mut self, url: String) -> Self {
+        // Don't add if already present
+        if !self.read_servers.iter().any(|s| s == &url) {
+            self.read_servers.insert(0, url);
+        }
         self
     }
 
@@ -332,11 +353,23 @@ impl BlossomClient {
             let url = format!("{}/{}.bin", server.trim_end_matches('/'), hash);
             match self.http.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
+                    // Capture X-Source header before consuming body (if from local daemon)
+                    let x_source = resp.headers()
+                        .get("x-source")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+
                     match resp.bytes().await {
                         Ok(bytes) => {
                             let computed = compute_sha256(&bytes);
                             if computed == hash {
-                                debug!("Downloaded {} ({} bytes) from {}", &hash[..12.min(hash.len())], bytes.len(), server);
+                                if let Some(source) = x_source {
+                                    debug!("Downloaded {} ({} bytes) via {} [source: {}]",
+                                        &hash[..12.min(hash.len())], bytes.len(), server, source);
+                                } else {
+                                    debug!("Downloaded {} ({} bytes) from {}",
+                                        &hash[..12.min(hash.len())], bytes.len(), server);
+                                }
                                 return Ok(bytes.to_vec());
                             } else {
                                 last_error = format!("hash mismatch from {}: expected {}, got {} ({} bytes received)",
@@ -589,5 +622,32 @@ mod tests {
         // Will fail since servers don't exist, but should compile
         let result = client.upload_to_all_servers(b"test data").await;
         assert!(result.is_err()); // Expected to fail - servers don't exist
+    }
+
+    #[test]
+    fn test_local_daemon_priority() {
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys)
+            .with_servers(vec!["https://remote1.com".to_string(), "https://remote2.com".to_string()])
+            .with_local_daemon("http://127.0.0.1:8080".to_string());
+
+        // Local daemon should be first in read_servers
+        assert_eq!(client.read_servers().len(), 3);
+        assert_eq!(client.read_servers()[0], "http://127.0.0.1:8080");
+        assert_eq!(client.read_servers()[1], "https://remote1.com");
+        assert_eq!(client.read_servers()[2], "https://remote2.com");
+    }
+
+    #[test]
+    fn test_local_daemon_not_duplicated() {
+        let keys = Keys::generate();
+        // If local daemon is already in servers, don't add it again
+        let client = BlossomClient::new_empty(keys)
+            .with_servers(vec!["http://127.0.0.1:8080".to_string(), "https://remote.com".to_string()])
+            .with_local_daemon("http://127.0.0.1:8080".to_string());
+
+        // Should not duplicate
+        assert_eq!(client.read_servers().len(), 2);
+        assert_eq!(client.read_servers()[0], "http://127.0.0.1:8080");
     }
 }

@@ -23,16 +23,56 @@ pub async fn serve_root() -> impl IntoResponse {
 /// Cache-Control header for immutable content-addressed data (1 year)
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 
+/// Source of blob data for X-Source header
+#[derive(Debug, Clone)]
+enum BlobSource {
+    Local,
+    WebRtcPeer { peer_id: String },
+    Upstream { server: String },
+}
+
+impl BlobSource {
+    fn to_header_value(&self) -> String {
+        match self {
+            BlobSource::Local => "local".to_string(),
+            BlobSource::WebRtcPeer { peer_id } => format!("webrtc:{}", peer_id),
+            BlobSource::Upstream { server } => format!("upstream:{}", server),
+        }
+    }
+}
+
+/// Build a blob response with optional X-Source header (only for localhost)
+fn build_blob_response(
+    data: Vec<u8>,
+    source: BlobSource,
+    is_localhost: bool,
+) -> Response<Body> {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, data.len())
+        .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+
+    if is_localhost {
+        builder = builder.header("X-Source", source.to_header_value());
+    }
+
+    builder.body(Body::from(data)).unwrap()
+}
+
 /// Internal content serving (shared by CID and blossom routes)
 ///
 /// `is_immutable`: if true, adds Cache-Control: immutable header.
 /// Use true for content-addressed routes (hash, nhash, blossom SHA256).
 /// Use false for mutable routes (npub/ref_name) where the reference can change.
+/// `is_localhost`: if true, adds X-Source header for debugging.
 async fn serve_content_internal(
     state: &AppState,
     hash: &[u8; 32],
     headers: axum::http::HeaderMap,
     is_immutable: bool,
+    is_localhost: bool,
 ) -> Response<Body> {
     let store = &state.store;
 
@@ -94,6 +134,9 @@ async fn serve_content_internal(
                                         if is_immutable {
                                             builder = builder.header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL);
                                         }
+                                        if is_localhost {
+                                            builder = builder.header("X-Source", "local");
+                                        }
                                         return builder
                                             .body(Body::from_stream(stream))
                                             .unwrap()
@@ -129,6 +172,9 @@ async fn serve_content_internal(
                                             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
                                         if is_immutable {
                                             builder = builder.header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL);
+                                        }
+                                        if is_localhost {
+                                            builder = builder.header("X-Source", "local");
                                         }
                                         return builder
                                             .body(Body::from(range_content))
@@ -191,6 +237,9 @@ async fn serve_content_internal(
             if is_immutable {
                 builder = builder.header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL);
             }
+            if is_localhost {
+                builder = builder.header("X-Source", "local");
+            }
             builder
                 .body(Body::from(content))
                 .unwrap()
@@ -220,6 +269,7 @@ pub async fn serve_content_or_blob(
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
+    let is_localhost = connect_info.0.ip().is_loopback();
     let _client_ip = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -243,15 +293,7 @@ pub async fn serve_content_or_blob(
         let hash_hex = hash_part.to_lowercase();
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
             if let Ok(Some(data)) = state.store.get_blob(&hash_bytes) {
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .header(header::CONTENT_LENGTH, data.len())
-                    .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(data))
-                    .unwrap()
-                    .into_response();
+                return build_blob_response(data, BlobSource::Local, is_localhost).into_response();
             }
         }
     }
@@ -260,7 +302,7 @@ pub async fn serve_content_or_blob(
     // (hashtree hashes are 64 hex chars, same as blossom SHA256)
     if let Ok(hash) = from_hex(&id) {
         if state.store.get_file_chunk_metadata(&hash).ok().flatten().is_some() {
-            return serve_content_internal(&state, &hash, headers, true).await;
+            return serve_content_internal(&state, &hash, headers, true, is_localhost).await;
         }
     }
 
@@ -273,22 +315,13 @@ pub async fn serve_content_or_blob(
             tracing::info!("Hash {} not found locally, querying WebRTC peers", &hash_hex[..16.min(hash_hex.len())]);
 
             // Query connected WebRTC peers
-            if let Some(data) = query_webrtc_peers(webrtc_state, &hash_hex).await {
+            if let Some((data, peer_id)) = query_webrtc_peers(webrtc_state, &hash_hex).await {
                 // Cache locally for future requests
                 if let Err(e) = state.store.put_blob(&data) {
                     tracing::warn!("Failed to cache peer data: {}", e);
                 }
 
-                // Return the data directly
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .header(header::CONTENT_LENGTH, data.len())
-                    .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(data))
-                    .unwrap()
-                    .into_response();
+                return build_blob_response(data, BlobSource::WebRtcPeer { peer_id }, is_localhost).into_response();
             }
         }
 
@@ -296,21 +329,13 @@ pub async fn serve_content_or_blob(
         if !state.upstream_blossom.is_empty() {
             tracing::info!("Hash {} not found via WebRTC, trying upstream Blossom", &hash_hex[..16.min(hash_hex.len())]);
 
-            if let Some(data) = query_upstream_blossom(&state.upstream_blossom, &hash_hex).await {
+            if let Some((data, server)) = query_upstream_blossom(&state.upstream_blossom, &hash_hex).await {
                 // Cache locally for future requests
                 if let Err(e) = state.store.put_blob(&data) {
                     tracing::warn!("Failed to cache upstream data: {}", e);
                 }
 
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .header(header::CONTENT_LENGTH, data.len())
-                    .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(data))
-                    .unwrap()
-                    .into_response();
+                return build_blob_response(data, BlobSource::Upstream { server }, is_localhost).into_response();
             }
         }
     }
@@ -360,7 +385,7 @@ pub async fn serve_npub(
     match tokio::time::timeout(HTTP_RESOLVER_TIMEOUT, resolver.resolve_wait(&key)).await {
         Ok(Ok(cid)) => {
             let _ = resolver.stop().await;
-            serve_content_internal(&state, &cid.hash, headers, false).await
+            serve_content_internal(&state, &cid.hash, headers, false, false).await
         }
         Ok(Err(e)) => {
             let _ = resolver.stop().await;
@@ -718,7 +743,7 @@ pub async fn resolve_and_serve(
     match tokio::time::timeout(HTTP_RESOLVER_TIMEOUT, resolver.resolve_wait(&key)).await {
         Ok(Ok(cid)) => {
             let _ = resolver.stop().await;
-            serve_content_internal(&state, &cid.hash, headers, false).await
+            serve_content_internal(&state, &cid.hash, headers, false, false).await
         }
         Ok(Err(e)) => {
             let _ = resolver.stop().await;
@@ -831,8 +856,8 @@ pub async fn list_trees(
 }
 
 /// Query connected WebRTC peers for content by hash
-/// Returns the first successful response, or None if no peer has it
-async fn query_webrtc_peers(webrtc_state: &Arc<WebRTCState>, hash_hex: &str) -> Option<Vec<u8>> {
+/// Returns the first successful response with peer_id, or None if no peer has it
+async fn query_webrtc_peers(webrtc_state: &Arc<WebRTCState>, hash_hex: &str) -> Option<(Vec<u8>, String)> {
     let peers = webrtc_state.peers.read().await;
 
     // Collect connected peers that have data channels
@@ -860,13 +885,14 @@ async fn query_webrtc_peers(webrtc_state: &Arc<WebRTCState>, hash_hex: &str) -> 
         if let Some(ref peer) = entry.peer {
             match peer.request(hash_hex).await {
                 Ok(Some(data)) => {
+                    let peer_id = entry.peer_id.short();
                     tracing::info!(
                         "Got {} bytes from peer {} for hash {}",
                         data.len(),
-                        entry.peer_id.short(),
+                        peer_id,
                         &hash_hex[..16.min(hash_hex.len())]
                     );
-                    return Some(data);
+                    return Some((data, peer_id));
                 }
                 Ok(None) => {
                     tracing::debug!(
@@ -891,8 +917,8 @@ async fn query_webrtc_peers(webrtc_state: &Arc<WebRTCState>, hash_hex: &str) -> 
 }
 
 /// Query upstream Blossom servers for content by hash
-/// Returns the first successful response, or None if not found
-async fn query_upstream_blossom(servers: &[String], hash_hex: &str) -> Option<Vec<u8>> {
+/// Returns the first successful response with server URL, or None if not found
+async fn query_upstream_blossom(servers: &[String], hash_hex: &str) -> Option<(Vec<u8>, String)> {
     use sha2::{Digest, Sha256};
 
     let client = reqwest::Client::builder()
@@ -919,7 +945,7 @@ async fn query_upstream_blossom(servers: &[String], hash_hex: &str) -> Option<Ve
                             server,
                             &hash_hex[..16.min(hash_hex.len())]
                         );
-                        return Some(bytes.to_vec());
+                        return Some((bytes.to_vec(), server.clone()));
                     } else {
                         tracing::warn!(
                             "Hash mismatch from {}: expected {}, got {}",

@@ -300,7 +300,9 @@ pub async fn cors_preflight(headers: HeaderMap) -> impl IntoResponse {
 pub async fn head_blob(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
+    let is_localhost = connect_info.0.ip().is_loopback();
     let (hash_part, ext) = parse_hash_and_extension(&id);
 
     if !is_valid_sha256(&hash_part) {
@@ -330,15 +332,17 @@ pub async fn head_blob(
                 .map(|e| get_mime_type(&format!("file{}", e)))
                 .unwrap_or("application/octet-stream");
 
-            Response::builder()
+            let mut builder = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime_type)
                 .header(header::CONTENT_LENGTH, data.len())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::empty())
-                .unwrap()
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+            if is_localhost {
+                builder = builder.header("X-Source", "local");
+            }
+            builder.body(Body::empty()).unwrap()
         }
         Ok(None) => Response::builder()
             .status(StatusCode::NOT_FOUND)
