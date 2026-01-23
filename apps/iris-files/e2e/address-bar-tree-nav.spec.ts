@@ -32,10 +32,6 @@ test.describe('Address Bar Tree Navigation', () => {
     // The URL hash should include the full path
     expect(page.url()).toContain('public/test/nested/file.txt');
 
-    // Check what IrisRouter actually rendered by looking at the DOM
-    // ProfileView has unique elements like "Following" and "Known Followers" links
-    // TreeRoute has FileBrowser with file list or "Loading..."
-
     // Wait a moment for rendering to complete
     await page.waitForTimeout(500);
 
@@ -56,7 +52,7 @@ test.describe('Address Bar Tree Navigation', () => {
     console.log('[test] hasFollowingLink:', hasFollowingLink);
     console.log('[test] hasFollowersLink:', hasFollowersLink);
 
-    // FAIL if ProfileView elements are visible - this means the bug is present
+    // Fail if ProfileView elements are visible - this means the bug is present
     if (hasFollowingLink || hasFollowersLink) {
       console.log('[test] BUG DETECTED: ProfileView is rendered instead of TreeRoute!');
       throw new Error('BUG: ProfileView rendered for tree path - IrisRouter not handling tree routes');
@@ -73,6 +69,24 @@ test.describe('Address Bar Tree Navigation', () => {
 
     // At least one of these should be true for TreeRoute
     expect(hasLoading || hasFileBrowser).toBe(true);
+
+    // Verify the route was parsed correctly by checking the routeStore
+    const routeState = await page.evaluate(async () => {
+      const stores = await import('/src/stores');
+      let routeValue: any = null;
+      const unsub = stores.routeStore.subscribe((v: any) => { routeValue = v; });
+      unsub();
+      return {
+        hash: window.location.hash,
+        routeValue,
+      };
+    });
+
+    console.log('[test] Route state:', JSON.stringify(routeState, null, 2));
+
+    // The routeStore should have treeName set (TreeRoute, not ProfileView)
+    expect(routeState.routeValue.treeName).toBe('public');
+    expect(routeState.routeValue.path).toEqual(['test', 'nested', 'file.txt']);
   });
 
   test('IrisRouter.parseRoute handles tree paths correctly', async ({ page }) => {
@@ -128,5 +142,49 @@ test.describe('Address Bar Tree Navigation', () => {
     expect(result.type).toBe('tree');
     expect(result.treeName).toBe('public');
     expect(result.wild).toBe('jumble/dist/index.html');
+  });
+
+  test('matchRoute correctly handles npub/treeName/path pattern', async ({ page }) => {
+    setupPageErrorHandler(page);
+    await page.goto('/iris.html');
+    await page.waitForSelector('input[placeholder="Search or enter address"]', { timeout: 30000 });
+
+    // Wait for initial loading to complete
+    await page.waitForLoadState('networkidle');
+
+    // Test the matchRoute function directly
+    const results = await page.evaluate(async () => {
+      const { matchRoute } = await import('/src/lib/router.svelte');
+
+      const testPath = '/npub1wj6a4ex6hsp7rq4g3h9fzqwezt9f0478vnku9wzzkl25w2uudnds4z3upt/public/jumble/dist/index.html';
+
+      // Test all relevant patterns in order
+      const patterns = [
+        { pattern: '/', name: 'home' },
+        { pattern: '/:npub/profile', name: 'profile-explicit' },
+        { pattern: '/:npub/:treeName/*', name: 'tree-wildcard' },
+        { pattern: '/:npub/:treeName', name: 'tree-exact' },
+        { pattern: '/:id/*', name: 'user-wildcard' },
+        { pattern: '/:id', name: 'user-exact' },
+      ];
+
+      const results = patterns.map(({ pattern, name }) => ({
+        name,
+        pattern,
+        ...matchRoute(pattern, testPath),
+      }));
+
+      return results;
+    });
+
+    console.log('[test] matchRoute results:', JSON.stringify(results, null, 2));
+
+    // Find first match
+    const firstMatch = results.find(r => r.matched);
+    expect(firstMatch).toBeDefined();
+    expect(firstMatch!.name).toBe('tree-wildcard');
+    expect(firstMatch!.params.treeName).toBe('public');
+    expect(firstMatch!.params.wild).toBe('jumble/dist/index.html');
+  });
   });
 });
