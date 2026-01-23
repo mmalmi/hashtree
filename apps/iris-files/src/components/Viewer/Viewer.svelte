@@ -94,8 +94,23 @@
   // Subpath for file (path from git root to file's parent directory)
   let fileSubpath = $derived.by(() => {
     if (!isInGitRepo || urlPath.length <= 1) return undefined;
-    // Path without the filename
-    return urlPath.slice(0, -1).join('/');
+
+    // Path without the filename (path to parent directory from tree root)
+    const parentPath = urlPath.slice(0, -1);
+
+    if (hasGitDir) {
+      // We're at the git root - subpath is just the parent path
+      return parentPath.length > 0 ? parentPath.join('/') : undefined;
+    } else if (gitRootFromUrl !== null) {
+      // We're in a subdirectory - need to subtract the git root path
+      const gitRootParts = gitRootFromUrl === '' ? [] : gitRootFromUrl.split('/');
+      // parentPath should start with gitRootParts
+      // Subpath is the remaining parts after the git root
+      const subpathParts = parentPath.slice(gitRootParts.length);
+      return subpathParts.length > 0 ? subpathParts.join('/') : undefined;
+    }
+
+    return undefined;
   });
 
   // For video streaming: compute effective tree name by absorbing path segments

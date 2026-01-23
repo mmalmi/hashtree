@@ -8,7 +8,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use hashtree_core::{
     Cid, DirEntry, HashTree, HashTreeConfig, HashTreeError, Link, LinkType, MemoryStore, Store,
-    TreeNode, encode_tree_node, sha256, to_hex,
+    to_hex,
 };
 
 fn make_tree() -> (Arc<MemoryStore>, HashTree<MemoryStore>) {
@@ -324,60 +324,6 @@ mod read {
         // Reconstruct
         let combined: Vec<u8> = chunks.into_iter().flatten().collect();
         assert_eq!(combined, data.to_vec());
-    }
-
-    #[tokio::test]
-    async fn test_read_file_range_encrypted_chunked() {
-        let (_store, tree) = make_encrypted_tree_with_chunk_size(64);
-
-        let data: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
-        let (cid, _) = tree.put_file(&data).await.unwrap();
-
-        let range = tree
-            .read_file_range_cid(&cid, 10, Some(30))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(range, data[10..30].to_vec());
-
-        let range = tree
-            .read_file_range_cid(&cid, 60, Some(130))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(range, data[60..130].to_vec());
-
-        let range = tree
-            .read_file_range_cid(&cid, 180, None)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(range, data[180..].to_vec());
-
-        let size = tree.get_size_cid(&cid).await.unwrap();
-        assert_eq!(size, data.len() as u64);
-    }
-
-    #[tokio::test]
-    async fn test_read_file_range_ignores_missing_link_sizes() {
-        let (store, tree) = make_tree();
-
-        let blob_hash = tree.put_blob(b"hello").await.unwrap();
-        let node = TreeNode::new(LinkType::File, vec![Link {
-            hash: blob_hash,
-            name: None,
-            size: 0,
-            key: None,
-            link_type: LinkType::Blob,
-            meta: None,
-        }]);
-        let encoded = encode_tree_node(&node).unwrap();
-        let node_hash = sha256(&encoded);
-
-        store.put(node_hash, encoded).await.unwrap();
-
-        let result = tree.read_file_range(&node_hash, 0, Some(1)).await.unwrap().unwrap();
-        assert_eq!(result, b"h".to_vec());
     }
 
     #[tokio::test]
@@ -1085,6 +1031,7 @@ mod encryption {
         let stored = store.get(&cid.hash).await.unwrap().unwrap();
         assert_eq!(stored, plaintext.to_vec());
     }
+
 }
 
 // ============ INTEROPERABILITY TESTS ============

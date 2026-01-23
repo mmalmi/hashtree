@@ -221,6 +221,14 @@ fn generate_and_save_key(petname: &str) -> Result<StoredKey> {
 
 use hashtree_config::Config;
 
+fn pick_latest_event<'a, I>(events: I) -> Option<&'a Event>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    // Use NIP-16 replaceable event ordering: created_at, then event id.
+    events.into_iter().max_by_key(|event| (event.created_at, event.id))
+}
+
 /// Result of publishing to relays
 #[derive(Debug, Clone)]
 pub struct RelayResult {
@@ -443,16 +451,13 @@ impl NostrClient {
 
         // Find the most recent event with "hashtree" label
         debug!("Got {} events from relays", events.len());
-        let event = events
-            .iter()
-            .filter(|e| {
-                e.tags.iter().any(|t| {
-                    t.as_slice().len() >= 2
-                        && t.as_slice()[0].as_str() == "l"
-                        && t.as_slice()[1].as_str() == LABEL_HASHTREE
-                })
+        let event = pick_latest_event(events.iter().filter(|e| {
+            e.tags.iter().any(|t| {
+                t.as_slice().len() >= 2
+                    && t.as_slice()[0].as_str() == "l"
+                    && t.as_slice()[1].as_str() == LABEL_HASHTREE
             })
-            .max_by_key(|e| e.created_at);
+        }));
 
         let Some(event) = event else {
             anyhow::bail!("Repository '{}' not found (no hashtree event published by {})", repo_name, &self.pubkey[..12]);
@@ -1095,6 +1100,44 @@ mod tests {
 
         let refs = client.cached_refs.get("repo").unwrap();
         assert_eq!(refs.get("refs/heads/main"), Some(&"abc123".to_string()));
+    }
+
+    #[test]
+    fn test_pick_latest_event_prefers_newer_timestamp() {
+        let keys = Keys::generate();
+        let older = Timestamp::from_secs(1_700_000_000);
+        let newer = Timestamp::from_secs(1_700_000_001);
+
+        let event_old = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "old", [])
+            .custom_created_at(older)
+            .to_event(&keys)
+            .unwrap();
+        let event_new = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "new", [])
+            .custom_created_at(newer)
+            .to_event(&keys)
+            .unwrap();
+
+        let picked = pick_latest_event([&event_old, &event_new]).unwrap();
+        assert_eq!(picked.id, event_new.id);
+    }
+
+    #[test]
+    fn test_pick_latest_event_breaks_ties_with_event_id() {
+        let keys = Keys::generate();
+        let created_at = Timestamp::from_secs(1_700_000_000);
+
+        let event_a = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "a", [])
+            .custom_created_at(created_at)
+            .to_event(&keys)
+            .unwrap();
+        let event_b = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "b", [])
+            .custom_created_at(created_at)
+            .to_event(&keys)
+            .unwrap();
+
+        let expected_id = if event_a.id > event_b.id { event_a.id } else { event_b.id };
+        let picked = pick_latest_event([&event_a, &event_b]).unwrap();
+        assert_eq!(picked.id, expected_id);
     }
 
     #[test]
