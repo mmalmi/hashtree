@@ -7,4 +7,5 @@ We are building a decentralized system independent of DNS, SSL certificates, web
 - Keep tests deterministic; avoid flaky tests.
 - Verify changes with unit or e2e tests. Don't ask the user to test. Don't assume code works - everything must be verified with tests.
 - Fix all errors you encounter, whether related to your changes or not.
-- Commit after relevant tests (and build/lint if applicable) pass. Run `git pull origin master --rebase` to rebase onto latest origin, then push to htree remote (`htree://self/hashtree`).
+- If remote `origin` exists, run `git pull origin master --rebase` before starting work and again before pushing.
+- Commit after relevant tests (and build/lint if applicable) pass, then push to htree remote (`htree://self/hashtree`).
