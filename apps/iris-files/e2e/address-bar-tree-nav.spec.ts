@@ -186,5 +186,4 @@ test.describe('Address Bar Tree Navigation', () => {
     expect(firstMatch!.params.treeName).toBe('public');
     expect(firstMatch!.params.wild).toBe('jumble/dist/index.html');
   });
-  });
 });
