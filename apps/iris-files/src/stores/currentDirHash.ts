@@ -183,8 +183,10 @@ async function updateCurrentDirCid() {
     }
     resolvingPathStore.set(false);
   } catch {
-    currentDirCidStore.set(null);
-    isViewingFileStore.set(false);
+    if (!isRootOnlyChange) {
+      currentDirCidStore.set(null);
+      isViewingFileStore.set(false);
+    }
     resolvingPathStore.set(false);
     if (urlPath.length > 0) {
       schedulePathRetry(route);
