@@ -546,7 +546,7 @@
 
   onMount(async () => {
     if (import.meta.env.VITE_TEST_MODE) {
-      (window as any).__reloadYjsEditors = () => loadEditors();
+      window.__reloadYjsEditors = () => loadEditors();
     }
 
     // Load editors

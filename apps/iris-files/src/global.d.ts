@@ -26,6 +26,7 @@ declare global {
     __settingsStore?: unknown;
     __thumbnailCaptureReset?: () => void;
     __testSetDirectoryEntries?: (entries: TreeEntry[]) => void;
+    __reloadYjsEditors?: () => Promise<void>;
 
     // File System Access API (not in standard TS types)
     showSaveFilePicker?: (options?: {
