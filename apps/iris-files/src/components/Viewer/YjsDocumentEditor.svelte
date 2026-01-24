@@ -550,31 +550,35 @@
       testWindow.__reloadYjsEditors = () => loadEditors();
     }
 
-    // Load editors
-    await loadEditors();
-
-    // Load images from attachments directory
-    await loadDocumentImages();
-
     // Create Yjs document
     ydoc = new Y.Doc();
 
-    // Load existing deltas from current view's entries
-    const localDeltas = await loadDeltasFromEntries(entries);
-    for (const delta of localDeltas) {
-      Y.applyUpdate(ydoc, delta, 'remote');
-    }
+    const initPromise = (async () => {
+      // Load editors
+      await loadEditors();
 
-    // Load deltas from collaborators' trees
-    if (collaborators.length > 0) {
-      await loadCollaboratorDeltas(collaborators, route.npub, route.path, route.treeName, ydoc);
-    }
+      // Load images from attachments directory
+      await loadDocumentImages();
+
+      // Load existing deltas from current view's entries
+      const localDeltas = await loadDeltasFromEntries(entries);
+      for (const delta of localDeltas) {
+        Y.applyUpdate(ydoc, delta, 'remote');
+      }
+
+      // Load deltas from collaborators' trees
+      if (collaborators.length > 0) {
+        await loadCollaboratorDeltas(collaborators, route.npub, route.path, route.treeName, ydoc);
+      }
+    })().catch((err) => {
+      console.error('[YjsDoc] Init failed:', err);
+    });
 
     // Set loading false and wait for DOM to render editorElement
     loading = false;
     await tick();
 
-    if (!editorElement) return;
+    if (!editorElement || !ydoc) return;
 
     // Create comments store backed by Yjs
     commentsStore = createCommentsStore(ydoc);
@@ -655,6 +659,8 @@
         scheduleSave();
       }
     });
+
+    void initPromise;
 
     // Set up image URL resolution for attachments:* sources
     // Use MutationObserver to watch for new images and resolve their sources

@@ -92,9 +92,9 @@ test.describe('Git branch features', () => {
     await expect(historyModal).toBeVisible({ timeout: 5000 });
 
     // Click checkout on the older commit (Initial commit)
-    const checkoutButtons = historyModal.locator('button').filter({ hasText: 'Checkout' });
-    await expect(checkoutButtons.first()).toBeVisible({ timeout: 10000 });
-    await checkoutButtons.first().click();
+    const checkoutButton = historyModal.getByRole('button', { name: 'Checkout' });
+    await expect(checkoutButton).toBeVisible({ timeout: 10000 });
+    await checkoutButton.click();
     await expect(historyModal).not.toBeVisible({ timeout: 30000 });
 
     // VERIFY: Branch selector should show short commit hash (7 chars), not "HEAD" or "detached"

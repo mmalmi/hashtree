@@ -2,8 +2,8 @@ import { test, expect } from './fixtures';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import WebSocket from 'ws';
 import { createHash } from 'crypto';
-import { setupPageErrorHandler, disableOthersPool, ensureLoggedIn, waitForRelayConnected, useLocalRelay, presetLocalRelayInDB, safeReload, waitForAppReady, clearAllStorage } from './test-utils';
-import { BOOTSTRAP_SECKEY_HEX, FOLLOW_SECKEY_HEX } from './nostr-test-keys';
+import { setupPageErrorHandler, disableOthersPool, ensureLoggedIn, waitForRelayConnected, useLocalRelay, presetLocalRelayInDB, safeReload, waitForAppReady, clearAllStorage, waitForFollowInWorker } from './test-utils';
+import { BOOTSTRAP_SECKEY_HEX, FOLLOW_SECKEY_HEX, FOLLOW2_SECKEY_HEX } from './nostr-test-keys';
 
 let relayUrl = '';
 test.beforeAll(({ relayUrl: workerRelayUrl }) => {
@@ -11,8 +11,9 @@ test.beforeAll(({ relayUrl: workerRelayUrl }) => {
 });
 const BOOTSTRAP_PUBKEY = getPublicKey(BOOTSTRAP_SECKEY_HEX);
 const FOLLOW_PUBKEY = getPublicKey(FOLLOW_SECKEY_HEX);
-const BOOTSTRAP_NPUB = nip19.npubEncode(BOOTSTRAP_PUBKEY);
 const FOLLOW_NPUB = nip19.npubEncode(FOLLOW_PUBKEY);
+const FOLLOW2_PUBKEY = getPublicKey(FOLLOW2_SECKEY_HEX);
+const FOLLOW2_NPUB = nip19.npubEncode(FOLLOW2_PUBKEY);
 
 async function publishEvent(event: Record<string, unknown>): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -46,32 +47,21 @@ async function publishEvent(event: Record<string, unknown>): Promise<void> {
   });
 }
 
-async function seedFeedVideos(suffix: string): Promise<{ bootstrapTree: string; followTree: string }> {
+async function seedFeedVideos(suffix: string): Promise<{ followTree: string; follow2Tree: string }> {
   const now = Math.floor(Date.now() / 1000);
   const bootstrapKey = Buffer.from(BOOTSTRAP_SECKEY_HEX, 'hex');
   const followKey = Buffer.from(FOLLOW_SECKEY_HEX, 'hex');
+  const follow2Key = Buffer.from(FOLLOW2_SECKEY_HEX, 'hex');
 
-  const bootstrapTree = `videos/Feed Multi A ${suffix}`;
-  const followTree = `videos/Feed Multi B ${suffix}`;
-  const bootstrapVideoHash = createHash('sha256').update(`feed-multi-${suffix}-bootstrap`).digest('hex');
+  const followTree = `videos/Feed Multi A ${suffix}`;
+  const follow2Tree = `videos/Feed Multi B ${suffix}`;
   const followVideoHash = createHash('sha256').update(`feed-multi-${suffix}-follow`).digest('hex');
+  const follow2VideoHash = createHash('sha256').update(`feed-multi-${suffix}-follow2`).digest('hex');
 
   const followEvent = finalizeEvent({
     kind: 3,
     content: '',
-    tags: [['p', FOLLOW_PUBKEY]],
-    created_at: now,
-    pubkey: BOOTSTRAP_PUBKEY,
-  }, bootstrapKey);
-
-  const bootstrapVideoEvent = finalizeEvent({
-    kind: 30078,
-    content: '',
-    tags: [
-      ['d', bootstrapTree],
-      ['l', 'hashtree'],
-      ['hash', bootstrapVideoHash],
-    ],
+    tags: [['p', FOLLOW_PUBKEY], ['p', FOLLOW2_PUBKEY]],
     created_at: now,
     pubkey: BOOTSTRAP_PUBKEY,
   }, bootstrapKey);
@@ -84,15 +74,27 @@ async function seedFeedVideos(suffix: string): Promise<{ bootstrapTree: string; 
       ['l', 'hashtree'],
       ['hash', followVideoHash],
     ],
-    created_at: now,
+    created_at: now + 2,
     pubkey: FOLLOW_PUBKEY,
   }, followKey);
 
-  await publishEvent(followEvent);
-  await publishEvent(bootstrapVideoEvent);
-  await publishEvent(followVideoEvent);
+  const follow2VideoEvent = finalizeEvent({
+    kind: 30078,
+    content: '',
+    tags: [
+      ['d', follow2Tree],
+      ['l', 'hashtree'],
+      ['hash', follow2VideoHash],
+    ],
+    created_at: now + 3,
+    pubkey: FOLLOW2_PUBKEY,
+  }, follow2Key);
 
-  return { bootstrapTree, followTree };
+  await publishEvent(followEvent);
+  await publishEvent(followVideoEvent);
+  await publishEvent(follow2VideoEvent);
+
+  return { followTree, follow2Tree };
 }
 
 test('new user feed shows videos from multiple owners', async ({ page }) => {
@@ -100,7 +102,7 @@ test('new user feed shows videos from multiple owners', async ({ page }) => {
   setupPageErrorHandler(page);
 
   const suffix = Date.now().toString(36);
-  await seedFeedVideos(suffix);
+  const { followTree, follow2Tree } = await seedFeedVideos(suffix);
 
   await page.goto('/video.html#/');
   await waitForAppReady(page);
@@ -112,34 +114,48 @@ test('new user feed shows videos from multiple owners', async ({ page }) => {
   await useLocalRelay(page);
   await ensureLoggedIn(page);
   await waitForRelayConnected(page, 30000);
+  await page.waitForFunction(() => (window as any).__testHelpers?.followPubkey, { timeout: 10000 });
+  await page.evaluate((pk: string) => (window as any).__testHelpers?.followPubkey?.(pk), FOLLOW_PUBKEY);
+  await page.evaluate((pk: string) => (window as any).__testHelpers?.followPubkey?.(pk), FOLLOW2_PUBKEY);
+  await waitForFollowInWorker(page, FOLLOW_PUBKEY, 20000);
+  await waitForFollowInWorker(page, FOLLOW2_PUBKEY, 20000);
 
   const refreshFeed = async () => {
     await page.evaluate(async () => {
-      const { resetFeedFetchState, fetchFeedVideos } = await import('/src/stores/feedStore');
+      (window as any).__workerAdapter?.sendHello?.();
+      const { feedStore, resetFeedFetchState, fetchFeedVideos } = await import('/src/stores/feedStore');
+      feedStore.set([]);
       resetFeedFetchState();
       await fetchFeedVideos();
     });
   };
 
   await refreshFeed();
+  const followEncoded = encodeURIComponent(followTree);
+  const follow2Encoded = encodeURIComponent(follow2Tree);
 
   await expect.poll(
     async () => {
-      const result = await page.evaluate(({ bootstrapNpub, followNpub }) => {
-        const hasBootstrap = !!document.querySelector(`a[href*="${bootstrapNpub}"][href*="videos%2F"]`);
-        const hasFollow = !!document.querySelector(`a[href*="${followNpub}"][href*="videos%2F"]`);
-        return { hasBootstrap, hasFollow };
-      }, { bootstrapNpub: BOOTSTRAP_NPUB, followNpub: FOLLOW_NPUB });
+      const result = await page.evaluate(({ followNpub, followPath, follow2Npub, follow2Path }) => {
+        const hasFollow = !!document.querySelector(`a[href*="${followNpub}"][href*="${followPath}"]`);
+        const hasFollow2 = !!document.querySelector(`a[href*="${follow2Npub}"][href*="${follow2Path}"]`);
+        return { hasFollow, hasFollow2 };
+      }, {
+        followNpub: FOLLOW_NPUB,
+        followPath: followEncoded,
+        follow2Npub: FOLLOW2_NPUB,
+        follow2Path: follow2Encoded,
+      });
 
-      if (!result.hasBootstrap || !result.hasFollow) {
+      if (!result.hasFollow || !result.hasFollow2) {
         await refreshFeed();
       }
 
       return result;
     },
-    { timeout: 60000, intervals: [1000, 2000, 3000] }
-  ).toEqual({ hasBootstrap: true, hasFollow: true });
+    { timeout: 180000, intervals: [1000, 2000, 3000] }
+  ).toEqual({ hasFollow: true, hasFollow2: true });
 
-  await expect(page.locator(`a[href*="${BOOTSTRAP_NPUB}"][href*="videos%2F"]`).first()).toBeVisible({ timeout: 20000 });
-  await expect(page.locator(`a[href*="${FOLLOW_NPUB}"][href*="videos%2F"]`).first()).toBeVisible({ timeout: 20000 });
+  await expect(page.locator(`a[href*="${FOLLOW_NPUB}"][href*="${followEncoded}"]`).first()).toBeVisible({ timeout: 20000 });
+  await expect(page.locator(`a[href*="${FOLLOW2_NPUB}"][href*="${follow2Encoded}"]`).first()).toBeVisible({ timeout: 20000 });
 });

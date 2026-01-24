@@ -11,6 +11,7 @@
 
 import { nhashEncode, type CID } from '@hashtree/core';
 import { isTauri } from '../tauri';
+import { getMediaClientId } from './mediaClient';
 import { logHtreeDebug } from './htreeDebug';
 
 /** Fixed port for Tauri htree server */
@@ -232,6 +233,13 @@ export function appendHtreeCacheBust(url: string): string {
   return `${url}${separator}htree_p=${prefixEpoch}`;
 }
 
+function appendMediaClientKey(url: string): string {
+  const clientId = getMediaClientId();
+  if (!clientId) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}htree_c=${encodeURIComponent(clientId)}`;
+}
+
 /**
  * Generate a file URL for npub-based access
  *
@@ -244,7 +252,7 @@ export function getNpubFileUrl(npub: string, treeName: string, path: string): st
   const encodedTreeName = encodeURIComponent(treeName);
   const encodedPath = path.split('/').map(encodeURIComponent).join('/');
   const url = `${getHtreePrefix()}/htree/${npub}/${encodedTreeName}/${encodedPath}`;
-  return appendHtreeCacheBust(url);
+  return appendHtreeCacheBust(appendMediaClientKey(url));
 }
 
 /**
@@ -265,9 +273,11 @@ export function getNhashFileUrl(cid: CID, filename?: string): string {
   const nhash = nhashEncode(cid);
   const prefix = getHtreePrefix();
   if (filename) {
-    return appendHtreeCacheBust(`${prefix}/htree/${nhash}/${encodeURIComponent(filename)}`);
+    return appendHtreeCacheBust(
+      appendMediaClientKey(`${prefix}/htree/${nhash}/${encodeURIComponent(filename)}`)
+    );
   }
-  return appendHtreeCacheBust(`${prefix}/htree/${nhash}`);
+  return appendHtreeCacheBust(appendMediaClientKey(`${prefix}/htree/${nhash}`));
 }
 
 /**
@@ -300,7 +310,7 @@ export function getThumbnailUrl(npub: string, treeName: string, videoId?: string
     : 'thumbnail';
   const base = `${getHtreePrefix()}/htree/${npub}/${encodedTreeName}/${path}`;
   const url = hashPrefix ? `${base}?v=${hashPrefix}` : base;
-  return appendHtreeCacheBust(url);
+  return appendHtreeCacheBust(appendMediaClientKey(url));
 }
 
 /**

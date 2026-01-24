@@ -220,8 +220,10 @@ test.describe('Git checkout features', () => {
       autosaveIfOwn(rootCid);
     });
 
+    const fileList = page.getByRole('listbox', { name: 'File list' });
+
     // Wait for file to appear
-    await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'initial.txt' })).toBeVisible({ timeout: 15000 });
+    await expect(fileList.getByRole('link', { name: /initial\.txt/i })).toBeVisible({ timeout: 15000 });
 
     // Initialize git repo (creates first commit with initial.txt)
     const gitInitBtn = page.getByRole('button', { name: 'Git Init' });
@@ -257,7 +259,7 @@ test.describe('Git checkout features', () => {
     });
 
     // Wait for the new file to appear
-    await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'added-later.txt' })).toBeVisible({ timeout: 15000 });
+    await expect(fileList.getByRole('link', { name: /added-later\.txt/i })).toBeVisible({ timeout: 15000 });
 
     // Wait for uncommitted changes indicator and commit
     const uncommittedBtn = page.locator('button').filter({ hasText: /uncommitted/i });
@@ -276,8 +278,8 @@ test.describe('Git checkout features', () => {
 
     // Verify we now have 2 commits and both files visible
     await expect(commitsBtn).toContainText(/2/, { timeout: 20000 });
-    await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'initial.txt' })).toBeVisible();
-    await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'added-later.txt' })).toBeVisible();
+    await expect(fileList.getByRole('link', { name: /initial\.txt/i })).toBeVisible();
+    await expect(fileList.getByRole('link', { name: /added-later\.txt/i })).toBeVisible();
 
     // Open commit history
     await commitsBtn.click();
@@ -298,8 +300,8 @@ test.describe('Git checkout features', () => {
     // After checkout to initial commit:
     // - initial.txt should still be visible (was in first commit)
     // - added-later.txt should NOT be visible (was added in second commit)
-    await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'initial.txt' })).toBeVisible({ timeout: 15000 });
-    await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'added-later.txt' })).not.toBeVisible({ timeout: 5000 });
+    await expect(fileList.getByRole('link', { name: /initial\.txt/i })).toBeVisible({ timeout: 15000 });
+    await expect(fileList.getByRole('link', { name: /added-later\.txt/i })).not.toBeVisible({ timeout: 5000 });
 
     // After checkout to older commit, git log from HEAD only shows ancestors
     // So we expect 1 commit (the initial commit we checked out)

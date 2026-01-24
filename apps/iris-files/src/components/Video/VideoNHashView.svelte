@@ -131,7 +131,9 @@
 
   function handleDownload() {
     if (!activeVideoCid) return;
-    window.location.href = getNhashFileUrl(activeVideoCid, videoFileName || 'video.mp4') + '?download=1';
+    const baseUrl = getNhashFileUrl(activeVideoCid, videoFileName || 'video.mp4');
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    window.location.href = `${baseUrl}${separator}download=1`;
   }
 </script>
 

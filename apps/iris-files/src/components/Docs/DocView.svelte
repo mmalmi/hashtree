@@ -13,6 +13,12 @@
 
   let route = $derived($routeStore);
   let treeRoot = $derived($treeRootStore);
+  let docKey = $derived.by(() => {
+    if (!route.npub || !route.treeName) return '';
+    const pathKey = route.path.join('/');
+    const linkKey = route.params.get('k') ?? '';
+    return `${route.npub}/${route.treeName}/${pathKey}?k=${linkKey}`;
+  });
 
   // Set selectedTree when viewing own document (required for autosave to work)
   function setSelectedTreeIfOwn(npubStr: string, treeNameVal: string) {
@@ -186,7 +192,9 @@
     <a href="#/" class="text-accent hover:underline">Back to home</a>
   </div>
 {:else if isYjsDoc && dirCid}
-  <YjsDocumentEditor {dirCid} {dirName} {entries} />
+  {#key docKey}
+    <YjsDocumentEditor {dirCid} {dirName} {entries} />
+  {/key}
 {:else if dirCid}
   <!-- Not a yjs doc - show option to convert or simple view -->
   <div class="flex-1 flex flex-col items-center justify-center text-text-3 p-6">

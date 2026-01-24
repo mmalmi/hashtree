@@ -2,7 +2,7 @@
  * Git-related stores for detecting and interacting with git repos
  */
 import { writable, get, type Readable } from 'svelte/store';
-import type { CID } from '@hashtree/core';
+import { toHex, type CID } from '@hashtree/core';
 import { isGitRepo, getBranches, getLog, getStatus, getHead } from '../utils/git';
 import type { GitStatusResult } from '../utils/wasmGit';
 import { nostrStore } from '../nostr';
@@ -27,6 +27,10 @@ export interface CommitInfo {
 // Cache for git info stores by repoPath:CID (LRU to prevent unbounded growth)
 const gitInfoStoreCache = new LRUCache<string, Readable<GitInfo>>(5);
 
+function cidCacheKey(cid: CID): string {
+  return cid.key ? `${toHex(cid.hash)}:${toHex(cid.key)}` : toHex(cid.hash);
+}
+
 /**
  * Create a store to detect if a directory is a git repo and get basic info
  * Cached by repoPath:CID to avoid re-fetching when navigating within the same repo
@@ -36,7 +40,7 @@ export function createGitInfoStore(dirCid: CID | null, repoPath?: string): Reada
     return { subscribe: writable<GitInfo>({ isRepo: false, currentBranch: null, branches: [], loading: false }).subscribe };
   }
 
-  const cacheKey = `${repoPath ?? ''}:${dirCid.toString()}`;
+  const cacheKey = `${repoPath ?? ''}:${cidCacheKey(dirCid)}`;
   if (gitInfoStoreCache.has(cacheKey)) {
     return gitInfoStoreCache.get(cacheKey)!;
   }
@@ -102,7 +106,7 @@ export function createGitLogStore(dirCid: CID | null, depth = 20, repoPath?: str
     return { subscribe: writable({ commits: [], headOid: null, loading: false, error: null }).subscribe };
   }
 
-  const cacheKey = `${repoPath ?? ''}:${dirCid.toString()}:${depth}`;
+  const cacheKey = `${repoPath ?? ''}:${cidCacheKey(dirCid)}:${depth}`;
   if (gitLogStoreCache.has(cacheKey)) {
     return gitLogStoreCache.get(cacheKey)!;
   }

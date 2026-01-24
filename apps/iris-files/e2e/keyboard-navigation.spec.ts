@@ -90,31 +90,28 @@ test.describe('Keyboard Navigation', () => {
     await createFile(page, 'alpha.txt', 'Alpha content', 'vim-keys-test');
     await createFile(page, 'beta.txt', 'Beta content', 'vim-keys-test');
 
+    const alphaLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'alpha.txt' }).first();
+    await expect(alphaLink).toBeVisible({ timeout: 10000 });
+    await alphaLink.click();
+    await expect(page.locator('pre')).toContainText('Alpha content', { timeout: 10000 });
+
     const fileList = page.getByTestId('file-list');
     await expect(fileList).toBeVisible({ timeout: 10000 });
     await fileList.click(); // Click to ensure focus
     await fileList.focus();
 
-    const reachContent = async (needle: string, key: string) => {
-      for (let i = 0; i < 6; i++) {
+    const pressAndExpect = async (needle: string, key: string) => {
+      await expect(async () => {
         await page.keyboard.press(key);
-        const text = await page.locator('pre').textContent().catch(() => '');
-        if (text && text.includes(needle)) {
-          return true;
-        }
-        await page.waitForTimeout(200);
-      }
-      return false;
+        await expect(page.locator('pre')).toContainText(needle, { timeout: 1000 });
+      }).toPass({ timeout: 8000, intervals: [200, 400, 800, 1200] });
     };
 
-    // Navigate down with j to alpha
-    expect(await reachContent('Alpha content', 'j')).toBe(true);
-
     // Navigate down with j to beta
-    expect(await reachContent('Beta content', 'j')).toBe(true);
+    await pressAndExpect('Beta content', 'j');
 
     // Navigate back up with k to alpha
-    expect(await reachContent('Alpha content', 'k')).toBe(true);
+    await pressAndExpect('Alpha content', 'k');
   });
 
   test('should navigate into directories with Enter key', async ({ page }) => {

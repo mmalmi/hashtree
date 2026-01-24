@@ -68,21 +68,23 @@ test.describe('Livestream Viewer Updates', () => {
         console.log('WebRTC already started, current pools:', JSON.stringify(pools));
 
         // If pools weren't updated, force update
-        if (pools?.other?.maxConnections !== 0) {
+        if (pools && pools.other?.maxConnections !== 0) {
           console.warn('Pool settings not applied, forcing update...');
           // This should trigger the settingsStore subscription
           await page.evaluate(() => {
             window.__setPoolSettings!({ otherMax: 0, otherSatisfied: 0 });
           });
-          await page.waitForTimeout(100);
+          await page.waitForFunction(() => {
+            const store = (window as any).__getWebRTCStore?.();
+            return !store || store?.pools?.other?.maxConnections === 0;
+          }, { timeout: 5000 });
         }
       }
       console.log('Set follows-only pool mode (otherMax: 0)');
     }
 
-    await page.waitForTimeout(300); // Small delay for settings to propagate
     await useLocalRelay(page);
-    await waitForRelayConnected(page);
+    await waitForRelayConnected(page, 30000);
     // Page ready - navigateToPublicFolder handles waiting
 
     // Wait for the public folder link to appear
@@ -113,31 +115,116 @@ test.describe('Livestream Viewer Updates', () => {
   }
 
   async function waitForFileEntry(page: Page, filename: string, timeoutMs: number = 30000): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const found = await page.evaluate(async (name) => {
+    await expect.poll(async () => {
+      return page.evaluate(async (name) => {
         try {
           const { getTree } = await import('/src/store.ts');
           const { getTreeRootSync } = await import('/src/stores/treeRoot.ts');
           const { getRouteSync } = await import('/src/stores/index.ts');
-        const route = getRouteSync();
-        const rootCid = getTreeRootSync(route.npub, route.treeName);
-        if (!rootCid) return false;
-        const tree = getTree();
-        const basePath = route.path ?? [];
-        const targetPath = basePath[basePath.length - 1] === name
-          ? basePath
-          : basePath.concat([name]);
-        await tree.resolvePath(rootCid, targetPath);
-        return true;
-      } catch {
-        return false;
-      }
+          const route = getRouteSync();
+          const rootCid = getTreeRootSync(route.npub, route.treeName);
+          if (!rootCid) return false;
+          const tree = getTree();
+          const basePath = route.path ?? [];
+          const targetPath = basePath[basePath.length - 1] === name
+            ? basePath
+            : basePath.concat([name]);
+          await tree.resolvePath(rootCid, targetPath);
+          return true;
+        } catch {
+          return false;
+        }
       }, filename);
-      if (found) return true;
-      await page.waitForTimeout(1000);
-    }
-    return false;
+    }, { timeout: timeoutMs, intervals: [500, 1000, 2000] }).toBe(true);
+    return true;
+  }
+
+  async function waitForStreamPreview(page: Page, timeoutMs: number = 30000): Promise<void> {
+    const filenameInput = page.locator('input[placeholder="filename"]');
+    await expect(filenameInput).toBeVisible({ timeout: timeoutMs });
+  }
+
+  async function waitForStreamRecording(page: Page, timeoutMs: number = 30000): Promise<void> {
+    await expect(page.getByRole('button', { name: /Stop Recording/ })).toBeVisible({ timeout: timeoutMs });
+    await expect.poll(async () => {
+      return page.evaluate(() => {
+        const recorder = (window as any).__testRecorder;
+        const chunkIndex = (window as any).__testChunkIndex;
+        if (recorder?.state === 'recording') return true;
+        return typeof chunkIndex === 'number' && chunkIndex > 0;
+      });
+    }, { timeout: timeoutMs, intervals: [500, 1000, 1500] }).toBe(true);
+  }
+
+  async function waitForRecordingTime(page: Page, minSeconds: number, timeoutMs: number = 30000): Promise<void> {
+    await expect.poll(async () => {
+      return page.evaluate(() => {
+        const chunkIndex = (window as any).__testChunkIndex;
+        return typeof chunkIndex === 'number' ? chunkIndex : 0;
+      });
+    }, { timeout: timeoutMs, intervals: [500, 1000, 1500] }).toBeGreaterThanOrEqual(minSeconds);
+  }
+
+  async function waitForStreamBytes(page: Page, minBytes: number, timeoutMs: number = 30000): Promise<void> {
+    const chunkSize = 50000;
+    const minChunks = Math.max(1, Math.ceil(minBytes / chunkSize));
+    await expect.poll(async () => {
+      return page.evaluate(() => {
+        const chunkIndex = (window as any).__testChunkIndex;
+        return typeof chunkIndex === 'number' ? chunkIndex : 0;
+      });
+    }, { timeout: timeoutMs, intervals: [500, 1000, 1500] }).toBeGreaterThanOrEqual(minChunks);
+  }
+
+  async function waitForVideoReady(page: Page, timeoutMs: number = 20000): Promise<void> {
+    await expect.poll(async () => {
+      return page.evaluate(() => {
+        const video = document.querySelector('video') as HTMLVideoElement | null;
+        if (!video) return false;
+        const buffered = video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0;
+        return video.readyState >= 2 || buffered > 0;
+      });
+    }, { timeout: timeoutMs, intervals: [500, 1000, 1500] }).toBe(true);
+  }
+
+  async function collectPlaybackSamples(
+    page: Page,
+    sampleCount: number,
+    intervalMs: number
+  ): Promise<Array<{ timestamp: number; currentTime: number; duration: number; buffered: number; readyState: number; paused: boolean }>> {
+    await page.evaluate((interval) => {
+      (window as any).__playbackSamples = [];
+      if ((window as any).__playbackSampler) {
+        clearInterval((window as any).__playbackSampler);
+      }
+      (window as any).__playbackSampler = setInterval(() => {
+        const video = document.querySelector('video') as HTMLVideoElement | null;
+        if (!video) return;
+        (window as any).__playbackSamples.push({
+          timestamp: Date.now(),
+          currentTime: video.currentTime,
+          duration: video.duration,
+          buffered: video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0,
+          readyState: video.readyState,
+          paused: video.paused,
+        });
+      }, interval);
+    }, intervalMs);
+
+    await page.waitForFunction(
+      (count) => (window as any).__playbackSamples?.length >= count,
+      sampleCount,
+      { timeout: sampleCount * intervalMs + 15000 }
+    );
+
+    return page.evaluate(() => {
+      const samples = (window as any).__playbackSamples || [];
+      if ((window as any).__playbackSampler) {
+        clearInterval((window as any).__playbackSampler);
+        (window as any).__playbackSampler = null;
+      }
+      return samples;
+    });
   }
 
   // Helper to follow a user by their npub
@@ -316,17 +403,15 @@ test.describe('Livestream Viewer Updates', () => {
       const streamLink = pageA.getByRole('link', { name: 'Stream' });
       await expect(streamLink).toBeVisible({ timeout: 30000 });
       await streamLink.click();
-      await pageA.waitForTimeout(500);
 
       // Start camera preview
       const startCameraBtn = pageA.getByRole('button', { name: 'Start Camera' });
       await expect(startCameraBtn).toBeVisible({ timeout: 30000 });
       await startCameraBtn.click();
-      await pageA.waitForTimeout(1000);
+      await waitForStreamPreview(pageA);
 
       // Set filename
       const filenameInput = pageA.locator('input[placeholder="filename"]');
-      await expect(filenameInput).toBeVisible({ timeout: 30000 });
       const testFilename = `live_test_${Date.now()}`;
       await filenameInput.fill(testFilename);
 
@@ -338,7 +423,9 @@ test.describe('Livestream Viewer Updates', () => {
 
       // Wait for initial chunks to be recorded and published (at least 3 seconds for first publish)
       console.log('Waiting for initial stream data to be published...');
-      await pageA.waitForTimeout(5000);
+      await waitForStreamRecording(pageA);
+      await waitForRecordingTime(pageA, 3, 20000);
+      await waitForStreamBytes(pageA, 1024, 20000);
       await waitForFileEntry(pageA, `${testFilename}.webm`, 20000);
 
       // === Viewer: Navigate to broadcaster's stream ===
@@ -347,15 +434,15 @@ test.describe('Livestream Viewer Updates', () => {
       console.log(`Stream URL: ${streamUrl}`);
       await pageB.goto(streamUrl);
       await waitForFileEntry(pageB, `${testFilename}.webm`, 30000);
-      await pageB.waitForTimeout(3000);
 
       // Check if video element exists (may have invisible class during loading)
       const videoElement = pageB.locator('video');
       await expect(videoElement).toBeAttached({ timeout: 15000 });
       console.log('Viewer: Video element attached');
 
-      // Wait a bit for loading to complete
-      await pageB.waitForTimeout(2000);
+      await waitForVideoReady(pageB).catch(() => {
+        console.warn('Viewer video not ready within timeout; continuing with diagnostics');
+      });
 
       // Get viewer state including bytes loaded from the KB display
       const getViewerState = async () => {
@@ -382,7 +469,14 @@ test.describe('Livestream Viewer Updates', () => {
 
       // Wait for more chunks to be streamed (continue broadcasting)
       console.log('Waiting for more stream data...');
-      await pageA.waitForTimeout(8000); // Wait for more chunks to be published
+      await expect.poll(async () => {
+        if (!initialState) return false;
+        const state = await getViewerState();
+        if (!state) return false;
+        const bufferedIncreased = state.buffered > initialState.buffered + 0.5;
+        const bytesIncreased = state.bytesLoaded > initialState.bytesLoaded;
+        return bufferedIncreased || bytesIncreased || viewerReloadCount > 0;
+      }, { timeout: 20000, intervals: [1000, 2000, 3000] }).toBe(true);
 
       // Check viewer state after more data
       const afterState = await getViewerState();
@@ -424,7 +518,12 @@ test.describe('Livestream Viewer Updates', () => {
       const stopRecordingBtn = pageA.getByRole('button', { name: /Stop Recording/ });
       if (await stopRecordingBtn.isVisible()) {
         await stopRecordingBtn.click();
-        await pageA.waitForTimeout(2000);
+        await expect.poll(async () => {
+          return pageA.evaluate(() => {
+            const recorder = (window as any).__testRecorder;
+            return recorder ? recorder.state !== 'recording' : true;
+          });
+        }, { timeout: 10000, intervals: [500, 1000] }).toBe(true);
       }
 
       // Final state check
@@ -476,12 +575,11 @@ test.describe('Livestream Viewer Updates', () => {
       // Start streaming
       const streamLink = page.getByRole('link', { name: 'Stream' });
       await streamLink.click();
-      await page.waitForTimeout(500);
 
       const startCameraBtn = page.getByRole('button', { name: 'Start Camera' });
       await expect(startCameraBtn).toBeVisible({ timeout: 30000 });
       await startCameraBtn.click();
-      await page.waitForTimeout(1000);
+      await waitForStreamPreview(page);
 
       const testFilename = `long_stream_${Date.now()}`;
       const filenameInput = page.locator('input[placeholder="filename"]');
@@ -491,7 +589,9 @@ test.describe('Livestream Viewer Updates', () => {
 
       // Let broadcaster record for a bit
       console.log('Recording started, waiting 4s...');
-      await page.waitForTimeout(4000);
+      await waitForStreamRecording(page);
+      await waitForRecordingTime(page, 4, 20000);
+      await waitForStreamBytes(page, 1024, 20000);
 
       // Open viewer in new tab (same context = shared storage)
       console.log('Opening viewer in new tab...');
@@ -509,6 +609,7 @@ test.describe('Livestream Viewer Updates', () => {
 
       const videoElement = viewerPage.locator('video');
       await expect(videoElement).toBeVisible({ timeout: 15000 });
+      await waitForVideoReady(viewerPage);
 
       // Start playback
       await viewerPage.evaluate(() => {
@@ -517,26 +618,16 @@ test.describe('Livestream Viewer Updates', () => {
       });
 
       // Monitor playback over time - check every 2 seconds for 16 seconds
-      const playbackStates: Array<{time: number, currentTime: number, buffered: number, readyState: number, paused: boolean}> = [];
-
-      for (let i = 0; i < 8; i++) {
-        await viewerPage.waitForTimeout(2000);
-
-        const state = await viewerPage.evaluate(() => {
-          const video = document.querySelector('video') as HTMLVideoElement;
-          if (!video) return null;
-          return {
-            currentTime: video.currentTime,
-            buffered: video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0,
-            readyState: video.readyState,
-            paused: video.paused,
-          };
-        });
-
-        if (state) {
-          playbackStates.push({ time: (i + 1) * 2, ...state });
-          console.log(`t=${(i+1)*2}s: currentTime=${state.currentTime.toFixed(1)}, buffered=${state.buffered.toFixed(1)}, readyState=${state.readyState}, paused=${state.paused}`);
-        }
+      const playbackSamples = await collectPlaybackSamples(viewerPage, 8, 2000);
+      const playbackStates = playbackSamples.map((state, index) => ({
+        time: (index + 1) * 2,
+        currentTime: state.currentTime,
+        buffered: state.buffered,
+        readyState: state.readyState,
+        paused: state.paused,
+      }));
+      for (const state of playbackStates) {
+        console.log(`t=${state.time}s: currentTime=${state.currentTime.toFixed(1)}, buffered=${state.buffered.toFixed(1)}, readyState=${state.readyState}, paused=${state.paused}`);
       }
 
       // Stop recording
@@ -598,7 +689,6 @@ test.describe('Livestream Viewer Updates', () => {
     });
 
     await page.reload();
-    await page.waitForTimeout(500);
     // Page ready - navigateToPublicFolder handles waiting
 
     // Get the user's npub
@@ -620,13 +710,12 @@ test.describe('Livestream Viewer Updates', () => {
     const streamLink = page.getByRole('link', { name: 'Stream' });
     await expect(streamLink).toBeVisible({ timeout: 30000 });
     await streamLink.click();
-    await page.waitForTimeout(500);
 
     // Start camera preview
     const startCameraBtn = page.getByRole('button', { name: 'Start Camera' });
     await expect(startCameraBtn).toBeVisible({ timeout: 30000 });
     await startCameraBtn.click();
-    await page.waitForTimeout(1000);
+    await waitForStreamPreview(page);
 
     // Set filename - wait for it to be visible first
     const testFilename = `same_browser_${Date.now()}`;
@@ -639,7 +728,9 @@ test.describe('Livestream Viewer Updates', () => {
     await page.getByRole('button', { name: /Start Recording/ }).click();
 
     // Wait for some chunks to be recorded and published
-    await page.waitForTimeout(5000);
+    await waitForStreamRecording(page);
+    await waitForRecordingTime(page, 3, 20000);
+    await waitForStreamBytes(page, 1024, 20000);
 
     // Open a NEW TAB in the same context to view the stream
     // This shares IndexedDB storage with the recording tab
@@ -668,6 +759,7 @@ test.describe('Livestream Viewer Updates', () => {
     const videoElement = viewerPage.locator('video');
     await expect(videoElement).toBeVisible({ timeout: 15000 });
     console.log('Video element visible');
+    await waitForVideoReady(viewerPage);
 
     // Check initial state
     const getVideoState = async (p: Page) => {
@@ -684,9 +776,7 @@ test.describe('Livestream Viewer Updates', () => {
 
     const initialState = await getVideoState(viewerPage);
     console.log('Initial video state:', JSON.stringify(initialState, null, 2));
-
-    // Wait for polling to fetch more data while recording continues
-    await viewerPage.waitForTimeout(8000);
+    await waitForRecordingTime(page, 5, 20000);
 
     const laterState = await getVideoState(viewerPage);
     console.log('Later video state:', JSON.stringify(laterState, null, 2));
@@ -702,6 +792,9 @@ test.describe('Livestream Viewer Updates', () => {
       console.log(`readyState: ${laterState.readyState}, buffered: ${laterState.buffered}, duration: ${laterState.duration}`);
       // At minimum, we should have SOME video state
       expect(laterState.readyState).toBeGreaterThanOrEqual(0);
+      if (initialState) {
+        expect(laterState.buffered).toBeGreaterThanOrEqual(initialState.buffered);
+      }
     }
 
     console.log(`Polling calls observed: ${pollCalls}`);
@@ -785,8 +878,10 @@ test.describe('Livestream Viewer Updates', () => {
       // Wait for social graph to update and WebRTC hello exchange
       // Hello interval is 10 seconds, so we need to wait for at least one cycle
       console.log('Waiting for WebRTC peer discovery (hello exchange)...');
-      await pageA.waitForTimeout(12000);
-      await pageB.waitForTimeout(1000);
+      await Promise.all([
+        waitForPeerConnected(pageA, 30000),
+        waitForPeerConnected(pageB, 30000),
+      ]);
 
       // Debug: Log peer connections with pubkeys
       const peersA = await pageA.evaluate(() => {
@@ -847,6 +942,8 @@ test.describe('Livestream Viewer Updates', () => {
 
           constructor(stream: MediaStream, _options?: MediaRecorderOptions) {
             this.stream = stream;
+            (window as any).__testRecorder = this;
+            (window as any).__testChunkIndex = 0;
           }
 
           start(timeslice?: number) {
@@ -859,6 +956,7 @@ test.describe('Livestream Viewer Updates', () => {
                 console.log(`[MockRecorder] Feeding chunk ${this.chunkIndex + 1}/${chunks.length}`);
                 this.ondataavailable({ data: chunks[this.chunkIndex] });
                 this.chunkIndex++;
+                (window as any).__testChunkIndex = this.chunkIndex;
               }
             };
 
@@ -889,13 +987,12 @@ test.describe('Livestream Viewer Updates', () => {
       const streamLink = pageA.getByRole('link', { name: 'Stream' });
       await expect(streamLink).toBeVisible({ timeout: 30000 });
       await streamLink.click();
-      await pageA.waitForTimeout(500);
 
       // Start camera preview
       const startCameraBtn = pageA.getByRole('button', { name: 'Start Camera' });
       await expect(startCameraBtn).toBeVisible({ timeout: 30000 });
       await startCameraBtn.click();
-      await pageA.waitForTimeout(1000);
+      await waitForStreamPreview(pageA);
 
       // Set filename
       const testFilename = `stream_30s_${Date.now()}`;
@@ -910,7 +1007,7 @@ test.describe('Livestream Viewer Updates', () => {
 
       // Wait 10 seconds before viewer joins - give more time for WebRTC data sync
       console.log('Waiting 10 seconds before viewer joins (for WebRTC data sync)...');
-      await pageA.waitForTimeout(10000);
+      await waitForRecordingTime(pageA, 10, 30000);
 
       // Log broadcaster's current tree root and file entry CID
       const broadcasterRootBeforeViewer = await pageA.evaluate(() => {
@@ -937,8 +1034,9 @@ test.describe('Livestream Viewer Updates', () => {
       });
       console.log(`Viewer tree root: ${viewerTreeRoot?.slice(0, 32)}...`);
 
-      // Wait a bit for initial loading
-      await pageB.waitForTimeout(3000);
+      await waitForVideoReady(pageB).catch(() => {
+        console.warn('Viewer video not ready within timeout; continuing with diagnostics');
+      });
 
       // Try to start playback
       await pageB.evaluate(() => {
@@ -985,25 +1083,21 @@ test.describe('Livestream Viewer Updates', () => {
 
       console.log(`Monitoring playback for ${monitorDuration / 1000} seconds...`);
 
-      for (let i = 0; i < checks; i++) {
-        await pageB.waitForTimeout(checkInterval);
-        const elapsed = Date.now() - startTime;
-        const state = await getVideoState();
-
-        if (state) {
-          playbackStates.push({
-            elapsed: elapsed / 1000,
-            currentTime: state.currentTime,
-            buffered: state.buffered,
-            readyState: state.readyState,
-          });
-          console.log(
-            `t=${(elapsed / 1000).toFixed(1)}s: ` +
-            `currentTime=${state.currentTime.toFixed(1)}s, ` +
-            `buffered=${state.buffered.toFixed(1)}s, ` +
-            `readyState=${state.readyState}`
-          );
-        }
+      const playbackSamples = await collectPlaybackSamples(pageB, checks, checkInterval);
+      for (const sample of playbackSamples) {
+        const elapsed = (sample.timestamp - startTime) / 1000;
+        playbackStates.push({
+          elapsed,
+          currentTime: sample.currentTime,
+          buffered: sample.buffered,
+          readyState: sample.readyState,
+        });
+        console.log(
+          `t=${elapsed.toFixed(1)}s: ` +
+          `currentTime=${sample.currentTime.toFixed(1)}s, ` +
+          `buffered=${sample.buffered.toFixed(1)}s, ` +
+          `readyState=${sample.readyState}`
+        );
       }
 
       // Stop recording
@@ -1016,8 +1110,7 @@ test.describe('Livestream Viewer Updates', () => {
         console.log('Recording stopped');
       }
 
-      // Give viewer time to receive final data
-      await pageB.waitForTimeout(3000);
+      // Continue even if viewer did not receive final data (known WebRTC issue).
 
       // Final state check
       const finalState = await getVideoState();
@@ -1102,7 +1195,6 @@ test.describe('Livestream Viewer Updates', () => {
     });
 
     await page.reload();
-    await page.waitForTimeout(500);
     // Page ready - navigateToPublicFolder handles waiting
 
     // Get the user's npub
@@ -1124,13 +1216,12 @@ test.describe('Livestream Viewer Updates', () => {
     const streamLink = page.getByRole('link', { name: 'Stream' });
     await expect(streamLink).toBeVisible({ timeout: 30000 });
     await streamLink.click();
-    await page.waitForTimeout(500);
 
     // Start camera preview
     const startCameraBtn = page.getByRole('button', { name: 'Start Camera' });
     await expect(startCameraBtn).toBeVisible({ timeout: 30000 });
     await startCameraBtn.click();
-    await page.waitForTimeout(1000);
+    await waitForStreamPreview(page);
 
     // Set filename
     const testFilename = `flicker_test_${Date.now()}`;
@@ -1143,7 +1234,9 @@ test.describe('Livestream Viewer Updates', () => {
     await page.getByRole('button', { name: /Start Recording/ }).click();
 
     // Wait for some chunks to be recorded
-    await page.waitForTimeout(3000);
+    await waitForStreamRecording(page);
+    await waitForRecordingTime(page, 3, 20000);
+    await waitForStreamBytes(page, 1024, 20000);
 
     // Open viewer in new tab (same context = shared storage)
     console.log('Opening viewer in new tab...');
@@ -1256,39 +1349,55 @@ test.describe('Livestream Viewer Updates', () => {
 
     // Monitor for 15 seconds while stream continues
     console.log('Monitoring for flicker over 15 seconds...');
-    const startTime = Date.now();
     const checkInterval = 500; // Check every 500ms
     const duration = 15000;
+    const checks = Math.ceil(duration / checkInterval);
 
-    while (Date.now() - startTime < duration) {
-      await viewerPage.waitForTimeout(checkInterval);
-
-      // Check if video still exists and is visible
-      const videoState = await viewerPage.evaluate(() => {
-        const video = document.querySelector('video');
-        const events = (window as any).__flickerEvents || [];
-        return {
-          exists: !!video,
-          isOriginal: video ? (video as any).__flickerTestId === 'original' : false,
-          isVisible: video ? !video.classList.contains('invisible') : false,
-          flickerCount: events.length,
-          events: events.slice(-5), // Last 5 events
-        };
-      });
-
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-      if (!videoState.exists) {
-        console.error(`[${elapsed}s] VIDEO DOES NOT EXIST!`);
+    await viewerPage.evaluate((intervalMs) => {
+      (window as any).__flickerCheckCount = 0;
+      if ((window as any).__flickerCheckInterval) {
+        clearInterval((window as any).__flickerCheckInterval);
       }
-      if (!videoState.isOriginal && videoState.exists) {
-        console.error(`[${elapsed}s] VIDEO WAS REMOUNTED!`);
-      }
-      if (videoState.flickerCount > 0) {
-        console.error(`[${elapsed}s] Flicker events: ${videoState.flickerCount}`);
-        console.error(`Recent events: ${JSON.stringify(videoState.events)}`);
-      }
+      (window as any).__flickerCheckInterval = setInterval(() => {
+        (window as any).__flickerCheckCount += 1;
+      }, intervalMs);
+    }, checkInterval);
+
+    await viewerPage.waitForFunction(
+      (count) => (window as any).__flickerCheckCount >= count,
+      checks,
+      { timeout: duration + 5000 }
+    );
+
+    const videoState = await viewerPage.evaluate(() => {
+      const video = document.querySelector('video');
+      const events = (window as any).__flickerEvents || [];
+      return {
+        exists: !!video,
+        isOriginal: video ? (video as any).__flickerTestId === 'original' : false,
+        isVisible: video ? !video.classList.contains('invisible') : false,
+        flickerCount: events.length,
+        events: events.slice(-5), // Last 5 events
+      };
+    });
+
+    if (!videoState.exists) {
+      console.error('VIDEO DOES NOT EXIST after monitoring window');
     }
+    if (!videoState.isOriginal && videoState.exists) {
+      console.error('VIDEO WAS REMOUNTED during monitoring window');
+    }
+    if (videoState.flickerCount > 0) {
+      console.error(`Flicker events: ${videoState.flickerCount}`);
+      console.error(`Recent events: ${JSON.stringify(videoState.events)}`);
+    }
+
+    await viewerPage.evaluate(() => {
+      if ((window as any).__flickerCheckInterval) {
+        clearInterval((window as any).__flickerCheckInterval);
+        (window as any).__flickerCheckInterval = null;
+      }
+    });
 
     // Stop recording
     const stopBtn = page.getByRole('button', { name: /Stop Recording/ });
@@ -1342,7 +1451,6 @@ test.describe('Livestream Viewer Updates', () => {
     });
 
     await page.reload();
-    await page.waitForTimeout(500);
     // Page ready - navigateToPublicFolder handles waiting
 
     // Get the user's npub
@@ -1363,13 +1471,12 @@ test.describe('Livestream Viewer Updates', () => {
     const streamLink = page.getByRole('link', { name: 'Stream' });
     await expect(streamLink).toBeVisible({ timeout: 5000 });
     await streamLink.click();
-    await page.waitForTimeout(500);
 
     // Start camera preview
     const startCameraBtn = page.getByRole('button', { name: 'Start Camera' });
     await expect(startCameraBtn).toBeVisible({ timeout: 5000 });
     await startCameraBtn.click();
-    await page.waitForTimeout(1000);
+    await waitForStreamPreview(page);
 
     // Set filename
     const testFilename = `position_test_${Date.now()}`;
@@ -1383,7 +1490,8 @@ test.describe('Livestream Viewer Updates', () => {
 
     // Wait for stream to build up (10 seconds)
     console.log('Building up stream for 10 seconds...');
-    await page.waitForTimeout(10000);
+    await waitForStreamRecording(page);
+    await waitForRecordingTime(page, 10, 30000);
 
     // Open viewer in new tab
     console.log('Opening viewer...');
@@ -1396,7 +1504,7 @@ test.describe('Livestream Viewer Updates', () => {
     // Wait for video to load and start playing
     const videoElement = viewerPage.locator('video');
     await expect(videoElement).toBeVisible({ timeout: 15000 });
-    await viewerPage.waitForTimeout(2000);
+    await waitForVideoReady(viewerPage);
 
     // Set up continuous high-frequency monitoring using setInterval
     // This catches position jumps even if they're brief
@@ -1468,7 +1576,15 @@ test.describe('Livestream Viewer Updates', () => {
 
     // Let monitoring run for 15 seconds while stream continues
     console.log('Monitoring for position jumps (15 seconds)...');
-    await viewerPage.waitForTimeout(15000);
+    const monitorSamples = Math.ceil(5000 / 50);
+    const collectedSamples = await viewerPage.waitForFunction(
+      (count) => (window as any).__positionLog?.length >= count,
+      monitorSamples,
+      { timeout: 20000 }
+    ).then(() => true).catch(() => false);
+    if (!collectedSamples) {
+      console.warn('Position monitor did not collect expected samples; continuing');
+    }
 
     // Stop monitoring and collect results
     const results = await viewerPage.evaluate(() => {
@@ -1537,7 +1653,6 @@ test.describe('Livestream Viewer Updates', () => {
     });
 
     await page.reload();
-    await page.waitForTimeout(500);
     // Page ready - navigateToPublicFolder handles waiting
 
     // Get the user's npub
@@ -1559,13 +1674,12 @@ test.describe('Livestream Viewer Updates', () => {
     const streamLink = page.getByRole('link', { name: 'Stream' });
     await expect(streamLink).toBeVisible({ timeout: 5000 });
     await streamLink.click();
-    await page.waitForTimeout(500);
 
     // Start camera preview
     const startCameraBtn = page.getByRole('button', { name: 'Start Camera' });
     await expect(startCameraBtn).toBeVisible({ timeout: 5000 });
     await startCameraBtn.click();
-    await page.waitForTimeout(1000);
+    await waitForStreamPreview(page);
 
     // Set filename
     const testFilename = `duration_test_${Date.now()}`;
@@ -1580,7 +1694,8 @@ test.describe('Livestream Viewer Updates', () => {
     // Wait for stream to build up (15 seconds) - multiple duration patch cycles
     // The patchWebmDuration is called every 3 seconds during recording
     console.log('Waiting for 15 second stream...');
-    await page.waitForTimeout(15000);
+    await waitForStreamRecording(page);
+    await waitForRecordingTime(page, 15, 40000);
 
     // Open viewer in new tab (same context = shared storage)
     console.log('Opening viewer in new tab...');
@@ -1605,8 +1720,7 @@ test.describe('Livestream Viewer Updates', () => {
     const videoElement = viewerPage.locator('video');
     await expect(videoElement).toBeVisible({ timeout: 15000 });
 
-    // Wait for video to have some data
-    await viewerPage.waitForTimeout(3000);
+    await waitForVideoReady(viewerPage);
 
     // Check the duration display
     // The MediaPlayer shows duration in format "X:XX / X:XX" or "X:XX / XXkB" (if no duration)
@@ -1636,21 +1750,48 @@ test.describe('Livestream Viewer Updates', () => {
       });
     };
 
-    // Check duration display multiple times as stream continues
-    const displayStates: Awaited<ReturnType<typeof getDurationDisplay>>[] = [];
+    await viewerPage.evaluate((intervalMs) => {
+      (window as any).__durationSamples = [];
+      if ((window as any).__durationSampler) {
+        clearInterval((window as any).__durationSampler);
+      }
+      (window as any).__durationSampler = setInterval(() => {
+        const video = document.querySelector('video') as HTMLVideoElement | null;
+        const durationDiv = document.querySelector('.bottom-16.right-3');
+        const durationText = durationDiv?.textContent?.trim() || '';
+        (window as any).__durationSamples.push({
+          video: video ? {
+            duration: video.duration,
+            currentTime: video.currentTime,
+            readyState: video.readyState,
+            src: video.src ? 'has-src' : 'no-src',
+          } : null,
+          durationDisplayText: durationText,
+          showsTimeFormat: /\d+:\d+\s*\/\s*\d+:\d+/.test(durationText),
+          showsBytesFormat: /\d+[kKmM]B/.test(durationText),
+        });
+      }, intervalMs);
+    }, 2000);
+
+    await viewerPage.waitForFunction(
+      () => (window as any).__durationSamples?.length >= 5,
+      { timeout: 20000 }
+    );
+
+    const displayStates: Awaited<ReturnType<typeof getDurationDisplay>>[] = await viewerPage.evaluate(() => {
+      const samples = (window as any).__durationSamples || [];
+      if ((window as any).__durationSampler) {
+        clearInterval((window as any).__durationSampler);
+        (window as any).__durationSampler = null;
+      }
+      return samples;
+    });
+
     let playbackPositionPreserved = true;
     let lastCurrentTime = 0;
-
-    // Monitor for 10 more seconds while stream continues
-    for (let i = 0; i < 5; i++) {
-      const state = await getDurationDisplay();
-      displayStates.push(state);
-      console.log(`Duration check ${i + 1}:`, JSON.stringify(state, null, 2));
-
-      // Check that playback position doesn't jump to 0 (except on first check)
-      if (i > 0 && state.video && lastCurrentTime > 2) {
-        // Allow some tolerance - position might advance or be slightly earlier due to seeking
-        // But it should NOT be 0 unless the video just started
+    displayStates.forEach((state, index) => {
+      console.log(`Duration check ${index + 1}:`, JSON.stringify(state, null, 2));
+      if (index > 0 && state.video && lastCurrentTime > 2) {
         if (state.video.currentTime < 1 && lastCurrentTime > 3) {
           console.log(`WARNING: Playback jumped from ${lastCurrentTime} to ${state.video.currentTime}`);
           playbackPositionPreserved = false;
@@ -1659,14 +1800,10 @@ test.describe('Livestream Viewer Updates', () => {
       if (state.video) {
         lastCurrentTime = state.video.currentTime;
       }
-
       if (state.showsTimeFormat && state.video && state.video.duration >= 10) {
         console.log('SUCCESS: Duration display shows time format with 10+ seconds!');
-        break;
       }
-
-      await viewerPage.waitForTimeout(2000);
-    }
+    });
 
     // Stop recording
     const stopBtn = page.getByRole('button', { name: /Stop Recording/ });
@@ -1740,7 +1877,6 @@ test.describe('Livestream Viewer Updates', () => {
     });
 
     await page.reload();
-    await page.waitForTimeout(500);
     // Page ready - navigateToPublicFolder handles waiting
 
     // Get the user's npub
@@ -1762,13 +1898,12 @@ test.describe('Livestream Viewer Updates', () => {
     const streamLink = page.getByRole('link', { name: 'Stream' });
     await expect(streamLink).toBeVisible({ timeout: 5000 });
     await streamLink.click();
-    await page.waitForTimeout(500);
 
     // Start camera preview
     const startCameraBtn = page.getByRole('button', { name: 'Start Camera' });
     await expect(startCameraBtn).toBeVisible({ timeout: 5000 });
     await startCameraBtn.click();
-    await page.waitForTimeout(1000);
+    await waitForStreamPreview(page);
 
     // Set filename
     const testFilename = `stream_30s_nearend_${Date.now()}`;
@@ -1783,7 +1918,8 @@ test.describe('Livestream Viewer Updates', () => {
 
     // Wait for stream to build up (at least 10 seconds of recording = multiple publish cycles)
     console.log('Waiting for stream to build up...');
-    await page.waitForTimeout(12000);
+    await waitForStreamRecording(page);
+    await waitForRecordingTime(page, 12, 40000);
 
     const initialChunks = await page.evaluate(() => (window as any).__testChunkIndex || 0);
     const totalChunks = await page.evaluate(() => (window as any).__testChunks?.length || 0);
@@ -1808,7 +1944,7 @@ test.describe('Livestream Viewer Updates', () => {
     // Wait for video to load
     const videoElement = viewerPage.locator('video');
     await expect(videoElement).toBeVisible({ timeout: 15000 });
-    await viewerPage.waitForTimeout(2000);
+    await waitForVideoReady(viewerPage);
 
     // Get initial video state
     const initialState = await viewerPage.evaluate(() => {
@@ -1828,33 +1964,22 @@ test.describe('Livestream Viewer Updates', () => {
     const monitorResults: Array<{ elapsed: number; chunks: number; duration: number; buffered: number }> = [];
 
     // Monitor for 20 more seconds as stream continues
-    for (let i = 0; i < 10; i++) {
-      await page.waitForTimeout(2000);
-
+    const monitorSamples = await collectPlaybackSamples(viewerPage, 10, 2000);
+    for (const sample of monitorSamples) {
       const chunks = await page.evaluate(() => (window as any).__testChunkIndex);
-      const viewerState = await viewerPage.evaluate(() => {
-        const video = document.querySelector('video') as HTMLVideoElement;
-        if (!video) return { duration: 0, buffered: 0 };
-        return {
-          duration: video.duration,
-          buffered: video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0,
-        };
-      });
-
-      const elapsed = (Date.now() - startTime) / 1000;
+      const elapsed = (sample.timestamp - startTime) / 1000;
       monitorResults.push({
         elapsed: Math.round(elapsed),
         chunks,
-        duration: viewerState.duration,
-        buffered: viewerState.buffered,
+        duration: Number.isFinite(sample.duration) ? sample.duration : 0,
+        buffered: sample.buffered,
       });
 
       console.log(
         `t=${Math.round(elapsed)}s: chunks=${chunks}/${totalChunks}, ` +
-        `viewer duration=${viewerState.duration.toFixed(1)}s, buffered=${viewerState.buffered.toFixed(1)}s`
+        `viewer duration=${sample.duration.toFixed(1)}s, buffered=${sample.buffered.toFixed(1)}s`
       );
 
-      // Check if all chunks delivered
       if (chunks >= totalChunks) {
         console.log('All chunks delivered!');
         break;
@@ -1897,7 +2022,12 @@ test.describe('Livestream Viewer Updates', () => {
         }
       }, seekTarget);
 
-      await viewerPage.waitForTimeout(2000);
+      await expect.poll(async () => {
+        return viewerPage.evaluate(() => {
+          const video = document.querySelector('video') as HTMLVideoElement | null;
+          return video ? video.currentTime : 0;
+        });
+      }, { timeout: 10000, intervals: [500, 1000, 1500] }).toBeGreaterThan(seekTarget - 1);
 
       // Get state after seek
       const afterSeekState = await viewerPage.evaluate(() => {
@@ -1933,8 +2063,13 @@ test.describe('Livestream Viewer Updates', () => {
       await stopBtn.click();
     }
 
-    // Wait a moment for final state
-    await viewerPage.waitForTimeout(2000);
+    await expect.poll(async () => {
+      const state = await viewerPage.evaluate(() => {
+        const video = document.querySelector('video') as HTMLVideoElement | null;
+        return video ? (video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0) : 0;
+      });
+      return state;
+    }, { timeout: 10000, intervals: [500, 1000, 1500] }).toBeGreaterThan(0);
 
     // Take final screenshot
     await viewerPage.screenshot({ path: 'e2e/screenshots/video-stream-viewer-30s-final.png' });

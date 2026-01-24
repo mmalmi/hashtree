@@ -8,7 +8,7 @@ import { test, expect, Page } from './fixtures';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, navigateToPublicFolder } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, waitForAppReady } from './test-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,9 +31,11 @@ async function setupFreshUser(page: Page) {
   });
 
   await page.reload();
-  await page.waitForTimeout(500);
+  await waitForAppReady(page, 30000);
+  await disableOthersPool(page);
   // Page ready - navigateToPublicFolder handles waiting
-  await navigateToPublicFolder(page);
+  await navigateToPublicFolder(page, { requireRelay: false });
+  await expect(page.locator('button[title="New File"]:visible').first()).toBeVisible({ timeout: 10000 });
 }
 
 test.describe('Offline Upload', () => {
@@ -115,7 +117,8 @@ test.describe('Offline Upload', () => {
     console.log('Going offline...');
 
     // Click New Folder button
-    const newFolderBtn = page.getByRole('button', { name: /Folder/i });
+    const newFolderBtn = page.locator('button[title="New Folder"]:visible').first();
+    await expect(newFolderBtn).toBeVisible({ timeout: 10000 });
     await newFolderBtn.click();
 
     // Enter folder name in modal
@@ -127,12 +130,17 @@ test.describe('Offline Upload', () => {
     // Wait for modal to close and folder to appear
     await expect(page.locator('.fixed.inset-0.bg-black')).not.toBeVisible({ timeout: 10000 });
 
-    // Check for the folder in the list or empty directory message
-    // (empty folder shows empty directory view)
-    const folderOrEmpty = page.locator('text=Empty directory').or(
-      page.locator('a:has-text("offline-test-folder")')
-    );
-    await expect(folderOrEmpty).toBeVisible({ timeout: 10000 });
+    // Check for the folder in the list or an auto-navigated empty folder view
+    const folderLink = page.locator('a:has-text("offline-test-folder")').first();
+    const emptyDirectory = page.getByText('Empty directory', { exact: true });
+    await expect.poll(async () => {
+      if (await folderLink.isVisible().catch(() => false)) return 'folder';
+      if (await emptyDirectory.isVisible().catch(() => false)) {
+        const hash = await page.evaluate(() => window.location.hash);
+        return hash.includes('/offline-test-folder') ? 'empty' : 'none';
+      }
+      return 'none';
+    }, { timeout: 30000, intervals: [500, 1000, 2000] }).not.toBe('none');
     console.log('Folder created while offline');
 
     // Go back online

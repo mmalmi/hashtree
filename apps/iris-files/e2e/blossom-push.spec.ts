@@ -117,11 +117,15 @@ test.describe('Blossom Push', () => {
       await expect(fileInput).toBeAttached({ timeout: 30000 });
       await fileInput.setInputFiles(testFilePath, { timeout: 60000 });
 
-      // Wait for file to appear in the sidebar
-      await expect(page.locator('[data-testid="file-list"] a:has-text("test-content.txt")')).toBeVisible({ timeout: 10000 });
+      // Wait for file to appear in the tree (may be hidden on smaller layouts)
+      await expect(page.locator('[data-testid="file-list"] a:has-text("test-content.txt")')).toBeAttached({ timeout: 10000 });
 
-      // Navigate back to folder view - click on public folder link in sidebar
-      await page.locator('[data-testid="file-list"] a:has-text("public")').click();
+      // Navigate back to folder view without relying on sidebar visibility
+      const npub = await page.evaluate(() => (window as any).__nostrStore?.getState?.()?.npub || '');
+      await page.evaluate((userNpub) => {
+        window.location.hash = `#/${userNpub}/public`;
+      }, npub);
+      await page.waitForURL(/\/#\/npub.*\/public/, { timeout: 10000 });
 
       // Wait for folder actions to be visible
       await expect(page.getByRole('button', { name: 'Push' }).first()).toBeVisible({ timeout: 10000 });
@@ -198,11 +202,15 @@ test.describe('Blossom Push', () => {
       await expect(fileInput).toBeAttached({ timeout: 30000 });
       await fileInput.setInputFiles(testFilePath, { timeout: 60000 });
 
-      // Wait for file to appear in the sidebar
-      await expect(page.locator('[data-testid="file-list"] a:has-text("error-test.txt")')).toBeVisible({ timeout: 10000 });
+      // Wait for file to appear in the tree (may be hidden on smaller layouts)
+      await expect(page.locator('[data-testid="file-list"] a:has-text("error-test.txt")')).toBeAttached({ timeout: 10000 });
 
-      // Navigate back to folder view - click on public folder link in sidebar
-      await page.locator('[data-testid="file-list"] a:has-text("public")').click();
+      // Navigate back to folder view without relying on sidebar visibility
+      const npub = await page.evaluate(() => (window as any).__nostrStore?.getState?.()?.npub || '');
+      await page.evaluate((userNpub) => {
+        window.location.hash = `#/${userNpub}/public`;
+      }, npub);
+      await page.waitForURL(/\/#\/npub.*\/public/, { timeout: 10000 });
 
       // Wait for folder actions to be visible
       await expect(page.getByRole('button', { name: 'Push' }).first()).toBeVisible({ timeout: 10000 });

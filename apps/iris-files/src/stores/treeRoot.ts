@@ -126,7 +126,7 @@ async function mergeTreeRootKeyToWorker(
 ): Promise<boolean> {
   try {
     const { getWorkerAdapter, waitForWorkerAdapter } = await import('../lib/workerInit');
-    const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(2000);
+    const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(10000);
     if (!adapter || !('mergeTreeRootKey' in adapter)) return false;
     return await adapter.mergeTreeRootKey(npub, treeName, hash, key);
   } catch (err) {

@@ -1,7 +1,24 @@
 import { test, expect } from './fixtures';
 import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool } from './test-utils.js';
 
-test.describe('Git shell features', () => {
+async function assertCodeDropdown(page: any, repoName: string): Promise<void> {
+  const codeBtn = page.locator('.code-dropdown > button');
+  await expect(codeBtn).toBeVisible({ timeout: 15000 });
+  await codeBtn.click();
+
+  const url = page.url();
+  const npubMatch = url.match(/npub1[0-9a-z]+/);
+  expect(npubMatch).toBeTruthy();
+  const expectedClone = `git clone htree://${npubMatch![0]}/public/${repoName}`;
+
+  const inputs = page.locator('.code-dropdown input[type="text"]');
+  await expect(inputs).toHaveCount(3, { timeout: 5000 });
+  await expect(inputs.nth(0)).toHaveValue(expectedClone);
+  await expect(inputs.nth(1)).toHaveValue(/https:\/\/sh\.rustup\.rs/);
+  await expect(inputs.nth(2)).toHaveValue(/cargo install git-remote-htree/);
+}
+
+test.describe('Git code dropdown', () => {
   // Disable "others pool" to prevent WebRTC cross-talk from parallel tests
   test.beforeEach(async ({ page }) => {
     setupPageErrorHandler(page);
@@ -9,7 +26,7 @@ test.describe('Git shell features', () => {
     await disableOthersPool(page);
   });
 
-  test('git shell modal should run commands and display output', async ({ page }) => {
+  test('git code dropdown should show clone instructions', async ({ page }) => {
     test.slow(); // This test involves git operations that take time
     await navigateToPublicFolder(page);
 
@@ -98,40 +115,14 @@ test.describe('Git shell features', () => {
       // Wait for git repo detection
       await expect(page.getByRole('button', { name: /commits/i })).toBeVisible({ timeout: 15000 });
 
-      // Click the Git Shell button
-      const shellBtn = page.getByRole('button', { name: /shell|terminal/i });
-      await expect(shellBtn).toBeVisible({ timeout: 10000 });
-      await shellBtn.click();
-
-      // Modal should open
-      const modal = page.locator('[data-testid="git-shell-modal"]');
-      await expect(modal).toBeVisible({ timeout: 5000 });
-
-      // Type a git command
-      const input = modal.locator('input[type="text"]');
-      await input.fill('status');
-      await input.press('Enter');
-
-      // Should see output containing "On branch"
-      await expect(modal.locator('text=/On branch/')).toBeVisible({ timeout: 10000 });
-
-      // Run another command - git log (plain format)
-      await input.fill('log');
-      await input.press('Enter');
-
-      // Should see the commit
-      await expect(modal.locator('text=/Initial commit/')).toBeVisible({ timeout: 10000 });
-
-      // Close modal
-      await page.keyboard.press('Escape');
-      await expect(modal).not.toBeVisible({ timeout: 5000 });
+      await assertCodeDropdown(page, 'shell-test-repo');
 
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 
-  test('git shell should support write commands like add and commit', async ({ page }) => {
+  test('git code dropdown should include setup commands', async ({ page }) => {
     test.slow(); // This test involves git operations that take time
     await navigateToPublicFolder(page);
 
@@ -217,77 +208,10 @@ test.describe('Git shell features', () => {
       await repoLink.click();
       await page.waitForURL(/commit-test-repo/, { timeout: 10000 });
 
-      // Wait for git repo detection and 1 commit to show
-      await expect(page.getByRole('button', { name: /1 commits/i })).toBeVisible({ timeout: 15000 });
+      // Wait for git repo detection
+      await expect(page.getByRole('button', { name: /commits/i })).toBeVisible({ timeout: 15000 });
 
-      // Click the Git Shell button
-      const shellBtn = page.getByRole('button', { name: /shell|terminal/i });
-      await expect(shellBtn).toBeVisible({ timeout: 10000 });
-      await shellBtn.click();
-
-      // Modal should open with write commands allowed
-      const modal = page.locator('[data-testid="git-shell-modal"]');
-      await expect(modal).toBeVisible({ timeout: 5000 });
-      await expect(modal.locator('text=/Write commands.*are supported/')).toBeVisible({ timeout: 5000 });
-
-      // First, add a new file via page.evaluate (simulate editing in hashtree)
-      await page.evaluate(async () => {
-        const { getTree, LinkType } = await import('/src/store.ts');
-        const { autosaveIfOwn } = await import('/src/nostr.ts');
-        const { getCurrentRootCid } = await import('/src/actions/route.ts');
-        const { getRouteSync } = await import('/src/stores/index.ts');
-
-        const tree = getTree();
-        const route = getRouteSync();
-        const rootCid = getCurrentRootCid();
-        if (!rootCid) return;
-
-        // Add a new file to the repo
-        const newFileContent = new TextEncoder().encode('New file content');
-        const { cid: fileCid, size } = await tree.putFile(newFileContent);
-
-        // Get current repo path and add file to it
-        const newRootCid = await tree.setEntry(rootCid, route.path, 'newfile.txt', fileCid, size, LinkType.Blob);
-        autosaveIfOwn(newRootCid);
-      });
-
-      // Wait for the file to appear in the list
-      await expect(page.locator('[data-testid="file-list"] a').filter({ hasText: 'newfile.txt' })).toBeVisible({ timeout: 10000 });
-
-      // Close and reopen modal to get fresh dirCid
-      await page.keyboard.press('Escape');
-      await expect(modal).not.toBeVisible({ timeout: 5000 });
-      await shellBtn.click();
-      await expect(modal).toBeVisible({ timeout: 5000 });
-
-      // Run git add to stage the new file
-      const input = modal.locator('input[type="text"]');
-
-      // Count pre elements before add
-      const preCountBeforeAdd = await modal.locator('pre').count();
-
-      await input.fill('add newfile.txt');
-      await input.press('Enter');
-
-      // Wait for add output to appear (a new pre element)
-      await expect(modal.locator('pre')).toHaveCount(preCountBeforeAdd + 1, { timeout: 15000 });
-
-      // Count pre elements before commit
-      const preCountBeforeCommit = await modal.locator('pre').count();
-
-      // Run git commit
-      await input.fill('commit -m "Add newfile.txt"');
-      await input.press('Enter');
-
-      // Wait for commit output to appear (a new pre element)
-      await expect(modal.locator('pre')).toHaveCount(preCountBeforeCommit + 1, { timeout: 30000 });
-
-      // Close modal and verify commit count increased
-      await page.keyboard.press('Escape');
-      await expect(modal).not.toBeVisible({ timeout: 5000 });
-
-      // Wait for UI to show 2 commits (reactive update from the commit)
-      await expect(page.getByRole('button', { name: /2 commits/i })).toBeVisible({ timeout: 15000 });
+      await assertCodeDropdown(page, 'commit-test-repo');
 
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });

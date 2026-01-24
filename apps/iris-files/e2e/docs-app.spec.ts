@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForAppReady, ensureLoggedIn, safeReload, flushPendingPublishes } from './test-utils';
+import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForAppReady, ensureLoggedIn, safeReload, flushPendingPublishes, evaluateWithRetry } from './test-utils';
 
 async function waitForTreeRootChange(page: any, previousRoot: string | null, timeoutMs: number = 30000) {
   await page.waitForFunction(
@@ -19,7 +19,7 @@ async function waitForTreeRootChange(page: any, previousRoot: string | null, tim
 
 async function waitForYjsEntry(page: any, timeoutMs: number = 60000) {
   await expect.poll(async () => {
-    return page.evaluate(async () => {
+    return evaluateWithRetry(page, async () => {
       const { getTreeRootSync } = await import('/src/stores');
       const { getTree } = await import('/src/store');
       const { getRouteSync } = await import('/src/stores/route');
@@ -32,11 +32,25 @@ async function waitForYjsEntry(page: any, timeoutMs: number = 60000) {
       if (!entry?.cid) return false;
       const entries = await tree.listDirectory(entry.cid);
       return entries?.some((item: { name: string }) => item.name === '.yjs') ?? false;
+    }, null);
+  }, { timeout: timeoutMs, intervals: [1000, 2000, 3000] }).toBe(true);
+}
+
+async function waitForDocsEditor(page: any, timeoutMs: number = 60000) {
+  await ensureLoggedIn(page, Math.min(30000, timeoutMs)).catch(() => {});
+  await waitForYjsEntry(page, timeoutMs).catch(() => {});
+  const editor = page.locator('.ProseMirror');
+  await expect.poll(async () => {
+    await page.evaluate(() => {
+      (window as any).__workerAdapter?.sendHello?.();
+      (window as any).__reloadYjsEditors?.();
     });
+    return editor.isVisible().catch(() => false);
   }, { timeout: timeoutMs, intervals: [1000, 2000, 3000] }).toBe(true);
 }
 
 test.describe('Iris Docs App', () => {
+  test.setTimeout(120000);
   test.beforeEach(async ({ page }) => {
     setupPageErrorHandler(page);
   });
@@ -50,16 +64,18 @@ test.describe('Iris Docs App', () => {
     await page.goto('/docs.html#/');
     await waitForAppReady(page);
     await disableOthersPool(page);
+    await ensureLoggedIn(page, 30000);
 
     await page.getByRole('button', { name: /New/i }).click();
 
-    await expect(page.locator('[role="button"]:has-text("New Document")')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('[role="button"]:has-text("New Document")')).toBeVisible({ timeout: 30000 });
   });
 
   test('can create new document', async ({ page }) => {
     await page.goto('/docs.html#/');
     await waitForAppReady(page);
     await disableOthersPool(page);
+    await ensureLoggedIn(page, 30000);
 
     await page.getByRole('button', { name: /New/i }).click();
 
@@ -80,8 +96,8 @@ test.describe('Iris Docs App', () => {
 
     await page.waitForURL(/\/docs\.html#\/npub.*\/docs%2FTest%20Doc/, { timeout: 15000 });
 
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
-    await expect(page.locator('.ProseMirror-container')).toBeVisible();
   });
 
   test('header has Iris Docs branding', async ({ page }) => {
@@ -94,6 +110,7 @@ test.describe('Iris Docs App', () => {
     await page.goto('/docs.html#/');
     await waitForAppReady(page);
     await disableOthersPool(page);
+    await ensureLoggedIn(page, 30000);
 
     await page.getByRole('button', { name: /New/i }).click();
 
@@ -107,6 +124,7 @@ test.describe('Iris Docs App', () => {
     await page.locator('input[placeholder="Document name..."]').fill(docName);
     await page.getByRole('button', { name: 'Create' }).click();
 
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
 
     const editor = page.locator('.ProseMirror');
@@ -131,6 +149,7 @@ test.describe('Iris Docs App', () => {
     ).catch(() => {});
     await waitForYjsEntry(page, 90000);
 
+    await waitForDocsEditor(page, 90000);
     const editorAfterReload = page.locator('.ProseMirror');
     await expect(editorAfterReload).toBeVisible({ timeout: 60000 });
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 60000 });
@@ -150,6 +169,7 @@ test.describe('Iris Docs App', () => {
     await page.goto('/docs.html#/');
     await waitForAppReady(page);
     await disableOthersPool(page);
+    await ensureLoggedIn(page, 30000);
 
     await page.getByRole('button', { name: /New/i }).click();
 
@@ -163,6 +183,7 @@ test.describe('Iris Docs App', () => {
     await page.locator('input[placeholder="Document name..."]').fill(docName);
     await page.getByRole('button', { name: 'Create' }).click();
 
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
     const editor = page.locator('.ProseMirror');
     const rootBefore = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
@@ -179,12 +200,13 @@ test.describe('Iris Docs App', () => {
     await expect(docCard).toBeVisible({ timeout: 30000 });
     await docCard.click();
 
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
     await expect(page.locator('.ProseMirror')).toContainText('Content for navigation test', { timeout: 30000 });
   });
 
   test('edits to existing document persist after navigation and refresh', async ({ page }) => {
-    test.setTimeout(90000); // Longer timeout for multiple reload operations
+    test.setTimeout(120000); // Longer timeout for multiple reload operations
 
     await page.goto('/docs.html#/');
     await waitForAppReady(page);
@@ -202,7 +224,8 @@ test.describe('Iris Docs App', () => {
     await page.locator('input[placeholder="Document name..."]').fill(docName);
     await page.getByRole('button', { name: 'Create' }).click();
 
-    await page.waitForURL(url => url.toString().includes(encodedDocPath), { timeout: 30000 });
+    await page.waitForURL(url => url.toString().includes(encodedDocPath), { timeout: 60000 });
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
     const editor = page.locator('.ProseMirror');
     const rootBeforeInitial = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
@@ -218,13 +241,16 @@ test.describe('Iris Docs App', () => {
     await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page);
     await waitForAppReady(page);
+    await ensureLoggedIn(page, 30000);
+    await disableOthersPool(page);
     await expect(page.locator('[role="button"]:has-text("New Document")')).toBeVisible({ timeout: 30000 });
 
     const docCard = page.locator(`text=${docName}`);
-    await expect(docCard).toBeVisible({ timeout: 30000 });
+    await expect(docCard).toBeVisible({ timeout: 60000 });
     await docCard.click();
 
-    await page.waitForURL(url => url.toString().includes(encodedDocPath), { timeout: 30000 });
+    await page.waitForURL(url => url.toString().includes(encodedDocPath), { timeout: 60000 });
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
     await waitForYjsEntry(page, 90000);
     await expect.poll(async () => {
@@ -289,9 +315,17 @@ test.describe('Iris Docs App', () => {
 
     await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page);
+    await ensureLoggedIn(page, 30000);
+    await disableOthersPool(page);
 
+    await waitForDocsEditor(page, 90000);
     await expect(page.locator('button[title="Bold (Ctrl+B)"]')).toBeVisible({ timeout: 30000 });
-    await expect(page.locator('.ProseMirror')).toContainText('Initial content. Added more content.', { timeout: 30000 });
+    await waitForYjsEntry(page, 90000);
+    await expect.poll(async () => {
+      await page.evaluate(() => (window as any).__reloadYjsEditors?.());
+      const text = await page.locator('.ProseMirror').textContent();
+      return text?.includes('Initial content. Added more content.') ?? false;
+    }, { timeout: 60000, intervals: [1000, 2000, 3000] }).toBe(true);
   });
 
   test('another browser can view document via shared link', async ({ browser }) => {
@@ -322,6 +356,7 @@ test.describe('Iris Docs App', () => {
       await page1.locator('input[placeholder="Document name..."]').fill(docName);
       await page1.getByRole('button', { name: 'Create' }).click();
 
+      await waitForDocsEditor(page1, 90000);
       const editor1 = page1.locator('.ProseMirror');
       await expect(editor1).toBeVisible({ timeout: 30000 });
       const content = `Shared content ${Date.now()}`;
@@ -365,23 +400,17 @@ test.describe('Iris Docs App', () => {
       await waitForAppReady(page2);
       await disableOthersPool(page2);
       await configureBlossomServers(page2);
+      await ensureLoggedIn(page2);
 
       await page2.goto(shareUrl);
       await waitForAppReady(page2);
       await disableOthersPool(page2);
+      await configureBlossomServers(page2);
 
-      await page2.waitForFunction(
-        (prefix) => {
-          const boxes = Array.from(document.querySelectorAll('[role="textbox"]'));
-          const longest = boxes.reduce((best, current) => {
-            return (current.textContent || '').length > (best.textContent || '').length ? current : best;
-          }, boxes[0] || null);
-          const text = (longest?.textContent || '').replace(/\s+/g, ' ');
-          return text.includes(prefix);
-        },
-        'Shared content',
-        { timeout: 60000 }
-      );
+      await waitForDocsEditor(page2, 120000);
+      const editor2 = page2.locator('.ProseMirror');
+      await expect(editor2).toBeVisible({ timeout: 60000 });
+      await expect(editor2).toContainText(content, { timeout: 60000 });
     } finally {
       await context1.close();
       await context2.close();
@@ -425,6 +454,7 @@ test.describe('Iris Docs App', () => {
     await page.locator('input[placeholder="Document name..."]').fill(docName);
     await page.getByRole('button', { name: 'Create' }).click();
 
+    await waitForDocsEditor(page, 90000);
     const editor = page.locator('.ProseMirror');
     await expect(editor).toBeVisible({ timeout: 30000 });
     await editor.click();

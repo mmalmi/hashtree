@@ -46,7 +46,7 @@ test.describe('Hashtree Explorer', () => {
     await disableOthersPool(page);
     await configureBlossomServers(page);
 
-    // Clear IndexedDB, localStorage, and OPFS before each test
+    // Clear IndexedDB and localStorage before each test
     await page.evaluate(async () => {
       const dbs = await indexedDB.databases();
       for (const db of dbs) {
@@ -54,16 +54,6 @@ test.describe('Hashtree Explorer', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-
-      // Clear OPFS
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {
-        // OPFS might not be available
-      }
     });
 
     // Reload to get truly fresh state (after clearing storage)

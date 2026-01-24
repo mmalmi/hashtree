@@ -7,7 +7,7 @@
   import { nostrStore } from '../../nostr';
   import { createProfileStore } from '../../stores/profile';
   import { createFollowsStore, followPubkey, unfollowPubkey } from '../../stores/follows';
-  import { createTreesStore } from '../../stores';
+  import { createTreesStore, type TreeEntry } from '../../stores';
   import { open as openCreateModal } from '../Modals/CreateModal.svelte';
   import { open as openShareModal } from '../Modals/ShareModal.svelte';
   import { Avatar, Name, Badge, FollowedBy } from '../User';
@@ -106,7 +106,7 @@
 
   // Trees store for this user's docs
   let treesStore = $derived(createTreesStore(npub));
-  let trees = $state<Array<{ name: string; visibility?: string; rootHash?: string; linkKey?: string }>>([]);
+  let trees = $state<TreeEntry[]>([]);
 
   $effect(() => {
     const store = treesStore;
@@ -309,6 +309,7 @@
           ownerNpub={npub}
           treeName={doc.name}
           visibility={doc.visibility}
+          rootHashHex={doc.hashHex}
         />
       {/each}
 

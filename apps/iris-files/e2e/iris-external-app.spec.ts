@@ -17,7 +17,7 @@ test.describe('External App in Webview', () => {
     await addressBar.press('Enter');
 
     // Wait for iframe to load
-    const iframe = page.locator('iframe[title="App"]');
+    const iframe = page.locator('main iframe');
     await expect(iframe).toBeVisible({ timeout: 15000 });
 
     // Star button should be visible and enabled
@@ -40,7 +40,7 @@ test.describe('External App in Webview', () => {
     await addressBar.press('Enter');
 
     // Wait for iframe
-    const iframe = page.locator('iframe[title="App"]');
+    const iframe = page.locator('main iframe');
     await expect(iframe).toBeVisible({ timeout: 15000 });
 
     // Click star button to save
@@ -69,7 +69,7 @@ test.describe('External App in Webview', () => {
     await addressBar.press('Enter');
 
     // Wait for iframe and save
-    const iframe = page.locator('iframe[title="App"]');
+    const iframe = page.locator('main iframe');
     await expect(iframe).toBeVisible({ timeout: 15000 });
 
     const starButton = page.locator('button[title="Add bookmark"]');

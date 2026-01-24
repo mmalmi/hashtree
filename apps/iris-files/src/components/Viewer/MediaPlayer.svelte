@@ -16,6 +16,7 @@
   import type { CID } from '@hashtree/core';
   import { getCidFileUrl, getNpubFileUrlAsync } from '../../lib/mediaUrl';
   import { getQueryParamsFromHash } from '../../lib/router.svelte';
+  import { ensureMediaStreamingReady } from '../../lib/mediaStreamingSetup';
 
   interface Props {
     cid: CID;
@@ -82,6 +83,16 @@
       return;
     }
 
+    const streamingReady = await ensureMediaStreamingReady().catch((err) => {
+      console.warn('[MediaPlayer] Media streaming setup failed:', err);
+      return false;
+    });
+    if (!streamingReady) {
+      error = 'Media streaming unavailable';
+      loading = false;
+      return;
+    }
+
     // Use npub-based URL if we have the context (supports live streaming)
     // Otherwise fall back to CID-based URL
     let url: string;
@@ -96,7 +107,8 @@
 
     // Add cache-busting timestamp to prevent browser caching
     // This ensures we always get fresh content, especially for live streams
-    mediaRef.src = `${url}?_t=${Date.now()}`;
+    const cacheSeparator = url.includes('?') ? '&' : '?';
+    mediaRef.src = `${url}${cacheSeparator}_t=${Date.now()}`;
 
     // Listen for metadata to get duration
     mediaRef.addEventListener('loadedmetadata', () => {

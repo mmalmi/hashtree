@@ -16,18 +16,22 @@ async function createFile(page: any, name: string, content: string = '') {
   await page.getByRole('button', { name: /File/ }).first().click();
   await page.locator('input[placeholder="File name..."]').fill(name);
   await page.getByRole('button', { name: 'Create' }).click();
-  await expect(page.getByRole('button', { name: 'Done' })).toBeVisible({ timeout: 5000 });
+  const doneButton = page.getByRole('button', { name: 'Done' });
+  await expect(doneButton).toBeVisible({ timeout: 5000 });
   if (content) {
     await page.locator('textarea').fill(content);
-    await page.getByRole('button', { name: 'Save' }).click();
-    await page.waitForTimeout(500);
+    const saveButton = page.getByRole('button', { name: /Save|Saved|Saving/ }).first();
+    if (await saveButton.isEnabled().catch(() => false)) {
+      await saveButton.click();
+    }
+    await expect(saveButton).toBeDisabled({ timeout: 10000 });
   }
-  await page.getByRole('button', { name: 'Done' }).click();
-  await page.waitForTimeout(500);
+  await doneButton.click();
+  await expect(page.locator('textarea')).not.toBeVisible({ timeout: 10000 });
 }
 
 test.describe('README Panel', () => {
-  test.setTimeout(60000);
+  test.setTimeout(120000);
 
   test.beforeEach(async ({ page }) => {
     setupPageErrorHandler(page);
@@ -44,7 +48,6 @@ test.describe('README Panel', () => {
     });
 
     await page.reload();
-    await page.waitForTimeout(500);
     // Page ready - navigateToPublicFolder handles waiting
     await navigateToPublicFolder(page);
   });
@@ -57,11 +60,10 @@ test.describe('README Panel', () => {
     // Navigate back to tree to see the readme panel
     await goToTreeList(page);
     await page.locator('a:has-text("readme-test")').first().click();
-    await page.waitForTimeout(1000);
 
     // Check that README panel is visible with rendered content
     // The panel has a header with book-open icon and "README.md" text
-    await expect(page.locator('.i-lucide-book-open')).toBeVisible();
+    await expect(page.locator('.i-lucide-book-open')).toBeVisible({ timeout: 30000 });
     await expect(page.locator('text=Hello World')).toBeVisible();
     await expect(page.locator('text=This is a test readme')).toBeVisible();
   });
@@ -74,10 +76,9 @@ test.describe('README Panel', () => {
     // Navigate back to tree
     await goToTreeList(page);
     await page.locator('a:has-text("readme-edit-test")').first().click();
-    await page.waitForTimeout(1000);
 
     // Check edit button exists in README panel
-    await expect(page.locator('.i-lucide-book-open')).toBeVisible();
+    await expect(page.locator('.i-lucide-book-open')).toBeVisible({ timeout: 30000 });
     // Edit button should be in the README panel header
     await expect(page.getByRole('button', { name: 'Edit' })).toBeVisible();
   });
@@ -90,14 +91,14 @@ test.describe('README Panel', () => {
     await page.getByRole('button', { name: 'Folder' }).click();
     await page.locator('input[placeholder="Folder name..."]').fill('subdir');
     await page.getByRole('button', { name: 'Create' }).click();
-    await page.waitForTimeout(500);
+    await expect(page.getByText('Empty directory')).toBeVisible({ timeout: 10000 });
 
     // Create README in subdir
     await createFile(page, 'README.md', '# Subdir Docs\n\nThis is the subdir readme.');
 
     // Go back to parent
     await page.locator('a[href*="link-test"]').filter({ hasText: 'link-test' }).first().click();
-    await page.waitForTimeout(500);
+    await expect(page.getByRole('button', { name: /File/ }).first()).toBeVisible({ timeout: 10000 });
 
     // Create root README with relative link
     await createFile(page, 'README.md', '# Main\n\nSee [subdir docs](subdir/README.md) for more.');
@@ -105,11 +106,10 @@ test.describe('README Panel', () => {
     // Navigate back to tree root to see the readme panel
     await goToTreeList(page);
     await page.locator('a:has-text("link-test")').first().click();
-    await page.waitForTimeout(1000);
+    await expect(page.locator('.i-lucide-book-open')).toBeVisible({ timeout: 30000 });
 
     // Click the relative link in the README
     await page.locator('.prose a:has-text("subdir docs")').click();
-    await page.waitForTimeout(500);
 
     // Should navigate to the subdir README file
     await expect(page).toHaveURL(/#.*link-test.*subdir.*README\.md/);

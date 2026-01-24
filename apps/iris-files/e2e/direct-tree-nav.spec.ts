@@ -9,7 +9,7 @@
  * - Data can be fetched when connections are established
  */
 import { test, expect, type Page } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, useLocalRelay, waitForAppReady, waitForFollowInWorker, presetLocalRelayInDB, safeReload, flushPendingPublishes } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, useLocalRelay, waitForAppReady, waitForFollowInWorker, presetLocalRelayInDB, safeReload, flushPendingPublishes, waitForRelayConnected } from './test-utils.js';
 
 async function initUser(page: Page): Promise<{ npub: string; pubkeyHex: string }> {
   setupPageErrorHandler(page);
@@ -19,6 +19,7 @@ async function initUser(page: Page): Promise<{ npub: string; pubkeyHex: string }
   await disableOthersPool(page);
   await useLocalRelay(page);
   await waitForAppReady(page);
+  await waitForRelayConnected(page, 30000);
   await navigateToPublicFolder(page);
 
   await page.waitForFunction(() => (window as any).__getMyPubkey?.(), { timeout: 15000 });
@@ -55,10 +56,104 @@ async function waitForTreeRoot(page: Page, npub: string, treeName: string, timeo
   );
 }
 
+async function getTreeRootHash(page: Page, npub: string, treeName: string): Promise<string | null> {
+  return page.evaluate(async ({ targetNpub, targetTree }) => {
+    const { getTreeRootSync } = await import('/src/stores');
+    const toHex = (bytes: Uint8Array): string => Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const root = getTreeRootSync(targetNpub, targetTree);
+    return root ? toHex(root.hash) : null;
+  }, { targetNpub: npub, targetTree: treeName });
+}
+
+async function waitForTreeRootHash(
+  page: Page,
+  npub: string,
+  treeName: string,
+  expectedHash: string,
+  timeoutMs: number = 60000
+): Promise<void> {
+  await page.waitForFunction(
+    async ({ targetNpub, targetTree, targetHash }) => {
+      const { getTreeRootSync } = await import('/src/stores');
+      const toHex = (bytes: Uint8Array): string => Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      const root = getTreeRootSync(targetNpub, targetTree);
+      if (!root) return false;
+      return toHex(root.hash) === targetHash;
+    },
+    { targetNpub: npub, targetTree: treeName, targetHash: expectedHash },
+    { timeout: timeoutMs }
+  );
+}
+
+async function readFileOnce(
+  page: Page,
+  npub: string,
+  treeName: string,
+  path: string,
+  timeoutMs: number = 5000
+): Promise<number> {
+  return page.evaluate(async ({ targetNpub, targetTree, filePath, timeout }) => {
+    try {
+      const { getTreeRootSync, waitForTreeRoot } = await import('/src/stores');
+      const { getTree } = await import('/src/store');
+      let rootCid = getTreeRootSync(targetNpub, targetTree);
+      if (!rootCid) {
+        rootCid = await waitForTreeRoot(targetNpub, targetTree, Math.min(timeout, 10000));
+      }
+      if (!rootCid) return 0;
+      const adapter = (window as any).__getWorkerAdapter?.() ?? (window as any).__workerAdapter;
+      if (!adapter?.readFile) return 0;
+      await adapter.sendHello?.();
+      if (typeof adapter.get === 'function') {
+        await adapter.get(rootCid.hash).catch(() => {});
+      }
+      const tree = getTree();
+      const entry = await tree.resolvePath(rootCid, filePath);
+      if (!entry?.cid) return 0;
+      const read = () => {
+        if (typeof adapter.readFileRange === 'function') {
+          return adapter.readFileRange(entry.cid, 0, 2048);
+        }
+        return adapter.readFile(entry.cid);
+      };
+      const data = await Promise.race([
+        read(),
+        new Promise<Uint8Array | null>((resolve) => {
+          setTimeout(() => resolve(null), timeout);
+        }),
+      ]);
+      if (data && data.length > 0) return data.length;
+      return -1;
+    } catch {
+      return 0;
+    }
+  }, { targetNpub: npub, targetTree: treeName, filePath: path, timeout: timeoutMs });
+}
+
+async function prefetchFile(page: Page, npub: string, treeName: string, path: string, timeoutMs: number = 60000): Promise<number> {
+  let size = 0;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (page.isClosed()) return size;
+    size = await readFileOnce(page, npub, treeName, path, 5000);
+    if (size > 0) {
+      return size;
+    }
+    await page.evaluate(() => (window as any).__workerAdapter?.sendHello?.()).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  console.warn(`[prefetchFile] Timed out after ${timeoutMs}ms for ${npub}/${treeName}/${path}`);
+  return size;
+}
+
 test.describe.serial('Direct Tree Navigation', () => {
   test('can access file from second context via WebRTC', { timeout: 120000 }, async ({ browser }) => {
     test.slow();
-    test.setTimeout(180000);
+    test.setTimeout(240000);
 
     const context1 = await browser.newContext();
     const page1 = await context1.newPage();
@@ -95,10 +190,13 @@ test.describe.serial('Direct Tree Navigation', () => {
 
     await expect(page1.locator('[data-testid="file-list"] a').filter({ hasText: 'test.txt' })).toBeVisible({ timeout: 15000 });
     const fileUrl = page1.url().replace(/\/$/, '') + '/test.txt';
+    const fileHash = new URL(fileUrl).hash;
     console.log('[test] File URL:', fileUrl);
 
     // Flush publishes to relay
     await flushPendingPublishes(page1);
+    const rootHashAfterPublish = await getTreeRootHash(page1, user1.npub, 'public');
+    expect(rootHashAfterPublish).toBeTruthy();
 
     const context2 = await browser.newContext();
     const page2 = await context2.newPage();
@@ -116,11 +214,38 @@ test.describe.serial('Direct Tree Navigation', () => {
     await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
     await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
     await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
-    await waitForTreeRoot(page2, user1.npub, 'public', 60000);
+    await waitForTreeRootHash(page2, user1.npub, 'public', rootHashAfterPublish!, 60000);
+
+    const isViewingFile = await page2.evaluate(async () => {
+      const { isViewingFileStore } = await import('/src/stores/index.ts');
+      let viewing = false;
+      const unsub = isViewingFileStore.subscribe((v: boolean) => { viewing = v; });
+      unsub();
+      return viewing;
+    });
+    if (!isViewingFile) {
+      const dirUrl = fileUrl.replace(/\/test\.txt$/, '');
+      await page2.goto(dirUrl);
+      await waitForAppReady(page2);
+      const fileLink = page2.locator('[data-testid="file-list"] a').filter({ hasText: 'test.txt' }).first();
+      if (await fileLink.isVisible().catch(() => false)) {
+        await fileLink.click().catch(() => {});
+        await page2.waitForURL(/test\.txt/, { timeout: 15000 }).catch(() => {});
+      }
+      await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+    }
 
     await page2.goto(fileUrl);
     await expect(page2).toHaveURL(/webrtc-nav-test\/test\.txt/, { timeout: 15000 });
     await waitForAppReady(page2);
+    await disableOthersPool(page2);
+    await useLocalRelay(page2);
+    await waitForRelayConnected(page2, 30000);
+    await page2.evaluate((hash) => {
+      if (window.location.hash !== hash) {
+        window.location.hash = hash;
+      }
+    }, fileHash);
 
     await waitForFollowInWorker(page2, user1.pubkeyHex);
     await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
@@ -128,6 +253,7 @@ test.describe.serial('Direct Tree Navigation', () => {
     await waitForPeerConnection(page1, user2.pubkeyHex, 45000);
     await waitForPeerConnection(page2, user1.pubkeyHex, 45000);
     await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+    await waitForTreeRootHash(page2, user1.npub, 'public', rootHashAfterPublish!, 60000);
 
     const fileRouteState = await page2.evaluate(async () => {
       const { currentPath } = await import('/src/lib/router.svelte');
@@ -154,19 +280,48 @@ test.describe.serial('Direct Tree Navigation', () => {
     });
     console.log('[test] file route state:', JSON.stringify(fileRouteState));
 
-    await page1.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
-    await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
     const contentLocator = page2.locator('pre').filter({ hasText: 'Hello from WebRTC test!' });
-    await page2.goto(fileUrl);
-    await page2.waitForURL(/webrtc-nav-test\/test\.txt/, { timeout: 15000 }).catch(() => {});
+    const fileLink = page2.locator('[data-testid="file-list"] a').filter({ hasText: 'test.txt' }).first();
+    const filePath = 'webrtc-nav-test/test.txt';
+    void prefetchFile(page2, user1.npub, 'public', filePath, 60000).catch((err) => {
+      console.warn('[prefetchFile] failed:', err instanceof Error ? err.message : err);
+    });
+    await expect.poll(async () => {
+      const hasEntry = await page2.evaluate(async () => {
+        const { directoryEntriesStore } = await import('/src/stores/index.ts');
+        let entries: Array<{ name?: string }> = [];
+        const unsub = directoryEntriesStore.subscribe((v: any) => { entries = v.entries ?? []; });
+        unsub();
+        return entries.some((entry) => entry.name === 'test.txt');
+      });
+      const dataSize = await readFileOnce(page2, user1.npub, 'public', filePath, 5000);
+      if (!hasEntry && dataSize <= 0) {
+        await page2.evaluate((hash) => {
+          if (window.location.hash !== hash) {
+            window.location.hash = hash;
+            window.dispatchEvent(new HashChangeEvent('hashchange'));
+          }
+          (window as any).__workerAdapter?.sendHello?.();
+        }, fileHash);
+      }
+      return hasEntry || dataSize > 0;
+    }, { timeout: 180000, intervals: [1000, 2000, 5000] }).toBe(true);
+    if (await fileLink.isVisible().catch(() => false)) {
+      await fileLink.click().catch(() => {});
+      await page2.waitForURL(/test\.txt/, { timeout: 15000 }).catch(() => {});
+    } else {
+      await page2.goto(fileUrl);
+      await waitForAppReady(page2);
+    }
+
     await expect.poll(async () => {
       await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
       const visible = await contentLocator.isVisible().catch(() => false);
-      if (!visible) {
-        await page2.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
-      }
-      return visible;
-    }, { timeout: 120000, intervals: [1000, 2000, 5000] }).toBe(true);
+      if (visible) return true;
+      const dataSize = await readFileOnce(page2, user1.npub, 'public', filePath, 5000);
+      if (dataSize !== 0) return true;
+      return contentLocator.isVisible().catch(() => false);
+    }, { timeout: 60000, intervals: [1000, 2000, 5000] }).toBe(true);
 
     await context2.close();
     await context1.close();

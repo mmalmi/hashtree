@@ -19,9 +19,11 @@ async function navigateToAccountsPage(page: any) {
   await profileButton.dblclick({ timeout: 15000 });
 
   // Should be on accounts page
-  await page.waitForURL(/#\/users/, { timeout: 10000 });
-  await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible({ timeout: 10000 });
-  await expect(page.getByRole('button', { name: 'Add with Secret Key' })).toBeVisible({ timeout: 10000 });
+  await page.waitForURL(/#\/users/, { timeout: 30000 });
+  await waitForAppReady(page, 30000);
+  await page.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+  await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole('button', { name: 'Add with Secret Key' })).toBeVisible({ timeout: 30000 });
 }
 
 // Generate a test nsec for adding accounts
@@ -37,8 +39,8 @@ test.describe('Multi-Account Management', () => {
     await page.goto('/');
     await disableOthersPool(page); // Prevent WebRTC cross-talk from parallel tests
 
-    await clearAllStorage(page, { clearOpfs: true });
-    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await clearAllStorage(page);
+    await safeReload(page, { waitUntil: 'load', timeoutMs: 60000 });
     await waitForAppReady(page, 60000); // Wait for page to load after reload
     await disableOthersPool(page); // Re-apply after reload
     await ensureLoggedIn(page, 30000);

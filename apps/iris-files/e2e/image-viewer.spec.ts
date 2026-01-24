@@ -31,7 +31,7 @@ test.describe('Image Viewer', () => {
     setupPageErrorHandler(page);
     await page.goto('/');
 
-    await clearAllStorage(page, { clearOpfs: true });
+    await clearAllStorage(page);
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
     await waitForAppReady(page, 60000);
     // Page ready - navigateToPublicFolder handles waiting

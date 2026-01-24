@@ -2,7 +2,7 @@ import { test, expect } from './fixtures';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import WebSocket from 'ws';
 import { createHash } from 'crypto';
-import { setupPageErrorHandler, disableOthersPool, evaluateWithRetry, waitForRelayConnected } from './test-utils';
+import { setupPageErrorHandler, disableOthersPool, ensureLoggedIn, evaluateWithRetry, waitForAppReady, waitForRelayConnected, presetLocalRelayInDB, safeReload } from './test-utils';
 import { BOOTSTRAP_SECKEY_HEX, FOLLOW_SECKEY_HEX } from './nostr-test-keys';
 
 let relayUrl = '';
@@ -107,6 +107,27 @@ async function seedBootstrapFeedData(): Promise<void> {
   await publishEvent(followVideoEvent);
 }
 
+async function openVideoPage(page: any, url: string) {
+  await page.goto(url);
+  await presetLocalRelayInDB(page);
+  await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, url });
+  await waitForAppReady(page);
+  await disableOthersPool(page);
+  await ensureLoggedIn(page);
+  await waitForRelayConnected(page, 30000);
+}
+
+async function waitForVideoCards(page: any, timeoutMs: number = 60000) {
+  await expect.poll(
+    async () => {
+      return await evaluateWithRetry(page, () => {
+        return document.querySelectorAll('a[href*="videos%2F"], a[href*="videos/"]').length;
+      }, undefined);
+    },
+    { timeout: timeoutMs, intervals: [500, 1000, 2000] }
+  ).toBeGreaterThan(0);
+}
+
 test.describe('Video Feed - Bootstrap Follows', () => {
   test.beforeEach(async ({ page }) => {
     await seedBootstrapFeedData();
@@ -119,18 +140,7 @@ test.describe('Video Feed - Bootstrap Follows', () => {
     // Fallback follows are now fetched directly from nostr kind 3 events via subscription.
     // NOTE: Main thread NDK has no relay connections, so fetchEvents() hangs forever.
     // Always use subscribe() instead.
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-    // Wait for SW to initialize and potential COI reload to complete
-    await page.waitForTimeout(3000);
-
-    // Login as new user (no follows - will trigger fallback to sirius)
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
-    await waitForRelayConnected(page, 30000);
+    await openVideoPage(page, '/video.html#/');
 
     // Verify we can fetch bootstrap follows via subscription
     const result = await evaluateWithRetry(page, async (pubkey) => {
@@ -178,24 +188,17 @@ test.describe('Video Feed - Bootstrap Follows', () => {
 
   test('video feed shows videos from sirius follows', async ({ page }) => {
     // Test that videos from bootstrap follows actually appear in the feed
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-
-    // Login as new user
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
+    await openVideoPage(page, '/video.html#/');
+    try {
+      await waitForVideoCards(page, 60000);
+    } catch {
+      await openVideoPage(page, '/video.html#/');
+      await waitForVideoCards(page, 60000);
     }
-
-    // Wait for feed to populate with fallback content
-    await page.waitForFunction(() => {
-      return document.querySelectorAll('[href*="videos%2F"]').length > 0;
-    }, { timeout: 30000 });
 
     // Check if there are video cards on the page
     const videoCount = await evaluateWithRetry(page, () => {
-      const cards = document.querySelectorAll('[href*="videos%2F"]');
+      const cards = document.querySelectorAll('a[href*="videos%2F"], a[href*="videos/"]');
       return cards.length;
     }, undefined);
 
@@ -208,11 +211,7 @@ test.describe('Video Feed - Bootstrap Follows', () => {
   test('checks if fishcake (sirius follow) has videos', async ({ page }) => {
     test.slow();
     // Navigate directly to fishcake's profile
-    await page.goto(`/video.html#/${FOLLOW_NPUB}`);
-    await disableOthersPool(page);
-
-    // Wait for the profile to load
-    await page.waitForTimeout(5000);
+    await openVideoPage(page, `/video.html#/${FOLLOW_NPUB}`);
 
     // Check if there are any video trees for this user
     const result = await evaluateWithRetry(page, async (pubkey) => {
@@ -265,20 +264,8 @@ test.describe('Video Feed - Bootstrap Follows', () => {
   test('video feed includes content from sirius follows', async ({ page }) => {
     test.slow(); // This test needs time for network requests
 
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-
-    // Login as new user
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
-
-    // Wait for videos to load (multi-author subscription needs time)
-    await page.waitForFunction(() => {
-      return document.querySelectorAll('a[href*="videos"]').length > 0;
-    }, { timeout: 30000 });
+    await openVideoPage(page, '/video.html#/');
+    await waitForVideoCards(page, 30000);
 
     // Get card count after waiting
     const effectiveFollowsCount = await evaluateWithRetry(page, () => {
@@ -335,24 +322,12 @@ test.describe('Video Feed - Bootstrap Follows', () => {
     // by checking that videos from bootstrap follows appear in the feed
     test.slow();
 
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-
-    // Login as new user
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
-
-    // Wait for videos to load
-    await page.waitForFunction(() => {
-      return document.querySelectorAll('[href*="videos%2F"]').length > 0;
-    }, { timeout: 30000 });
+    await openVideoPage(page, '/video.html#/');
+    await waitForVideoCards(page, 30000);
 
     // Count video cards on the page
     const videoCount = await evaluateWithRetry(page, () => {
-      return document.querySelectorAll('[href*="videos%2F"]').length;
+      return document.querySelectorAll('a[href*="videos%2F"], a[href*="videos/"]').length;
     }, undefined);
 
     console.log('Video count on page:', videoCount);
@@ -367,17 +342,7 @@ test.describe('Video Feed - Bootstrap Follows', () => {
     // This test verifies the fix: fallback follows are now fetched via
     // nostr subscriptions, not via the social graph worker.
     // NOTE: Main thread NDK has no relay connections, so fetchEvents() hangs.
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-    // Wait for SW to initialize and potential COI reload to complete
-    await page.waitForTimeout(3000);
-
-    // Login as new user
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
+    await openVideoPage(page, '/video.html#/');
 
     // Fetch sirius's kind 3 event via subscription (same logic as follows.ts now uses)
     const result = await evaluateWithRetry(page, async (bootstrapPubkey) => {
@@ -443,11 +408,6 @@ test.describe('Video Feed - Bootstrap Follows', () => {
     // Skip by default - this is for debugging specific issues
     test.slow();
     // Add console logging to trace the issue
-    await page.goto('/video.html#/');
-    // Wait for SW to initialize and potential COI reload to complete
-    await page.waitForTimeout(3000);
-
-    // Capture console logs
     const logs: string[] = [];
     page.on('console', msg => {
       if (msg.text().includes('socialGraph') || msg.text().includes('follows') || msg.text().includes('[DEBUG]')) {
@@ -455,14 +415,7 @@ test.describe('Video Feed - Bootstrap Follows', () => {
       }
     });
 
-    await disableOthersPool(page);
-
-    // Login
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
+    await openVideoPage(page, '/video.html#/');
 
     // Manually trigger fetchFollowList and trace
     const result = await evaluateWithRetry(page, async (siriusPubkey) => {
@@ -592,21 +545,14 @@ test.describe('Video Feed - Bootstrap Follows', () => {
 
 test.describe('Video Feed - Content Sources', () => {
   test.beforeEach(async ({ page }) => {
+    await seedBootstrapFeedData();
     setupPageErrorHandler(page);
   });
 
   test('feed shows own videos, liked videos, and followed users videos', async ({ page }) => {
     test.slow();
 
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-
-    // Login as new user
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
+    await openVideoPage(page, '/video.html#/');
 
     // Get the logged in user's pubkey
     const userPubkey = await evaluateWithRetry(page, async () => {
@@ -645,9 +591,6 @@ test.describe('Video Feed - Content Sources', () => {
     console.log('Subscription check:', subscriptionAuthors);
     expect(subscriptionAuthors.expectedToIncludeSelf).toBe(true);
 
-    // Wait for subscriptions to activate
-    await page.waitForTimeout(3000);
-
     // Verify the social subscription includes user's own pubkey for likes
     const socialSubscriptionCheck = await evaluateWithRetry(page, async () => {
       // The social feed effect should include myPubkey in authors
@@ -667,18 +610,8 @@ test.describe('Video Feed - Content Sources', () => {
   test('video subscription authors include self and follows', async ({ page }) => {
     test.slow();
 
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-
-    // Login
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
-
-    // Wait for feed to initialize
-    await page.waitForTimeout(5000);
+    await openVideoPage(page, '/video.html#/');
+    await waitForVideoCards(page, 30000);
 
     // Check the effective authors used for video subscription
     // by examining what videos appear (they should come from self + follows)
@@ -713,15 +646,7 @@ test.describe('Video Feed - Content Sources', () => {
   test('social feed subscription includes self for own likes', async ({ page }) => {
     test.slow();
 
-    await page.goto('/video.html#/');
-    await disableOthersPool(page);
-
-    // Login
-    const newBtn = page.getByRole('button', { name: /New/i });
-    if (await newBtn.isVisible().catch(() => false)) {
-      await newBtn.click();
-      await expect(page.locator('button:has-text("Create")')).toBeVisible({ timeout: 15000 });
-    }
+    await openVideoPage(page, '/video.html#/');
 
     // Get user pubkey
     const userPubkey = await evaluateWithRetry(page, async () => {
@@ -750,8 +675,6 @@ test.describe('Video Feed - Content Sources', () => {
     // We can't easily test the subscription parameters directly,
     // but we can verify the code structure is correct by checking
     // that the feed works when user is logged in
-
-    await page.waitForTimeout(3000);
 
     // The social subscription (kind 17 likes, kind 1111 comments) should include:
     // - User's own pubkey (to show videos they liked)

@@ -99,16 +99,16 @@
     // Path without the filename (path to parent directory from tree root)
     const parentPath = urlPath.slice(0, -1);
 
+    if (gitRootFromUrl !== null) {
+      // We're in a subdirectory - need to subtract the git root path
+      const gitRootParts = gitRootFromUrl === '' ? [] : gitRootFromUrl.split('/');
+      const subpathParts = parentPath.slice(gitRootParts.length);
+      return subpathParts.length > 0 ? subpathParts.join('/') : undefined;
+    }
+
     if (hasGitDir) {
       // We're at the git root - subpath is just the parent path
       return parentPath.length > 0 ? parentPath.join('/') : undefined;
-    } else if (gitRootFromUrl !== null) {
-      // We're in a subdirectory - need to subtract the git root path
-      const gitRootParts = gitRootFromUrl === '' ? [] : gitRootFromUrl.split('/');
-      // parentPath should start with gitRootParts
-      // Subpath is the remaining parts after the git root
-      const subpathParts = parentPath.slice(gitRootParts.length);
-      return subpathParts.length > 0 ? subpathParts.join('/') : undefined;
     }
 
     return undefined;
@@ -230,6 +230,12 @@
   let currentDirName = $derived.by(() => {
     const pathSegments = route.path;
     return pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : route.treeName || 'Document';
+  });
+  let yjsViewKey = $derived.by(() => {
+    if (!route.npub || !route.treeName) return '';
+    const pathKey = route.path.join('/');
+    const linkKey = route.params.get('k') ?? '';
+    return `${route.npub}/${route.treeName}/${pathKey}?k=${linkKey}`;
   });
 
   // File content state - raw binary data
@@ -695,8 +701,9 @@
 
     // Fallback: navigate to SW URL with ?download=1 query param
     // SW will serve with Content-Disposition: attachment header
-    const swUrl = getNhashFileUrl(entryFromStore.cid, fileName) + '?download=1';
-    window.location.href = swUrl;
+    const baseUrl = getNhashFileUrl(entryFromStore.cid, fileName);
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    window.location.href = `${baseUrl}${separator}download=1`;
   }
 
   // Share handler
@@ -933,11 +940,13 @@
   </div>
 {:else if hasTreeContext && isYjsDocument && currentDirCid}
   <!-- Yjs Document view - show Tiptap editor -->
-  <YjsDocumentEditor
-    dirCid={currentDirCid}
-    dirName={currentDirName}
-    entries={entries}
-  />
+  {#key yjsViewKey}
+    <YjsDocumentEditor
+      dirCid={currentDirCid}
+      dirName={currentDirName}
+      entries={entries}
+    />
+  {/key}
 {:else if hasTreeContext && !resolvingPath}
   <!-- Directory view - show DirectoryActions -->
   <div class="flex-1 flex flex-col min-h-0 bg-surface-0">

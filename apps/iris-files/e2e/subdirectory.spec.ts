@@ -18,7 +18,7 @@ test.describe('Subdirectory Creation', () => {
     await disableOthersPool(page);
     await configureBlossomServers(page);
 
-    // Clear storage for fresh state (including OPFS)
+    // Clear storage for fresh state
     await page.evaluate(async () => {
       const dbs = await indexedDB.databases();
       for (const db of dbs) {
@@ -26,16 +26,6 @@ test.describe('Subdirectory Creation', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-
-      // Clear OPFS
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {
-        // OPFS might not be available
-      }
     });
 
     await page.reload();

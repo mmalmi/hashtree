@@ -41,6 +41,7 @@
   import { toHex, nhashEncode } from '@hashtree/core';
   import { appendHtreeCacheBust, getHtreePrefix, getNpubFileUrl, getNpubFileUrlAsync, getNhashFileUrl, getThumbnailUrl, onHtreePrefixReady } from '../../lib/mediaUrl';
   import { logHtreeDebug } from '../../lib/htreeDebug';
+  import { ensureMediaStreamingReady } from '../../lib/mediaStreamingSetup';
   import { NDKEvent, type NDKFilter } from 'ndk';
   import { VideoZapButton } from '../Zaps';
   import { formatTimeAgo } from '../../utils/format';
@@ -65,6 +66,7 @@
   // Mobile comments toggle (closed by default on mobile)
   let mobileCommentsOpen = $state(false);
   let commentCount = $state(0);
+  let workerRootSyncSignature = $state<string | null>(null);
 
   // Thumbnail color for description box background
   let thumbnailColor = $state<{ r: number; g: number; b: number } | null>(null);
@@ -130,6 +132,27 @@
 
   function logVideoDebug(event: string, data?: Record<string, unknown>) {
     logHtreeDebug(`video:${event}`, data);
+  }
+
+  async function syncTreeRootToWorker(
+    npubValue: string,
+    treeNameValue: string,
+    rootCidValue: CID,
+    visibility: TreeVisibility
+  ): Promise<void> {
+    const signature = `${npubValue}/${treeNameValue}:${toHex(rootCidValue.hash)}:${rootCidValue.key ? toHex(rootCidValue.key) : ''}:${visibility}`;
+    if (workerRootSyncSignature === signature) return;
+
+    try {
+      const { getWorkerAdapter, waitForWorkerAdapter } = await import('../../lib/workerInit');
+      const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(2000);
+      if (!adapter || !('setTreeRootCache' in adapter)) return;
+      await (adapter as { setTreeRootCache: (npub: string, treeName: string, hash: Uint8Array, key?: Uint8Array, visibility?: TreeVisibility) => Promise<void> })
+        .setTreeRootCache(npubValue, treeNameValue, rootCidValue.hash, rootCidValue.key, visibility);
+      workerRootSyncSignature = signature;
+    } catch (err) {
+      console.warn('[VideoView] Failed to sync tree root to worker:', err);
+    }
   }
 
   let htreePrefix = $state<string>(getHtreePrefix());
@@ -789,6 +812,7 @@
     const capturedTreeName = treeName;
     const capturedIsPlaylistVideo = isPlaylistVideo;
     const capturedVideoId = currentVideoId;
+    const capturedVisibility = effectiveVisibility;
 
     if (!capturedNpub || !capturedTreeName) return;
 
@@ -800,6 +824,23 @@
       rootCid: toHex(rootCidParam.hash).slice(0, 8),
       prefix: htreePrefix,
     });
+
+    const streamingReady = await ensureMediaStreamingReady().catch((err) => {
+      console.warn('[VideoView] Media streaming setup failed:', err);
+      return false;
+    });
+    if (!streamingReady) {
+      error = 'Video streaming unavailable. Please reload and try again.';
+      loading = false;
+      return;
+    }
+
+    await syncTreeRootToWorker(
+      capturedNpub,
+      capturedTreeName,
+      rootCidParam,
+      capturedVisibility ?? 'public'
+    );
 
     const tree = getTree();
 
@@ -1060,8 +1101,9 @@
     if (!videoCid || !videoFileName) return;
     // Navigate to SW URL with ?download=1 query param
     // SW will serve with Content-Disposition: attachment header for streaming download
-    const swUrl = getNhashFileUrl(videoCid, videoFileName) + '?download=1';
-    window.location.href = swUrl;
+    const baseUrl = getNhashFileUrl(videoCid, videoFileName);
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    window.location.href = `${baseUrl}${separator}download=1`;
   }
 
   function handleBlossomPush() {

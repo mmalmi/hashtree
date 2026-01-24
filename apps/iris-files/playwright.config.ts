@@ -1,13 +1,30 @@
 import { defineConfig, devices } from '@playwright/test';
+import os from 'os';
 import { getPublicKey } from 'nostr-tools';
 import { BOOTSTRAP_SECKEY_HEX } from './e2e/nostr-test-keys';
 
-// Workers: use PW_WORKERS env var, or default to 100% of CPU cores
-// PW_WORKERS can be a number (4) or percentage (100%)
+// Workers: use PW_WORKERS env var, or default to 100% of CPU cores.
+// PW_WORKERS can be a number (4) or percentage (100%).
 const workersEnv = process.env.PW_WORKERS;
-const workers = workersEnv
-  ? /^\d+$/.test(workersEnv) ? parseInt(workersEnv, 10) : workersEnv
-  : '100%';
+const maxWorkersEnv = process.env.PW_MAX_WORKERS;
+const maxWorkers = Number.isFinite(Number(maxWorkersEnv)) ? Number(maxWorkersEnv) : 32;
+const cpuCount = os.cpus().length || 1;
+const resolveWorkers = (): number | string => {
+  if (!workersEnv) {
+    return Math.min(cpuCount, maxWorkers);
+  }
+  if (/^\d+$/.test(workersEnv)) {
+    return parseInt(workersEnv, 10);
+  }
+  const percentMatch = workersEnv.match(/^(\d+)%$/);
+  if (percentMatch) {
+    const percent = Math.max(1, Math.min(100, parseInt(percentMatch[1], 10)));
+    const computed = Math.max(1, Math.floor((cpuCount * percent) / 100));
+    return Math.min(computed, maxWorkers);
+  }
+  return workersEnv;
+};
+const workers = resolveWorkers();
 
 const slowSpecs = [
   'e2e/yjs-collaboration.spec.ts',

@@ -5,6 +5,7 @@ import type { CID } from '@hashtree/core';
 import { LinkType } from '@hashtree/core';
 import { getTree } from '../../store';
 import { withWasmGitLock, loadWasmGit, copyToWasmFS, runSilent, rmRf, createRepoPath } from './core';
+import { getHead } from './log';
 
 /**
  * Checkout a specific commit using wasm-git
@@ -22,6 +23,29 @@ export async function checkoutWasm(
     const gitDirResult = await tree.resolvePath(rootCid, '.git');
     if (!gitDirResult || gitDirResult.type !== LinkType.Dir) {
       throw new Error('Not a git repository');
+    }
+
+    const isCommitSha = /^[0-9a-f]{40}$/i.test(commitSha);
+    let originalHeadRef: string | null = null;
+    let originalHeadCommit: string | null = null;
+
+    if (isCommitSha) {
+      try {
+        const headResult = await tree.resolvePath(gitDirResult.cid, 'HEAD');
+        if (headResult && headResult.type !== LinkType.Dir) {
+          const headData = await tree.readFile(headResult.cid);
+          if (headData) {
+            const headContent = new TextDecoder().decode(headData).trim();
+            const refMatch = headContent.match(/^ref:\s+(.+)$/);
+            if (refMatch) {
+              originalHeadRef = refMatch[1];
+              originalHeadCommit = await getHead(rootCid);
+            }
+          }
+        }
+      } catch {
+        // Ignore - we'll proceed without restoring branch refs.
+      }
     }
 
     const module = await loadWasmGit();
@@ -109,6 +133,31 @@ export async function checkoutWasm(
       }
 
       readGitDir('.git', '.git');
+
+      // Ensure detached HEAD when checking out a specific commit SHA.
+      if (isCommitSha) {
+        const headEntry = gitFiles.find(file => file.name === '.git/HEAD' && !file.isDir);
+        const headContent = headEntry ? new TextDecoder().decode(headEntry.data).trim() : '';
+        if (!/^[0-9a-f]{40}$/i.test(headContent) || headContent.toLowerCase() !== commitSha.toLowerCase()) {
+          const data = new TextEncoder().encode(`${commitSha}\n`);
+          if (headEntry) {
+            headEntry.data = data;
+          } else {
+            gitFiles.push({ name: '.git/HEAD', data, isDir: false });
+          }
+        }
+
+        if (originalHeadRef && originalHeadCommit) {
+          const refPath = `.git/${originalHeadRef}`;
+          const refEntry = gitFiles.find(file => file.name === refPath && !file.isDir);
+          const refData = new TextEncoder().encode(`${originalHeadCommit}\n`);
+          if (refEntry) {
+            refEntry.data = refData;
+          } else {
+            gitFiles.push({ name: refPath, data: refData, isDir: false });
+          }
+        }
+      }
 
       return { files, gitFiles };
     } catch (err) {

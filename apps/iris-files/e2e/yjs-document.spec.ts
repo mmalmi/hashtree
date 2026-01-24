@@ -7,6 +7,22 @@
 import { test, expect } from './fixtures';
 import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, configureBlossomServers } from './test-utils.js';
 
+async function waitForTreeRootChange(page: any, previousRoot: string | null, timeoutMs: number = 60000) {
+  await page.waitForFunction(
+    () => typeof (window as any).__getTreeRoot === 'function',
+    undefined,
+    { timeout: 10000 }
+  );
+  await page.waitForFunction(
+    (prev) => {
+      const current = (window as any).__getTreeRoot?.();
+      return !!current && current !== prev;
+    },
+    previousRoot,
+    { timeout: timeoutMs }
+  );
+}
+
 test.describe('Yjs Document Viewer', () => {
   test.setTimeout(60000);
 
@@ -17,7 +33,7 @@ test.describe('Yjs Document Viewer', () => {
     await disableOthersPool(page);
     await configureBlossomServers(page);
 
-    // Clear storage for fresh state (including OPFS)
+    // Clear storage for fresh state
     await page.evaluate(async () => {
       const dbs = await indexedDB.databases();
       for (const db of dbs) {
@@ -25,17 +41,6 @@ test.describe('Yjs Document Viewer', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-
-      // Clear OPFS
-      try {
-        const root = await navigator.storage.getDirectory();
-        // @ts-ignore - removeEntry is available in OPFS
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {
-        // OPFS might not be available
-      }
     });
 
     await page.reload();
@@ -178,18 +183,14 @@ test.describe('Yjs Document Viewer', () => {
     await editor.click();
 
     // Type some text
+    const rootBefore = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
     await page.keyboard.type('Hello, this is a test document!');
-    await page.waitForTimeout(500);
 
     // Verify text appears in editor
     await expect(editor).toContainText('Hello, this is a test document!');
 
-    // Wait for auto-save (1 second debounce + some buffer)
-    await page.waitForTimeout(2000);
-
-    // Should show "Saved" status
-    const savedStatus = page.locator('text=Saved');
-    await expect(savedStatus).toBeVisible({ timeout: 30000 });
+    // Wait for auto-save to update the tree root
+    await waitForTreeRootChange(page, rootBefore, 60000);
 
     // Verify a "deltas" folder was created for delta-based storage
     const deltasFolder = page.getByRole('link', { name: /^deltas$/ }).first();
@@ -258,20 +259,11 @@ test.describe('Yjs Document Viewer', () => {
     await editor.click();
 
     // Type initial content
+    const rootBefore = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
     await page.keyboard.type('First sentence.');
 
-    // Wait for auto-save to complete (1s debounce + save time)
-    const savedStatus = page.locator('text=Saved');
-    await expect(savedStatus).toBeVisible({ timeout: 30000 });
-
-    // Wait for merkle root update to fully propagate through stores:
-    // 1. Save completes -> local root cache updates
-    // 2. Nostr publish (async) -> resolver subscription fires
-    // 3. treeRootStore updates -> currentDirCidStore recalculates
-    // 4. directoryEntriesStore fetches new entries -> entries prop changes
-    // 5. Component re-renders with new entries
-    // This full cycle can take 2-3 seconds
-    await page.waitForTimeout(3000);
+    // Wait for auto-save to complete
+    await waitForTreeRootChange(page, rootBefore, 60000);
 
     // Verify editor still has focus (activeElement should be inside ProseMirror)
     const hasFocus = await page.evaluate(() => {
@@ -283,17 +275,19 @@ test.describe('Yjs Document Viewer', () => {
 
     // Now type more content WITHOUT clicking the editor again
     // If focus is maintained, this text should appear after the first sentence
+    const rootBeforeSecond = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
     await page.keyboard.type(' Second sentence.');
 
     // Verify both sentences are in the editor
     await expect(editor).toContainText('First sentence. Second sentence.', { timeout: 30000 });
 
-    // Wait for the second save + full store update cycle
-    await expect(savedStatus).toBeVisible({ timeout: 30000 });
-    await page.waitForTimeout(3000);
+    // Wait for the second save to complete
+    await waitForTreeRootChange(page, rootBeforeSecond, 60000);
 
     // Type a third sentence
+    const rootBeforeThird = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
     await page.keyboard.type(' Third sentence.');
+    await waitForTreeRootChange(page, rootBeforeThird, 60000);
 
     // Verify all content is there
     await expect(editor).toContainText('First sentence. Second sentence. Third sentence.', { timeout: 30000 });
@@ -314,16 +308,15 @@ test.describe('Yjs Document Viewer', () => {
     await editor.click();
 
     // Type content rapidly, triggering save debounces
+    const rootBefore = await page.evaluate(() => (window as any).__getTreeRoot?.() ?? null);
     for (let i = 1; i <= 5; i++) {
       await page.keyboard.type(`Line ${i}. `);
       // Small delay to allow debounce to start but not complete
       await page.waitForTimeout(300);
     }
 
-    // Wait for all saves to complete
-    const savedStatus = page.locator('text=Saved');
-    await expect(savedStatus).toBeVisible({ timeout: 15000 });
-    await page.waitForTimeout(1000); // Extra time for store updates
+    // Wait for a save to complete
+    await waitForTreeRootChange(page, rootBefore, 60000);
 
     // Now verify we can still type without clicking
     await page.keyboard.type('Final line.');

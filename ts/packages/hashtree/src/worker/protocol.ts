@@ -2,7 +2,7 @@
  * Worker Protocol Types
  *
  * Message types for communication between main thread and hashtree worker.
- * Worker owns: HashTree, OpfsStore, WebRTC, Nostr (via nostr-tools)
+ * Worker owns: HashTree, WebRTC, Nostr (via nostr-tools)
  * Main thread owns: UI, NIP-07 extension access (signing/encryption)
  */
 

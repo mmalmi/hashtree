@@ -186,7 +186,7 @@ test.describe('Upload Download Integrity', () => {
     await expect(videoLink).toBeVisible({ timeout: 60000 });
     await page.waitForTimeout(2000);
 
-    // Check IndexedDB storage stats (we use IndexedDB, not OPFS)
+    // Check IndexedDB storage stats
     const storageInfo = await page.evaluate(async () => {
       let idbSize = 0;
       let idbCount = 0;

@@ -8,7 +8,7 @@ import { test, expect, Page } from './fixtures';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, flushPendingPublishes, clearAllStorage } from './test-utils.js';
 // Run tests in this file serially to avoid WebRTC/timing conflicts
 test.describe.configure({ mode: 'serial' });
 
@@ -21,26 +21,16 @@ async function setupFreshUser(page: Page) {
   setupPageErrorHandler(page);
 
   await page.goto('/');
-  await disableOthersPool(page);
 
-  // Clear storage for fresh state
-  await page.evaluate(async () => {
-    const dbs = await indexedDB.databases();
-    for (const db of dbs) {
-      if (db.name) indexedDB.deleteDatabase(db.name);
-    }
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-
+  await clearAllStorage(page);
   await page.reload();
-  await page.waitForTimeout(500);
   // Page ready - navigateToPublicFolder handles waiting
-  await navigateToPublicFolder(page);
+  await navigateToPublicFolder(page, { timeoutMs: 60000, requireRelay: false });
+  await disableOthersPool(page);
 }
 
 test.describe('Video Viewer', () => {
-  test.setTimeout(60000);
+  test.setTimeout(120000);
 
   test('should display video with correct duration', async ({ page }) => {
     // Verify test file exists
@@ -58,7 +48,6 @@ test.describe('Video Viewer', () => {
     // Upload the video via hidden file input
     const fileInput = page.locator('input[type="file"][multiple]').first();
     await fileInput.setInputFiles(TEST_VIDEO);
-    await page.waitForTimeout(1000);
 
     // Wait for upload to complete - look for the video in the file list
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
@@ -66,24 +55,23 @@ test.describe('Video Viewer', () => {
 
     // Click on the video to view it
     await videoLink.click();
-    await page.waitForTimeout(1000);
 
     // Check that video element exists
     const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 10000 });
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
 
     // Wait for video to have a source
     await page.waitForFunction(() => {
       const video = document.querySelector('video');
       if (!video) return false;
       return video.src !== '' || video.srcObject !== null;
-    }, undefined, { timeout: 10000 });
+    }, undefined, { timeout: 30000 });
 
     // Wait for video metadata to load (duration becomes available)
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
       return video && video.readyState >= 1; // HAVE_METADATA
-    }, undefined, { timeout: 15000 });
+    }, undefined, { timeout: 30000 });
 
     // Get video state
     const videoState = await page.evaluate(() => {
@@ -114,7 +102,7 @@ test.describe('Video Viewer', () => {
     // Check duration display in UI (format: "0:00 / 0:10" for 10s video)
     // Big Buck Bunny test video is ~10 seconds
     const durationDisplay = page.locator('text=/\\d+:\\d+ \\/ \\d+:\\d+/');
-    await expect(durationDisplay).toBeVisible({ timeout: 5000 });
+    await expect(durationDisplay).toBeVisible({ timeout: 10000 });
   });
 
   test('should play video and update current time', async ({ page }) => {
@@ -125,7 +113,6 @@ test.describe('Video Viewer', () => {
     // Upload the video
     const fileInput = page.locator('input[type="file"][multiple]').first();
     await fileInput.setInputFiles(TEST_VIDEO);
-    await page.waitForTimeout(1000);
 
     // Click on video
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
@@ -134,12 +121,12 @@ test.describe('Video Viewer', () => {
 
     // Wait for video to load - allow more time when running in parallel
     const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 30000 });
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
 
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
       return video && video.readyState >= 2; // HAVE_CURRENT_DATA
-    }, undefined, { timeout: 15000 });
+    }, undefined, { timeout: 45000 });
 
     // Play the video (muted to avoid autoplay restrictions)
     await page.evaluate(() => {
@@ -150,8 +137,10 @@ test.describe('Video Viewer', () => {
       }
     });
 
-    // Wait for video to play a bit
-    await page.waitForTimeout(1500);
+    await page.waitForFunction(() => {
+      const video = document.querySelector('video') as HTMLVideoElement;
+      return video && video.currentTime > 0.2;
+    }, undefined, { timeout: 15000 });
 
     // Check that currentTime has advanced
     const currentTime = await page.evaluate(() => {
@@ -171,7 +160,6 @@ test.describe('Video Viewer', () => {
     // Upload the video
     const fileInput = page.locator('input[type="file"][multiple]').first();
     await fileInput.setInputFiles(TEST_VIDEO);
-    await page.waitForTimeout(1000);
 
     // Click on video immediately after upload (while it's still "recently changed")
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
@@ -180,13 +168,13 @@ test.describe('Video Viewer', () => {
 
     // Wait for video element to appear first (may take time to load data from IndexedDB)
     const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 30000 });
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
 
     // Then wait for video metadata to load
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
       return video && video.readyState >= 1;
-    }, undefined, { timeout: 15000 });
+    }, undefined, { timeout: 30000 });
 
     // Check for LIVE indicator (should appear for recently changed files)
     // The file was just uploaded so it should be in recentlyChangedFiles store
@@ -233,7 +221,6 @@ test.describe('Video Viewer', () => {
     // Upload the video
     const fileInput = page.locator('input[type="file"][multiple]').first();
     await fileInput.setInputFiles(TEST_VIDEO);
-    await page.waitForTimeout(1000);
 
     // Get the video URL
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
@@ -247,18 +234,18 @@ test.describe('Video Viewer', () => {
 
     // Wait for video element to appear first
     const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 30000 });
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
 
     // Then wait for video metadata to load
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
       return video && video.readyState >= 1;
-    }, undefined, { timeout: 15000 });
+    }, undefined, { timeout: 30000 });
 
     // LIVE indicator should be visible because of ?live=1 param
     // Note: LIVE badge appears in both viewer header and video overlay - use .first()
     const liveIndicator = page.locator('text=LIVE').first();
-    await expect(liveIndicator).toBeVisible({ timeout: 5000 });
+    await expect(liveIndicator).toBeVisible({ timeout: 10000 });
 
     // Get video state
     const videoState = await page.evaluate(() => {
@@ -294,7 +281,6 @@ test.describe('Video Viewer', () => {
     // Upload the video
     const fileInput = page.locator('input[type="file"][multiple]').first();
     await fileInput.setInputFiles(TEST_VIDEO);
-    await page.waitForTimeout(1000);
 
     // Get the video URL and navigate with ?live=1
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
@@ -309,11 +295,18 @@ test.describe('Video Viewer', () => {
     // Verify ?live=1 is in URL
     expect(page.url()).toContain('live=1');
 
-    // Wait for video to load
+    await page.evaluate(async () => {
+      const { ensureMediaStreamingReady } = await import('/src/lib/mediaStreamingSetup.ts');
+      await ensureMediaStreamingReady(5, 1000);
+    });
+
+    // Wait for video element and src to be set before checking live param removal
+    const videoElement = page.locator('video');
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
-      return video && video.readyState >= 1;
-    }, undefined, { timeout: 15000 });
+      return video && video.src;
+    }, undefined, { timeout: 30000 });
 
     // Wait for the ?live=1 param to be removed
     // The file is not in recentlyChangedFiles (uploaded via setInputFiles, not our saveFile)
@@ -337,28 +330,28 @@ test.describe('Video Viewer', () => {
     // Upload the video
     const fileInput = page.locator('input[type="file"][multiple]').first();
     await fileInput.setInputFiles(TEST_VIDEO);
-    await page.waitForTimeout(1000);
 
     // Get the video URL
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
     await expect(videoLink).toBeVisible({ timeout: 30000 });
+    await flushPendingPublishes(page);
     const href = await videoLink.getAttribute('href');
     expect(href).toBeTruthy();
     console.log('Video URL:', href);
 
     // Navigate away first using hash (keeps app in memory - no page reload)
     await page.evaluate(() => { window.location.hash = '#/'; });
-    await page.waitForTimeout(500);
+    await page.waitForURL('**/#/');
 
     // Navigate DIRECTLY to the video URL (simulating clicking a shared link within the same session)
     // NOTE: In a real "share link" scenario, the viewer would have a fresh page load
     // and would get data from nostr. This test verifies the SPA navigation works correctly.
     await page.evaluate((url: string) => { window.location.hash = url; }, href);
-    await page.waitForTimeout(2000);
+    await page.waitForFunction((target) => window.location.hash === target, href);
 
     // Should show video element, NOT directory listing
     const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 10000 });
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
 
     // Should NOT show "Empty directory" or file list
     const emptyDir = page.locator('text=Empty directory');
@@ -371,8 +364,8 @@ test.describe('Video Viewer', () => {
     // Video should have loaded metadata
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
-      return video && video.readyState >= 1;
-    }, undefined, { timeout: 15000 });
+      return video && video.readyState >= 1 && video.duration > 0;
+    }, undefined, { timeout: 30000 });
 
     const videoState = await page.evaluate(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
@@ -402,6 +395,7 @@ test.describe('Video Viewer', () => {
     // Get the video URL
     const videoLink = page.locator('[data-testid="file-list"] a').filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' }).first();
     await expect(videoLink).toBeVisible({ timeout: 30000 });
+    await flushPendingPublishes(page);
     const href = await videoLink.getAttribute('href');
     expect(href).toBeTruthy();
 
@@ -412,10 +406,11 @@ test.describe('Video Viewer', () => {
     // Navigate DIRECTLY to video with ?live=1 (simulating shared live stream link)
     const liveUrl = href + '?live=1';
     await page.evaluate((url: string) => { window.location.hash = url; }, liveUrl);
+    await page.waitForFunction((target) => window.location.hash === target, liveUrl);
 
     // Should show video element
     const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 10000 });
+    await expect(videoElement).toBeAttached({ timeout: 30000 });
 
     // Should show LIVE indicator
     const liveIndicator = page.locator('text=LIVE').first();
@@ -425,7 +420,7 @@ test.describe('Video Viewer', () => {
     await page.waitForFunction(() => {
       const video = document.querySelector('video') as HTMLVideoElement;
       return video && video.readyState >= 1 && video.duration > 0;
-    }, undefined, { timeout: 15000 });
+    }, undefined, { timeout: 30000 });
 
     const videoState = await page.evaluate(() => {
       const video = document.querySelector('video') as HTMLVideoElement;

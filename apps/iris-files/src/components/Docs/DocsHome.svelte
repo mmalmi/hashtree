@@ -8,7 +8,7 @@
   import { SvelteSet } from 'svelte/reactivity';
   import { nostrStore } from '../../nostr';
   import { recentsStore, clearRecentsByPrefix, type RecentItem } from '../../stores/recents';
-  import { createTreesStore } from '../../stores';
+  import { createTreesStore, type TreeEntry } from '../../stores';
   import { open as openCreateModal } from '../Modals/CreateModal.svelte';
   import DocCard from './DocCard.svelte';
 
@@ -36,12 +36,13 @@
         visibility: r.visibility,
         href: buildRecentHref(r),
         timestamp: r.timestamp,
+        rootHashHex: r.npub === userNpub && r.treeName ? trees.find(t => t.name === r.treeName)?.hashHex : undefined,
       }))
   );
 
   // Get user's own trees
   let treesStore = $derived(createTreesStore(userNpub));
-  let trees = $state<Array<{ name: string; visibility?: string; rootHash?: string; linkKey?: string }>>([]);
+  let trees = $state<TreeEntry[]>([]);
 
   $effect(() => {
     const store = treesStore;
@@ -64,6 +65,7 @@
         visibility: t.visibility,
         href: `#/${userNpub}/${encodeTreeNameForUrl(t.name)}${t.linkKey ? `?k=${t.linkKey}` : ''}`,
         timestamp: 0, // Own docs don't have timestamp, will be sorted after recents
+        rootHashHex: t.hashHex,
       }))
   );
 
@@ -162,6 +164,7 @@
           ownerNpub={doc.ownerNpub}
           treeName={doc.treeName}
           visibility={doc.visibility}
+          rootHashHex={doc.rootHashHex}
         />
       {/each}
     </div>

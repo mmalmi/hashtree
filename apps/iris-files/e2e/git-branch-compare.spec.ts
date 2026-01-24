@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, safeReload, waitForAppReady } from './test-utils.js';
 
 async function createAndEnterFolder(page: any, name: string) {
   await page.getByRole('button', { name: 'New Folder' }).click();
@@ -200,9 +200,21 @@ test.describe('Git branch comparison and merge', () => {
     // Wait for dropdown to close and branch to be created
     await expect(branchNameInput).not.toBeVisible({ timeout: 10000 });
 
-    // Verify we're on feature branch after creation
+    // Reload to ensure git info store reflects the new branch
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await waitForAppReady(page, 60000);
+    await disableOthersPool(page);
+    await page.waitForURL(/branch-compare-test/, { timeout: 10000 });
+
+    // Verify we now have 2 branches and switch to feature
+    await expect(page.locator('text=/2 branches/')).toBeVisible({ timeout: 30000 });
+    const branchDropdownBtn = page.locator('button').filter({ has: page.locator('.i-lucide-git-branch') }).first();
+    await expect(branchDropdownBtn).toBeVisible({ timeout: 10000 });
+    await branchDropdownBtn.click();
+    const featureOption = page.locator('button').filter({ hasText: 'feature' }).first();
+    await expect(featureOption).toBeVisible({ timeout: 10000 });
+    await featureOption.click();
     await expect(page.locator('button').filter({ hasText: 'feature' }).first()).toBeVisible({ timeout: 15000 });
-    await expect(page.locator('text=/2 branches/')).toBeVisible({ timeout: 10000 });
 
     // Add a new file on the feature branch
     await page.evaluate(async () => {
@@ -309,15 +321,23 @@ test.describe('Git branch comparison and merge', () => {
     await page.locator('button').filter({ hasText: 'Create' }).click();
 
     // Wait for dropdown to close
-    await expect(branchNameInput).not.toBeVisible({ timeout: 5000 });
+    await expect(branchNameInput).not.toBeVisible({ timeout: 10000 });
+
+    // Reload to pick up updated git metadata after branch creation
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await waitForAppReady(page, 60000);
+    await disableOthersPool(page);
+    await page.waitForURL(/compare-dropdown-test/, { timeout: 10000 });
+
+    await expect(page.locator('text=/2 branches/')).toBeVisible({ timeout: 30000 });
 
     // Re-open branch dropdown and check for "Compare branches" option
-    const branchBtn = page.locator('button').filter({ has: page.locator('.i-lucide-git-branch') }).first();
-    await expect(branchBtn).toBeVisible({ timeout: 10000 });
-    await branchBtn.click();
+    const branchDropdownBtn = page.locator('button').filter({ has: page.locator('.i-lucide-git-branch') }).first();
+    await expect(branchDropdownBtn).toBeVisible({ timeout: 10000 });
+    await branchDropdownBtn.click();
 
     // The compare option should be visible when there are multiple branches
-    const compareBtn = page.locator('button').filter({ hasText: 'Compare branches' });
+    const compareBtn = page.getByRole('button', { name: 'Compare branches' });
     await expect(compareBtn).toBeVisible({ timeout: 10000 });
   });
 
@@ -370,12 +390,18 @@ test.describe('Git branch comparison and merge', () => {
     // Wait for dropdown to close
     await expect(branchNameInput).not.toBeVisible({ timeout: 10000 });
 
-    // Verify branch selector now shows "feature" (we checked out to it)
-    const featureBranchBtn = page.locator('button').filter({ hasText: 'feature' }).first();
-    await expect(featureBranchBtn).toBeVisible({ timeout: 15000 });
+    // Reload to ensure git info store reflects the new branch
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await waitForAppReady(page, 60000);
+    await disableOthersPool(page);
+    await page.waitForURL(/branch-persist-test/, { timeout: 10000 });
 
-    // Verify we now have 2 branches
-    await expect(page.locator('text=/2 branches/')).toBeVisible({ timeout: 10000 });
+    // Verify we now have 2 branches and the new branch is listed
+    await expect(page.locator('text=/2 branches/')).toBeVisible({ timeout: 30000 });
+    const branchDropdownBtn = page.locator('button').filter({ has: page.locator('.i-lucide-git-branch') }).first();
+    await expect(branchDropdownBtn).toBeVisible({ timeout: 10000 });
+    await branchDropdownBtn.click();
+    await expect(page.locator('button').filter({ hasText: 'feature' }).first()).toBeVisible({ timeout: 10000 });
   });
 
   test('merge branches shows success message', async ({ page }) => {
@@ -435,7 +461,20 @@ test.describe('Git branch comparison and merge', () => {
     // Wait for dropdown to close and branch to be created
     await expect(branchNameInput).not.toBeVisible({ timeout: 10000 });
 
-    // Verify we're on feature branch after creation
+    // Reload to ensure git info store reflects the new branch
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await waitForAppReady(page, 60000);
+    await disableOthersPool(page);
+    await page.waitForURL(/merge-test/, { timeout: 10000 });
+    await expect(page.locator('text=/2 branches/')).toBeVisible({ timeout: 30000 });
+
+    // Switch to feature branch if needed
+    const branchDropdownBtn = page.locator('button').filter({ has: page.locator('.i-lucide-git-branch') }).first();
+    await expect(branchDropdownBtn).toBeVisible({ timeout: 10000 });
+    await branchDropdownBtn.click();
+    const featureOption = page.locator('button').filter({ hasText: 'feature' }).first();
+    await expect(featureOption).toBeVisible({ timeout: 10000 });
+    await featureOption.click();
     await expect(page.locator('button').filter({ hasText: 'feature' }).first()).toBeVisible({ timeout: 15000 });
 
     // Add a new file on the feature branch

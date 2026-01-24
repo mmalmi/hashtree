@@ -823,7 +823,17 @@ test.describe('Yjs Collaborative Document Editing', () => {
 
     console.log('[shared-notes] User B opening User A doc');
     const linkParamA = linkKeyA ? `?k=${linkKeyA}` : '';
-    await pageB.goto(`http://localhost:5173/#/${npubA}/public${linkParamA}`);
+    const targetHashA = `#/${npubA}/public${linkParamA}`;
+    await pageB.evaluate((hash) => {
+      window.location.hash = hash;
+    }, targetHashA);
+    await pageB.waitForFunction((hash) => {
+      if (!hash) return false;
+      const current = window.location.hash;
+      if (current === hash) return true;
+      const base = hash.split('?')[0];
+      return current.startsWith(base);
+    }, targetHashA, { timeout: 15000 });
     await waitForAppReady(pageB);
     await waitForRelayConnected(pageB, 30000);
     const docLink = pageB.getByRole('link', { name: sharedDocA }).first();

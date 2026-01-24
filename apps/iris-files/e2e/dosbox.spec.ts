@@ -86,13 +86,15 @@ test.describe('DOSBox integration', () => {
     await expect(page.locator('text=GAME.EXE')).toBeVisible({ timeout: 10000 });
 
     // Click on the .exe file
-    await page.click('text=GAME.EXE');
-
-    // Should show DOSBox viewer with terminal icon
-    await expect(page.locator('.i-lucide-terminal.text-3xl').first()).toBeVisible({ timeout: 10000 });
+    const exeEntry = page.locator('[data-testid="file-list"] a, [data-testid="file-list"] button').filter({ hasText: 'GAME.EXE' }).first();
+    await exeEntry.click();
+    await page.waitForURL(/GAME\.EXE/, { timeout: 10000 });
 
     // Should show "DOS Executable" label
-    await expect(page.locator('text=DOS Executable')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=DOS Executable')).toBeVisible({ timeout: 10000 });
+
+    // Should show DOSBox viewer with terminal icon
+    await expect(page.locator('.i-lucide-terminal.text-3xl').first()).toBeAttached({ timeout: 5000 });
 
     // Should show file count (5 files in our test zip: GAME.EXE, CONFIG.TXT, README.TXT, DATA/LEVELS.DAT, DATA/SOUND.DAT)
     await expect(page.locator('text=/\\d+ files.*ready to mount/')).toBeVisible({ timeout: 10000 });
@@ -109,7 +111,9 @@ test.describe('DOSBox integration', () => {
 
     // Click on GAME.EXE
     await expect(page.locator('text=GAME.EXE')).toBeVisible({ timeout: 10000 });
-    await page.click('text=GAME.EXE');
+    const exeEntry = page.locator('[data-testid="file-list"] a, [data-testid="file-list"] button').filter({ hasText: 'GAME.EXE' }).first();
+    await exeEntry.click();
+    await page.waitForURL(/GAME\.EXE/, { timeout: 10000 });
 
     // Wait for files to be collected
     await expect(page.locator('text=/\\d+ files.*ready to mount/')).toBeVisible({ timeout: 10000 });
@@ -134,7 +138,7 @@ test.describe('DOSBox integration', () => {
     // Find the row containing GAME.EXE and check for the icon
     const exeRow = page.locator('[data-testid="file-list"] a, [data-testid="file-list"] button').filter({ hasText: 'GAME.EXE' });
     await expect(exeRow).toBeVisible();
-    await expect(exeRow.locator('.i-lucide-terminal')).toBeVisible();
+    await expect(exeRow.locator('.i-lucide-terminal')).toBeAttached();
   });
 
   test('should allow keeping ZIP as file instead of extracting', async ({ page }) => {

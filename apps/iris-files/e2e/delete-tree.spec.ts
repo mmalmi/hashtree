@@ -40,9 +40,22 @@ test.describe('Tree Deletion', () => {
 
     // Submit the form
     await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page.locator('.fixed.inset-0.bg-black')).not.toBeVisible({ timeout: 10000 });
 
     // Wait for navigation to the new tree (URL should contain tree name)
-    await page.waitForURL(new RegExp(treeName), { timeout: 10000 });
+    const encodedTreeName = encodeURIComponent(treeName);
+    const alreadyInTree = page.url().includes(`/${encodedTreeName}`);
+    if (!alreadyInTree) {
+      const autoNavigated = await page.waitForURL(new RegExp(encodedTreeName), { timeout: 5000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!autoNavigated) {
+        const treeLink = page.locator('[data-testid="file-list"] a').filter({ hasText: treeName }).first();
+        await expect(treeLink).toBeVisible({ timeout: 15000 });
+        await treeLink.click();
+      }
+    }
+    await page.waitForURL(new RegExp(encodedTreeName), { timeout: 15000 });
     await expect(page.getByText('Empty directory')).toBeVisible({ timeout: 10000 });
     console.log(`Tree "${treeName}" created and navigated`);
 

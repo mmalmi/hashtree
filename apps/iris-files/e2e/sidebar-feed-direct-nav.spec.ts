@@ -6,7 +6,7 @@
  * by VideoHome which never loads on direct navigation.
  */
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, waitForAppReady, ensureLoggedIn, disableOthersPool, useLocalRelay } from './test-utils.js';
+import { setupPageErrorHandler, waitForAppReady, ensureLoggedIn, disableOthersPool, useLocalRelay, waitForRelayConnected, flushPendingPublishes } from './test-utils.js';
 
 async function createSidebarVideos(page: any, suffix: string): Promise<{ npub: string; treeNames: string[] }> {
   return page.evaluate(async ({ suffix }) => {
@@ -64,9 +64,11 @@ test.describe('Sidebar Feed Direct Navigation', () => {
     await disableOthersPool(page);
     await ensureLoggedIn(page);
     await useLocalRelay(page);
+    await waitForRelayConnected(page);
 
     const suffix = Date.now().toString(36);
     const { npub, treeNames } = await createSidebarVideos(page, suffix);
+    await flushPendingPublishes(page);
     const [treeNameA, treeNameB] = treeNames;
     const titleA = treeNameA.replace('videos/', '');
     const titleB = treeNameB.replace('videos/', '');
@@ -74,6 +76,7 @@ test.describe('Sidebar Feed Direct Navigation', () => {
     const videoUrl = `/video.html#/${npub}/${encodeURIComponent(treeNameA)}`;
     const pageLoadStart = Date.now();
     await page.goto(videoUrl);
+    await waitForAppReady(page);
 
     await expect(page.getByTestId('video-title')).toHaveText(titleA, { timeout: 20000 });
 

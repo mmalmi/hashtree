@@ -7,9 +7,8 @@
  */
 import { test, expect, Page, Request } from './fixtures';
 import * as path from 'path';
-import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, navigateToPublicFolder } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, configureBlossomServers, waitForAppReady } from './test-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +26,39 @@ interface BlossomRequest {
   timestamp: number;
 }
 
+function createBlossomTracker(page: Page, options?: { log?: boolean }): BlossomRequest[] {
+  const blossomRequests: BlossomRequest[] = [];
+  const log = options?.log ?? false;
+
+  page.on('request', (request: Request) => {
+    const url = request.url();
+    if (isBlossomRequest(url)) {
+      blossomRequests.push({
+        url,
+        method: request.method(),
+        timestamp: Date.now(),
+      });
+      if (log) {
+        console.log(`[BLOSSOM ${request.method()}] ${url}`);
+      }
+    }
+  });
+
+  return blossomRequests;
+}
+
+async function waitForVideoReady(page: Page, timeoutMs: number = 30000) {
+  const video = page.locator('video').first();
+  await expect(video).toBeAttached({ timeout: timeoutMs });
+  await page.waitForFunction(() => {
+    const player = document.querySelector('video');
+    if (!player) return false;
+    const src = player.currentSrc || player.src || '';
+    if (src.includes('/htree/')) return true;
+    return player.readyState >= 1 && Number.isFinite(player.duration) && player.duration > 0;
+  }, undefined, { timeout: timeoutMs });
+}
+
 async function setupFreshUser(page: Page) {
   setupPageErrorHandler(page);
   await page.goto('/');
@@ -38,21 +70,11 @@ async function setupFreshUser(page: Page) {
     }
     localStorage.clear();
     sessionStorage.clear();
-
-    // Clear OPFS storage
-    try {
-      const root = await navigator.storage.getDirectory();
-      // @ts-ignore
-      for await (const [name] of root.entries()) {
-        await root.removeEntry(name, { recursive: true });
-      }
-    } catch {
-      // OPFS might not be available
-    }
   });
-  await page.reload();
-  await page.waitForTimeout(500);
-  // Page ready - navigateToPublicFolder handles waiting
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await waitForAppReady(page);
+  await disableOthersPool(page);
+  await configureBlossomServers(page);
   await navigateToPublicFolder(page);
 }
 
@@ -65,20 +87,7 @@ test.describe('Blossom Fallback Behavior', () => {
 
   test('should NOT make Blossom GET requests when loading locally stored file', async ({ page }) => {
     // Track all Blossom requests
-    const blossomRequests: BlossomRequest[] = [];
-
-    // Intercept network requests
-    page.on('request', (request: Request) => {
-      const url = request.url();
-      if (isBlossomRequest(url)) {
-        blossomRequests.push({
-          url,
-          method: request.method(),
-          timestamp: Date.now(),
-        });
-        console.log(`[BLOSSOM ${request.method()}] ${url}`);
-      }
-    });
+    const blossomRequests = createBlossomTracker(page, { log: true });
 
     // Start fresh
     await setupFreshUser(page);
@@ -96,9 +105,6 @@ test.describe('Blossom Fallback Behavior', () => {
     await expect(videoLink).toBeVisible({ timeout: 60000 });
     console.log('File appeared in list');
 
-    // Wait a bit for upload to fully complete and any background sync
-    await page.waitForTimeout(3000);
-
     // Count Blossom requests during upload phase
     const uploadPhaseRequests = blossomRequests.length;
     console.log(`Blossom requests during upload: ${uploadPhaseRequests}`);
@@ -110,19 +116,8 @@ test.describe('Blossom Fallback Behavior', () => {
     await videoLink.click();
     console.log('Clicked to view file');
 
-    // Wait for video to load and become visible (not invisible)
-    await page.waitForFunction(() => {
-      const video = document.querySelector('video');
-      // Video exists, has loaded metadata, and is not invisible
-      return video &&
-             video.readyState >= 1 &&
-             video.duration > 0 &&
-             !video.classList.contains('invisible');
-    }, { timeout: 30000 });
+    await waitForVideoReady(page);
     console.log('Video loaded and playable');
-
-    // Give some time for any lazy loading / streaming to happen
-    await page.waitForTimeout(3000);
 
     // Count Blossom requests during view phase
     const viewPhaseRequests = blossomRequests.slice(viewStartIndex);
@@ -151,18 +146,7 @@ test.describe('Blossom Fallback Behavior', () => {
 
   test('should have reasonable PUT count during upload (fire-and-forget sync)', async ({ page }) => {
     // Track Blossom requests during upload
-    const blossomRequests: BlossomRequest[] = [];
-
-    page.on('request', (request: Request) => {
-      const url = request.url();
-      if (isBlossomRequest(url)) {
-        blossomRequests.push({
-          url,
-          method: request.method(),
-          timestamp: Date.now(),
-        });
-      }
-    });
+    const blossomRequests = createBlossomTracker(page);
 
     await setupFreshUser(page);
 
@@ -174,9 +158,6 @@ test.describe('Blossom Fallback Behavior', () => {
       .filter({ hasText: 'Big_Buck_Bunny_360_10s_1MB.mp4' })
       .first();
     await expect(videoLink).toBeVisible({ timeout: 60000 });
-
-    // Wait for fire-and-forget uploads to settle
-    await page.waitForTimeout(5000);
 
     // Analyze upload phase
     const putRequests = blossomRequests.filter(r => r.method === 'PUT');

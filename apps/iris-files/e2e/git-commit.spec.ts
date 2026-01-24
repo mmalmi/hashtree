@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, safeReload, waitForAppReady } from './test-utils.js';
 
 test.describe('Git commit features', () => {
   // Disable "others pool" to prevent WebRTC cross-talk from parallel tests
@@ -135,9 +135,15 @@ test.describe('Git commit features', () => {
     // Wait for commit to complete (modal should close)
     await expect(commitModal).not.toBeVisible({ timeout: 30000 });
 
+    // Reload to ensure git info and commit count refresh after commit
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
+    await waitForAppReady(page, 60000);
+    await disableOthersPool(page);
+    await page.waitForURL(/commit-test-repo/, { timeout: 10000 });
+
     // Verify commits count increased to 2 (this proves the commit worked)
     const updatedCommitsBtn = page.getByRole('button', { name: /commits/i });
-    await expect(updatedCommitsBtn).toContainText(/2/, { timeout: 15000 });
+    await expect(updatedCommitsBtn).toContainText(/2/, { timeout: 30000 });
 
     // Note: Status refresh after commit may have timing issues
     // The important verification is that commit count increased

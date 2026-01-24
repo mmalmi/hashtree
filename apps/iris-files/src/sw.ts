@@ -43,8 +43,10 @@ if (isTestMode) {
 // Request counter for unique IDs
 let requestId = 0;
 
-// Worker port for direct communication (set by main thread via REGISTER_WORKER_PORT)
-let workerPort: MessagePort | null = null;
+// Worker ports for direct communication (keyed by client ID)
+const workerPorts = new Map<string, MessagePort>();
+const workerPortsByClientKey = new Map<string, MessagePort>();
+let defaultWorkerPort: MessagePort | null = null;
 
 // Pending requests waiting for worker responses
 const pendingRequests = new Map<string, {
@@ -61,10 +63,42 @@ const pendingRequests = new Map<string, {
  * Handle messages from main thread (port registration)
  */
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
-  if (event.data?.type === 'REGISTER_WORKER_PORT' && event.data.port) {
-    workerPort = event.data.port;
-    workerPort.onmessage = handleWorkerMessage;
-    console.log('[SW] Worker port registered');
+  if (event.data?.type === 'PING_WORKER_PORT') {
+    const source = event.source as Client | null;
+    const requestId = event.data?.requestId;
+    const clientId = source?.id ?? event.data?.clientId;
+    const clientKey = event.data?.clientKey as string | undefined;
+    const hasPort = (clientKey && workerPortsByClientKey.has(clientKey))
+      || (clientId && workerPorts.has(clientId))
+      || !!defaultWorkerPort;
+    if (requestId && source?.postMessage) {
+      source.postMessage({ type: 'WORKER_PORT_PONG', requestId, ok: hasPort });
+    }
+    return;
+  }
+  if (event.data?.type === 'REGISTER_WORKER_PORT') {
+    const port = event.data?.port ?? event.ports?.[0];
+    if (!port) {
+      console.warn('[SW] Worker port registration missing MessagePort');
+      return;
+    }
+    const source = event.source as Client | null;
+    const clientId = source?.id ?? event.data?.clientId;
+    const clientKey = event.data?.clientKey as string | undefined;
+    if (clientId) {
+      workerPorts.set(clientId, port);
+    } else {
+      defaultWorkerPort = port;
+    }
+    if (clientKey) {
+      workerPortsByClientKey.set(clientKey, port);
+    }
+    port.onmessage = handleWorkerMessage;
+    console.log('[SW] Worker port registered', clientId ? `for ${clientId}` : '(default)');
+    const requestId = event.data?.requestId;
+    if (requestId && source?.postMessage) {
+      source.postMessage({ type: 'WORKER_PORT_READY', requestId });
+    }
   }
 });
 
@@ -135,10 +169,10 @@ function handleWorkerMessage(event: MessageEvent): void {
 /**
  * Serve file via direct worker port (preferred path)
  */
-function serveFileViaWorker(request: FileRequest): Promise<Response> {
+function serveFileViaWorker(request: FileRequest, port: MessagePort): Promise<Response> {
   return new Promise((resolve, reject) => {
-    if (!workerPort) {
-      reject(new Error('Worker port not available'));
+    if (!port) {
+      reject(new Error('Worker port not available for client'));
       return;
     }
 
@@ -168,7 +202,7 @@ function serveFileViaWorker(request: FileRequest): Promise<Response> {
     pendingRequests.set(request.requestId, { resolve: wrappedResolve, reject: wrappedReject });
 
     // Send request to worker
-    workerPort.postMessage(request);
+    port.postMessage(request);
   });
 }
 
@@ -258,11 +292,51 @@ interface FileResponseHeaders {
 /**
  * Serve file - tries worker port first, falls back to client broadcast
  */
-async function serveFile(request: FileRequest): Promise<Response> {
-  // Try direct worker path first (faster, no main thread involvement)
-  if (workerPort) {
+async function getWorkerPortForClient(clientId?: string | null): Promise<MessagePort | null> {
+  if (clientId && workerPorts.has(clientId)) {
+    return workerPorts.get(clientId) || null;
+  }
+  if (clientId) {
+    const client = await self.clients.get(clientId).catch(() => null);
+    if (!client) {
+      workerPorts.delete(clientId);
+    }
+  }
+  return defaultWorkerPort;
+}
+
+function normalizeClientUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return url.split('#')[0] || url;
+  }
+}
+
+async function resolveClientId(clientId?: string | null, referrer?: string | null): Promise<string | null> {
+  if (clientId) return clientId;
+  if (!referrer) return null;
+
+  const target = normalizeClientUrl(referrer);
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const match = clients.find(client => normalizeClientUrl(client.url) === target);
+  return match?.id ?? null;
+}
+
+async function serveFile(
+  request: FileRequest,
+  clientId?: string | null,
+  clientKey?: string | null,
+  referrer?: string | null
+): Promise<Response> {
+  const directPort = clientKey ? workerPortsByClientKey.get(clientKey) : null;
+  const resolvedClientId = await resolveClientId(clientId, referrer);
+  const port = directPort ?? await getWorkerPortForClient(resolvedClientId);
+  if (port) {
     try {
-      return await serveFileViaWorker(request);
+      return await serveFileViaWorker(request, port);
     } catch (error) {
       console.warn('[SW] Worker path failed, falling back to clients:', error);
     }
@@ -398,11 +472,14 @@ async function serveFileViaClients(request: FileRequest): Promise<Response> {
 /**
  * Create file request for npub-based paths
  */
-function createNpubFileResponse(
+async function createNpubFileResponse(
   npub: string,
   treeName: string,
   filePath: string,
-  rangeHeader: string | null
+  rangeHeader: string | null,
+  clientId?: string | null,
+  clientKey?: string | null,
+  referrer?: string | null
 ): Promise<Response> {
   const id = `file_${++requestId}`;
   const mimeType = guessMimeType(filePath || treeName);
@@ -429,7 +506,7 @@ function createNpubFileResponse(
     mimeType,
   };
 
-  return serveFile(request).catch((error) => {
+  return serveFile(request, clientId, clientKey, referrer).catch((error) => {
     console.error('[SW] File request failed:', error);
     return new Response(`File request failed: ${error.message}`, { status: 500 });
   });
@@ -438,11 +515,14 @@ function createNpubFileResponse(
 /**
  * Create file request for nhash-based paths (content-addressed)
  */
-function createNhashFileResponse(
+async function createNhashFileResponse(
   nhash: string,
   filename: string,
   rangeHeader: string | null,
-  forceDownload: boolean
+  forceDownload: boolean,
+  clientId?: string | null,
+  clientKey?: string | null,
+  referrer?: string | null
 ): Promise<Response> {
   const id = `file_${++requestId}`;
   const mimeType = guessMimeType(filename);
@@ -469,7 +549,7 @@ function createNhashFileResponse(
     download: forceDownload,
   };
 
-  return serveFile(request).catch((error) => {
+  return serveFile(request, clientId, clientKey, referrer).catch((error) => {
     console.error('[SW] File request failed:', error);
     return new Response(`File request failed: ${error.message}`, { status: 500 });
   });
@@ -542,6 +622,7 @@ self.addEventListener('fetch', (event: FetchEvent) => {
   const rawPath = pathMatch ? pathMatch[1].split('?')[0] : url.pathname;
   const pathParts = rawPath.slice(1).split('/'); // Remove leading /
   const rangeHeader = event.request.headers.get('Range');
+  const clientKey = url.searchParams.get('htree_c');
 
   // Skip non-GET requests
   if (event.request.method !== 'GET') return;
@@ -554,7 +635,17 @@ self.addEventListener('fetch', (event: FetchEvent) => {
       const nhash = pathParts[1];
       const filename = pathParts.slice(2).join('/') || 'file';
       const forceDownload = url.searchParams.get('download') === '1';
-      event.respondWith(createNhashFileResponse(nhash, filename, rangeHeader, forceDownload).then(addCORSHeaders));
+      event.respondWith(
+        createNhashFileResponse(
+          nhash,
+          filename,
+          rangeHeader,
+          forceDownload,
+          event.clientId,
+          clientKey,
+          event.request.referrer
+        ).then(addCORSHeaders)
+      );
       return;
     }
 
@@ -564,7 +655,17 @@ self.addEventListener('fetch', (event: FetchEvent) => {
       const npub = pathParts[1];
       const treeName = decodeURIComponent(pathParts[2]);
       const filePath = pathParts.slice(3).map(decodeURIComponent).join('/');
-      event.respondWith(createNpubFileResponse(npub, treeName, filePath, rangeHeader).then(addCORSHeaders));
+      event.respondWith(
+        createNpubFileResponse(
+          npub,
+          treeName,
+          filePath,
+          rangeHeader,
+          event.clientId,
+          clientKey,
+          event.request.referrer
+        ).then(addCORSHeaders)
+      );
       return;
     }
   }

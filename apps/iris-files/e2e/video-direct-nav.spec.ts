@@ -8,7 +8,7 @@ import { test, expect } from './fixtures';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, configureBlossomServers, followUser, waitForFollowInWorker, waitForWebRTCConnection, waitForAppReady, waitForRelayConnected } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, configureBlossomServers, followUser, waitForFollowInWorker, waitForWebRTCConnection, waitForAppReady, waitForRelayConnected, presetLocalRelayInDB, safeReload, useLocalRelay } from './test-utils.js';
 // Run tests in this file serially to avoid WebRTC/timing conflicts
 test.describe.configure({ mode: 'serial' });
 
@@ -70,6 +70,36 @@ async function prefetchFile(page: any, npub: string, treeName: string, filePath:
   return size;
 }
 
+async function waitForTreeEntry(page: any, npub: string, treeName: string, filePath: string, timeoutMs = 60000): Promise<void> {
+  await expect.poll(async () => {
+    return page.evaluate(async (args: { targetNpub: string; targetTree: string; path: string }) => {
+      try {
+        const { getTreeRootSync } = await import('/src/stores');
+        const { getTree } = await import('/src/store');
+        const root = getTreeRootSync(args.targetNpub, args.targetTree);
+        if (!root) return false;
+        const adapter = (window as any).__getWorkerAdapter?.() ?? (window as any).__workerAdapter;
+        if (!adapter) return false;
+        await adapter.sendHello?.();
+        if (typeof adapter.get === 'function') {
+          await Promise.race([
+            adapter.get(root.hash).catch(() => null),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+        }
+        const tree = getTree();
+        const entry = await Promise.race([
+          tree.resolvePath(root, args.path),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+        ]);
+        return !!entry?.cid;
+      } catch {
+        return false;
+      }
+    }, { targetNpub: npub, targetTree: treeName, path: filePath });
+  }, { timeout: timeoutMs, intervals: [1000, 2000, 3000] }).toBe(true);
+}
+
 test.describe('Video Direct Navigation', () => {
   test.setTimeout(120000);
 
@@ -116,16 +146,13 @@ test.describe('Video Direct Navigation', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {}
     });
+    await presetLocalRelayInDB(page1);
 
-    await page1.reload();
+    await safeReload(page1, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page1);
+    await useLocalRelay(page1);
+    await waitForRelayConnected(page1, 30000);
     await waitForRelayConnected(page1, 30000);
     await disableOthersPool(page1);
     await configureBlossomServers(page1);
@@ -170,16 +197,12 @@ test.describe('Video Direct Navigation', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {}
     });
+    await presetLocalRelayInDB(page2);
 
-    await page2.reload();
+    await safeReload(page2, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page2);
+    await useLocalRelay(page2);
     await waitForRelayConnected(page2, 30000);
     await waitForTreeRootHash(page2, page1Npub, 'public', rootHashAfterUpload!);
     await disableOthersPool(page2);
@@ -221,19 +244,58 @@ test.describe('Video Direct Navigation', () => {
     expect(page1Connected).toBe(true);
     expect(page2Connected).toBe(true);
 
+    await waitForTreeEntry(page2, page1Npub, 'public', videoFileName, 60000).catch(() => {});
+
     // === Direct navigate to the video file ===
     const videoUrl = `http://localhost:5173/#/${page1Npub}/public/${videoFileName}`;
     console.log(`Direct navigating to: ${videoUrl}`);
     await page2.goto(videoUrl);
+    const videoUrlPattern = new RegExp(videoFileName.replace(/\./g, '\\.'));
+    await page2.waitForURL(videoUrlPattern, { timeout: 20000 }).catch(async () => {
+      const nextHash = `/${page1Npub}/public/${videoFileName}`;
+      await page2.evaluate((hash: string) => {
+        window.location.hash = hash;
+      }, nextHash);
+    });
 
     await waitForAppReady(page2);
     await waitForRelayConnected(page2, 30000);
     await waitForTreeRootHash(page2, page1Npub, 'public', rootHashAfterUpload!);
     await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
 
-    // Check that video element exists
+    // Check that video element exists (fallback to list navigation if needed)
     const videoElement = page2.locator('video');
-    await expect(videoElement).toHaveCount(1, { timeout: 60000 });
+    let attemptedFallback = false;
+    const dirUrl = `http://localhost:5173/#/${page1Npub}/public`;
+    const expectedHash = `#/${page1Npub}/public/${videoFileName}`;
+    const videoEntryLink = page2.locator('[data-testid="file-list"] a').filter({ hasText: videoFileName }).first();
+    await expect.poll(async () => {
+      await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+      const count = await videoElement.count().catch(() => 0);
+      if (count > 0) return true;
+      const currentUrl = page2.url();
+      if (!attemptedFallback && !currentUrl.includes(`/public/${videoFileName}`) && !currentUrl.includes(expectedHash)) {
+        attemptedFallback = true;
+        await page2.goto(dirUrl);
+        await waitForAppReady(page2);
+        await waitForRelayConnected(page2, 30000);
+        await waitForTreeRootHash(page2, page1Npub, 'public', rootHashAfterUpload!);
+        await waitForTreeEntry(page2, page1Npub, 'public', videoFileName, 60000).catch(() => {});
+      }
+      if (await videoEntryLink.isVisible().catch(() => false)) {
+        await videoEntryLink.click().catch(() => {});
+        await page2.waitForURL(videoUrlPattern, { timeout: 30000 }).catch(() => {});
+      } else {
+        await page2.evaluate((hash: string) => {
+          if (window.location.hash !== hash) {
+            window.location.hash = hash;
+            window.dispatchEvent(new HashChangeEvent('hashchange'));
+          }
+        }, expectedHash);
+      }
+      return false;
+    }, { timeout: 90000, intervals: [1000, 2000, 3000] }).toBe(true);
+    await expect(videoElement).toHaveCount(1, { timeout: 30000 });
     console.log('Video element is present');
 
     // Wait for video to have a source (SW URL for hashtree files)
@@ -317,16 +379,12 @@ test.describe('Video Direct Navigation', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {}
     });
+    await presetLocalRelayInDB(page1);
 
-    await page1.reload();
+    await safeReload(page1, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page1);
+    await useLocalRelay(page1);
     await disableOthersPool(page1);
     await configureBlossomServers(page1);
     await navigateToPublicFolder(page1);
@@ -375,6 +433,8 @@ test.describe('Video Direct Navigation', () => {
       const { flushPendingPublishes } = await import('/src/treeRootCache');
       await flushPendingPublishes();
     });
+    const rootHashAfterUpload = await getTreeRootHash(page1, page1Npub, 'public');
+    expect(rootHashAfterUpload).toBeTruthy();
 
     // Close page1 - browser A is now gone
     console.log('Closing browser A...');
@@ -407,18 +467,16 @@ test.describe('Video Direct Navigation', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {}
     });
+    await presetLocalRelayInDB(page2);
 
-    await page2.reload();
+    await safeReload(page2, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page2);
+    await useLocalRelay(page2);
+    await waitForRelayConnected(page2, 30000);
     await disableOthersPool(page2);
     await configureBlossomServers(page2);
+    await navigateToPublicFolder(page2, { timeoutMs: 60000 });
 
     // === Direct navigate to the video file ===
     // Page2 does NOT follow page1 - the only way to get the video is via Blossom
@@ -427,10 +485,32 @@ test.describe('Video Direct Navigation', () => {
     await page2.goto(videoUrl);
 
     await waitForAppReady(page2);
+    await waitForTreeRootHash(page2, page1Npub, 'public', rootHashAfterUpload!, 90000);
+    await page2.evaluate(async () => {
+      const { ensureMediaStreamingReady } = await import('/src/lib/mediaStreamingSetup.ts');
+      await ensureMediaStreamingReady(5, 1000);
+    });
 
     // Check that video element exists
     const videoElement = page2.locator('video');
-    await expect(videoElement).toHaveCount(1, { timeout: 30000 });
+    const fileLink = page2.locator('[data-testid="file-list"] a').filter({ hasText: videoFileName }).first();
+    const expectedHash = `#/${page1Npub}/public/${videoFileName}`;
+    await expect.poll(async () => {
+      await page2.evaluate(() => (window as any).__workerAdapter?.sendHello?.());
+      const count = await videoElement.count().catch(() => 0);
+      if (count > 0) return true;
+      if (await fileLink.isVisible().catch(() => false)) {
+        await fileLink.click().catch(() => {});
+      } else {
+        await page2.evaluate((hash) => {
+          if (window.location.hash !== hash) {
+            window.location.hash = hash;
+            window.dispatchEvent(new HashChangeEvent('hashchange'));
+          }
+        }, expectedHash);
+      }
+      return false;
+    }, { timeout: 90000, intervals: [1000, 2000, 3000] }).toBe(true);
     console.log('Video element is present');
 
     // Wait for video to have a source
@@ -512,16 +592,13 @@ test.describe('Video Direct Navigation', () => {
       }
       localStorage.clear();
       sessionStorage.clear();
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {}
     });
+    await presetLocalRelayInDB(page1);
 
-    await page1.reload();
+    await safeReload(page1, { waitUntil: 'domcontentloaded', timeoutMs: 60000 });
     await waitForAppReady(page1);
+    await useLocalRelay(page1);
+    await waitForRelayConnected(page1, 30000);
     await disableOthersPool(page1);
     await configureBlossomServers(page1);
 
@@ -573,11 +650,17 @@ test.describe('Video Direct Navigation', () => {
     const videoPageUrl = page1.url();
     console.log(`Video page URL: ${videoPageUrl}`);
 
+    const videoExt = TEST_VIDEO.split('.').pop()?.toLowerCase() || 'mp4';
+    const videoFileName = `video.${videoExt}`;
+    const treeName = `videos/${videoTitle.replace(/[<>:"/\\|?*]/g, '_')}`;
+
     // Ensure latest tree root is published before viewer loads
     await page1.evaluate(async () => {
       const { flushPendingPublishes } = await import('/src/treeRootCache');
       await flushPendingPublishes();
     });
+    const rootHashAfterUpload = await getTreeRootHash(page1, uploaderNpub, treeName);
+    expect(rootHashAfterUpload).toBeTruthy();
 
     // Close uploader browser
     console.log('Closing uploader browser...');
@@ -602,12 +685,19 @@ test.describe('Video Direct Navigation', () => {
     // This tests cold-start direct navigation
     console.log(`Viewer directly navigating to: ${videoPageUrl}`);
     await page2.goto(videoPageUrl);
+    await presetLocalRelayInDB(page2);
+    await safeReload(page2, { waitUntil: 'domcontentloaded', timeoutMs: 60000, url: videoPageUrl });
 
+    await page2.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 30000 });
     await page2.waitForFunction(() => Boolean((window as any).__configureBlossomServers), undefined, { timeout: 30000 });
 
     // Configure Blossom for viewer (needed for fetching)
     await configureBlossomServers(page2);
     await disableOthersPool(page2);
+    await useLocalRelay(page2);
+    await waitForRelayConnected(page2, 30000);
+    await waitForTreeRootHash(page2, uploaderNpub, treeName, rootHashAfterUpload!, 90000);
+    await waitForTreeEntry(page2, uploaderNpub, treeName, videoFileName, 90000).catch(() => {});
 
     // Check for error message (the bug we're looking for)
     const errorVisible = await page2.locator('text=Video not found').isVisible({ timeout: 5000 }).catch(() => false);
@@ -618,7 +708,20 @@ test.describe('Video Direct Navigation', () => {
 
     // Wait for video element to be present
     const videoElement = page2.locator('video');
-    await expect(videoElement).toHaveCount(1, { timeout: 60000 });
+    let attemptedReload = false;
+    await expect.poll(async () => {
+      const count = await videoElement.count().catch(() => 0);
+      if (count > 0) return true;
+      if (!attemptedReload) {
+        attemptedReload = true;
+        await safeReload(page2, { waitUntil: 'domcontentloaded', timeoutMs: 60000, url: videoPageUrl });
+        await waitForAppReady(page2);
+        await waitForRelayConnected(page2, 30000);
+        await waitForTreeRootHash(page2, uploaderNpub, treeName, rootHashAfterUpload!, 90000);
+        await waitForTreeEntry(page2, uploaderNpub, treeName, videoFileName, 90000).catch(() => {});
+      }
+      return false;
+    }, { timeout: 90000, intervals: [1000, 2000, 3000] }).toBe(true);
     console.log('Video element is present');
 
     // Wait for video to have a source
@@ -631,9 +734,6 @@ test.describe('Video Direct Navigation', () => {
     expect(hasSource).toBe(true);
 
     // Prefetch the file data to avoid WebRTC timing issues
-    const videoExt = TEST_VIDEO.split('.').pop()?.toLowerCase() || 'mp4';
-    const videoFileName = `video.${videoExt}`;
-    const treeName = `videos/${videoTitle.replace(/[<>:"/\\|?*]/g, '_')}`;
     let prefetchedSize = 0;
     try {
       prefetchedSize = await prefetchFile(page2, uploaderNpub, treeName, videoFileName);

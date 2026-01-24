@@ -2,7 +2,7 @@
  * Git log and history operations
  */
 import type { CID } from '@hashtree/core';
-import { LinkType } from '@hashtree/core';
+import { LinkType, toHex } from '@hashtree/core';
 import { getTree } from '../../store';
 import { withWasmGitLock, loadWasmGit, copyGitDirToWasmFS, rmRf, createRepoPath } from './core';
 
@@ -181,6 +181,10 @@ async function decompressZlib(data: Uint8Array): Promise<Uint8Array> {
   return result;
 }
 
+function gitDirCacheKey(gitDirCid: CID): string {
+  return gitDirCid.key ? `${toHex(gitDirCid.hash)}:${toHex(gitDirCid.key)}` : toHex(gitDirCid.hash);
+}
+
 // Cache for pack indexes and pack data per git dir CID
 const packIndexCache = new Map<string, Map<string, { shas: string[]; offsets: number[]; shaToOffset: Map<string, number> }>>();
 const packDataCache = new Map<string, Map<string, Uint8Array>>();
@@ -194,7 +198,7 @@ async function loadPackIndex(
   idxName: string
 ): Promise<{ fanout: Uint32Array; shas: string[]; offsets: number[]; shaToOffset: Map<string, number> } | null> {
   // Check cache first
-  const cacheKey = gitDirCid.toString();
+  const cacheKey = gitDirCacheKey(gitDirCid);
   let dirCache = packIndexCache.get(cacheKey);
   if (dirCache?.has(idxName)) {
     const cached = dirCache.get(idxName)!;
@@ -278,7 +282,7 @@ async function loadPackData(
   gitDirCid: CID,
   packName: string
 ): Promise<Uint8Array | null> {
-  const cacheKey = gitDirCid.toString();
+  const cacheKey = gitDirCacheKey(gitDirCid);
   let dirCache = packDataCache.get(cacheKey);
   if (dirCache?.has(packName)) {
     return dirCache.get(packName)!;
@@ -311,7 +315,7 @@ async function findInPack(
   gitDirCid: CID,
   sha: string
 ): Promise<{ packName: string; offset: number } | null> {
-  const cacheKey = gitDirCid.toString();
+  const cacheKey = gitDirCacheKey(gitDirCid);
 
   // Get cached list of idx files or load it
   let idxFileNames = packDirCache.get(cacheKey);
@@ -603,7 +607,7 @@ async function preloadCommitsFromPacks(
   tree: ReturnType<typeof getTree>,
   gitDirCid: CID
 ): Promise<Map<string, { type: string; content: Uint8Array }>> {
-  const cacheKey = gitDirCid.toString();
+  const cacheKey = gitDirCacheKey(gitDirCid);
   if (commitCache.has(cacheKey)) {
     return commitCache.get(cacheKey)!;
   }
@@ -906,7 +910,9 @@ export async function getCommitCountFast(rootCid: CID): Promise<number> {
   }
 
   // Check cache
-  const cacheKey = gitDirResult.cid.toString();
+  const cacheKey = gitDirResult.cid.key
+    ? `${toHex(gitDirResult.cid.hash)}:${toHex(gitDirResult.cid.key)}`
+    : toHex(gitDirResult.cid.hash);
   if (commitCountCache.has(cacheKey)) {
     const cached = commitCountCache.get(cacheKey)!;
     console.log(`[git perf] getCommitCountFast cache hit: ${cached} commits`);
@@ -915,8 +921,17 @@ export async function getCommitCountFast(rootCid: CID): Promise<number> {
 
   let commitCount = 0;
   let hasPackFiles = false;
+  let hasLooseObjects = false;
 
   try {
+    const objectsDirResult = await tree.resolvePath(gitDirResult.cid, 'objects');
+    if (objectsDirResult && objectsDirResult.type === LinkType.Dir) {
+      const objectEntries = await tree.listDirectory(objectsDirResult.cid);
+      hasLooseObjects = objectEntries.some(entry =>
+        entry.type === LinkType.Dir && entry.name !== 'pack' && entry.name !== 'info'
+      );
+    }
+
     // 1. Count commits in pack files (most commits are packed)
     const packDirResult = await tree.resolvePath(gitDirResult.cid, 'objects/pack');
     if (packDirResult && packDirResult.type === LinkType.Dir) {
@@ -983,6 +998,9 @@ export async function getCommitCountFast(rootCid: CID): Promise<number> {
 
         commitCount = visited.size;
       }
+    } else if (hasLooseObjects || commitCount < 2) {
+      // Pack-only counting misses loose commits; fall back to graph traversal when needed.
+      commitCount = await getCommitCount(rootCid);
     }
 
     // Cache the result

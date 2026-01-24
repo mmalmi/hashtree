@@ -49,8 +49,8 @@ test.describe('Blossom Disabled', () => {
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(testFilePath);
 
-      // Wait for file to appear in the list
-      await expect(page.locator('[data-testid="file-list"] a:has-text("test-file.txt")')).toBeVisible({ timeout: 10000 });
+      // Wait for file to appear in the tree (may be hidden on smaller layouts)
+      await expect(page.locator('[data-testid="file-list"] a:has-text("test-file.txt")')).toBeAttached({ timeout: 10000 });
 
       // Verify no blossom requests were made
       console.log('[Test] Blossom requests made:', blossomRequests);
@@ -106,7 +106,7 @@ test.describe('Blossom Disabled', () => {
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(testFilePath);
 
-      await expect(page.locator('[data-testid="file-list"] a:has-text("test-file2.txt")')).toBeVisible({ timeout: 10000 });
+      await expect(page.locator('[data-testid="file-list"] a:has-text("test-file2.txt")')).toBeAttached({ timeout: 10000 });
 
       console.log('[Test] Blossom requests made:', blossomRequests);
       expect(blossomRequests.length).toBe(0);

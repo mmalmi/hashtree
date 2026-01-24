@@ -71,6 +71,33 @@ export async function waitForAppReady(page: any, timeoutMs: number = 60000) {
   await waitForWorkerAdapter(page, timeoutMs).catch(() => {});
 }
 
+export async function safeGoto(
+  page: any,
+  url: string,
+  options?: { waitUntil?: 'domcontentloaded' | 'load' | 'networkidle'; timeoutMs?: number; retries?: number; delayMs?: number }
+): Promise<void> {
+  const waitUntil = options?.waitUntil ?? 'domcontentloaded';
+  const timeoutMs = options?.timeoutMs ?? 60000;
+  const retries = options?.retries ?? 2;
+  const delayMs = options?.delayMs ?? 1000;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await page.goto(url, { waitUntil, timeout: timeoutMs });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt === retries) {
+        break;
+      }
+      await page.waitForTimeout(delayMs);
+    }
+  }
+
+  throw lastError;
+}
+
 export async function safeReload(
   page: any,
   options?: { waitUntil?: 'domcontentloaded' | 'load' | 'networkidle'; timeoutMs?: number; retries?: number; url?: string }
@@ -117,10 +144,10 @@ export async function waitForRelayConnected(page: any, timeoutMs: number = 15000
  * Ensure a user is logged in (create a new account if needed).
  */
 export async function ensureLoggedIn(page: any, timeoutMs: number = 15000) {
-  const alreadyLoggedIn = await page.evaluate(() => {
+  const alreadyLoggedIn = await evaluateWithRetry(page, () => {
     const nostrStore = (window as any).__nostrStore;
     return (nostrStore?.getState?.().pubkey?.length ?? 0) === 64;
-  }).catch(() => false);
+  }, undefined).catch(() => false);
 
   if (!alreadyLoggedIn) {
     const newBtn = page.getByRole('button', { name: 'New', exact: true });
@@ -137,10 +164,10 @@ export async function ensureLoggedIn(page: any, timeoutMs: number = 15000) {
         await newBtn.click({ force: true });
       });
     } else {
-      await page.evaluate(async () => {
+      await evaluateWithRetry(page, async () => {
         const { generateNewKey } = await import('/src/nostr.ts');
         await generateNewKey();
-      });
+      }, undefined);
     }
   }
 
@@ -752,25 +779,21 @@ export async function createFolder(page: any, folderName: string) {
  * Clear all browser storage (IndexedDB, localStorage, sessionStorage).
  * Use this to reset state between tests or create a fresh user.
  */
-export async function clearAllStorage(page: any, options?: { clearOpfs?: boolean }) {
-  await page.evaluate(async (opts?: { clearOpfs?: boolean }) => {
+export async function clearAllStorage(page: any) {
+  await page.evaluate(async () => {
     const dbs = await indexedDB.databases();
-    for (const db of dbs) {
-      if (db.name) indexedDB.deleteDatabase(db.name);
-    }
+    await Promise.all(dbs.map((db) => new Promise<void>((resolve) => {
+      if (!db.name) {
+        resolve();
+        return;
+      }
+      const req = indexedDB.deleteDatabase(db.name);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve();
+    })));
     localStorage.clear();
     sessionStorage.clear();
-
-    if (opts?.clearOpfs) {
-      try {
-        const root = await navigator.storage.getDirectory();
-        for await (const name of root.keys()) {
-          await root.removeEntry(name, { recursive: true });
-        }
-      } catch {
-        // OPFS might not be available
-      }
-    }
   });
 }
 
@@ -778,11 +801,11 @@ export async function clearAllStorage(page: any, options?: { clearOpfs?: boolean
  * Setup a fresh user by clearing all storage and reloading.
  * Combines setupPageErrorHandler, goto, clearAllStorage, reload, and waitForAppReady.
  */
-export async function setupFreshUser(page: any, options?: { timeoutMs?: number; clearOpfs?: boolean }) {
+export async function setupFreshUser(page: any, options?: { timeoutMs?: number }) {
   setupPageErrorHandler(page);
-  await page.goto('/');
-  await clearAllStorage(page, { clearOpfs: options?.clearOpfs });
-  await page.reload();
+  await safeGoto(page, '/', { retries: 4, delayMs: 1500 });
+  await clearAllStorage(page);
+  await safeGoto(page, '/', { retries: 4, delayMs: 1500 });
   await waitForAppReady(page, options?.timeoutMs ?? 30000);
 }
 

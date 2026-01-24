@@ -25,7 +25,7 @@
   function buildQueryString(params: { k?: string | null; g?: string | null }): string {
     const parts: string[] = [];
     if (params.k) parts.push(`k=${params.k}`);
-    if (params.g) parts.push(`g=${encodeURIComponent(params.g)}`);
+    if (params.g !== null && params.g !== undefined) parts.push(`g=${encodeURIComponent(params.g)}`);
     return parts.length > 0 ? '?' + parts.join('&') : '';
   }
 

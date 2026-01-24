@@ -40,6 +40,8 @@ test.describe('Social graph features', () => {
       await avatarButton.click();
     }
     await page.waitForURL(/npub1/, { timeout: 15000 });
+    await waitForAppReady(page);
+    await closeModals(page);
     await expect(page.locator('h1').first()).toBeVisible({ timeout: 15000 });
     await closeModals(page);
   }

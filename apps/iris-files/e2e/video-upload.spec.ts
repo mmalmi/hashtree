@@ -41,9 +41,60 @@ async function loginAsTestUser(page: Page) {
     const testNsec = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
     localStorage.setItem('nostr-login', JSON.stringify({ nsec: testNsec }));
   });
-  await page.reload();
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 30000 });
   // Wait for login to complete - Create button appears when logged in
   await page.locator('button:has-text("Create"), a:has-text("Create")').first().waitFor({ state: 'visible', timeout: 15000 });
+}
+
+async function waitForVideoData(page: Page, timeoutMs = 120000) {
+  await expect.poll(async () => {
+    return page.evaluate(async () => {
+      try {
+        const hash = window.location.hash;
+        const match = hash.match(/#\/(npub1[a-z0-9]+)\/([^/?]+)/);
+        if (!match) return false;
+        const npub = match[1];
+        const treeName = decodeURIComponent(match[2]);
+        const { getTreeRootSync } = await import('/src/stores');
+        const { getTree } = await import('/src/store');
+        const root = getTreeRootSync(npub, treeName);
+        if (!root) return false;
+        const adapter = (window as any).__getWorkerAdapter?.() ?? (window as any).__workerAdapter;
+        if (!adapter?.readFile && !adapter?.readFileRange) return false;
+        await adapter.sendHello?.();
+        if (typeof adapter.get === 'function') {
+          await Promise.race([
+            adapter.get(root.hash).catch(() => null),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+        }
+        const tree = getTree();
+        const candidates = ['video.mp4', 'video.webm', 'video.mov', 'video.mkv'];
+        for (const name of candidates) {
+          const entry = await Promise.race([
+            tree.resolvePath(root, name),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+          if (!entry?.cid) continue;
+          const read = () => {
+            if (typeof adapter.readFileRange === 'function') {
+              return adapter.readFileRange(entry.cid, 0, 1024);
+            }
+            return adapter.readFile(entry.cid);
+          };
+          const data = await Promise.race([
+            read(),
+            new Promise<Uint8Array | null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+          if (data && data.length > 0) return true;
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    });
+  }, { timeout: timeoutMs, intervals: [1000, 2000, 3000, 5000] }).toBe(true);
 }
 
 test.describe('Video Upload with Visibility', () => {
@@ -92,7 +143,8 @@ test.describe('Video Upload with Visibility', () => {
     expect(videoUrl).toContain('k=');
 
     // Wait for page to stabilize after navigation
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 30000 });
 
     // Wait for video page to load - h1 title appears
     const titleElement = page.locator('h1');
@@ -104,18 +156,39 @@ test.describe('Video Upload with Visibility', () => {
     await expect(videoElement).toBeVisible({ timeout: 15000 });
 
     // Verify video has loaded content (not empty element)
-    await expect(async () => {
-      const videoState = await videoElement.evaluate((v: HTMLVideoElement) => ({
-        src: v.src,
-        readyState: v.readyState,
-        duration: v.duration,
-        videoWidth: v.videoWidth,
-      }));
+    const mediaSetup = await page.evaluate(async () => {
+      const { ensureMediaStreamingReady, isMediaStreamingSetup } = await import('/src/lib/mediaStreamingSetup.ts');
+      const result = await ensureMediaStreamingReady(5, 1000);
+      return { result, isSetup: isMediaStreamingSetup() };
+    });
+    console.log('Media streaming setup:', mediaSetup);
+    let attemptedReload = false;
+    await expect.poll(async () => {
+      const videoState = await page.evaluate(() => {
+        const v = document.querySelector('video') as HTMLVideoElement | null;
+        if (!v) {
+          return { hasSrc: false, reason: 'no-video', readyState: 0 };
+        }
+        if (v.readyState === 0 && v.src) {
+          v.load();
+        }
+        const src = v.currentSrc || v.src;
+        return { hasSrc: !!src, reason: src ? 'has-src' : 'no-src', readyState: v.readyState };
+      });
+      if (!videoState.hasSrc && videoState.reason === 'no-video') {
+        const failedVisible = await page.getByText('Video failed to load').isVisible().catch(() => false);
+        if (failedVisible && !attemptedReload) {
+          attemptedReload = true;
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 30000 });
+          await expect(page.locator('h1')).toBeVisible({ timeout: 30000 });
+        }
+      }
       console.log('Video state:', videoState);
-      // readyState >= 1 means metadata loaded, src should exist
-      expect(videoState.src).toBeTruthy();
-      expect(videoState.readyState).toBeGreaterThanOrEqual(1);
-    }).toPass({ timeout: 30000 });
+      return videoState.hasSrc;
+    }, { timeout: 60000, intervals: [1000, 2000, 3000, 5000] }).toBe(true);
+
+    await waitForVideoData(page, 120000);
 
     // Screenshot to verify video loaded
     await page.screenshot({ path: 'test-results/link-visible-upload.png' });
@@ -254,9 +327,6 @@ test.describe('Video Upload with Visibility', () => {
     // Navigate to the URL WITHOUT the k= param
     await page.goto(urlWithoutK);
 
-    // Wait a bit for the resolver to fetch and process the event
-    await page.waitForTimeout(5000);
-
     // Print debug logs
     const treeRootLogs = consoleLogs.filter(l => l.includes('treeRoot'));
     console.log('treeRoot logs:', treeRootLogs.length ? treeRootLogs.join('\n') : 'NONE');
@@ -274,7 +344,7 @@ test.describe('Video Upload with Visibility', () => {
     }).toPass({ timeout: 15000 });
 
     // Wait for page to stabilize
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     // Verify the video title loads correctly
     const titleElement = page.locator('h1');

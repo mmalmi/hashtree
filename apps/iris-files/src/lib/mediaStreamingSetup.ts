@@ -5,10 +5,21 @@
  * to enable media streaming via /media/{cid}/{path} URLs.
  */
 
-import { getWorkerAdapter } from './workerInit';
+import { getMediaClientId } from './mediaClient';
+import { getWorkerAdapter, waitForWorkerAdapter } from './workerInit';
 
 let isSetup = false;
 let setupPromise: Promise<boolean> | null = null;
+let activeController: ServiceWorker | null = null;
+let controllerListenerAttached = false;
+
+function ensureControllerListener(): void {
+  if (controllerListenerAttached || !('serviceWorker' in navigator)) return;
+  controllerListenerAttached = true;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    resetMediaStreaming();
+  });
+}
 
 /**
  * Setup media streaming by connecting service worker to hashtree worker
@@ -20,11 +31,85 @@ let setupPromise: Promise<boolean> | null = null;
  * The service worker can then request media data directly from the worker.
  */
 export async function setupMediaStreaming(): Promise<boolean> {
+  if ('serviceWorker' in navigator) {
+    ensureControllerListener();
+    const controller = navigator.serviceWorker.controller;
+    if (isSetup && activeController && controller && controller !== activeController) {
+      resetMediaStreaming();
+    } else if (isSetup && controller) {
+      const clientKey = getMediaClientId();
+      if (clientKey) {
+        const ok = await pingWorkerPort(clientKey, controller);
+        if (!ok) {
+          resetMediaStreaming();
+        }
+      }
+    }
+  }
+
   if (isSetup) return true;
   if (setupPromise) return setupPromise;
 
-  setupPromise = doSetup();
+  setupPromise = doSetup().then((result) => {
+    if (!result) setupPromise = null;
+    return result;
+  });
   return setupPromise;
+}
+
+export async function ensureMediaStreamingReady(attempts = 3, delayMs = 500): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const ready = await setupMediaStreaming().catch(() => false);
+    if (ready) return true;
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  return false;
+}
+
+async function waitForController(timeoutMs: number): Promise<ServiceWorker | null> {
+  if (!('serviceWorker' in navigator)) return null;
+  if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+
+  await navigator.serviceWorker.ready.catch(() => {});
+  if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+
+  return new Promise<ServiceWorker | null>((resolve) => {
+    const timeoutId = setTimeout(() => {
+      resolve(navigator.serviceWorker.controller ?? null);
+    }, timeoutMs);
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      clearTimeout(timeoutId);
+      resolve(navigator.serviceWorker.controller ?? null);
+    }, { once: true });
+  });
+}
+
+async function pingWorkerPort(clientKey: string, controller: ServiceWorker): Promise<boolean> {
+  const pingId = `media-ping-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const ackPromise = new Promise<boolean>((resolve) => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { type?: string; requestId?: string; ok?: boolean };
+      if (data?.type === 'WORKER_PORT_PONG' && data.requestId === pingId) {
+        cleanup();
+        resolve(!!data.ok);
+      }
+    };
+    const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      navigator.serviceWorker.removeEventListener('message', handler);
+    };
+    timeoutId = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, 1500);
+    navigator.serviceWorker.addEventListener('message', handler);
+  });
+
+  controller.postMessage({ type: 'PING_WORKER_PORT', requestId: pingId, clientKey });
+  return await ackPromise;
 }
 
 async function doSetup(): Promise<boolean> {
@@ -66,10 +151,16 @@ async function doSetup(): Promise<boolean> {
       return false;
     }
 
+    const controller = await waitForController(5000);
+    if (!controller) {
+      console.warn('[MediaStreaming] No controlling service worker');
+      return false;
+    }
+
     console.log('[MediaStreaming] SW active:', registration.scope);
 
     // Get the worker adapter
-    const adapter = getWorkerAdapter();
+    const adapter = getWorkerAdapter() ?? await waitForWorkerAdapter(10000);
     if (!adapter) {
       console.warn('[MediaStreaming] Worker adapter not initialized');
       return false;
@@ -78,16 +169,49 @@ async function doSetup(): Promise<boolean> {
     // Create a MessageChannel
     const channel = new MessageChannel();
 
+    const setupId = `media-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const ackPromise = new Promise<boolean>((resolve) => {
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      const handler = (event: MessageEvent) => {
+        const data = event.data as { type?: string; requestId?: string };
+        if (data?.type === 'WORKER_PORT_READY' && data.requestId === setupId) {
+          settled = true;
+          cleanup();
+          resolve(true);
+        }
+      };
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+      };
+      timeoutId = setTimeout(() => {
+        if (settled) return;
+        cleanup();
+        resolve(false);
+      }, 5000);
+      navigator.serviceWorker.addEventListener('message', handler);
+    });
+
+    const clientKey = getMediaClientId();
+
     // Send one port to the service worker
-    registration.active.postMessage(
-      { type: 'REGISTER_WORKER_PORT', port: channel.port1 },
+    controller.postMessage(
+      { type: 'REGISTER_WORKER_PORT', port: channel.port1, requestId: setupId, clientKey },
       [channel.port1]
     );
 
     // Send the other port to the hashtree worker
     adapter.registerMediaPort(channel.port2);
 
+    const acked = await ackPromise;
+    if (!acked) {
+      console.warn('[MediaStreaming] No ack from service worker');
+      return false;
+    }
+
     isSetup = true;
+    activeController = controller;
     console.log('[MediaStreaming] Setup complete');
     return true;
   } catch (error) {
@@ -109,4 +233,5 @@ export function isMediaStreamingSetup(): boolean {
 export function resetMediaStreaming(): void {
   isSetup = false;
   setupPromise = null;
+  activeController = null;
 }
