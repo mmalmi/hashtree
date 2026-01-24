@@ -1220,14 +1220,99 @@ pub fn init_htree_state(data_dir: PathBuf) {
     let _ = GLOBAL_HTREE_STATE.get_or_init(|| HtreeState::new(data_dir));
 }
 
+/// Handle NIP-07 requests via htree://nip07/ protocol
+/// This allows HTTPS child webviews to use window.nostr without mixed content issues
+fn handle_nip07_protocol_request(
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let body = request.body();
+
+    info!(
+        "[htree://nip07] Request: {} bytes",
+        body.len()
+    );
+
+    // Parse the JSON body
+    let nip07_request: crate::nip07::Nip07Request = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => {
+            error!("[htree://nip07] Failed to parse request body: {}", e);
+            let response = crate::nip07::Nip07Response {
+                result: None,
+                error: Some(format!("Invalid request: {}", e)),
+            };
+            return tauri::http::Response::builder()
+                .status(400)
+                .header("content-type", "application/json")
+                .header("access-control-allow-origin", "*")
+                .body(serde_json::to_vec(&response).unwrap_or_default())
+                .unwrap();
+        }
+    };
+
+    info!(
+        "[htree://nip07] Method: {} from {}",
+        nip07_request.method, nip07_request.origin
+    );
+
+    // Get worker state for NIP-07 operations
+    let worker_state = match crate::nip07::get_worker_state() {
+        Some(state) => state,
+        None => {
+            let response = crate::nip07::Nip07Response {
+                result: None,
+                error: Some("Worker state not initialized".to_string()),
+            };
+            return tauri::http::Response::builder()
+                .status(500)
+                .header("content-type", "application/json")
+                .header("access-control-allow-origin", "*")
+                .body(serde_json::to_vec(&response).unwrap_or_default())
+                .unwrap();
+        }
+    };
+
+    // Get NIP-07 state for permissions (optional)
+    let nip07_state = crate::nip07::get_nip07_state();
+    let permissions = nip07_state.as_ref().map(|s| &*s.permissions);
+
+    // Process the request
+    let response = tauri::async_runtime::block_on(async {
+        crate::nip07::handle_nip07_request(
+            &worker_state,
+            permissions,
+            &nip07_request.method,
+            &nip07_request.params,
+            &nip07_request.origin,
+        )
+        .await
+    });
+
+    info!(
+        "[htree://nip07] Response: result={}, error={:?}",
+        response.result.is_some(),
+        response.error
+    );
+
+    tauri::http::Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .header("access-control-allow-origin", "*")
+        .body(serde_json::to_vec(&response).unwrap_or_default())
+        .unwrap()
+}
+
 /// Handle htree:// URI scheme protocol requests
 /// This is called by Tauri's register_uri_scheme_protocol
 ///
-/// Supports two URL formats:
-/// 1. Host-based (for origin isolation):
+/// Supports multiple URL formats:
+/// 1. NIP-07 API (for extension login in child webviews):
+///    - htree://nip07/getPublicKey
+///    - htree://nip07/signEvent
+/// 2. Host-based (for origin isolation):
 ///    - htree://nhash1abc.../path/to/file
 ///    - htree://npub1xyz.treename/path/to/file
-/// 2. Legacy path-based:
+/// 3. Legacy path-based:
 ///    - htree:///htree/nhash1abc.../path
 ///    - htree:///htree/npub1xyz/treename/path
 pub fn handle_htree_protocol<R: tauri::Runtime>(
@@ -1237,6 +1322,11 @@ pub fn handle_htree_protocol<R: tauri::Runtime>(
     let uri = request.uri();
     let host = uri.host().unwrap_or("");
     let raw_path = uri.path();
+
+    // Handle NIP-07 API requests (htree://nip07/...)
+    if host == "nip07" {
+        return handle_nip07_protocol_request(request);
+    }
 
     // Determine path based on URL format (host-based or legacy path-based)
     let resolved_path = resolve_htree_url_to_path(host, raw_path);

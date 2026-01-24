@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: tauri: asset: https: wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: tauri: asset: https: wss:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' https: wss: ws: http://127.0.0.1:* http://localhost:*"
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: tauri: asset: htree: https: wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: tauri: asset: htree: https: wss:; img-src 'self' data: blob: htree: https: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: htree: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' htree: https: wss: ws: http://127.0.0.1:* http://localhost:*"
     },
     "trayIcon": {
       "iconPath": "icons/icon.png",

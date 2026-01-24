@@ -437,11 +437,11 @@ pub fn generate_nip07_script(server_url: &str, session_token: &str, label: &str)
   async function callNip07(method, params) {{
     console.log('[NIP-07] Calling:', method, params);
     try {{
-      const response = await fetch(`${{SERVER_URL}}/nip07`, {{
+      // Use htree://nip07/ protocol to avoid mixed content issues on HTTPS sites
+      const response = await fetch('htree://nip07/', {{
         method: 'POST',
         headers: {{
-          'Content-Type': 'application/json',
-          'X-Session-Token': SESSION_TOKEN
+          'Content-Type': 'application/json'
         }},
         body: JSON.stringify({{
           method,
