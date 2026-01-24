@@ -115,5 +115,7 @@
 {:else if route.type === 'users'}
   <UsersPage />
 {:else if route.type === 'tree'}
-  <TreeRoute npub={route.npub} treeName={route.treeName} wild={route.wild} />
+  <div class="flex-1 flex flex-col lg:flex-row min-h-0">
+    <TreeRoute npub={route.npub} treeName={route.treeName} wild={route.wild} />
+  </div>
 {/if}
