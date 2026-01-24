@@ -4,7 +4,7 @@
  * Tests that deleting a tree removes it from the list and it doesn't reappear.
  */
 import { test, expect } from './fixtures';
-import { setupPageErrorHandler, navigateToPublicFolder, goToTreeList, disableOthersPool, waitForAppReady } from './test-utils.js';
+import { setupPageErrorHandler, navigateToPublicFolder, goToTreeList, disableOthersPool, waitForAppReady, safeGoto, safeReload } from './test-utils.js';
 
 test.describe('Tree Deletion', () => {
   test('deleted tree should not reappear in tree list', { timeout: 60000 }, async ({ page }) => {
@@ -19,7 +19,7 @@ test.describe('Tree Deletion', () => {
       }
     });
 
-    await page.goto('/');
+    await safeGoto(page, '/', { retries: 4, delayMs: 1500 });
     await disableOthersPool(page);
 
     // Wait for app to load
@@ -103,7 +103,7 @@ test.describe('Tree Deletion', () => {
     console.log('Tree not visible immediately after delete');
 
     // Reload the page to test persistence
-    await page.reload();
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, retries: 3 });
     await waitForAppReady(page, 30000);
 
     // Should still not be visible after reload
@@ -114,7 +114,7 @@ test.describe('Tree Deletion', () => {
   test('delete button should be visible at tree root', { timeout: 60000 }, async ({ page }) => {
     test.setTimeout(90000);
     setupPageErrorHandler(page);
-    await page.goto('/');
+    await safeGoto(page, '/', { retries: 4, delayMs: 1500 });
     await disableOthersPool(page);
 
     // Page ready - navigateToPublicFolder handles waiting
