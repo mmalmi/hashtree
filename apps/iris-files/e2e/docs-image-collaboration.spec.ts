@@ -7,7 +7,7 @@
  * 3. Images use /htree/ service worker URLs (not blob URLs)
  */
 import { test, expect, Page } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForRelayConnected, waitForAppReady, clearAllStorage, navigateToPublicFolder, safeReload, flushPendingPublishes, waitForFollowInWorker } from './test-utils.js';
+import { setupPageErrorHandler, disableOthersPool, configureBlossomServers, waitForWebRTCConnection, waitForRelayConnected, waitForAppReady, clearAllStorage, navigateToPublicFolder, safeReload, safeGoto, flushPendingPublishes, waitForFollowInWorker } from './test-utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -257,7 +257,7 @@ async function openRemoteDocument(
     await page.evaluate(() => (window as any).__reloadYjsEditors?.());
   };
 
-  await page.goto(docUrl);
+  await safeGoto(page, docUrl, { retries: 4, delayMs: 1500 });
   await waitForAppReady(page);
   await waitForRelayConnected(page, 30000);
   if (expectedHash) {
@@ -268,7 +268,7 @@ async function openRemoteDocument(
   await waitForYjsEntry(page, npub, treeName, docPath, 60000).catch(() => {});
   if (await waitForEditorVisible(page, 60000)) return;
 
-  await page.goto(treeUrl);
+  await safeGoto(page, treeUrl, { retries: 4, delayMs: 1500 });
   await waitForAppReady(page);
   await waitForRelayConnected(page, 30000);
   if (expectedHash) {
@@ -345,7 +345,7 @@ async function pushTreeToBlossom(page: Page, npub: string, treeName: string) {
 async function setupFreshUser(page: Page) {
   setupPageErrorHandler(page);
 
-  await page.goto('http://localhost:5173');
+  await safeGoto(page, 'http://localhost:5173/', { retries: 4, delayMs: 1500 });
   await disableOthersPool(page);
   await configureBlossomServers(page);
 
@@ -357,6 +357,7 @@ async function setupFreshUser(page: Page) {
   await disableOthersPool(page);
   await configureBlossomServers(page);
 
+  await waitForRelayConnected(page, 30000);
   await navigateToPublicFolder(page, { timeoutMs: 60000 });
 }
 
@@ -449,7 +450,9 @@ async function setEditors(page: Page, npubs: string[]) {
 
 // Helper to follow a user by their npub
 async function followUser(page: Page, targetNpub: string) {
-  await page.goto(`http://localhost:5173/#/${targetNpub}`);
+  await safeGoto(page, `http://localhost:5173/#/${targetNpub}`, { retries: 4, delayMs: 1500 });
+  await waitForAppReady(page);
+  await waitForRelayConnected(page, 30000);
 
   const followButton = page.getByRole('button', { name: 'Follow', exact: true });
   await expect(followButton).toBeVisible({ timeout: 30000 });
@@ -465,7 +468,7 @@ async function followUser(page: Page, targetNpub: string) {
 // Helper to navigate to another user's document
 async function navigateToUserDocument(page: Page, npub: string, treeName: string, docPath: string) {
   const url = `http://localhost:5173/#/${npub}/${treeName}/${docPath}`;
-  await page.goto(url);
+  await safeGoto(page, url, { retries: 4, delayMs: 1500 });
   await waitForAppReady(page);
   await waitForRelayConnected(page, 30000);
 }
@@ -523,9 +526,9 @@ test.describe('Document Image Collaboration', () => {
       console.log('WebRTC connected');
 
       // Navigate back to public folders
-      await pageA.goto(`http://localhost:5173/#/${npubA}/public`);
+      await safeGoto(pageA, `http://localhost:5173/#/${npubA}/public`, { retries: 4, delayMs: 1500 });
       await expect(pageA.getByRole('button', { name: 'New Document' })).toBeVisible({ timeout: 30000 });
-      await pageB.goto(`http://localhost:5173/#/${npubB}/public`);
+      await safeGoto(pageB, `http://localhost:5173/#/${npubB}/public`, { retries: 4, delayMs: 1500 });
       await expect(pageB.getByRole('button', { name: 'New Document' })).toBeVisible({ timeout: 30000 });
 
       // === User A: Create document ===
@@ -732,7 +735,7 @@ test.describe('Document Image Collaboration', () => {
   test('Image persists after document refresh', async ({ page }) => {
     setupPageErrorHandler(page);
 
-    await page.goto('http://localhost:5173');
+    await safeGoto(page, 'http://localhost:5173/', { retries: 4, delayMs: 1500 });
     await disableOthersPool(page);
     await configureBlossomServers(page);
 
@@ -746,7 +749,7 @@ test.describe('Document Image Collaboration', () => {
       sessionStorage.clear();
     });
 
-    await page.reload();
+    await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, retries: 3 });
     await waitForAppReady(page); // Wait for page to load after reload
     await disableOthersPool(page);
     await configureBlossomServers(page);
@@ -827,7 +830,7 @@ test.describe('Document Image Collaboration', () => {
       await waitForTreeRootHash(page, npub, 'public', rootAfterImage, 60000);
     }
     // Re-open the document via the tree list to ensure attachments load after refresh
-    await page.goto(`http://localhost:5173/#/${npub}/public`);
+    await safeGoto(page, `http://localhost:5173/#/${npub}/public`, { retries: 4, delayMs: 1500 });
     await waitForAppReady(page);
     if (rootAfterImage) {
       await waitForTreeRootHash(page, npub, 'public', rootAfterImage, 60000);

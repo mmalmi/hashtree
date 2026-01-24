@@ -7,7 +7,7 @@
  * 2. Repo Viewer - follows the runner, fetches CI status via WebRTC/Blossom
  */
 import { test, expect, type Page } from './fixtures';
-import { setupPageErrorHandler, disableOthersPool, followUser, waitForAppReady, ensureLoggedIn, navigateToPublicFolder, useLocalRelay, waitForRelayConnected, evaluateWithRetry, getTestRelayUrl } from './test-utils';
+import { setupPageErrorHandler, disableOthersPool, followUser, waitForAppReady, ensureLoggedIn, navigateToPublicFolder, useLocalRelay, waitForRelayConnected, evaluateWithRetry, getTestRelayUrl, safeGoto, safeReload } from './test-utils';
 import { spawn, execSync, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -56,7 +56,7 @@ const HASHTREE_CI_DIR = path.resolve(__dirname, '../../../../hashtree-ci');
 
 // Setup fresh user with cleared storage
 async function setupFreshUser(page: Page): Promise<void> {
-  await page.goto('http://localhost:5173');
+  await safeGoto(page, 'http://localhost:5173/', { retries: 4, delayMs: 1500 });
 
   // Clear storage
   await page.evaluate(async () => {
@@ -68,7 +68,7 @@ async function setupFreshUser(page: Page): Promise<void> {
     sessionStorage.clear();
   });
 
-  await page.reload();
+  await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, retries: 3 });
   await waitForAppReady(page);
   await useLocalRelay(page);
   await waitForRelayConnected(page, 30000);

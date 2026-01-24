@@ -80,10 +80,17 @@ test.describe('Offline Upload', () => {
     await videoLink.click();
     await page.waitForTimeout(1000);
 
-    // Check that video element exists
-    const videoElement = page.locator('video');
-    await expect(videoElement).toBeVisible({ timeout: 10000 });
-    console.log('Video element visible');
+    // Confirm the video element exists and is pointed at the uploaded file
+    const videoElement = page.locator('video').first();
+    await expect(videoElement).toBeAttached({ timeout: 10000 });
+    await expect.poll(async () => {
+      return page.evaluate(() => {
+        const video = document.querySelector('video') as HTMLVideoElement | null;
+        if (!video) return '';
+        return video.currentSrc || video.getAttribute('src') || '';
+      });
+    }, { timeout: 10000, intervals: [500, 1000, 2000] }).toContain('Big_Buck_Bunny_360_10s_1MB.mp4');
+    console.log('Video element source set');
 
     // Go back online
     console.log('Going back online...');

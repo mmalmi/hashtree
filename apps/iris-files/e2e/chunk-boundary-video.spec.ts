@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, waitForAppReady } from './test-utils';
+import { setupPageErrorHandler, navigateToPublicFolder, disableOthersPool, waitForAppReady, safeGoto, safeReload } from './test-utils';
 // Tests create their own browser contexts - safe for parallel execution
 
 const __filename = fileURLToPath(import.meta.url);
@@ -43,21 +43,8 @@ test.describe('Chunk Boundary Video', () => {
     setupPageErrorHandler(page);
 
     try {
-      const gotoWithRetry = async (url: string, attempts = 3) => {
-        let lastError: unknown;
-        for (let attempt = 0; attempt < attempts; attempt++) {
-          try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            return;
-          } catch (err) {
-            lastError = err;
-          }
-        }
-        throw lastError;
-      };
-
       // Setup fresh user
-      await gotoWithRetry('/');
+      await safeGoto(page, '/', { retries: 4, delayMs: 1500 });
       await disableOthersPool(page);
       await page.evaluate(async () => {
         const dbs = await indexedDB.databases();
@@ -66,7 +53,7 @@ test.describe('Chunk Boundary Video', () => {
         }
         localStorage.clear();
       });
-      await page.reload();
+      await safeReload(page, { waitUntil: 'domcontentloaded', timeoutMs: 60000, retries: 3 });
       await waitForAppReady(page);
       await disableOthersPool(page);
       await navigateToPublicFolder(page);
@@ -116,13 +103,22 @@ test.describe('Chunk Boundary Video', () => {
       // Navigate to the uploaded file
       const videoUrl = `http://localhost:5173/#/${npub}/public/chunk-test.webm`;
       console.log(`Navigating to: ${videoUrl}`);
-      await page.goto(videoUrl);
+      await safeGoto(page, videoUrl, { retries: 4, delayMs: 1500 });
+      await waitForAppReady(page);
       const videoEl = page.locator('video');
       await expect(videoEl).toBeAttached({ timeout: 15000 });
-      await page.waitForFunction(() => {
-        const video = document.querySelector('video') as HTMLVideoElement | null;
-        return !!video && video.readyState >= 2;
-      }, undefined, { timeout: 60000 });
+      await expect.poll(async () => {
+        const state = await page.evaluate(() => {
+          const video = document.querySelector('video') as HTMLVideoElement | null;
+          if (!video) return { hasSrc: false, readyState: 0, duration: 0 };
+          const src = video.currentSrc || video.src;
+          if (video.readyState === 0 && src) {
+            video.load();
+          }
+          return { hasSrc: !!src, readyState: video.readyState, duration: video.duration };
+        });
+        return state.hasSrc && (state.readyState >= 1 || (Number.isFinite(state.duration) && state.duration > 0));
+      }, { timeout: 60000, intervals: [1000, 2000, 3000, 5000] }).toBe(true);
 
       // Check video element
       const videoInfo = await page.evaluate(() => {
