@@ -460,7 +460,11 @@ impl NostrClient {
         }));
 
         let Some(event) = event else {
-            anyhow::bail!("Repository '{}' not found (no hashtree event published by {})", repo_name, &self.pubkey[..12]);
+            let npub = PublicKey::from_hex(&self.pubkey)
+                .map(|pk| pk.to_bech32().unwrap_or_else(|_| self.pubkey[..12].to_string()))
+                .map(|s| format!("{}...{}", &s[..12], &s[s.len()-6..]))
+                .unwrap_or_else(|_| self.pubkey[..12].to_string());
+            anyhow::bail!("Repository '{}' not found (no hashtree event published by {})", repo_name, npub);
         };
         debug!("Found event with root hash: {}", &event.content[..12.min(event.content.len())]);
 
