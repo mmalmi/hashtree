@@ -1,0 +1,256 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.2.3)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 (static musl)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          # Linux aarch64 (static musl)
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cross: false
+          # macOS aarch64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-14
+            cross: false
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: |
+          cross build --release --target ${{ matrix.target }} -p git-remote-htree
+          cross build --release --target ${{ matrix.target }} -p hashtree-cli
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p git-remote-htree
+          cargo build --release --target ${{ matrix.target }} -p hashtree-cli
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/hashtree
+          cp target/${{ matrix.target }}/release/git-remote-htree dist/hashtree/
+          cp target/${{ matrix.target }}/release/htree dist/hashtree/
+          
+          # Create install script
+          cat > dist/hashtree/install.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          INSTALL_DIR="${1:-/usr/local/bin}"
+          
+          echo "Installing hashtree binaries to $INSTALL_DIR"
+          
+          if [ ! -w "$INSTALL_DIR" ]; then
+            echo "Need sudo to install to $INSTALL_DIR"
+            sudo install -m 755 htree git-remote-htree "$INSTALL_DIR/"
+          else
+            install -m 755 htree git-remote-htree "$INSTALL_DIR/"
+          fi
+          
+          echo "✓ Installed htree and git-remote-htree"
+          echo ""
+          echo "Verify with:"
+          echo "  htree --help"
+          echo "  git clone htree://npub1.../repo"
+          EOF
+          chmod +x dist/hashtree/install.sh
+          
+          # Create README
+          cat > dist/hashtree/README.txt << 'EOF'
+          hashtree - Git over Nostr via Merkle trees
+          ==========================================
+          
+          Binaries included:
+            htree             - CLI and daemon for hashtree operations
+            git-remote-htree  - Git remote helper for htree:// URLs
+          
+          Quick install:
+            ./install.sh              # installs to /usr/local/bin (may need sudo)
+            ./install.sh ~/.local/bin # installs to custom directory
+          
+          Manual install:
+            cp htree git-remote-htree /usr/local/bin/
+          
+          Usage:
+            htree add <file>                    # add file to hashtree
+            htree get <hash>                    # download by hash
+            htree start                         # start P2P daemon
+            git clone htree://npub1.../repo     # clone git repo
+            git remote add htree htree://self/myrepo
+            git push htree main
+          
+          More info: https://github.com/mmalmi/hashtree
+          EOF
+          
+          cd dist
+          tar -czvf hashtree-${{ matrix.target }}.tar.gz hashtree
+          rm -rf hashtree
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/hashtree
+          Copy-Item target/${{ matrix.target }}/release/git-remote-htree.exe dist/hashtree/
+          Copy-Item target/${{ matrix.target }}/release/htree.exe dist/hashtree/
+          
+          # Create README
+          @"
+          hashtree - Git over Nostr via Merkle trees
+          ==========================================
+          
+          Binaries included:
+            htree.exe             - CLI and daemon for hashtree operations
+            git-remote-htree.exe  - Git remote helper for htree:// URLs
+          
+          Install:
+            Copy both .exe files to a directory in your PATH, e.g.:
+            C:\Users\<you>\AppData\Local\Microsoft\WindowsApps\
+          
+          Usage:
+            htree add <file>                    # add file to hashtree
+            htree get <hash>                    # download by hash
+            htree start                         # start P2P daemon
+            git clone htree://npub1.../repo     # clone git repo
+          
+          More info: https://github.com/mmalmi/hashtree
+          "@ | Out-File -FilePath dist/hashtree/README.txt -Encoding UTF8
+          
+          Compress-Archive -Path dist/hashtree -DestinationPath dist/hashtree-${{ matrix.target }}.zip
+          Remove-Item -Recurse dist/hashtree
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hashtree-${{ matrix.target }}
+          path: rust/dist/hashtree-*
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: artifacts/*
+          body: |
+            ## Installation
+
+            ### Linux / macOS (auto-detect)
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/hashtree-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/apple-darwin/' | sed 's/linux/unknown-linux-musl/').tar.gz | tar -xz && cd hashtree && ./install.sh
+            ```
+
+            ### macOS (manual)
+            ```bash
+            # Apple Silicon (M1/M2/M3)
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/hashtree-aarch64-apple-darwin.tar.gz
+            
+            # Intel Mac
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/hashtree-x86_64-apple-darwin.tar.gz
+            
+            tar -xzf hashtree-*.tar.gz && cd hashtree && ./install.sh
+            ```
+
+            ### Linux (manual)
+            ```bash
+            # x86_64
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/hashtree-x86_64-unknown-linux-musl.tar.gz
+            
+            # ARM64 (Raspberry Pi, etc.)
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/hashtree-aarch64-unknown-linux-musl.tar.gz
+            
+            tar -xzf hashtree-*.tar.gz && cd hashtree && ./install.sh
+            ```
+
+            ### Windows
+            Download `hashtree-x86_64-pc-windows-msvc.zip`, extract, and add the folder to PATH.
+
+            ### Verify
+            ```bash
+            htree --help
+            git clone htree://npub1.../repo
+            ```
+
+            ## What's included
+            - `htree` — CLI + daemon for hashtree (add, get, push, start)
+            - `git-remote-htree` — Git remote helper for `htree://` URLs
+            - `install.sh` — Installer script (Unix)
+            - `README.txt` — Quick reference
