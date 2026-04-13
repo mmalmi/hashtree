@@ -228,7 +228,7 @@ fn default_nostr_history_sync_on_reconnect() -> bool {
 }
 
 fn default_nostr_mirror_kinds() -> Vec<u16> {
-    vec![0, 3]
+    vec![0, 1, 3, 6, 7, 9_735]
 }
 
 fn default_nostr_history_sync_author_chunk_size() -> usize {
@@ -924,7 +924,7 @@ nsec1ghi789
         );
         assert!(!config.negentropy_only);
         assert_eq!(config.overmute_threshold, 1.0);
-        assert_eq!(config.mirror_kinds, vec![0, 3]);
+        assert_eq!(config.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
         assert_eq!(config.history_sync_author_chunk_size, 5_000);
         assert!(config.history_sync_on_reconnect);
     }
@@ -940,7 +940,7 @@ social_graph_crawl_depth = 6
 max_write_distance = 7
 negentropy_only = true
 overmute_threshold = 1.5
-mirror_kinds = [0, 3]
+mirror_kinds = [0, 1, 3, 6, 7, 9735]
 history_sync_author_chunk_size = 512
 history_sync_on_reconnect = false
 "#,
@@ -954,7 +954,7 @@ history_sync_on_reconnect = false
         assert_eq!(config.max_write_distance, 7);
         assert!(config.negentropy_only);
         assert_eq!(config.overmute_threshold, 1.5);
-        assert_eq!(config.mirror_kinds, vec![0, 3]);
+        assert_eq!(config.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
         assert_eq!(config.history_sync_author_chunk_size, 512);
         assert!(!config.history_sync_on_reconnect);
     }

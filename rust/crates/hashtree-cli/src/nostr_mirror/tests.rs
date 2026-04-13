@@ -104,6 +104,23 @@ impl Drop for TestRelay {
     }
 }
 
+fn published_root_event_count(relay: &TestRelay, tree_name: &str) -> usize {
+    relay
+        .events
+        .lock()
+        .expect("relay events")
+        .iter()
+        .filter(|event| {
+            event.kind == Kind::Custom(30078)
+                && event.tags.iter().any(|tag| {
+                    let values = tag.as_slice();
+                    values.first().is_some_and(|value| value == "d")
+                        && values.get(1).is_some_and(|value| value == tree_name)
+                })
+        })
+        .count()
+}
+
 async fn handle_connection(
     stream: TcpStream,
     events: Arc<Mutex<Vec<Event>>>,
@@ -360,6 +377,94 @@ async fn apply_history_root_publishes_profile_search_tree() -> Result<()> {
     assert_eq!(
         resolved,
         graph_store.profile_search_root()?.expect("search root")
+    );
+    resolver.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_history_root_publishes_event_tree() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_note = EventBuilder::new(Kind::TextNote, "hello event tree", [])
+        .custom_created_at(Timestamp::from(11))
+        .to_event(&alice_keys)
+        .expect("alice note");
+    let stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_note.id.to_hex(),
+        pubkey: alice_note.pubkey.to_hex(),
+        created_at: alice_note.created_at.as_u64(),
+        kind: alice_note.kind.as_u16() as u32,
+        tags: alice_note
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_note.content.clone(),
+        sig: alice_note.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store.build(None, vec![stored]).await?;
+
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: None,
+            published_event_tree_name: Some("nostr-event-index".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store.clone(),
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    mirror.apply_history_root(root.as_ref()).await?;
+
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+    let resolved = resolver
+        .resolve(&format!("{npub}/nostr-event-index"))
+        .await?
+        .expect("published event root");
+
+    assert_eq!(
+        resolved,
+        graph_store.public_events_root()?.expect("event root")
     );
     resolver.stop().await?;
     Ok(())
@@ -700,7 +805,7 @@ async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Res
     let mirror = BackgroundNostrMirror::new(
         NostrMirrorConfig {
             max_follow_distance: 1,
-            kinds: vec![0, 3],
+            kinds: vec![0, 1, 3, 6, 7, 9_735],
             history_sync_on_start: false,
             ..NostrMirrorConfig::default()
         },
@@ -714,6 +819,100 @@ async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Res
     assert!(authors.contains(&missing_keys.public_key().to_hex()));
     assert!(!authors.contains(&existing_keys.public_key().to_hex()));
     assert!(!authors.contains(&root_keys.public_key().to_hex()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: None,
+            published_event_tree_name: Some("nostr-event-index".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store.clone(),
+        graph_store.clone(),
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_note = EventBuilder::new(Kind::TextNote, "hello live flush", [])
+        .custom_created_at(Timestamp::from(21))
+        .to_event(&alice_keys)
+        .expect("alice note");
+
+    mirror.ingest_live_event(&alice_note)?;
+    mirror.flush_live_events().await?;
+
+    let public_root = graph_store
+        .public_events_root()?
+        .expect("public event root");
+    let event_store = NostrEventStore::new(store.store_arc());
+    let stored = event_store
+        .get_by_id(Some(&public_root), &alice_note.id.to_hex())
+        .await?
+        .expect("stored mirrored note");
+    assert_eq!(stored.id, alice_note.id.to_hex());
+
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+    let resolved = resolver
+        .resolve(&format!("{npub}/nostr-event-index"))
+        .await?
+        .expect("published event root");
+    assert_eq!(resolved, public_root);
+
+    let published_count = published_root_event_count(&relay, "nostr-event-index");
+    assert_eq!(published_count, 1);
+
+    mirror.ingest_live_event(&alice_note)?;
+    mirror.flush_live_events().await?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        published_root_event_count(&relay, "nostr-event-index"),
+        published_count,
+        "expected duplicate live flush to avoid republishing the same root"
+    );
+
+    resolver.stop().await?;
     Ok(())
 }
 

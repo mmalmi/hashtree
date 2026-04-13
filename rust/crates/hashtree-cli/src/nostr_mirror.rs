@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -42,7 +42,8 @@ const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_secs(30)
 #[cfg(test)]
 const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_millis(100);
 
-const DEFAULT_HISTORY_KINDS: [u16; 2] = [0, 3];
+const DEFAULT_HISTORY_KINDS: [u16; 6] = [0, 1, 3, 6, 7, 9735];
+const DEFAULT_EVENT_TREE_NAME: &str = "nostr-event-index";
 const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 
 #[cfg(not(test))]
@@ -75,6 +76,7 @@ pub struct NostrMirrorConfig {
     pub kinds: Vec<u16>,
     pub history_sync_on_start: bool,
     pub history_sync_on_reconnect: bool,
+    pub published_event_tree_name: Option<String>,
     pub published_profile_search_tree_name: Option<String>,
 }
 
@@ -94,6 +96,7 @@ impl Default for NostrMirrorConfig {
             kinds: DEFAULT_HISTORY_KINDS.to_vec(),
             history_sync_on_start: true,
             history_sync_on_reconnect: true,
+            published_event_tree_name: Some(DEFAULT_EVENT_TREE_NAME.to_string()),
             published_profile_search_tree_name: Some(DEFAULT_PROFILE_SEARCH_TREE_NAME.to_string()),
         }
     }
@@ -114,7 +117,9 @@ pub struct BackgroundNostrMirror {
     graph_store: Arc<SocialGraphStore>,
     client: Client,
     publish_client: Option<Client>,
+    event_publish_state: Mutex<RootPublishState>,
     profile_search_publish_state: Mutex<RootPublishState>,
+    pending_live_events: Mutex<BTreeMap<String, Event>>,
     missing_profile_cursor: Mutex<usize>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -167,7 +172,9 @@ impl BackgroundNostrMirror {
             graph_store,
             client,
             publish_client,
+            event_publish_state: Mutex::new(RootPublishState::default()),
             profile_search_publish_state: Mutex::new(RootPublishState::default()),
+            pending_live_events: Mutex::new(BTreeMap::new()),
             missing_profile_cursor: Mutex::new(0),
             shutdown_tx,
             shutdown_rx,
@@ -197,6 +204,7 @@ impl BackgroundNostrMirror {
         tokio::time::sleep(MIRROR_STARTUP_DELAY).await;
         tokio::time::sleep(MIRROR_CONNECT_SETTLE_DELAY).await;
         let live_since = Timestamp::now();
+        self.note_public_events_root_change()?;
         self.note_profile_search_root_change()?;
 
         let initial_authors = self.collect_authors()?;
@@ -279,6 +287,12 @@ impl BackgroundNostrMirror {
                     }
                 }
                 _ = publish_interval.tick() => {
+                    if let Err(err) = self.flush_live_events().await {
+                        warn!("Nostr mirror live event flush failed: {:#}", err);
+                    }
+                    if let Err(err) = self.maybe_publish_event_root(false).await {
+                        warn!("Nostr mirror event-root publish failed: {:#}", err);
+                    }
                     if let Err(err) = self.maybe_publish_profile_search_root(false).await {
                         warn!("Nostr mirror profile-search publish failed: {:#}", err);
                     }
@@ -323,6 +337,24 @@ impl BackgroundNostrMirror {
             }
         }
 
+        if let Err(err) = self.flush_live_events().await {
+            warn!(
+                "Nostr mirror live event flush failed during shutdown: {:#}",
+                err
+            );
+        }
+        if let Err(err) = self.maybe_publish_event_root(true).await {
+            warn!(
+                "Nostr mirror event-root publish failed during shutdown: {:#}",
+                err
+            );
+        }
+        if let Err(err) = self.maybe_publish_profile_search_root(true).await {
+            warn!(
+                "Nostr mirror profile-search publish failed during shutdown: {:#}",
+                err
+            );
+        }
         let _ = self.client.disconnect().await;
         if let Some(client) = self.publish_client.as_ref() {
             let _ = client.disconnect().await;
@@ -641,7 +673,14 @@ impl BackgroundNostrMirror {
             .context("rebuild mirrored profile search index")?;
         socialgraph::ingest_graph_parsed_events(self.graph_store.as_ref(), &events)
             .context("sync mirrored social graph state")?;
+        self.note_public_events_root_change()?;
         self.note_profile_search_root_change()?;
+        if let Err(err) = self.maybe_publish_event_root(true).await {
+            warn!(
+                "Nostr mirror event-root publish failed after root update: {:#}",
+                err
+            );
+        }
         if let Err(err) = self.maybe_publish_profile_search_root(false).await {
             warn!(
                 "Nostr mirror profile-search publish failed after root update: {:#}",
@@ -691,24 +730,89 @@ impl BackgroundNostrMirror {
     }
 
     fn ingest_live_event(&self, event: &Event) -> Result<()> {
-        socialgraph::ingest_parsed_event(self.graph_store.as_ref(), event)
-            .context("ingest live mirrored event")?;
-        if event.kind == Kind::Metadata {
-            self.note_profile_search_root_change()?;
-        }
+        self.pending_live_events
+            .lock()
+            .expect("pending live events")
+            .insert(event.id.to_hex(), event.clone());
         Ok(())
     }
 
+    async fn flush_live_events(&self) -> Result<()> {
+        let pending = {
+            let mut pending = self
+                .pending_live_events
+                .lock()
+                .expect("pending live events");
+            if pending.is_empty() {
+                return Ok(());
+            }
+            std::mem::take(&mut *pending)
+        };
+        let events = pending.into_values().collect::<Vec<_>>();
+        let event_count = events.len();
+        let previous_event_root = self.graph_store.public_events_root()?;
+        let previous_profile_search_root = self.graph_store.profile_search_root()?;
+
+        socialgraph::ingest_parsed_events_with_storage_class(
+            self.graph_store.as_ref(),
+            &events,
+            socialgraph::EventStorageClass::Public,
+        )
+        .context("ingest live mirrored event batch")?;
+
+        let next_event_root = self.graph_store.public_events_root()?;
+        let next_profile_search_root = self.graph_store.profile_search_root()?;
+        let event_root_changed = next_event_root != previous_event_root;
+        let profile_search_root_changed = next_profile_search_root != previous_profile_search_root;
+
+        if event_root_changed {
+            self.note_public_events_root_change()?;
+        }
+        if profile_search_root_changed {
+            self.note_profile_search_root_change()?;
+        }
+        if event_root_changed {
+            self.maybe_publish_event_root(true).await?;
+        }
+        if profile_search_root_changed {
+            self.maybe_publish_profile_search_root(true).await?;
+        }
+
+        info!(
+            "Nostr mirror flushed live events: events={} event_root_changed={} profile_search_root_changed={}",
+            event_count, event_root_changed, profile_search_root_changed
+        );
+        Ok(())
+    }
+
+    fn note_public_events_root_change(&self) -> Result<()> {
+        let root = self.graph_store.public_events_root()?;
+        Self::note_root_change(
+            self.config.published_event_tree_name.as_deref(),
+            &self.event_publish_state,
+            root,
+        )
+    }
+
     fn note_profile_search_root_change(&self) -> Result<()> {
-        let Some(_tree_name) = self.config.published_profile_search_tree_name.as_deref() else {
+        let root = self.graph_store.profile_search_root()?;
+        Self::note_root_change(
+            self.config.published_profile_search_tree_name.as_deref(),
+            &self.profile_search_publish_state,
+            root,
+        )
+    }
+
+    fn note_root_change(
+        tree_name: Option<&str>,
+        publish_state: &Mutex<RootPublishState>,
+        root: Option<hashtree_core::Cid>,
+    ) -> Result<()> {
+        let Some(_tree_name) = tree_name else {
             return Ok(());
         };
 
-        let root = self.graph_store.profile_search_root()?;
-        let mut state = self
-            .profile_search_publish_state
-            .lock()
-            .expect("profile search publish state");
+        let mut state = publish_state.lock().expect("root publish state");
         let now = Instant::now();
 
         if state.pending_root == root {
@@ -723,8 +827,34 @@ impl BackgroundNostrMirror {
         Ok(())
     }
 
+    async fn maybe_publish_event_root(&self, force: bool) -> Result<()> {
+        self.maybe_publish_root(
+            self.config.published_event_tree_name.as_deref(),
+            &self.event_publish_state,
+            "event root",
+            force,
+        )
+        .await
+    }
+
     async fn maybe_publish_profile_search_root(&self, force: bool) -> Result<()> {
-        let Some(tree_name) = self.config.published_profile_search_tree_name.as_deref() else {
+        self.maybe_publish_root(
+            self.config.published_profile_search_tree_name.as_deref(),
+            &self.profile_search_publish_state,
+            "profile search root",
+            force,
+        )
+        .await
+    }
+
+    async fn maybe_publish_root(
+        &self,
+        tree_name: Option<&str>,
+        publish_state: &Mutex<RootPublishState>,
+        log_label: &str,
+        force: bool,
+    ) -> Result<()> {
+        let Some(tree_name) = tree_name else {
             return Ok(());
         };
         let Some(publish_client) = self.publish_client.as_ref() else {
@@ -735,10 +865,7 @@ impl BackgroundNostrMirror {
         }
 
         let pending_root = {
-            let state = self
-                .profile_search_publish_state
-                .lock()
-                .expect("profile search publish state");
+            let state = publish_state.lock().expect("root publish state");
             let Some(pending_root) = state.pending_root.clone() else {
                 return Ok(());
             };
@@ -764,16 +891,13 @@ impl BackgroundNostrMirror {
         let output = publish_client
             .send_event_builder(event)
             .await
-            .context("publish profile search root event")?;
+            .with_context(|| format!("publish {log_label} event"))?;
         if output.failed.is_empty() && output.success.is_empty() {
             return Ok(());
         }
 
         {
-            let mut state = self
-                .profile_search_publish_state
-                .lock()
-                .expect("profile search publish state");
+            let mut state = publish_state.lock().expect("root publish state");
             if state.pending_root.as_ref() == Some(&pending_root) {
                 state.last_published_root = Some(pending_root.clone());
                 state.last_published_at = Some(Instant::now());
@@ -782,7 +906,8 @@ impl BackgroundNostrMirror {
         }
 
         info!(
-            "Nostr mirror published profile search root: tree={} hash={}",
+            "Nostr mirror published {}: tree={} hash={}",
+            log_label,
             tree_name,
             hex::encode(pending_root.hash)
         );
