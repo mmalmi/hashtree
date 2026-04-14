@@ -14,7 +14,7 @@ use heed::types::*;
 use heed::{Database, EnvOpenOptions};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -541,6 +541,7 @@ impl Store for StorageRouter {
 }
 
 pub struct HashtreeStore {
+    base_path: PathBuf,
     env: heed::Env,
     /// Set of pinned hashes (32-byte raw hashes, prevents garbage collection)
     pins: Database<Bytes, Unit>,
@@ -689,6 +690,7 @@ impl HashtreeStore {
         });
 
         Ok(Self {
+            base_path: path.to_path_buf(),
             env,
             pins,
             blob_owners,
@@ -700,6 +702,10 @@ impl HashtreeStore {
             router,
             max_size_bytes,
         })
+    }
+
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
     }
 
     /// Get the storage router

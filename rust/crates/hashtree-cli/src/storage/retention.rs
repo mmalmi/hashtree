@@ -4,6 +4,7 @@ use hashtree_core::store::Store;
 use hashtree_core::{to_hex, types::Hash, HashTree, HashTreeConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
@@ -49,6 +50,91 @@ pub struct PinnedItem {
 }
 
 impl HashtreeStore {
+    fn socialgraph_root_files(&self) -> [PathBuf; 4] {
+        let socialgraph = self.base_path().join("socialgraph");
+        [
+            socialgraph.join("events-root.msgpack"),
+            socialgraph.join("events-root-ambient.msgpack"),
+            socialgraph.join("profile-search-root.msgpack"),
+            socialgraph.join("profiles-by-pubkey-root.msgpack"),
+        ]
+    }
+
+    fn read_stored_cid(path: &Path) -> Result<Option<Hash>> {
+        #[derive(Deserialize)]
+        struct StoredCid {
+            hash: [u8; 32],
+            #[allow(dead_code)]
+            key: Option<[u8; 32]>,
+        }
+
+        let Ok(bytes) = std::fs::read(path) else {
+            return Ok(None);
+        };
+        let stored: StoredCid = rmp_serde::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to decode root file {}: {}", path.display(), e))?;
+        Ok(Some(stored.hash))
+    }
+
+    async fn collect_tree_hashes<S: Store>(
+        &self,
+        tree: &HashTree<S>,
+        root: &Hash,
+    ) -> Result<HashSet<Hash>> {
+        let mut hashes = HashSet::new();
+        let mut stack = vec![*root];
+
+        while let Some(hash) = stack.pop() {
+            if !hashes.insert(hash) {
+                continue;
+            }
+
+            let is_tree = tree
+                .is_tree(&hash)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to check tree: {}", e))?;
+
+            if !is_tree {
+                continue;
+            }
+
+            if let Some(node) = tree
+                .get_tree_node(&hash)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))?
+            {
+                for link in &node.links {
+                    stack.push(link.hash);
+                }
+            }
+        }
+
+        Ok(hashes)
+    }
+
+    fn protected_hashes(&self) -> Result<HashSet<Hash>> {
+        let mut protected = HashSet::new();
+
+        let rtxn = self.env.read_txn()?;
+        for (key_bytes, _) in self.blob_trees.iter(&rtxn)?.flatten() {
+            if key_bytes.len() >= 32 {
+                let hash: Hash = key_bytes[..32].try_into().unwrap();
+                protected.insert(hash);
+            }
+        }
+        drop(rtxn);
+
+        let tree = HashTree::new(HashTreeConfig::new(self.store_arc()).public());
+        for path in self.socialgraph_root_files() {
+            let Some(root_hash) = Self::read_stored_cid(&path)? else {
+                continue;
+            };
+            protected.extend(sync_block_on(self.collect_tree_hashes(&tree, &root_hash))?);
+        }
+
+        Ok(protected)
+    }
+
     /// Pin a hash (prevent garbage collection)
     pub fn pin(&self, hash: &[u8; 32]) -> Result<()> {
         let mut wtxn = self.env.write_txn()?;
@@ -154,15 +240,16 @@ impl HashtreeStore {
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
         // Walk tree and collect all blob hashes + compute total size
-        let (blob_hashes, total_size) =
+        let (_blob_hashes, total_size) =
             sync_block_on(async { self.collect_tree_blobs(&tree, root_hash).await })?;
+        let tracked_hashes = sync_block_on(self.collect_tree_hashes(&tree, root_hash))?;
 
         let mut wtxn = self.env.write_txn()?;
 
         // Store blob-tree relationships (64-byte key: blob_hash ++ tree_hash)
-        for blob_hash in &blob_hashes {
+        for tracked_hash in &tracked_hashes {
             let mut key = [0u8; 64];
-            key[..32].copy_from_slice(blob_hash);
+            key[..32].copy_from_slice(tracked_hash);
             key[32..].copy_from_slice(root_hash);
             self.blob_trees.put(&mut wtxn, &key[..], &())?;
         }
@@ -193,7 +280,7 @@ impl HashtreeStore {
         tracing::debug!(
             "Indexed tree {} ({} blobs, {} bytes, priority {})",
             &root_hex[..8],
-            blob_hashes.len(),
+            tracked_hashes.len(),
             total_size,
             priority
         );
@@ -254,17 +341,16 @@ impl HashtreeStore {
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
         // Walk tree and collect all blob hashes
-        let (blob_hashes, _) =
-            sync_block_on(async { self.collect_tree_blobs(&tree, root_hash).await })?;
+        let tracked_hashes = sync_block_on(self.collect_tree_hashes(&tree, root_hash))?;
 
         let mut wtxn = self.env.write_txn()?;
         let mut freed = 0u64;
 
         // For each blob, remove the blob-tree entry and check if orphaned
-        for blob_hash in &blob_hashes {
+        for tracked_hash in &tracked_hashes {
             // Delete blob-tree entry (64-byte key: blob_hash ++ tree_hash)
             let mut key = [0u8; 64];
-            key[..32].copy_from_slice(blob_hash);
+            key[..32].copy_from_slice(tracked_hash);
             key[32..].copy_from_slice(root_hash);
             self.blob_trees.delete(&mut wtxn, &key[..])?;
 
@@ -272,7 +358,7 @@ impl HashtreeStore {
             let rtxn = self.env.read_txn()?;
             let mut has_other_tree = false;
 
-            for item in self.blob_trees.prefix_iter(&rtxn, &blob_hash[..])? {
+            for item in self.blob_trees.prefix_iter(&rtxn, &tracked_hash[..])? {
                 if item.is_ok() {
                     has_other_tree = true;
                     break;
@@ -284,29 +370,16 @@ impl HashtreeStore {
             if !has_other_tree {
                 if let Some(data) = self
                     .router
-                    .get_sync(blob_hash)
+                    .get_sync(tracked_hash)
                     .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?
                 {
                     freed += data.len() as u64;
                     // Delete locally only - keep S3 as archive
                     self.router
-                        .delete_local_only(blob_hash)
+                        .delete_local_only(tracked_hash)
                         .map_err(|e| anyhow::anyhow!("Failed to delete blob: {}", e))?;
                 }
             }
-        }
-
-        // Delete tree node itself if exists
-        if let Some(data) = self
-            .router
-            .get_sync(root_hash)
-            .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))?
-        {
-            freed += data.len() as u64;
-            // Delete locally only - keep S3 as archive
-            self.router
-                .delete_local_only(root_hash)
-                .map_err(|e| anyhow::anyhow!("Failed to delete tree node: {}", e))?;
         }
 
         // Delete tree metadata
@@ -479,17 +552,9 @@ impl HashtreeStore {
                 }
             })
             .collect();
-
-        // Collect all blob hashes that are in at least one tree
-        // Key format is blob_hash (32 bytes) ++ tree_hash (32 bytes)
-        let mut blobs_in_trees: HashSet<Hash> = HashSet::new();
-        for (key_bytes, _) in self.blob_trees.iter(&rtxn)?.flatten() {
-            if key_bytes.len() >= 32 {
-                let blob_hash: Hash = key_bytes[..32].try_into().unwrap();
-                blobs_in_trees.insert(blob_hash);
-            }
-        }
         drop(rtxn);
+
+        let protected_hashes = self.protected_hashes()?;
 
         // Find and delete orphaned blobs
         for hash in all_hashes {
@@ -499,7 +564,7 @@ impl HashtreeStore {
             }
 
             // Skip if part of any tree
-            if blobs_in_trees.contains(&hash) {
+            if protected_hashes.contains(&hash) {
                 continue;
             }
 
@@ -566,5 +631,79 @@ impl HashtreeStore {
             pinned_dags: total_pins,
             total_bytes: stats.total_bytes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hashtree_core::Cid;
+    use hashtree_index::{BTree, BTreeOptions};
+    use tempfile::TempDir;
+
+    use crate::storage::PRIORITY_OTHER;
+
+    fn write_root_file(path: &Path, cid: &Cid) {
+        #[derive(Serialize)]
+        struct StoredCid {
+            hash: [u8; 32],
+            key: Option<[u8; 32]>,
+        }
+
+        std::fs::create_dir_all(path.parent().expect("root file parent")).expect("create dir");
+        let bytes = rmp_serde::to_vec_named(&StoredCid {
+            hash: cid.hash,
+            key: cid.key,
+        })
+        .expect("encode cid");
+        std::fs::write(path, bytes).expect("write root file");
+    }
+
+    fn build_test_tree(store: &HashtreeStore) -> Cid {
+        let index = BTree::new(store.store_arc(), BTreeOptions { order: Some(8) });
+        sync_block_on(index.build(vec![
+            ("alpha".to_string(), "one".to_string()),
+            ("beta".to_string(), "two".to_string()),
+            ("gamma".to_string(), "three".to_string()),
+        ]))
+        .expect("build btree")
+        .expect("non-empty root")
+    }
+
+    #[test]
+    fn orphan_cleanup_keeps_indexed_tree_hashes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024).expect("store");
+        let cid = build_test_tree(&store);
+
+        store
+            .index_tree(
+                &cid.hash,
+                "owner",
+                Some("tree"),
+                PRIORITY_OTHER,
+                Some("owner/tree"),
+            )
+            .expect("index tree");
+        let freed = store.evict_orphaned_blobs().expect("orphan cleanup");
+
+        assert!(freed < 1024);
+        assert!(store.blob_exists(&cid.hash).expect("root exists"));
+    }
+
+    #[test]
+    fn orphan_cleanup_keeps_socialgraph_root_hashes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024).expect("store");
+        let cid = build_test_tree(&store);
+        write_root_file(
+            &temp_dir.path().join("socialgraph/events-root.msgpack"),
+            &cid,
+        );
+
+        let freed = store.evict_orphaned_blobs().expect("orphan cleanup");
+
+        assert!(freed < 1024);
+        assert!(store.blob_exists(&cid.hash).expect("root exists"));
     }
 }
