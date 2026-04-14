@@ -3,7 +3,7 @@ FROM rust:bookworm AS builder
 WORKDIR /app
 
 # Copy workspace files
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY crates ./crates
 COPY vendor ./vendor
 
