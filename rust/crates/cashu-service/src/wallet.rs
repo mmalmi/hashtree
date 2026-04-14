@@ -1,11 +1,12 @@
 use anyhow::{bail, Context, Result};
 use cdk::mint_url::MintUrl;
-use cdk::nuts::{CurrencyUnit, PaymentMethod, Token};
+use cdk::nuts::{CurrencyUnit, MeltQuoteState, PaymentMethod, Token};
 use cdk::wallet::{ReceiveOptions, SendOptions, WalletRepository, WalletRepositoryBuilder};
 use cdk::Amount;
 use cdk_sqlite::WalletSqliteDatabase;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -14,7 +15,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
 
-use crate::helper::{CashuMintBalance, CashuReceivedPayment, CashuSentPayment};
+use crate::helper::{
+    CashuLightningPayment, CashuMintBalance, CashuReceivedPayment, CashuSentPayment,
+};
 
 pub const CASHU_WALLET_SEED_VERSION: u32 = 1;
 
@@ -297,6 +300,22 @@ pub async fn send_payment_token(
     })
 }
 
+pub async fn send_lightning_payment(
+    data_dir: &Path,
+    mint_url: &str,
+    payment_request: &str,
+) -> Result<CashuLightningPayment> {
+    let normalized_mint = normalize_mint_url(mint_url)?;
+    let mint_url =
+        MintUrl::from_str(&normalized_mint).context("Failed to parse normalized mint URL")?;
+    let repository = open_wallet_repository(data_dir).await?;
+    let wallet = ensure_sat_wallet(&repository, &mint_url).await?;
+
+    let mut payment = send_lightning_payment_with_wallet(&wallet, payment_request).await?;
+    payment.mint_url = normalized_mint;
+    Ok(payment)
+}
+
 pub async fn receive_payment_token(
     data_dir: &Path,
     encoded_token: &str,
@@ -400,9 +419,337 @@ async fn ensure_sat_wallet(
     Ok(wallet)
 }
 
+async fn send_lightning_payment_with_wallet(
+    wallet: &cdk::wallet::Wallet,
+    payment_request: &str,
+) -> Result<CashuLightningPayment> {
+    wallet
+        .recover_incomplete_sagas()
+        .await
+        .context("Failed to recover Cashu wallet state before sending Lightning payment")?;
+
+    let quote = wallet
+        .melt_quote(PaymentMethod::BOLT11, payment_request, None, None)
+        .await
+        .context("Failed to create Cashu Lightning melt quote")?;
+    let prepared = wallet
+        .prepare_melt(&quote.id, HashMap::new())
+        .await
+        .context("Failed to prepare Cashu Lightning payment")?;
+    let finalized = prepared
+        .confirm()
+        .await
+        .context("Failed to execute Cashu Lightning payment")?;
+
+    if finalized.state() != MeltQuoteState::Paid {
+        bail!(
+            "Cashu Lightning payment finished in unexpected state {}",
+            finalized.state()
+        );
+    }
+
+    let preimage = finalized
+        .payment_proof()
+        .filter(|proof| !proof.is_empty())
+        .map(str::to_owned)
+        .context("Cashu Lightning payment completed without a preimage")?;
+
+    Ok(CashuLightningPayment {
+        mint_url: wallet.mint_url.to_string(),
+        unit: wallet.unit.to_string(),
+        amount_sat: finalized.amount().to_u64(),
+        fee_paid_sat: finalized.fee_paid().to_u64(),
+        quote_id: finalized.quote_id().to_string(),
+        preimage,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use cdk::cdk_database::WalletDatabase;
+    use cdk::nuts::{
+        CheckStateRequest, CheckStateResponse, CurrencyUnit, Id, KeySet, KeySetInfo, Keys,
+        KeysetResponse, MeltQuoteBolt11Request, MeltQuoteBolt11Response, MeltQuoteBolt12Request,
+        MeltQuoteBolt12Response, MeltRequest, MintInfo, MintQuoteBolt11Request,
+        MintQuoteBolt11Response, MintQuoteBolt12Request, MintQuoteBolt12Response,
+        MintQuoteCustomRequest, MintQuoteCustomResponse, MintRequest, MintResponse, PaymentMethod,
+        Proof, RestoreRequest, RestoreResponse, SecretKey, State, SwapRequest, SwapResponse,
+    };
+    use cdk::secret::Secret;
+    use cdk::wallet::{types::ProofInfo, MintConnector, WalletBuilder};
+    use cdk::{nuts::MeltQuoteCustomResponse, Amount, Error};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    const K_VALID_BOLT11_INVOICE: &str = "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpu9qrsgquk0rl77nj30yxdy8j9vdx85fkpmdla2087ne0xh8nhedh8w27kyke0lp53ut353s06fv3qfegext0eh0ymjpf39tuven09sam30g4vgpfna3rh";
+    const K_TEST_EXPIRY_UNIX: u64 = 4_102_444_800;
+
+    #[derive(Debug, Clone)]
+    struct LightningMockMintConnector {
+        keyset: KeySet,
+        quote_id: String,
+        preimage: String,
+    }
+
+    impl LightningMockMintConnector {
+        fn new(keyset: KeySet, quote_id: &str, preimage: &str) -> Self {
+            Self {
+                keyset,
+                quote_id: quote_id.to_string(),
+                preimage: preimage.to_string(),
+            }
+        }
+
+        fn keyset_info(&self) -> KeySetInfo {
+            KeySetInfo {
+                id: self.keyset.id,
+                unit: self.keyset.unit.clone(),
+                active: self.keyset.active.unwrap_or(true),
+                input_fee_ppk: self.keyset.input_fee_ppk,
+                final_expiry: self.keyset.final_expiry,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MintConnector for LightningMockMintConnector {
+        async fn fetch_lnurl_pay_request(
+            &self,
+            _url: &str,
+        ) -> Result<cdk::wallet::LnurlPayResponse, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn fetch_lnurl_invoice(
+            &self,
+            _url: &str,
+        ) -> Result<cdk::wallet::LnurlPayInvoiceResponse, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_mint_keys(&self) -> Result<Vec<KeySet>, Error> {
+            Ok(vec![self.keyset.clone()])
+        }
+
+        async fn get_mint_keyset(&self, keyset_id: Id) -> Result<KeySet, Error> {
+            if keyset_id == self.keyset.id {
+                Ok(self.keyset.clone())
+            } else {
+                Err(Error::UnknownKeySet)
+            }
+        }
+
+        async fn get_mint_keysets(&self) -> Result<KeysetResponse, Error> {
+            Ok(KeysetResponse {
+                keysets: vec![self.keyset_info()],
+            })
+        }
+
+        async fn post_mint_quote(
+            &self,
+            _request: MintQuoteBolt11Request,
+        ) -> Result<MintQuoteBolt11Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_mint_quote_status(
+            &self,
+            _quote_id: &str,
+        ) -> Result<MintQuoteBolt11Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_mint(
+            &self,
+            _method: &PaymentMethod,
+            _request: MintRequest<String>,
+        ) -> Result<MintResponse, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_melt_quote(
+            &self,
+            request: MeltQuoteBolt11Request,
+        ) -> Result<MeltQuoteBolt11Response<String>, Error> {
+            let amount_msat = request
+                .request
+                .amount_milli_satoshis()
+                .ok_or(Error::InvoiceAmountUndefined)?;
+            Ok(MeltQuoteBolt11Response {
+                quote: self.quote_id.clone(),
+                amount: Amount::from(amount_msat / 1000),
+                fee_reserve: Amount::ZERO,
+                state: MeltQuoteState::Unpaid,
+                expiry: K_TEST_EXPIRY_UNIX,
+                payment_preimage: None,
+                change: None,
+                request: Some(request.request.to_string()),
+                unit: Some(CurrencyUnit::Sat),
+            })
+        }
+
+        async fn get_melt_quote_status(
+            &self,
+            _quote_id: &str,
+        ) -> Result<MeltQuoteBolt11Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_melt(
+            &self,
+            _method: &PaymentMethod,
+            request: MeltRequest<String>,
+        ) -> Result<MeltQuoteBolt11Response<String>, Error> {
+            if request.quote_id() != &self.quote_id {
+                return Err(Error::Custom("unexpected quote id".to_string()));
+            }
+            Ok(MeltQuoteBolt11Response {
+                quote: self.quote_id.clone(),
+                amount: Amount::from(250_000_u64),
+                fee_reserve: Amount::ZERO,
+                state: MeltQuoteState::Paid,
+                expiry: K_TEST_EXPIRY_UNIX,
+                payment_preimage: Some(self.preimage.clone()),
+                change: None,
+                request: None,
+                unit: Some(CurrencyUnit::Sat),
+            })
+        }
+
+        async fn post_swap(&self, _request: SwapRequest) -> Result<SwapResponse, Error> {
+            unreachable!("exact proofs avoid the swap path in this test")
+        }
+
+        async fn get_mint_info(&self) -> Result<MintInfo, Error> {
+            Ok(MintInfo::new())
+        }
+
+        async fn post_check_state(
+            &self,
+            _request: CheckStateRequest,
+        ) -> Result<CheckStateResponse, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_restore(&self, _request: RestoreRequest) -> Result<RestoreResponse, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_auth_wallet(&self) -> Option<cdk::wallet::AuthWallet> {
+            None
+        }
+
+        async fn set_auth_wallet(&self, _wallet: Option<cdk::wallet::AuthWallet>) {}
+
+        async fn post_mint_bolt12_quote(
+            &self,
+            _request: MintQuoteBolt12Request,
+        ) -> Result<MintQuoteBolt12Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_mint_quote_bolt12_status(
+            &self,
+            _quote_id: &str,
+        ) -> Result<MintQuoteBolt12Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_melt_bolt12_quote(
+            &self,
+            _request: MeltQuoteBolt12Request,
+        ) -> Result<MeltQuoteBolt12Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_melt_bolt12_quote_status(
+            &self,
+            _quote_id: &str,
+        ) -> Result<MeltQuoteBolt12Response<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_mint_custom_quote(
+            &self,
+            _method: &PaymentMethod,
+            _request: MintQuoteCustomRequest,
+        ) -> Result<MintQuoteCustomResponse<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_mint_quote_custom_status(
+            &self,
+            _method: &str,
+            _quote_id: &str,
+        ) -> Result<MintQuoteCustomResponse<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn post_melt_custom_quote(
+            &self,
+            _request: cdk::nuts::MeltQuoteCustomRequest,
+        ) -> Result<MeltQuoteCustomResponse<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+
+        async fn get_melt_quote_custom_status(
+            &self,
+            _method: &str,
+            _quote_id: &str,
+        ) -> Result<MeltQuoteCustomResponse<String>, Error> {
+            unreachable!("unused in Cashu Lightning payment test")
+        }
+    }
+
+    fn build_test_keyset(max_amount_sat: u64) -> KeySet {
+        let mut keys_map = BTreeMap::new();
+        let mut current = 1_u64;
+        let mut seed_byte = 1_u8;
+        while current <= max_amount_sat {
+            let secret_key = SecretKey::from_slice(&[seed_byte; 32]).unwrap();
+            keys_map.insert(Amount::from(current), secret_key.public_key());
+            current <<= 1;
+            seed_byte = seed_byte.saturating_add(1);
+        }
+
+        let keys = Keys::new(keys_map);
+        KeySet {
+            id: Id::v1_from_keys(&keys),
+            unit: CurrencyUnit::Sat,
+            active: Some(true),
+            keys,
+            input_fee_ppk: 0,
+            final_expiry: None,
+        }
+    }
+
+    fn make_proof_info(keyset_id: Id, amount: u64, mint_url: MintUrl) -> ProofInfo {
+        let proof = Proof {
+            amount: Amount::from(amount),
+            keyset_id,
+            secret: Secret::generate(),
+            c: SecretKey::generate().public_key(),
+            witness: None,
+            dleq: None,
+        };
+        ProofInfo::new(proof, mint_url, State::Unspent, CurrencyUnit::Sat).unwrap()
+    }
+
+    fn binary_proof_infos(mint_url: MintUrl, keyset_id: Id, amount_sat: u64) -> Vec<ProofInfo> {
+        let mut proofs = Vec::new();
+        let mut remaining = amount_sat;
+        let mut bit = 1_u64 << (63 - remaining.leading_zeros() as u64);
+        while bit > 0 {
+            if remaining >= bit {
+                proofs.push(make_proof_info(keyset_id, bit, mint_url.clone()));
+                remaining -= bit;
+            }
+            bit >>= 1;
+        }
+        proofs
+    }
 
     #[test]
     fn test_normalize_mint_url_trims_trailing_slash_and_rejects_query() {
@@ -488,6 +835,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("greater than zero"));
+    }
+
+    #[tokio::test]
+    async fn test_send_lightning_payment_with_wallet_returns_preimage() {
+        let keyset = build_test_keyset(250_000);
+        let mint_url: MintUrl = "https://mint.example".parse().unwrap();
+        let proof_infos = binary_proof_infos(mint_url.clone(), keyset.id, 250_000);
+        let db = cdk_sqlite::wallet::memory::empty().await.unwrap();
+        db.update_proofs(proof_infos, vec![]).await.unwrap();
+
+        let mock = Arc::new(LightningMockMintConnector::new(keyset, "quote-123", "00ff"));
+        let wallet = WalletBuilder::new()
+            .mint_url(mint_url)
+            .unit(CurrencyUnit::Sat)
+            .localstore(Arc::new(db))
+            .seed([7_u8; 64])
+            .shared_client(mock)
+            .build()
+            .unwrap();
+
+        let payment = send_lightning_payment_with_wallet(&wallet, K_VALID_BOLT11_INVOICE)
+            .await
+            .unwrap();
+        assert_eq!(payment.mint_url, "https://mint.example");
+        assert_eq!(payment.unit, "sat");
+        assert_eq!(payment.amount_sat, 250_000);
+        assert_eq!(payment.fee_paid_sat, 0);
+        assert_eq!(payment.quote_id, "quote-123");
+        assert_eq!(payment.preimage, "00ff");
     }
 
     #[tokio::test]

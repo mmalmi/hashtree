@@ -253,7 +253,7 @@ fn format_amount(amount: u64, unit: &str) -> String {
     format!("{amount} {unit}")
 }
 
-fn resolve_selected_mint(config: &Config, mint: Option<&str>) -> Result<String> {
+pub fn resolve_selected_mint(config: &Config, mint: Option<&str>) -> Result<String> {
     if let Some(raw_mint) = mint {
         let mint_url = normalize_mint_url(raw_mint)?;
         if !config

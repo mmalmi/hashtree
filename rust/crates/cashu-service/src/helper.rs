@@ -35,6 +35,16 @@ pub struct CashuMintBalance {
     pub balance_sat: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CashuLightningPayment {
+    pub mint_url: String,
+    pub unit: String,
+    pub amount_sat: u64,
+    pub fee_paid_sat: u64,
+    pub quote_id: String,
+    pub preimage: String,
+}
+
 #[async_trait]
 pub trait CashuPaymentClient: Send + Sync {
     async fn send_payment(&self, mint_url: &str, amount_sat: u64) -> Result<CashuSentPayment>;

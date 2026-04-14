@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use hashtree_cli::cashu::{
-    load_mint_balance, receive_payment_token, revoke_pending_payment, send_payment_token,
+    load_mint_balance, receive_payment_token, revoke_pending_payment, send_lightning_payment,
+    send_payment_token,
 };
 use hashtree_cli::cashu_cli::{
-    add_mint, list_mints, print_balance, remove_mint, set_default_mint, topup_balance,
+    add_mint, list_mints, print_balance, remove_mint, resolve_selected_mint, set_default_mint,
+    topup_balance,
 };
 use hashtree_cli::config::get_hashtree_dir;
 use hashtree_cli::Config;
@@ -47,6 +49,14 @@ enum Commands {
     Topup {
         /// Amount in satoshis
         amount_sat: u64,
+        /// Mint to use (defaults to configured default mint)
+        #[arg(long)]
+        mint: Option<String>,
+    },
+    /// Pay a BOLT11 invoice from the selected mint
+    SendPayment {
+        /// BOLT11 payment request
+        payment_request: String,
         /// Mint to use (defaults to configured default mint)
         #[arg(long)]
         mint: Option<String>,
@@ -127,6 +137,14 @@ async fn main() -> Result<()> {
         Commands::Topup { amount_sat, mint } => {
             topup_balance(&config, &data_dir, amount_sat, mint.as_deref()).await?;
         }
+        Commands::SendPayment {
+            payment_request,
+            mint,
+        } => {
+            let mint_url = resolve_selected_mint(&config, mint.as_deref())?;
+            let payment = send_lightning_payment(&data_dir, &mint_url, &payment_request).await?;
+            println!("{}", serde_json::to_string(&payment)?);
+        }
         Commands::Mint { command } => match command {
             MintCommands::List => {
                 list_mints(&config);
@@ -190,6 +208,24 @@ mod tests {
                 assert_eq!(mint.as_deref(), Some("https://mint.example"));
             }
             _ => panic!("expected topup command"),
+        }
+
+        let cli = Cli::parse_from([
+            "htree-cashu",
+            "send-payment",
+            "lnbc1example",
+            "--mint",
+            "https://mint.example",
+        ]);
+        match cli.command {
+            Commands::SendPayment {
+                payment_request,
+                mint,
+            } => {
+                assert_eq!(payment_request, "lnbc1example");
+                assert_eq!(mint.as_deref(), Some("https://mint.example"));
+            }
+            _ => panic!("expected send-payment command"),
         }
 
         let cli = Cli::parse_from([
