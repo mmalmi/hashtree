@@ -111,6 +111,8 @@ pub struct StorageConfig {
     pub data_dir: String,
     #[serde(default = "default_max_size_gb")]
     pub max_size_gb: u64,
+    #[serde(default = "default_storage_evict_orphans")]
+    pub evict_orphans: bool,
     /// Optional S3/R2 backend for blob storage
     #[serde(default)]
     pub s3: Option<S3Config>,
@@ -531,6 +533,10 @@ fn default_max_size_gb() -> u64 {
     10
 }
 
+fn default_storage_evict_orphans() -> bool {
+    true
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -558,6 +564,7 @@ impl Default for StorageConfig {
         Self {
             data_dir: default_data_dir(),
             max_size_gb: default_max_size_gb(),
+            evict_orphans: default_storage_evict_orphans(),
             s3: None,
         }
     }
@@ -579,8 +586,8 @@ impl Default for NostrConfig {
             overmute_threshold: default_nostr_overmute_threshold(),
             mirror_kinds: default_nostr_mirror_kinds(),
             history_sync_author_chunk_size: default_nostr_history_sync_author_chunk_size(),
-            history_sync_per_author_event_limit:
-                default_nostr_history_sync_per_author_event_limit(),
+            history_sync_per_author_event_limit: default_nostr_history_sync_per_author_event_limit(
+            ),
             history_sync_on_reconnect: default_nostr_history_sync_on_reconnect(),
         }
     }
@@ -879,6 +886,7 @@ mod tests {
         assert!(!config.server.enable_bluetooth);
         assert_eq!(config.server.max_bluetooth_peers, 0);
         assert_eq!(config.storage.max_size_gb, 10);
+        assert!(config.storage.evict_orphans);
         assert!(config.nostr.enabled);
         assert!(config
             .nostr
@@ -924,6 +932,7 @@ relays = ["wss://relay.damus.io"]
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.nostr.enabled);
         assert_eq!(config.nostr.relays, vec!["wss://relay.damus.io"]);
+        assert!(config.storage.evict_orphans);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);
         assert_eq!(config.nostr.max_write_distance, 3);
         assert_eq!(config.nostr.db_max_size_gb, 10);
@@ -959,6 +968,7 @@ history_sync_on_reconnect = false
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.nostr.enabled);
+        assert!(config.storage.evict_orphans);
         assert_eq!(config.nostr.socialgraph_root, Some("npub1test".to_string()));
         assert!(config.nostr.bootstrap_follows.is_empty());
         assert_eq!(config.nostr.social_graph_crawl_depth, 3);
@@ -982,6 +992,16 @@ crawl_depth = 4
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.nostr.social_graph_crawl_depth, 4);
+    }
+
+    #[test]
+    fn test_storage_config_disables_orphan_eviction_when_requested() {
+        let toml_str = r#"
+[storage]
+evict_orphans = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.storage.evict_orphans);
     }
 
     #[test]

@@ -104,6 +104,8 @@ pub struct StorageConfig {
     pub data_dir: String,
     #[serde(default = "default_max_size_gb")]
     pub max_size_gb: u64,
+    #[serde(default = "default_storage_evict_orphans")]
+    pub evict_orphans: bool,
     #[serde(default)]
     pub s3: Option<S3Config>,
 }
@@ -114,6 +116,7 @@ impl Default for StorageConfig {
             backend: StorageBackend::default(),
             data_dir: default_data_dir(),
             max_size_gb: default_max_size_gb(),
+            evict_orphans: default_storage_evict_orphans(),
             s3: None,
         }
     }
@@ -128,6 +131,10 @@ fn default_data_dir() -> String {
 
 fn default_max_size_gb() -> u64 {
     10
+}
+
+fn default_storage_evict_orphans() -> bool {
+    true
 }
 
 /// S3-compatible storage configuration
@@ -786,6 +793,18 @@ backend = "fs"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.storage.backend, StorageBackend::Fs);
+    }
+
+    #[test]
+    fn test_storage_orphan_eviction_defaults_on_and_allows_override() {
+        assert!(Config::default().storage.evict_orphans);
+
+        let toml = r#"
+[storage]
+evict_orphans = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.storage.evict_orphans);
     }
 
     #[test]

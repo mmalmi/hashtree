@@ -474,12 +474,16 @@ impl HashtreeStore {
         let mut current_size = current;
 
         // Phase 1: Evict orphaned blobs (not in any tree and not pinned)
-        let orphan_freed = self.evict_orphaned_blobs()?;
-        freed += orphan_freed;
-        current_size = current_size.saturating_sub(orphan_freed);
+        if self.evict_orphans {
+            let orphan_freed = self.evict_orphaned_blobs()?;
+            freed += orphan_freed;
+            current_size = current_size.saturating_sub(orphan_freed);
 
-        if orphan_freed > 0 {
-            tracing::info!("Evicted orphaned blobs: {} bytes freed", orphan_freed);
+            if orphan_freed > 0 {
+                tracing::info!("Evicted orphaned blobs: {} bytes freed", orphan_freed);
+            }
+        } else {
+            tracing::debug!("Skipping orphan blob eviction; storage.evict_orphans=false");
         }
 
         // Check if we're now under target

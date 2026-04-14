@@ -561,6 +561,8 @@ pub struct HashtreeStore {
     router: Arc<StorageRouter>,
     /// Maximum storage size in bytes (from config)
     max_size_bytes: u64,
+    /// Whether quota enforcement may delete local blobs not tracked by any indexed tree.
+    evict_orphans: bool,
 }
 
 impl HashtreeStore {
@@ -571,7 +573,13 @@ impl HashtreeStore {
             .storage
             .max_size_gb
             .saturating_mul(1024 * 1024 * 1024);
-        Self::with_options_and_backend(path, None, max_size_bytes, &config.storage.backend)
+        Self::with_options_and_backend(
+            path,
+            None,
+            max_size_bytes,
+            config.storage.evict_orphans,
+            &config.storage.backend,
+        )
     }
 
     /// Create a new store with an explicit local backend and size limit.
@@ -580,7 +588,7 @@ impl HashtreeStore {
         backend: hashtree_config::StorageBackend,
         max_size_bytes: u64,
     ) -> Result<Self> {
-        Self::with_options_and_backend(path, None, max_size_bytes, &backend)
+        Self::with_options_and_backend(path, None, max_size_bytes, true, &backend)
     }
 
     /// Create a new store with optional S3 backend and the configured local storage limit.
@@ -590,7 +598,13 @@ impl HashtreeStore {
             .storage
             .max_size_gb
             .saturating_mul(1024 * 1024 * 1024);
-        Self::with_options_and_backend(path, s3_config, max_size_bytes, &config.storage.backend)
+        Self::with_options_and_backend(
+            path,
+            s3_config,
+            max_size_bytes,
+            config.storage.evict_orphans,
+            &config.storage.backend,
+        )
     }
 
     /// Create a new store with optional S3 backend and custom size limit.
@@ -604,13 +618,20 @@ impl HashtreeStore {
         max_size_bytes: u64,
     ) -> Result<Self> {
         let config = hashtree_config::Config::load_or_default();
-        Self::with_options_and_backend(path, s3_config, max_size_bytes, &config.storage.backend)
+        Self::with_options_and_backend(
+            path,
+            s3_config,
+            max_size_bytes,
+            config.storage.evict_orphans,
+            &config.storage.backend,
+        )
     }
 
     fn with_options_and_backend<P: AsRef<Path>>(
         path: P,
         s3_config: Option<&S3Config>,
         max_size_bytes: u64,
+        evict_orphans: bool,
         backend: &hashtree_config::StorageBackend,
     ) -> Result<Self> {
         let path = path.as_ref();
@@ -701,6 +722,7 @@ impl HashtreeStore {
             cached_roots,
             router,
             max_size_bytes,
+            evict_orphans,
         })
     }
 
@@ -1500,6 +1522,7 @@ mod tests {
             temp.path(),
             None,
             requested,
+            true,
             &StorageBackend::Lmdb,
         )?;
 
@@ -1549,6 +1572,7 @@ mod tests {
             temp.path(),
             None,
             LMDB_BLOB_MIN_MAP_SIZE_BYTES,
+            true,
             &StorageBackend::Lmdb,
         )?;
 
