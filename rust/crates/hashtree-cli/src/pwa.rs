@@ -1469,6 +1469,8 @@ mod tests {
     const LIVE_JUMBLE_SMOKE_MANIFEST_URL: &str = "https://jumble.social/manifest.webmanifest";
     const LIVE_PHOTOPEA_SMOKE_URL: &str = "https://www.photopea.com/";
     const LIVE_PHOTOPEA_SMOKE_MANIFEST_URL: &str = "https://www.photopea.com/manifest.json";
+    const LIVE_EXCALIDRAW_SMOKE_URL: &str = "https://excalidraw.com/";
+    const LIVE_EXCALIDRAW_SMOKE_MANIFEST_URL: &str = "https://excalidraw.com/manifest.webmanifest";
 
     fn split_htree_nhash_url(url: &str) -> (String, String) {
         let trimmed = url.strip_prefix("htree://").expect("htree:// url");
@@ -2005,6 +2007,78 @@ mod tests {
                 handler.get("action").and_then(Value::as_str),
                 Some("index.html")
             );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live network smoke test against excalidraw.com"]
+    async fn installs_live_excalidraw_pwa_with_rewritten_screenshots() {
+        let temp_dir = tempdir().unwrap();
+        let store = HashtreeStore::new(temp_dir.path()).unwrap();
+
+        let installed = install_site_pwa_to_store(&store, LIVE_EXCALIDRAW_SMOKE_URL)
+            .await
+            .unwrap();
+
+        assert_eq!(installed.name, "Excalidraw");
+        assert_eq!(
+            installed.source_app_id.as_deref(),
+            Some("https://excalidraw.com/excalidraw")
+        );
+        assert_eq!(installed.source_url, LIVE_EXCALIDRAW_SMOKE_URL);
+        assert_eq!(
+            installed.source_manifest_url,
+            LIVE_EXCALIDRAW_SMOKE_MANIFEST_URL
+        );
+        assert_eq!(
+            installed.description.as_deref(),
+            Some(
+                "Excalidraw is a whiteboard tool that lets you easily sketch diagrams that have a hand-drawn feel to them."
+            )
+        );
+        assert_eq!(installed.display_mode.as_deref(), Some("standalone"));
+        assert!(installed.launch_url.starts_with("htree://nhash1"));
+        assert!(installed.launch_url.ends_with("/index.html"));
+
+        let icon_url = installed.icon_url.clone().expect("installed icon url");
+        let (launch_nhash, launch_path) = split_htree_nhash_url(&installed.launch_url);
+        let (icon_nhash, icon_path) = split_htree_nhash_url(&icon_url);
+        assert_eq!(icon_nhash, launch_nhash);
+        assert!(icon_path.ends_with(".png"));
+
+        let launch_html = read_exported_tree_text(&store, &launch_nhash, &launch_path).await;
+        assert!(launch_html.contains("manifest.webmanifest"));
+
+        let manifest_text =
+            read_exported_tree_text(&store, &launch_nhash, "/manifest.webmanifest").await;
+        let manifest: Value = serde_json::from_str(&manifest_text).unwrap();
+        assert_eq!(
+            manifest.get("start_url").and_then(Value::as_str),
+            Some("index.html")
+        );
+        assert_eq!(
+            manifest["share_target"]
+                .get("action")
+                .and_then(Value::as_str),
+            Some("web-share-target")
+        );
+        assert_eq!(
+            manifest["file_handlers"][0]
+                .get("action")
+                .and_then(Value::as_str),
+            Some("index.html")
+        );
+
+        let screenshots = manifest["screenshots"]
+            .as_array()
+            .expect("screenshots array");
+        assert!(screenshots.len() >= 6);
+        for screenshot in screenshots {
+            let src = screenshot
+                .get("src")
+                .and_then(Value::as_str)
+                .expect("screenshot src");
+            assert!(src.starts_with("screenshots/"));
         }
     }
 }
