@@ -185,6 +185,9 @@ pub struct NostrConfig {
     /// How many graph authors to reconcile before checkpointing the mirror root.
     #[serde(default = "default_nostr_history_sync_author_chunk_size")]
     pub history_sync_author_chunk_size: usize,
+    /// Maximum mirrored history events to fetch per author during history sync.
+    #[serde(default = "default_nostr_history_sync_per_author_event_limit")]
+    pub history_sync_per_author_event_limit: usize,
     /// Run a catch-up history sync after relay reconnects.
     #[serde(default = "default_nostr_history_sync_on_reconnect")]
     pub history_sync_on_reconnect: bool,
@@ -456,6 +459,10 @@ fn default_nostr_history_sync_author_chunk_size() -> usize {
     5_000
 }
 
+fn default_nostr_history_sync_per_author_event_limit() -> usize {
+    256
+}
+
 fn default_relays() -> Vec<String> {
     vec![
         "wss://relay.damus.io".to_string(),
@@ -572,6 +579,8 @@ impl Default for NostrConfig {
             overmute_threshold: default_nostr_overmute_threshold(),
             mirror_kinds: default_nostr_mirror_kinds(),
             history_sync_author_chunk_size: default_nostr_history_sync_author_chunk_size(),
+            history_sync_per_author_event_limit:
+                default_nostr_history_sync_per_author_event_limit(),
             history_sync_on_reconnect: default_nostr_history_sync_on_reconnect(),
         }
     }
@@ -884,6 +893,7 @@ mod tests {
         assert_eq!(config.nostr.overmute_threshold, 1.0);
         assert_eq!(config.nostr.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
+        assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
@@ -922,6 +932,7 @@ relays = ["wss://relay.damus.io"]
         assert_eq!(config.nostr.overmute_threshold, 1.0);
         assert_eq!(config.nostr.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
+        assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
@@ -943,6 +954,7 @@ negentropy_only = true
 overmute_threshold = 2.5
 mirror_kinds = [0, 10000]
 history_sync_author_chunk_size = 250
+history_sync_per_author_event_limit = 128
 history_sync_on_reconnect = false
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -957,6 +969,7 @@ history_sync_on_reconnect = false
         assert_eq!(config.nostr.overmute_threshold, 2.5);
         assert_eq!(config.nostr.mirror_kinds, vec![0, 10_000]);
         assert_eq!(config.nostr.history_sync_author_chunk_size, 250);
+        assert_eq!(config.nostr.history_sync_per_author_event_limit, 128);
         assert!(!config.nostr.history_sync_on_reconnect);
     }
 

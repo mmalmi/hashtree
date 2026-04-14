@@ -297,6 +297,10 @@ impl EmbeddedBackgroundServicesController {
                             .nostr
                             .history_sync_author_chunk_size
                             .max(1),
+                        history_sync_per_author_event_limit: config
+                            .nostr
+                            .history_sync_per_author_event_limit
+                            .max(1),
                         missing_profile_backfill_batch_size: config
                             .nostr
                             .history_sync_author_chunk_size
