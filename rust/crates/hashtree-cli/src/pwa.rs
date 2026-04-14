@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Url};
 use serde::Serialize;
 use serde_json::Value;
@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::storage::HashtreeStore;
-use hashtree_core::{nhash_encode, Cid, DirEntry, HashTree, HashTreeConfig, LinkType};
+use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, nhash_encode};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -638,24 +638,62 @@ fn extract_manifest_resource_urls(manifest: &Value, manifest_url: &Url) -> Vec<U
 
 fn pick_manifest_icon_url(manifest: &Value, manifest_url: &Url) -> Option<Url> {
     let icons = manifest.get("icons")?.as_array()?;
-    let icon = icons
-        .iter()
-        .filter_map(|value| {
-            let src = value.get("src")?.as_str()?;
-            let size = value
-                .get("sizes")
-                .and_then(Value::as_str)
-                .and_then(parse_largest_icon_size)
-                .unwrap_or(0);
-            Some((src, size))
-        })
-        .max_by(|(_, left), (_, right)| left.cmp(right))?;
-    manifest_url.join(icon.0).ok()
+    let mut best_icon: Option<(&str, u8, u32)> = None;
+
+    for value in icons {
+        let Some(src) = value.get("src").and_then(Value::as_str) else {
+            continue;
+        };
+        let priority = manifest_icon_priority(value);
+        let size = value
+            .get("sizes")
+            .and_then(Value::as_str)
+            .and_then(parse_largest_icon_size)
+            .unwrap_or(0);
+
+        if best_icon
+            .map(|(_, best_priority, best_size)| {
+                priority > best_priority || (priority == best_priority && size > best_size)
+            })
+            .unwrap_or(true)
+        {
+            best_icon = Some((src, priority, size));
+        }
+    }
+
+    manifest_url.join(best_icon?.0).ok()
 }
 
 fn pick_manifest_icon_path(manifest: &Value, manifest_url: &Url) -> Option<String> {
     let resolved = pick_manifest_icon_url(manifest, manifest_url)?;
     Some(url_to_path(&resolved, manifest_url))
+}
+
+fn manifest_icon_priority(icon: &Value) -> u8 {
+    let Some(purpose) = icon.get("purpose").and_then(Value::as_str) else {
+        return 3;
+    };
+
+    let purposes: Vec<&str> = purpose.split_whitespace().collect();
+    if purposes
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("any"))
+    {
+        return 3;
+    }
+    if purposes
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("maskable"))
+    {
+        return 2;
+    }
+    if purposes
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("monochrome"))
+    {
+        return 1;
+    }
+    0
 }
 
 fn parse_largest_icon_size(sizes: &str) -> Option<u32> {
@@ -1417,17 +1455,58 @@ fn dir_depth(path: &str) -> usize {
 }
 
 fn display_dir(path: &str) -> &str {
-    if path.is_empty() {
-        "/"
-    } else {
-        path
-    }
+    if path.is_empty() { "/" } else { path }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashtree_core::nhash_decode;
     use serde_json::json;
+    use tempfile::tempdir;
+
+    const LIVE_JUMBLE_SMOKE_URL: &str = "https://jumble.social/";
+    const LIVE_JUMBLE_SMOKE_MANIFEST_URL: &str = "https://jumble.social/manifest.webmanifest";
+    const LIVE_PHOTOPEA_SMOKE_URL: &str = "https://www.photopea.com/";
+    const LIVE_PHOTOPEA_SMOKE_MANIFEST_URL: &str = "https://www.photopea.com/manifest.json";
+
+    fn split_htree_nhash_url(url: &str) -> (String, String) {
+        let trimmed = url.strip_prefix("htree://").expect("htree:// url");
+        let (host, path) = trimmed.split_once('/').unwrap_or((trimmed, ""));
+        let normalized_path = if path.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{path}")
+        };
+        (host.to_string(), normalized_path)
+    }
+
+    async fn read_exported_tree_text(
+        store: &HashtreeStore,
+        root_nhash: &str,
+        path: &str,
+    ) -> String {
+        let root = nhash_decode(root_nhash).unwrap();
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        let root_cid = Cid::public(root.hash);
+        let resolved_path = path
+            .trim_start_matches('/')
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("");
+        let file_cid = tree
+            .resolve_path(&root_cid, resolved_path)
+            .await
+            .unwrap()
+            .expect("resolve exported path");
+        String::from_utf8(
+            tree.read_file(&file_cid.hash)
+                .await
+                .unwrap()
+                .expect("read exported file"),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn extract_manifest_url_finds_manifest_link() {
@@ -1604,6 +1683,24 @@ mod tests {
         });
 
         assert_eq!(manifest_display_mode(&manifest), None);
+    }
+
+    #[test]
+    fn pick_manifest_icon_url_prefers_any_icons_over_monochrome_ties() {
+        let manifest = json!({
+            "icons": [
+                {"src": "/pwa-512x512.png", "sizes": "512x512", "purpose": "any"},
+                {"src": "/pwa-192x192.png", "sizes": "192x192", "purpose": "any"},
+                {"src": "/pwa-512x512-maskable.png", "sizes": "512x512", "purpose": "maskable"},
+                {"src": "/pwa-monochrome.svg", "sizes": "512x512", "purpose": "monochrome"}
+            ]
+        });
+        let manifest_url = Url::parse("https://jumble.social/manifest.webmanifest").unwrap();
+
+        assert_eq!(
+            pick_manifest_icon_url(&manifest, &manifest_url).map(|value| value.to_string()),
+            Some("https://jumble.social/pwa-512x512.png".to_string())
+        );
     }
 
     #[test]
@@ -1811,5 +1908,103 @@ mod tests {
                 .and_then(Value::as_str),
             Some("tabs/new.html")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "live network smoke test against jumble.social"]
+    async fn installs_live_jumble_social_pwa_with_primary_app_icon() {
+        let temp_dir = tempdir().unwrap();
+        let store = HashtreeStore::new(temp_dir.path()).unwrap();
+
+        let installed = install_site_pwa_to_store(&store, LIVE_JUMBLE_SMOKE_URL)
+            .await
+            .unwrap();
+
+        assert_eq!(installed.name, "Jumble");
+        assert_eq!(installed.source_app_id, None);
+        assert_eq!(installed.source_url, LIVE_JUMBLE_SMOKE_URL);
+        assert_eq!(
+            installed.source_manifest_url,
+            LIVE_JUMBLE_SMOKE_MANIFEST_URL
+        );
+        assert_eq!(
+            installed.description.as_deref(),
+            Some("A user-friendly Nostr client for exploring relay feeds")
+        );
+        assert_eq!(installed.display_mode.as_deref(), Some("standalone"));
+        assert!(installed.launch_url.starts_with("htree://nhash1"));
+        assert!(installed.launch_url.ends_with("/index.html"));
+
+        let icon_url = installed.icon_url.clone().expect("installed icon url");
+        let (launch_nhash, launch_path) = split_htree_nhash_url(&installed.launch_url);
+        let (icon_nhash, icon_path) = split_htree_nhash_url(&icon_url);
+        assert_eq!(icon_nhash, launch_nhash);
+        assert_eq!(icon_path, "/pwa-512x512.png");
+
+        let launch_html = read_exported_tree_text(&store, &launch_nhash, &launch_path).await;
+        assert!(launch_html.contains("manifest.webmanifest"));
+        assert!(!launch_html.contains("src=\"/assets/"));
+        assert!(!launch_html.contains("href=\"/assets/"));
+    }
+
+    #[tokio::test]
+    #[ignore = "live network smoke test against photopea.com"]
+    async fn installs_live_photopea_pwa_with_rewritten_file_handlers() {
+        let temp_dir = tempdir().unwrap();
+        let store = HashtreeStore::new(temp_dir.path()).unwrap();
+
+        let installed = install_site_pwa_to_store(&store, LIVE_PHOTOPEA_SMOKE_URL)
+            .await
+            .unwrap();
+
+        assert_eq!(installed.name, "Photopea");
+        assert_eq!(installed.source_app_id, None);
+        assert_eq!(installed.source_url, LIVE_PHOTOPEA_SMOKE_URL);
+        assert_eq!(
+            installed.source_manifest_url,
+            LIVE_PHOTOPEA_SMOKE_MANIFEST_URL
+        );
+        assert_eq!(installed.description, None);
+        assert_eq!(installed.display_mode.as_deref(), Some("standalone"));
+        assert!(installed.launch_url.starts_with("htree://nhash1"));
+        assert!(
+            installed
+                .launch_url
+                .ends_with("/index.html?utm_source=homescreen")
+        );
+
+        let icon_url = installed.icon_url.clone().expect("installed icon url");
+        let (launch_nhash, launch_path) = split_htree_nhash_url(&installed.launch_url);
+        let (icon_nhash, icon_path) = split_htree_nhash_url(&icon_url);
+        assert_eq!(icon_nhash, launch_nhash);
+        assert_eq!(icon_path, "/promo/icon512.png");
+
+        let launch_html = read_exported_tree_text(&store, &launch_nhash, &launch_path).await;
+        assert!(launch_html.contains("manifest.json"));
+        assert!(!launch_html.contains("src=\"/img/"));
+        assert!(!launch_html.contains("href=\"/img/"));
+
+        let manifest_text = read_exported_tree_text(&store, &launch_nhash, "/manifest.json").await;
+        let manifest: Value = serde_json::from_str(&manifest_text).unwrap();
+        assert_eq!(
+            manifest.get("start_url").and_then(Value::as_str),
+            Some("index.html?utm_source=homescreen")
+        );
+        assert_eq!(
+            manifest["share_target"]
+                .get("action")
+                .and_then(Value::as_str),
+            Some("index.html")
+        );
+        let file_handlers = manifest["file_handlers"]
+            .as_array()
+            .expect("file_handlers array");
+        assert!(file_handlers.len() >= 20);
+        for handler in file_handlers {
+            assert_eq!(
+                handler.get("action").and_then(Value::as_str),
+                Some("index.html")
+            );
+        }
     }
 }
