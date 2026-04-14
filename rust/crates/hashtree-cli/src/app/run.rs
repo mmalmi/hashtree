@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use super::add::run_add;
 use super::args::{
-    Cli, Commands, PrCommands, ReleaseCommands, SocialGraphCommands, StorageCommands,
+    Cli, Commands, PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands, StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -38,6 +38,7 @@ use super::mount_target::{
 use super::mounts::print_active_mounts;
 use super::nostr_index::{run_socialgraph_index_from_cli, SocialGraphIndexOptions};
 use super::peers::list_peers;
+use super::pwa::run_export;
 use super::release::publish_release_version;
 use super::resolve::{resolve_cid_input, ResolvedCid};
 use super::socialgraph::{
@@ -680,6 +681,9 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?
         }
+        Commands::Pwa { command } => match command {
+            PwaCommands::Export { url, json } => run_export(data_dir.clone(), url, json).await?,
+        },
         Commands::Load { cid: cid_input } => {
             let resolved = resolve_cid_input(&cid_input).await?;
             let store = Arc::new(HashtreeStore::new(&data_dir)?);

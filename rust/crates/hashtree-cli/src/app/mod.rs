@@ -14,6 +14,7 @@ pub(crate) mod mounts;
 pub(crate) mod nostr_index;
 pub(crate) mod peers;
 pub(crate) mod pr;
+pub(crate) mod pwa;
 pub(crate) mod release;
 pub(crate) mod repos;
 pub(crate) mod resolve;

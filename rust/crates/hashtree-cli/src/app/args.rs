@@ -19,6 +19,7 @@ const CLI_GROUPED_COMMANDS: &str = "\
 
 Content Commands:
   add          Add file or directory to hashtree (like ipfs add)
+  pwa          Capture an installable web app into hashtree
   load         Load/prefetch content into local hashtree storage
   get          Get/download content by CID
   cat          Output file content to stdout (like cat)
@@ -68,6 +69,7 @@ const CLI_GROUPED_COMMANDS: &str = "\
 
 Content Commands:
   add          Add file or directory to hashtree (like ipfs add)
+  pwa          Capture an installable web app into hashtree
   load         Load/prefetch content into local hashtree storage
   get          Get/download content by CID
   cat          Output file content to stdout (like cat)
@@ -211,6 +213,12 @@ pub(crate) enum Commands {
         /// Don't push to file servers (local only)
         #[arg(long)]
         local: bool,
+    },
+
+    /// Capture an installable web app into hashtree
+    Pwa {
+        #[command(subcommand)]
+        command: PwaCommands,
     },
 
     /// Get/download content by CID
@@ -500,6 +508,18 @@ pub(crate) enum CashuCommands {
     Mint {
         #[command(subcommand)]
         command: CashuMintCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PwaCommands {
+    /// Export an installable web app into a pinned htree:// bundle
+    Export {
+        /// The source web app URL
+        url: String,
+        /// Print the export result as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
