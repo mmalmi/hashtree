@@ -61,6 +61,31 @@ pub enum LocalStore {
     Lmdb(LmdbBlobStore),
 }
 
+#[cfg(feature = "lmdb")]
+fn is_fs_blob_shard_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.len() == 2 && name.as_bytes().iter().all(u8::is_ascii_hexdigit))
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "lmdb")]
+fn remove_stale_fs_blob_shards(path: &Path) -> Result<(), StoreError> {
+    let entries = std::fs::read_dir(path).map_err(StoreError::Io)?;
+    for entry in entries {
+        let entry = entry.map_err(StoreError::Io)?;
+        let entry_path = entry.path();
+        if entry_path.is_dir() && is_fs_blob_shard_dir(&entry_path) {
+            std::fs::remove_dir_all(&entry_path).map_err(StoreError::Io)?;
+            tracing::info!(
+                "Removed stale filesystem blob shard directory after LMDB cutover: {}",
+                entry_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 impl LocalStore {
     /// Create a new unbounded local store.
     ///
@@ -82,6 +107,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             StorageBackend::Lmdb => match _map_size_bytes {
                 Some(map_size_bytes) => {
+                    std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
+                    remove_stale_fs_blob_shards(path.as_ref())?;
                     let map_size = usize::try_from(map_size_bytes).map_err(|_| {
                         StoreError::Other("LMDB map size exceeds usize".to_string())
                     })?;
@@ -89,7 +116,11 @@ impl LocalStore {
                         path, map_size,
                     )?))
                 }
-                None => Ok(LocalStore::Lmdb(LmdbBlobStore::new(path)?)),
+                None => {
+                    std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
+                    remove_stale_fs_blob_shards(path.as_ref())?;
+                    Ok(LocalStore::Lmdb(LmdbBlobStore::new(path)?))
+                }
             },
             #[cfg(not(feature = "lmdb"))]
             StorageBackend::Lmdb => {
@@ -666,6 +697,9 @@ impl HashtreeStore {
             ),
             #[cfg(feature = "lmdb")]
             hashtree_config::StorageBackend::Lmdb => {
+                std::fs::create_dir_all(path.join("blobs"))?;
+                remove_stale_fs_blob_shards(&path.join("blobs"))
+                    .map_err(|e| anyhow::anyhow!("Failed to clean LMDB blob store path: {}", e))?;
                 let requested_map_size = max_size_bytes.max(LMDB_BLOB_MIN_MAP_SIZE_BYTES);
                 let map_size = usize::try_from(requested_map_size)
                     .context("LMDB blob map size exceeds usize")?;
@@ -1560,6 +1594,33 @@ mod tests {
             map_size >= requested,
             "expected LMDB map to grow to at least {requested} bytes, got {map_size}"
         );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn lmdb_local_store_removes_stale_fs_blob_shard_dirs() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("lmdb-blobs");
+        std::fs::create_dir_all(path.join("aa"))?;
+        std::fs::create_dir_all(path.join("b2"))?;
+        std::fs::create_dir_all(path.join("keep-me"))?;
+        std::fs::write(path.join("aa").join("blob.bin"), b"old fs shard")?;
+        std::fs::write(path.join("b2").join("blob.bin"), b"old fs shard")?;
+        std::fs::write(path.join("keep-me").join("note.txt"), b"keep")?;
+
+        let _store = LocalStore::new_with_lmdb_map_size(
+            &path,
+            &StorageBackend::Lmdb,
+            Some(128 * 1024 * 1024),
+        )?;
+
+        assert!(!path.join("aa").exists());
+        assert!(!path.join("b2").exists());
+        assert!(path.join("keep-me").exists());
+        assert!(path.join("data.mdb").exists());
+        assert!(path.join("lock.mdb").exists());
 
         Ok(())
     }
