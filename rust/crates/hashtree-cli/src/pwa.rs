@@ -37,7 +37,7 @@ struct FetchedPwa {
     source_app_id: Option<String>,
     source_url: String,
     source_manifest_url: String,
-    launch_path: String,
+    launch_reference: String,
     icon_path: Option<String>,
     assets: Vec<PwaAsset>,
 }
@@ -57,10 +57,7 @@ pub async fn install_site_pwa_to_store(
 
     Ok(InstalledSitePwa {
         name: fetched.name,
-        launch_url: format!(
-            "htree://{nhash}{}",
-            absolute_tree_path(&fetched.launch_path)
-        ),
+        launch_url: format!("htree://{nhash}{}", fetched.launch_reference),
         icon_url: fetched
             .icon_path
             .as_ref()
@@ -185,8 +182,8 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         ));
         queued_assets.insert(image.resolved_url.to_string());
     }
-    for icon in extract_manifest_icon_urls(&manifest, &manifest_url) {
-        queued_assets.insert(icon.to_string());
+    for asset_url in extract_manifest_resource_urls(&manifest, &manifest_url) {
+        queued_assets.insert(asset_url.to_string());
     }
 
     let mut queued_asset_urls: Vec<Url> = queued_assets
@@ -231,8 +228,8 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         data: serde_json::to_vec_pretty(&manifest).context("serialize rewritten manifest")?,
     });
 
-    let launch_path =
-        manifest_start_path(&manifest, &manifest_url).unwrap_or_else(|| html_path.clone());
+    let launch_reference = manifest_start_reference(&manifest, &manifest_url)
+        .unwrap_or_else(|| absolute_tree_path(&html_path));
     let icon_path = pick_manifest_icon_path(&manifest, &manifest_url);
     let source_app_id = manifest_app_id(&manifest, &manifest_url);
     let name = manifest_name(&manifest)
@@ -249,7 +246,7 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         source_app_id,
         source_url,
         source_manifest_url,
-        launch_path,
+        launch_reference,
         icon_path,
         assets,
     })
@@ -443,6 +440,23 @@ async fn fetch_asset(
         return nested_urls;
     }
 
+    if content_type.starts_with("text/html") || path.ends_with(".html") || path.ends_with(".htm") {
+        let html = match response.text().await {
+            Ok(html) => html,
+            Err(error) => {
+                tracing::warn!("Failed to read HTML asset {}: {}", asset_url, error);
+                return Vec::new();
+            }
+        };
+        let (rewritten_html, nested_urls) =
+            rewrite_html_asset_urls(&html, &path, asset_url, base_url);
+        assets.push(PwaAsset {
+            path,
+            data: rewritten_html.into_bytes(),
+        });
+        return nested_urls;
+    }
+
     match response.bytes().await {
         Ok(bytes) => {
             assets.push(PwaAsset {
@@ -521,10 +535,10 @@ fn manifest_name(manifest: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn manifest_start_path(manifest: &Value, manifest_url: &Url) -> Option<String> {
+fn manifest_start_reference(manifest: &Value, manifest_url: &Url) -> Option<String> {
     let start_url = manifest.get("start_url")?.as_str()?;
     let resolved = manifest_url.join(start_url).ok()?;
-    Some(url_to_path(&resolved, manifest_url))
+    Some(absolute_tree_reference_for_url(&resolved, manifest_url))
 }
 
 fn manifest_app_id(manifest: &Value, manifest_url: &Url) -> Option<String> {
@@ -541,15 +555,54 @@ fn manifest_app_id(manifest: &Value, manifest_url: &Url) -> Option<String> {
     )
 }
 
-fn extract_manifest_icon_urls(manifest: &Value, manifest_url: &Url) -> Vec<Url> {
-    manifest
-        .get("icons")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|icon| icon.get("src").and_then(Value::as_str))
-        .filter_map(|src| manifest_url.join(src).ok())
-        .collect()
+fn extract_manifest_resource_urls(manifest: &Value, manifest_url: &Url) -> Vec<Url> {
+    let mut urls = Vec::new();
+
+    collect_manifest_url_field(manifest.get("start_url"), manifest_url, &mut urls);
+    collect_manifest_icon_like_urls(manifest.get("icons"), manifest_url, &mut urls);
+    collect_manifest_icon_like_urls(manifest.get("screenshots"), manifest_url, &mut urls);
+
+    if let Some(shortcuts) = manifest.get("shortcuts").and_then(Value::as_array) {
+        for shortcut in shortcuts {
+            collect_manifest_url_field(shortcut.get("url"), manifest_url, &mut urls);
+            collect_manifest_icon_like_urls(shortcut.get("icons"), manifest_url, &mut urls);
+        }
+    }
+
+    if let Some(protocol_handlers) = manifest.get("protocol_handlers").and_then(Value::as_array) {
+        for handler in protocol_handlers {
+            collect_manifest_url_field(handler.get("url"), manifest_url, &mut urls);
+        }
+    }
+
+    if let Some(file_handlers) = manifest.get("file_handlers").and_then(Value::as_array) {
+        for handler in file_handlers {
+            collect_manifest_url_field(handler.get("action"), manifest_url, &mut urls);
+            collect_manifest_icon_like_urls(handler.get("icons"), manifest_url, &mut urls);
+        }
+    }
+
+    if let Some(share_target) = manifest.get("share_target") {
+        collect_manifest_url_field(share_target.get("action"), manifest_url, &mut urls);
+        collect_manifest_url_field(share_target.get("url_template"), manifest_url, &mut urls);
+    }
+
+    if let Some(note_taking) = manifest.get("note_taking") {
+        collect_manifest_url_field(note_taking.get("new_note_url"), manifest_url, &mut urls);
+    }
+
+    if let Some(tab_strip) = manifest.get("tab_strip") {
+        if let Some(home_tab) = tab_strip.get("home_tab") {
+            collect_manifest_url_field(home_tab.get("url"), manifest_url, &mut urls);
+            collect_manifest_icon_like_urls(home_tab.get("icons"), manifest_url, &mut urls);
+        }
+        if let Some(new_tab_button) = tab_strip.get("new_tab_button") {
+            collect_manifest_url_field(new_tab_button.get("url"), manifest_url, &mut urls);
+            collect_manifest_icon_like_urls(new_tab_button.get("icons"), manifest_url, &mut urls);
+        }
+    }
+
+    urls
 }
 
 fn pick_manifest_icon_url(manifest: &Value, manifest_url: &Url) -> Option<Url> {
@@ -587,28 +640,179 @@ fn parse_largest_icon_size(sizes: &str) -> Option<u32> {
 }
 
 fn rewrite_manifest_urls(manifest: &mut Value, manifest_url: &Url, manifest_path: &str) {
-    if let Some(start_url) = manifest.get_mut("start_url") {
-        if let Some(raw) = start_url.as_str() {
-            if let Ok(resolved) = manifest_url.join(raw) {
-                let target_path = url_to_path(&resolved, manifest_url);
-                *start_url = Value::String(relative_tree_reference(manifest_path, &target_path));
-            }
+    rewrite_manifest_url_field(manifest, "start_url", manifest_url, manifest_path);
+    rewrite_manifest_icon_like_array(manifest, "icons", manifest_url, manifest_path);
+    rewrite_manifest_icon_like_array(manifest, "screenshots", manifest_url, manifest_path);
+
+    if let Some(shortcuts) = manifest.get_mut("shortcuts").and_then(Value::as_array_mut) {
+        for shortcut in shortcuts {
+            rewrite_manifest_url_field(shortcut, "url", manifest_url, manifest_path);
+            rewrite_manifest_icon_like_array(shortcut, "icons", manifest_url, manifest_path);
         }
     }
 
-    if let Some(icons) = manifest.get_mut("icons").and_then(Value::as_array_mut) {
-        for icon in icons {
-            let Some(raw_src) = icon.get("src").and_then(Value::as_str) else {
-                continue;
-            };
-            if let Ok(resolved) = manifest_url.join(raw_src) {
-                if let Some(src) = icon.get_mut("src") {
-                    let target_path = url_to_path(&resolved, manifest_url);
-                    *src = Value::String(relative_tree_reference(manifest_path, &target_path));
-                }
-            }
+    if let Some(protocol_handlers) = manifest
+        .get_mut("protocol_handlers")
+        .and_then(Value::as_array_mut)
+    {
+        for handler in protocol_handlers {
+            rewrite_manifest_url_field(handler, "url", manifest_url, manifest_path);
         }
     }
+
+    if let Some(file_handlers) = manifest
+        .get_mut("file_handlers")
+        .and_then(Value::as_array_mut)
+    {
+        for handler in file_handlers {
+            rewrite_manifest_url_field(handler, "action", manifest_url, manifest_path);
+            rewrite_manifest_icon_like_array(handler, "icons", manifest_url, manifest_path);
+        }
+    }
+
+    if let Some(share_target) = manifest.get_mut("share_target") {
+        rewrite_manifest_url_field(share_target, "action", manifest_url, manifest_path);
+        rewrite_manifest_url_field(share_target, "url_template", manifest_url, manifest_path);
+    }
+
+    if let Some(note_taking) = manifest.get_mut("note_taking") {
+        rewrite_manifest_url_field(note_taking, "new_note_url", manifest_url, manifest_path);
+    }
+
+    if let Some(tab_strip) = manifest.get_mut("tab_strip") {
+        if let Some(home_tab) = tab_strip.get_mut("home_tab") {
+            rewrite_manifest_url_field(home_tab, "url", manifest_url, manifest_path);
+            rewrite_manifest_icon_like_array(home_tab, "icons", manifest_url, manifest_path);
+        }
+        if let Some(new_tab_button) = tab_strip.get_mut("new_tab_button") {
+            rewrite_manifest_url_field(new_tab_button, "url", manifest_url, manifest_path);
+            rewrite_manifest_icon_like_array(new_tab_button, "icons", manifest_url, manifest_path);
+        }
+    }
+}
+
+fn collect_manifest_url_field(value: Option<&Value>, manifest_url: &Url, urls: &mut Vec<Url>) {
+    let Some(raw_value) = value.and_then(Value::as_str) else {
+        return;
+    };
+    let Some(resolved) = resolve_resource_url(raw_value, manifest_url) else {
+        return;
+    };
+    urls.push(resolved);
+}
+
+fn collect_manifest_icon_like_urls(value: Option<&Value>, manifest_url: &Url, urls: &mut Vec<Url>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        collect_manifest_url_field(item.get("src"), manifest_url, urls);
+    }
+}
+
+fn rewrite_manifest_url_field(
+    object: &mut Value,
+    key: &str,
+    manifest_url: &Url,
+    manifest_path: &str,
+) {
+    let Some(value) = object.get_mut(key) else {
+        return;
+    };
+    let Some(raw_value) = value.as_str() else {
+        return;
+    };
+    let Some(resolved) = resolve_resource_url(raw_value, manifest_url) else {
+        return;
+    };
+
+    *value = Value::String(relative_tree_reference_for_url(
+        manifest_path,
+        &resolved,
+        manifest_url,
+    ));
+}
+
+fn rewrite_manifest_icon_like_array(
+    object: &mut Value,
+    key: &str,
+    manifest_url: &Url,
+    manifest_path: &str,
+) {
+    let Some(items) = object.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        rewrite_manifest_url_field(item, "src", manifest_url, manifest_path);
+    }
+}
+
+fn relative_tree_reference_for_url(from_path: &str, target_url: &Url, base_url: &Url) -> String {
+    let target_path = url_to_path(target_url, base_url);
+    let mut relative = relative_tree_reference(from_path, &target_path);
+    if let Some(query) = target_url.query() {
+        relative.push('?');
+        relative.push_str(query);
+    }
+    if let Some(fragment) = target_url.fragment() {
+        relative.push('#');
+        relative.push_str(fragment);
+    }
+    relative
+}
+
+fn absolute_tree_reference_for_url(target_url: &Url, base_url: &Url) -> String {
+    let target_path = url_to_path(target_url, base_url);
+    let mut absolute = absolute_tree_path(&target_path);
+    if let Some(query) = target_url.query() {
+        absolute.push('?');
+        absolute.push_str(query);
+    }
+    if let Some(fragment) = target_url.fragment() {
+        absolute.push('#');
+        absolute.push_str(fragment);
+    }
+    absolute
+}
+
+fn rewrite_html_asset_urls(
+    html: &str,
+    html_path: &str,
+    html_url: &Url,
+    base_url: &Url,
+) -> (String, Vec<Url>) {
+    let mut html_rewrites = Vec::new();
+    let mut queued_assets = BTreeSet::new();
+
+    for stylesheet in extract_link_references(html, "stylesheet", html_url) {
+        let asset_path = url_to_path(&stylesheet.resolved_url, base_url);
+        html_rewrites.push((
+            stylesheet.raw_value,
+            relative_tree_reference(html_path, &asset_path),
+        ));
+        queued_assets.insert(stylesheet.resolved_url);
+    }
+    for script in extract_script_references(html, html_url) {
+        let asset_path = url_to_path(&script.resolved_url, base_url);
+        html_rewrites.push((
+            script.raw_value,
+            relative_tree_reference(html_path, &asset_path),
+        ));
+        queued_assets.insert(script.resolved_url);
+    }
+    for image in extract_image_references(html, html_url) {
+        let asset_path = url_to_path(&image.resolved_url, base_url);
+        html_rewrites.push((
+            image.raw_value,
+            relative_tree_reference(html_path, &asset_path),
+        ));
+        queued_assets.insert(image.resolved_url);
+    }
+
+    (
+        rewrite_html_urls(html, &html_rewrites),
+        queued_assets.into_iter().collect(),
+    )
 }
 
 fn rewrite_html_urls(html: &str, rewrites: &[(String, String)]) -> String {
@@ -1192,6 +1396,7 @@ fn display_dir(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn extract_manifest_url_finds_manifest_link() {
@@ -1274,5 +1479,255 @@ mod tests {
 
         assert!(rewritten.contains("url(\"../img/bg.png\")"));
         assert!(rewritten.contains("url(\"../_external/cdn.example.com/fonts/app.woff2\")"));
+    }
+
+    #[test]
+    fn rewrite_html_asset_urls_rewrites_nested_page_dependencies() {
+        let html = r#"
+          <link rel="stylesheet" href="/assets/main.css">
+          <script type="module" src="bundle.js"></script>
+          <img src="https://cdn.example.com/logo.png">
+        "#;
+        let html_url = Url::parse("https://jumble.social/app/index.html").unwrap();
+        let base_url = Url::parse("https://jumble.social/").unwrap();
+
+        let (rewritten, mut nested_urls) =
+            rewrite_html_asset_urls(html, "app/index.html", &html_url, &base_url);
+        nested_urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+
+        assert!(rewritten.contains(r#"href="../assets/main.css""#));
+        assert!(rewritten.contains(r#"src="bundle.js""#));
+        assert!(rewritten.contains(r#"src="../_external/cdn.example.com/logo.png""#));
+        assert_eq!(
+            nested_urls
+                .into_iter()
+                .map(|url| url.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://cdn.example.com/logo.png",
+                "https://jumble.social/app/bundle.js",
+                "https://jumble.social/assets/main.css",
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_start_reference_preserves_query_and_fragment() {
+        let manifest = json!({
+            "start_url": "../index.html?source=pwa#home"
+        });
+        let manifest_url = Url::parse("https://jumble.social/app/manifest.webmanifest").unwrap();
+
+        assert_eq!(
+            manifest_start_reference(&manifest, &manifest_url),
+            Some("/index.html?source=pwa#home".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_manifest_resource_urls_collects_nested_manifest_fields() {
+        let manifest = json!({
+            "start_url": "../index.html?source=pwa#home",
+            "icons": [
+                {"src": "icons/app.png"},
+                {"src": "https://cdn.example.com/icons/maskable.png"}
+            ],
+            "screenshots": [
+                {"src": "shots/hero.png"}
+            ],
+            "shortcuts": [
+                {
+                    "url": "../launch/compose.html?mode=quick#composer",
+                    "icons": [
+                        {"src": "icons/shortcut.png"}
+                    ]
+                }
+            ],
+            "protocol_handlers": [
+                {"url": "open?uri=placeholder"}
+            ],
+            "file_handlers": [
+                {
+                    "action": "/open-file",
+                    "icons": [
+                        {"src": "icons/file.png"}
+                    ]
+                }
+            ],
+            "share_target": {
+                "action": "/share/submit?from=manifest"
+            },
+            "note_taking": {
+                "new_note_url": "/notes/new.html"
+            },
+            "tab_strip": {
+                "home_tab": {
+                    "url": "/home.html",
+                    "icons": [
+                        {"src": "icons/home.png"}
+                    ]
+                },
+                "new_tab_button": {
+                    "url": "tabs/new.html"
+                }
+            }
+        });
+        let manifest_url = Url::parse("https://jumble.social/app/manifest.webmanifest").unwrap();
+
+        let mut urls: Vec<String> = extract_manifest_resource_urls(&manifest, &manifest_url)
+            .into_iter()
+            .map(|url| url.to_string())
+            .collect();
+        urls.sort();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://cdn.example.com/icons/maskable.png",
+                "https://jumble.social/app/icons/app.png",
+                "https://jumble.social/app/icons/file.png",
+                "https://jumble.social/app/icons/home.png",
+                "https://jumble.social/app/icons/shortcut.png",
+                "https://jumble.social/app/open?uri=placeholder",
+                "https://jumble.social/app/shots/hero.png",
+                "https://jumble.social/app/tabs/new.html",
+                "https://jumble.social/home.html",
+                "https://jumble.social/index.html?source=pwa#home",
+                "https://jumble.social/launch/compose.html?mode=quick#composer",
+                "https://jumble.social/notes/new.html",
+                "https://jumble.social/open-file",
+                "https://jumble.social/share/submit?from=manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_manifest_urls_rewrites_nested_manifest_fields() {
+        let mut manifest = json!({
+            "start_url": "../index.html?source=pwa#home",
+            "icons": [
+                {"src": "icons/app.png"},
+                {"src": "https://cdn.example.com/icons/maskable.png"}
+            ],
+            "screenshots": [
+                {"src": "shots/hero.png"}
+            ],
+            "shortcuts": [
+                {
+                    "url": "../launch/compose.html?mode=quick#composer",
+                    "icons": [
+                        {"src": "icons/shortcut.png"}
+                    ]
+                }
+            ],
+            "protocol_handlers": [
+                {"url": "open?uri=placeholder"}
+            ],
+            "file_handlers": [
+                {
+                    "action": "/open-file",
+                    "icons": [
+                        {"src": "icons/file.png"}
+                    ]
+                }
+            ],
+            "share_target": {
+                "action": "/share/submit?from=manifest"
+            },
+            "note_taking": {
+                "new_note_url": "/notes/new.html"
+            },
+            "tab_strip": {
+                "home_tab": {
+                    "url": "/home.html",
+                    "icons": [
+                        {"src": "icons/home.png"}
+                    ]
+                },
+                "new_tab_button": {
+                    "url": "tabs/new.html"
+                }
+            }
+        });
+        let manifest_url = Url::parse("https://jumble.social/app/manifest.webmanifest").unwrap();
+
+        rewrite_manifest_urls(&mut manifest, &manifest_url, "app/manifest.webmanifest");
+
+        assert_eq!(
+            manifest.get("start_url").and_then(Value::as_str),
+            Some("../index.html?source=pwa#home")
+        );
+        assert_eq!(
+            manifest["icons"][0].get("src").and_then(Value::as_str),
+            Some("icons/app.png")
+        );
+        assert_eq!(
+            manifest["icons"][1].get("src").and_then(Value::as_str),
+            Some("../_external/cdn.example.com/icons/maskable.png")
+        );
+        assert_eq!(
+            manifest["screenshots"][0]
+                .get("src")
+                .and_then(Value::as_str),
+            Some("shots/hero.png")
+        );
+        assert_eq!(
+            manifest["shortcuts"][0].get("url").and_then(Value::as_str),
+            Some("../launch/compose.html?mode=quick#composer")
+        );
+        assert_eq!(
+            manifest["shortcuts"][0]["icons"][0]
+                .get("src")
+                .and_then(Value::as_str),
+            Some("icons/shortcut.png")
+        );
+        assert_eq!(
+            manifest["protocol_handlers"][0]
+                .get("url")
+                .and_then(Value::as_str),
+            Some("open?uri=placeholder")
+        );
+        assert_eq!(
+            manifest["file_handlers"][0]
+                .get("action")
+                .and_then(Value::as_str),
+            Some("../open-file")
+        );
+        assert_eq!(
+            manifest["file_handlers"][0]["icons"][0]
+                .get("src")
+                .and_then(Value::as_str),
+            Some("icons/file.png")
+        );
+        assert_eq!(
+            manifest["share_target"]
+                .get("action")
+                .and_then(Value::as_str),
+            Some("../share/submit?from=manifest")
+        );
+        assert_eq!(
+            manifest["note_taking"]
+                .get("new_note_url")
+                .and_then(Value::as_str),
+            Some("../notes/new.html")
+        );
+        assert_eq!(
+            manifest["tab_strip"]["home_tab"]
+                .get("url")
+                .and_then(Value::as_str),
+            Some("../home.html")
+        );
+        assert_eq!(
+            manifest["tab_strip"]["home_tab"]["icons"][0]
+                .get("src")
+                .and_then(Value::as_str),
+            Some("icons/home.png")
+        );
+        assert_eq!(
+            manifest["tab_strip"]["new_tab_button"]
+                .get("url")
+                .and_then(Value::as_str),
+            Some("tabs/new.html")
+        );
     }
 }
