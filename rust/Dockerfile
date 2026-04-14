@@ -5,6 +5,7 @@ WORKDIR /app
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY vendor ./vendor
 
 # Build release binary with S3 support
 RUN cargo build --release --package hashtree-cli --features s3

@@ -3,7 +3,6 @@ use axum::Router;
 use nostr::nips::nip19::ToBech32;
 use nostr::Keys;
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -147,19 +146,8 @@ pub struct EmbeddedBackgroundServicesController {
 }
 
 impl EmbeddedBackgroundServicesController {
-    fn local_publish_relay(bind_address: &str) -> Option<String> {
-        let addr: SocketAddr = bind_address.parse().ok()?;
-        if addr.port() == 0 {
-            return None;
-        }
-
-        let host = match addr.ip() {
-            IpAddr::V4(ip) if ip.is_unspecified() => Ipv4Addr::LOCALHOST.to_string(),
-            IpAddr::V6(ip) if ip.is_unspecified() => format!("[{}]", Ipv6Addr::LOCALHOST),
-            IpAddr::V4(ip) => ip.to_string(),
-            IpAddr::V6(ip) => format!("[{ip}]"),
-        };
-        Some(format!("ws://{host}:{}/ws", addr.port()))
+    fn mirror_publish_relays(active_relays: &[String], _bind_address: &str) -> Vec<String> {
+        active_relays.to_vec()
     }
 
     pub fn new(
@@ -297,9 +285,10 @@ impl EmbeddedBackgroundServicesController {
                 crate::nostr_mirror::BackgroundNostrMirror::new(
                     crate::nostr_mirror::NostrMirrorConfig {
                         relays: active_relays.clone(),
-                        publish_relays: Self::local_publish_relay(&config.server.bind_address)
-                            .into_iter()
-                            .collect(),
+                        publish_relays: Self::mirror_publish_relays(
+                            &active_relays,
+                            &config.server.bind_address,
+                        ),
                         max_follow_distance: config.nostr.social_graph_crawl_depth,
                         overmute_threshold: config.nostr.overmute_threshold,
                         require_negentropy: config.nostr.negentropy_only,
@@ -822,4 +811,28 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         peer_router_controller,
         background_services_controller: Some(background_services_controller),
     })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::EmbeddedBackgroundServicesController;
+
+    #[test]
+    fn mirror_publish_relays_match_upstream_relays_only() {
+        let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
+            &[
+                "wss://relay.example".to_string(),
+                "wss://relay.two".to_string(),
+            ],
+            "0.0.0.0:8080",
+        );
+        assert_eq!(
+            relays,
+            vec![
+                "wss://relay.example".to_string(),
+                "wss://relay.two".to_string(),
+            ]
+        );
+    }
 }
