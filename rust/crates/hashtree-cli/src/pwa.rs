@@ -17,6 +17,8 @@ pub struct InstalledSitePwa {
     pub source_app_id: Option<String>,
     pub source_url: String,
     pub source_manifest_url: String,
+    pub description: Option<String>,
+    pub display_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,8 @@ struct FetchedPwa {
     source_app_id: Option<String>,
     source_url: String,
     source_manifest_url: String,
+    description: Option<String>,
+    display_mode: Option<String>,
     launch_reference: String,
     icon_path: Option<String>,
     assets: Vec<PwaAsset>,
@@ -65,6 +69,8 @@ pub async fn install_site_pwa_to_store(
         source_app_id: fetched.source_app_id,
         source_url: fetched.source_url,
         source_manifest_url: fetched.source_manifest_url,
+        description: fetched.description,
+        display_mode: fetched.display_mode,
     })
 }
 
@@ -232,6 +238,8 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         .unwrap_or_else(|| absolute_tree_path(&html_path));
     let icon_path = pick_manifest_icon_path(&manifest, &manifest_url);
     let source_app_id = manifest_app_id(&manifest, &manifest_url);
+    let description = manifest_description(&manifest);
+    let display_mode = manifest_display_mode(&manifest);
     let name = manifest_name(&manifest)
         .or_else(|| extract_title(&original_html))
         .unwrap_or_else(|| {
@@ -246,6 +254,8 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         source_app_id,
         source_url,
         source_manifest_url,
+        description,
+        display_mode,
         launch_reference,
         icon_path,
         assets,
@@ -535,6 +545,15 @@ fn manifest_name(manifest: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn manifest_description(manifest: &Value) -> Option<String> {
+    manifest
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 fn manifest_start_reference(manifest: &Value, manifest_url: &Url) -> Option<String> {
     let start_url = manifest.get("start_url")?.as_str()?;
     let resolved = manifest_url.join(start_url).ok()?;
@@ -553,6 +572,18 @@ fn manifest_app_id(manifest: &Value, manifest_url: &Url) -> Option<String> {
             .map(|resolved| resolved.to_string())
             .unwrap_or_else(|_| raw_id.to_string()),
     )
+}
+
+fn manifest_display_mode(manifest: &Value) -> Option<String> {
+    let display_mode = manifest
+        .get("display")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+    match display_mode.as_str() {
+        "browser" | "minimal-ui" | "standalone" | "fullscreen" => Some(display_mode),
+        _ => None,
+    }
 }
 
 fn extract_manifest_resource_urls(manifest: &Value, manifest_url: &Url) -> Vec<Url> {
@@ -1522,6 +1553,57 @@ mod tests {
             manifest_start_reference(&manifest, &manifest_url),
             Some("/index.html?source=pwa#home".to_string())
         );
+    }
+
+    #[test]
+    fn installed_site_pwa_serialization_includes_manifest_metadata() {
+        let installed = InstalledSitePwa {
+            name: "Example App".to_string(),
+            launch_url: "htree://nhash-example/app/index.html".to_string(),
+            icon_url: Some("htree://nhash-example/icons/pwa-192.png".to_string()),
+            source_app_id: Some("https://example.com/app".to_string()),
+            source_url: "https://example.com/app".to_string(),
+            source_manifest_url: "https://example.com/manifest.webmanifest".to_string(),
+            description: Some("Portable notes".to_string()),
+            display_mode: Some("minimal-ui".to_string()),
+        };
+
+        let value = serde_json::to_value(installed).unwrap();
+
+        assert_eq!(
+            value.get("description").and_then(Value::as_str),
+            Some("Portable notes")
+        );
+        assert_eq!(
+            value.get("displayMode").and_then(Value::as_str),
+            Some("minimal-ui")
+        );
+    }
+
+    #[test]
+    fn manifest_metadata_extractors_read_description_and_supported_display() {
+        let manifest = json!({
+            "description": " Portable notes ",
+            "display": "minimal-ui"
+        });
+
+        assert_eq!(
+            manifest_description(&manifest),
+            Some("Portable notes".to_string())
+        );
+        assert_eq!(
+            manifest_display_mode(&manifest),
+            Some("minimal-ui".to_string())
+        );
+    }
+
+    #[test]
+    fn manifest_display_mode_ignores_unsupported_values() {
+        let manifest = json!({
+            "display": "window-controls-overlay"
+        });
+
+        assert_eq!(manifest_display_mode(&manifest), None);
     }
 
     #[test]
