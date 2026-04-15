@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use reqwest::{Client, Url};
 use serde::Serialize;
 use serde_json::Value;
@@ -6,7 +6,21 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::storage::HashtreeStore;
-use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, nhash_encode};
+use hashtree_core::{nhash_encode, Cid, DirEntry, HashTree, HashTreeConfig, LinkType};
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PwaShortcut {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PwaProtocolHandler {
+    pub protocol: String,
+    pub url: String,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +33,9 @@ pub struct InstalledSitePwa {
     pub source_manifest_url: String,
     pub description: Option<String>,
     pub display_mode: Option<String>,
+    pub scope_url: Option<String>,
+    pub shortcuts: Vec<PwaShortcut>,
+    pub protocol_handlers: Vec<PwaProtocolHandler>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +58,11 @@ struct FetchedPwa {
     source_manifest_url: String,
     description: Option<String>,
     display_mode: Option<String>,
+    scope_reference: Option<String>,
     launch_reference: String,
     icon_path: Option<String>,
+    shortcuts: Vec<PwaShortcut>,
+    protocol_handlers: Vec<PwaProtocolHandler>,
     assets: Vec<PwaAsset>,
 }
 
@@ -71,6 +91,26 @@ pub async fn install_site_pwa_to_store(
         source_manifest_url: fetched.source_manifest_url,
         description: fetched.description,
         display_mode: fetched.display_mode,
+        scope_url: fetched
+            .scope_reference
+            .as_ref()
+            .map(|scope_reference| format!("htree://{nhash}{scope_reference}")),
+        shortcuts: fetched
+            .shortcuts
+            .into_iter()
+            .map(|shortcut| PwaShortcut {
+                name: shortcut.name,
+                url: format!("htree://{nhash}{}", shortcut.url),
+            })
+            .collect(),
+        protocol_handlers: fetched
+            .protocol_handlers
+            .into_iter()
+            .map(|handler| PwaProtocolHandler {
+                protocol: handler.protocol,
+                url: format!("htree://{nhash}{}", handler.url),
+            })
+            .collect(),
     })
 }
 
@@ -230,7 +270,7 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         data: rewritten_html.into_bytes(),
     });
     assets.push(PwaAsset {
-        path: manifest_path,
+        path: manifest_path.clone(),
         data: serde_json::to_vec_pretty(&manifest).context("serialize rewritten manifest")?,
     });
 
@@ -240,6 +280,9 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
     let source_app_id = manifest_app_id(&manifest, &manifest_url);
     let description = manifest_description(&manifest);
     let display_mode = manifest_display_mode(&manifest);
+    let scope_reference = manifest_scope_reference(&manifest, &manifest_url);
+    let shortcuts = manifest_shortcuts(&manifest, &manifest_path);
+    let protocol_handlers = manifest_protocol_handlers(&manifest, &manifest_path);
     let name = manifest_name(&manifest)
         .or_else(|| extract_title(&original_html))
         .unwrap_or_else(|| {
@@ -256,8 +299,11 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         source_manifest_url,
         description,
         display_mode,
+        scope_reference,
         launch_reference,
         icon_path,
+        shortcuts,
+        protocol_handlers,
         assets,
     })
 }
@@ -560,6 +606,75 @@ fn manifest_start_reference(manifest: &Value, manifest_url: &Url) -> Option<Stri
     Some(absolute_tree_reference_for_url(&resolved, manifest_url))
 }
 
+fn manifest_scope_reference(manifest: &Value, manifest_url: &Url) -> Option<String> {
+    let raw_scope = manifest
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let resolved_scope = resolve_resource_url(raw_scope, manifest_url)?;
+    if resolved_scope.origin() != manifest_url.origin() {
+        return None;
+    }
+
+    let path = resolved_scope.path();
+    if path.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(path.to_string())
+    }
+}
+
+fn manifest_shortcuts(manifest: &Value, manifest_path: &str) -> Vec<PwaShortcut> {
+    manifest
+        .get("shortcuts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|shortcut| {
+            let name = shortcut
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let url = shortcut
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(|value| absolute_tree_reference_from_path(manifest_path, value))?;
+
+            Some(PwaShortcut {
+                name: name.to_string(),
+                url,
+            })
+        })
+        .collect()
+}
+
+fn manifest_protocol_handlers(manifest: &Value, manifest_path: &str) -> Vec<PwaProtocolHandler> {
+    manifest
+        .get("protocol_handlers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|handler| {
+            let protocol = handler
+                .get("protocol")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let url = handler
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(|value| absolute_tree_reference_from_path(manifest_path, value))?;
+
+            Some(PwaProtocolHandler {
+                protocol: protocol.to_string(),
+                url,
+            })
+        })
+        .collect()
+}
+
 fn manifest_app_id(manifest: &Value, manifest_url: &Url) -> Option<String> {
     let raw_id = manifest.get("id")?.as_str()?.trim();
     if raw_id.is_empty() {
@@ -842,6 +957,21 @@ fn absolute_tree_reference_for_url(target_url: &Url, base_url: &Url) -> String {
         absolute.push_str(fragment);
     }
     absolute
+}
+
+fn absolute_tree_reference_from_path(from_path: &str, reference: &str) -> Option<String> {
+    let trimmed_reference = reference.trim();
+    if trimmed_reference.is_empty() {
+        return None;
+    }
+
+    let base_url = Url::parse(&format!(
+        "https://tree.invalid/{}",
+        normalize_asset_path(from_path)
+    ))
+    .ok()?;
+    let resolved = base_url.join(trimmed_reference).ok()?;
+    Some(absolute_tree_reference_for_url(&resolved, &resolved))
 }
 
 fn rewrite_html_asset_urls(
@@ -1455,7 +1585,11 @@ fn dir_depth(path: &str) -> usize {
 }
 
 fn display_dir(path: &str) -> &str {
-    if path.is_empty() { "/" } else { path }
+    if path.is_empty() {
+        "/"
+    } else {
+        path
+    }
 }
 
 #[cfg(test)]
@@ -1640,6 +1774,63 @@ mod tests {
     }
 
     #[test]
+    fn manifest_scope_reference_preserves_root_scope() {
+        let manifest = json!({
+            "scope": "/"
+        });
+        let manifest_url =
+            Url::parse("https://app.fastmail.com/static/jmapui/hash/app.webmanifest").unwrap();
+
+        assert_eq!(
+            manifest_scope_reference(&manifest, &manifest_url),
+            Some("/".to_string())
+        );
+    }
+
+    #[test]
+    fn manifest_handlers_resolve_to_absolute_tree_paths() {
+        let manifest = json!({
+            "shortcuts": [
+                {
+                    "name": "Compose",
+                    "url": "../../../mail/Inbox/compose"
+                },
+                {
+                    "name": "Contacts",
+                    "url": "../../../contacts/index.html"
+                }
+            ],
+            "protocol_handlers": [
+                {
+                    "protocol": "mailto",
+                    "url": "../../../mail/compose?mailto=%s"
+                }
+            ]
+        });
+
+        assert_eq!(
+            manifest_shortcuts(&manifest, "static/jmapui/hash/app.webmanifest"),
+            vec![
+                PwaShortcut {
+                    name: "Compose".to_string(),
+                    url: "/mail/Inbox/compose".to_string(),
+                },
+                PwaShortcut {
+                    name: "Contacts".to_string(),
+                    url: "/contacts/index.html".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            manifest_protocol_handlers(&manifest, "static/jmapui/hash/app.webmanifest"),
+            vec![PwaProtocolHandler {
+                protocol: "mailto".to_string(),
+                url: "/mail/compose?mailto=%s".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn installed_site_pwa_serialization_includes_manifest_metadata() {
         let installed = InstalledSitePwa {
             name: "Example App".to_string(),
@@ -1650,6 +1841,15 @@ mod tests {
             source_manifest_url: "https://example.com/manifest.webmanifest".to_string(),
             description: Some("Portable notes".to_string()),
             display_mode: Some("minimal-ui".to_string()),
+            scope_url: Some("htree://nhash-example/".to_string()),
+            shortcuts: vec![PwaShortcut {
+                name: "Compose".to_string(),
+                url: "htree://nhash-example/mail/Inbox/compose".to_string(),
+            }],
+            protocol_handlers: vec![PwaProtocolHandler {
+                protocol: "mailto".to_string(),
+                url: "htree://nhash-example/mail/compose?mailto=%s".to_string(),
+            }],
         };
 
         let value = serde_json::to_value(installed).unwrap();
@@ -1661,6 +1861,30 @@ mod tests {
         assert_eq!(
             value.get("displayMode").and_then(Value::as_str),
             Some("minimal-ui")
+        );
+        assert_eq!(
+            value.get("scopeUrl").and_then(Value::as_str),
+            Some("htree://nhash-example/")
+        );
+        assert_eq!(
+            value["shortcuts"][0].get("name").and_then(Value::as_str),
+            Some("Compose")
+        );
+        assert_eq!(
+            value["shortcuts"][0].get("url").and_then(Value::as_str),
+            Some("htree://nhash-example/mail/Inbox/compose")
+        );
+        assert_eq!(
+            value["protocolHandlers"][0]
+                .get("protocol")
+                .and_then(Value::as_str),
+            Some("mailto")
+        );
+        assert_eq!(
+            value["protocolHandlers"][0]
+                .get("url")
+                .and_then(Value::as_str),
+            Some("htree://nhash-example/mail/compose?mailto=%s")
         );
     }
 
@@ -1972,11 +2196,9 @@ mod tests {
         assert_eq!(installed.description, None);
         assert_eq!(installed.display_mode.as_deref(), Some("standalone"));
         assert!(installed.launch_url.starts_with("htree://nhash1"));
-        assert!(
-            installed
-                .launch_url
-                .ends_with("/index.html?utm_source=homescreen")
-        );
+        assert!(installed
+            .launch_url
+            .ends_with("/index.html?utm_source=homescreen"));
 
         let icon_url = installed.icon_url.clone().expect("installed icon url");
         let (launch_nhash, launch_path) = split_htree_nhash_url(&installed.launch_url);
@@ -2099,16 +2321,12 @@ mod tests {
         assert_eq!(installed.name, "Fastmail");
         assert_eq!(installed.source_app_id, None);
         assert_eq!(installed.source_url, LIVE_FASTMAIL_SMOKE_URL);
-        assert!(
-            installed
-                .source_manifest_url
-                .starts_with(LIVE_FASTMAIL_SMOKE_MANIFEST_PREFIX)
-        );
-        assert!(
-            installed
-                .source_manifest_url
-                .ends_with(LIVE_FASTMAIL_SMOKE_MANIFEST_SUFFIX)
-        );
+        assert!(installed
+            .source_manifest_url
+            .starts_with(LIVE_FASTMAIL_SMOKE_MANIFEST_PREFIX));
+        assert!(installed
+            .source_manifest_url
+            .ends_with(LIVE_FASTMAIL_SMOKE_MANIFEST_SUFFIX));
         assert_eq!(
             installed.description.as_deref(),
             Some("Email + calendar made better")
@@ -2123,6 +2341,37 @@ mod tests {
         assert_eq!(icon_nhash, launch_nhash);
         assert!(icon_path.starts_with("/static/appicons/"));
         assert!(icon_path.ends_with(".png"));
+        let expected_root = format!("htree://{launch_nhash}");
+        assert_eq!(
+            installed.scope_url.as_deref(),
+            Some(format!("{expected_root}/").as_str())
+        );
+        assert_eq!(installed.protocol_handlers.len(), 1);
+        assert_eq!(installed.protocol_handlers[0].protocol, "mailto");
+        assert_eq!(
+            installed.protocol_handlers[0].url,
+            format!("{expected_root}/mail/compose?mailto=%s")
+        );
+        assert_eq!(installed.shortcuts.len(), 4);
+        let installed_shortcut_pairs: Vec<(String, String)> = installed
+            .shortcuts
+            .iter()
+            .map(|shortcut| (shortcut.name.clone(), shortcut.url.clone()))
+            .collect();
+        assert!(installed_shortcut_pairs.contains(&(
+            "Compose".to_string(),
+            format!("{expected_root}/mail/Inbox/compose")
+        )));
+        assert!(installed_shortcut_pairs
+            .contains(&("Mail".to_string(), format!("{expected_root}/mail/Inbox"))));
+        assert!(installed_shortcut_pairs.contains(&(
+            "Contacts".to_string(),
+            format!("{expected_root}/contacts/index.html")
+        )));
+        assert!(installed_shortcut_pairs.contains(&(
+            "Calendar".to_string(),
+            format!("{expected_root}/calendar/index.html")
+        )));
 
         let launch_path = fetched.launch_reference.trim_start_matches('/');
         let launch_html = String::from_utf8(
