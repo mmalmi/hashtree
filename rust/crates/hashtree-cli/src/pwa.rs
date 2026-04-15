@@ -204,13 +204,13 @@ async fn fetch_pwa(url: &str) -> Result<FetchedPwa> {
         relative_tree_reference(&html_path, &manifest_path),
     ));
 
-    for stylesheet in extract_link_references(&original_html, "stylesheet", &base_url) {
-        let asset_path = url_to_path(&stylesheet.resolved_url, &base_url);
+    for link_asset in extract_link_asset_references(&original_html, &base_url) {
+        let asset_path = url_to_path(&link_asset.resolved_url, &base_url);
         html_rewrites.push((
-            stylesheet.raw_value,
+            link_asset.raw_value,
             relative_tree_reference(&html_path, &asset_path),
         ));
-        queued_assets.insert(stylesheet.resolved_url.to_string());
+        queued_assets.insert(link_asset.resolved_url.to_string());
     }
     for script in extract_script_references(&original_html, &base_url) {
         let asset_path = url_to_path(&script.resolved_url, &base_url);
@@ -983,13 +983,13 @@ fn rewrite_html_asset_urls(
     let mut html_rewrites = Vec::new();
     let mut queued_assets = BTreeSet::new();
 
-    for stylesheet in extract_link_references(html, "stylesheet", html_url) {
-        let asset_path = url_to_path(&stylesheet.resolved_url, base_url);
+    for link_asset in extract_link_asset_references(html, html_url) {
+        let asset_path = url_to_path(&link_asset.resolved_url, base_url);
         html_rewrites.push((
-            stylesheet.raw_value,
+            link_asset.raw_value,
             relative_tree_reference(html_path, &asset_path),
         ));
-        queued_assets.insert(stylesheet.resolved_url);
+        queued_assets.insert(link_asset.resolved_url);
     }
     for script in extract_script_references(html, html_url) {
         let asset_path = url_to_path(&script.resolved_url, base_url);
@@ -1196,10 +1196,12 @@ fn extract_manifest_reference(html: &str, base_url: &Url) -> Option<AssetReferen
         .and_then(|href| asset_reference(href, base_url))
 }
 
-fn extract_link_references(html: &str, rel: &str, base_url: &Url) -> Vec<AssetReference> {
+fn extract_link_asset_references(html: &str, base_url: &Url) -> Vec<AssetReference> {
+    const ASSET_LINK_RELS: &[&str] = &["stylesheet", "modulepreload", "preload", "prefetch"];
+
     extract_tag_attributes(html, "link")
         .into_iter()
-        .filter(|attrs| rel_contains(attrs, rel))
+        .filter(|attrs| ASSET_LINK_RELS.iter().any(|rel| rel_contains(attrs, rel)))
         .filter_map(|attrs| attrs.get("href").cloned())
         .filter_map(|href| asset_reference(href, base_url))
         .collect()
@@ -1608,6 +1610,8 @@ mod tests {
     const LIVE_FASTMAIL_SMOKE_URL: &str = "https://app.fastmail.com/";
     const LIVE_FASTMAIL_SMOKE_MANIFEST_PREFIX: &str = "https://app.fastmail.com/static/jmapui/";
     const LIVE_FASTMAIL_SMOKE_MANIFEST_SUFFIX: &str = "/app.webmanifest";
+    const LIVE_MASTODON_SMOKE_URL: &str = "https://mastodon.social/";
+    const LIVE_MASTODON_SMOKE_MANIFEST_URL: &str = "https://mastodon.social/manifest";
 
     fn split_htree_nhash_url(url: &str) -> (String, String) {
         let trimmed = url.strip_prefix("htree://").expect("htree:// url");
@@ -1734,6 +1738,8 @@ mod tests {
     fn rewrite_html_asset_urls_rewrites_nested_page_dependencies() {
         let html = r#"
           <link rel="stylesheet" href="/assets/main.css">
+          <link rel="modulepreload" href="/assets/chunk.js">
+          <link rel="preload" as="font" href="https://cdn.example.com/fonts/app.woff2">
           <script type="module" src="bundle.js"></script>
           <img src="https://cdn.example.com/logo.png">
         "#;
@@ -1745,6 +1751,8 @@ mod tests {
         nested_urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
 
         assert!(rewritten.contains(r#"href="../assets/main.css""#));
+        assert!(rewritten.contains(r#"href="../assets/chunk.js""#));
+        assert!(rewritten.contains(r#"href="../_external/cdn.example.com/fonts/app.woff2""#));
         assert!(rewritten.contains(r#"src="bundle.js""#));
         assert!(rewritten.contains(r#"src="../_external/cdn.example.com/logo.png""#));
         assert_eq!(
@@ -1753,8 +1761,10 @@ mod tests {
                 .map(|url| url.to_string())
                 .collect::<Vec<_>>(),
             vec![
+                "https://cdn.example.com/fonts/app.woff2",
                 "https://cdn.example.com/logo.png",
                 "https://jumble.social/app/bundle.js",
+                "https://jumble.social/assets/chunk.js",
                 "https://jumble.social/assets/main.css",
             ]
         );
@@ -2448,5 +2458,116 @@ mod tests {
             "Calendar".to_string(),
             "../../../calendar/index.html".to_string()
         )));
+    }
+
+    #[tokio::test]
+    #[ignore = "live network smoke test against mastodon.social"]
+    async fn installs_live_mastodon_pwa_with_source_app_id_and_shortcuts() {
+        let fetched = fetch_pwa(LIVE_MASTODON_SMOKE_URL).await.unwrap();
+        let temp_dir = tempdir().unwrap();
+        let store = HashtreeStore::new(temp_dir.path()).unwrap();
+
+        let installed = install_site_pwa_to_store(&store, LIVE_MASTODON_SMOKE_URL)
+            .await
+            .unwrap();
+
+        assert_eq!(installed.name, "Mastodon");
+        assert_eq!(
+            installed.source_app_id.as_deref(),
+            Some("https://mastodon.social/home")
+        );
+        assert_eq!(installed.source_url, LIVE_MASTODON_SMOKE_URL);
+        assert_eq!(
+            installed.source_manifest_url,
+            LIVE_MASTODON_SMOKE_MANIFEST_URL
+        );
+        assert_eq!(installed.description, None);
+        assert_eq!(installed.display_mode.as_deref(), Some("standalone"));
+        assert!(installed.launch_url.starts_with("htree://nhash1"));
+        assert!(installed.launch_url.ends_with("/index.html"));
+
+        let icon_url = installed.icon_url.clone().expect("installed icon url");
+        let (launch_nhash, launch_path) = split_htree_nhash_url(&installed.launch_url);
+        let (icon_nhash, icon_path) = split_htree_nhash_url(&icon_url);
+        assert_eq!(icon_nhash, launch_nhash);
+        assert_eq!(
+            installed.scope_url.as_deref(),
+            Some(format!("htree://{launch_nhash}/").as_str())
+        );
+        assert!(icon_path.starts_with("/packs/assets/android-chrome-512x512-"));
+        assert!(icon_path.ends_with(".png"));
+
+        let launch_html = read_exported_tree_text(&store, &launch_nhash, &launch_path).await;
+        assert!(launch_html.contains("manifest"));
+        for attrs in extract_tag_attributes(&launch_html, "link") {
+            if ["stylesheet", "modulepreload", "preload", "prefetch"]
+                .iter()
+                .any(|rel| rel_contains(&attrs, rel))
+            {
+                let href = attrs.get("href").expect("asset link href");
+                assert!(!href.starts_with('/'), "asset link stayed absolute: {href}");
+            }
+        }
+        assert!(!launch_html.contains("src=\"/packs/"));
+
+        assert_eq!(installed.shortcuts.len(), 3);
+        let expected_root = format!("htree://{launch_nhash}");
+        let installed_shortcut_pairs: Vec<(String, String)> = installed
+            .shortcuts
+            .iter()
+            .map(|shortcut| (shortcut.name.clone(), shortcut.url.clone()))
+            .collect();
+        assert!(installed_shortcut_pairs.contains(&(
+            "Compose new post".to_string(),
+            format!("{expected_root}/publish")
+        )));
+        assert!(installed_shortcut_pairs.contains(&(
+            "Notifications".to_string(),
+            format!("{expected_root}/notifications")
+        )));
+        assert!(installed_shortcut_pairs
+            .contains(&("Explore".to_string(), format!("{expected_root}/explore"))));
+
+        let base_url = Url::parse(&installed.source_url).unwrap();
+        let manifest_url = Url::parse(&installed.source_manifest_url).unwrap();
+        let manifest_path = url_to_path(&manifest_url, &base_url);
+        let manifest: Value = serde_json::from_slice(
+            &fetched
+                .assets
+                .iter()
+                .find(|asset| asset.path == manifest_path)
+                .expect("manifest asset")
+                .data,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest.get("start_url").and_then(Value::as_str),
+            Some("index.html")
+        );
+        let shortcuts = manifest["shortcuts"].as_array().expect("shortcuts array");
+        assert_eq!(shortcuts.len(), 3);
+        let shortcut_pairs: Vec<(String, String)> = shortcuts
+            .iter()
+            .map(|shortcut| {
+                (
+                    shortcut
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .expect("shortcut name")
+                        .to_string(),
+                    shortcut
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .expect("shortcut url")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert!(shortcut_pairs.contains(&("Compose new post".to_string(), "publish".to_string())));
+        assert!(
+            shortcut_pairs.contains(&("Notifications".to_string(), "notifications".to_string()))
+        );
+        assert!(shortcut_pairs.contains(&("Explore".to_string(), "explore".to_string())));
     }
 }
