@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import process from 'node:process'
 
-import { collectReleaseAssetEntries, renderReleaseNotes } from './stage_repo_release.mjs'
+import { collectReleaseAssetEntries, readChangelogEntry, renderReleaseNotes } from './stage_repo_release.mjs'
 
 function usage() {
   return `Usage: node scripts/render_repo_release_notes.mjs --tag <tag> --commit <commit> --cli-dir <dir> --output-file <path> [options]
@@ -15,6 +15,7 @@ Options:
   --tag <tag>               Release tag (for example: v0.2.16)
   --commit <sha>            Commit hash for release notes
   --cli-dir <dir>           Directory containing CLI release assets
+  --changelog-file <path>   Optional changelog entry to splice into the notes
   --install-url <url>       Optional bootstrap install URL to include in notes
   --output-file <path>      File to write the rendered notes into
   -h, --help                Show this help
@@ -27,6 +28,7 @@ function parseArgs(argv) {
     tag: '',
     commit: '',
     cliDir: '',
+    changelogFile: '',
     installUrl: '',
     outputFile: '',
   }
@@ -42,6 +44,9 @@ function parseArgs(argv) {
         break
       case '--cli-dir':
         options.cliDir = resolve(args[++index] ?? '')
+        break
+      case '--changelog-file':
+        options.changelogFile = resolve(args[++index] ?? '')
         break
       case '--install-url':
         options.installUrl = args[++index] ?? ''
@@ -80,6 +85,7 @@ function main() {
   }
 
   const assetEntries = collectReleaseAssetEntries({ cliDir: options.cliDir })
+  const changelogEntry = options.changelogFile ? readChangelogEntry(options.changelogFile, options.tag) : ''
   if (assetEntries.length === 0) {
     throw new Error('No release assets found to render')
   }
@@ -90,6 +96,7 @@ function main() {
       tag: options.tag,
       commit: options.commit,
       assetEntries,
+      changelogEntry,
       installUrl: options.installUrl,
     }),
   )

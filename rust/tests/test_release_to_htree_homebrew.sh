@@ -34,6 +34,17 @@ cp "${SOURCE_REPO_ROOT}/rust/scripts/write_release_bootstrap_installer.sh" "${RE
 cp "${SOURCE_REPO_ROOT}/scripts/stage_repo_release.mjs" "${REPO_ROOT}/scripts/stage_repo_release.mjs"
 chmod +x "${REPO_ROOT}/rust/scripts/release_to_htree.sh"
 chmod +x "${REPO_ROOT}/rust/scripts/write_release_bootstrap_installer.sh"
+cat >"${REPO_ROOT}/rust/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## 0.2.3 - 2026-04-16
+
+Changes since the previous release.
+
+### Improved
+
+- Added release changelog coverage to the staged repo notes.
+EOF
 git init "${REPO_ROOT}" >/dev/null
 git -C "${REPO_ROOT}" config user.name "Test User"
 git -C "${REPO_ROOT}" config user.email "test@example.com"
@@ -175,6 +186,8 @@ test -f "${TMPDIR}/release-stage/notes.md"
 test -f "${TMPDIR}/release-stage/install.sh"
 test -f "${TMPDIR}/release-stage/assets/hashtree-aarch64-apple-darwin.tar.gz"
 grep -F "\"commit\": \"${SOURCE_COMMIT}\"" "${TMPDIR}/release-stage/release.json" >/dev/null
+grep -F "## Changelog" "${TMPDIR}/release-stage/notes.md" >/dev/null
+grep -F "Added release changelog coverage to the staged repo notes." "${TMPDIR}/release-stage/notes.md" >/dev/null
 
 grep -F "publish_release:v0.2.3 nhash1release releases/hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "publish_tap:--version v0.2.3 --release-base-url https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3/assets --assets-dir ${TMPDIR}/out --tap-repo homebrew-hashtree" "${TMPDIR}/logs/calls.log" >/dev/null

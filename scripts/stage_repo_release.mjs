@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -25,6 +26,7 @@ Options:
   --commit <sha>            Commit hash for release.json metadata
   --cli-dir <dir>           Directory containing CLI release assets
   --output-dir <dir>        Staged release directory to create
+  --changelog-file <path>   Optional changelog to splice into the release notes
   --install-url <url>       Optional bootstrap install URL to include in notes
   --title <title>           Optional release title (defaults to <tag>)
   -h, --help                Show this help
@@ -38,6 +40,7 @@ export function parseArgs(argv) {
     commit: '',
     cliDir: '',
     outputDir: '',
+    changelogFile: '',
     installUrl: '',
     title: '',
   }
@@ -56,6 +59,9 @@ export function parseArgs(argv) {
         break
       case '--output-dir':
         options.outputDir = resolve(args[++index] ?? '')
+        break
+      case '--changelog-file':
+        options.changelogFile = resolve(args[++index] ?? '')
         break
       case '--install-url':
         options.installUrl = args[++index] ?? ''
@@ -137,7 +143,41 @@ function classifyAssetNames(assetNames) {
   }
 }
 
-export function renderReleaseNotes({ tag, commit, assetEntries, installUrl = '' }) {
+function versionFromTag(tag) {
+  return tag.startsWith('v') ? tag.slice(1) : tag
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export function readChangelogEntry(changelogFile, tag) {
+  if (!changelogFile) {
+    return ''
+  }
+
+  const version = versionFromTag(tag)
+  const headingPattern = new RegExp(`^##\\s+${escapeRegExp(version)}(?:\\s+-\\s+.*)?\\s*$`)
+  const text = readFileSync(changelogFile, 'utf8').replace(/\r\n/g, '\n')
+  const lines = text.split('\n')
+  const startIndex = lines.findIndex((line) => headingPattern.test(line.trim()))
+
+  if (startIndex === -1) {
+    throw new Error(`Missing changelog entry for ${version} in ${changelogFile}`)
+  }
+
+  let endIndex = lines.length
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    if (/^##\s+/.test(lines[index])) {
+      endIndex = index
+      break
+    }
+  }
+
+  return lines.slice(startIndex + 1, endIndex).join('\n').trim()
+}
+
+export function renderReleaseNotes({ tag, commit, assetEntries, changelogEntry = '', installUrl = '' }) {
   const assetNames = assetEntries.map((entry) => entry.name)
   const assets = classifyAssetNames(assetNames)
   const lines = ['## Installation', '']
@@ -169,6 +209,10 @@ export function renderReleaseNotes({ tag, commit, assetEntries, installUrl = '' 
     )
   }
 
+  if (changelogEntry) {
+    lines.push('## Changelog', '', changelogEntry, '')
+  }
+
   lines.push('## Build Info', '', `- Release \`${tag}\` from commit \`${commit}\`.`)
   if (!hasCliArchives && !assets.installSh) {
     lines.push('- Staged metadata-only release record.')
@@ -189,6 +233,7 @@ export function stageRepoRelease({
   commit,
   cliDir,
   outputDir,
+  changelogFile = '',
   installUrl = '',
   title = '',
 }) {
@@ -203,6 +248,7 @@ export function stageRepoRelease({
   }
 
   const assetEntries = collectReleaseAssetEntries({ cliDir })
+  const changelogEntry = changelogFile ? readChangelogEntry(changelogFile, tag) : ''
   if (assetEntries.length === 0) {
     throw new Error('No release assets found to stage')
   }
@@ -244,7 +290,16 @@ export function stageRepoRelease({
     assets: manifestAssets.sort((left, right) => left.name.localeCompare(right.name)),
   }
 
-  writeFileSync(join(outputDir, 'notes.md'), renderReleaseNotes({ tag, commit, assetEntries: manifestAssets, installUrl }))
+  writeFileSync(
+    join(outputDir, 'notes.md'),
+    renderReleaseNotes({
+      tag,
+      commit,
+      assetEntries: manifestAssets,
+      changelogEntry,
+      installUrl,
+    }),
+  )
   writeFileSync(join(outputDir, 'release.json'), `${JSON.stringify(record, null, 2)}\n`)
 
   return {

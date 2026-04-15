@@ -203,6 +203,7 @@ jobs:
             --tag "${{ github.event.inputs.tag || github.ref_name }}" \
             --commit "${{ steps.release_commit.outputs.sha }}" \
             --cli-dir artifacts/hashtree \
+            --changelog-file rust/CHANGELOG.md \
             --output-file release-body.md \
             --install-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/install.sh"
 

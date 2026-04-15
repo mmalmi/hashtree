@@ -241,7 +241,7 @@ Publish the canonical repo release and mirror the same staged files to GitHub in
 ./publish_release.sh --version v<version>
 ```
 
-That wraps `scripts/release_to_htree.sh`, reuses one staged release directory for both outputs, and keeps GitHub from drifting ahead of the hashtree/Homebrew publish path.
+That wraps `scripts/release_to_htree.sh`, reuses one staged release directory for both outputs, and keeps GitHub from drifting ahead of the hashtree/Homebrew publish path. Before bumping a Rust release version, add the matching `## <version> - YYYY-MM-DD` entry to [`rust/CHANGELOG.md`](CHANGELOG.md); staging now splices that entry into the published notes and fails if the version is missing.
 
 On macOS this builds the macOS CLI artifacts locally, builds the Linux musl CLI artifacts in target-native Alpine Docker containers, and auto-builds the Windows x64 CLI binaries from a running Parallels Windows VM when available. The Linux Docker path is deliberate: the FUSE-enabled CLI needs target-native libfuse headers/libs for `pkg-config`, which the old `cross`-based release path did not provide reliably. You can still override the Windows input explicitly with `--windows-artifacts-dir <shared-dir>`, or skip the VM step with `--skip-windows-vm`.
 

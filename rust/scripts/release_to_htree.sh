@@ -45,6 +45,7 @@ source "${SCRIPT_DIR}/release_common.sh"
 RUST_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${RUST_DIR}/.." && pwd)"
 REPO_NAME="$(infer_repo_name "$REPO_DIR")"
+CHANGELOG_FILE="${RUST_DIR}/CHANGELOG.md"
 
 VERSION=""
 VERSION_PATH=""
@@ -297,6 +298,7 @@ STAGE_ARGS=(
     --commit "$RELEASE_COMMIT"
     --cli-dir "$OUTPUT_DIR"
     --output-dir "$RELEASE_STAGE_DIR"
+    --changelog-file "$CHANGELOG_FILE"
 )
 
 if [ -n "$npub" ] && [ -f "${OUTPUT_DIR}/install.sh" ]; then

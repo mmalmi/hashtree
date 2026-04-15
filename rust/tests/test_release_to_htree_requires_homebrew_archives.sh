@@ -22,6 +22,17 @@ cp /Users/sirius/src/hashtree/rust/scripts/write_release_bootstrap_installer.sh 
 cp /Users/sirius/src/hashtree/scripts/stage_repo_release.mjs "${REPO_ROOT}/scripts/stage_repo_release.mjs"
 chmod +x "${REPO_ROOT}/rust/scripts/release_to_htree.sh"
 chmod +x "${REPO_ROOT}/rust/scripts/write_release_bootstrap_installer.sh"
+cat >"${REPO_ROOT}/rust/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## 0.2.3 - 2026-04-16
+
+Changes since the previous release.
+
+### Improved
+
+- Added release changelog coverage to the staged repo notes.
+EOF
 
 git init "${REPO_ROOT}" >/dev/null
 git -C "${REPO_ROOT}" remote add origin htree://self/hashtree
