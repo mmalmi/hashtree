@@ -7,8 +7,6 @@ Usage: rust/scripts/release_to_htree.sh --version <version> [options]
 
 Builds local CLI release artifacts, stages a metadata-backed repo release
 directory, adds it to hashtree, then publishes it into a mutable release tree.
-When a sibling iris-browser checkout is present, the same release also stages
-locally-built Iris desktop installers unless explicitly skipped.
 
 Options:
   --version <version>                 Release version label, for example: v0.2.3
@@ -31,11 +29,6 @@ Options:
   --linux-builder <mode>             Linux musl builder for release artifacts: auto, cross, or docker
   --docker-bin <path>                Docker binary to use for Linux docker builds
   --docker-rust-image <image>        Rust Alpine image to use for Linux docker builds
-  --skip-iris                        Do not include Iris desktop assets in the repo release
-  --skip-iris-verify                 Skip pnpm build/icon verification before Iris packaging
-  --iris-only <csv>                  Limit Iris packaging steps to verify,macos,linux,windows
-  --iris-skip <csv>                  Skip selected Iris packaging steps
-  --iris-stage-dir <dir>             Directory to use for staged Iris release metadata
   --release-stage-dir <dir>          Directory to use for the staged repo release metadata
   --cargo-bin <path>                 Cargo binary to use
   --cross-bin <path>                 cross binary to use for Linux musl targets
@@ -60,11 +53,6 @@ HOMEBREW_TAP_REPO="homebrew-${REPO_NAME}"
 SKIP_HOMEBREW_TAP=0
 SKIP_POST_PUBLISH_INSTALL_CHECKS=0
 CARGO_PUBLISH=0
-SKIP_IRIS=0
-SKIP_IRIS_VERIFY=0
-IRIS_ONLY=""
-IRIS_SKIP=""
-IRIS_STAGE_DIR=""
 RELEASE_STAGE_DIR=""
 
 BUILD_ARGS=()
@@ -116,10 +104,6 @@ while [ $# -gt 0 ]; do
             CARGO_PUBLISH=1
             shift
             ;;
-        --skip-iris)
-            SKIP_IRIS=1
-            shift
-            ;;
         --skip-windows-vm)
             SKIP_WINDOWS_VM=1
             shift
@@ -134,22 +118,6 @@ while [ $# -gt 0 ]; do
             ;;
         --windows-guest-repo-path)
             WINDOWS_GUEST_REPO_PATH="${2:-}"
-            shift 2
-            ;;
-        --skip-iris-verify)
-            SKIP_IRIS_VERIFY=1
-            shift
-            ;;
-        --iris-only)
-            IRIS_ONLY="${2:-}"
-            shift 2
-            ;;
-        --iris-skip)
-            IRIS_SKIP="${2:-}"
-            shift 2
-            ;;
-        --iris-stage-dir)
-            IRIS_STAGE_DIR="${2:-}"
             shift 2
             ;;
         --release-stage-dir)
@@ -296,29 +264,6 @@ npub="$(current_npub)"
 RELEASE_STAGE_SCRIPT="${REPO_DIR}/scripts/stage_repo_release.mjs"
 RELEASE_BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/write_release_bootstrap_installer.sh"
 
-resolve_iris_release_script() {
-    local candidate_root
-    for candidate_root in \
-        "${IRIS_BROWSER_REPO_ROOT:-}" \
-        "${REPO_DIR}/iris-browser" \
-        "${REPO_DIR}/../iris-browser" \
-        "${REPO_DIR}"
-    do
-        if [ -z "$candidate_root" ]; then
-            continue
-        fi
-
-        if [ -f "${candidate_root}/apps/iris/scripts/local-release.mjs" ]; then
-            printf '%s\n' "${candidate_root}/apps/iris/scripts/local-release.mjs"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-IRIS_RELEASE_SCRIPT="$(resolve_iris_release_script || true)"
-
 if [ -n "$npub" ]; then
     if ! homebrew_archives_ready "$OUTPUT_DIR"; then
         echo "Warning: skipping release installer generation because the full macOS/Linux archive set is not present." >&2
@@ -332,32 +277,6 @@ if [ -n "$npub" ]; then
     fi
 else
     echo "Warning: Could not determine current npub; skipping release installer generation." >&2
-fi
-
-if [ "$SKIP_IRIS" -eq 0 ]; then
-    if [ -n "$IRIS_RELEASE_SCRIPT" ] && [ -f "$IRIS_RELEASE_SCRIPT" ]; then
-        require_command node
-
-        if [ -z "$IRIS_STAGE_DIR" ]; then
-            IRIS_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-iris-release-XXXXXX")"
-            TEMP_DIRS+=("$IRIS_STAGE_DIR")
-        fi
-
-        IRIS_ARGS=("$IRIS_RELEASE_SCRIPT" "--tag" "$VERSION" "--stage-dir" "$IRIS_STAGE_DIR")
-        if [ "$SKIP_IRIS_VERIFY" -eq 1 ]; then
-            IRIS_ARGS+=("--skip-verify")
-        fi
-        if [ -n "$IRIS_ONLY" ]; then
-            IRIS_ARGS+=("--only" "$IRIS_ONLY")
-        fi
-        if [ -n "$IRIS_SKIP" ]; then
-            IRIS_ARGS+=("--skip" "$IRIS_SKIP")
-        fi
-
-        node "${IRIS_ARGS[@]}"
-    else
-        echo "Warning: Iris browser release script not found in a sibling iris-browser checkout; skipping Iris desktop assets." >&2
-    fi
 fi
 
 if [ ! -f "$RELEASE_STAGE_SCRIPT" ]; then
@@ -379,10 +298,6 @@ STAGE_ARGS=(
     --cli-dir "$OUTPUT_DIR"
     --output-dir "$RELEASE_STAGE_DIR"
 )
-
-if [ -n "$IRIS_STAGE_DIR" ] && [ -d "$IRIS_STAGE_DIR" ]; then
-    STAGE_ARGS+=(--iris-stage-dir "$IRIS_STAGE_DIR")
-fi
 
 if [ -n "$npub" ] && [ -f "${OUTPUT_DIR}/install.sh" ]; then
     STAGE_ARGS+=(--install-url "$(gateway_release_base_url "$npub" "$TREE_NAME" "$VERSION_PATH")/install.sh")

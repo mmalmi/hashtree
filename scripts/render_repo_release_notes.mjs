@@ -15,7 +15,6 @@ Options:
   --tag <tag>               Release tag (for example: v0.2.16)
   --commit <sha>            Commit hash for release notes
   --cli-dir <dir>           Directory containing CLI release assets
-  --iris-assets-dir <dir>   Optional directory containing Iris release assets
   --install-url <url>       Optional bootstrap install URL to include in notes
   --output-file <path>      File to write the rendered notes into
   -h, --help                Show this help
@@ -28,7 +27,6 @@ function parseArgs(argv) {
     tag: '',
     commit: '',
     cliDir: '',
-    irisAssetsDir: '',
     installUrl: '',
     outputFile: '',
   }
@@ -44,9 +42,6 @@ function parseArgs(argv) {
         break
       case '--cli-dir':
         options.cliDir = resolve(args[++index] ?? '')
-        break
-      case '--iris-assets-dir':
-        options.irisAssetsDir = resolve(args[++index] ?? '')
         break
       case '--install-url':
         options.installUrl = args[++index] ?? ''
@@ -84,10 +79,7 @@ function main() {
     throw new Error('Missing --output-file')
   }
 
-  const assetEntries = collectReleaseAssetEntries({
-    cliDir: options.cliDir,
-    irisAssetsDir: options.irisAssetsDir,
-  })
+  const assetEntries = collectReleaseAssetEntries({ cliDir: options.cliDir })
   if (assetEntries.length === 0) {
     throw new Error('No release assets found to render')
   }

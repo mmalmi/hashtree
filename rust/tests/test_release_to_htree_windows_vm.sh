@@ -162,7 +162,6 @@ PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
     --output-dir "${TMPDIR}/out" \
     --release-stage-dir "${TMPDIR}/release-stage" \
     --skip-homebrew-tap \
-    --skip-iris \
     --skip-post-publish-install-checks >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
 
 grep -F "build:--version v0.2.3 --output-dir ${TMPDIR}/out --windows-artifacts-dir" "${TMPDIR}/logs/calls.log" >/dev/null

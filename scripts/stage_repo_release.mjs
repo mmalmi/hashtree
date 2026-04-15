@@ -25,7 +25,6 @@ Options:
   --commit <sha>            Commit hash for release.json metadata
   --cli-dir <dir>           Directory containing CLI release assets
   --output-dir <dir>        Staged release directory to create
-  --iris-stage-dir <dir>    Optional staged Iris release directory
   --install-url <url>       Optional bootstrap install URL to include in notes
   --title <title>           Optional release title (defaults to <tag>)
   -h, --help                Show this help
@@ -39,7 +38,6 @@ export function parseArgs(argv) {
     commit: '',
     cliDir: '',
     outputDir: '',
-    irisStageDir: '',
     installUrl: '',
     title: '',
   }
@@ -58,9 +56,6 @@ export function parseArgs(argv) {
         break
       case '--output-dir':
         options.outputDir = resolve(args[++index] ?? '')
-        break
-      case '--iris-stage-dir':
-        options.irisStageDir = resolve(args[++index] ?? '')
         break
       case '--install-url':
         options.installUrl = args[++index] ?? ''
@@ -116,19 +111,6 @@ function buildCliAssetEntries(cliDir) {
   )
 }
 
-function buildIrisAssetEntries(irisStageDir) {
-  if (!irisStageDir) {
-    return []
-  }
-
-  const assetsDir = join(irisStageDir, 'assets')
-  return buildTopLevelAssetEntries(assetsDir, (sourcePath) => ({
-    name: basename(sourcePath),
-    sourcePath,
-    relativePath: `assets/${basename(sourcePath)}`,
-  }))
-}
-
 function buildAssetDirEntries(assetsDir) {
   if (!assetsDir) {
     return []
@@ -152,10 +134,6 @@ function classifyAssetNames(assetNames) {
     cliLinuxX64: find(/^hashtree-x86_64-unknown-linux-musl\.tar\.gz$/),
     cliLinuxArm64: find(/^hashtree-aarch64-unknown-linux-musl\.tar\.gz$/),
     cliWindowsX64: find(/^hashtree-x86_64-pc-windows-msvc\.zip$/),
-    irisMacArm64: find(/^iris-.*-macos-arm64\.zip$/),
-    irisLinuxAppImage: find(/^iris-.*-linux-x86_64\.AppImage$/),
-    irisLinuxDeb: find(/^iris-.*-linux-x86_64\.deb$/),
-    irisWindowsX64: find(/^iris-.*-windows-x64-setup\.exe$/),
   }
 }
 
@@ -169,11 +147,6 @@ export function renderReleaseNotes({ tag, commit, assetEntries, installUrl = '' 
     assets.cliLinuxX64 ||
     assets.cliLinuxArm64 ||
     assets.cliWindowsX64
-  const hasIrisAssets =
-    assets.irisMacArm64 ||
-    assets.irisLinuxAppImage ||
-    assets.irisLinuxDeb ||
-    assets.irisWindowsX64
 
   lines.push('### htree CLI', '')
   if (installUrl && assets.installSh) {
@@ -196,35 +169,19 @@ export function renderReleaseNotes({ tag, commit, assetEntries, installUrl = '' 
     )
   }
 
-  if (hasIrisAssets) {
-    lines.push('### Iris Desktop App', '')
-    if (assets.irisMacArm64) {
-      lines.push('- macOS: download the macOS app archive below, unzip it, and move `Iris.app` into `/Applications`.')
-    }
-    if (assets.irisLinuxAppImage) {
-      lines.push('- Linux AppImage: download the AppImage asset below, make it executable, and run it.')
-    }
-    if (assets.irisLinuxDeb) {
-      lines.push('- Linux .deb: install the Debian package asset below with `sudo apt install ./<package>.deb`.')
-    }
-    if (assets.irisWindowsX64) {
-      lines.push('- Windows: run the installer asset below.')
-    }
-    lines.push('')
-  }
-
   lines.push('## Build Info', '', `- Release \`${tag}\` from commit \`${commit}\`.`)
-  if (hasIrisAssets) {
-    lines.push('- Includes Iris desktop release assets.')
-  } else {
-    lines.push('- No Iris desktop release assets were staged.')
+  if (!hasCliArchives && !assets.installSh) {
+    lines.push('- Staged metadata-only release record.')
   }
 
   return `${lines.join('\n')}\n`
 }
 
-export function collectReleaseAssetEntries({ cliDir = '', irisStageDir = '', irisAssetsDir = '' }) {
-  return [...buildCliAssetEntries(cliDir), ...buildIrisAssetEntries(irisStageDir), ...buildAssetDirEntries(irisAssetsDir)]
+export function collectReleaseAssetEntries({ cliDir = '', assetDirs = [] }) {
+  return [
+    ...buildCliAssetEntries(cliDir),
+    ...assetDirs.flatMap((assetsDir) => buildAssetDirEntries(assetsDir)),
+  ]
 }
 
 export function stageRepoRelease({
@@ -232,7 +189,6 @@ export function stageRepoRelease({
   commit,
   cliDir,
   outputDir,
-  irisStageDir = '',
   installUrl = '',
   title = '',
 }) {
@@ -246,7 +202,7 @@ export function stageRepoRelease({
     throw new Error('Missing --output-dir')
   }
 
-  const assetEntries = collectReleaseAssetEntries({ cliDir, irisStageDir })
+  const assetEntries = collectReleaseAssetEntries({ cliDir })
   if (assetEntries.length === 0) {
     throw new Error('No release assets found to stage')
   }

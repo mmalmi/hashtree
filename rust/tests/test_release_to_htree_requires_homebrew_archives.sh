@@ -108,8 +108,7 @@ STDERR_FILE="${TMPDIR}/release_to_htree_partial.stderr"
 if PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
     "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
     --version v0.2.3 \
-    --output-dir "${TMPDIR}/out" \
-    --skip-iris >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
+    --output-dir "${TMPDIR}/out" >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
 then
     echo "release_to_htree.sh should fail when Homebrew archives are incomplete" >&2
     exit 1

@@ -56,7 +56,6 @@ printf 'notes for %s\n' "$version" >"${stage_dir}/notes.md"
 printf '#!/bin/sh\necho install\n' >"${stage_dir}/install.sh"
 chmod +x "${stage_dir}/install.sh"
 printf 'cli archive\n' >"${stage_dir}/assets/hashtree-aarch64-apple-darwin.tar.gz"
-printf 'iris archive\n' >"${stage_dir}/assets/iris-1.0.0-macos-arm64.zip"
 EOF
 chmod +x "${TEST_REPO}/rust/scripts/release_to_htree.sh"
 
@@ -102,6 +101,5 @@ grep -F -- '--notes-file' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'release.json' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'install.sh' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'hashtree-aarch64-apple-darwin.tar.gz' "${LOG_DIR}/gh.log" >/dev/null
-grep -F 'iris-1.0.0-macos-arm64.zip' "${LOG_DIR}/gh.log" >/dev/null
 
 echo "test_publish_release_wrapper.sh passed"

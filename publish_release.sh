@@ -17,10 +17,6 @@ Wrapper options:
 
 All other flags are forwarded to rust/scripts/release_to_htree.sh, including:
   --skip-homebrew-tap
-  --skip-iris
-  --skip-iris-verify
-  --iris-only <csv>
-  --iris-skip <csv>
   --cargo-publish
   --release-stage-dir <dir>
   --output-dir <dir>
@@ -32,7 +28,7 @@ All other flags are forwarded to rust/scripts/release_to_htree.sh, including:
 Examples:
   ./publish_release.sh --version v0.2.20
   ./publish_release.sh --version v0.2.20 --skip-github
-  ./publish_release.sh --version v0.2.20 --skip-iris --skip-homebrew-tap
+  ./publish_release.sh --version v0.2.20 --skip-homebrew-tap
 EOF
 }
 
