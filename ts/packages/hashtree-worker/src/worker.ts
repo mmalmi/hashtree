@@ -28,6 +28,7 @@ import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blosso
 import { probeConnectivity } from './capabilities/connectivity.js';
 import { MeshRouterStore } from './capabilities/meshRouterStore.js';
 import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
+import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
 import { streamFileRangeChunks } from './mediaStreaming.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
@@ -206,6 +207,7 @@ function resetState(): void {
   pendingP2PFetches.clear();
   peerShareableEncryptedHashes.clear();
   activePutBlobStreams.clear();
+  clearMemoryCache();
   blossomBandwidth = { ...EMPTY_BLOSSOM_BANDWIDTH };
   nostrRelays = [];
   diagnosticsEnabled = false;
@@ -549,6 +551,7 @@ function init(config: WorkerConfig): void {
   diagnosticsMirrorToConsole = config.diagnosticsMirrorToConsole === true;
 
   storage = new IdbBlobStorage(storeName, maxBytes);
+  initTreeRootCache(createStorageStore());
   blossom = new BlossomTransport(
     config.blossomServers || DEFAULT_BLOSSOM_SERVERS,
     (stats) => {

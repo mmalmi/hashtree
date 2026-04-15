@@ -2,11 +2,39 @@
 
 WebRTC P2P storage and Nostr ref resolver for hashtree.
 
+For app-builder guidance and common pitfalls, see [../../GETTING_STARTED.md](../../GETTING_STARTED.md).
+
 ## Install
 
 ```bash
 npm install @hashtree/nostr
 ```
+
+## Nostr Event Collections
+
+Use `NostrEventStore` when your app wants a hashtree-native Nostr event collection instead of inventing its own query API.
+
+```typescript
+import { MemoryStore } from '@hashtree/core';
+import { NostrEventStore } from '@hashtree/nostr';
+
+const store = new MemoryStore();
+const events = new NostrEventStore(store);
+
+const profileNotes = await events.query(rootCid, {
+  authors: pubkey,
+  kinds: [1],
+}, { limit: 50 });
+
+for await (const event of events.streamQuery(rootCid, {
+  authors: pubkey,
+  tags: { t: 'hashtree' },
+})) {
+  console.log(event.id, event.content);
+}
+```
+
+`query()` and `streamQuery()` choose the best published index they can (`by-author`, `by-author-kind`, `by-kind`, `by-tag`, or recent) so app code does not need to hand-roll index selection.
 
 ## WebRTC Store
 
@@ -75,16 +103,20 @@ npub1abc.../treename/path/to/file.ext
 import { createNostrRefResolver } from '@hashtree/nostr';
 
 const resolver = createNostrRefResolver({
-  subscribe: (filters, onEvent) => { /* NDK subscribe */ },
-  publish: (event) => { /* NDK publish */ },
+  subscribe: (filters, onEvent) => { /* your relay client subscribe callback */ },
+  publish: (event) => { /* your relay client publish callback */ },
 });
 
 const root = await resolver.resolve('npub1.../myfiles');
 ```
 
+The resolver does not require NDK. Any raw relay client is fine as long as it can subscribe and publish signed events.
+
 ## Signed Tree Snapshots
 
 For immutable permalinks, store a copy of the signed kind `30078` root event as a plain hashtree blob. The snapshot gives you one signed root even when relays do not answer, and you can still watch for newer events later.
+
+For live mutable app data, prefer resolving the current root from relays first. Snapshots are for permalinks, offline reuse, and signed historical captures, not for replacing a live source lookup.
 
 ```typescript
 import {

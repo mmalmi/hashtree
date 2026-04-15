@@ -135,6 +135,116 @@ impl HashtreeStore {
         Ok(protected)
     }
 
+    fn evict_disposable_orphans_to_target(&self, target_bytes: u64) -> Result<u64> {
+        let stats = self
+            .router
+            .stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+        let mut current_size = stats.total_bytes;
+        if current_size <= target_bytes {
+            return Ok(0);
+        }
+
+        let rtxn = self.env.read_txn()?;
+        let pinned: HashSet<Hash> = self
+            .pins
+            .iter(&rtxn)?
+            .filter_map(|item| item.ok())
+            .filter_map(|(hash_bytes, _)| {
+                if hash_bytes.len() == 32 {
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(hash_bytes);
+                    Some(hash)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        drop(rtxn);
+
+        let protected_hashes = self.protected_hashes()?;
+        let all_hashes = self
+            .router
+            .list()
+            .map_err(|e| anyhow::anyhow!("Failed to list hashes: {}", e))?;
+
+        let mut freed = 0u64;
+        for hash in all_hashes {
+            if current_size <= target_bytes {
+                break;
+            }
+
+            if pinned.contains(&hash) || protected_hashes.contains(&hash) {
+                continue;
+            }
+
+            if self.blob_has_owners(&hash)? {
+                continue;
+            }
+
+            let Some(data) = self
+                .router
+                .get_sync(&hash)
+                .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?
+            else {
+                continue;
+            };
+
+            let size = data.len() as u64;
+            if self
+                .router
+                .delete_local_only(&hash)
+                .map_err(|e| anyhow::anyhow!("Failed to delete orphaned blob: {}", e))?
+            {
+                freed = freed.saturating_add(size);
+                current_size = current_size.saturating_sub(size);
+                tracing::debug!(
+                    "Deleted disposable orphaned blob {} ({} bytes)",
+                    &to_hex(&hash)[..8],
+                    size
+                );
+            }
+        }
+
+        Ok(freed)
+    }
+
+    pub fn make_room_for_cached_blob(&self, incoming_bytes: u64) -> Result<u64> {
+        if self.max_size_bytes == 0 {
+            return Ok(0);
+        }
+
+        let stats = self
+            .router
+            .stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+        if stats.total_bytes.saturating_add(incoming_bytes) <= self.max_size_bytes {
+            return Ok(0);
+        }
+
+        let target = if incoming_bytes >= self.max_size_bytes {
+            0
+        } else {
+            (self.max_size_bytes.saturating_mul(9) / 10)
+                .min(self.max_size_bytes.saturating_sub(incoming_bytes))
+        };
+        self.evict_disposable_orphans_to_target(target)
+    }
+
+    pub fn relieve_cached_blob_write_pressure(&self, incoming_bytes: u64) -> Result<u64> {
+        let stats = self
+            .router
+            .stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+        if stats.total_bytes == 0 {
+            return Ok(0);
+        }
+
+        let headroom = incoming_bytes.max(stats.total_bytes / 10).max(1);
+        let target = stats.total_bytes.saturating_sub(headroom);
+        self.evict_disposable_orphans_to_target(target)
+    }
+
     /// Pin a hash (prevent garbage collection)
     pub fn pin(&self, hash: &[u8; 32]) -> Result<()> {
         let mut wtxn = self.env.write_txn()?;
@@ -355,16 +465,13 @@ impl HashtreeStore {
             self.blob_trees.delete(&mut wtxn, &key[..])?;
 
             // Check if blob is in any other tree (prefix scan on first 32 bytes)
-            let rtxn = self.env.read_txn()?;
             let mut has_other_tree = false;
-
-            for item in self.blob_trees.prefix_iter(&rtxn, &tracked_hash[..])? {
+            for item in self.blob_trees.prefix_iter(&wtxn, &tracked_hash[..])? {
                 if item.is_ok() {
                     has_other_tree = true;
                     break;
                 }
             }
-            drop(rtxn);
 
             // If orphaned, delete the blob
             if !has_other_tree {
@@ -569,6 +676,11 @@ impl HashtreeStore {
 
             // Skip if part of any tree
             if protected_hashes.contains(&hash) {
+                continue;
+            }
+
+            // Skip owned Blossom uploads
+            if self.blob_has_owners(&hash)? {
                 continue;
             }
 

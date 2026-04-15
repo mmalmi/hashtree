@@ -42,8 +42,9 @@ use super::pwa::run_export;
 use super::release::publish_release_version;
 use super::resolve::{resolve_cid_input, ResolvedCid};
 use super::socialgraph::{
-    run_socialgraph_filter, run_socialgraph_rebuild_profile_index, run_socialgraph_snapshot,
-    run_socialgraph_stats, run_socialgraph_warm,
+    run_socialgraph_filter, run_socialgraph_rebuild_event_index,
+    run_socialgraph_rebuild_profile_index, run_socialgraph_snapshot, run_socialgraph_stats,
+    run_socialgraph_warm,
 };
 use super::user::show_user_identity;
 use super::util::chrono_humanize_timestamp;
@@ -1080,6 +1081,9 @@ pub(crate) async fn run() -> Result<()> {
             }
             SocialGraphCommands::RebuildProfileIndex => {
                 run_socialgraph_rebuild_profile_index(data_dir)?;
+            }
+            SocialGraphCommands::RebuildEventIndex => {
+                run_socialgraph_rebuild_event_index(data_dir)?;
             }
             SocialGraphCommands::Index {
                 warm_secs,

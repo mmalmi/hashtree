@@ -1,6 +1,9 @@
 import type { SignalingMessage } from '@hashtree/nostr';
 
 type DirectedSignalingMessage = Exclude<SignalingMessage, { type: 'hello' }>;
+type HelloSignalingMessage = Extract<SignalingMessage, { type: 'hello' }> & {
+  hashGet?: boolean;
+};
 
 export const SIGNALING_KIND = 25050;
 export const HELLO_TAG = 'hello';
@@ -108,10 +111,10 @@ function normalizeSignalingMessage(raw: unknown, senderPubkey: string): Signalin
 
   if (typeof msg.peerId === 'string' && msg.type === 'hello') {
     return {
-      ...(msg as unknown as Extract<SignalingMessage, { type: 'hello' }>),
+      ...(msg as unknown as HelloSignalingMessage),
       peerId: senderPubkey,
       hashGet: msg.hashGet !== false,
-    };
+    } as HelloSignalingMessage;
   }
 
   if (
@@ -236,7 +239,7 @@ export async function sendSignalingMessage<TEvent extends SignalingEventLike>({
     tags: [
       ['l', HELLO_TAG],
       ['peerId', msg.peerId],
-      ['hashGet', msg.type === 'hello' && msg.hashGet === false ? '0' : '1'],
+      ['hashGet', msg.type === 'hello' && (msg as HelloSignalingMessage).hashGet === false ? '0' : '1'],
       ['expiration', String(createdAt + HELLO_EXPIRATION_SEC)],
     ],
     content: '',
@@ -269,7 +272,7 @@ export async function decodeSignalingEvent<TEvent extends SignalingEventLike>({
         type: 'hello',
         peerId: senderPeerId,
         hashGet: decodeHashGetTag(event.tags.find((tag) => tag[0] === 'hashGet')?.[1]),
-      },
+      } as HelloSignalingMessage,
     };
   }
 

@@ -78,10 +78,15 @@ export {
 
 // Event storage and indexing
 export {
+  NOSTR_EVENT_ENVELOPE_VERSION,
   NostrEventStore,
+  decodeStoredNostrEventMsgpack,
+  encodeStoredNostrEventMsgpack,
   type StoredNostrEvent,
   type NostrEventManifest,
   type ListEventsOptions,
+  type NostrEventQuery,
+  type NostrEventQueryValue,
 } from './events.js';
 
 export {
@@ -103,12 +108,14 @@ export {
   MANIFEST_BY_AUTHOR_TIME,
   MANIFEST_BY_ID,
   MANIFEST_BY_KIND_TIME,
+  MANIFEST_BY_KIND_TIME_AUTHOR,
   MANIFEST_BY_TAG,
   MANIFEST_BY_TIME,
   MANIFEST_PARAMETERIZED_REPLACEABLE,
   MANIFEST_REPLACEABLE,
   parameterizedReplaceableKey,
   replaceableKey,
+  kindTimeAuthorKey,
   tagPrefix,
 } from './eventKeys.js';
 

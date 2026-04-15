@@ -601,6 +601,8 @@ pub(crate) enum SocialGraphCommands {
     },
     /// Rebuild the profile search index from trusted locally stored kind-0 events
     RebuildProfileIndex,
+    /// Rebuild stored Nostr event indexes from trusted local event blobs
+    RebuildEventIndex,
     /// Crawl and index Nostr events for authors in the social graph
     Index {
         /// Warm the social graph for this many seconds before indexing

@@ -30,10 +30,11 @@ use hashtree_core::{
 use hashtree_index::{BTree, BTreeError, BTreeOptions};
 use serde::{Deserialize, Serialize};
 
-const EVENT_ENVELOPE_VERSION: u8 = 1;
+pub const NOSTR_EVENT_ENVELOPE_VERSION: u8 = 1;
 const MANIFEST_BY_AUTHOR_TIME: &str = "by-author-time";
 const MANIFEST_BY_AUTHOR_KIND_TIME: &str = "by-author-kind-time";
 const MANIFEST_BY_KIND_TIME: &str = "by-kind-time";
+const MANIFEST_BY_KIND_TIME_AUTHOR: &str = "by-kind-time-author";
 const MANIFEST_BY_TIME: &str = "by-time";
 const MANIFEST_BY_TAG: &str = "by-tag";
 const MANIFEST_REPLACEABLE: &str = "replaceable";
@@ -72,6 +73,7 @@ pub struct NostrEventManifest {
     pub by_author_time: Option<Cid>,
     pub by_author_kind_time: Option<Cid>,
     pub by_kind_time: Option<Cid>,
+    pub by_kind_time_author: Option<Cid>,
     pub by_time: Option<Cid>,
     pub by_tag: Option<Cid>,
     pub replaceable: Option<Cid>,
@@ -222,6 +224,51 @@ pub fn encode_signed_event_json(event: &StoredNostrEvent) -> Result<Vec<u8>, Nos
 pub fn decode_signed_event_json(data: &[u8]) -> Result<StoredNostrEvent, NostrEventStoreError> {
     let decoded: StoredNostrEvent = serde_json::from_slice(data)?;
     normalize_signed_event(decoded)
+}
+
+pub fn encode_stored_event_msgpack(
+    event: &StoredNostrEvent,
+) -> Result<Vec<u8>, NostrEventStoreError> {
+    let normalized = normalize_signed_event(event.clone())?;
+    Ok(rmp_serde::to_vec(&(
+        NOSTR_EVENT_ENVELOPE_VERSION,
+        normalized.id,
+        normalized.pubkey,
+        normalized.created_at,
+        normalized.kind,
+        normalized.tags,
+        normalized.content,
+        normalized.sig,
+    ))?)
+}
+
+pub fn decode_stored_event_msgpack(data: &[u8]) -> Result<StoredNostrEvent, NostrEventStoreError> {
+    let (version, id, pubkey, created_at, kind, tags, content, sig): (
+        u8,
+        String,
+        String,
+        u64,
+        u32,
+        Vec<Vec<String>>,
+        String,
+        String,
+    ) = rmp_serde::from_slice(data)?;
+
+    if version != NOSTR_EVENT_ENVELOPE_VERSION {
+        return Err(NostrEventStoreError::Validation(format!(
+            "unsupported event envelope version: {version}"
+        )));
+    }
+
+    normalize_signed_event(StoredNostrEvent {
+        id,
+        pubkey,
+        created_at,
+        kind,
+        tags,
+        content,
+        sig,
+    })
 }
 
 pub async fn store_signed_event_snapshot<S: Store>(
@@ -378,6 +425,9 @@ fn nostr_collection_definition() -> CollectionDefinition<StoredNostrEvent> {
             vec![author_kind_time_key(event)]
         })
         .with_key_index(MANIFEST_BY_KIND_TIME, |event| vec![kind_time_key(event)])
+        .with_key_index(MANIFEST_BY_KIND_TIME_AUTHOR, |event| {
+            vec![kind_time_author_key(event)]
+        })
         .with_key_index(MANIFEST_BY_TIME, |event| vec![time_key(event)])
         .with_key_index(MANIFEST_BY_TAG, |event| tag_keys(event))
         .with_key_index(MANIFEST_REPLACEABLE, |event| {
@@ -420,6 +470,10 @@ fn collection_state_from_nostr_manifest(manifest: &NostrEventManifest) -> Collec
         MANIFEST_BY_KIND_TIME.to_string(),
         manifest.by_kind_time.clone(),
     );
+    key_roots.insert(
+        MANIFEST_BY_KIND_TIME_AUTHOR.to_string(),
+        manifest.by_kind_time_author.clone(),
+    );
     key_roots.insert(MANIFEST_BY_TIME.to_string(), manifest.by_time.clone());
     key_roots.insert(MANIFEST_BY_TAG.to_string(), manifest.by_tag.clone());
     key_roots.insert(
@@ -443,6 +497,7 @@ fn nostr_manifest_from_collection_state(state: &CollectionState) -> NostrEventMa
         by_author_time: state.key_root(MANIFEST_BY_AUTHOR_TIME).cloned(),
         by_author_kind_time: state.key_root(MANIFEST_BY_AUTHOR_KIND_TIME).cloned(),
         by_kind_time: state.key_root(MANIFEST_BY_KIND_TIME).cloned(),
+        by_kind_time_author: state.key_root(MANIFEST_BY_KIND_TIME_AUTHOR).cloned(),
         by_time: state.key_root(MANIFEST_BY_TIME).cloned(),
         by_tag: state.key_root(MANIFEST_BY_TAG).cloned(),
         replaceable: state.key_root(MANIFEST_REPLACEABLE).cloned(),
@@ -470,37 +525,11 @@ impl<S: Store> NostrEventStore<S> {
     }
 
     pub fn encode_event(&self, event: &StoredNostrEvent) -> Result<Vec<u8>, NostrEventStoreError> {
-        let normalized = self.validate_event_shape(event.clone())?;
-        self.encode_validated_event(&normalized)
+        encode_stored_event_msgpack(&self.validate_event_shape(event.clone())?)
     }
 
     pub fn decode_event(&self, data: &[u8]) -> Result<StoredNostrEvent, NostrEventStoreError> {
-        let (version, id, pubkey, created_at, kind, tags, content, sig): (
-            u8,
-            String,
-            String,
-            u64,
-            u32,
-            Vec<Vec<String>>,
-            String,
-            String,
-        ) = rmp_serde::from_slice(data)?;
-
-        if version != EVENT_ENVELOPE_VERSION {
-            return Err(NostrEventStoreError::Validation(format!(
-                "unsupported event envelope version: {version}"
-            )));
-        }
-
-        self.validate_event_shape(StoredNostrEvent {
-            id,
-            pubkey,
-            created_at,
-            kind,
-            tags,
-            content,
-            sig,
-        })
+        self.validate_event_shape(decode_stored_event_msgpack(data)?)
     }
 
     pub async fn add(
@@ -584,6 +613,34 @@ impl<S: Store> NostrEventStore<S> {
             .map_err(|err| NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string())))?;
         self.delete_obsolete_event_blobs(&obsolete_event_cids)
             .await?;
+        Ok(next_root)
+    }
+
+    pub async fn upgrade_manifest_indexes(
+        &self,
+        root: Option<&Cid>,
+    ) -> Result<Option<Cid>, NostrEventStoreError> {
+        let Some(root) = root else {
+            return Ok(None);
+        };
+
+        let manifest = self.get_manifest(Some(root)).await?;
+        let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
+        let buffered_writer =
+            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
+
+        let Some(next_manifest) = buffered_writer
+            .upgrade_manifest_with_missing_indexes(&manifest)
+            .await?
+        else {
+            return Ok(Some(root.clone()));
+        };
+
+        let next_root = buffered_writer.write_manifest(&next_manifest).await?;
+        buffered_store
+            .flush()
+            .await
+            .map_err(|err| NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string())))?;
         Ok(next_root)
     }
 
@@ -903,6 +960,35 @@ impl<S: Store> NostrEventStore<S> {
         collection.write_root().await.map_err(Into::into)
     }
 
+    async fn upgrade_manifest_with_missing_indexes(
+        &self,
+        manifest: &NostrEventManifest,
+    ) -> Result<Option<NostrEventManifest>, NostrEventStoreError> {
+        let mut next_manifest = manifest.clone();
+        let mut changed = false;
+
+        if next_manifest.by_kind_time_author.is_none() {
+            if let Some(by_author_kind_time_root) = manifest.by_author_kind_time.as_ref() {
+                let entries = self
+                    .index
+                    .links_entries(Some(by_author_kind_time_root))
+                    .await?;
+                let mut derived = BTreeMap::new();
+                for (key, cid) in entries {
+                    derived.insert(kind_time_author_key_from_author_kind_time_key(&key)?, cid);
+                }
+                next_manifest.by_kind_time_author = self.index.build_links(derived).await?;
+                changed = true;
+            }
+        }
+
+        if changed {
+            Ok(Some(next_manifest))
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn resolve_replaceable_decision(
         &self,
         manifest: &NostrEventManifest,
@@ -1043,16 +1129,7 @@ impl<S: Store> NostrEventStore<S> {
         &self,
         event: &StoredNostrEvent,
     ) -> Result<Vec<u8>, NostrEventStoreError> {
-        Ok(rmp_serde::to_vec(&(
-            EVENT_ENVELOPE_VERSION,
-            event.id.clone(),
-            event.pubkey.clone(),
-            event.created_at,
-            event.kind,
-            event.tags.clone(),
-            event.content.clone(),
-            event.sig.clone(),
-        ))?)
+        encode_stored_event_msgpack(event)
     }
 
     fn validate_event_shape(
@@ -1155,6 +1232,52 @@ fn kind_time_key(event: &StoredNostrEvent) -> String {
         reverse_timestamp(event.created_at),
         event.id
     )
+}
+
+fn kind_time_author_key(event: &StoredNostrEvent) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        pad_kind(event.kind),
+        reverse_timestamp(event.created_at),
+        event.pubkey,
+        event.id
+    )
+}
+
+fn kind_time_author_key_from_author_kind_time_key(
+    key: &str,
+) -> Result<String, NostrEventStoreError> {
+    let mut parts = key.split(':');
+    let Some(pubkey) = parts.next() else {
+        return Err(NostrEventStoreError::Validation(format!(
+            "invalid author-kind-time key: {key}"
+        )));
+    };
+    let Some(kind) = parts.next() else {
+        return Err(NostrEventStoreError::Validation(format!(
+            "invalid author-kind-time key: {key}"
+        )));
+    };
+    let Some(reversed_timestamp) = parts.next() else {
+        return Err(NostrEventStoreError::Validation(format!(
+            "invalid author-kind-time key: {key}"
+        )));
+    };
+    let Some(event_id) = parts.next() else {
+        return Err(NostrEventStoreError::Validation(format!(
+            "invalid author-kind-time key: {key}"
+        )));
+    };
+    if parts.next().is_some() {
+        return Err(NostrEventStoreError::Validation(format!(
+            "invalid author-kind-time key: {key}"
+        )));
+    }
+
+    Ok(format!(
+        "{}:{}:{}:{}",
+        kind, reversed_timestamp, pubkey, event_id
+    ))
 }
 
 fn time_key(event: &StoredNostrEvent) -> String {

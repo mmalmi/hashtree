@@ -338,6 +338,40 @@ pub(crate) fn run_socialgraph_rebuild_profile_index(data_dir: PathBuf) -> Result
     Ok(())
 }
 
+pub(crate) fn run_socialgraph_rebuild_event_index(data_dir: PathBuf) -> Result<()> {
+    let config = Config::load()?;
+    let (graph_store, _social_graph_root_bytes) =
+        init_socialgraph_with_shared_storage(&data_dir, &config)?;
+    let (public_count, ambient_count) = graph_store
+        .rebuild_event_indexes_from_stored_events()
+        .context("rebuild event indexes from stored events")?;
+    let public_root = graph_store.public_events_root()?;
+
+    println!(
+        "Rebuilt event indexes from stored events: public={}, ambient={}",
+        public_count, ambient_count
+    );
+    match public_root {
+        Some(root) => {
+            let nhash = nhash_encode_full(&NHashData {
+                hash: root.hash,
+                decrypt_key: root.key,
+            })
+            .context("encode public events root nhash")?;
+            println!("  public hash:  {}", hex::encode(root.hash));
+            if let Some(key) = root.key {
+                println!("  public key:   {}", hex::encode(key));
+            }
+            println!("  public nhash: {}", nhash);
+        }
+        None => {
+            println!("  public root:  none");
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn run_socialgraph_warm(
     data_dir: PathBuf,
     secs: u64,

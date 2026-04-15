@@ -1,6 +1,7 @@
 import type { CID, HashTree } from '@hashtree/core';
 import { parseHashtreeRootEvent, type NostrEvent } from '@hashtree/nostr';
 import { nip19 } from 'nostr-tools';
+import { getCachedRootInfo, setCachedRoot } from '../relay/treeRootCache.js';
 
 export const DEFAULT_ROOT_RESOLVE_TIMEOUT_MS = 15_000;
 export const DEFAULT_ROOT_RESOLVE_SETTLE_MS = 500;
@@ -42,15 +43,18 @@ function splitPathSegments(path?: string): string[] {
     .map(safeDecodePathSegment) ?? [];
 }
 
-function compareReplaceableEvents(left: NostrEvent, right: NostrEvent): number {
-  const createdAtDiff = (right.created_at ?? 0) - (left.created_at ?? 0);
+function compareReplaceableEventOrder(
+  candidateCreatedAt: number,
+  candidateEventId: string,
+  currentCreatedAt: number,
+  currentEventId: string,
+): number {
+  const createdAtDiff = candidateCreatedAt - currentCreatedAt;
   if (createdAtDiff !== 0) {
     return createdAtDiff;
   }
 
-  const leftId = left.id ?? '';
-  const rightId = right.id ?? '';
-  return rightId.localeCompare(leftId);
+  return candidateEventId.localeCompare(currentEventId);
 }
 
 type ParsedRootPath = {
@@ -61,7 +65,8 @@ type ParsedRootPath = {
 };
 
 type RootRecord = {
-  event: NostrEvent;
+  createdAt: number;
+  eventId: string;
   cid: CID;
 };
 
@@ -104,12 +109,17 @@ function cidKey(cid: CID | null): string {
   return keyHex ? `${hashHex}:${keyHex}` : hashHex;
 }
 
-function updateLatestRecord(current: RootRecord | null, event: NostrEvent, cid: CID): RootRecord | null {
-  if (current && compareReplaceableEvents(event, current.event) >= 0) {
+function updateLatestRecord(
+  current: RootRecord | null,
+  createdAt: number,
+  eventId: string,
+  cid: CID,
+): RootRecord | null {
+  if (current && compareReplaceableEventOrder(createdAt, eventId, current.createdAt, current.eventId) <= 0) {
     return null;
   }
 
-  return { event, cid };
+  return { createdAt, eventId, cid };
 }
 
 function createSubscriptionId(): string {
@@ -242,6 +252,40 @@ async function resolvePreferredCid(
   return (await tree.resolvePath(treeRecord.cid, subPath))?.cid ?? null;
 }
 
+function cachedRootToRecord(
+  cached: Awaited<ReturnType<typeof getCachedRootInfo>>,
+): RootRecord | null {
+  if (!cached) {
+    return null;
+  }
+
+  return {
+    createdAt: cached.updatedAt ?? 0,
+    eventId: cached.eventId ?? '',
+    cid: {
+      hash: cached.hash,
+      key: cached.key,
+    },
+  };
+}
+
+async function cacheParsedRootEvent(npub: string, event: NostrEvent): Promise<void> {
+  const parsed = parseHashtreeRootEvent(event as Parameters<typeof parseHashtreeRootEvent>[0]);
+  if (!parsed) {
+    return;
+  }
+
+  await setCachedRoot(npub, parsed.treeName, parsed.rootCid, parsed.visibility, {
+    updatedAt: event.created_at ?? 0,
+    eventId: event.id,
+    labels: parsed.labels,
+    encryptedKey: parsed.encryptedKey,
+    keyId: parsed.keyId,
+    selfEncryptedKey: parsed.selfEncryptedKey,
+    selfEncryptedLinkKey: parsed.selfEncryptedLinkKey,
+  });
+}
+
 async function queryLatestTreeRoot(
   relays: string[],
   npub: string,
@@ -272,12 +316,13 @@ async function queryLatestTreeRoot(
           return;
         }
 
-        const nextRecord = updateLatestRecord(latestRecord, event, parsed.rootCid);
+        const nextRecord = updateLatestRecord(latestRecord, event.created_at ?? 0, event.id ?? '', parsed.rootCid);
         if (!nextRecord) {
           return;
         }
 
         latestRecord = nextRecord;
+        void cacheParsedRootEvent(npub, event);
         if (settleTimer) {
           clearTimeout(settleTimer);
         }
@@ -336,14 +381,19 @@ export async function watchRootPathFromRelays(
   }
 
   const { exactTreeName, treeName, subPath, watchTreeNames } = parseRootLookupPath(path);
-  let exactRecord: RootRecord | null = null;
-  let treeRecord: RootRecord | null = null;
+  const cachedExactRecord = cachedRootToRecord(await getCachedRootInfo(npub, exactTreeName));
+  const cachedTreeRecord = exactTreeName === treeName
+    ? cachedExactRecord
+    : cachedRootToRecord(await getCachedRootInfo(npub, treeName));
+  let exactRecord: RootRecord | null = cachedExactRecord;
+  let treeRecord: RootRecord | null = cachedTreeRecord;
   let subscription: { close(): Promise<void> } | null = null;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let resolveTicket = 0;
   let currentCidKey: string | null = null;
-  let initialResolved = false;
+  const initialCid = await resolvePreferredCid(tree, exactRecord, treeRecord, subPath);
+  let initialResolved = initialCid !== null;
   let closed = false;
 
   const close = async (): Promise<void> => {
@@ -406,13 +456,17 @@ export async function watchRootPathFromRelays(
     }, settleMs);
   };
 
-  timeoutId = setTimeout(() => {
-    void emitCurrent('initial').then((cid) => {
-      if (!closed) {
-        void onUpdate(cid);
-      }
-    });
-  }, timeoutMs);
+  if (initialCid) {
+    currentCidKey = cidKey(initialCid);
+  } else {
+    timeoutId = setTimeout(() => {
+      void emitCurrent('initial').then((cid) => {
+        if (!closed) {
+          void onUpdate(cid);
+        }
+      });
+    }, timeoutMs);
+  }
 
   subscription = openRelaySubscriptions(relayList, {
     kinds: [30078],
@@ -428,7 +482,7 @@ export async function watchRootPathFromRelays(
 
       let updated = false;
       if (parsed.treeName === exactTreeName) {
-        const nextRecord = updateLatestRecord(exactRecord, event, parsed.rootCid);
+        const nextRecord = updateLatestRecord(exactRecord, event.created_at ?? 0, event.id ?? '', parsed.rootCid);
         if (nextRecord) {
           exactRecord = nextRecord;
           updated = true;
@@ -436,7 +490,7 @@ export async function watchRootPathFromRelays(
       }
 
       if (parsed.treeName === treeName) {
-        const nextRecord = updateLatestRecord(treeRecord, event, parsed.rootCid);
+        const nextRecord = updateLatestRecord(treeRecord, event.created_at ?? 0, event.id ?? '', parsed.rootCid);
         if (nextRecord) {
           treeRecord = nextRecord;
           updated = true;
@@ -446,6 +500,8 @@ export async function watchRootPathFromRelays(
       if (!updated) {
         return;
       }
+
+      void cacheParsedRootEvent(npub, event);
 
       if (!initialResolved) {
         settleInitial();
@@ -463,7 +519,7 @@ export async function watchRootPathFromRelays(
   });
 
   return {
-    initialCid: null,
+    initialCid,
     close,
   };
 }
@@ -478,6 +534,21 @@ export async function resolveRootPathFromRelays(
 ): Promise<CID | null> {
   const relayList = withUniqueRelays(relays);
   const { exactTreeName, treeName, subPath } = parseRootLookupPath(path);
+  const cachedExactRoot = cachedRootToRecord(await getCachedRootInfo(npub, exactTreeName));
+
+  if (cachedExactRoot) {
+    return cachedExactRoot.cid;
+  }
+
+  if (subPath.length > 0) {
+    const cachedTreeRoot = exactTreeName === treeName
+      ? cachedExactRoot
+      : cachedRootToRecord(await getCachedRootInfo(npub, treeName));
+    const cachedResolved = await resolvePreferredCid(tree, null, cachedTreeRoot, subPath);
+    if (cachedResolved) {
+      return cachedResolved;
+    }
+  }
 
   const exactRoot = await queryLatestTreeRoot(relayList, npub, exactTreeName, timeoutMs, settleMs);
   if (exactRoot) {

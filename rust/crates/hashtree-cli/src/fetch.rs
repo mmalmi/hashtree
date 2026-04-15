@@ -180,7 +180,7 @@ impl Fetcher {
         // Fetch remotely and store
         let hash_hex = to_hex(hash);
         let data = self.fetch_chunk(webrtc_state, &hash_hex).await?;
-        store.put_blob(&data)?;
+        store.put_cached_blob(&data)?;
         Ok(data)
     }
 
@@ -318,7 +318,7 @@ impl Fetcher {
                 match result {
                     Ok(data) => {
                         // Store it
-                        store.put_blob(&data)?;
+                        store.put_cached_blob(&data)?;
                         if let Some(progress) = progress {
                             progress.record_chunk(data.len());
                         }

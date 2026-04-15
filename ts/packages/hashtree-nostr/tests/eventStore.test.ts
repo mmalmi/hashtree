@@ -3,6 +3,8 @@ import { HashTree, MemoryStore, sha256, toHex } from '@hashtree/core';
 import { loadCollectionManifestMetadata } from '@hashtree/collection';
 import {
   COLLECTION_MANIFEST_METADATA_FILE,
+  decodeStoredNostrEventMsgpack,
+  encodeStoredNostrEventMsgpack,
   NostrEventStore,
   type StoredNostrEvent,
 } from '../src/index.js';
@@ -44,6 +46,7 @@ describe('NostrEventStore', () => {
 
     expect(encodedA).toEqual(encodedB);
     expect(store.decodeEvent(encodedA)).toEqual(event);
+    expect(decodeStoredNostrEventMsgpack(encodeStoredNostrEventMsgpack(event))).toEqual(event);
   });
 
   it('stores events by id and exposes manifest roots', async () => {
@@ -57,6 +60,7 @@ describe('NostrEventStore', () => {
     expect(manifest.byAuthorTime).not.toBeNull();
     expect(manifest.byAuthorKindTime).not.toBeNull();
     expect(manifest.byKindTime).not.toBeNull();
+    expect(manifest.byKindTimeAuthor).not.toBeNull();
 
     await expect(store.getById(root, event.id)).resolves.toEqual(event);
     await expect(store.getById(root, 'f'.repeat(64))).resolves.toBeNull();
@@ -119,6 +123,60 @@ describe('NostrEventStore', () => {
       newest,
       middle,
     ]);
+  });
+
+  it('queries feeds with hashtree-side filter planning instead of app-side index glue', async () => {
+    const store = new NostrEventStore(new MemoryStore());
+    const author = 'a'.repeat(64);
+    const otherAuthor = 'b'.repeat(64);
+    const older = await makeEvent({
+      pubkey: author,
+      created_at: 10,
+      content: 'older tagged',
+      tags: [['t', 'nostr']],
+    });
+    const newest = await makeEvent({
+      pubkey: author,
+      created_at: 30,
+      content: 'newest tagged',
+      tags: [['t', 'hashtree']],
+    });
+    const other = await makeEvent({
+      pubkey: otherAuthor,
+      created_at: 40,
+      content: 'other tagged',
+      tags: [['t', 'nostr']],
+    });
+
+    let root = await store.add(null, older);
+    root = await store.add(root, newest);
+    root = await store.add(root, other);
+
+    await expect(store.query(root, { authors: author, kinds: 1 })).resolves.toEqual([newest, older]);
+    await expect(store.query(root, { authors: [author, otherAuthor], kinds: 1 })).resolves.toEqual([
+      other,
+      newest,
+      older,
+    ]);
+    await expect(store.query(root, { tags: { t: 'nostr' } })).resolves.toEqual([other, older]);
+    await expect(store.query(root, { ids: [older.id, newest.id] }, { limit: 1 })).resolves.toEqual([newest]);
+  });
+
+  it('streams planned queries for direct per-author lookups', async () => {
+    const store = new NostrEventStore(new MemoryStore());
+    const author = 'f'.repeat(64);
+    const older = await makeEvent({ pubkey: author, created_at: 10, content: 'older' });
+    const newer = await makeEvent({ pubkey: author, created_at: 20, content: 'newer' });
+
+    let root = await store.add(null, older);
+    root = await store.add(root, newer);
+
+    const streamed: StoredNostrEvent[] = [];
+    for await (const event of store.streamQuery(root, { authors: author, kinds: 1 }, { limit: 1 })) {
+      streamed.push(event);
+    }
+
+    expect(streamed).toEqual([newer]);
   });
 
   it('indexes hashtag tags case-insensitively for search', async () => {

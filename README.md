@@ -108,6 +108,7 @@ Hashtree is the canonical remote for this repository:
 
 ## Getting started
 
+- Building decentralized apps and data models on hashtree: follow [`ts/GETTING_STARTED.md`](ts/GETTING_STARTED.md)
 - CLI + daemon + git remote: follow [`rust/README.md`](rust/README.md)
 - JS SDK packages: follow [`ts/README.md`](ts/README.md)
 - Portable web + Iris Browser app runtime: use [`@hashtree/worker`](https://www.npmjs.com/package/@hashtree/worker) from [`ts/packages/hashtree-worker`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/ts/packages/hashtree-worker), with host/runtime details in [`iris-browser`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser)

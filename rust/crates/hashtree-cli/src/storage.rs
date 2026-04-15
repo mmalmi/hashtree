@@ -796,6 +796,40 @@ impl HashtreeStore {
         Ok(to_hex(&hash))
     }
 
+    /// Store an opportunistically cached blob.
+    ///
+    /// Unlike durable `put_blob` writes, this path may evict disposable orphaned
+    /// blobs to make room under storage pressure. It intentionally avoids touching
+    /// indexed trees, social-graph roots, explicit pins, and owned Blossom blobs.
+    pub fn put_cached_blob(&self, data: &[u8]) -> Result<String> {
+        let hash = sha256(data);
+        if self
+            .router
+            .exists(&hash)
+            .map_err(|e| anyhow::anyhow!("Failed to check cached blob: {}", e))?
+        {
+            return Ok(to_hex(&hash));
+        }
+
+        let incoming_bytes = data.len() as u64;
+        let _ = self.make_room_for_cached_blob(incoming_bytes);
+
+        let mut retried_after_cleanup = false;
+        loop {
+            match self.router.put_sync(hash, data) {
+                Ok(_) => return Ok(to_hex(&hash)),
+                Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
+                    let freed = self.relieve_cached_blob_write_pressure(incoming_bytes)?;
+                    if freed == 0 {
+                        return Err(anyhow::anyhow!("Failed to store cached blob: {}", err));
+                    }
+                    retried_after_cleanup = true;
+                }
+                Err(err) => return Err(anyhow::anyhow!("Failed to store cached blob: {}", err)),
+            }
+        }
+    }
+
     /// Get a raw blob by SHA256 hash (raw bytes).
     pub fn get_blob(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         self.router
@@ -1428,6 +1462,11 @@ impl HashtreeStore {
         wtxn.commit()?;
         Ok(deleted)
     }
+}
+
+fn is_map_full_store_error(err: &StoreError) -> bool {
+    let message = err.to_string();
+    message.contains("MDB_MAP_FULL") || message.contains("MapFull")
 }
 
 #[derive(Debug, Clone)]

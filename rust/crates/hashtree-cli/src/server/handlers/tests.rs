@@ -7,19 +7,19 @@ use crate::webrtc::{
     PeerTransport, WebRTCState,
 };
 use axum::{
-    Router,
-    body::{Body, to_bytes},
+    body::{to_bytes, Body},
     extract::{Path as AxumPath, State as AxumState},
     response::IntoResponse,
     routing::get,
+    Router,
 };
 use futures::{SinkExt, StreamExt};
 use hashtree_core::DirEntry;
 use http_body_util::BodyExt;
 use nostr::{
-    Alphabet, ClientMessage as NostrClientMessage, EventBuilder, JsonUtil as NostrJsonUtil, Keys,
-    Kind, RelayMessage as NostrRelayMessage, SingleLetterTag, Tag, TagKind, Timestamp,
-    nips::nip19::ToBech32,
+    nips::nip19::ToBech32, Alphabet, ClientMessage as NostrClientMessage, EventBuilder,
+    JsonUtil as NostrJsonUtil, Keys, Kind, RelayMessage as NostrRelayMessage, SingleLetterTag, Tag,
+    TagKind, Timestamp,
 };
 use sha2::Digest;
 use std::{
@@ -552,7 +552,7 @@ async fn resolve_thumbnail_path_prefers_root_thumbnail() {
     let (thumb_cid, _size) = tree.put(b"thumb").await.unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -573,7 +573,7 @@ async fn resolve_thumbnail_path_accepts_generic_image_names() {
     let (thumb_cid, _size) = tree.put(b"thumb").await.unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("cover.jpeg", &thumb_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("cover.jpeg", &thumb_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -594,7 +594,7 @@ async fn resolve_thumbnail_path_falls_back_to_subdir() {
     let (thumb_cid, _size) = tree.put(b"thumb").await.unwrap();
     let subdir_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("thumbnail.png", &thumb_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("thumbnail.png", &thumb_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -623,13 +623,13 @@ async fn resolve_thumbnail_path_fetches_missing_subdir_from_upstream() {
     let (thumb_cid, _size) = source_tree.put(b"thumb").await.unwrap();
     let subdir_cid = source_tree
         .put_directory(vec![
-            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
     let root_cid = source_tree
         .put_directory(vec![
-            DirEntry::from_cid("clip", &subdir_cid).with_link_type(LinkType::Dir),
+            DirEntry::from_cid("clip", &subdir_cid).with_link_type(LinkType::Dir)
         ])
         .await
         .unwrap();
@@ -668,7 +668,7 @@ async fn resolve_directory_target_prefers_root_index() {
     let (index_cid, _size) = tree.put(b"<html>ok</html>").await.unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -697,13 +697,13 @@ async fn resolve_directory_target_prefers_subdir_index() {
     let (index_cid, _size) = tree.put(b"<html>nested</html>").await.unwrap();
     let subdir_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("video", &subdir_cid).with_link_type(LinkType::Dir),
+            DirEntry::from_cid("video", &subdir_cid).with_link_type(LinkType::Dir)
         ])
         .await
         .unwrap();
@@ -732,7 +732,7 @@ async fn resolve_directory_target_lists_directory_without_index() {
     let (file_cid, _size) = tree.put(b"asset").await.unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("asset.txt", &file_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("asset.txt", &file_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -828,7 +828,7 @@ async fn htree_nhash_path_resolves_thumbnail_alias() {
     let (thumb_cid, _) = tree.put(&thumb_bytes).await.unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -961,14 +961,16 @@ async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
     let (video_cid, _) = source_tree.put(&video_data).await.unwrap();
     let child_dir_cid = source_tree
         .put_directory(vec![
-            DirEntry::from_cid("video.mp4", &video_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("video.mp4", &video_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
     let root_cid = source_tree
-        .put_directory(vec![
-            DirEntry::from_cid("video_1767136282070", &child_dir_cid).with_link_type(LinkType::Dir),
-        ])
+        .put_directory(vec![DirEntry::from_cid(
+            "video_1767136282070",
+            &child_dir_cid,
+        )
+        .with_link_type(LinkType::Dir)])
         .await
         .unwrap();
 
@@ -1035,14 +1037,16 @@ async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream(
     let (video_cid, _) = source_tree.put(&video_data).await.unwrap();
     let child_dir_cid = source_tree
         .put_directory(vec![
-            DirEntry::from_cid("video.mp4", &video_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("video.mp4", &video_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
     let root_cid = source_tree
-        .put_directory(vec![
-            DirEntry::from_cid("video_1767136255334", &child_dir_cid).with_link_type(LinkType::Dir),
-        ])
+        .put_directory(vec![DirEntry::from_cid(
+            "video_1767136255334",
+            &child_dir_cid,
+        )
+        .with_link_type(LinkType::Dir)])
         .await
         .unwrap();
 
@@ -1107,21 +1111,22 @@ async fn htree_npub_path_uses_original_uri_for_encoded_tree_names() {
     let asset_bytes = b"nostr-vpn-macos-zip".to_vec();
     let (asset_cid, _) = tree.put(&asset_bytes).await.unwrap();
     let assets_dir = tree
-        .put_directory(vec![
-            DirEntry::from_cid("nostr-vpn-v0.3.0-macos-arm64.zip", &asset_cid)
-                .with_link_type(LinkType::File),
-        ])
+        .put_directory(vec![DirEntry::from_cid(
+            "nostr-vpn-v0.3.0-macos-arm64.zip",
+            &asset_cid,
+        )
+        .with_link_type(LinkType::File)])
         .await
         .unwrap();
     let version_dir = tree
         .put_directory(vec![
-            DirEntry::from_cid("assets", &assets_dir).with_link_type(LinkType::Dir),
+            DirEntry::from_cid("assets", &assets_dir).with_link_type(LinkType::Dir)
         ])
         .await
         .unwrap();
     let root_cid = tree
         .put_directory(vec![
-            DirEntry::from_cid("v0.3.0", &version_dir).with_link_type(LinkType::Dir),
+            DirEntry::from_cid("v0.3.0", &version_dir).with_link_type(LinkType::Dir)
         ])
         .await
         .unwrap();
@@ -1510,14 +1515,14 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
     let (thumb_cid, _) = tree.put(&thumb_bytes).await.unwrap();
     let historical_root = tree
         .put_directory(vec![
-            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("thumbnail.jpg", &thumb_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
     let (video_cid, _) = tree.put(b"video-data").await.unwrap();
     let current_root = tree
         .put_directory(vec![
-            DirEntry::from_cid("video.mp4", &video_cid).with_link_type(LinkType::File),
+            DirEntry::from_cid("video.mp4", &video_cid).with_link_type(LinkType::File)
         ])
         .await
         .unwrap();
@@ -1624,13 +1629,11 @@ async fn cache_tree_root_public_chk_uses_plain_mutable_cache_key() {
         cached.cid.key.map(|key| to_hex(&key)).as_deref(),
         Some("34e24fadaddc60da2e761501aae44c1c2b6b8706b73dff736eb0fc7d803133bb")
     );
-    assert!(
-        get_cached_tree_root(
-            &state,
-            "npub1example/video?k=34e24fadaddc60da2e761501aae44c1c2b6b8706b73dff736eb0fc7d803133bb"
-        )
-        .is_none()
-    );
+    assert!(get_cached_tree_root(
+        &state,
+        "npub1example/video?k=34e24fadaddc60da2e761501aae44c1c2b6b8706b73dff736eb0fc7d803133bb"
+    )
+    .is_none());
 }
 
 #[tokio::test]

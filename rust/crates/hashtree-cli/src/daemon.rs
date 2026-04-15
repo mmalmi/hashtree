@@ -817,7 +817,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::EmbeddedBackgroundServicesController;

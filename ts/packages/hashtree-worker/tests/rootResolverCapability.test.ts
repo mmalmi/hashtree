@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { toHex, type CID } from '@hashtree/core';
+import { MemoryStore, fromHex, toHex, type CID } from '@hashtree/core';
 
 const decodeMock = vi.hoisted(() => vi.fn());
 const socketPlanMock = vi.hoisted(() => vi.fn());
@@ -13,9 +13,10 @@ vi.mock('nostr-tools', () => ({
 }));
 
 import {
-  DEFAULT_ROOT_RESOLVE_TIMEOUT_MS,
   resolveRootPathFromRelays,
+  watchRootPathFromRelays,
 } from '../src/capabilities/rootResolver.js';
+import { clearMemoryCache, initTreeRootCache, setCachedRoot } from '../src/relay/treeRootCache.js';
 
 const NPUB = 'npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk';
 const PUBKEY = '1'.repeat(64);
@@ -75,6 +76,8 @@ describe('rootResolver capability', () => {
     socketPlanMock.mockReset();
     socketSendMock.mockReset();
     socketCloseMock.mockReset();
+    clearMemoryCache();
+    initTreeRootCache(new MemoryStore());
     Object.defineProperty(globalThis, 'WebSocket', {
       configurable: true,
       writable: true,
@@ -106,6 +109,23 @@ describe('rootResolver capability', () => {
     expect(toHex(resolved!.hash)).toBe(EXACT_HASH);
     expect(resolvePath).not.toHaveBeenCalled();
     expect(socketSendMock).toHaveBeenCalled();
+  });
+
+  it('returns a cached exact tree match without opening relay subscriptions', async () => {
+    decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
+    await setCachedRoot(NPUB, 'audio-catalog/root.json', { hash: fromHex(EXACT_HASH) });
+
+    const resolvePath = vi.fn();
+    const resolved = await resolveRootPathFromRelays(
+      { resolvePath },
+      ['wss://relay.example'],
+      NPUB,
+      'audio-catalog/root.json',
+    );
+
+    expect(toHex(resolved!.hash)).toBe(EXACT_HASH);
+    expect(resolvePath).not.toHaveBeenCalled();
+    expect(socketSendMock).not.toHaveBeenCalled();
   });
 
   it('falls back to the tree root and resolves the remaining subpath', async () => {
@@ -143,7 +163,6 @@ describe('rootResolver capability', () => {
   });
 
   it('waits for a newer event that arrives before the query window closes', async () => {
-    vi.useFakeTimers();
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
     socketPlanMock.mockImplementation((socket: FakeWebSocket, url: string) => {
       if (url !== 'wss://relay.example') {
@@ -168,10 +187,30 @@ describe('rootResolver capability', () => {
       50,
     );
 
-    await vi.advanceTimersByTimeAsync(100);
     const resolved = await resolvePromise;
 
     expect(toHex(resolved!.hash)).toBe('6'.repeat(64));
     expect(socketSendMock).toHaveBeenCalled();
+  });
+
+  it('returns a cached initial root immediately for live watches', async () => {
+    decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
+    await setCachedRoot(NPUB, 'audio-catalog/root.json', { hash: fromHex(EXACT_HASH) });
+
+    const onUpdate = vi.fn();
+    const watch = await watchRootPathFromRelays(
+      { resolvePath: vi.fn() },
+      ['wss://relay.example'],
+      NPUB,
+      'audio-catalog/root.json',
+      onUpdate,
+    );
+
+    expect(toHex(watch.initialCid!.hash)).toBe(EXACT_HASH);
+    await Promise.resolve();
+    expect(socketSendMock).toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    await watch.close();
   });
 });

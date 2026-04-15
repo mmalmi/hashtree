@@ -28,6 +28,14 @@ fn add_blob(store: &HashtreeStore, data: &[u8]) -> [u8; 32] {
     from_hex(&hash_hex).expect("Invalid hash")
 }
 
+fn used_bytes(store: &HashtreeStore) -> u64 {
+    store
+        .router()
+        .stats()
+        .expect("Failed to read stats")
+        .total_bytes
+}
+
 #[test]
 fn test_tree_indexing() {
     let (store, _tmp) = test_store(1024 * 1024 * 1024); // 1GB
@@ -477,4 +485,66 @@ fn test_ref_key_replaces_old_version() {
         store.get_tree_meta(&hash2).unwrap().is_some(),
         "New version should be indexed"
     );
+}
+
+#[test]
+fn test_put_cached_blob_evicts_disposable_orphans() {
+    let (store, _tmp) = test_store(250);
+
+    let protected_hash = add_blob(&store, &vec![9u8; 100]);
+    store
+        .index_tree(
+            &protected_hash,
+            "owner",
+            Some("protected"),
+            PRIORITY_OTHER,
+            None,
+        )
+        .unwrap();
+
+    let disposable_hash = add_blob(&store, &vec![1u8; 100]);
+    assert!(store.blob_exists(&disposable_hash).unwrap());
+
+    let cached_hash = from_hex(&store.put_cached_blob(&vec![2u8; 100]).unwrap()).unwrap();
+
+    assert!(
+        store.blob_exists(&protected_hash).unwrap(),
+        "Indexed tree blob should be protected from cache eviction"
+    );
+    assert!(
+        !store.blob_exists(&disposable_hash).unwrap(),
+        "Disposable orphan should be evicted to make room"
+    );
+    assert!(
+        store.blob_exists(&cached_hash).unwrap(),
+        "New cached blob should be stored"
+    );
+    assert!(
+        used_bytes(&store) <= store.max_size_bytes(),
+        "Cache write should keep usage within limit"
+    );
+}
+
+#[test]
+fn test_put_cached_blob_preserves_owned_blossom_blob() {
+    let (store, _tmp) = test_store(250);
+
+    let owned_hash = add_blob(&store, &vec![7u8; 100]);
+    store
+        .set_blob_owner(&owned_hash, &[42u8; 32])
+        .expect("Failed to set owner");
+
+    let disposable_hash = add_blob(&store, &vec![1u8; 100]);
+    let cached_hash = from_hex(&store.put_cached_blob(&vec![2u8; 100]).unwrap()).unwrap();
+
+    assert!(
+        store.blob_exists(&owned_hash).unwrap(),
+        "Owned Blossom blob should not be evicted by cache cleanup"
+    );
+    assert!(
+        !store.blob_exists(&disposable_hash).unwrap(),
+        "Unowned orphan should be evicted first"
+    );
+    assert!(store.blob_exists(&cached_hash).unwrap());
+    assert!(used_bytes(&store) <= store.max_size_bytes());
 }

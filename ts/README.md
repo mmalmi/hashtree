@@ -5,6 +5,8 @@ packages only; the Iris app workspaces live in sibling repos.
 
 Part of the hashtree repository. See [../README.md](../README.md) for the project overview and [../rust/README.md](../rust/README.md) for the Rust CLI/daemon.
 
+If you are building apps on top of hashtree, start with [GETTING_STARTED.md](GETTING_STARTED.md).
+
 Blossom-compatible storage with chunking and directory structure. Merkle roots can be published on Nostr to get mutable `npub/path` addresses.
 
 ## Design

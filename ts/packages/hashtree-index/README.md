@@ -2,6 +2,8 @@
 
 B-Tree index structures for hashtree.
 
+Most app code should treat this package as the low-level primitive layer. For app-facing collection/query logic, prefer `@hashtree/collection` or `@hashtree/nostr` so index selection stays in the library instead of being reinvented in each app.
+
 ## Install
 
 ```bash

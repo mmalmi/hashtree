@@ -73,7 +73,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                     peer_id,
                     &hash_hex[..16.min(hash_hex.len())]
                 );
-                if let Err(e) = state.store.put_blob(&data) {
+                if let Err(e) = state.store.put_cached_blob(&data) {
                     tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
                 }
                 return true;
@@ -85,7 +85,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                     server,
                     &hash_hex[..16.min(hash_hex.len())]
                 );
-                if let Err(e) = state.store.put_blob(&data) {
+                if let Err(e) = state.store.put_cached_blob(&data) {
                     tracing::warn!("[htree-fetch] Failed to cache upstream data: {}", e);
                 }
                 return true;

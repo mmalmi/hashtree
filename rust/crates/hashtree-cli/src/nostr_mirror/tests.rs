@@ -997,6 +997,108 @@ async fn mirror_live_ingest_updates_profile_index() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn mirror_republishes_roots_changed_outside_the_mirror() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = Arc::new(
+        BackgroundNostrMirror::new(
+            NostrMirrorConfig {
+                relays: vec![relay.url()],
+                publish_relays: vec![relay.url()],
+                history_sync_on_start: false,
+                missing_profile_backfill_batch_size: 0,
+                ..NostrMirrorConfig::default()
+            },
+            store,
+            graph_store.clone(),
+            Some(publish_keys),
+        )
+        .await?,
+    );
+
+    let mirror_task = {
+        let mirror = Arc::clone(&mirror);
+        tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test mirror runtime");
+            runtime.block_on(async { mirror.run().await })
+        })
+    };
+
+    wait_until("publisher relay connection", Duration::from_secs(5), || {
+        futures::executor::block_on(mirror.has_connected_publish_relay())
+    })
+    .await;
+
+    let root_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Root Out Of Band"}"#, [])
+        .custom_created_at(Timestamp::from(42))
+        .to_event(&root_keys)
+        .expect("root profile");
+    socialgraph::ingest_parsed_event(graph_store.as_ref(), &root_profile)?;
+
+    wait_until(
+        "out-of-band root publication",
+        Duration::from_secs(5),
+        || {
+            published_root_event_count(&relay, "nostr-event-index") > 0
+                && published_root_event_count(&relay, "profile-search") > 0
+        },
+    )
+    .await;
+
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+
+    let published_event_root = resolver
+        .resolve(&format!("{npub}/nostr-event-index"))
+        .await?
+        .expect("published event root");
+    let published_profile_root = resolver
+        .resolve(&format!("{npub}/profile-search"))
+        .await?
+        .expect("published profile root");
+
+    assert_eq!(
+        published_event_root,
+        graph_store
+            .public_events_root()?
+            .expect("current public event root")
+    );
+    assert_eq!(
+        published_profile_root,
+        graph_store
+            .profile_search_root()?
+            .expect("current profile search root")
+    );
+
+    mirror.shutdown();
+    mirror_task.await.expect("mirror join")?;
+    resolver.stop().await?;
+    Ok(())
+}
+
 #[test]
 fn relay_connected_after_disconnect_triggers_reconnect_history_sync() {
     assert!(BackgroundNostrMirror::should_history_sync_on_reconnect(

@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use futures::executor::block_on;
-use hashtree_core::{sha256, Cid, HashTree, HashTreeConfig, MemoryStore, Store, TreeVisibility};
+use hashtree_core::{
+    sha256, Cid, DirEntry, HashTree, HashTreeConfig, MemoryStore, Store, TreeVisibility,
+};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
-    decode_signed_event_json, encode_signed_event_json, parse_hashtree_root_event,
-    read_signed_event_snapshot, store_signed_event_snapshot, ListEventsOptions, NostrEventStore,
-    StoredNostrEvent,
+    decode_signed_event_json, decode_stored_event_msgpack, encode_signed_event_json,
+    encode_stored_event_msgpack, parse_hashtree_root_event, read_signed_event_snapshot,
+    store_signed_event_snapshot, ListEventsOptions, NostrEventStore, StoredNostrEvent,
 };
 
 fn event(
@@ -101,10 +103,28 @@ async fn replaceable_event_cid(
         .expect("get replaceable link")
 }
 
+async fn manifest_index_root(store: Arc<MemoryStore>, root: &Cid, name: &str) -> Option<Cid> {
+    let tree = HashTree::new(HashTreeConfig::new(store));
+    tree.list_directory(root)
+        .await
+        .expect("list manifest directory")
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| Cid {
+            hash: entry.hash,
+            key: entry.key,
+        })
+}
+
+fn reverse_timestamp(created_at: u64) -> String {
+    format!("{:016x}", u64::MAX - created_at)
+}
+
 #[test]
 fn stores_events_by_id_author_and_replaceable_views() {
     block_on(async {
-        let store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
         let author = "a".repeat(64);
         let other_author = "b".repeat(64);
         let event1 = event(
@@ -158,6 +178,16 @@ fn stores_events_by_id_author_and_replaceable_views() {
         root = store.add(Some(&root), profile.clone()).await.unwrap();
         root = store.add(Some(&root), other.clone()).await.unwrap();
         root = store.add(Some(&root), hashtagged.clone()).await.unwrap();
+
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&backing)));
+        let names = tree
+            .list_directory(&root)
+            .await
+            .expect("list manifest directory")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "by-kind-time-author"));
 
         assert_eq!(
             store.get_by_id(Some(&root), &event2.id).await.unwrap(),
@@ -252,6 +282,136 @@ fn stores_events_by_id_author_and_replaceable_views() {
             vec![hashtagged]
         );
     });
+}
+
+#[test]
+fn upgrades_legacy_manifest_with_kind_time_author_index() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let author = "a".repeat(64);
+        let other_author = "b".repeat(64);
+        let event1 = event(
+            "1195275911eb877e6687b4f8a3495de1e0719280e7fc1fb229a9de37b2d87bea",
+            &author,
+            10,
+            1,
+            "older",
+            &"2".repeat(128),
+        );
+        let event2 = event(
+            "ff92321262e009d97bc0292e83a851e4a2435b2b9748f656fbdbd5c0ccd6f0b4",
+            &author,
+            20,
+            1,
+            "newer",
+            &"2".repeat(128),
+        );
+        let other = event(
+            "ee5e6609ca7f7beb6a0e1927740e8cb1c68cc29e407bc85b2936883757cb0884",
+            &other_author,
+            40,
+            1,
+            "other",
+            &"4".repeat(128),
+        );
+
+        let mut root = store.add(None, event1.clone()).await.unwrap();
+        root = store.add(Some(&root), event2.clone()).await.unwrap();
+        root = store.add(Some(&root), other.clone()).await.unwrap();
+
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&backing)));
+        let legacy_entries = tree
+            .list_directory(&root)
+            .await
+            .expect("list manifest directory")
+            .into_iter()
+            .filter(|entry| entry.name != "by-kind-time-author")
+            .map(|entry| {
+                DirEntry::from_cid(
+                    entry.name,
+                    &Cid {
+                        hash: entry.hash,
+                        key: entry.key,
+                    },
+                )
+                .with_size(entry.size)
+                .with_link_type(entry.link_type)
+            })
+            .collect::<Vec<_>>();
+        let legacy_root = tree
+            .put_directory(legacy_entries)
+            .await
+            .expect("write legacy manifest directory");
+
+        assert!(
+            manifest_index_root(Arc::clone(&backing), &legacy_root, "by-kind-time-author")
+                .await
+                .is_none()
+        );
+
+        let upgraded_root = store
+            .upgrade_manifest_indexes(Some(&legacy_root))
+            .await
+            .expect("upgrade manifest indexes")
+            .expect("upgraded root");
+        let by_kind_time_author_root =
+            manifest_index_root(Arc::clone(&backing), &upgraded_root, "by-kind-time-author")
+                .await
+                .expect("kind-time-author root");
+
+        let index = BTree::new(Arc::clone(&backing), BTreeOptions::default());
+        let entries = index
+            .prefix_links(&by_kind_time_author_root, "00000001:")
+            .await
+            .expect("list kind-time-author entries");
+        let keys = entries.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                format!(
+                    "00000001:{}:{}:{}",
+                    reverse_timestamp(other.created_at),
+                    other.pubkey,
+                    other.id
+                ),
+                format!(
+                    "00000001:{}:{}:{}",
+                    reverse_timestamp(event2.created_at),
+                    event2.pubkey,
+                    event2.id
+                ),
+                format!(
+                    "00000001:{}:{}:{}",
+                    reverse_timestamp(event1.created_at),
+                    event1.pubkey,
+                    event1.id
+                ),
+            ]
+        );
+
+        assert_eq!(
+            store
+                .upgrade_manifest_indexes(Some(&upgraded_root))
+                .await
+                .expect("re-upgrade manifest indexes"),
+            Some(upgraded_root)
+        );
+    });
+}
+
+#[test]
+fn shared_msgpack_helpers_round_trip_events() {
+    let event = canonical_store_event(
+        "a".repeat(64).as_str(),
+        1_700_000_000,
+        1,
+        Vec::new(),
+        "hello",
+    );
+    let encoded = encode_stored_event_msgpack(&event).expect("encode msgpack");
+    let decoded = decode_stored_event_msgpack(&encoded).expect("decode msgpack");
+    assert_eq!(decoded, event);
 }
 
 #[test]
@@ -438,9 +598,9 @@ fn manifest_root_matches_typescript_fixture() {
         assert_eq!(
             cid_to_pair(&root),
             (
-                "c90483aa7c51ce19510cfb8f4b0304ec10f01ba67ff1b1266604180b85fbfb84".to_string(),
+                "42fe879573c9d4b526c8e0b0302ccf5c7be5976da11c82a37268da9d79c7ff79".to_string(),
                 Some(
-                    "1c1ed8e66913e8060047b7c1a5be347396ae1be2b4340d75a804947565f2fbcc".to_string()
+                    "d71321a960031651d28135f4d1304a2e2cf8ae612ca40ab07eb5fb1c389b06b4".to_string()
                 )
             )
         );

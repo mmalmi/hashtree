@@ -23,10 +23,14 @@ import {
   MANIFEST_BY_AUTHOR_TIME,
   MANIFEST_BY_ID,
   MANIFEST_BY_KIND_TIME,
+  MANIFEST_BY_KIND_TIME_AUTHOR,
   MANIFEST_BY_TAG,
   MANIFEST_BY_TIME,
   MANIFEST_PARAMETERIZED_REPLACEABLE,
   MANIFEST_REPLACEABLE,
+  normalizeTagName,
+  normalizeTagValue,
+  padKind,
   parameterizedReplaceableKey,
   replaceableKey,
   retainLatestReplaceableEvents,
@@ -34,7 +38,7 @@ import {
 } from './eventKeys.js';
 import { assertStringArray, validateEventShape, validateHex64, validateKind } from './eventValidation.js';
 
-const EVENT_ENVELOPE_VERSION = 1;
+export const NOSTR_EVENT_ENVELOPE_VERSION = 1;
 
 export interface StoredNostrEvent {
   id: string;
@@ -51,6 +55,7 @@ export interface NostrEventManifest {
   byAuthorTime: CID | null;
   byAuthorKindTime: CID | null;
   byKindTime: CID | null;
+  byKindTimeAuthor: CID | null;
   byTime: CID | null;
   byTag: CID | null;
   replaceable: CID | null;
@@ -63,6 +68,169 @@ export interface ListEventsOptions {
   until?: number;
 }
 
+export type NostrEventQueryValue<T> = T | readonly T[];
+
+export interface NostrEventQuery {
+  ids?: NostrEventQueryValue<string>;
+  authors?: NostrEventQueryValue<string>;
+  kinds?: NostrEventQueryValue<number>;
+  tags?: Record<string, NostrEventQueryValue<string>>;
+}
+
+interface NormalizedNostrEventQuery {
+  ids: string[];
+  authors: string[];
+  kinds: number[];
+  tags: Map<string, string[]>;
+}
+
+interface NostrEventQueryPlan {
+  type: 'ids' | 'index';
+  indexName?: string;
+  prefixes: string[];
+}
+
+const EMPTY_NOSTR_EVENT_QUERY: NormalizedNostrEventQuery = {
+  ids: [],
+  authors: [],
+  kinds: [],
+  tags: new Map(),
+};
+
+function normalizeQueryValues<T>(value: NostrEventQueryValue<T> | undefined): T[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return [...value];
+  }
+
+  const scalarValue = value as T;
+  return [scalarValue];
+}
+
+function dedupeValues<T>(values: T[]): T[] {
+  return [...new Set(values)];
+}
+
+function normalizeNostrEventQuery(query: NostrEventQuery = {}): NormalizedNostrEventQuery {
+  const ids = dedupeValues(normalizeQueryValues(query.ids).map((value) => validateHex64(value, 'event id')));
+  const authors = dedupeValues(normalizeQueryValues(query.authors).map((value) => validateHex64(value, 'pubkey')));
+  const kinds = dedupeValues(normalizeQueryValues(query.kinds).map((value) => validateKind(value)));
+  const tags = new Map<string, string[]>();
+
+  for (const [rawTagName, rawTagValues] of Object.entries(query.tags ?? {})) {
+    const tagName = normalizeTagName(rawTagName);
+    const tagValues = dedupeValues(
+      normalizeQueryValues(rawTagValues).map((value) => normalizeTagValue(tagName, value)),
+    );
+    if (tagValues.length > 0) {
+      tags.set(tagName, tagValues);
+    }
+  }
+
+  return { ids, authors, kinds, tags };
+}
+
+function matchesNostrEventQuery(event: StoredNostrEvent, query: NormalizedNostrEventQuery): boolean {
+  if (query.ids.length > 0 && !query.ids.includes(event.id)) {
+    return false;
+  }
+  if (query.authors.length > 0 && !query.authors.includes(event.pubkey)) {
+    return false;
+  }
+  if (query.kinds.length > 0 && !query.kinds.includes(event.kind)) {
+    return false;
+  }
+
+  for (const [tagName, tagValues] of query.tags) {
+    const matchesTag = event.tags.some(([candidateTagName, candidateTagValue]) => {
+      if (typeof candidateTagName !== 'string' || typeof candidateTagValue !== 'string') {
+        return false;
+      }
+
+      const normalizedCandidateName = candidateTagName.toLowerCase();
+      if (normalizedCandidateName !== tagName) {
+        return false;
+      }
+
+      return tagValues.includes(normalizeTagValue(tagName, candidateTagValue));
+    });
+
+    if (!matchesTag) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function selectNostrEventQueryPlan(query: NormalizedNostrEventQuery): NostrEventQueryPlan {
+  if (query.ids.length > 0) {
+    return { type: 'ids', prefixes: [] };
+  }
+
+  if (query.authors.length > 0) {
+    if (query.kinds.length === 1) {
+      const kindPrefix = `${padKind(query.kinds[0]!)}:`;
+      return {
+        type: 'index',
+        indexName: MANIFEST_BY_AUTHOR_KIND_TIME,
+        prefixes: query.authors.map((author) => `${author}:${kindPrefix}`),
+      };
+    }
+
+    return {
+      type: 'index',
+      indexName: MANIFEST_BY_AUTHOR_TIME,
+      prefixes: query.authors.map((author) => `${author}:`),
+    };
+  }
+
+  if (query.kinds.length > 0) {
+    return {
+      type: 'index',
+      indexName: MANIFEST_BY_KIND_TIME,
+      prefixes: query.kinds.map((kind) => `${padKind(kind)}:`),
+    };
+  }
+
+  if (query.tags.size === 1) {
+    const firstTag = query.tags.entries().next().value;
+    if (firstTag) {
+      const [tagName, tagValues] = firstTag;
+      return {
+        type: 'index',
+        indexName: MANIFEST_BY_TAG,
+        prefixes: tagValues.map((tagValue) => tagPrefix(tagName, tagValue)),
+      };
+    }
+  }
+
+  return {
+    type: 'index',
+    indexName: MANIFEST_BY_TIME,
+    prefixes: [''],
+  };
+}
+
+function mergeQueriedEvents(eventGroups: StoredNostrEvent[][], limit?: number): StoredNostrEvent[] {
+  const merged = new Map<string, StoredNostrEvent>();
+
+  for (const group of eventGroups) {
+    for (const event of group) {
+      const current = merged.get(event.id);
+      if (!current || compareEvents(event, current) > 0) {
+        merged.set(event.id, event);
+      }
+    }
+  }
+
+  const ordered = [...merged.values()].sort((left, right) => compareEvents(right, left));
+  return limit === undefined ? ordered : ordered.slice(0, limit);
+}
+
 function canonicalEventIdPayload(event: Omit<StoredNostrEvent, 'id' | 'sig'>): string {
   return JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
 }
@@ -70,6 +238,63 @@ function canonicalEventIdPayload(event: Omit<StoredNostrEvent, 'id' | 'sig'>): s
 async function computeCanonicalEventId(event: Omit<StoredNostrEvent, 'sig'>): Promise<string> {
   const payload = canonicalEventIdPayload(event);
   return toHex(await sha256(new TextEncoder().encode(payload)));
+}
+
+export function encodeStoredNostrEventMsgpack(event: StoredNostrEvent): Uint8Array {
+  const normalized = validateEventShape(event);
+  return encode([
+    NOSTR_EVENT_ENVELOPE_VERSION,
+    normalized.id,
+    normalized.pubkey,
+    normalized.created_at,
+    normalized.kind,
+    normalized.tags,
+    normalized.content,
+    normalized.sig,
+  ]);
+}
+
+export function decodeStoredNostrEventMsgpack(data: Uint8Array): StoredNostrEvent {
+  const decoded = decode(data);
+  if (!Array.isArray(decoded) || decoded.length !== 8) {
+    throw new Error('Invalid Nostr event envelope');
+  }
+
+  const [
+    version,
+    id,
+    pubkey,
+    createdAt,
+    kind,
+    tags,
+    content,
+    sig,
+  ] = decoded;
+
+  if (version !== NOSTR_EVENT_ENVELOPE_VERSION) {
+    throw new Error(`Unsupported Nostr event envelope version: ${String(version)}`);
+  }
+  if (typeof id !== 'string' || typeof pubkey !== 'string' || typeof content !== 'string' || typeof sig !== 'string') {
+    throw new Error('Invalid Nostr event envelope fields');
+  }
+  if (typeof createdAt !== 'number' || !Number.isInteger(createdAt) || createdAt < 0) {
+    throw new Error('Invalid Nostr event created_at');
+  }
+  if (typeof kind !== 'number' || !Number.isInteger(kind) || kind < 0) {
+    throw new Error('Invalid Nostr event kind');
+  }
+
+  assertStringArray(tags);
+
+  return validateEventShape({
+    id,
+    pubkey,
+    created_at: createdAt,
+    kind,
+    tags,
+    content,
+    sig,
+  });
 }
 
 export class NostrEventStore {
@@ -82,60 +307,11 @@ export class NostrEventStore {
   }
 
   encodeEvent(event: StoredNostrEvent): Uint8Array {
-    const normalized = this.validateEventShape(event);
-    return encode([
-      EVENT_ENVELOPE_VERSION,
-      normalized.id,
-      normalized.pubkey,
-      normalized.created_at,
-      normalized.kind,
-      normalized.tags,
-      normalized.content,
-      normalized.sig,
-    ]);
+    return encodeStoredNostrEventMsgpack(this.validateEventShape(event));
   }
 
   decodeEvent(data: Uint8Array): StoredNostrEvent {
-    const decoded = decode(data);
-    if (!Array.isArray(decoded) || decoded.length !== 8) {
-      throw new Error('Invalid Nostr event envelope');
-    }
-
-    const [
-      version,
-      id,
-      pubkey,
-      createdAt,
-      kind,
-      tags,
-      content,
-      sig,
-    ] = decoded;
-
-    if (version !== EVENT_ENVELOPE_VERSION) {
-      throw new Error(`Unsupported Nostr event envelope version: ${String(version)}`);
-    }
-    if (typeof id !== 'string' || typeof pubkey !== 'string' || typeof content !== 'string' || typeof sig !== 'string') {
-      throw new Error('Invalid Nostr event envelope fields');
-    }
-    if (typeof createdAt !== 'number' || !Number.isInteger(createdAt) || createdAt < 0) {
-      throw new Error('Invalid Nostr event created_at');
-    }
-    if (typeof kind !== 'number' || !Number.isInteger(kind) || kind < 0) {
-      throw new Error('Invalid Nostr event kind');
-    }
-
-    assertStringArray(tags);
-
-    return this.validateEventShape({
-      id,
-      pubkey,
-      created_at: createdAt,
-      kind,
-      tags,
-      content,
-      sig,
-    });
+    return this.validateEventShape(decodeStoredNostrEventMsgpack(data));
   }
 
   async add(root: CID | null, event: StoredNostrEvent): Promise<CID> {
@@ -229,6 +405,83 @@ export class NostrEventStore {
     );
   }
 
+  async *streamByAuthor(
+    root: CID | null,
+    pubkey: string,
+    options: ListEventsOptions = {},
+  ): AsyncGenerator<StoredNostrEvent> {
+    yield* this.streamEvents(
+      this.collectionSourceFromManifest(await this.getManifest(root)),
+      MANIFEST_BY_AUTHOR_TIME,
+      `${validateHex64(pubkey, 'pubkey')}:`,
+      options,
+    );
+  }
+
+  async *streamByAuthorAndKind(
+    root: CID | null,
+    pubkey: string,
+    kind: number,
+    options: ListEventsOptions = {},
+  ): AsyncGenerator<StoredNostrEvent> {
+    yield* this.streamEvents(
+      this.collectionSourceFromManifest(await this.getManifest(root)),
+      MANIFEST_BY_AUTHOR_KIND_TIME,
+      `${validateHex64(pubkey, 'pubkey')}:${validateKind(kind).toString(16).padStart(8, '0')}:`,
+      options,
+    );
+  }
+
+  async query(
+    root: CID | null,
+    query: NostrEventQuery = {},
+    options: ListEventsOptions = {},
+  ): Promise<StoredNostrEvent[]> {
+    const normalizedQuery = normalizeNostrEventQuery(query);
+    const plan = selectNostrEventQueryPlan(normalizedQuery);
+
+    if (plan.type === 'ids') {
+      return this.queryByIds(root, normalizedQuery, options);
+    }
+
+    const source = this.collectionSourceFromManifest(await this.getManifest(root));
+    const groups = await Promise.all(
+      plan.prefixes.map((prefix) => this.collectEvents(
+        source,
+        plan.indexName!,
+        prefix,
+        options,
+        normalizedQuery,
+      )),
+    );
+
+    return mergeQueriedEvents(groups, options.limit);
+  }
+
+  async *streamQuery(
+    root: CID | null,
+    query: NostrEventQuery = {},
+    options: ListEventsOptions = {},
+  ): AsyncGenerator<StoredNostrEvent> {
+    const normalizedQuery = normalizeNostrEventQuery(query);
+    const plan = selectNostrEventQueryPlan(normalizedQuery);
+
+    if (plan.type === 'ids' || plan.prefixes.length !== 1) {
+      for (const event of await this.query(root, query, options)) {
+        yield event;
+      }
+      return;
+    }
+
+    yield* this.streamEvents(
+      this.collectionSourceFromManifest(await this.getManifest(root)),
+      plan.indexName!,
+      plan.prefixes[0] ?? '',
+      options,
+      normalizedQuery,
+    );
+  }
+
   async getReplaceable(root: CID | null, pubkey: string, kind: number): Promise<StoredNostrEvent | null> {
     const source = this.collectionSourceFromManifest(await this.getManifest(root));
     const eventCid = await source.getIndexLink(
@@ -248,6 +501,18 @@ export class NostrEventStore {
     );
   }
 
+  async *streamRecent(
+    root: CID | null,
+    options: ListEventsOptions = {},
+  ): AsyncGenerator<StoredNostrEvent> {
+    yield* this.streamEvents(
+      this.collectionSourceFromManifest(await this.getManifest(root)),
+      MANIFEST_BY_TIME,
+      '',
+      options,
+    );
+  }
+
   async listByTag(
     root: CID | null,
     tagName: string,
@@ -255,6 +520,20 @@ export class NostrEventStore {
     options: ListEventsOptions = {}
   ): Promise<StoredNostrEvent[]> {
     return this.collectEvents(
+      this.collectionSourceFromManifest(await this.getManifest(root)),
+      MANIFEST_BY_TAG,
+      tagPrefix(tagName, tagValue),
+      options,
+    );
+  }
+
+  async *streamByTag(
+    root: CID | null,
+    tagName: string,
+    tagValue: string,
+    options: ListEventsOptions = {},
+  ): AsyncGenerator<StoredNostrEvent> {
+    yield* this.streamEvents(
       this.collectionSourceFromManifest(await this.getManifest(root)),
       MANIFEST_BY_TAG,
       tagPrefix(tagName, tagValue),
@@ -292,6 +571,7 @@ export class NostrEventStore {
         byAuthorTime: null,
         byAuthorKindTime: null,
         byKindTime: null,
+        byKindTimeAuthor: null,
         byTime: null,
         byTag: null,
         replaceable: null,
@@ -307,6 +587,7 @@ export class NostrEventStore {
       byAuthorTime: getCid(MANIFEST_BY_AUTHOR_TIME),
       byAuthorKindTime: getCid(MANIFEST_BY_AUTHOR_KIND_TIME),
       byKindTime: getCid(MANIFEST_BY_KIND_TIME),
+      byKindTimeAuthor: getCid(MANIFEST_BY_KIND_TIME_AUTHOR),
       byTime: getCid(MANIFEST_BY_TIME),
       byTag: getCid(MANIFEST_BY_TAG),
       replaceable: getCid(MANIFEST_REPLACEABLE),
@@ -346,11 +627,25 @@ export class NostrEventStore {
     );
   }
 
+  async *streamByKind(
+    root: CID | null,
+    kind: number,
+    options: ListEventsOptions = {},
+  ): AsyncGenerator<StoredNostrEvent> {
+    yield* this.streamEvents(
+      this.collectionSourceFromManifest(await this.getManifest(root)),
+      MANIFEST_BY_KIND_TIME,
+      `${validateKind(kind).toString(16).padStart(8, '0')}:`,
+      options,
+    );
+  }
+
   private async collectEvents(
     source: CollectionSource,
     indexName: string,
     prefix: string,
     options: ListEventsOptions = {},
+    query: NormalizedNostrEventQuery = EMPTY_NOSTR_EVENT_QUERY,
   ): Promise<StoredNostrEvent[]> {
     const events: StoredNostrEvent[] = [];
     const entries = indexName === MANIFEST_BY_ID
@@ -375,13 +670,84 @@ export class NostrEventStore {
       if (options.since !== undefined && createdAt < options.since) {
         break;
       }
-      events.push(await this.readStoredEvent(eventCid));
+      const event = await this.tryReadStoredEvent(eventCid);
+      if (!event) {
+        continue;
+      }
+      if (!matchesNostrEventQuery(event, query)) {
+        continue;
+      }
+      events.push(event);
       if (options.limit !== undefined && events.length >= options.limit) {
         break;
       }
     }
 
     return events;
+  }
+
+  private async *streamEvents(
+    source: CollectionSource,
+    indexName: string,
+    prefix: string,
+    options: ListEventsOptions = {},
+    query: NormalizedNostrEventQuery = EMPTY_NOSTR_EVENT_QUERY,
+  ): AsyncGenerator<StoredNostrEvent> {
+    const iterator = indexName === MANIFEST_BY_ID
+      ? source.streamQueryById({ prefix })
+      : source.streamQueryIndex(indexName, { prefix });
+    let emitted = 0;
+
+    for await (const { key, cid: eventCid } of iterator) {
+      const createdAt = createdAtFromIndexKey(key);
+      if (options.until !== undefined && createdAt > options.until) {
+        continue;
+      }
+      if (options.since !== undefined && createdAt < options.since) {
+        break;
+      }
+
+      const event = await this.tryReadStoredEvent(eventCid);
+      if (!event) {
+        continue;
+      }
+      if (!matchesNostrEventQuery(event, query)) {
+        continue;
+      }
+
+      yield event;
+      emitted += 1;
+      if (options.limit !== undefined && emitted >= options.limit) {
+        break;
+      }
+    }
+  }
+
+  private async queryByIds(
+    root: CID | null,
+    query: NormalizedNostrEventQuery,
+    options: ListEventsOptions = {},
+  ): Promise<StoredNostrEvent[]> {
+    const events: StoredNostrEvent[] = [];
+    for (const eventId of query.ids) {
+      const event = await this.getById(root, eventId);
+      if (!event) {
+        continue;
+      }
+      if (options.until !== undefined && event.created_at > options.until) {
+        continue;
+      }
+      if (options.since !== undefined && event.created_at < options.since) {
+        continue;
+      }
+      if (!matchesNostrEventQuery(event, query)) {
+        continue;
+      }
+      events.push(event);
+    }
+
+    events.sort((left, right) => compareEvents(right, left));
+    return options.limit === undefined ? events : events.slice(0, options.limit);
   }
 
   private async readStoredEvent(eventCid: CID): Promise<StoredNostrEvent> {
@@ -393,12 +759,22 @@ export class NostrEventStore {
     return this.decodeEvent(data);
   }
 
+  private async tryReadStoredEvent(eventCid: CID): Promise<StoredNostrEvent | null> {
+    try {
+      return await this.readStoredEvent(eventCid);
+    } catch (error) {
+      console.warn('Skipping unreadable stored Nostr event', error);
+      return null;
+    }
+  }
+
   private emptyManifest(): NostrEventManifest {
     return {
       byId: null,
       byAuthorTime: null,
       byAuthorKindTime: null,
       byKindTime: null,
+      byKindTimeAuthor: null,
       byTime: null,
       byTag: null,
       replaceable: null,
@@ -478,6 +854,9 @@ export class NostrEventStore {
     }
     if (manifest.byKindTime) {
       entries.push({ name: MANIFEST_BY_KIND_TIME, cid: manifest.byKindTime, size: 0, type: LinkType.Dir });
+    }
+    if (manifest.byKindTimeAuthor) {
+      entries.push({ name: MANIFEST_BY_KIND_TIME_AUTHOR, cid: manifest.byKindTimeAuthor, size: 0, type: LinkType.Dir });
     }
     if (manifest.byTime) {
       entries.push({ name: MANIFEST_BY_TIME, cid: manifest.byTime, size: 0, type: LinkType.Dir });

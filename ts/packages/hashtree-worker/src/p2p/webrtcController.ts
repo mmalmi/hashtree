@@ -57,6 +57,9 @@ const DEFAULT_REQUEST_DISPATCH: RequestDispatchConfig = {
   hedgeIntervalMs: 120,
 };
 const ACTIVE_REQUEST_RANK_PENALTY = 3;
+type HelloSignalingMessage = Extract<SignalingMessage, { type: 'hello' }> & {
+  hashGet?: boolean;
+};
 
 // ============================================================================
 // Types
@@ -222,7 +225,7 @@ export class WebRTCController {
   // ============================================================================
 
   private sendHello(): void {
-    const msg: SignalingMessage = {
+    const msg: HelloSignalingMessage = {
       type: 'hello',
       peerId: this.myPeerId.toString(),
       hashGet: true,
@@ -250,7 +253,7 @@ export class WebRTCController {
 
     switch (msg.type) {
       case 'hello':
-        await this.handleHello(senderPubkey, msg.hashGet !== false);
+        await this.handleHello(senderPubkey, (msg as HelloSignalingMessage).hashGet !== false);
         break;
 
       case 'offer':

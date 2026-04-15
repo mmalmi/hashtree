@@ -187,6 +187,12 @@ impl BackgroundNostrMirror {
         let _ = self.shutdown_tx.send(true);
     }
 
+    fn sync_publish_roots_from_store(&self) -> Result<()> {
+        self.note_public_events_root_change()?;
+        self.note_profile_search_root_change()?;
+        Ok(())
+    }
+
     pub async fn run(&self) -> Result<()> {
         if self.config.relays.is_empty() || self.config.max_follow_distance == 0 {
             return Ok(());
@@ -206,8 +212,7 @@ impl BackgroundNostrMirror {
         tokio::time::sleep(MIRROR_STARTUP_DELAY).await;
         tokio::time::sleep(MIRROR_CONNECT_SETTLE_DELAY).await;
         let live_since = Timestamp::now();
-        self.note_public_events_root_change()?;
-        self.note_profile_search_root_change()?;
+        self.sync_publish_roots_from_store()?;
 
         let initial_authors = self.collect_authors()?;
         if initial_authors.is_empty() {
@@ -289,6 +294,7 @@ impl BackgroundNostrMirror {
                     }
                 }
                 _ = publish_interval.tick() => {
+                    self.sync_publish_roots_from_store()?;
                     if let Err(err) = self.flush_live_events().await {
                         warn!("Nostr mirror live event flush failed: {:#}", err);
                     }
@@ -342,6 +348,12 @@ impl BackgroundNostrMirror {
         if let Err(err) = self.flush_live_events().await {
             warn!(
                 "Nostr mirror live event flush failed during shutdown: {:#}",
+                err
+            );
+        }
+        if let Err(err) = self.sync_publish_roots_from_store() {
+            warn!(
+                "Nostr mirror root-state refresh failed during shutdown: {:#}",
                 err
             );
         }

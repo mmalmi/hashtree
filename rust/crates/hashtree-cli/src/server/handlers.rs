@@ -3,29 +3,29 @@ use super::mime::get_mime_type;
 use super::nostr_query::query_events_for_local_request;
 pub(super) use super::peer_status::{daemon_status, webrtc_peers};
 use super::request_paths::{
-    VirtualTreeRoot, parse_api_resolve_request_path, parse_bare_npub_request_path,
-    parse_mutable_htree_request_path, parse_resolve_request_path, parse_virtual_tree_root,
-    request_virtual_tree_root, should_fallback_to_virtual_host_index,
+    parse_api_resolve_request_path, parse_bare_npub_request_path, parse_mutable_htree_request_path,
+    parse_resolve_request_path, parse_virtual_tree_root, request_virtual_tree_root,
+    should_fallback_to_virtual_host_index, VirtualTreeRoot,
 };
 use super::ui::root_page;
 use crate::socialgraph;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, OriginalUri, Path, Query, State},
-    http::{Response, StatusCode, header},
+    http::{header, Response, StatusCode},
     response::{IntoResponse, Json},
 };
 use bytes::Bytes;
-use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
+use futures::FutureExt;
 use hashtree_core::{
-    Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Store, TreeEntry, from_hex,
-    nhash_decode, to_hex,
+    from_hex, nhash_decode, to_hex, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Store,
+    TreeEntry,
 };
 use hashtree_resolver::{
-    RootResolver,
     nostr::{NostrResolverConfig, NostrRootResolver},
+    RootResolver,
 };
 use nostr::{Filter as NostrFilter, FromBech32, Kind, PublicKey};
 use serde::Deserialize;
@@ -1178,7 +1178,7 @@ pub async fn serve_content_or_blob(
             // Query connected mesh peers
             if let Some((data, peer_id)) = query_webrtc_peers(webrtc_state, &hash_hex).await {
                 // Cache locally for future requests
-                if let Err(e) = state.store.put_blob(&data) {
+                if let Err(e) = state.store.put_cached_blob(&data) {
                     tracing::warn!("Failed to cache peer data: {}", e);
                 }
 
@@ -1198,7 +1198,7 @@ pub async fn serve_content_or_blob(
                 query_upstream_blossom(&state.upstream_blossom, &hash_hex).await
             {
                 // Cache locally for future requests
-                if let Err(e) = state.store.put_blob(&data) {
+                if let Err(e) = state.store.put_cached_blob(&data) {
                     tracing::warn!("Failed to cache upstream data: {}", e);
                 }
 

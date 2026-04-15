@@ -6,6 +6,7 @@ export const MANIFEST_BY_ID = 'by-id';
 export const MANIFEST_BY_AUTHOR_TIME = 'by-author-time';
 export const MANIFEST_BY_AUTHOR_KIND_TIME = 'by-author-kind-time';
 export const MANIFEST_BY_KIND_TIME = 'by-kind-time';
+export const MANIFEST_BY_KIND_TIME_AUTHOR = 'by-kind-time-author';
 export const MANIFEST_BY_TIME = 'by-time';
 export const MANIFEST_BY_TAG = 'by-tag';
 export const MANIFEST_REPLACEABLE = 'replaceable';
@@ -55,6 +56,10 @@ export function authorKindTimeKey(event: StoredNostrEvent): string {
 
 export function kindTimeKey(event: StoredNostrEvent): string {
   return `${padKind(event.kind)}:${reverseTimestamp(event.created_at)}:${event.id}`;
+}
+
+export function kindTimeAuthorKey(event: StoredNostrEvent): string {
+  return `${padKind(event.kind)}:${reverseTimestamp(event.created_at)}:${event.pubkey}:${event.id}`;
 }
 
 export function timeKey(event: StoredNostrEvent): string {

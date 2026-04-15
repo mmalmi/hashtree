@@ -94,6 +94,29 @@ describe('@hashtree/collection', () => {
     ]);
   });
 
+  it('streams by-id and key indexes without materializing the whole result set first', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, songDefinition);
+
+    await writer.put({ id: 'song-a', title: 'Midnight Orchard', artist: 'Ada' }, cidFromSeed(6));
+    await writer.put({ id: 'song-b', title: 'Sun Clock', artist: 'Ada' }, cidFromSeed(7));
+    await writer.put({ id: 'song-c', title: 'Silent Tide', artist: 'Bea' }, cidFromSeed(8));
+
+    const source = new CollectionSource(store, writer.manifest());
+    const byIdKeys: string[] = [];
+    for await (const result of source.streamQueryById({ prefix: 'song-', limit: 2 })) {
+      byIdKeys.push(result.key);
+    }
+
+    const artistKeys: string[] = [];
+    for await (const result of source.streamQueryIndex('artist', { prefix: 'artist:ada', limit: 1 })) {
+      artistKeys.push(result.key);
+    }
+
+    expect(byIdKeys).toEqual(['song-a', 'song-b']);
+    expect(artistKeys).toEqual(['artist:ada']);
+  });
+
   it('removes stale index entries when an item is replaced in batch', async () => {
     const store = new MemoryStore();
     const writer = new CollectionWriter(store, songDefinition);

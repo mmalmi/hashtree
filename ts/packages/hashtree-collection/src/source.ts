@@ -93,6 +93,26 @@ export class CollectionSource {
     return results;
   }
 
+  async *streamQueryById(options: { prefix?: string; limit?: number } = {}): AsyncGenerator<CollectionIndexLinkResult> {
+    if (!this.byIdRoot) {
+      return;
+    }
+
+    const limit = options.limit ?? Number.POSITIVE_INFINITY;
+    let emitted = 0;
+    const iterator = options.prefix
+      ? this.byIdIndex.prefixLinks(this.byIdRoot, options.prefix)
+      : this.byIdIndex.linksEntries(this.byIdRoot);
+
+    for await (const [key, cid] of iterator) {
+      yield { key, cid };
+      emitted += 1;
+      if (emitted >= limit) {
+        break;
+      }
+    }
+  }
+
   async search(indexName: string, query: string, options: SearchOptions = {}): Promise<SearchLinkResult[]> {
     const manifestIndex = this.manifest.indexes[indexName];
     if (!manifestIndex || manifestIndex.kind !== 'search') {
@@ -136,6 +156,35 @@ export class CollectionSource {
     }
 
     return results;
+  }
+
+  async *streamQueryIndex(
+    indexName: string,
+    options: { prefix?: string; limit?: number } = {},
+  ): AsyncGenerator<CollectionIndexLinkResult> {
+    const manifestIndex = this.manifest.indexes[indexName];
+    if (!manifestIndex) {
+      return;
+    }
+
+    const root = deserializeCid(manifestIndex.root);
+    if (!root) {
+      return;
+    }
+
+    const limit = options.limit ?? Number.POSITIVE_INFINITY;
+    let emitted = 0;
+    const iterator = options.prefix
+      ? this.linkIndex.prefixLinks(root, options.prefix)
+      : this.linkIndex.linksEntries(root);
+
+    for await (const [key, cid] of iterator) {
+      yield { key, cid };
+      emitted += 1;
+      if (emitted >= limit) {
+        break;
+      }
+    }
   }
 
   getSearchManifestIndex(indexName: string): CollectionSearchManifestIndex | null {

@@ -504,7 +504,7 @@ impl SocialGraphStore {
         self.profile_index.search_root()
     }
 
-    pub(crate) fn public_events_root(&self) -> Result<Option<Cid>> {
+    pub fn public_events_root(&self) -> Result<Option<Cid>> {
         self.public_events.events_root()
     }
 
@@ -576,6 +576,48 @@ impl SocialGraphStore {
             .len();
         self.rebuild_profile_index_for_events(&events)?;
         Ok(latest_count)
+    }
+
+    pub fn rebuild_event_indexes_from_stored_events(&self) -> Result<(usize, usize)> {
+        let public_count =
+            self.rebuild_event_index_bucket_from_stored_events(&self.public_events)?;
+        let ambient_count =
+            self.rebuild_event_index_bucket_from_stored_events(&self.ambient_events)?;
+        self.rebuild_profile_index_from_stored_events()?;
+        Ok((public_count, ambient_count))
+    }
+
+    fn rebuild_event_index_bucket_from_stored_events(
+        &self,
+        bucket: &EventIndexBucket,
+    ) -> Result<usize> {
+        let Some(root) = bucket.events_root()? else {
+            bucket.write_events_root(None)?;
+            return Ok(0);
+        };
+
+        let manifest = block_on(bucket.event_store.get_manifest(Some(&root)))
+            .map_err(map_event_store_error)?;
+        if manifest.by_kind_time_author.is_none() {
+            let next_root = block_on(bucket.event_store.upgrade_manifest_indexes(Some(&root)))
+                .map_err(map_event_store_error)?;
+            if next_root.as_ref() != Some(&root) {
+                bucket.write_events_root(next_root.as_ref())?;
+                return Ok(0);
+            }
+        }
+
+        let stored = block_on(
+            bucket
+                .event_store
+                .list_recent_lossy(Some(&root), ListEventsOptions::default()),
+        )
+        .map_err(map_event_store_error)?;
+        let count = stored.len();
+        let next_root =
+            block_on(bucket.event_store.build(None, stored)).map_err(map_event_store_error)?;
+        bucket.write_events_root(next_root.as_ref())?;
+        Ok(count)
     }
 
     fn update_profile_index_for_events(&self, events: &[Event]) -> Result<()> {

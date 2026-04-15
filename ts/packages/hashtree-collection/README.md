@@ -2,6 +2,8 @@
 
 Immutable content-addressed collections for hashtree.
 
+For app-builder guidance and common pitfalls, see [../../GETTING_STARTED.md](../../GETTING_STARTED.md).
+
 This package adds a small layer on top of `@hashtree/index`:
 
 - canonical `byId` roots
@@ -11,7 +13,7 @@ This package adds a small layer on top of `@hashtree/index`:
 - published source manifests
 - federated search across many source manifests
 
-It is meant for decentralized app data such as personal catalogs, followed-user datasets, and local merged views.
+It is meant for decentralized app data such as personal catalogs, followed-user datasets, local merged views, and broader platform-style apps where many publishers own their own records.
 
 ## Design
 
@@ -33,6 +35,25 @@ In practice, that means a collection source should be thought of as:
 - a manifest that advertises those roots
 
 The current package focuses on the index and manifest layer. It does not try to be a full database.
+
+## Platform Apps
+
+This package is intended to be the generic data/index layer for apps that used to default to centralized "platform" backends.
+
+Examples:
+
+- marketplace listings
+- room or apartment inventories
+- ride availability and dispatch inputs
+- booking slots and service catalogs
+- jobs, offers, menus, and local reputation projections
+
+The decentralized pattern is:
+
+- each participant publishes their own source
+- canonical state stays source-owned
+- browse/search/trust are local derived views
+- federated query replaces the one global SQL table
 
 ## Raw Data vs Projections
 
