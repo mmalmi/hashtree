@@ -21,7 +21,7 @@ import { clearMemoryCache, initTreeRootCache, setCachedRoot } from '../src/relay
 const NPUB = 'npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk';
 const PUBKEY = '1'.repeat(64);
 const ROOT_HASH = '2'.repeat(64);
-const EXACT_HASH = '3'.repeat(64);
+const UPDATED_HASH = '3'.repeat(64);
 const CHILD: CID = { hash: Uint8Array.from({ length: 32 }, (_, index) => index + 1) };
 
 class FakeWebSocket {
@@ -91,7 +91,7 @@ describe('rootResolver capability', () => {
     delete globalThis.WebSocket;
   });
 
-  it('returns an exact tree match without resolving a subpath', async () => {
+  it('returns a tree root without resolving a subpath', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
     socketPlanMock.mockImplementation((socket: FakeWebSocket, url: string) => {
       if (url === 'wss://relay.example') {
@@ -99,36 +99,36 @@ describe('rootResolver capability', () => {
           .filter(([relayUrl]) => relayUrl === 'wss://relay.example')
           .map(([, data]) => JSON.parse(data as string));
         const request = requestMessages[requestMessages.length - 1];
-        socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog/root.json', EXACT_HASH)]);
+        socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog', ROOT_HASH)]);
       }
     });
 
     const resolvePath = vi.fn();
-    const resolved = await resolveRootPathFromRelays({ resolvePath }, ['wss://relay.example'], NPUB, 'audio-catalog/root.json');
+    const resolved = await resolveRootPathFromRelays({ resolvePath }, ['wss://relay.example'], NPUB, 'audio-catalog');
 
-    expect(toHex(resolved!.hash)).toBe(EXACT_HASH);
+    expect(toHex(resolved!.hash)).toBe(ROOT_HASH);
     expect(resolvePath).not.toHaveBeenCalled();
     expect(socketSendMock).toHaveBeenCalled();
   });
 
-  it('returns a cached exact tree match without opening relay subscriptions', async () => {
+  it('returns a cached tree root without opening relay subscriptions', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
-    await setCachedRoot(NPUB, 'audio-catalog/root.json', { hash: fromHex(EXACT_HASH) });
+    await setCachedRoot(NPUB, 'audio-catalog', { hash: fromHex(ROOT_HASH) });
 
     const resolvePath = vi.fn();
     const resolved = await resolveRootPathFromRelays(
       { resolvePath },
       ['wss://relay.example'],
       NPUB,
-      'audio-catalog/root.json',
+      'audio-catalog',
     );
 
-    expect(toHex(resolved!.hash)).toBe(EXACT_HASH);
+    expect(toHex(resolved!.hash)).toBe(ROOT_HASH);
     expect(resolvePath).not.toHaveBeenCalled();
     expect(socketSendMock).not.toHaveBeenCalled();
   });
 
-  it('falls back to the tree root and resolves the remaining subpath', async () => {
+  it('resolves a subpath from the fetched tree root', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
     socketPlanMock.mockImplementation((socket: FakeWebSocket, url: string) => {
       if (url === 'wss://relay.example') {
@@ -162,6 +162,25 @@ describe('rootResolver capability', () => {
     expect(socketSendMock).toHaveBeenCalled();
   });
 
+  it('resolves a subpath from a cached tree root without opening relay subscriptions', async () => {
+    decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
+    await setCachedRoot(NPUB, 'audio-catalog', { hash: fromHex(ROOT_HASH) });
+
+    const resolvePath = vi.fn().mockResolvedValue({ cid: CHILD });
+    const resolved = await resolveRootPathFromRelays(
+      { resolvePath },
+      ['wss://relay.example'],
+      NPUB,
+      'audio-catalog/root.json',
+    );
+
+    expect(resolved).toEqual(CHILD);
+    expect(resolvePath).toHaveBeenCalledTimes(1);
+    expect(resolvePath).toHaveBeenCalledWith(expect.objectContaining({ hash: expect.any(Uint8Array) }), ['root.json']);
+    expect(toHex((resolvePath.mock.calls[0]![0] as CID).hash)).toBe(ROOT_HASH);
+    expect(socketSendMock).not.toHaveBeenCalled();
+  });
+
   it('waits for a newer event that arrives before the query window closes', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
     socketPlanMock.mockImplementation((socket: FakeWebSocket, url: string) => {
@@ -172,9 +191,9 @@ describe('rootResolver capability', () => {
         .filter(([relayUrl]) => relayUrl === 'wss://relay.example')
         .map(([, data]) => JSON.parse(data as string));
       const request = requestMessages[requestMessages.length - 1];
-      socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog/root.json', '5'.repeat(64), 100)]);
+      socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog', ROOT_HASH, 100)]);
       setTimeout(() => {
-        socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog/root.json', '6'.repeat(64), 200)]);
+        socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog', UPDATED_HASH, 200)]);
       }, 20);
     });
 
@@ -182,31 +201,31 @@ describe('rootResolver capability', () => {
       { resolvePath: vi.fn() },
       ['wss://relay.example'],
       NPUB,
-      'audio-catalog/root.json',
+      'audio-catalog',
       200,
       50,
     );
 
     const resolved = await resolvePromise;
 
-    expect(toHex(resolved!.hash)).toBe('6'.repeat(64));
+    expect(toHex(resolved!.hash)).toBe(UPDATED_HASH);
     expect(socketSendMock).toHaveBeenCalled();
   });
 
   it('returns a cached initial root immediately for live watches', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
-    await setCachedRoot(NPUB, 'audio-catalog/root.json', { hash: fromHex(EXACT_HASH) });
+    await setCachedRoot(NPUB, 'audio-catalog', { hash: fromHex(ROOT_HASH) });
 
     const onUpdate = vi.fn();
     const watch = await watchRootPathFromRelays(
       { resolvePath: vi.fn() },
       ['wss://relay.example'],
       NPUB,
-      'audio-catalog/root.json',
+      'audio-catalog',
       onUpdate,
     );
 
-    expect(toHex(watch.initialCid!.hash)).toBe(EXACT_HASH);
+    expect(toHex(watch.initialCid!.hash)).toBe(ROOT_HASH);
     await Promise.resolve();
     expect(socketSendMock).toHaveBeenCalled();
     expect(onUpdate).not.toHaveBeenCalled();

@@ -8,8 +8,16 @@ export interface ParsedRootPath {
   subPath: string[];
 }
 
+function safeDecodePathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 export function parseRootPath(path?: string): ParsedRootPath {
-  const pathParts = path?.split('/').filter(Boolean) ?? [];
+  const pathParts = path?.split('/').filter(Boolean).map(safeDecodePathSegment) ?? [];
   return {
     treeName: pathParts[0] || 'public',
     subPath: pathParts.slice(1),
@@ -22,17 +30,7 @@ export async function resolveRootPath(
   path?: string,
   timeoutMs: number = DEFAULT_ROOT_PATH_RESOLVE_TIMEOUT_MS,
 ): Promise<CID | null> {
-  const exactTreeName = path?.split('/').filter(Boolean).join('/') || 'public';
-  const exactRootCid = await resolveTreeRootNow(npub, exactTreeName, timeoutMs);
-  if (exactRootCid) {
-    return exactRootCid;
-  }
-
   const { treeName, subPath } = parseRootPath(path);
-  if (subPath.length === 0) {
-    return null;
-  }
-
   const rootCid = await resolveTreeRootNow(npub, treeName, timeoutMs);
   if (!rootCid) {
     return null;

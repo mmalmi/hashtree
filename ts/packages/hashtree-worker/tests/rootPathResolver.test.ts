@@ -20,25 +20,23 @@ describe('rootPathResolver', () => {
     resolveTreeRootNow.mockReset();
   });
 
-  it('actively resolves a missing root instead of returning null immediately', async () => {
-    resolveTreeRootNow
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(ROOT);
+  it('resolves a subpath from the fetched tree root', async () => {
+    resolveTreeRootNow.mockResolvedValue(ROOT);
     const resolvePath = vi.fn().mockResolvedValue({ cid: CHILD });
 
     await expect(resolveRootPath({ resolvePath }, NPUB, 'videos/Mine Bombers in-game music'))
       .resolves.toEqual(CHILD);
 
-    expect(resolveTreeRootNow).toHaveBeenNthCalledWith(1, NPUB, 'videos/Mine Bombers in-game music', DEFAULT_ROOT_PATH_RESOLVE_TIMEOUT_MS);
+    expect(resolveTreeRootNow).toHaveBeenCalledTimes(1);
     expect(resolveTreeRootNow).toHaveBeenCalledWith(NPUB, 'videos', DEFAULT_ROOT_PATH_RESOLVE_TIMEOUT_MS);
     expect(resolvePath).toHaveBeenCalledWith(ROOT, ['Mine Bombers in-game music']);
   });
 
-  it('returns the exact tree root when the full path is itself the tree name', async () => {
+  it('returns the tree root when the path points at the tree itself', async () => {
     const resolvePath = vi.fn();
     resolveTreeRootNow.mockResolvedValue(ROOT);
 
-    await expect(resolveRootPath({ resolvePath }, NPUB, 'videos/Mine Bombers in-game music')).resolves.toEqual(ROOT);
+    await expect(resolveRootPath({ resolvePath }, NPUB, 'videos')).resolves.toEqual(ROOT);
 
     expect(resolvePath).not.toHaveBeenCalled();
   });
@@ -56,6 +54,10 @@ describe('rootPathResolver', () => {
       treeName: 'videos',
       subPath: ['Music', 'video_123'],
     });
+    expect(parseRootPath('videos/Music%20video')).toEqual({
+      treeName: 'videos',
+      subPath: ['Music video'],
+    });
     expect(parseRootPath()).toEqual({
       treeName: 'public',
       subPath: [],
@@ -63,13 +65,20 @@ describe('rootPathResolver', () => {
   });
 
   it('resolves nested paths relative to the fetched root', async () => {
-    resolveTreeRootNow
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(ROOT);
+    resolveTreeRootNow.mockResolvedValue(ROOT);
     const resolvePath = vi.fn().mockResolvedValue({ cid: CHILD });
 
-    await expect(resolveRootPath({ resolvePath }, NPUB, 'repo/src/index.ts')).resolves.toEqual(CHILD);
+    await expect(resolveRootPath({ resolvePath }, NPUB, 'repo/src%20dir/index.ts')).resolves.toEqual(CHILD);
 
-    expect(resolvePath).toHaveBeenCalledWith(ROOT, ['src', 'index.ts']);
+    expect(resolveTreeRootNow).toHaveBeenCalledWith(NPUB, 'repo', DEFAULT_ROOT_PATH_RESOLVE_TIMEOUT_MS);
+    expect(resolvePath).toHaveBeenCalledWith(ROOT, ['src dir', 'index.ts']);
+  });
+
+  it('returns null when the tree root cannot be resolved', async () => {
+    resolveTreeRootNow.mockResolvedValue(null);
+
+    await expect(resolveRootPath({ resolvePath: vi.fn() }, NPUB, 'videos/Mine Bombers in-game music')).resolves.toBeNull();
+
+    expect(resolveTreeRootNow).toHaveBeenCalledWith(NPUB, 'videos', DEFAULT_ROOT_PATH_RESOLVE_TIMEOUT_MS);
   });
 });
