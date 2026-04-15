@@ -1471,6 +1471,9 @@ mod tests {
     const LIVE_PHOTOPEA_SMOKE_MANIFEST_URL: &str = "https://www.photopea.com/manifest.json";
     const LIVE_EXCALIDRAW_SMOKE_URL: &str = "https://excalidraw.com/";
     const LIVE_EXCALIDRAW_SMOKE_MANIFEST_URL: &str = "https://excalidraw.com/manifest.webmanifest";
+    const LIVE_FASTMAIL_SMOKE_URL: &str = "https://app.fastmail.com/";
+    const LIVE_FASTMAIL_SMOKE_MANIFEST_PREFIX: &str = "https://app.fastmail.com/static/jmapui/";
+    const LIVE_FASTMAIL_SMOKE_MANIFEST_SUFFIX: &str = "/app.webmanifest";
 
     fn split_htree_nhash_url(url: &str) -> (String, String) {
         let trimmed = url.strip_prefix("htree://").expect("htree:// url");
@@ -2080,5 +2083,121 @@ mod tests {
                 .expect("screenshot src");
             assert!(src.starts_with("screenshots/"));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "live network smoke test against app.fastmail.com"]
+    async fn installs_live_fastmail_pwa_with_protocol_handlers_and_shortcuts() {
+        let fetched = fetch_pwa(LIVE_FASTMAIL_SMOKE_URL).await.unwrap();
+        let temp_dir = tempdir().unwrap();
+        let store = HashtreeStore::new(temp_dir.path()).unwrap();
+
+        let installed = install_site_pwa_to_store(&store, LIVE_FASTMAIL_SMOKE_URL)
+            .await
+            .unwrap();
+
+        assert_eq!(installed.name, "Fastmail");
+        assert_eq!(installed.source_app_id, None);
+        assert_eq!(installed.source_url, LIVE_FASTMAIL_SMOKE_URL);
+        assert!(
+            installed
+                .source_manifest_url
+                .starts_with(LIVE_FASTMAIL_SMOKE_MANIFEST_PREFIX)
+        );
+        assert!(
+            installed
+                .source_manifest_url
+                .ends_with(LIVE_FASTMAIL_SMOKE_MANIFEST_SUFFIX)
+        );
+        assert_eq!(
+            installed.description.as_deref(),
+            Some("Email + calendar made better")
+        );
+        assert_eq!(installed.display_mode.as_deref(), Some("standalone"));
+        assert!(installed.launch_url.starts_with("htree://nhash1"));
+        assert!(installed.launch_url.ends_with("/mail/Inbox/index.html"));
+
+        let icon_url = installed.icon_url.clone().expect("installed icon url");
+        let (launch_nhash, _launch_path) = split_htree_nhash_url(&installed.launch_url);
+        let (icon_nhash, icon_path) = split_htree_nhash_url(&icon_url);
+        assert_eq!(icon_nhash, launch_nhash);
+        assert!(icon_path.starts_with("/static/appicons/"));
+        assert!(icon_path.ends_with(".png"));
+
+        let launch_path = fetched.launch_reference.trim_start_matches('/');
+        let launch_html = String::from_utf8(
+            fetched
+                .assets
+                .iter()
+                .find(|asset| asset.path == launch_path)
+                .expect("launch html asset")
+                .data
+                .clone(),
+        )
+        .unwrap();
+        assert!(launch_html.contains("app.webmanifest"));
+
+        let base_url = Url::parse(&installed.source_url).unwrap();
+        let manifest_url = Url::parse(&installed.source_manifest_url).unwrap();
+        let manifest_path = url_to_path(&manifest_url, &base_url);
+        let manifest: Value = serde_json::from_slice(
+            &fetched
+                .assets
+                .iter()
+                .find(|asset| asset.path == manifest_path)
+                .expect("manifest asset")
+                .data,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest.get("start_url").and_then(Value::as_str),
+            Some("../../../mail/Inbox/index.html")
+        );
+        let protocol_handlers = manifest["protocol_handlers"]
+            .as_array()
+            .expect("protocol_handlers array");
+        assert_eq!(protocol_handlers.len(), 1);
+        assert_eq!(
+            protocol_handlers[0].get("protocol").and_then(Value::as_str),
+            Some("mailto")
+        );
+        assert_eq!(
+            protocol_handlers[0].get("url").and_then(Value::as_str),
+            Some("../../../mail/compose?mailto=%s")
+        );
+
+        let shortcuts = manifest["shortcuts"].as_array().expect("shortcuts array");
+        assert_eq!(shortcuts.len(), 4);
+        let shortcut_pairs: Vec<(String, String)> = shortcuts
+            .iter()
+            .map(|shortcut| {
+                (
+                    shortcut
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .expect("shortcut name")
+                        .to_string(),
+                    shortcut
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .expect("shortcut url")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert!(shortcut_pairs.contains(&(
+            "Compose".to_string(),
+            "../../../mail/Inbox/compose".to_string()
+        )));
+        assert!(shortcut_pairs.contains(&("Mail".to_string(), "../../../mail/Inbox".to_string())));
+        assert!(shortcut_pairs.contains(&(
+            "Contacts".to_string(),
+            "../../../contacts/index.html".to_string()
+        )));
+        assert!(shortcut_pairs.contains(&(
+            "Calendar".to_string(),
+            "../../../calendar/index.html".to_string()
+        )));
     }
 }
