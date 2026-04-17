@@ -23,10 +23,12 @@ use crate::webrtc::WebRTCState;
 /// Sync priority levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SyncPriority {
-    /// Own trees - highest priority
-    Own = 0,
+    /// Explicitly pinned mutable refs - highest priority
+    Pinned = 0,
+    /// Own trees - high priority
+    Own = 1,
     /// Followed users' trees - lower priority
-    Followed = 1,
+    Followed = 2,
 }
 
 /// A tree to sync
@@ -98,6 +100,73 @@ struct TreeSubscription {
     last_synced: Option<Instant>,
 }
 
+fn build_exact_tree_filter(key: &str) -> Result<Filter> {
+    let (npub, tree_name) = key
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("Invalid pinned ref key: {}", key))?;
+    let author = PublicKey::from_bech32(npub)
+        .map_err(|_| anyhow::anyhow!("Invalid npub in pinned ref key: {}", key))?;
+
+    Ok(Filter::new()
+        .kind(Kind::Custom(30078))
+        .author(author)
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            vec![tree_name.to_string()],
+        )
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"]))
+}
+
+fn classify_sync_event(
+    key: &str,
+    author_hex: &str,
+    my_pubkey: &PublicKey,
+    pinned_refs: &HashSet<String>,
+    followed_authors: &HashSet<String>,
+) -> Option<SyncPriority> {
+    if pinned_refs.contains(key) {
+        return Some(SyncPriority::Pinned);
+    }
+
+    if author_hex == my_pubkey.to_hex() {
+        return Some(SyncPriority::Own);
+    }
+
+    if followed_authors.contains(author_hex) {
+        return Some(SyncPriority::Followed);
+    }
+
+    None
+}
+
+fn apply_synced_tree_update(store: &HashtreeStore, task: &SyncTask) -> Result<()> {
+    let (owner, name) = task
+        .key
+        .split_once('/')
+        .map(|(o, n)| (o.to_string(), Some(n)))
+        .unwrap_or((task.key.clone(), None));
+
+    let storage_priority = match task.priority {
+        SyncPriority::Pinned | SyncPriority::Own => PRIORITY_OWN,
+        SyncPriority::Followed => PRIORITY_FOLLOWED,
+    };
+
+    if task.priority == SyncPriority::Pinned {
+        store.pin(&task.cid.hash)?;
+    }
+
+    store.index_tree(
+        &task.cid.hash,
+        &owner,
+        name,
+        storage_priority,
+        Some(&task.key),
+    )?;
+
+    store.evict_if_needed()?;
+    Ok(())
+}
+
 /// Background sync service
 pub struct BackgroundSync {
     config: SyncConfig,
@@ -109,6 +178,12 @@ pub struct BackgroundSync {
     my_pubkey: PublicKey,
     /// Subscribed trees
     subscriptions: Arc<RwLock<HashMap<String, TreeSubscription>>>,
+    /// Followed authors that are allowed to generate sync tasks
+    followed_authors: Arc<RwLock<HashSet<String>>>,
+    /// Currently pinned mutable refs that should keep following updates
+    pinned_refs: Arc<RwLock<HashSet<String>>>,
+    /// Exact pinned refs already subscribed at the relay layer
+    subscribed_pinned_refs: Arc<RwLock<HashSet<String>>>,
     /// Sync queue
     queue: Arc<RwLock<VecDeque<SyncTask>>>,
     /// Currently syncing hashes
@@ -158,6 +233,9 @@ impl BackgroundSync {
             client,
             my_pubkey,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            followed_authors: Arc::new(RwLock::new(HashSet::new())),
+            pinned_refs: Arc::new(RwLock::new(HashSet::new())),
+            subscribed_pinned_refs: Arc::new(RwLock::new(HashSet::new())),
             queue: Arc::new(RwLock::new(VecDeque::new())),
             syncing: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
@@ -172,6 +250,8 @@ impl BackgroundSync {
 
         // Wait for relays to connect before subscribing
         tokio::time::sleep(Duration::from_secs(3)).await;
+
+        self.refresh_pinned_ref_subscriptions().await?;
 
         // Subscribe to own trees
         if self.config.sync_own {
@@ -251,35 +331,15 @@ impl BackgroundSync {
                                                 chunks_fetched,
                                                 bytes_fetched
                                             );
-
-                                            // Index the tree for eviction tracking
-                                            // Extract owner from key (format: "npub.../treename" or "pubkey/treename")
-                                            let (owner, name) = task.key.split_once('/')
-                                                .map(|(o, n)| (o.to_string(), Some(n)))
-                                                .unwrap_or((task.key.clone(), None));
-
-                                            // Map SyncPriority to storage priority
-                                            let storage_priority = match task.priority {
-                                                SyncPriority::Own => PRIORITY_OWN,
-                                                SyncPriority::Followed => PRIORITY_FOLLOWED,
-                                            };
-
-                                            if let Err(e) = store_clone.index_tree(
-                                                &task.cid.hash,
-                                                &owner,
-                                                name,
-                                                storage_priority,
-                                                Some(&task.key), // ref_key for replacing old versions
-                                            ) {
-                                                warn!("Failed to index tree {}: {}", &hash_hex[..12], e);
-                                            }
-
-                                            // Check if eviction is needed
-                                            if let Err(e) = store_clone.evict_if_needed() {
-                                                warn!("Eviction check failed: {}", e);
-                                            }
                                         } else {
-                                            tracing::debug!("Tree {} already synced", &hash_hex[..12]);
+                                            tracing::debug!(
+                                                "Tree {} already present locally; applying ref update",
+                                                &hash_hex[..12]
+                                            );
+                                        }
+
+                                        if let Err(e) = apply_synced_tree_update(&store_clone, &task) {
+                                            warn!("Failed to apply synced tree {}: {}", &hash_hex[..12], e);
                                         }
                                     }
                                     Err(e) => {
@@ -300,6 +360,7 @@ impl BackgroundSync {
         let mut notifications = self.client.notifications();
         let subscriptions = self.subscriptions.clone();
         let queue = self.queue.clone();
+        let mut pinned_refresh = tokio::time::interval(Duration::from_secs(5));
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
@@ -308,6 +369,11 @@ impl BackgroundSync {
                     if *shutdown_rx.borrow() {
                         info!("Background sync shutting down");
                         break;
+                    }
+                }
+                _ = pinned_refresh.tick() => {
+                    if let Err(err) = self.refresh_pinned_ref_subscriptions().await {
+                        warn!("Failed to refresh pinned ref subscriptions: {}", err);
                     }
                 }
                 notification = notifications.recv() => {
@@ -321,6 +387,55 @@ impl BackgroundSync {
                             break;
                         }
                     }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_pinned_ref_subscriptions(&self) -> Result<()> {
+        let current_refs: HashSet<String> = self.store.list_pinned_refs()?.into_iter().collect();
+        {
+            let mut pinned_refs = self.pinned_refs.write().await;
+            *pinned_refs = current_refs.clone();
+        }
+
+        {
+            let mut subscriptions = self.subscriptions.write().await;
+            subscriptions.retain(|key, sub| {
+                sub.priority != SyncPriority::Pinned || current_refs.contains(key)
+            });
+        }
+
+        let new_refs: Vec<String> = {
+            let subscribed = self.subscribed_pinned_refs.read().await;
+            current_refs
+                .iter()
+                .filter(|key| !subscribed.contains(*key))
+                .cloned()
+                .collect()
+        };
+
+        for key in new_refs {
+            let filter = match build_exact_tree_filter(&key) {
+                Ok(filter) => filter,
+                Err(err) => {
+                    warn!("Ignoring invalid pinned ref {}: {}", key, err);
+                    continue;
+                }
+            };
+
+            match self.client.subscribe(vec![filter], None).await {
+                Ok(_) => {
+                    info!("Subscribed to pinned ref {}", key);
+                    self.subscribed_pinned_refs.write().await.insert(key);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to subscribe to pinned ref (will retry on refresh): {}",
+                        err
+                    );
                 }
             }
         }
@@ -364,8 +479,14 @@ impl BackgroundSync {
         };
 
         if contacts.is_empty() {
+            self.followed_authors.write().await.clear();
             info!("No contacts to subscribe to");
             return Ok(());
+        }
+
+        {
+            let mut followed_authors = self.followed_authors.write().await;
+            *followed_authors = contacts.iter().cloned().collect();
         }
 
         // Convert hex pubkeys to PublicKey
@@ -470,11 +591,19 @@ impl BackgroundSync {
             .unwrap_or_else(|_| event.pubkey.to_hex());
         let key = format!("{}/{}", npub, tree_name);
 
-        // Determine priority
-        let priority = if event.pubkey == self.my_pubkey {
-            SyncPriority::Own
-        } else {
-            SyncPriority::Followed
+        let author_hex = event.pubkey.to_hex();
+        let pinned_refs = self.pinned_refs.read().await.clone();
+        let followed_authors = self.followed_authors.read().await.clone();
+
+        // Determine priority and ignore stale events from refs we no longer care about.
+        let Some(priority) = classify_sync_event(
+            &key,
+            &author_hex,
+            &self.my_pubkey,
+            &pinned_refs,
+            &followed_authors,
+        ) else {
+            return;
         };
 
         // Check if we need to sync
@@ -565,4 +694,104 @@ pub struct SyncStatus {
     pub subscribed_trees: usize,
     pub queued_tasks: usize,
     pub active_syncs: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::Keys;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn upload_repo_root(
+        store: &HashtreeStore,
+        base: &std::path::Path,
+        name: &str,
+        body: &str,
+    ) -> Cid {
+        let dir = base.join(name);
+        fs::create_dir_all(&dir).expect("create repo dir");
+        fs::write(dir.join("README.md"), body).expect("write repo file");
+        let cid = store
+            .upload_dir_with_options(&dir, true)
+            .expect("upload repo directory");
+        let cid = Cid::parse(&cid).expect("parse repo cid");
+        store.unpin(&cid.hash).expect("clear upload auto-pin");
+        cid
+    }
+
+    #[test]
+    fn classify_sync_event_ignores_removed_pinned_refs() {
+        let keys = Keys::generate();
+        let author = Keys::generate().public_key();
+        let key = format!("{}/repo", author.to_bech32().expect("author npub"));
+
+        let priority = classify_sync_event(
+            &key,
+            &author.to_hex(),
+            &keys.public_key(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(priority, None);
+    }
+
+    #[test]
+    fn pinned_sync_update_replaces_old_root_pin() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::new(temp_dir.path().join("store")).expect("store");
+        let first_cid = upload_repo_root(&store, temp_dir.path(), "repo-v1", "version one\n");
+        let second_cid = upload_repo_root(&store, temp_dir.path(), "repo-v2", "version two\n");
+        let repo_key = format!(
+            "{}/repo",
+            Keys::generate()
+                .public_key()
+                .to_bech32()
+                .expect("repo owner npub")
+        );
+
+        let first_task = SyncTask {
+            key: repo_key.clone(),
+            cid: first_cid.clone(),
+            priority: SyncPriority::Pinned,
+            queued_at: Instant::now(),
+        };
+        apply_synced_tree_update(&store, &first_task).expect("apply first sync update");
+
+        assert!(store.is_pinned(&first_cid.hash).expect("first root pinned"));
+        assert_eq!(
+            store.get_tree_ref(&repo_key).expect("first tree ref"),
+            Some(first_cid.hash)
+        );
+
+        let second_task = SyncTask {
+            key: repo_key.clone(),
+            cid: second_cid.clone(),
+            priority: SyncPriority::Pinned,
+            queued_at: Instant::now(),
+        };
+        apply_synced_tree_update(&store, &second_task).expect("apply second sync update");
+
+        assert!(
+            !store
+                .is_pinned(&first_cid.hash)
+                .expect("first root pin status"),
+            "updating a pinned ref should unpin the superseded root"
+        );
+        assert!(store
+            .is_pinned(&second_cid.hash)
+            .expect("second root pinned"));
+        assert_eq!(
+            store.get_tree_ref(&repo_key).expect("updated tree ref"),
+            Some(second_cid.hash)
+        );
+        assert!(
+            store
+                .get_tree_meta(&first_cid.hash)
+                .expect("first meta lookup")
+                .is_none(),
+            "superseded pinned root should be unindexed after update"
+        );
+    }
 }

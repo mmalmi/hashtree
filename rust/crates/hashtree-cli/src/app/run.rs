@@ -177,18 +177,24 @@ async fn resolve_cid_input_for_pin(input: &str, data_dir: &PathBuf) -> Result<Re
     resolve_cid_input_with_opts(input, &opts).await
 }
 
+fn pinned_ref_key_for_input(input: &str) -> Option<String> {
+    let parsed_target = parse_published_target(input)?;
+    if parsed_target.path.is_some() {
+        return None;
+    }
+    Some(format!(
+        "{}/{}",
+        parsed_target.npub, parsed_target.tree_name
+    ))
+}
+
 pub(crate) fn stored_published_pin_hash(
     store: &HashtreeStore,
     input: &str,
 ) -> Result<Option<[u8; 32]>> {
-    let Some(parsed_target) = parse_published_target(input) else {
+    let Some(ref_key) = pinned_ref_key_for_input(input) else {
         return Ok(None);
     };
-    if parsed_target.path.is_some() {
-        return Ok(None);
-    }
-
-    let ref_key = format!("{}/{}", parsed_target.npub, parsed_target.tree_name);
     store.get_tree_ref(&ref_key)
 }
 
@@ -225,6 +231,9 @@ pub(crate) async fn pin_input_target(
         PRIORITY_OTHER,
         ref_key.as_deref(),
     )?;
+    if let Some(ref_key) = ref_key.as_deref() {
+        store.add_pinned_ref(ref_key)?;
+    }
 
     if let Some(parsed_target) = parsed_target.as_ref() {
         let pubkey_hex = hex::encode(parse_npub(&parsed_target.npub)?);
@@ -641,7 +650,11 @@ pub(crate) async fn run() -> Result<()> {
                 if config.sync.sync_followed {
                     sync_features.push("followed trees");
                 }
-                println!("Background sync: enabled ({})", sync_features.join(", "));
+                if sync_features.is_empty() {
+                    println!("Background sync: enabled");
+                } else {
+                    println!("Background sync: enabled ({})", sync_features.join(", "));
+                }
             }
 
             if config.server.enable_auth {
@@ -926,6 +939,9 @@ pub(crate) async fn run() -> Result<()> {
             let store = HashtreeStore::new(&data_dir)?;
             if let Some(hash) = stored_published_pin_hash(&store, &cid_input)? {
                 store.unpin(&hash)?;
+                if let Some(ref_key) = pinned_ref_key_for_input(&cid_input) {
+                    store.remove_pinned_ref(&ref_key)?;
+                }
                 println!("Unpinned: {}", hashtree_core::to_hex(&hash));
             } else {
                 let resolved = resolve_cid_input_for_pin(&cid_input, &data_dir).await?;
@@ -933,6 +949,9 @@ pub(crate) async fn run() -> Result<()> {
                 let fetcher = Fetcher::new(FetchConfig::default());
                 let target = resolve_load_target_cid(&fetcher, &store, &resolved, None).await?;
                 store.unpin(&target.hash)?;
+                if let Some(ref_key) = pinned_ref_key_for_input(&cid_input) {
+                    store.remove_pinned_ref(&ref_key)?;
+                }
                 println!("Unpinned: {}", format_cid_for_display(&target));
             }
         }

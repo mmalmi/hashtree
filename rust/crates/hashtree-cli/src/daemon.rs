@@ -336,8 +336,14 @@ impl EmbeddedBackgroundServicesController {
             });
         }
 
+        let has_pinned_refs = self
+            .store
+            .list_pinned_refs()
+            .map(|refs| !refs.is_empty())
+            .unwrap_or(false);
+
         if config.sync.enabled
-            && (config.sync.sync_own || config.sync.sync_followed)
+            && (config.sync.sync_own || config.sync.sync_followed || has_pinned_refs)
             && !active_relays.is_empty()
         {
             let sync_config = crate::sync::SyncConfig {

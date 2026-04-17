@@ -576,6 +576,8 @@ pub struct HashtreeStore {
     env: heed::Env,
     /// Set of pinned hashes (32-byte raw hashes, prevents garbage collection)
     pins: Database<Bytes, Unit>,
+    /// Mutable published refs that should stay subscribed and keep following updates
+    pinned_refs: Database<Str, Unit>,
     /// Blob ownership: sha256 (32 bytes) ++ pubkey (32 bytes) -> () (composite key for multi-owner)
     blob_owners: Database<Bytes, Unit>,
     /// Maps pubkey (32 bytes) -> blob metadata JSON (for blossom list)
@@ -671,7 +673,7 @@ impl HashtreeStore {
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(10 * 1024 * 1024 * 1024) // 10GB virtual address space
-                .max_dbs(8) // pins, blob_owners, pubkey_blobs, tree_meta, blob_trees, tree_refs, cached_roots, blobs
+                .max_dbs(9) // pins, pinned_refs, blob_owners, pubkey_blobs, tree_meta, blob_trees, tree_refs, cached_roots, blobs
                 .max_readers(LMDB_MAX_READERS)
                 .open(path)?
         };
@@ -679,6 +681,7 @@ impl HashtreeStore {
 
         let mut wtxn = env.write_txn()?;
         let pins = env.create_database(&mut wtxn, Some("pins"))?;
+        let pinned_refs = env.create_database(&mut wtxn, Some("pinned_refs"))?;
         let blob_owners = env.create_database(&mut wtxn, Some("blob_owners"))?;
         let pubkey_blobs = env.create_database(&mut wtxn, Some("pubkey_blobs"))?;
         let tree_meta = env.create_database(&mut wtxn, Some("tree_meta"))?;
@@ -748,6 +751,7 @@ impl HashtreeStore {
             base_path: path.to_path_buf(),
             env,
             pins,
+            pinned_refs,
             blob_owners,
             pubkey_blobs,
             tree_meta,
@@ -1396,6 +1400,36 @@ impl HashtreeStore {
     }
 
     // === Cached roots ===
+
+    /// Persist a mutable published ref that should stay subscribed.
+    pub fn add_pinned_ref(&self, key: &str) -> Result<()> {
+        let mut wtxn = self.env.write_txn()?;
+        self.pinned_refs.put(&mut wtxn, key, &())?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    /// Remove a mutable published ref from the live pinned set.
+    pub fn remove_pinned_ref(&self, key: &str) -> Result<bool> {
+        let mut wtxn = self.env.write_txn()?;
+        let removed = self.pinned_refs.delete(&mut wtxn, key)?;
+        wtxn.commit()?;
+        Ok(removed)
+    }
+
+    /// List mutable published refs that should stay subscribed.
+    pub fn list_pinned_refs(&self) -> Result<Vec<String>> {
+        let rtxn = self.env.read_txn()?;
+        let mut refs = Vec::new();
+
+        for item in self.pinned_refs.iter(&rtxn)? {
+            let (key, _) = item?;
+            refs.push(key.to_string());
+        }
+
+        refs.sort();
+        Ok(refs)
+    }
 
     /// Get cached root for a pubkey/tree_name pair
     pub fn get_cached_root(&self, pubkey_hex: &str, tree_name: &str) -> Result<Option<CachedRoot>> {

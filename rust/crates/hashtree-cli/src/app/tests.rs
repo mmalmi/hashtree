@@ -978,6 +978,10 @@ async fn test_pin_published_repo_indexes_named_ref_and_unpins_stored_root() {
         Some(first_cid.hash)
     );
     assert_eq!(
+        store.list_pinned_refs().expect("list pinned refs"),
+        vec![repo_target.clone()]
+    );
+    assert_eq!(
         store.list_pins_with_names().expect("list pins")[0].name,
         repo_target
     );
@@ -1001,6 +1005,9 @@ async fn test_pin_published_repo_indexes_named_ref_and_unpins_stored_root() {
     store
         .unpin(&stored_hash)
         .expect("unpin stored published root");
+    store
+        .remove_pinned_ref(&repo_target)
+        .expect("remove pinned ref");
     assert!(
         !store
             .is_pinned(&first_cid.hash)
@@ -1012,5 +1019,12 @@ async fn test_pin_published_repo_indexes_named_ref_and_unpins_stored_root() {
             .is_pinned(&second_cid.hash)
             .expect("second root pin status"),
         "newer cached root should not be touched by unpinning the stored ref"
+    );
+    assert!(
+        store
+            .list_pinned_refs()
+            .expect("list pinned refs")
+            .is_empty(),
+        "unpinned published refs should be removed from the live pinned-ref set"
     );
 }
