@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use hashtree_cli::cashu::{
-    load_mint_balance, receive_payment_token, revoke_pending_payment, send_lightning_payment,
-    send_payment_token,
+    load_mint_balance, load_wallet_overview, receive_payment_token, revoke_pending_payment,
+    send_lightning_payment, send_payment_token,
 };
 use hashtree_cli::cashu_cli::{
     add_mint, list_mints, print_balance, remove_mint, resolve_selected_mint, set_default_mint,
@@ -99,6 +99,8 @@ enum MintCommands {
 
 #[derive(Subcommand)]
 enum InternalCommands {
+    Overview,
+    Mints,
     Balance {
         #[arg(long)]
         mint: String,
@@ -120,6 +122,24 @@ enum InternalCommands {
         #[arg(long)]
         operation_id: String,
     },
+    MintAdd {
+        url: String,
+        #[arg(long = "default")]
+        make_default: bool,
+    },
+    MintRemove {
+        url: String,
+    },
+    MintDefault {
+        url: String,
+    },
+}
+
+fn mint_state_json(config: &Config) -> serde_json::Value {
+    json!({
+        "accepted_mints": config.cashu.accepted_mints.clone(),
+        "default_mint": config.cashu.default_mint.clone(),
+    })
 }
 
 #[tokio::main]
@@ -160,6 +180,30 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Internal { command } => match command {
+            InternalCommands::Overview => {
+                let overview = load_wallet_overview(&data_dir, true).await?;
+                println!(
+                    "{}",
+                    json!({
+                        "totals": overview.totals.iter().map(|total| json!({
+                            "unit": total.unit,
+                            "balance": total.balance,
+                        })).collect::<Vec<_>>(),
+                        "entries": overview.entries.iter().map(|entry| json!({
+                            "mint_url": entry.mint_url,
+                            "unit": entry.unit,
+                            "balance": entry.balance,
+                        })).collect::<Vec<_>>(),
+                        "warnings": overview.warnings,
+                        "legacy_state_detected": overview.legacy_state_detected,
+                        "accepted_mints": config.cashu.accepted_mints.clone(),
+                        "default_mint": config.cashu.default_mint.clone(),
+                    })
+                );
+            }
+            InternalCommands::Mints => {
+                println!("{}", mint_state_json(&config));
+            }
             InternalCommands::Balance { mint } => {
                 let balance = load_mint_balance(&data_dir, &mint).await?;
                 println!("{}", serde_json::to_string(&balance)?);
@@ -182,6 +226,18 @@ async fn main() -> Result<()> {
             InternalCommands::Revoke { mint, operation_id } => {
                 let revoked_sat = revoke_pending_payment(&data_dir, &mint, &operation_id).await?;
                 println!("{}", json!({ "revoked_sat": revoked_sat }));
+            }
+            InternalCommands::MintAdd { url, make_default } => {
+                add_mint(&mut config, &url, make_default)?;
+                println!("{}", mint_state_json(&config));
+            }
+            InternalCommands::MintRemove { url } => {
+                remove_mint(&mut config, &url)?;
+                println!("{}", mint_state_json(&config));
+            }
+            InternalCommands::MintDefault { url } => {
+                set_default_mint(&mut config, &url)?;
+                println!("{}", mint_state_json(&config));
             }
         },
     }
@@ -248,6 +304,14 @@ mod tests {
 
     #[test]
     fn test_cli_parses_internal_commands() {
+        let cli = Cli::parse_from(["htree-cashu", "internal", "overview"]);
+        match cli.command {
+            Commands::Internal {
+                command: InternalCommands::Overview,
+            } => {}
+            _ => panic!("expected internal overview command"),
+        }
+
         let cli = Cli::parse_from([
             "htree-cashu",
             "internal",
@@ -291,6 +355,23 @@ mod tests {
                 assert!(token_stdin);
             }
             _ => panic!("expected internal receive command"),
+        }
+
+        let cli = Cli::parse_from([
+            "htree-cashu",
+            "internal",
+            "mint-add",
+            "https://mint.example",
+            "--default",
+        ]);
+        match cli.command {
+            Commands::Internal {
+                command: InternalCommands::MintAdd { url, make_default },
+            } => {
+                assert_eq!(url, "https://mint.example");
+                assert!(make_default);
+            }
+            _ => panic!("expected internal mint add command"),
         }
     }
 }
