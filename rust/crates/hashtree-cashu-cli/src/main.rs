@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use hashtree_cli::cashu::{
-    load_mint_balance, load_wallet_overview, receive_payment_token, revoke_pending_payment,
-    send_lightning_payment, send_payment_token,
+    load_mint_balance, load_wallet_activity, load_wallet_overview, receive_payment_token,
+    revoke_pending_payment, send_lightning_payment, send_payment_token,
 };
 use hashtree_cli::cashu_cli::{
     add_mint, list_mints, print_balance, remove_mint, resolve_selected_mint, set_default_mint,
@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
         Commands::Internal { command } => match command {
             InternalCommands::Overview => {
                 let overview = load_wallet_overview(&data_dir, true).await?;
+                let history = load_wallet_activity(&data_dir).await?;
                 println!(
                     "{}",
                     json!({
@@ -198,6 +199,21 @@ async fn main() -> Result<()> {
                         "legacy_state_detected": overview.legacy_state_detected,
                         "accepted_mints": config.cashu.accepted_mints.clone(),
                         "default_mint": config.cashu.default_mint.clone(),
+                        "history": history.iter().map(|entry| json!({
+                            "id": entry.id,
+                            "kind": entry.kind,
+                            "status": entry.status,
+                            "mint_url": entry.mint_url,
+                            "unit": entry.unit,
+                            "amount_sat": entry.amount_sat,
+                            "fee_sat": entry.fee_sat,
+                            "created_at_unix": entry.created_at_unix,
+                            "expires_at_unix": entry.expires_at_unix,
+                            "quote_id": entry.quote_id,
+                            "operation_id": entry.operation_id,
+                            "payment_request": entry.payment_request,
+                            "token": entry.token,
+                        })).collect::<Vec<_>>(),
                     })
                 );
             }

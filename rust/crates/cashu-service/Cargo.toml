@@ -10,7 +10,7 @@ description = "Reusable Cashu helper and wallet primitives for paid connectivity
 
 [features]
 default = []
-wallet = ["dep:cdk", "dep:cdk-sqlite", "dep:rand", "dep:url", "dep:hex"]
+wallet = ["dep:cdk", "dep:cdk-sqlite", "dep:rand", "dep:url", "dep:hex", "dep:uuid"]
 
 [dependencies]
 anyhow.workspace = true
@@ -24,6 +24,7 @@ cdk-sqlite = { version = "0.15.1", default-features = false, features = ["wallet
 hex = { workspace = true, optional = true }
 rand = { version = "0.8", optional = true }
 url = { version = "2", optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

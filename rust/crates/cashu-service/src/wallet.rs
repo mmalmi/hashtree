@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
+use cdk::cdk_database::WalletDatabase;
 use cdk::mint_url::MintUrl;
-use cdk::nuts::{CurrencyUnit, MeltQuoteState, PaymentMethod, Token};
+use cdk::nuts::{CurrencyUnit, MeltQuoteState, MintQuoteState, PaymentMethod, Token};
 use cdk::wallet::{ReceiveOptions, SendOptions, WalletRepository, WalletRepositoryBuilder};
 use cdk::Amount;
 use cdk_sqlite::WalletSqliteDatabase;
@@ -13,7 +14,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
+use uuid::Uuid;
 
 use crate::helper::{
     CashuLightningPayment, CashuMintBalance, CashuReceivedPayment, CashuSentPayment,
@@ -58,6 +61,52 @@ pub struct CashuTopupQuote {
     pub expiry_unix: u64,
 }
 
+const K_WALLET_ACTIVITY_PRIMARY_NAMESPACE: &str = "iris_wallet";
+const K_WALLET_ACTIVITY_SECONDARY_NAMESPACE: &str = "activity";
+const K_WALLET_ACTIVITY_KEY: &str = "entries";
+const K_MAX_WALLET_ACTIVITY_ENTRIES: usize = 200;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CashuWalletActivityKind {
+    TopUp,
+    LightningPayment,
+    TokenSend,
+    TokenReceive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CashuWalletActivityStatus {
+    Pending,
+    Complete,
+    Reclaimed,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CashuWalletActivityEntry {
+    pub id: String,
+    pub kind: CashuWalletActivityKind,
+    pub status: CashuWalletActivityStatus,
+    pub mint_url: String,
+    pub unit: String,
+    pub amount_sat: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_sat: Option<u64>,
+    pub created_at_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
 pub fn cashu_wallet_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("cashu")
 }
@@ -72,6 +121,203 @@ pub fn cashu_wallet_seed_path(data_dir: &Path) -> PathBuf {
 
 pub fn legacy_cashu_wallet_state_path(data_dir: &Path) -> PathBuf {
     data_dir.join("cashu-wallet.json")
+}
+
+fn wallet_activity_now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn wallet_activity_id() -> String {
+    let mut suffix = [0_u8; 4];
+    rand::thread_rng().fill_bytes(&mut suffix);
+    format!("{}-{}", wallet_activity_now_unix(), hex::encode(suffix))
+}
+
+fn sort_wallet_activity_entries(entries: &mut Vec<CashuWalletActivityEntry>) {
+    entries.sort_by(|left, right| {
+        right
+            .created_at_unix
+            .cmp(&left.created_at_unix)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    if entries.len() > K_MAX_WALLET_ACTIVITY_ENTRIES {
+        entries.truncate(K_MAX_WALLET_ACTIVITY_ENTRIES);
+    }
+}
+
+async fn open_wallet_localstore(data_dir: &Path) -> Result<Arc<WalletSqliteDatabase>> {
+    fs::create_dir_all(cashu_wallet_dir(data_dir))
+        .context("Failed to create Cashu wallet directory")?;
+    Ok(Arc::new(
+        WalletSqliteDatabase::new(cashu_wallet_db_path(data_dir))
+            .await
+            .context("Failed to open Cashu wallet database")?,
+    ))
+}
+
+async fn load_wallet_activity_entries_from_store(
+    localstore: &WalletSqliteDatabase,
+) -> Result<Vec<CashuWalletActivityEntry>> {
+    let stored = localstore
+        .kv_read(
+            K_WALLET_ACTIVITY_PRIMARY_NAMESPACE,
+            K_WALLET_ACTIVITY_SECONDARY_NAMESPACE,
+            K_WALLET_ACTIVITY_KEY,
+        )
+        .await
+        .context("Failed to read Cashu wallet activity")?;
+    let mut entries = match stored {
+        Some(bytes) if !bytes.is_empty() => {
+            serde_json::from_slice(&bytes).context("Failed to parse Cashu wallet activity")?
+        }
+        _ => Vec::new(),
+    };
+    sort_wallet_activity_entries(&mut entries);
+    Ok(entries)
+}
+
+async fn save_wallet_activity_entries_to_store(
+    localstore: &WalletSqliteDatabase,
+    entries: &mut Vec<CashuWalletActivityEntry>,
+) -> Result<()> {
+    sort_wallet_activity_entries(entries);
+    let encoded = serde_json::to_vec(entries).context("Failed to encode Cashu wallet activity")?;
+    localstore
+        .kv_write(
+            K_WALLET_ACTIVITY_PRIMARY_NAMESPACE,
+            K_WALLET_ACTIVITY_SECONDARY_NAMESPACE,
+            K_WALLET_ACTIVITY_KEY,
+            &encoded,
+        )
+        .await
+        .context("Failed to write Cashu wallet activity")?;
+    Ok(())
+}
+
+async fn append_wallet_activity_entry(
+    data_dir: &Path,
+    entry: CashuWalletActivityEntry,
+) -> Result<()> {
+    let localstore = open_wallet_localstore(data_dir).await?;
+    let mut entries = load_wallet_activity_entries_from_store(localstore.as_ref()).await?;
+    entries.push(entry);
+    save_wallet_activity_entries_to_store(localstore.as_ref(), &mut entries).await
+}
+
+async fn mark_wallet_activity_reclaimed(data_dir: &Path, operation_id: &str) -> Result<()> {
+    let localstore = open_wallet_localstore(data_dir).await?;
+    let mut entries = load_wallet_activity_entries_from_store(localstore.as_ref()).await?;
+    let mut changed = false;
+    for entry in &mut entries {
+        if entry.kind == CashuWalletActivityKind::TokenSend
+            && entry.operation_id.as_deref() == Some(operation_id)
+            && entry.status != CashuWalletActivityStatus::Reclaimed
+        {
+            entry.status = CashuWalletActivityStatus::Reclaimed;
+            changed = true;
+        }
+    }
+    if changed {
+        save_wallet_activity_entries_to_store(localstore.as_ref(), &mut entries).await?;
+    }
+    Ok(())
+}
+
+pub async fn load_wallet_activity(data_dir: &Path) -> Result<Vec<CashuWalletActivityEntry>> {
+    let localstore = open_wallet_localstore(data_dir).await?;
+    let mut entries = load_wallet_activity_entries_from_store(localstore.as_ref()).await?;
+    if entries.is_empty() {
+        return Ok(entries);
+    }
+
+    let repository = open_wallet_repository(data_dir).await?;
+    let mut wallets_by_mint = HashMap::new();
+    let mut mint_quotes_by_id = HashMap::new();
+
+    for wallet in repository.get_wallets().await {
+        for quote in wallet
+            .localstore
+            .get_mint_quotes()
+            .await
+            .context("Failed to load Cashu mint quotes for activity")?
+        {
+            mint_quotes_by_id.insert(quote.id.clone(), quote);
+        }
+        wallets_by_mint.insert(wallet.mint_url.to_string(), wallet);
+    }
+
+    let now_unix = wallet_activity_now_unix();
+    let mut changed = false;
+    for entry in &mut entries {
+        match entry.kind {
+            CashuWalletActivityKind::TopUp => {
+                let next_status = if let Some(quote_id) = entry.quote_id.as_deref() {
+                    match mint_quotes_by_id.get(quote_id) {
+                        Some(quote)
+                            if quote.state == MintQuoteState::Issued
+                                || quote.state == MintQuoteState::Paid =>
+                        {
+                            CashuWalletActivityStatus::Complete
+                        }
+                        Some(quote)
+                            if quote.state == MintQuoteState::Unpaid
+                                && quote.expiry != 0
+                                && quote.expiry < now_unix =>
+                        {
+                            CashuWalletActivityStatus::Expired
+                        }
+                        Some(_) => CashuWalletActivityStatus::Pending,
+                        None if entry
+                            .expires_at_unix
+                            .is_some_and(|expiry| expiry != 0 && expiry < now_unix) =>
+                        {
+                            CashuWalletActivityStatus::Expired
+                        }
+                        None => entry.status.clone(),
+                    }
+                } else {
+                    entry.status.clone()
+                };
+
+                if entry.status != next_status {
+                    entry.status = next_status;
+                    changed = true;
+                }
+            }
+            CashuWalletActivityKind::TokenSend
+                if entry.status == CashuWalletActivityStatus::Pending =>
+            {
+                let Some(operation_id) = entry.operation_id.as_deref() else {
+                    continue;
+                };
+                let Some(wallet) = wallets_by_mint.get(&entry.mint_url) else {
+                    continue;
+                };
+                let Ok(operation_uuid) = Uuid::parse_str(operation_id) else {
+                    continue;
+                };
+                let saga = wallet
+                    .localstore
+                    .get_saga(&operation_uuid)
+                    .await
+                    .context("Failed to load Cashu send saga for activity")?;
+                if saga.is_none() {
+                    entry.status = CashuWalletActivityStatus::Complete;
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if changed {
+        save_wallet_activity_entries_to_store(localstore.as_ref(), &mut entries).await?;
+    }
+
+    Ok(entries)
 }
 
 pub fn normalize_mint_url(raw: &str) -> Result<String> {
@@ -113,14 +359,8 @@ pub fn load_or_create_wallet_seed(path: &Path) -> Result<[u8; 64]> {
 }
 
 pub async fn open_wallet_repository(data_dir: &Path) -> Result<WalletRepository> {
-    fs::create_dir_all(cashu_wallet_dir(data_dir))
-        .context("Failed to create Cashu wallet directory")?;
     let seed = load_or_create_wallet_seed(&cashu_wallet_seed_path(data_dir))?;
-    let localstore = Arc::new(
-        WalletSqliteDatabase::new(cashu_wallet_db_path(data_dir))
-            .await
-            .context("Failed to open Cashu wallet database")?,
-    );
+    let localstore = open_wallet_localstore(data_dir).await?;
     let repository = WalletRepositoryBuilder::new()
         .localstore(localstore)
         .seed(seed)
@@ -219,14 +459,37 @@ pub async fn create_topup_quote(
         .await
         .context("Failed to create Cashu mint quote")?;
 
-    Ok(CashuTopupQuote {
+    let topup_quote = CashuTopupQuote {
         mint_url: normalized_mint,
         unit: CurrencyUnit::Sat.to_string(),
         amount: amount_sat,
         quote_id: quote.id,
         payment_request: quote.request,
         expiry_unix: quote.expiry,
-    })
+    };
+
+    append_wallet_activity_entry(
+        data_dir,
+        CashuWalletActivityEntry {
+            id: wallet_activity_id(),
+            kind: CashuWalletActivityKind::TopUp,
+            status: CashuWalletActivityStatus::Pending,
+            mint_url: topup_quote.mint_url.clone(),
+            unit: topup_quote.unit.clone(),
+            amount_sat,
+            fee_sat: None,
+            created_at_unix: wallet_activity_now_unix(),
+            expires_at_unix: Some(topup_quote.expiry_unix),
+            quote_id: Some(topup_quote.quote_id.clone()),
+            operation_id: None,
+            payment_request: Some(topup_quote.payment_request.clone()),
+            token: None,
+        },
+    )
+    .await
+    .context("Failed to record Cashu top-up activity")?;
+
+    Ok(topup_quote)
 }
 
 pub async fn load_mint_balance(data_dir: &Path, mint_url: &str) -> Result<CashuMintBalance> {
@@ -290,14 +553,37 @@ pub async fn send_payment_token(
         .await
         .context("Failed to create Cashu payment token")?;
 
-    Ok(CashuSentPayment {
+    let payment = CashuSentPayment {
         mint_url: normalized_mint,
         unit: CurrencyUnit::Sat.to_string(),
         amount_sat,
         send_fee_sat,
         operation_id,
         token: token.to_string(),
-    })
+    };
+
+    append_wallet_activity_entry(
+        data_dir,
+        CashuWalletActivityEntry {
+            id: wallet_activity_id(),
+            kind: CashuWalletActivityKind::TokenSend,
+            status: CashuWalletActivityStatus::Pending,
+            mint_url: payment.mint_url.clone(),
+            unit: payment.unit.clone(),
+            amount_sat: payment.amount_sat,
+            fee_sat: Some(payment.send_fee_sat),
+            created_at_unix: wallet_activity_now_unix(),
+            expires_at_unix: None,
+            quote_id: None,
+            operation_id: Some(payment.operation_id.clone()),
+            payment_request: None,
+            token: Some(payment.token.clone()),
+        },
+    )
+    .await
+    .context("Failed to record Cashu token activity")?;
+
+    Ok(payment)
 }
 
 pub async fn send_lightning_payment(
@@ -313,6 +599,26 @@ pub async fn send_lightning_payment(
 
     let mut payment = send_lightning_payment_with_wallet(&wallet, payment_request).await?;
     payment.mint_url = normalized_mint;
+    append_wallet_activity_entry(
+        data_dir,
+        CashuWalletActivityEntry {
+            id: wallet_activity_id(),
+            kind: CashuWalletActivityKind::LightningPayment,
+            status: CashuWalletActivityStatus::Complete,
+            mint_url: payment.mint_url.clone(),
+            unit: payment.unit.clone(),
+            amount_sat: payment.amount_sat,
+            fee_sat: Some(payment.fee_paid_sat),
+            created_at_unix: wallet_activity_now_unix(),
+            expires_at_unix: None,
+            quote_id: Some(payment.quote_id.clone()),
+            operation_id: None,
+            payment_request: Some(payment_request.to_string()),
+            token: None,
+        },
+    )
+    .await
+    .context("Failed to record Cashu Lightning payment activity")?;
     Ok(payment)
 }
 
@@ -342,11 +648,34 @@ pub async fn receive_payment_token(
         .await
         .context("Failed to receive Cashu payment token")?;
 
-    Ok(CashuReceivedPayment {
+    let payment = CashuReceivedPayment {
         mint_url: normalized_mint,
         unit: CurrencyUnit::Sat.to_string(),
         amount_sat: amount_received.to_u64(),
-    })
+    };
+
+    append_wallet_activity_entry(
+        data_dir,
+        CashuWalletActivityEntry {
+            id: wallet_activity_id(),
+            kind: CashuWalletActivityKind::TokenReceive,
+            status: CashuWalletActivityStatus::Complete,
+            mint_url: payment.mint_url.clone(),
+            unit: payment.unit.clone(),
+            amount_sat: payment.amount_sat,
+            fee_sat: None,
+            created_at_unix: wallet_activity_now_unix(),
+            expires_at_unix: None,
+            quote_id: None,
+            operation_id: None,
+            payment_request: None,
+            token: None,
+        },
+    )
+    .await
+    .context("Failed to record Cashu receive activity")?;
+
+    Ok(payment)
 }
 
 pub async fn revoke_pending_payment(
@@ -364,13 +693,17 @@ pub async fn revoke_pending_payment(
         .await
         .context("Failed to recover Cashu wallet state before revoking payment")?;
 
-    let operation_id = operation_id
+    let normalized_operation_id = operation_id.to_string();
+    let operation_id = normalized_operation_id
         .parse()
         .context("Invalid Cashu send operation id")?;
     let amount = wallet
         .revoke_send(operation_id)
         .await
         .context("Failed to revoke Cashu payment token")?;
+    mark_wallet_activity_reclaimed(data_dir, &normalized_operation_id)
+        .await
+        .context("Failed to record reclaimed Cashu token")?;
     Ok(amount.to_u64())
 }
 
@@ -882,6 +1215,85 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Invalid Cashu send operation id"));
+    }
+
+    #[tokio::test]
+    async fn test_wallet_activity_pending_topup_syncs_to_complete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mint_url: MintUrl = "https://mint.example".parse().unwrap();
+        let repository = open_wallet_repository(temp_dir.path()).await.unwrap();
+        let wallet = ensure_sat_wallet(&repository, &mint_url).await.unwrap();
+
+        let mut quote = cdk::wallet::MintQuote::new(
+            "quote-1".to_string(),
+            mint_url.clone(),
+            PaymentMethod::BOLT11,
+            Some(Amount::from(5_u64)),
+            CurrencyUnit::Sat,
+            "lnbc5n1p0test".to_string(),
+            wallet_activity_now_unix() + 300,
+            None,
+        );
+        quote.state = MintQuoteState::Issued;
+        wallet.localstore.add_mint_quote(quote).await.unwrap();
+
+        append_wallet_activity_entry(
+            temp_dir.path(),
+            CashuWalletActivityEntry {
+                id: "entry-topup".to_string(),
+                kind: CashuWalletActivityKind::TopUp,
+                status: CashuWalletActivityStatus::Pending,
+                mint_url: mint_url.to_string(),
+                unit: "sat".to_string(),
+                amount_sat: 5,
+                fee_sat: None,
+                created_at_unix: wallet_activity_now_unix(),
+                expires_at_unix: Some(wallet_activity_now_unix() + 300),
+                quote_id: Some("quote-1".to_string()),
+                operation_id: None,
+                payment_request: Some("lnbc5n1p0test".to_string()),
+                token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let history = load_wallet_activity(temp_dir.path()).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, CashuWalletActivityStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_wallet_activity_pending_send_syncs_to_complete_without_saga() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mint_url: MintUrl = "https://mint.example".parse().unwrap();
+        let repository = open_wallet_repository(temp_dir.path()).await.unwrap();
+        ensure_sat_wallet(&repository, &mint_url).await.unwrap();
+
+        append_wallet_activity_entry(
+            temp_dir.path(),
+            CashuWalletActivityEntry {
+                id: "entry-send".to_string(),
+                kind: CashuWalletActivityKind::TokenSend,
+                status: CashuWalletActivityStatus::Pending,
+                mint_url: mint_url.to_string(),
+                unit: "sat".to_string(),
+                amount_sat: 3,
+                fee_sat: Some(1),
+                created_at_unix: wallet_activity_now_unix(),
+                expires_at_unix: None,
+                quote_id: None,
+                operation_id: Some(Uuid::new_v4().to_string()),
+                payment_request: None,
+                token: Some("cashuBtoken".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let history = load_wallet_activity(temp_dir.path()).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, CashuWalletActivityStatus::Complete);
     }
 
     #[tokio::test]
