@@ -961,6 +961,71 @@ async fn test_forwarded_request_can_be_served_from_read_source() {
 }
 
 #[tokio::test]
+async fn test_blocked_requester_miss_can_still_be_served_from_read_source() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let requester = make_shared_test_node(
+        relay.clone(),
+        "requester-blocked-upstream",
+        MeshRoutingConfig::default(),
+    );
+    let gateway = make_shared_test_node(
+        relay,
+        "gateway-blocked-upstream",
+        MeshRoutingConfig {
+            cashu_payment_default_block_threshold: 1,
+            ..Default::default()
+        },
+    );
+    let nodes = [&requester, &gateway];
+
+    requester.transport.connect(&[]).await.expect("connect");
+    gateway.transport.connect(&[]).await.expect("connect");
+    requester.store.start().await.expect("start");
+    gateway.store.start().await.expect("start");
+    pump_test_network(&nodes, 24).await;
+
+    gateway
+        .store
+        .record_cashu_payment_default_from_peer("requester-blocked-upstream")
+        .await;
+
+    let payload = b"blocked-requester-upstream-data".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    let upstream_store = Arc::new(MemoryStore::new());
+    upstream_store
+        .put(hash, payload.clone())
+        .await
+        .expect("put upstream");
+    let calls = Arc::new(AtomicUsize::new(0));
+    gateway
+        .store
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "upstream",
+            upstream_store,
+            calls.clone(),
+            Duration::from_millis(10),
+        )) as Arc<dyn MeshReadSource>])
+        .await;
+
+    let result = run_get_with_pumps(requester.store.clone(), hash, &nodes).await;
+    assert_eq!(result, Some(payload.clone()));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        gateway
+            .local_store
+            .get(&hash)
+            .await
+            .expect("gateway local lookup"),
+        Some(payload),
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
 async fn test_forwarded_request_can_be_served_from_another_peer() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;

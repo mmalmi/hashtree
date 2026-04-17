@@ -15,6 +15,7 @@ import {
 export const DEFAULT_BLOSSOM_SERVERS: BlossomServerConfig[] = [];
 
 const MAX_CONCURRENT_READ_FETCHES = 32;
+const DEFAULT_FETCH_TIMEOUT_MS = 6_000;
 
 let activeReadFetches = 0;
 const pendingReadFetchWaiters: Array<() => void> = [];
@@ -105,12 +106,18 @@ export class BlossomTransport {
   private readonly signer: BlossomSigner;
   private readonly bandwidthTracker: BlossomBandwidthTracker;
   private readonly inflightFetches = new Map<string, Promise<Uint8Array | null>>();
+  private readonly fetchTimeoutMs: number;
   private store: BlossomStore;
 
-  constructor(servers?: BlossomServerConfig[], onBandwidthUpdate?: BlossomBandwidthUpdateHandler) {
+  constructor(
+    servers?: BlossomServerConfig[],
+    onBandwidthUpdate?: BlossomBandwidthUpdateHandler,
+    fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+  ) {
     this.servers = normalizeServers(servers);
     this.signer = createEphemeralSigner();
     this.bandwidthTracker = new BlossomBandwidthTracker(onBandwidthUpdate);
+    this.fetchTimeoutMs = fetchTimeoutMs;
     this.store = this.createStore(this.servers);
   }
 
@@ -169,7 +176,28 @@ export class BlossomTransport {
       return inflight;
     }
 
-    const pending = withReadFetchSlot(() => this.store.get(fromHex(hashHex)))
+    const pending = withReadFetchSlot(() => new Promise<Uint8Array | null>((resolve, reject) => {
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(null);
+      }, this.fetchTimeoutMs);
+
+      this.store.get(fromHex(hashHex))
+        .then((data) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve(data);
+        })
+        .catch((error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          reject(error);
+        });
+    }))
       .finally(() => {
         this.inflightFetches.delete(hashHex);
       });

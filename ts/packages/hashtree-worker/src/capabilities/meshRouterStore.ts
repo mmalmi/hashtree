@@ -14,6 +14,7 @@ const DEFAULT_DISPATCH: RequestDispatchConfig = {
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_500;
+const DEFAULT_PRIMARY_READ_TIMEOUT_MS = 300;
 const INITIAL_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 10_000;
 const SCORE_TIE_DELTA = 0.15;
@@ -39,6 +40,7 @@ export interface MeshRouterStoreConfig {
   sources?: MeshReadSource[];
   dispatch?: RequestDispatchConfig;
   requestTimeoutMs?: number;
+  primaryReadTimeoutMs?: number;
   primarySourceId?: string;
 }
 
@@ -115,6 +117,7 @@ export class MeshRouterStore implements Store {
   private readonly primarySourceId: string;
   private readonly dispatch: RequestDispatchConfig;
   private readonly requestTimeoutMs: number;
+  private readonly primaryReadTimeoutMs: number;
   private readonly sources = new Map<string, MeshReadSource>();
   private readonly statsBySource = new Map<string, SourceStats>();
   private readonly inflightReads = new Map<string, Promise<MeshRouterGetResult | null>>();
@@ -124,6 +127,7 @@ export class MeshRouterStore implements Store {
     this.primarySourceId = config.primarySourceId ?? 'primary';
     this.dispatch = config.dispatch ?? DEFAULT_DISPATCH;
     this.requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.primaryReadTimeoutMs = config.primaryReadTimeoutMs ?? DEFAULT_PRIMARY_READ_TIMEOUT_MS;
     this.setSources(config.sources ?? []);
   }
 
@@ -146,7 +150,7 @@ export class MeshRouterStore implements Store {
 
   async getDetailed(hash: Hash, options: MeshRouterGetOptions = {}): Promise<MeshRouterGetResult | null> {
     if (!options.skipPrimary) {
-      const local = await this.primary.get(hash);
+      const local = await this.readPrimary(hash);
       if (local) {
         return { data: local, sourceId: this.primarySourceId };
       }
@@ -186,6 +190,35 @@ export class MeshRouterStore implements Store {
 
   async delete(hash: Hash): Promise<boolean> {
     return this.primary.delete(hash);
+  }
+
+  private async readPrimary(hash: Hash): Promise<Uint8Array | null> {
+    if (this.primaryReadTimeoutMs <= 0) {
+      return await this.primary.get(hash);
+    }
+
+    return await new Promise<Uint8Array | null>((resolve) => {
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(null);
+      }, this.primaryReadTimeoutMs);
+
+      this.primary.get(hash)
+        .then((data) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve(data);
+        })
+        .catch(() => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve(null);
+        });
+    });
   }
 
   private pendingReadKey(hash: Hash, options: MeshRouterGetOptions): string {
@@ -269,9 +302,10 @@ export class MeshRouterStore implements Store {
       .then(async (data) => {
         const elapsedMs = Math.max(1, Date.now() - startedAt);
         if (data) {
+          const stableData = data.slice();
           this.recordSuccess(source.id, elapsedMs);
-          await this.primary.put(hash, data).catch(() => false);
-          return { sourceId: source.id, data };
+          await this.primary.put(hash, stableData).catch(() => false);
+          return { sourceId: source.id, data: stableData };
         }
 
         if (!task.timeoutRecorded) {

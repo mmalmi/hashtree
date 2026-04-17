@@ -26,7 +26,7 @@ import type {
 import { IdbBlobStorage } from './capabilities/idbStorage.js';
 import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blossomTransport.js';
 import { probeConnectivity } from './capabilities/connectivity.js';
-import { MeshRouterStore } from './capabilities/meshRouterStore.js';
+import { MeshRouterStore, type MeshRouterGetOptions } from './capabilities/meshRouterStore.js';
 import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
@@ -36,7 +36,8 @@ import { cloneTransferableBytes } from './transferableBytes.js';
 const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
-const P2P_FETCH_TIMEOUT_MS = 2_000;
+const P2P_FETCH_TIMEOUT_MS = 15_000;
+const PRIMARY_READ_TIMEOUT_MS = 300;
 
 export interface HashtreeWorkerMessageEndpoint {
   postMessage(message: WorkerResponse): void;
@@ -73,6 +74,7 @@ const activePutBlobStreams = new Map<string, {
     finalize(): Promise<{ hash: Hash; size: number; key?: Uint8Array }>;
   };
 }>();
+let typedArraySetDebugInstalled = false;
 
 interface MediaFileRequest {
   type: 'hashtree-file';
@@ -81,6 +83,8 @@ interface MediaFileRequest {
   path: string;
   start: number;
   end?: number;
+  rangeHeader?: string | null;
+  sizeHint?: number;
   mimeType?: string;
   download?: boolean;
   head?: boolean;
@@ -111,11 +115,261 @@ interface MediaErrorResponse {
   message: string;
 }
 
+interface ResolvedByteRange {
+  start: number;
+  endInclusive: number;
+}
+
+type ParsedHttpRange =
+  | { kind: 'range'; range: ResolvedByteRange }
+  | { kind: 'unsatisfiable' }
+  | { kind: 'unsupported' };
+
+function parseHttpByteRange(
+  rangeHeader: string | null | undefined,
+  totalSize: number,
+): ParsedHttpRange {
+  if (!rangeHeader) return { kind: 'unsupported' };
+  const bytesRange = rangeHeader.startsWith('bytes=')
+    ? rangeHeader.slice('bytes='.length)
+    : null;
+  if (!bytesRange || bytesRange.includes(',')) return { kind: 'unsupported' };
+  if (totalSize <= 0) return { kind: 'unsatisfiable' };
+
+  const parts = bytesRange.split('-', 2);
+  if (parts.length !== 2) return { kind: 'unsupported' };
+  const [startPart, endPart] = parts;
+
+  if (!startPart) {
+    const suffixLength = Number.parseInt(endPart, 10);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+      return { kind: 'unsatisfiable' };
+    }
+    const clampedSuffix = Math.min(suffixLength, totalSize);
+    return {
+      kind: 'range',
+      range: {
+        start: totalSize - clampedSuffix,
+        endInclusive: totalSize - 1,
+      },
+    };
+  }
+
+  const start = Number.parseInt(startPart, 10);
+  if (!Number.isFinite(start) || start < 0 || start >= totalSize) {
+    return { kind: 'unsatisfiable' };
+  }
+
+  const endInclusive = endPart ? Number.parseInt(endPart, 10) : totalSize - 1;
+  if (!Number.isFinite(endInclusive) || endInclusive < start) {
+    return { kind: 'unsatisfiable' };
+  }
+
+  return {
+    kind: 'range',
+    range: {
+      start,
+      endInclusive: Math.min(endInclusive, totalSize - 1),
+    },
+  };
+}
+
 const MEDIA_CHUNK_SIZE = 64 * 1024;
-const MESH_READ_TIMEOUT_MS = 30_000;
+// Match videoChunker's first chunk so startup buffering does not refetch the same encrypted media block.
+const OPEN_ENDED_RANGE_WINDOW_BYTES = 256 * 1024;
+const MESH_READ_TIMEOUT_MS = 20_000;
+const MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS = [100, 300, 900] as const;
+const STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS = [250, 1_000, 2_500, 5_000] as const;
+const PEER_SHARED_READ_SOURCE_IDS = ['blossom'] as const;
 
 function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function installTypedArraySetDebugHook(): void {
+  if (typedArraySetDebugInstalled) {
+    return;
+  }
+  const originalSet = Uint8Array.prototype.set;
+  Uint8Array.prototype.set = function patchedTypedArraySet(
+    source: ArrayLike<number>,
+    offset?: number,
+  ): void {
+    try {
+      return originalSet.call(this, source, offset);
+    } catch (error) {
+      emitDiagnostic('error', 'typed-array', 'set-failed', getErrorMessage(error), {
+        targetLength: typeof this?.length === 'number' ? this.length : null,
+        sourceLength: typeof source?.length === 'number' ? source.length : null,
+        offset: typeof offset === 'number' ? offset : 0,
+        stack: new Error().stack ?? null,
+      });
+      throw error;
+    }
+  };
+  typedArraySetDebugInstalled = true;
+}
+
+function isOpenEndedHttpByteRange(rangeHeader: string | null | undefined): boolean {
+  if (!rangeHeader) {
+    return false;
+  }
+  return /^bytes=\d+-$/i.test(rangeHeader.trim());
+}
+
+function isTransientMissingChunkError(error: unknown): boolean {
+  return getErrorMessage(error).toLowerCase().startsWith('missing chunk:');
+}
+
+function shouldSendMediaHeadersBeforeFirstChunk(mimeType: string | null | undefined): boolean {
+  const normalized = `${mimeType ?? ''}`.trim().toLowerCase();
+  return normalized.startsWith('audio/') || normalized.startsWith('video/');
+}
+
+async function waitForMediaRetry(ms: number): Promise<void> {
+  await new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
+async function readNextNonEmptyMediaChunk(
+  iterator: AsyncIterator<Uint8Array, void, unknown>,
+): Promise<Uint8Array | null> {
+  while (true) {
+    const next = await iterator.next();
+    if (next.done) {
+      return null;
+    }
+    if (next.value.byteLength > 0) {
+      return next.value;
+    }
+  }
+}
+
+async function readStartupMediaRangeWithRetries(
+  tree: HashTree,
+  cid: CID,
+  start: number,
+  endExclusive: number,
+): Promise<Uint8Array> {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const range = await tree.readFileRange(cid, start, endExclusive);
+      if (!range) {
+        throw new Error('File not found');
+      }
+      return range;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientMissingChunkError(error) || attempt >= STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      await waitForMediaRetry(STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS[attempt] ?? 0);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(getErrorMessage(lastError));
+}
+
+async function resolveMediaPathWithRetries(
+  tree: HashTree,
+  rootCid: CID,
+  requestedPath: string,
+  requestId: string,
+): Promise<Awaited<ReturnType<HashTree['resolvePath']>>> {
+  let resolved = await tree.resolvePath(rootCid, requestedPath);
+  if (resolved) {
+    return resolved;
+  }
+
+  for (let attempt = 0; attempt < MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS.length; attempt += 1) {
+    const delayMs = MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS[attempt] ?? 0;
+    emitDiagnostic('debug', 'media', 'path-resolve-retry', 'Retrying media path resolution after a transient directory miss', {
+      requestId,
+      path: requestedPath,
+      attempt: attempt + 1,
+      delayMs,
+    });
+    await waitForMediaRetry(delayMs);
+    resolved = await tree.resolvePath(rootCid, requestedPath);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+async function detectMediaDirectoryWithRetries(
+  tree: HashTree,
+  rootCid: CID,
+  requestedPath: string,
+  requestId: string,
+): Promise<boolean> {
+  let rootIsDirectory = await tree.isDirectory(rootCid);
+  if (rootIsDirectory) {
+    return true;
+  }
+
+  for (let attempt = 0; attempt < MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS.length; attempt += 1) {
+    const delayMs = MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS[attempt] ?? 0;
+    emitDiagnostic('debug', 'media', 'path-root-kind-retry', 'Retrying media root kind detection after a transient miss', {
+      requestId,
+      path: requestedPath,
+      attempt: attempt + 1,
+      delayMs,
+    });
+    await waitForMediaRetry(delayMs);
+    rootIsDirectory = await tree.isDirectory(rootCid);
+    if (rootIsDirectory) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function* readFileStreamWithRetries(
+  tree: HashTree,
+  cid: CID,
+  offset: number,
+  requestId: string,
+  prefetch: number = 2,
+): AsyncGenerator<Uint8Array> {
+  let nextOffset = Math.max(0, offset);
+  let attempt = 0;
+
+  while (true) {
+    try {
+      const stream = tree.readFileStream(cid, { offset: nextOffset, prefetch });
+      const iterator = stream[Symbol.asyncIterator]();
+      while (true) {
+        const chunk = await readNextNonEmptyMediaChunk(iterator);
+        if (!chunk) {
+          return;
+        }
+        nextOffset += chunk.byteLength;
+        attempt = 0;
+        yield chunk;
+      }
+    } catch (error) {
+      if (!isTransientMissingChunkError(error) || attempt >= STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      const delayMs = STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS[attempt] ?? 0;
+      emitDiagnostic('debug', 'media', 'stream-retry', 'Retrying media stream after a transient missing chunk', {
+        requestId,
+        offset: nextOffset,
+        attempt: attempt + 1,
+        delayMs,
+        error: getErrorMessage(error),
+      });
+      attempt += 1;
+      await waitForMediaRetry(delayMs);
+    }
+  }
 }
 
 const EMPTY_BLOSSOM_BANDWIDTH: BlossomBandwidthState = {
@@ -251,9 +505,18 @@ function nextRootWatchId(): string {
 
 async function requestP2PBlob(hashHex: string): Promise<Uint8Array | null> {
   const requestId = nextP2PFetchRequestId();
+  emitDiagnostic('debug', 'mesh', 'p2p-fetch-start', 'Requesting blob over P2P', {
+    requestId,
+    hashHex: hashHex.slice(0, 16),
+  });
   const data = await new Promise<Uint8Array | null>((resolve) => {
     const timeoutId = setTimeout(() => {
       pendingP2PFetches.delete(requestId);
+      emitDiagnostic('warn', 'mesh', 'p2p-fetch-timeout', 'P2P blob request timed out', {
+        requestId,
+        hashHex: hashHex.slice(0, 16),
+        timeoutMs: P2P_FETCH_TIMEOUT_MS,
+      });
       resolve(null);
     }, P2P_FETCH_TIMEOUT_MS);
     pendingP2PFetches.set(requestId, { resolve, timeoutId });
@@ -270,24 +533,96 @@ function resolveP2PFetch(requestId: string, data?: Uint8Array, error?: string): 
   pendingP2PFetches.delete(requestId);
 
   if (error || !data) {
+    emitDiagnostic('debug', 'mesh', 'p2p-fetch-miss', 'P2P blob request completed without data', {
+      requestId,
+      error: error ?? null,
+    });
     pending.resolve(null);
     return;
   }
 
+  emitDiagnostic('debug', 'mesh', 'p2p-fetch-hit', 'Received blob data over P2P', {
+    requestId,
+    bytes: data.byteLength,
+  });
   pending.resolve(data);
 }
 
-async function loadBlobData(hashHex: string): Promise<{ data: Uint8Array; source: BlobSource } | null> {
-  if (!meshStore) return null;
-  const result = await meshStore.getDetailed(fromHex(hashHex) as Hash);
-  if (!result) return null;
+type LoadedBlobData = {
+  data: Uint8Array;
+  source: BlobSource;
+  sourceId: string;
+};
 
-  const source: BlobSource = result.sourceId === 'idb'
+function toBlobSource(sourceId: string): BlobSource {
+  return sourceId === 'idb'
     ? 'idb'
-    : result.sourceId === 'blossom'
+    : sourceId === 'blossom'
       ? 'blossom'
       : 'p2p';
-  return { data: result.data, source };
+}
+
+async function loadBlobData(
+  hashHex: string,
+  options: MeshRouterGetOptions = {},
+): Promise<LoadedBlobData | null> {
+  if (!meshStore) return null;
+  const result = await meshStore.getDetailed(fromHex(hashHex) as Hash, options);
+  if (!result) {
+    emitDiagnostic('debug', 'mesh', 'blob-load-miss', 'Blob was not available from any source', {
+      hashHex: hashHex.slice(0, 16),
+      skipPrimary: options.skipPrimary === true,
+    });
+    return null;
+  }
+
+  const source = toBlobSource(result.sourceId);
+  emitDiagnostic('debug', 'mesh', 'blob-load-hit', 'Loaded blob from mesh store', {
+    hashHex: hashHex.slice(0, 16),
+    source,
+    bytes: result.data.byteLength,
+    skipPrimary: options.skipPrimary === true,
+  });
+  return { data: result.data, source, sourceId: result.sourceId };
+}
+
+async function loadPeerBlobData(hashHex: string): Promise<LoadedBlobData | null> {
+  const trustedEncryptedHash = shouldServeHashToPeer(hashHex, peerShareableEncryptedHashes);
+  const loaded = await loadBlobData(
+    hashHex,
+    trustedEncryptedHash ? {} : { sourceIds: PEER_SHARED_READ_SOURCE_IDS },
+  );
+  if (!loaded) {
+    return null;
+  }
+  if (trustedEncryptedHash || loaded.sourceId !== 'idb') {
+    if (!trustedEncryptedHash) {
+      markEncryptedHashes([hashHex], peerShareableEncryptedHashes);
+    }
+    return loaded;
+  }
+
+  const readSourceResult = await loadBlobData(hashHex, {
+    skipPrimary: true,
+    sourceIds: PEER_SHARED_READ_SOURCE_IDS,
+  });
+  if (readSourceResult) {
+    markEncryptedHashes([hashHex], peerShareableEncryptedHashes);
+    emitDiagnostic('debug', 'mesh', 'peer-blob-share-enabled', 'Allowing peer blob after verifying it is reachable from a read source', {
+      hashHex: hashHex.slice(0, 16),
+      source: readSourceResult.source,
+    });
+    return {
+      ...loaded,
+      source: readSourceResult.source,
+      sourceId: readSourceResult.sourceId,
+    };
+  }
+
+  emitDiagnostic('warn', 'mesh', 'peer-blob-share-denied', 'Refusing peer blob that is only available from local encrypted cache', {
+    hashHex: hashHex.slice(0, 16),
+  });
+  return null;
 }
 
 function createStorageStore(): Store {
@@ -319,6 +654,7 @@ function createMeshStore(): MeshRouterStore {
     primary: createStorageStore(),
     primarySourceId: 'idb',
     requestTimeoutMs: MESH_READ_TIMEOUT_MS,
+    primaryReadTimeoutMs: PRIMARY_READ_TIMEOUT_MS,
     sources: [
       {
         id: 'p2p',
@@ -396,32 +732,160 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     requestId: request.requestId,
     start: request.start,
     end: typeof request.end === 'number' ? request.end : null,
+    rangeHeader: request.rangeHeader ?? null,
     head: request.head === true,
   });
 
   let cid = rootCid;
   const requestedPath = request.path.trim().replace(/^\/+/, '');
   if (requestedPath) {
-    const resolved = await tree.resolvePath(rootCid, requestedPath);
-    if (resolved) {
-      cid = resolved.cid;
-    } else if (await tree.isDirectory(rootCid)) {
-      emitDiagnostic('warn', 'media', 'file-not-found', 'Media file path not found', {
+    emitDiagnostic('debug', 'media', 'path-resolve-start', 'Resolving media path', {
+      requestId: request.requestId,
+      path: requestedPath,
+    });
+    const rootIsDirectory = await detectMediaDirectoryWithRetries(tree, rootCid, requestedPath, request.requestId);
+    emitDiagnostic('debug', 'media', 'path-resolve-root-kind', 'Resolved root directory status for media request', {
+      requestId: request.requestId,
+      path: requestedPath,
+      rootIsDirectory,
+    });
+    if (rootIsDirectory) {
+      emitDiagnostic('debug', 'media', 'path-resolve-lookup', 'Looking up media path inside a directory root', {
         requestId: request.requestId,
+        path: requestedPath,
       });
-      postMediaError(port, request.requestId, 'File not found');
-      return;
+      const resolved = await resolveMediaPathWithRetries(tree, rootCid, requestedPath, request.requestId);
+      if (resolved) {
+        cid = resolved.cid;
+        emitDiagnostic('debug', 'media', 'path-resolved', 'Resolved media path to a CID', {
+          requestId: request.requestId,
+          path: requestedPath,
+          type: resolved.type,
+        });
+      } else {
+        emitDiagnostic('warn', 'media', 'file-not-found', 'Media file path not found', {
+          requestId: request.requestId,
+        });
+        postMediaError(port, request.requestId, 'File not found');
+        return;
+      }
+    } else {
+      emitDiagnostic('debug', 'media', 'root-is-file', 'Using the root CID directly for a file media request', {
+        requestId: request.requestId,
+        path: requestedPath,
+      });
     }
   }
 
-  const totalSize = await getPlaintextFileSize(cid);
-  if (totalSize === null) {
+  const sizeHint = typeof request.sizeHint === 'number' && Number.isFinite(request.sizeHint) && request.sizeHint > 0
+    ? Math.floor(request.sizeHint)
+    : undefined;
+  const isStreamingStartupRequestWithoutKnownSize = !request.head
+    && !sizeHint
+    && (!request.rangeHeader || isOpenEndedHttpByteRange(request.rangeHeader))
+    && (!Number.isFinite(request.start) || request.start <= 0)
+    && typeof request.end !== 'number'
+    && (!request.rangeHeader || shouldSendMediaHeadersBeforeFirstChunk(request.mimeType));
+  if (isStreamingStartupRequestWithoutKnownSize) {
+    const responseHeaders: Record<string, string> = {
+      'content-type': request.mimeType || 'application/octet-stream',
+      'accept-ranges': 'bytes',
+    };
+    if (request.download) {
+      const fileName = decodeDownloadName(request.path).replace(/["\\]/g, '_');
+      responseHeaders['content-disposition'] = `attachment; filename="${fileName}"`;
+    }
+
+    const headersMessage: MediaHeadersResponse = {
+      type: 'headers',
+      requestId: request.requestId,
+      status: 200,
+      totalSize: 0,
+      headers: responseHeaders,
+    };
+    const sendHeadersBeforeStartupChunk = shouldSendMediaHeadersBeforeFirstChunk(request.mimeType);
+    if (sendHeadersBeforeStartupChunk) {
+      port.postMessage(headersMessage);
+      emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+        requestId: request.requestId,
+        totalSize: 0,
+        status: 200,
+        start: 0,
+        end: null,
+      });
+    }
+
+    const startupChunk = await readStartupMediaRangeWithRetries(
+      tree,
+      cid,
+      0,
+      OPEN_ENDED_RANGE_WINDOW_BYTES,
+    );
+    let startupBytesSent = 0;
+    if (!sendHeadersBeforeStartupChunk) {
+      port.postMessage(headersMessage);
+      emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+        requestId: request.requestId,
+        totalSize: 0,
+        status: 200,
+        start: 0,
+        end: null,
+      });
+    }
+
+    let emittedChunks = 0;
+    for (let offset = 0; offset < startupChunk.byteLength; offset += MEDIA_CHUNK_SIZE) {
+      const chunk = startupChunk.slice(offset, offset + MEDIA_CHUNK_SIZE);
+      if (chunk.byteLength === 0) {
+        continue;
+      }
+      startupBytesSent += chunk.byteLength;
+      emittedChunks += 1;
+      if (offset === 0) {
+        emitDiagnostic('debug', 'media', 'first-chunk', 'Emitting first unbounded media chunk', {
+          requestId: request.requestId,
+          bytes: chunk.byteLength,
+        });
+      }
+      const transferableChunk = cloneTransferableBytes(chunk);
+      const chunkMessage: MediaChunkResponse = {
+        type: 'chunk',
+        requestId: request.requestId,
+        data: transferableChunk,
+      };
+      port.postMessage(chunkMessage, [transferableChunk.buffer]);
+    }
+
+    const stream = readFileStreamWithRetries(tree, cid, startupBytesSent, request.requestId, 2);
+    for await (const chunk of stream) {
+      emittedChunks += 1;
+      const transferableChunk = cloneTransferableBytes(chunk);
+      const chunkMessage: MediaChunkResponse = {
+        type: 'chunk',
+        requestId: request.requestId,
+        data: transferableChunk,
+      };
+      port.postMessage(chunkMessage, [transferableChunk.buffer]);
+    }
+
+    emitDiagnostic('debug', 'media', 'request-complete', 'Completed media request without a precomputed size', {
+      requestId: request.requestId,
+      status: 200,
+    });
+    const doneMessage: MediaDoneResponse = { type: 'done', requestId: request.requestId };
+    port.postMessage(doneMessage);
+    return;
+  }
+
+  const totalSizeValue = sizeHint ?? await getPlaintextFileSize(cid);
+  if (totalSizeValue === null) {
     emitDiagnostic('warn', 'media', 'size-not-found', 'Media file size unavailable', {
       requestId: request.requestId,
     });
     postMediaError(port, request.requestId, 'File not found');
     return;
   }
+  const totalSize = totalSizeValue;
 
   if (totalSize === 0) {
     const headersMessage: MediaHeadersResponse = {
@@ -441,7 +905,26 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     return;
   }
 
-  const start = Number.isFinite(request.start) ? Math.max(0, Math.floor(request.start)) : 0;
+  const parsedRange = parseHttpByteRange(request.rangeHeader, totalSize);
+  if (parsedRange.kind === 'unsatisfiable') {
+    const headers: MediaHeadersResponse = {
+      type: 'headers',
+      requestId: request.requestId,
+      status: 416,
+      totalSize,
+      headers: {
+        'content-type': request.mimeType || 'application/octet-stream',
+        'content-range': `bytes */${totalSize}`,
+      },
+    };
+    port.postMessage(headers);
+    const done: MediaDoneResponse = { type: 'done', requestId: request.requestId };
+    port.postMessage(done);
+    return;
+  }
+
+  const defaultStart = Number.isFinite(request.start) ? Math.max(0, Math.floor(request.start)) : 0;
+  const start = parsedRange.kind === 'range' ? parsedRange.range.start : defaultStart;
   if (start >= totalSize) {
     const headers: MediaHeadersResponse = {
       type: 'headers',
@@ -459,11 +942,16 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     return;
   }
 
-  const requestedEnd = Number.isFinite(request.end) && typeof request.end === 'number'
-    ? Math.floor(request.end)
-    : totalSize - 1;
-  const end = Math.min(totalSize - 1, Math.max(start, requestedEnd));
-  const isPartial = start !== 0 || end !== totalSize - 1;
+  const requestedEnd = parsedRange.kind === 'range'
+    ? parsedRange.range.endInclusive
+    : Number.isFinite(request.end) && typeof request.end === 'number'
+      ? Math.floor(request.end)
+      : totalSize - 1;
+  const cappedRequestedEnd = parsedRange.kind === 'range' && isOpenEndedHttpByteRange(request.rangeHeader)
+    ? Math.min(requestedEnd, start + OPEN_ENDED_RANGE_WINDOW_BYTES - 1)
+    : requestedEnd;
+  const end = Math.min(totalSize - 1, Math.max(start, cappedRequestedEnd));
+  const isPartial = parsedRange.kind === 'range' || start !== 0 || end !== totalSize - 1;
 
   const expectedLength = end - start + 1;
 
@@ -487,10 +975,46 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     totalSize,
     headers: responseHeaders,
   };
-  port.postMessage(headersMessage);
+  const sendHeadersBeforeFirstChunk = !request.head
+    && shouldSendMediaHeadersBeforeFirstChunk(request.mimeType);
 
-  if (!request.head) {
-    for await (const chunk of streamFileRangeChunks(tree, cid, start, end, MEDIA_CHUNK_SIZE)) {
+  const shouldBufferStartupRange = !request.head
+    && parsedRange.kind === 'range'
+    && isOpenEndedHttpByteRange(request.rangeHeader)
+    && start === 0
+    && expectedLength <= OPEN_ENDED_RANGE_WINDOW_BYTES;
+
+  if (shouldBufferStartupRange) {
+    if (sendHeadersBeforeFirstChunk) {
+      port.postMessage(headersMessage);
+      emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+        requestId: request.requestId,
+        totalSize,
+        status: isPartial ? 206 : 200,
+        start,
+        end,
+      });
+    }
+    const buffered = await readStartupMediaRangeWithRetries(tree, cid, start, end + 1);
+    if (!sendHeadersBeforeFirstChunk) {
+      port.postMessage(headersMessage);
+      emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+        requestId: request.requestId,
+        totalSize,
+        status: isPartial ? 206 : 200,
+        start,
+        end,
+      });
+    }
+
+    for (let offset = 0; offset < buffered.byteLength; offset += MEDIA_CHUNK_SIZE) {
+      const chunk = buffered.slice(offset, offset + MEDIA_CHUNK_SIZE);
+      if (offset === 0) {
+        emitDiagnostic('debug', 'media', 'first-chunk', 'Emitting first ranged media chunk', {
+          requestId: request.requestId,
+          bytes: chunk.byteLength,
+        });
+      }
       const transferableChunk = cloneTransferableBytes(chunk);
       const chunkMessage: MediaChunkResponse = {
         type: 'chunk',
@@ -499,6 +1023,81 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       };
       port.postMessage(chunkMessage, [transferableChunk.buffer]);
     }
+
+    emitDiagnostic('debug', 'media', 'request-complete', 'Completed media request', {
+      requestId: request.requestId,
+      totalSize,
+      status: isPartial ? 206 : 200,
+    });
+    const doneMessage: MediaDoneResponse = { type: 'done', requestId: request.requestId };
+    port.postMessage(doneMessage);
+    return;
+  }
+
+  if (!request.head) {
+    const stream = streamFileRangeChunks(tree, cid, start, end, MEDIA_CHUNK_SIZE);
+    const iterator = stream[Symbol.asyncIterator]();
+    let firstChunk: Uint8Array | null = null;
+    if (sendHeadersBeforeFirstChunk) {
+      port.postMessage(headersMessage);
+      emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+        requestId: request.requestId,
+        totalSize,
+        status: isPartial ? 206 : 200,
+        start,
+        end,
+      });
+      firstChunk = await readNextNonEmptyMediaChunk(iterator);
+    } else {
+      firstChunk = await readNextNonEmptyMediaChunk(iterator);
+      port.postMessage(headersMessage);
+      emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+        requestId: request.requestId,
+        totalSize,
+        status: isPartial ? 206 : 200,
+        start,
+        end,
+      });
+    }
+
+    let emittedChunks = 0;
+    if (firstChunk) {
+      emittedChunks += 1;
+      emitDiagnostic('debug', 'media', 'first-chunk', 'Emitting first ranged media chunk', {
+        requestId: request.requestId,
+        bytes: firstChunk.byteLength,
+      });
+      const transferableChunk = cloneTransferableBytes(firstChunk);
+      const chunkMessage: MediaChunkResponse = {
+        type: 'chunk',
+        requestId: request.requestId,
+        data: transferableChunk,
+      };
+      port.postMessage(chunkMessage, [transferableChunk.buffer]);
+    }
+    while (true) {
+      const chunk = await readNextNonEmptyMediaChunk(iterator);
+      if (!chunk) {
+        break;
+      }
+      emittedChunks += 1;
+      const transferableChunk = cloneTransferableBytes(chunk);
+      const chunkMessage: MediaChunkResponse = {
+        type: 'chunk',
+        requestId: request.requestId,
+        data: transferableChunk,
+      };
+      port.postMessage(chunkMessage, [transferableChunk.buffer]);
+    }
+  } else {
+    port.postMessage(headersMessage);
+    emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
+      requestId: request.requestId,
+      totalSize,
+      status: isPartial ? 206 : 200,
+      start,
+      end,
+    });
   }
 
   emitDiagnostic('debug', 'media', 'request-complete', 'Completed media request', {
@@ -531,6 +1130,10 @@ function registerMediaPort(port: MessagePort): void {
       path: data.path,
       start: typeof data.start === 'number' ? data.start : 0,
       end: typeof data.end === 'number' ? data.end : undefined,
+      rangeHeader: typeof data.rangeHeader === 'string' ? data.rangeHeader : null,
+      sizeHint: typeof data.sizeHint === 'number' && Number.isFinite(data.sizeHint) && data.sizeHint > 0
+        ? Math.floor(data.sizeHint)
+        : undefined,
       mimeType: typeof data.mimeType === 'string' ? data.mimeType : undefined,
       download: !!data.download,
       head: !!data.head,
@@ -549,6 +1152,9 @@ function init(config: WorkerConfig): void {
   nostrRelays = config.relays ?? [];
   diagnosticsEnabled = config.diagnosticsEnabled === true;
   diagnosticsMirrorToConsole = config.diagnosticsMirrorToConsole === true;
+  if (diagnosticsEnabled || diagnosticsMirrorToConsole) {
+    installTypedArraySetDebugHook();
+  }
 
   storage = new IdbBlobStorage(storeName, maxBytes);
   initTreeRootCache(createStorageStore());
@@ -803,13 +1409,17 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
         respond({ type: 'blob', id: req.id, error: 'Worker not initialized' });
         return;
       }
-      if (req.forPeer && !shouldServeHashToPeer(req.hashHex, peerShareableEncryptedHashes)) {
-        respond({ type: 'blob', id: req.id, error: 'Refusing to serve non-encrypted or untrusted blob to peer' });
-        return;
-      }
-      const loaded = await loadBlobData(req.hashHex);
+      const loaded = req.forPeer
+        ? await loadPeerBlobData(req.hashHex)
+        : await loadBlobData(req.hashHex);
       if (!loaded) {
-        respond({ type: 'blob', id: req.id, error: 'Blob not found' });
+        respond({
+          type: 'blob',
+          id: req.id,
+          error: req.forPeer
+            ? 'Refusing to serve blob to peer because it is not reachable from a shared read source'
+            : 'Blob not found',
+        });
         return;
       }
       respond({ type: 'blob', id: req.id, data: loaded.data, source: loaded.source });

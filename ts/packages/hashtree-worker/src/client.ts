@@ -194,14 +194,15 @@ export class HashtreeWorkerClient {
     try {
       const data = await this.p2pFetchHandler(hashHex);
       if (data && data.byteLength > 0) {
+        const transferableData = data.slice();
         this.worker.postMessage(
           {
             type: 'p2pFetchResult',
             id,
             requestId,
-            data,
+            data: transferableData,
           } as WorkerRequest,
-          [data.buffer]
+          [transferableData.buffer]
         );
         return;
       }

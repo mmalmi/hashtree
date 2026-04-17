@@ -1967,19 +1967,6 @@ where
         };
         let hash_key = hash_to_key(&hash);
 
-        {
-            let selector = self.peer_selector.read().await;
-            if self.should_refuse_requests_from_peer(&selector, from_peer) {
-                if self.debug {
-                    println!(
-                        "[MeshStoreCore] Refusing request from delinquent peer {}",
-                        from_peer
-                    );
-                }
-                return;
-            }
-        }
-
         if let Some(quote_id) = req.q {
             if !self.take_valid_quote(from_peer, &hash_key, quote_id).await {
                 if self.debug {
@@ -1991,6 +1978,11 @@ where
                 return;
             }
         }
+
+        let allow_peer_forwarding = {
+            let selector = self.peer_selector.read().await;
+            !self.should_refuse_requests_from_peer(&selector, from_peer)
+        };
 
         // Check local store
         if let Ok(Some(mut data)) = self.local_store.get(&hash).await {
@@ -2037,12 +2029,23 @@ where
 
         let from_peer = from_peer.to_string();
         let this = Arc::clone(self);
+        let request_htl = req.htl;
         tokio::spawn(async move {
-            let context = MeshReadContext {
-                exclude_peer_id: Some(from_peer.clone()),
-                request_htl: req.htl,
+            let result = if allow_peer_forwarding {
+                let context = MeshReadContext {
+                    exclude_peer_id: Some(from_peer.clone()),
+                    request_htl,
+                };
+                this.request_from_mesh_with_context(&hash, &context).await
+            } else {
+                if this.debug {
+                    println!(
+                        "[MeshStoreCore] Serving request from delinquent peer {} via read sources only",
+                        from_peer
+                    );
+                }
+                this.request_from_read_sources(&hash).await
             };
-            let result = this.request_from_mesh_with_context(&hash, &context).await;
             let requester_ids = this.take_forward_requesters(&hash_key).await;
             if let Some(data) = result {
                 let res = create_response(&hash, data);
