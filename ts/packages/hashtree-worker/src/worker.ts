@@ -36,7 +36,7 @@ import { cloneTransferableBytes } from './transferableBytes.js';
 const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
-const P2P_FETCH_TIMEOUT_MS = 15_000;
+const P2P_FETCH_SLOW_LOG_MS = 15_000;
 const PRIMARY_READ_TIMEOUT_MS = 300;
 
 export interface HashtreeWorkerMessageEndpoint {
@@ -62,7 +62,7 @@ let diagnosticsEnabled = false;
 let diagnosticsMirrorToConsole = false;
 const pendingP2PFetches = new Map<
   string,
-  { resolve: (data: Uint8Array | null) => void; timeoutId: ReturnType<typeof setTimeout> }
+  { resolve: (data: Uint8Array | null) => void; slowLogId: ReturnType<typeof setTimeout> | null; startedAt: number }
 >();
 const peerShareableEncryptedHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
@@ -456,7 +456,9 @@ function resetState(): void {
   meshStore = null;
   tree = null;
   for (const pending of pendingP2PFetches.values()) {
-    clearTimeout(pending.timeoutId);
+    if (pending.slowLogId) {
+      clearTimeout(pending.slowLogId);
+    }
   }
   pendingP2PFetches.clear();
   peerShareableEncryptedHashes.clear();
@@ -505,21 +507,23 @@ function nextRootWatchId(): string {
 
 async function requestP2PBlob(hashHex: string): Promise<Uint8Array | null> {
   const requestId = nextP2PFetchRequestId();
+  const startedAt = Date.now();
   emitDiagnostic('debug', 'mesh', 'p2p-fetch-start', 'Requesting blob over P2P', {
     requestId,
     hashHex: hashHex.slice(0, 16),
   });
   const data = await new Promise<Uint8Array | null>((resolve) => {
-    const timeoutId = setTimeout(() => {
-      pendingP2PFetches.delete(requestId);
-      emitDiagnostic('warn', 'mesh', 'p2p-fetch-timeout', 'P2P blob request timed out', {
+    const slowLogId = setTimeout(() => {
+      if (!pendingP2PFetches.has(requestId)) {
+        return;
+      }
+      emitDiagnostic('warn', 'mesh', 'p2p-fetch-slow', 'P2P blob request is still in flight', {
         requestId,
         hashHex: hashHex.slice(0, 16),
-        timeoutMs: P2P_FETCH_TIMEOUT_MS,
+        elapsedMs: Date.now() - startedAt,
       });
-      resolve(null);
-    }, P2P_FETCH_TIMEOUT_MS);
-    pendingP2PFetches.set(requestId, { resolve, timeoutId });
+    }, P2P_FETCH_SLOW_LOG_MS);
+    pendingP2PFetches.set(requestId, { resolve, slowLogId, startedAt });
     respond({ type: 'p2pFetch', requestId, hashHex });
   });
 
@@ -529,13 +533,16 @@ async function requestP2PBlob(hashHex: string): Promise<Uint8Array | null> {
 function resolveP2PFetch(requestId: string, data?: Uint8Array, error?: string): void {
   const pending = pendingP2PFetches.get(requestId);
   if (!pending) return;
-  clearTimeout(pending.timeoutId);
+  if (pending.slowLogId) {
+    clearTimeout(pending.slowLogId);
+  }
   pendingP2PFetches.delete(requestId);
 
   if (error || !data) {
     emitDiagnostic('debug', 'mesh', 'p2p-fetch-miss', 'P2P blob request completed without data', {
       requestId,
       error: error ?? null,
+      elapsedMs: Math.max(0, Date.now() - pending.startedAt),
     });
     pending.resolve(null);
     return;
@@ -544,6 +551,7 @@ function resolveP2PFetch(requestId: string, data?: Uint8Array, error?: string): 
   emitDiagnostic('debug', 'mesh', 'p2p-fetch-hit', 'Received blob data over P2P', {
     requestId,
     bytes: data.byteLength,
+    elapsedMs: Math.max(0, Date.now() - pending.startedAt),
   });
   pending.resolve(data);
 }

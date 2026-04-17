@@ -325,18 +325,21 @@ export class MeshRouterStore implements Store {
 
   private async waitForNextResult(
     inFlight: InFlightSourceRequest[],
-    waitMs: number,
+    waitMs?: number,
   ): Promise<{ task: InFlightSourceRequest; sourceId: string; data: Uint8Array | null } | null> {
     const active = inFlight.filter((task) => !task.settled);
-    if (active.length === 0 || waitMs <= 0) return null;
+    if (active.length === 0) return null;
+    if (waitMs !== undefined && waitMs <= 0) return null;
 
-    const timeout = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), waitMs);
-    });
-    const result = await Promise.race([
-      timeout,
-      ...active.map((task) => task.promise.then((value) => ({ task, ...value }))),
-    ]);
+    const outcomes = active.map((task) => task.promise.then((value) => ({ task, ...value })));
+    const result = waitMs === undefined
+      ? await Promise.race(outcomes)
+      : await Promise.race([
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), waitMs);
+        }),
+        ...outcomes,
+      ]);
     if (!result) return null;
 
     result.task.settled = true;
@@ -356,7 +359,6 @@ export class MeshRouterStore implements Store {
     const wavePlan = buildHedgedWavePlan(orderedSources.length, dispatch);
     if (wavePlan.length === 0) return null;
 
-    const deadline = Date.now() + this.requestTimeoutMs;
     const inFlight: InFlightSourceRequest[] = [];
     let nextSourceIdx = 0;
 
@@ -371,12 +373,10 @@ export class MeshRouterStore implements Store {
       }
 
       const isLastWave = waveIdx === wavePlan.length - 1 || nextSourceIdx >= orderedSources.length;
-      const windowEnd = isLastWave
-        ? deadline
-        : Math.min(deadline, Date.now() + dispatch.hedgeIntervalMs);
+      const windowEnd = isLastWave ? null : Date.now() + dispatch.hedgeIntervalMs;
 
-      while (Date.now() < windowEnd) {
-        const remaining = windowEnd - Date.now();
+      while (isLastWave || Date.now() < (windowEnd ?? 0)) {
+        const remaining = windowEnd === null ? undefined : windowEnd - Date.now();
         const result = await this.waitForNextResult(inFlight, remaining);
         if (!result) break;
         if (result.data) {
@@ -385,10 +385,6 @@ export class MeshRouterStore implements Store {
             sourceId: result.sourceId,
           };
         }
-      }
-
-      if (Date.now() >= deadline) {
-        break;
       }
     }
 

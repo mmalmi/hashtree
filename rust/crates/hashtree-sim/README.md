@@ -158,9 +158,19 @@ custom `MintClient` implementation.
 - `WallClock`: uses real timeout progression
 - `VirtualSteps`: uses simulated step budgets for faster runs
 
-In `VirtualSteps`, latency simulation is still reflected via scaled-down real sleeps
-(derived from `network_latency_ms` and `retrieval_poll_interval_ms`), so ordering/latency
-effects remain visible while runtime is compressed.
+In `VirtualSteps`, the simulator pauses Tokio time for the duration of the run.
+That means transport-layer `tokio::time::sleep(...)` calls in shared network code
+advance on the simulated clock instead of wall clock, so response delay models
+(first-byte delay, throughput, stalls) stay realistic without turning sweeps into
+multi-minute real-time waits.
+
+Latency simulation is still reflected in ordering and timeout outcomes:
+- link/message delay is stepped via the simulator poll loop
+- transport sleeps follow the paused Tokio clock
+- wall-clock runtime stays short even for heavier payload workloads
+
+For standalone binaries/examples, use a current-thread Tokio runtime if you want
+paused simulated time (`#[tokio::main(flavor = "current_thread")]`).
 
 ## Network Connectivity
 
@@ -236,6 +246,21 @@ cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual
 
 # Auto-generated candidate grid
 cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=auto
+
+# Heavy-media workload preset (larger payloads, longer timeout)
+cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual --heavy-media
+
+# Focus on a subset of manual candidates
+cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual \
+  --heavy-media --candidate-offset=8 --candidate-limit=4
+
+# Override timeout or seeds for focused comparisons
+cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual \
+  --heavy-media --timeout-ms=2600 --seeds=11,22,33,44
+
+# Progress prints once per config; redirect stdout if you want just the final tables in a file
+cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual \
+  --heavy-media > /tmp/hashtree-sim-heavy.txt
 
 # 1000-node connectivity/scalability test
 cargo test -p hashtree-sim mesh_sim::tests::test_mesh_sim_1000_nodes_connectivity -- --nocapture

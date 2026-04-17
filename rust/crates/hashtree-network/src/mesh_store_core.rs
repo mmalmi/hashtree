@@ -92,12 +92,14 @@ struct AdaptiveSourceStats {
 }
 
 #[derive(Debug, Clone)]
-struct SourceFetchResult {
-    data: Vec<u8>,
+enum RouteFetchOutcome {
+    Hit(Vec<u8>),
+    Miss,
+    Timeout,
 }
 
 struct InflightSourceFetch {
-    waiters: Vec<oneshot::Sender<Option<SourceFetchResult>>>,
+    waiters: Vec<oneshot::Sender<RouteFetchOutcome>>,
 }
 
 enum SourceFetchOutcome {
@@ -392,8 +394,16 @@ pub struct ResponseBehaviorConfig {
     pub drop_response_prob: f64,
     /// Probability that a node responds with corrupted payload.
     pub corrupt_response_prob: f64,
-    /// Optional response delay to model slow/incompetent peers.
+    /// Baseline response delay before a peer starts sending any data.
     pub extra_delay_ms: u64,
+    /// Additional delay before the first response byte becomes available.
+    pub first_byte_delay_ms: u64,
+    /// Sustained throughput for delivering large payloads. `0` disables size-based slowdown.
+    pub bytes_per_second: u64,
+    /// Probability that an otherwise honest response experiences an extra stall.
+    pub stall_response_prob: f64,
+    /// Extra delay injected when a stall event happens.
+    pub stall_delay_ms: u64,
 }
 
 impl Default for ResponseBehaviorConfig {
@@ -402,6 +412,10 @@ impl Default for ResponseBehaviorConfig {
             drop_response_prob: 0.0,
             corrupt_response_prob: 0.0,
             extra_delay_ms: 0,
+            first_byte_delay_ms: 0,
+            bytes_per_second: 0,
+            stall_response_prob: 0.0,
+            stall_delay_ms: 0,
         }
     }
 }
@@ -412,6 +426,10 @@ impl ResponseBehaviorConfig {
             drop_response_prob: self.drop_response_prob.clamp(0.0, 1.0),
             corrupt_response_prob: self.corrupt_response_prob.clamp(0.0, 1.0),
             extra_delay_ms: self.extra_delay_ms,
+            first_byte_delay_ms: self.first_byte_delay_ms,
+            bytes_per_second: self.bytes_per_second,
+            stall_response_prob: self.stall_response_prob.clamp(0.0, 1.0),
+            stall_delay_ms: self.stall_delay_ms,
         }
     }
 }
@@ -650,6 +668,34 @@ where
             return false;
         }
         self.deterministic_actor_draw(hash, 0xC0_C0_C0_C0_C0_C0_C0_C0) < p
+    }
+
+    fn should_stall_response(&self, hash: &Hash) -> bool {
+        let p = self.response_behavior().stall_response_prob;
+        if p <= 0.0 {
+            return false;
+        }
+        self.deterministic_actor_draw(hash, 0x5A_11_5A_11_5A_11_5A_11) < p
+    }
+
+    fn response_send_delay(&self, hash: &Hash, payload_len: usize) -> Duration {
+        let behavior = self.response_behavior();
+        let mut total_ms = behavior
+            .extra_delay_ms
+            .saturating_add(behavior.first_byte_delay_ms);
+
+        if behavior.bytes_per_second > 0 && payload_len > 0 {
+            let throughput_ms = ((payload_len as u128) * 1000)
+                .div_ceil(behavior.bytes_per_second as u128)
+                .min(u64::MAX as u128) as u64;
+            total_ms = total_ms.saturating_add(throughput_ms);
+        }
+
+        if behavior.stall_delay_ms > 0 && self.should_stall_response(hash) {
+            total_ms = total_ms.saturating_add(behavior.stall_delay_ms);
+        }
+
+        Duration::from_millis(total_ms)
     }
 
     async fn ordered_connected_peers(&self, exclude_peer_id: Option<&str>) -> Vec<String> {
@@ -1001,6 +1047,11 @@ where
     async fn record_route_miss(&self, route_id: &str) {
         let mut stats = self.read_route_stats.write().await;
         Self::route_stats_for(&mut stats, route_id).misses += 1;
+    }
+
+    async fn record_route_timeout(&self, route_id: &str) {
+        let mut stats = self.read_route_stats.write().await;
+        Self::route_stats_for(&mut stats, route_id).timeouts += 1;
     }
 
     async fn record_read_source_request(&self, source_id: &str) {
@@ -1462,7 +1513,7 @@ where
         hash: &Hash,
         ordered_peer_ids: &[String],
         request_htl: u8,
-    ) -> Option<Vec<u8>> {
+    ) -> RouteFetchOutcome {
         let hash_key = hash_to_key(hash);
         let (tx, rx) = oneshot::channel();
         self.pending_requests.write().await.insert(
@@ -1528,17 +1579,17 @@ where
                 }
             }
             let _ = self.take_forward_requesters(&hash_key).await;
-            return None;
+            return RouteFetchOutcome::Timeout;
         };
 
         let _ = self.local_store.put(*hash, data.clone()).await;
-        Some(data)
+        RouteFetchOutcome::Hit(data)
     }
 
-    async fn request_from_read_sources_inner(&self, hash: &Hash) -> Option<SourceFetchResult> {
+    async fn request_from_read_sources_inner(&self, hash: &Hash) -> RouteFetchOutcome {
         let ordered_sources = self.ordered_read_sources().await;
         if ordered_sources.is_empty() {
-            return None;
+            return RouteFetchOutcome::Miss;
         }
 
         let dispatch = normalize_dispatch_config(
@@ -1547,12 +1598,13 @@ where
         );
         let wave_plan = build_hedged_wave_plan(ordered_sources.len(), dispatch);
         if wave_plan.is_empty() {
-            return None;
+            return RouteFetchOutcome::Miss;
         }
 
         let deadline = Instant::now() + self.request_timeout;
         let mut pending = FuturesUnordered::new();
         let mut pending_source_ids = HashSet::new();
+        let mut saw_timeout = false;
         let mut next_source_idx = 0usize;
 
         for (wave_idx, wave_size) in wave_plan.iter().copied().enumerate() {
@@ -1611,7 +1663,7 @@ where
                         pending_source_ids.remove(&source_id);
                         self.record_read_source_success(&source_id, elapsed_ms)
                             .await;
-                        return Some(SourceFetchResult { data });
+                        return RouteFetchOutcome::Hit(data);
                     }
                     SourceFetchOutcome::Miss { source_id } => {
                         pending_source_ids.remove(&source_id);
@@ -1630,12 +1682,17 @@ where
         }
 
         for source_id in pending_source_ids {
+            saw_timeout = true;
             self.record_read_source_timeout(&source_id).await;
         }
-        None
+        if saw_timeout {
+            RouteFetchOutcome::Timeout
+        } else {
+            RouteFetchOutcome::Miss
+        }
     }
 
-    async fn request_from_read_sources(&self, hash: &Hash) -> Option<Vec<u8>> {
+    async fn request_from_read_sources(&self, hash: &Hash) -> RouteFetchOutcome {
         let hash_key = hash_to_key(hash);
         let existing_wait = {
             let mut inflight = self.inflight_source_fetches.lock().await;
@@ -1655,12 +1712,12 @@ where
         };
 
         if let Some(wait) = existing_wait {
-            return wait.await.ok().flatten().map(|result| result.data);
+            return wait.await.unwrap_or(RouteFetchOutcome::Timeout);
         }
 
         let result = self.request_from_read_sources_inner(hash).await;
-        if let Some(hit) = result.as_ref() {
-            let _ = self.local_store.put(*hash, hit.data.clone()).await;
+        if let RouteFetchOutcome::Hit(hit) = &result {
+            let _ = self.local_store.put(*hash, hit.clone()).await;
         }
 
         let waiters = self
@@ -1674,7 +1731,7 @@ where
             let _ = waiter.send(result.clone());
         }
 
-        result.map(|hit| hit.data)
+        result
     }
 
     async fn available_read_routes(&self, context: &MeshReadContext) -> Vec<ReadRoute> {
@@ -1725,7 +1782,7 @@ where
         hash: &Hash,
         route: &ReadRoute,
         context: &MeshReadContext,
-    ) -> Option<Vec<u8>> {
+    ) -> RouteFetchOutcome {
         let route_id = route.id();
         self.record_route_request(route_id).await;
         let started_at = Instant::now();
@@ -1736,11 +1793,17 @@ where
             }
             ReadRoute::Sources => self.request_from_read_sources(hash).await,
         };
-        if result.is_some() {
-            self.record_route_success(route_id, started_at.elapsed().as_millis().max(1) as u64)
-                .await;
-        } else {
-            self.record_route_miss(route_id).await;
+        match &result {
+            RouteFetchOutcome::Hit(_) => {
+                self.record_route_success(route_id, started_at.elapsed().as_millis().max(1) as u64)
+                    .await;
+            }
+            RouteFetchOutcome::Miss => {
+                self.record_route_miss(route_id).await;
+            }
+            RouteFetchOutcome::Timeout => {
+                self.record_route_timeout(route_id).await;
+            }
         }
         result
     }
@@ -1753,7 +1816,10 @@ where
         let routes = self.available_read_routes(context).await;
         match routes.as_slice() {
             [] => None,
-            [route] => self.run_read_route(hash, route, context).await,
+            [route] => match self.run_read_route(hash, route, context).await {
+                RouteFetchOutcome::Hit(data) => Some(data),
+                RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
+            },
             [first, second, ..] => {
                 if self.should_probe_multiple_routes(&routes).await {
                     let first_fut = self.run_read_route(hash, first, context);
@@ -1766,14 +1832,14 @@ where
                         tokio::select! {
                             result = &mut first_fut, if !first_done => {
                                 first_done = true;
-                                if result.is_some() {
-                                    return result;
+                                if let RouteFetchOutcome::Hit(data) = result {
+                                    return Some(data);
                                 }
                             }
                             result = &mut second_fut, if !second_done => {
                                 second_done = true;
-                                if result.is_some() {
-                                    return result;
+                                if let RouteFetchOutcome::Hit(data) = result {
+                                    return Some(data);
                                 }
                             }
                             else => break,
@@ -1784,10 +1850,14 @@ where
                     }
                     None
                 } else {
-                    if let Some(data) = self.run_read_route(hash, first, context).await {
-                        return Some(data);
+                    match self.run_read_route(hash, first, context).await {
+                        RouteFetchOutcome::Hit(data) => return Some(data),
+                        RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => {}
                     }
-                    self.run_read_route(hash, second, context).await
+                    match self.run_read_route(hash, second, context).await {
+                        RouteFetchOutcome::Hit(data) => Some(data),
+                        RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
+                    }
                 }
             }
         }
@@ -1996,9 +2066,9 @@ where
                 return;
             }
 
-            let behavior = self.response_behavior();
-            if behavior.extra_delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(behavior.extra_delay_ms)).await;
+            let response_delay = self.response_send_delay(&hash, data.len());
+            if !response_delay.is_zero() {
+                tokio::time::sleep(response_delay).await;
             }
 
             if self.should_corrupt_response(&hash) {
@@ -2044,7 +2114,10 @@ where
                         from_peer
                     );
                 }
-                this.request_from_read_sources(&hash).await
+                match this.request_from_read_sources(&hash).await {
+                    RouteFetchOutcome::Hit(data) => Some(data),
+                    RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
+                }
             };
             let requester_ids = this.take_forward_requesters(&hash_key).await;
             if let Some(data) = result {

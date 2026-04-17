@@ -111,7 +111,11 @@ fn mixed_bad_actor_config(seed: u64, cashu: Option<CashuIncentiveConfig>) -> Sim
                 response_behavior: ResponseBehaviorConfig {
                     drop_response_prob: 0.25,
                     corrupt_response_prob: 0.05,
-                    extra_delay_ms: 40,
+                    extra_delay_ms: 15,
+                    first_byte_delay_ms: 25,
+                    bytes_per_second: 18_000,
+                    stall_response_prob: 0.15,
+                    stall_delay_ms: 60,
                 },
             },
             NodeStrategyProfile {
@@ -128,6 +132,10 @@ fn mixed_bad_actor_config(seed: u64, cashu: Option<CashuIncentiveConfig>) -> Sim
                     drop_response_prob: 0.55,
                     corrupt_response_prob: 0.35,
                     extra_delay_ms: 5,
+                    first_byte_delay_ms: 10,
+                    bytes_per_second: 9_000,
+                    stall_response_prob: 0.45,
+                    stall_delay_ms: 120,
                 },
             },
         ],

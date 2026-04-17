@@ -316,6 +316,29 @@ pub struct Simulation {
     cashu_mint: Option<Arc<dyn MintClient>>,
 }
 
+struct VirtualTimeGuard {
+    paused: bool,
+}
+
+impl VirtualTimeGuard {
+    fn maybe_pause(mode: RetrievalTimingMode) -> Self {
+        if mode != RetrievalTimingMode::VirtualSteps {
+            return Self { paused: false };
+        }
+
+        let paused = std::panic::catch_unwind(tokio::time::pause).is_ok();
+        Self { paused }
+    }
+}
+
+impl Drop for VirtualTimeGuard {
+    fn drop(&mut self) {
+        if self.paused {
+            tokio::time::resume();
+        }
+    }
+}
+
 impl Simulation {
     fn virtual_sleep_divisor(&self) -> u64 {
         self.config.retrieval_poll_interval_ms.max(1)
@@ -401,6 +424,7 @@ impl Simulation {
         // Mock negotiated channels share a global registry; each simulation run must
         // start from a clean slate or later runs inherit stale links.
         hashtree_network::clear_channel_registry().await;
+        let _virtual_time = VirtualTimeGuard::maybe_pause(self.config.retrieval_timing_mode);
         let run_started = Instant::now();
         let total_ms = self.config.duration.as_millis() as u64;
         let tick_ms = self.config.discovery_interval_ms;
@@ -1330,6 +1354,10 @@ impl Simulation {
                             "drop_response_prob": s.response_behavior.drop_response_prob,
                             "corrupt_response_prob": s.response_behavior.corrupt_response_prob,
                             "extra_delay_ms": s.response_behavior.extra_delay_ms,
+                            "first_byte_delay_ms": s.response_behavior.first_byte_delay_ms,
+                            "bytes_per_second": s.response_behavior.bytes_per_second,
+                            "stall_response_prob": s.response_behavior.stall_response_prob,
+                            "stall_delay_ms": s.response_behavior.stall_delay_ms,
                         },
                         "pool": {
                             "max_connections": s.pool.max_connections,

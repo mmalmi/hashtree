@@ -1,14 +1,30 @@
 use hashtree_sim::{
-    run_parameter_sweep, NodeStrategyProfile, PoolConfig, RequestDispatchConfig,
-    ResponseBehaviorConfig, RetrievalTimingMode, SelectionStrategy, SimConfig,
+    NodeStrategyProfile, PoolConfig, RequestDispatchConfig, ResponseBehaviorConfig,
+    RetrievalTimingMode, SelectionStrategy, SimConfig, Simulation, SweepResult,
 };
 use std::env;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExploreMode {
     Manual,
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkloadProfile {
+    Standard,
+    HeavyMedia,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkloadRuntime {
+    node_count: usize,
+    duration_secs: u64,
+    retrieval_probe_count: usize,
+    retrieval_payload_bytes: usize,
+    retrieval_timeout_ms: u64,
+    max_events_retained: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +96,130 @@ fn parse_mode() -> ExploreMode {
     ExploreMode::Manual
 }
 
+fn parse_workload_profile() -> WorkloadProfile {
+    for arg in env::args().skip(1) {
+        match arg.as_str() {
+            "--heavy-media" | "--workload=heavy-media" => return WorkloadProfile::HeavyMedia,
+            "--standard" | "--workload=standard" => return WorkloadProfile::Standard,
+            _ => {}
+        }
+    }
+    WorkloadProfile::Standard
+}
+
+fn parse_candidate_limit() -> Option<usize> {
+    for arg in env::args().skip(1) {
+        if let Some(raw) = arg.strip_prefix("--candidate-limit=") {
+            if let Ok(limit) = raw.parse::<usize>() {
+                return Some(limit.max(1));
+            }
+        }
+    }
+    None
+}
+
+fn parse_candidate_offset() -> usize {
+    for arg in env::args().skip(1) {
+        if let Some(raw) = arg.strip_prefix("--candidate-offset=") {
+            if let Ok(offset) = raw.parse::<usize>() {
+                return offset;
+            }
+        }
+    }
+    0
+}
+
+fn parse_seed_limit() -> Option<usize> {
+    for arg in env::args().skip(1) {
+        if let Some(raw) = arg.strip_prefix("--seed-limit=") {
+            if let Ok(limit) = raw.parse::<usize>() {
+                return Some(limit.max(1));
+            }
+        }
+    }
+    None
+}
+
+fn parse_seeds_override() -> Option<Vec<u64>> {
+    for arg in env::args().skip(1) {
+        if let Some(raw) = arg.strip_prefix("--seeds=") {
+            let mut seeds = Vec::new();
+            for part in raw.split(',') {
+                let trimmed = part.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(seed) = trimmed.parse::<u64>() {
+                    seeds.push(seed);
+                }
+            }
+            if !seeds.is_empty() {
+                return Some(seeds);
+            }
+        }
+    }
+    None
+}
+
+fn parse_timeout_override_ms() -> Option<u64> {
+    for arg in env::args().skip(1) {
+        if let Some(raw) = arg.strip_prefix("--timeout-ms=") {
+            if let Ok(timeout_ms) = raw.parse::<u64>() {
+                return Some(timeout_ms.max(1));
+            }
+        }
+    }
+    None
+}
+
+fn workload_runtime(profile: WorkloadProfile) -> WorkloadRuntime {
+    match profile {
+        WorkloadProfile::Standard => WorkloadRuntime {
+            node_count: 90,
+            duration_secs: 5,
+            retrieval_probe_count: 20,
+            retrieval_payload_bytes: 2048,
+            retrieval_timeout_ms: 700,
+            max_events_retained: 10_000,
+        },
+        WorkloadProfile::HeavyMedia => WorkloadRuntime {
+            node_count: 60,
+            duration_secs: 3,
+            retrieval_probe_count: 12,
+            retrieval_payload_bytes: 16 * 1024,
+            retrieval_timeout_ms: 1_800,
+            max_events_retained: 12_000,
+        },
+    }
+}
+
+async fn run_parameter_sweep_with_progress(configs: &[SimConfig]) -> Vec<SweepResult> {
+    let mut results = Vec::with_capacity(configs.len());
+    let started = Instant::now();
+    for (index, config) in configs.iter().enumerate() {
+        let sim = Simulation::new(config.clone());
+        sim.run().await;
+        let stats = sim.get_stats().await;
+        let final_topology = sim.analyze_topology().await;
+        let elapsed = started.elapsed().as_secs_f32();
+        eprintln!(
+            "[{}/{}] seed={} success={:.2}% p95={}ms elapsed={:.1}s",
+            index + 1,
+            configs.len(),
+            config.seed,
+            stats.retrieval.success_rate * 100.0,
+            stats.retrieval.p95_latency_ms,
+            elapsed,
+        );
+        results.push(SweepResult {
+            config: config.clone(),
+            stats,
+            final_topology,
+        });
+    }
+    results
+}
+
 fn flood_runtime(selection_strategy: SelectionStrategy) -> StrategyRuntime {
     StrategyRuntime {
         selection_strategy,
@@ -113,7 +253,11 @@ fn goofball_behavior() -> ResponseBehaviorConfig {
     ResponseBehaviorConfig {
         drop_response_prob: 0.25,
         corrupt_response_prob: 0.05,
-        extra_delay_ms: 40,
+        extra_delay_ms: 15,
+        first_byte_delay_ms: 25,
+        bytes_per_second: 18_000,
+        stall_response_prob: 0.15,
+        stall_delay_ms: 60,
     }
 }
 
@@ -122,6 +266,10 @@ fn adversarial_behavior() -> ResponseBehaviorConfig {
         drop_response_prob: 0.55,
         corrupt_response_prob: 0.35,
         extra_delay_ms: 5,
+        first_byte_delay_ms: 10,
+        bytes_per_second: 9_000,
+        stall_response_prob: 0.45,
+        stall_delay_ms: 120,
     }
 }
 
@@ -358,16 +506,39 @@ fn print_ranked_for_profile(profile: GateProfile, summaries: &[Summary]) {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mode = parse_mode();
-    let candidates = match mode {
+    let workload = parse_workload_profile();
+    let mut runtime = workload_runtime(workload);
+    if let Some(timeout_ms) = parse_timeout_override_ms() {
+        runtime.retrieval_timeout_ms = timeout_ms;
+    }
+    let mut candidates = match mode {
         ExploreMode::Manual => build_manual_candidates(),
         ExploreMode::Auto => build_auto_candidates(),
     };
-    let seeds: Vec<u64> = match mode {
-        ExploreMode::Manual => vec![11, 22, 33, 44],
-        ExploreMode::Auto => vec![11, 22, 33],
+    let candidate_offset = parse_candidate_offset().min(candidates.len());
+    if candidate_offset > 0 {
+        candidates.drain(0..candidate_offset);
+    }
+    if let Some(limit) = parse_candidate_limit() {
+        candidates.truncate(limit.min(candidates.len()));
+    }
+    let seeds: Vec<u64> = if let Some(seeds) = parse_seeds_override() {
+        seeds
+    } else {
+        match (mode, workload) {
+            (ExploreMode::Manual, WorkloadProfile::Standard) => vec![11, 22, 33, 44],
+            (ExploreMode::Auto, WorkloadProfile::Standard) => vec![11, 22, 33],
+            (ExploreMode::Manual, WorkloadProfile::HeavyMedia) => vec![11, 22],
+            (ExploreMode::Auto, WorkloadProfile::HeavyMedia) => vec![11, 22],
+        }
+    };
+    let seeds = if let Some(limit) = parse_seed_limit() {
+        seeds.into_iter().take(limit).collect()
+    } else {
+        seeds
     };
 
     let mut configs = Vec::new();
@@ -377,8 +548,8 @@ async fn main() {
         for seed in &seeds {
             let (w_ref, w_cons, w_agg) = candidate.weights;
             configs.push(SimConfig {
-                node_count: 90,
-                duration: Duration::from_secs(5),
+                node_count: runtime.node_count,
+                duration: Duration::from_secs(runtime.duration_secs),
                 seed: *seed,
                 // Fallback-only when strategy_mix is empty; keep aligned with reference.
                 pool: candidate.reference_pool.clone(),
@@ -387,10 +558,10 @@ async fn main() {
                 churn_rate: 0.02,
                 allow_rejoin: true,
                 network_latency_ms: 30,
-                retrieval_probe_count: 20,
-                retrieval_payload_bytes: 2048,
-                retrieval_timeout_ms: 700,
-                max_events_retained: 10_000,
+                retrieval_probe_count: runtime.retrieval_probe_count,
+                retrieval_payload_bytes: runtime.retrieval_payload_bytes,
+                retrieval_timeout_ms: runtime.retrieval_timeout_ms,
+                max_events_retained: runtime.max_events_retained,
                 retrieval_timing_mode: RetrievalTimingMode::VirtualSteps,
                 retrieval_poll_interval_ms: 5,
                 reference_strategy: Some("reference".to_string()),
@@ -448,14 +619,17 @@ async fn main() {
     }
 
     println!(
-        "Mode: {:?} | Running {} configs ({} candidates x {} seeds)",
+        "Mode: {:?} | Workload: {:?} | timeout={}ms | Running {} configs ({} candidates x {} seeds, offset {})",
         mode,
+        workload,
+        runtime.retrieval_timeout_ms,
         configs.len(),
         candidates.len(),
-        seeds.len()
+        seeds.len(),
+        candidate_offset
     );
 
-    let results = run_parameter_sweep(&configs).await;
+    let results = run_parameter_sweep_with_progress(&configs).await;
 
     let mut per_candidate_runs: Vec<Vec<&hashtree_sim::SweepResult>> =
         vec![Vec::new(); candidates.len()];

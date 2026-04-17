@@ -1,5 +1,29 @@
 use super::*;
 
+fn goofball_behavior() -> ResponseBehaviorConfig {
+    ResponseBehaviorConfig {
+        drop_response_prob: 0.25,
+        corrupt_response_prob: 0.05,
+        extra_delay_ms: 15,
+        first_byte_delay_ms: 25,
+        bytes_per_second: 18_000,
+        stall_response_prob: 0.15,
+        stall_delay_ms: 60,
+    }
+}
+
+fn adversarial_behavior() -> ResponseBehaviorConfig {
+    ResponseBehaviorConfig {
+        drop_response_prob: 0.55,
+        corrupt_response_prob: 0.35,
+        extra_delay_ms: 5,
+        first_byte_delay_ms: 10,
+        bytes_per_second: 9_000,
+        stall_response_prob: 0.45,
+        stall_delay_ms: 120,
+    }
+}
+
 #[tokio::test]
 async fn test_mesh_sim_small() {
     let config = SimConfig {
@@ -537,11 +561,7 @@ fn mixed_bad_actor_config(seed: u64, reference_selection: SelectionStrategy) -> 
                 selection_strategy: SelectionStrategy::RoundRobin,
                 fairness_enabled: true,
                 dispatch: RequestDispatchConfig::default(),
-                response_behavior: ResponseBehaviorConfig {
-                    drop_response_prob: 0.25,
-                    corrupt_response_prob: 0.05,
-                    extra_delay_ms: 40,
-                },
+                response_behavior: goofball_behavior(),
             },
             NodeStrategyProfile {
                 name: "adversarial".to_string(),
@@ -553,11 +573,7 @@ fn mixed_bad_actor_config(seed: u64, reference_selection: SelectionStrategy) -> 
                 selection_strategy: SelectionStrategy::Random,
                 fairness_enabled: true,
                 dispatch: RequestDispatchConfig::default(),
-                response_behavior: ResponseBehaviorConfig {
-                    drop_response_prob: 0.55,
-                    corrupt_response_prob: 0.35,
-                    extra_delay_ms: 5,
-                },
+                response_behavior: adversarial_behavior(),
             },
         ],
         reference_strategy: Some("reference".to_string()),
@@ -628,6 +644,69 @@ async fn test_mesh_sim_goofballs_reduce_reference_success() {
             honest_ref,
             mixed_ref
         );
+}
+
+#[tokio::test]
+async fn test_mesh_sim_report_json_includes_extended_response_behavior_fields() {
+    let config = SimConfig {
+        node_count: 6,
+        duration: Duration::from_secs(1),
+        seed: 909,
+        pool: PoolConfig {
+            max_connections: 4,
+            satisfied_connections: 2,
+        },
+        discovery_interval_ms: 100,
+        hello_reannounce_interval_ms: 200,
+        churn_rate: 0.0,
+        allow_rejoin: false,
+        network_latency_ms: 10,
+        retrieval_probe_count: 0,
+        retrieval_payload_bytes: 512,
+        retrieval_timeout_ms: 500,
+        max_events_retained: 128,
+        retrieval_timing_mode: RetrievalTimingMode::VirtualSteps,
+        retrieval_poll_interval_ms: 5,
+        reference_strategy: Some("reference".to_string()),
+        cashu_incentives: None,
+        strategy_mix: vec![NodeStrategyProfile {
+            name: "reference".to_string(),
+            weight: 1,
+            pool: PoolConfig {
+                max_connections: 4,
+                satisfied_connections: 2,
+            },
+            selection_strategy: SelectionStrategy::TitForTat,
+            fairness_enabled: true,
+            dispatch: RequestDispatchConfig::default(),
+            response_behavior: ResponseBehaviorConfig {
+                extra_delay_ms: 11,
+                first_byte_delay_ms: 22,
+                bytes_per_second: 33_000,
+                stall_response_prob: 0.25,
+                stall_delay_ms: 44,
+                ..Default::default()
+            },
+        }],
+    };
+
+    let sim = Simulation::new(config);
+    sim.run().await;
+    let report = sim.report_json().await;
+    let strategies = report["config"]["strategy_mix"]
+        .as_array()
+        .expect("strategy mix array");
+    let reference = strategies
+        .iter()
+        .find(|entry| entry["name"] == "reference")
+        .expect("reference strategy");
+    let behavior = &reference["response_behavior"];
+
+    assert_eq!(behavior["extra_delay_ms"].as_u64(), Some(11));
+    assert_eq!(behavior["first_byte_delay_ms"].as_u64(), Some(22));
+    assert_eq!(behavior["bytes_per_second"].as_u64(), Some(33_000));
+    assert_eq!(behavior["stall_response_prob"].as_f64(), Some(0.25));
+    assert_eq!(behavior["stall_delay_ms"].as_u64(), Some(44));
 }
 
 #[tokio::test]

@@ -26,10 +26,14 @@ interface ControllerPrivateApi {
 }
 
 interface SimulatedPeerProfile {
-  serviceMs: number;
   payloadsByHash: Map<string, Uint8Array>;
   corrupt?: boolean;
   availableAtMs: number;
+  serviceMs?: number;
+  firstByteMs?: number;
+  bytesPerSecond?: number;
+  stallOnRequestNumbers?: number[];
+  stallMs?: number;
 }
 
 function connectPeer(
@@ -43,7 +47,10 @@ function connectPeer(
   return peer;
 }
 
-function createTimedController(peerProfiles: Record<string, SimulatedPeerProfile>) {
+function createTimedController(
+  peerProfiles: Record<string, SimulatedPeerProfile>,
+  options?: { requestTimeout?: number },
+) {
   const requestCounts = new Map<string, number>();
   const controller = new WebRTCController({
     pubkey: 'self-pubkey',
@@ -66,13 +73,24 @@ function createTimedController(peerProfiles: Record<string, SimulatedPeerProfile
 
       const now = Date.now();
       const startAt = Math.max(now, profile.availableAtMs);
-      const deliverAt = startAt + profile.serviceMs;
-      profile.availableAtMs = deliverAt;
-
       const payload = profile.payloadsByHash.get(hashToKey(message.body.h));
       if (!payload) {
         return;
       }
+
+      const requestNumber = requestCounts.get(cmd.peerId) ?? 0;
+      let serviceMs = profile.serviceMs ?? 0;
+      if (profile.firstByteMs !== undefined || profile.bytesPerSecond !== undefined) {
+        serviceMs = profile.firstByteMs ?? 0;
+        if ((profile.bytesPerSecond ?? 0) > 0) {
+          serviceMs += Math.ceil((payload.byteLength * 1000) / (profile.bytesPerSecond ?? 1));
+        }
+      }
+      if (profile.stallMs && profile.stallOnRequestNumbers?.includes(requestNumber)) {
+        serviceMs += profile.stallMs;
+      }
+      const deliverAt = startAt + serviceMs;
+      profile.availableAtMs = deliverAt;
 
       const responsePayload = profile.corrupt
         ? new Uint8Array(payload.map((byte, idx) => (idx === 0 ? byte ^ 0xff : byte)))
@@ -82,10 +100,10 @@ function createTimedController(peerProfiles: Record<string, SimulatedPeerProfile
           cmd.peerId,
           new Uint8Array(encodeResponse(createResponse(message.body.h, responsePayload))),
         );
-      }, deliverAt - now);
+      }, Math.max(0, deliverAt - now));
     },
     sendSignaling: async () => {},
-    requestTimeout: 250,
+    requestTimeout: options?.requestTimeout ?? 250,
     requestDispatch: {
       initialFanout: 1,
       hedgeFanout: 1,
@@ -178,6 +196,47 @@ describe('WebRTCController multi-peer block scheduling', () => {
     expect(mixed.requestCounts.get('peer-a-junk') ?? 0).toBe(0);
     expect(mixed.requestCounts.get('peer-b-fast') ?? 0).toBeGreaterThan(0);
     expect(mixed.requestCounts.get('peer-c-medium') ?? 0).toBeGreaterThan(0);
+    expect(mixedRun.elapsedMs).toBeLessThan(baselineRun.elapsedMs);
+  });
+
+  it('adapts to peers with slow large-payload throughput instead of treating all hits as equal', async () => {
+    const payloads = await Promise.all(
+      Array.from({ length: 4 }, async (_, index) => {
+        const payload = new Uint8Array(16 * 1024).fill(index + 1);
+        return { hash: await sha256(payload), payload };
+      }),
+    );
+
+    const payloadsByHash = new Map(payloads.map(({ hash, payload }) => [hashToKey(hash), payload]));
+    const baseline = createTimedController({
+      'peer-slow-link': {
+        firstByteMs: 10,
+        bytesPerSecond: 20_000,
+        payloadsByHash: new Map(payloadsByHash),
+        availableAtMs: 0,
+      },
+    }, { requestTimeout: 4_000 });
+    const baselineRun = await runConcurrentFetches(baseline.controller, payloads);
+    expect(baselineRun.results).toEqual(payloads.map(({ payload }) => payload));
+
+    const mixed = createTimedController({
+      'peer-slow-link': {
+        firstByteMs: 10,
+        bytesPerSecond: 20_000,
+        payloadsByHash: new Map(payloadsByHash),
+        availableAtMs: 0,
+      },
+      'peer-fast-link': {
+        firstByteMs: 30,
+        bytesPerSecond: 140_000,
+        payloadsByHash: new Map(payloadsByHash),
+        availableAtMs: 0,
+      },
+    }, { requestTimeout: 4_000 });
+    const mixedRun = await runConcurrentFetches(mixed.controller, payloads);
+    expect(mixedRun.results).toEqual(payloads.map(({ payload }) => payload));
+
+    expect(mixed.requestCounts.get('peer-fast-link') ?? 0).toBeGreaterThan(0);
     expect(mixedRun.elapsedMs).toBeLessThan(baselineRun.elapsedMs);
   });
 });

@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const postMessageMock = vi.hoisted(() => vi.fn());
 const idbDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
 const blossomDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
+const peerFetchResponder = vi.hoisted(() => ({
+  handle: null as null | ((ctx: FakeWorkerGlobal, requestId: string, hashHex: string) => void),
+}));
 
 class FakeWorkerGlobal {
   private listener: EventListener | null = null;
@@ -11,6 +14,11 @@ class FakeWorkerGlobal {
     postMessageMock(message);
     const candidate = message as { type?: string; requestId?: string };
     if (candidate?.type === 'p2pFetch' && typeof candidate.requestId === 'string') {
+      const request = message as { hashHex?: string };
+      if (peerFetchResponder.handle) {
+        peerFetchResponder.handle(this, candidate.requestId, `${request.hashHex ?? ''}`);
+        return;
+      }
       queueMicrotask(() => {
         this.dispatch({
           type: 'p2pFetchResult',
@@ -182,6 +190,7 @@ describe('worker peer blob sharing', () => {
     postMessageMock.mockReset();
     idbDataByHash.clear();
     blossomDataByHash.clear();
+    peerFetchResponder.handle = null;
     Object.defineProperty(globalThis, 'self', {
       configurable: true,
       writable: true,
@@ -190,6 +199,7 @@ describe('worker peer blob sharing', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     // @ts-expect-error test cleanup
     delete globalThis.self;
   });
@@ -256,6 +266,58 @@ describe('worker peer blob sharing', () => {
       type: 'blob',
       id: 'blob-2',
       error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
+    });
+  });
+
+  it('keeps waiting for a late peer blob instead of failing at the old worker timeout', async () => {
+    vi.useFakeTimers();
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    const hashHex = '33'.repeat(32);
+    const blobData = new Uint8Array([4, 5, 6, 7]);
+    peerFetchResponder.handle = (target, requestId) => {
+      setTimeout(() => {
+        target.dispatch({
+          type: 'p2pFetchResult',
+          id: `peer-hit-${requestId}`,
+          requestId,
+          data: blobData,
+        });
+      }, 16_000);
+    };
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-3',
+      config: {
+        relays: [],
+        blossomServers: [],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    ctx.dispatch({
+      type: 'getBlob',
+      id: 'blob-3',
+      hashHex,
+    });
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(15_500);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readBlobResponse('blob-3')).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(500);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readBlobResponse('blob-3')).toEqual({
+      type: 'blob',
+      id: 'blob-3',
+      data: blobData,
+      source: 'p2p',
     });
   });
 });

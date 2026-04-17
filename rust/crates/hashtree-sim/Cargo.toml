@@ -24,7 +24,7 @@ async-trait.workspace = true
 rand = "0.8"
 
 # Async runtime
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "net"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "net", "test-util"] }
 
 # WebSocket relay for testing
 axum = { workspace = true }

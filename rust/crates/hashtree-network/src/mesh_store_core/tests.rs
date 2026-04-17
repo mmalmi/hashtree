@@ -380,11 +380,43 @@ fn test_response_behavior_normalization_clamps_probs() {
         drop_response_prob: -1.5,
         corrupt_response_prob: 9.0,
         extra_delay_ms: 12,
+        first_byte_delay_ms: 7,
+        bytes_per_second: 1234,
+        stall_response_prob: 4.0,
+        stall_delay_ms: 55,
     };
     let normalized = raw.normalized();
     assert_eq!(normalized.drop_response_prob, 0.0);
     assert_eq!(normalized.corrupt_response_prob, 1.0);
     assert_eq!(normalized.extra_delay_ms, 12);
+    assert_eq!(normalized.first_byte_delay_ms, 7);
+    assert_eq!(normalized.bytes_per_second, 1234);
+    assert_eq!(normalized.stall_response_prob, 1.0);
+    assert_eq!(normalized.stall_delay_ms, 55);
+}
+
+#[test]
+fn test_response_behavior_delay_models_first_byte_throughput_and_stall() {
+    let store = make_test_store_with_routing(
+        Arc::new(MemoryStore::new()),
+        "delay-model",
+        MeshRoutingConfig {
+            response_behavior: ResponseBehaviorConfig {
+                extra_delay_ms: 12,
+                first_byte_delay_ms: 18,
+                bytes_per_second: 2000,
+                stall_response_prob: 1.0,
+                stall_delay_ms: 25,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+
+    let hash = hashtree_core::sha256(b"delay-model-hash");
+    let delay = store.response_send_delay(&hash, 5000);
+    // 12ms baseline + 18ms first-byte + ceil(5000/2000 * 1000)=2500ms throughput + 25ms forced stall
+    assert_eq!(delay, Duration::from_millis(2555));
 }
 
 #[test]
@@ -905,6 +937,49 @@ async fn test_read_sources_prefer_previously_successful_source() {
         1,
         "miss-heavy source should not be probed again immediately",
     );
+}
+
+#[tokio::test]
+async fn test_read_source_timeout_records_timeout_not_miss() {
+    let local_store = Arc::new(MemoryStore::new());
+    let store = make_test_store_with_routing(
+        local_store,
+        "source-timeout",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 1,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+
+    let slow_store = Arc::new(MemoryStore::new());
+    let payload = b"slow-source-data".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    slow_store
+        .put(hash, payload)
+        .await
+        .expect("put slow payload");
+
+    store
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "slow",
+            slow_store,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::from_millis(250),
+        )) as Arc<dyn MeshReadSource>])
+        .await;
+
+    let result = store.get(&hash).await.expect("get");
+    assert!(result.is_none());
+
+    let stats = store.read_route_stats.read().await;
+    let route = stats.get("sources").expect("sources route stats");
+    assert_eq!(route.timeouts, 1);
+    assert_eq!(route.misses, 0);
 }
 
 #[tokio::test]

@@ -37,6 +37,7 @@ describe('MeshRouterStore', () => {
     const router = new MeshRouterStore({
       primary,
       primarySourceId: 'idb',
+      primaryReadTimeoutMs: 0,
       requestTimeoutMs: 500,
       sources: [
         delayedSource('webrtc', 200, slowData, slowCalls),
@@ -45,6 +46,7 @@ describe('MeshRouterStore', () => {
     });
 
     const pending = router.getDetailed(HASH_A);
+    await Promise.resolve();
     await Promise.resolve();
 
     expect(slowCalls.count).toBe(1);
@@ -65,6 +67,7 @@ describe('MeshRouterStore', () => {
     const router = new MeshRouterStore({
       primary,
       primarySourceId: 'idb',
+      primaryReadTimeoutMs: 0,
       requestTimeoutMs: 500,
       sources: [
         delayedSource('webrtc', 20, peerData, peerCalls),
@@ -74,6 +77,7 @@ describe('MeshRouterStore', () => {
 
     const first = router.getDetailed(HASH_A);
     await Promise.resolve();
+    await Promise.resolve();
     expect(peerCalls.count).toBe(1);
     expect(blossomCalls.count).toBe(1);
 
@@ -81,6 +85,8 @@ describe('MeshRouterStore', () => {
     await expect(first).resolves.toEqual({ data: peerData, sourceId: 'webrtc' });
 
     const second = router.getDetailed(HASH_B);
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
 
     expect(peerCalls.count).toBe(2);
@@ -120,6 +126,98 @@ describe('MeshRouterStore', () => {
     expect(blossomCalls.count).toBe(1);
   });
 
+  it('falls back to remote sources when primary storage read stalls', async () => {
+    vi.useFakeTimers();
+    const remoteData = new Uint8Array([42]);
+    const remoteCalls = { count: 0 };
+    const primary = {
+      put: vi.fn(async () => true),
+      get: vi.fn(() => new Promise<Uint8Array | null>(() => {})),
+      has: vi.fn(async () => false),
+      delete: vi.fn(async () => false),
+    };
+    const router = new MeshRouterStore({
+      primary,
+      primarySourceId: 'idb',
+      primaryReadTimeoutMs: 250,
+      requestTimeoutMs: 500,
+      sources: [
+        delayedSource('blossom', 50, remoteData, remoteCalls),
+      ],
+    });
+
+    const pending = router.getDetailed(HASH_A);
+    await Promise.resolve();
+    expect(remoteCalls.count).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(remoteCalls.count).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(pending).resolves.toEqual({ data: remoteData, sourceId: 'blossom' });
+  });
+
+  it('gives the last hedged source a full chance instead of clipping it at query start', async () => {
+    vi.useFakeTimers();
+    const primary = new MemoryStore();
+    const warmCalls = { count: 0 };
+    const missCalls = { count: 0 };
+    const slowWarmMissCalls = { count: 0 };
+    const slowCalls = { count: 0 };
+    const warmData = new Uint8Array([7]);
+    const slowData = new Uint8Array([99]);
+    const router = new MeshRouterStore({
+      primary,
+      primarySourceId: 'idb',
+      requestTimeoutMs: 120,
+      dispatch: {
+        initialFanout: 1,
+        hedgeFanout: 1,
+        maxFanout: 2,
+        hedgeIntervalMs: 50,
+      },
+      sources: [
+        {
+          id: 'first-miss',
+          get: async (hash) => {
+            if (hash === HASH_B) {
+              return delayedSource('warm', 10, warmData, warmCalls).get(hash);
+            }
+            return delayedSource('miss', 200, null, missCalls).get(hash);
+          },
+        },
+        {
+          id: 'late-hit',
+          get: async (hash) => {
+            if (hash === HASH_B) {
+              return delayedSource('late-warm-miss', 20, null, slowWarmMissCalls).get(hash);
+            }
+            return delayedSource('late-hit', 100, slowData, slowCalls).get(hash);
+          },
+        },
+      ],
+    });
+
+    const warm = router.getDetailed(HASH_B, { skipPrimary: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(20);
+    await expect(warm).resolves.toEqual({ data: warmData, sourceId: 'first-miss' });
+    expect(slowWarmMissCalls.count).toBe(1);
+
+    const pending = router.getDetailed(HASH_A, { skipPrimary: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(missCalls.count).toBe(1);
+    expect(slowCalls.count).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(slowCalls.count).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toEqual({ data: slowData, sourceId: 'late-hit' });
+  });
+
   it('coalesces concurrent remote reads for the same hash and filter set', async () => {
     vi.useFakeTimers();
     const primary = new MemoryStore();
@@ -150,5 +248,28 @@ describe('MeshRouterStore', () => {
     await vi.advanceTimersByTimeAsync(50);
     await expect(first).resolves.toEqual({ data, sourceId: 'blossom' });
     await expect(second).resolves.toEqual({ data, sourceId: 'blossom' });
+  });
+
+  it('copies remote source bytes before caching and returning them', async () => {
+    const primary = new MemoryStore();
+    const sourceData = new Uint8Array([7, 8, 9]);
+    const router = new MeshRouterStore({
+      primary,
+      sources: [
+        {
+          id: 'webrtc',
+          get: async () => sourceData,
+        },
+      ],
+    });
+
+    const result = await router.getDetailed(HASH_A, { skipPrimary: true });
+    expect(result).toEqual({ data: new Uint8Array([7, 8, 9]), sourceId: 'webrtc' });
+    expect(result?.data).not.toBe(sourceData);
+
+    sourceData[0] = 99;
+
+    await expect(primary.get(HASH_A)).resolves.toEqual(new Uint8Array([7, 8, 9]));
+    expect(result?.data).toEqual(new Uint8Array([7, 8, 9]));
   });
 });
