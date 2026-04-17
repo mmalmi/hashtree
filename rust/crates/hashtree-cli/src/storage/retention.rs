@@ -49,6 +49,20 @@ pub struct PinnedItem {
     pub is_directory: bool,
 }
 
+fn pinned_item_name(hash: &Hash, meta: Option<&TreeMeta>) -> String {
+    let Some(meta) = meta else {
+        return to_hex(hash);
+    };
+
+    match (meta.owner.as_str(), meta.name.as_deref()) {
+        ("pinned", Some(name)) => name.to_string(),
+        ("", Some(name)) => name.to_string(),
+        (owner, Some(name)) if !owner.is_empty() => format!("{owner}/{name}"),
+        (owner, None) if !owner.is_empty() && owner != "pinned" => owner.to_string(),
+        _ => to_hex(hash),
+    }
+}
+
 impl HashtreeStore {
     fn socialgraph_root_files(&self) -> [PathBuf; 4] {
         let socialgraph = self.base_path().join("socialgraph");
@@ -303,9 +317,18 @@ impl HashtreeStore {
             let is_directory =
                 sync_block_on(async { tree.is_directory(&hash).await.unwrap_or(false) });
 
+            let meta = self
+                .tree_meta
+                .get(&rtxn, hash.as_slice())?
+                .map(|bytes| {
+                    rmp_serde::from_slice::<TreeMeta>(bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize TreeMeta: {}", e))
+                })
+                .transpose()?;
+
             pins.push(PinnedItem {
                 cid: to_hex(&hash),
-                name: "Unknown".to_string(),
+                name: pinned_item_name(&hash, meta.as_ref()),
                 is_directory,
             });
         }
@@ -509,6 +532,18 @@ impl HashtreeStore {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_tree_ref(&self, key: &str) -> Result<Option<Hash>> {
+        let rtxn = self.env.read_txn()?;
+        let Some(bytes) = self.tree_refs.get(&rtxn, key)? else {
+            return Ok(None);
+        };
+
+        let hash: Hash = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid hash in tree_refs"))?;
+        Ok(Some(hash))
     }
 
     /// List all indexed trees
@@ -805,6 +840,53 @@ mod tests {
 
         assert!(freed < 1024);
         assert!(store.blob_exists(&cid.hash).expect("root exists"));
+    }
+
+    #[test]
+    fn list_pins_with_names_uses_indexed_tree_metadata() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024 * 1024).expect("store");
+        let cid = build_test_tree(&store);
+
+        store.pin(&cid.hash).expect("pin tree");
+        store
+            .index_tree(
+                &cid.hash,
+                "npub1example",
+                Some("playlist"),
+                PRIORITY_OTHER,
+                Some("npub1example/playlist"),
+            )
+            .expect("index tree");
+
+        let pins = store.list_pins_with_names().expect("list pins");
+
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].name, "npub1example/playlist");
+    }
+
+    #[test]
+    fn get_tree_ref_returns_stored_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024 * 1024).expect("store");
+        let cid = build_test_tree(&store);
+
+        store
+            .index_tree(
+                &cid.hash,
+                "npub1example",
+                Some("playlist"),
+                PRIORITY_OTHER,
+                Some("npub1example/playlist"),
+            )
+            .expect("index tree");
+
+        assert_eq!(
+            store
+                .get_tree_ref("npub1example/playlist")
+                .expect("tree ref lookup"),
+            Some(cid.hash)
+        );
     }
 
     #[test]

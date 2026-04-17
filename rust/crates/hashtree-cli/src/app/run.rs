@@ -8,7 +8,7 @@ use hashtree_cli::WebRTCManager;
 use hashtree_cli::{
     spawn_background_eviction_task, Config, FetchConfig, FetchProgress, Fetcher, HashtreeServer,
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, NostrToBech32, RootResolver,
-    BACKGROUND_EVICTION_INTERVAL,
+    BACKGROUND_EVICTION_INTERVAL, PRIORITY_OTHER,
 };
 use hashtree_core::{Cid, HashTree, HashTreeConfig, NHashData};
 use std::collections::HashSet;
@@ -17,7 +17,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::add::run_add;
 use super::args::{
@@ -40,7 +40,10 @@ use super::nostr_index::{run_socialgraph_index_from_cli, SocialGraphIndexOptions
 use super::peers::list_peers;
 use super::pwa::run_export;
 use super::release::publish_release_version;
-use super::resolve::{resolve_cid_input, ResolvedCid};
+use super::resolve::{
+    parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ResolveOptions,
+    ResolvedCid,
+};
 use super::socialgraph::{
     run_socialgraph_filter, run_socialgraph_rebuild_event_index,
     run_socialgraph_rebuild_profile_index, run_socialgraph_snapshot, run_socialgraph_stats,
@@ -142,6 +145,110 @@ pub(crate) fn warn_if_stun_unavailable(config: &mut Config) {
         );
         config.server.stun_port = 0;
     }
+}
+
+fn normalized_pin_label(input: &str) -> String {
+    input
+        .strip_prefix("htree://")
+        .unwrap_or(input)
+        .split('#')
+        .next()
+        .unwrap_or(input)
+        .split('?')
+        .next()
+        .unwrap_or(input)
+        .trim_matches('/')
+        .to_string()
+}
+
+fn ensure_supported_pin_target(input: &str) -> Result<()> {
+    let normalized = normalized_pin_label(input);
+    if normalized.starts_with("npub1") && !normalized.contains('/') {
+        anyhow::bail!("Author-wide pinning is not implemented yet. Use npub.../reponame.");
+    }
+    Ok(())
+}
+
+async fn resolve_cid_input_for_pin(input: &str, data_dir: &PathBuf) -> Result<ResolvedCid> {
+    let opts = ResolveOptions {
+        data_dir: Some(data_dir.clone()),
+        ..ResolveOptions::default()
+    };
+    resolve_cid_input_with_opts(input, &opts).await
+}
+
+pub(crate) fn stored_published_pin_hash(
+    store: &HashtreeStore,
+    input: &str,
+) -> Result<Option<[u8; 32]>> {
+    let Some(parsed_target) = parse_published_target(input) else {
+        return Ok(None);
+    };
+    if parsed_target.path.is_some() {
+        return Ok(None);
+    }
+
+    let ref_key = format!("{}/{}", parsed_target.npub, parsed_target.tree_name);
+    store.get_tree_ref(&ref_key)
+}
+
+pub(crate) async fn pin_input_target(
+    store: &Arc<HashtreeStore>,
+    fetcher: &Fetcher,
+    input: &str,
+    resolved: &ResolvedCid,
+) -> Result<Cid> {
+    let target_cid = resolve_load_target_cid(fetcher, store, resolved, None).await?;
+    let normalized_input = normalized_pin_label(input);
+    let parsed_target = parse_published_target(input);
+
+    let (owner, name, ref_key) = if let Some(parsed_target) = parsed_target.as_ref() {
+        let name = parsed_target
+            .path
+            .as_deref()
+            .map(|path| format!("{}/{}", parsed_target.tree_name, path))
+            .unwrap_or_else(|| parsed_target.tree_name.clone());
+        let ref_key = parsed_target
+            .path
+            .is_none()
+            .then(|| format!("{}/{}", parsed_target.npub, parsed_target.tree_name));
+        (parsed_target.npub.clone(), Some(name), ref_key)
+    } else {
+        ("pinned".to_string(), Some(normalized_input), None)
+    };
+
+    store.pin(&target_cid.hash)?;
+    store.index_tree(
+        &target_cid.hash,
+        &owner,
+        name.as_deref(),
+        PRIORITY_OTHER,
+        ref_key.as_deref(),
+    )?;
+
+    if let Some(parsed_target) = parsed_target.as_ref() {
+        let pubkey_hex = hex::encode(parse_npub(&parsed_target.npub)?);
+        let root_hash = hashtree_core::to_hex(&resolved.cid.hash);
+        let root_key = resolved.cid.key.map(hex::encode);
+        let updated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        store.set_cached_root(
+            &pubkey_hex,
+            &parsed_target.tree_name,
+            &root_hash,
+            root_key.as_deref(),
+            "public",
+            updated_at,
+        )?;
+    }
+
+    if let Err(error) = store.evict_if_needed() {
+        tracing::warn!("Post-pin eviction check failed: {}", error);
+    }
+
+    Ok(target_cid)
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -807,18 +914,27 @@ pub(crate) async fn run() -> Result<()> {
             }
         }
         Commands::Pin { cid: cid_input } => {
-            // Resolve npub/repo or htree:// URLs to CID
-            let resolved = resolve_cid_input(&cid_input).await?;
-            let store = HashtreeStore::new(&data_dir)?;
-            store.pin(&resolved.cid.hash)?;
-            println!("Pinned: {}", format_cid_for_display(&resolved.cid));
+            ensure_supported_pin_target(&cid_input)?;
+            let resolved = resolve_cid_input_for_pin(&cid_input, &data_dir).await?;
+            let store = Arc::new(HashtreeStore::new(&data_dir)?);
+            let fetcher = Fetcher::new(FetchConfig::default());
+            let pinned = pin_input_target(&store, &fetcher, &cid_input, &resolved).await?;
+            println!("Pinned: {}", format_cid_for_display(&pinned));
         }
         Commands::Unpin { cid: cid_input } => {
-            // Resolve npub/repo or htree:// URLs to CID
-            let resolved = resolve_cid_input(&cid_input).await?;
+            ensure_supported_pin_target(&cid_input)?;
             let store = HashtreeStore::new(&data_dir)?;
-            store.unpin(&resolved.cid.hash)?;
-            println!("Unpinned: {}", format_cid_for_display(&resolved.cid));
+            if let Some(hash) = stored_published_pin_hash(&store, &cid_input)? {
+                store.unpin(&hash)?;
+                println!("Unpinned: {}", hashtree_core::to_hex(&hash));
+            } else {
+                let resolved = resolve_cid_input_for_pin(&cid_input, &data_dir).await?;
+                let store = Arc::new(store);
+                let fetcher = Fetcher::new(FetchConfig::default());
+                let target = resolve_load_target_cid(&fetcher, &store, &resolved, None).await?;
+                store.unpin(&target.hash)?;
+                println!("Unpinned: {}", format_cid_for_display(&target));
+            }
         }
         Commands::Info { cid: cid_input } => {
             // Resolve npub/repo or htree:// URLs to CID

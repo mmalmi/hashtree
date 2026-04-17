@@ -9,15 +9,16 @@ use super::lists::{
     update_mute_list_file_with_status, MuteEntry, MuteUpdate,
 };
 use super::resolve::{
-    parse_published_target, resolve_cid_input, ParsedPublishedTarget, ResolvedCid,
+    parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ParsedPublishedTarget,
+    ResolveOptions, ResolvedCid,
 };
 #[cfg(feature = "fuse")]
 use super::run::{
     find_existing_active_mount, is_stale_mount_io_error, should_warn_for_temporary_mountpoint,
 };
 use super::run::{
-    format_cid_for_display, resolve_cat_target_cid, resolve_load_target_cid,
-    warn_if_stun_unavailable,
+    format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_load_target_cid,
+    stored_published_pin_hash, warn_if_stun_unavailable,
 };
 use crate::app::args::{CashuCommands, CashuMintCommands, ReleaseCommands, SocialGraphCommands};
 use crate::app::args::{Cli, Commands};
@@ -25,9 +26,9 @@ use crate::app::args::{Cli, Commands};
 use crate::app::mount_registry::ActiveMount;
 use clap::{CommandFactory, Parser};
 use hashtree_cli::config::ServerMode;
-use hashtree_cli::{Config as AppConfig, FetchConfig, Fetcher, HashtreeStore};
+use hashtree_cli::{Config as AppConfig, FetchConfig, Fetcher, HashtreeStore, NostrToBech32};
 use hashtree_core::{nhash_decode, Cid};
-use nostr::Kind;
+use nostr::{Keys, Kind};
 #[cfg(feature = "fuse")]
 use std::io;
 use std::path::PathBuf;
@@ -909,4 +910,107 @@ async fn test_resolve_cat_target_cid_rejects_directories_without_path() {
         .await
         .expect_err("catting a directory should fail");
     assert!(err.to_string().contains("Cannot cat a directory"));
+}
+
+#[tokio::test]
+async fn test_pin_published_repo_indexes_named_ref_and_unpins_stored_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(HashtreeStore::new(tmp.path().join("store")).unwrap());
+
+    let first_dir = tmp.path().join("repo-v1");
+    std::fs::create_dir_all(&first_dir).unwrap();
+    std::fs::write(first_dir.join("README.md"), "version one\n").unwrap();
+    let first_root = store
+        .upload_dir_with_options(&first_dir, true)
+        .expect("upload first repo root");
+    let first_cid = Cid::parse(&first_root).expect("parse first root cid");
+    store.unpin(&first_cid.hash).expect("clear upload auto-pin");
+
+    let second_dir = tmp.path().join("repo-v2");
+    std::fs::create_dir_all(&second_dir).unwrap();
+    std::fs::write(second_dir.join("README.md"), "version two\n").unwrap();
+    let second_root = store
+        .upload_dir_with_options(&second_dir, true)
+        .expect("upload second repo root");
+    let second_cid = Cid::parse(&second_root).expect("parse second root cid");
+    store
+        .unpin(&second_cid.hash)
+        .expect("clear upload auto-pin");
+
+    let keys = Keys::generate();
+    let npub = NostrToBech32::to_bech32(&keys.public_key()).expect("encode npub");
+    let pubkey_hex = hex::encode(keys.public_key().to_bytes());
+    let repo_target = format!("{npub}/repo");
+
+    store
+        .set_cached_root(
+            &pubkey_hex,
+            "repo",
+            &hex::encode(first_cid.hash),
+            None,
+            "public",
+            1,
+        )
+        .expect("cache first root");
+
+    let resolved = resolve_cid_input_with_opts(
+        &repo_target,
+        &ResolveOptions {
+            data_dir: Some(tmp.path().join("store")),
+            relays: Some(Vec::new()),
+            ..ResolveOptions::default()
+        },
+    )
+    .await
+    .expect("resolve cached repo target");
+
+    let fetcher = Fetcher::new(FetchConfig::default());
+    let pinned = pin_input_target(&store, &fetcher, &repo_target, &resolved)
+        .await
+        .expect("pin published repo");
+
+    assert_eq!(pinned.hash, first_cid.hash);
+    assert!(store.is_pinned(&first_cid.hash).expect("first root pinned"));
+    assert_eq!(
+        store
+            .get_tree_ref(&repo_target)
+            .expect("stored tree ref lookup"),
+        Some(first_cid.hash)
+    );
+    assert_eq!(
+        store.list_pins_with_names().expect("list pins")[0].name,
+        repo_target
+    );
+
+    store
+        .set_cached_root(
+            &pubkey_hex,
+            "repo",
+            &hex::encode(second_cid.hash),
+            None,
+            "public",
+            2,
+        )
+        .expect("cache newer root");
+
+    let stored_hash = stored_published_pin_hash(store.as_ref(), &repo_target)
+        .expect("stored published pin lookup")
+        .expect("stored published root");
+    assert_eq!(stored_hash, first_cid.hash);
+
+    store
+        .unpin(&stored_hash)
+        .expect("unpin stored published root");
+    assert!(
+        !store
+            .is_pinned(&first_cid.hash)
+            .expect("first root pin status"),
+        "unpin should remove the originally pinned root even after the cached mutable ref changes"
+    );
+    assert!(
+        !store
+            .is_pinned(&second_cid.hash)
+            .expect("second root pin status"),
+        "newer cached root should not be touched by unpinning the stored ref"
+    );
 }

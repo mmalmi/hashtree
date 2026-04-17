@@ -27,9 +27,9 @@ Content Commands:
   info         Get information about a CID
 
 Storage Commands:
-  pin          Pin a CID
-  unpin        Unpin a CID
-  pins         List all pinned CIDs
+  pin          Pin content
+  unpin        Unpin content
+  pins         List all pinned content
   stats        Get storage statistics
   gc           Run garbage collection
   storage      Manage storage limits and eviction
@@ -77,9 +77,9 @@ Content Commands:
   info         Get information about a CID
 
 Storage Commands:
-  pin          Pin a CID
-  unpin        Unpin a CID
-  pins         List all pinned CIDs
+  pin          Pin content
+  unpin        Unpin content
+  pins         List all pinned content
   stats        Get storage statistics
   gc           Run garbage collection
   storage      Manage storage limits and eviction
@@ -258,19 +258,19 @@ pub(crate) enum Commands {
     },
 
     // ── Pinning ─────────────────────────────────────────────
-    /// Pin a CID
+    /// Pin content
     Pin {
-        /// CID to pin
+        /// CID, npub/repo, or htree:// target to pin
         cid: String,
     },
 
-    /// Unpin a CID
+    /// Unpin content
     Unpin {
-        /// CID to unpin
+        /// CID, npub/repo, or htree:// target to unpin
         cid: String,
     },
 
-    /// List all pinned CIDs
+    /// List all pinned content
     Pins,
 
     // ── Storage ─────────────────────────────────────────────
