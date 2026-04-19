@@ -103,6 +103,7 @@ fn browser_config(data_dir: &Path) -> Config {
     let mut config = Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
+    config.server.public_writes = false;
     config.server.enable_webrtc = false;
     config.server.enable_multicast = false;
     config.server.max_multicast_peers = 0;
@@ -117,7 +118,27 @@ fn browser_config(data_dir: &Path) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
+    use reqwest::blocking::Client;
     use tempfile::TempDir;
+
+    fn create_blossom_auth(keys: &Keys, action: &str) -> String {
+        let expiration = Timestamp::from(Timestamp::now().as_u64() + 300);
+        let tags = vec![
+            Tag::custom(TagKind::Custom("t".into()), vec![action.to_string()]),
+            Tag::custom(
+                TagKind::Custom("expiration".into()),
+                vec![expiration.to_string()],
+            ),
+        ];
+        let event = EventBuilder::new(Kind::Custom(24242), "", tags)
+            .to_event(keys)
+            .expect("sign blossom auth");
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_string(&event).expect("serialize auth event"));
+        format!("Nostr {encoded}")
+    }
 
     #[test]
     fn host_runtime_starts_and_shuts_down() {
@@ -142,5 +163,28 @@ mod tests {
 
         let stopped = reqwest::blocking::get(format!("{}/htree/test", status.base_url)).is_err();
         assert!(stopped, "expected host daemon shutdown to stop serving");
+    }
+
+    #[test]
+    fn host_runtime_rejects_public_blossom_uploads() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime =
+            HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
+        let status = runtime.status();
+
+        let keys = Keys::generate();
+        let response = Client::new()
+            .put(format!("{}/upload", status.base_url))
+            .header("Authorization", create_blossom_auth(&keys, "upload"))
+            .header("Content-Type", "text/plain")
+            .body("browser-mode upload probe")
+            .send()
+            .expect("upload request");
+
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "browser-mode daemon must not accept public Blossom uploads"
+        );
     }
 }

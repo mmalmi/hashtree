@@ -165,6 +165,10 @@ fn find_htree_binary() -> PathBuf {
 /// Create a blossom auth header for upload
 /// Kind 24242 event with "upload" action tag
 fn create_blossom_auth(keys: &Keys) -> String {
+    create_blossom_auth_for_action(keys, "upload")
+}
+
+fn create_blossom_auth_for_action(keys: &Keys, action: &str) -> String {
     use base64::Engine;
     use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
 
@@ -173,7 +177,7 @@ fn create_blossom_auth(keys: &Keys) -> String {
 
     // Create kind 24242 event with tags
     let tags = vec![
-        Tag::custom(TagKind::Custom("t".into()), vec!["upload".to_string()]),
+        Tag::custom(TagKind::Custom("t".into()), vec![action.to_string()]),
         Tag::custom(
             TagKind::Custom("expiration".into()),
             vec![expiration.to_string()],
@@ -500,6 +504,54 @@ fn test_list_blobs() {
             .is_ok(),
         "List should return 404, empty array, or valid JSON"
     );
+}
+
+#[test]
+fn test_list_blobs_requires_matching_auth() {
+    let server = TestServer::new(19011, false);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("build client");
+    let keys = Keys::generate();
+    let upload_auth = create_blossom_auth(&keys);
+
+    let upload = client
+        .put(format!("{}/upload", server.base_url()))
+        .header("Content-Type", "text/plain")
+        .header("Authorization", upload_auth.clone())
+        .body("private blob listing probe")
+        .send()
+        .expect("upload probe blob");
+    assert!(
+        upload.status().is_success(),
+        "setup upload should succeed, got {}",
+        upload.status()
+    );
+
+    let pubkey_hex = keys.public_key().to_hex();
+    let list_url = format!("{}/list/{}", server.base_url(), pubkey_hex);
+
+    let unauthenticated = client
+        .get(&list_url)
+        .send()
+        .expect("request list without auth");
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let wrong_action = client
+        .get(&list_url)
+        .header("Authorization", upload_auth)
+        .send()
+        .expect("request list with upload auth");
+    assert_eq!(wrong_action.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let list_auth = create_blossom_auth_for_action(&keys, "list");
+    let authorized = client
+        .get(&list_url)
+        .header("Authorization", list_auth)
+        .send()
+        .expect("request list with list auth");
+    assert_eq!(authorized.status(), reqwest::StatusCode::OK);
 }
 
 // Social graph tests removed from this file.

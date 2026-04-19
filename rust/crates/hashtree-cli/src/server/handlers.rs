@@ -1516,6 +1516,14 @@ pub async fn socialgraph_snapshot(
             .into_response();
     }
 
+    let add_public_cors = |builder: axum::http::response::Builder| {
+        if state.socialgraph_snapshot_public {
+            builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        } else {
+            builder
+        }
+    };
+
     let social_graph_store = match &state.social_graph_store {
         Some(store) => Arc::clone(store),
         None => {
@@ -1551,23 +1559,21 @@ pub async fn socialgraph_snapshot(
     {
         Ok(Ok(chunks)) => chunks,
         Ok(Err(err)) => {
-            return Response::builder()
+            return add_public_cors(Response::builder())
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .body(Body::from(format!("Error generating snapshot: {err}")))
                 .unwrap();
         }
         Err(err) => {
-            return Response::builder()
+            return add_public_cors(Response::builder())
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .body(Body::from(format!("Error generating snapshot: {err}")))
                 .unwrap();
         }
     };
 
     let stream = stream::iter(chunks.into_iter().map(Ok::<Bytes, std::io::Error>));
-    Response::builder()
+    add_public_cors(Response::builder())
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
@@ -1578,7 +1584,6 @@ pub async fn socialgraph_snapshot(
             header::CACHE_CONTROL,
             "public, max-age=60, stale-while-revalidate=60",
         )
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Body::from_stream(stream))
         .unwrap()
 }

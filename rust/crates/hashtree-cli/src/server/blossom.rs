@@ -676,8 +676,28 @@ pub async fn list_blobs(
         }
     };
 
-    // Optional auth verification for list
-    let _auth = verify_blossom_auth(&headers, "list", None).ok();
+    let auth = match verify_blossom_auth(&headers, "list", None) {
+        Ok(auth) => auth,
+        Err((status, reason)) => {
+            return Response::builder()
+                .status(status)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", reason)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("[]"))
+                .unwrap();
+        }
+    };
+
+    if !auth.pubkey.eq_ignore_ascii_case(&pubkey_hex) {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header("X-Reason", "Pubkey mismatch")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("[]"))
+            .unwrap();
+    }
 
     // Get blobs for this pubkey
     match state.store.list_blobs_by_pubkey(&pubkey_bytes) {
