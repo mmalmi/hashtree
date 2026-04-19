@@ -1,14 +1,21 @@
 use super::*;
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{head, put},
+    Router,
+};
 use futures::{SinkExt, StreamExt};
 use hashtree_resolver::RootResolver;
 use nostr::{EventBuilder, JsonUtil, Tag};
 use nostr_sdk::ToBech32;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::TcpListener;
 use std::sync::Mutex;
 use tempfile::TempDir;
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::socialgraph::{open_social_graph_store_with_storage, set_social_graph_root};
@@ -104,6 +111,118 @@ impl Drop for TestRelay {
     }
 }
 
+struct TestBlossom {
+    base_url: String,
+    uploaded_hashes: Arc<Mutex<HashSet<String>>>,
+    put_delays: Arc<Mutex<HashMap<String, Duration>>>,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl TestBlossom {
+    async fn new() -> Self {
+        let uploaded_hashes = Arc::new(Mutex::new(HashSet::new()));
+        let put_delays = Arc::new(Mutex::new(HashMap::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blossom");
+        let port = listener.local_addr().expect("blossom addr").port();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let state = Arc::clone(&uploaded_hashes);
+        let delays = Arc::clone(&put_delays);
+
+        tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/upload",
+                    put(
+                        |State((uploaded_hashes, put_delays)): State<(
+                            Arc<Mutex<HashSet<String>>>,
+                            Arc<Mutex<HashMap<String, Duration>>>,
+                        )>,
+                         headers: axum::http::HeaderMap,
+                         _body: Bytes| async move {
+                            let Some(hash) = headers
+                                .get("x-sha-256")
+                                .and_then(|value| value.to_str().ok())
+                                .map(|value| value.to_lowercase())
+                            else {
+                                return StatusCode::BAD_REQUEST;
+                            };
+                            let delay = put_delays.lock().expect("put delays").get(&hash).copied();
+                            if let Some(delay) = delay {
+                                tokio::time::sleep(delay).await;
+                            }
+                            uploaded_hashes
+                                .lock()
+                                .expect("uploaded hashes")
+                                .insert(hash);
+                            StatusCode::CREATED
+                        },
+                    ),
+                )
+                .route(
+                    "/:hash.bin",
+                    head(
+                        |State((uploaded_hashes, _put_delays)): State<(
+                            Arc<Mutex<HashSet<String>>>,
+                            Arc<Mutex<HashMap<String, Duration>>>,
+                        )>,
+                         Path(hash): Path<String>| async move {
+                            if uploaded_hashes
+                                .lock()
+                                .expect("uploaded hashes")
+                                .contains(&hash.to_lowercase())
+                            {
+                                StatusCode::OK
+                            } else {
+                                StatusCode::NOT_FOUND
+                            }
+                        },
+                    ),
+                )
+                .with_state((state, delays));
+
+            let server = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            });
+            let _ = server.await;
+        });
+
+        Self {
+            base_url: format!("http://127.0.0.1:{port}"),
+            uploaded_hashes,
+            put_delays,
+            shutdown: Some(shutdown),
+        }
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    fn has_hash(&self, hash: &str) -> bool {
+        self.uploaded_hashes
+            .lock()
+            .expect("uploaded hashes")
+            .contains(&hash.to_lowercase())
+    }
+
+    fn set_put_delay(&self, hash: &str, delay: Duration) {
+        self.put_delays
+            .lock()
+            .expect("put delays")
+            .insert(hash.to_lowercase(), delay);
+    }
+}
+
+impl Drop for TestBlossom {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
 fn published_root_event_count(relay: &TestRelay, tree_name: &str) -> usize {
     relay
         .events
@@ -119,6 +238,24 @@ fn published_root_event_count(relay: &TestRelay, tree_name: &str) -> usize {
                 })
         })
         .count()
+}
+
+fn latest_published_root_event(relay: &TestRelay, tree_name: &str) -> Option<Event> {
+    relay
+        .events
+        .lock()
+        .expect("relay events")
+        .iter()
+        .filter(|event| {
+            event.kind == Kind::Custom(30078)
+                && event.tags.iter().any(|tag| {
+                    let values = tag.as_slice();
+                    values.first().is_some_and(|value| value == "d")
+                        && values.get(1).is_some_and(|value| value == tree_name)
+                })
+        })
+        .max_by_key(|event| (event.created_at, event.id))
+        .cloned()
 }
 
 async fn handle_connection(
@@ -379,6 +516,428 @@ async fn apply_history_root_publishes_profile_search_tree() -> Result<()> {
         graph_store.profile_search_root()?.expect("search root")
     );
     resolver.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_history_root_publishes_profiles_by_pubkey_tree() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_profile = EventBuilder::new(
+        Kind::Metadata,
+        r#"{"name":"Alice Published Profile Tree"}"#,
+        [],
+    )
+    .custom_created_at(Timestamp::from(11))
+    .to_event(&alice_keys)
+    .expect("alice profile");
+    let stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_profile.id.to_hex(),
+        pubkey: alice_profile.pubkey.to_hex(),
+        created_at: alice_profile.created_at.as_u64(),
+        kind: alice_profile.kind.as_u16() as u32,
+        tags: alice_profile
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_profile.content.clone(),
+        sig: alice_profile.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store.build(None, vec![stored]).await?;
+
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            history_sync_on_start: false,
+            published_profiles_by_pubkey_tree_name: Some("profiles-by-pubkey".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store.clone(),
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+    mirror.apply_history_root(root.as_ref()).await?;
+    tokio::time::sleep(MIRROR_ROOT_PUBLISH_DEBOUNCE + Duration::from_millis(20)).await;
+    mirror.maybe_publish_profiles_by_pubkey_root(false).await?;
+
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+    let resolved = resolver
+        .resolve(&format!("{npub}/profiles-by-pubkey"))
+        .await?
+        .expect("published profiles-by-pubkey root");
+
+    assert_eq!(
+        resolved,
+        graph_store
+            .profiles_by_pubkey_root()?
+            .expect("profiles-by-pubkey root")
+    );
+    resolver.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publish() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_profile =
+        EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Uploaded Search"}"#, [])
+            .custom_created_at(Timestamp::from(11))
+            .to_event(&alice_keys)
+            .expect("alice profile");
+    let stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_profile.id.to_hex(),
+        pubkey: alice_profile.pubkey.to_hex(),
+        created_at: alice_profile.created_at.as_u64(),
+        kind: alice_profile.kind.as_u16() as u32,
+        tags: alice_profile
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_profile.content.clone(),
+        sig: alice_profile.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store.build(None, vec![stored]).await?;
+
+    let relay = TestRelay::new(Vec::new());
+    let blossom = TestBlossom::new().await;
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            blossom_write_servers: vec![blossom.base_url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: Some("profile-search".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store.clone(),
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    mirror.apply_history_root(root.as_ref()).await?;
+    tokio::time::sleep(MIRROR_ROOT_PUBLISH_DEBOUNCE + Duration::from_millis(20)).await;
+    mirror.maybe_publish_profile_search_root(false).await?;
+
+    let published_root = graph_store
+        .profile_search_root()?
+        .expect("profile-search root");
+    assert!(
+        blossom.has_hash(&hex::encode(published_root.hash)),
+        "expected profile-search DAG root blob to be uploaded before publish"
+    );
+    assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_history_root_publishes_profile_indexes_even_if_event_upload_is_slow() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_profile = EventBuilder::new(
+        Kind::Metadata,
+        r#"{"name":"Alice Concurrent Publish","picture":"https://example.com/alice.png"}"#,
+        [],
+    )
+    .custom_created_at(Timestamp::from(11))
+    .to_event(&alice_keys)
+    .expect("alice profile");
+    let stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_profile.id.to_hex(),
+        pubkey: alice_profile.pubkey.to_hex(),
+        created_at: alice_profile.created_at.as_u64(),
+        kind: alice_profile.kind.as_u16() as u32,
+        tags: alice_profile
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_profile.content.clone(),
+        sig: alice_profile.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store.build(None, vec![stored]).await?;
+
+    let relay = TestRelay::new(Vec::new());
+    let blossom = TestBlossom::new().await;
+    let delayed_hashes =
+        crate::blossom_push::collect_cids_for_push(&store, root.clone().expect("event root"))?
+            .into_iter()
+            .map(|cid| hex::encode(cid.hash))
+            .collect::<Vec<_>>();
+    let delayed_upload_timeout = Duration::from_secs(15);
+    for hash in &delayed_hashes {
+        blossom.set_put_delay(hash, delayed_upload_timeout);
+    }
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = Arc::new(
+        BackgroundNostrMirror::new(
+            NostrMirrorConfig {
+                relays: vec![relay.url()],
+                publish_relays: vec![relay.url()],
+                blossom_write_servers: vec![blossom.base_url()],
+                history_sync_on_start: false,
+                published_event_tree_name: Some("nostr-event-index".to_string()),
+                published_profile_search_tree_name: Some("profile-search".to_string()),
+                published_profiles_by_pubkey_tree_name: Some("profiles-by-pubkey".to_string()),
+                ..NostrMirrorConfig::default()
+            },
+            store,
+            graph_store.clone(),
+            Some(publish_keys),
+        )
+        .await?,
+    );
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    let apply_future = mirror.apply_history_root(root.as_ref());
+    tokio::pin!(apply_future);
+    let started = std::time::Instant::now();
+    let mut apply_result = None;
+    loop {
+        if published_root_event_count(&relay, "profile-search") == 1
+            && published_root_event_count(&relay, "profiles-by-pubkey") == 1
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "profile index roots should publish before delayed event upload finishes"
+        );
+        assert!(
+            delayed_hashes.iter().all(|hash| !blossom.has_hash(hash)),
+            "delayed event upload completed before profile indexes published"
+        );
+        if apply_result.is_none() {
+            tokio::select! {
+                result = &mut apply_future => {
+                    apply_result = Some(result);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
+    assert!(
+        apply_result.is_none(),
+        "event-root publish should still be pending while profile indexes publish"
+    );
+
+    if let Some(result) = apply_result {
+        result?;
+    } else {
+        apply_future.await?;
+    }
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_history_root_bumps_replaceable_timestamp_past_existing_profile_search_event(
+) -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_profile = EventBuilder::new(
+        Kind::Metadata,
+        r#"{"name":"Alice Replaceable Timestamp"}"#,
+        [],
+    )
+    .custom_created_at(Timestamp::from(11))
+    .to_event(&alice_keys)
+    .expect("alice profile");
+    let stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_profile.id.to_hex(),
+        pubkey: alice_profile.pubkey.to_hex(),
+        created_at: alice_profile.created_at.as_u64(),
+        kind: alice_profile.kind.as_u16() as u32,
+        tags: alice_profile
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_profile.content.clone(),
+        sig: alice_profile.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store.build(None, vec![stored]).await?;
+
+    let stale_created_at = Timestamp::from_secs(Timestamp::now().as_u64().saturating_add(30));
+    let stale_event = EventBuilder::new(
+        Kind::Custom(30078),
+        "",
+        [
+            Tag::identifier("profile-search".to_string()),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                vec!["hashtree"],
+            ),
+            Tag::custom(TagKind::Custom("hash".into()), vec!["11".repeat(32)]),
+        ],
+    )
+    .custom_created_at(stale_created_at)
+    .to_event(&root_keys)
+    .expect("stale root event");
+
+    let relay = TestRelay::new(vec![stale_event]);
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: Some("profile-search".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store.clone(),
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    mirror.apply_history_root(root.as_ref()).await?;
+
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+    let resolved = resolver
+        .resolve(&format!("{npub}/profile-search"))
+        .await?
+        .expect("published profile-search root");
+    resolver.stop().await?;
+
+    let latest = latest_published_root_event(&relay, "profile-search")
+        .expect("latest published profile-search event");
+    assert!(
+        latest.created_at > stale_created_at,
+        "new publish should advance replaceable timestamp past existing relay state"
+    );
+    assert_eq!(
+        resolved,
+        graph_store
+            .profile_search_root()?
+            .expect("profile-search root")
+    );
     Ok(())
 }
 
@@ -1132,4 +1691,31 @@ fn reconnect_history_sync_respects_cooldown() {
     assert!(!BackgroundNostrMirror::should_run_reconnect_history_sync(
         Some(&now)
     ));
+}
+
+#[test]
+fn metadata_only_history_sync_uses_small_author_batches() {
+    let plan = BackgroundNostrMirror::history_sync_plan_for(
+        &NostrMirrorConfig::default(),
+        5_000,
+        &[Kind::Metadata.as_u16()],
+    );
+
+    assert_eq!(plan.relay_fetch_mode, RelayFetchMode::AuthorBatches);
+    assert_eq!(plan.per_author_event_limit, 1);
+    assert_eq!(plan.author_batch_size, 64);
+}
+
+#[test]
+fn large_history_sync_prefers_global_recent() {
+    let config = NostrMirrorConfig::default();
+    let plan = BackgroundNostrMirror::history_sync_plan_for(
+        &config,
+        config.author_batch_size * 9,
+        &config.kinds,
+    );
+
+    assert_eq!(plan.relay_fetch_mode, RelayFetchMode::GlobalRecent);
+    assert_eq!(plan.per_author_event_limit, 16);
+    assert_eq!(plan.max_relay_pages, 20);
 }

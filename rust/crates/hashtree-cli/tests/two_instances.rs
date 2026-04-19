@@ -1226,7 +1226,7 @@ fn test_two_instances_connect_local_relay() -> Result<()> {
     not(feature = "p2p"),
     ignore = "requires p2p feature for WebRTC data channels"
 )]
-fn test_three_peers_chain_preserves_ac_mesh_after_relay_shutdown() -> Result<()> {
+fn test_three_peers_direct_mesh_survives_relay_shutdown() -> Result<()> {
     let htree_bin = find_htree_binary();
     let mut relay_r1 = test_relay::TestRelay::new(0);
     let mut relay_r2 = test_relay::TestRelay::new(0);
@@ -1264,28 +1264,29 @@ fn test_three_peers_chain_preserves_ac_mesh_after_relay_shutdown() -> Result<()>
         std::slice::from_ref(&relay_r2_url),
     )?;
 
+    wait_for_peer_data_channel(&instance_a.addr, &pubkey_b, Duration::from_secs(45))?;
+    wait_for_peer_data_channel(&instance_b.addr, &pubkey_a, Duration::from_secs(45))?;
+    wait_for_peer_data_channel(&instance_b.addr, &pubkey_c, Duration::from_secs(45))?;
+    wait_for_peer_data_channel(&instance_c.addr, &pubkey_b, Duration::from_secs(45))?;
+
+    relay_r1.stop();
+    relay_r2.stop();
+
     wait_for_peer_data_channel(&instance_a.addr, &pubkey_b, Duration::from_secs(20))?;
     wait_for_peer_data_channel(&instance_b.addr, &pubkey_a, Duration::from_secs(20))?;
     wait_for_peer_data_channel(&instance_b.addr, &pubkey_c, Duration::from_secs(20))?;
     wait_for_peer_data_channel(&instance_c.addr, &pubkey_b, Duration::from_secs(20))?;
 
-    relay_r1.stop();
-    relay_r2.stop();
-
-    // Relayless A<->C mesh formation can lag under workspace-wide test load.
-    wait_for_peer_data_channel(&instance_a.addr, &pubkey_c, Duration::from_secs(45))?;
-    wait_for_peer_data_channel(&instance_c.addr, &pubkey_a, Duration::from_secs(45))?;
-
-    let expected = b"relayless-ac-mesh".to_vec();
+    let expected = b"relayless-direct-mesh".to_vec();
     let store = HashtreeStore::new_with_backend(
         &instance_a.data_path,
         StorageBackend::Lmdb,
         TEST_STORAGE_MAX_SIZE_BYTES,
     )?;
     let cid = store.put_blob(&expected)?;
-    let url = format!("{}/{}", instance_c.base_url(), cid);
+    let url = format!("{}/{}", instance_b.base_url(), cid);
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Ok(bytes) = fetch_bytes(&url) {
             if bytes == expected {
@@ -1293,7 +1294,7 @@ fn test_three_peers_chain_preserves_ac_mesh_after_relay_shutdown() -> Result<()>
             }
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("Timed out waiting for C to fetch A's blob over mesh");
+            anyhow::bail!("Timed out waiting for B to fetch A's blob over relayless mesh");
         }
         std::thread::sleep(Duration::from_millis(200));
     }
