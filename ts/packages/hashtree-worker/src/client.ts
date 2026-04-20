@@ -21,6 +21,10 @@ type PendingRequest = {
 export type WorkerFactory = URL | string | (new () => Worker);
 export type P2PFetchHandler = (hashHex: string, peerId?: string) => Promise<Uint8Array | null>;
 export type P2PPeerListHandler = () => string[] | Promise<string[]>;
+export interface WorkerP2PProvider {
+  fetch: P2PFetchHandler;
+  listPeerIds: P2PPeerListHandler;
+}
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const PUT_BLOB_TIMEOUT_MS = 15 * 60_000;
@@ -528,6 +532,11 @@ export class HashtreeWorkerClient {
 
   setP2PPeerListHandler(handler: P2PPeerListHandler | null): void {
     this.p2pPeerListHandler = handler;
+  }
+
+  setP2PProvider(provider: WorkerP2PProvider | null): void {
+    this.p2pFetchHandler = provider ? provider.fetch : null;
+    this.p2pPeerListHandler = provider ? provider.listPeerIds : null;
   }
 
   async close(): Promise<void> {

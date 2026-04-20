@@ -1,5 +1,10 @@
 export { HashtreeWorkerClient } from './client.js';
-export type { WorkerFactory, P2PFetchHandler } from './client.js';
+export type {
+  WorkerFactory,
+  P2PFetchHandler,
+  P2PPeerListHandler,
+  WorkerP2PProvider,
+} from './client.js';
 export { RelayWorkerClient } from './relay-client.js';
 export type {
   TreeRootInfo as RelayTreeRootInfo,

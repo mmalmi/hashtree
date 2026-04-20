@@ -24,6 +24,14 @@ export {
   closeWebRTCProxy,
 } from './webrtcProxy.js';
 
+export {
+  createWebRTCWorkerP2PProvider,
+} from './clientBridge.js';
+
+export type {
+  WebRTCWorkerP2PProviderOptions,
+} from './clientBridge.js';
+
 export type {
   WebRTCCommand,
   WebRTCEvent,

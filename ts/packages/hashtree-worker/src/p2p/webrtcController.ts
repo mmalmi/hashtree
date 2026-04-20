@@ -1346,6 +1346,13 @@ export class WebRTCController {
     return count;
   }
 
+  getConnectedHashGetPeerIds(): string[] {
+    return Array.from(this.peers.values())
+      .filter((peer) => peer.state === 'connected' && peer.dataChannelReady && peer.hashGet)
+      .map((peer) => peer.peerId)
+      .sort();
+  }
+
   /**
    * Set pool configuration
    */
