@@ -148,6 +148,11 @@ export class BlossomStore implements StoreWithMeta {
     return this.servers.filter(s => s.write).map(s => s.url);
   }
 
+  /** Get read-enabled servers in configured order. */
+  getReadServers(): BlossomServer[] {
+    return this.servers.filter((server) => server.read !== false);
+  }
+
   /** Check if server is in backoff period */
   private isServerInBackoff(serverUrl: string): boolean {
     const health = this.serverHealth.get(serverUrl);
@@ -584,9 +589,18 @@ export class BlossomStore implements StoreWithMeta {
   }
 
   async get(hash: Hash): Promise<Uint8Array | null> {
+    return await this.getFromServers(hash, this.getReadServers().map((server) => server.url));
+  }
+
+  async getFromServers(hash: Hash, serverUrls: readonly string[]): Promise<Uint8Array | null> {
+    const requested = new Set(serverUrls.map((serverUrl) => `${serverUrl}`.trim()).filter(Boolean));
+    if (requested.size === 0) {
+      return null;
+    }
+
     const hashHex = toHex(hash);
-    const readServers = this.servers.filter((server) => {
-      if (server.read === false) return false;
+    const readServers = this.getReadServers().filter((server) => {
+      if (!requested.has(server.url)) return false;
       if (this.isServerInBackoff(server.url)) return false;
       return true;
     });
@@ -594,6 +608,7 @@ export class BlossomStore implements StoreWithMeta {
     if (readServers.length === 0) {
       return null;
     }
+
     const orderedServers = this.orderedReadServers(readServers);
     const requests: InFlightReadRequest[] = [];
     let nextServerIndex = 0;

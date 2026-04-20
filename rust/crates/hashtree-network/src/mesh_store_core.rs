@@ -191,6 +191,41 @@ fn adaptive_source_score(stats: &AdaptiveSourceStats, now: Instant) -> f64 {
         - failure_penalty
 }
 
+fn peer_endpoint_has_history(stats: &crate::peer_selector::PeerStats) -> bool {
+    stats.requests_sent > 0 || stats.successes > 0 || stats.failures > 0 || stats.timeouts > 0
+}
+
+fn peer_endpoint_score(stats: &crate::peer_selector::PeerStats, now: Instant) -> f64 {
+    if stats.backed_off_until.is_some_and(|until| until > now) {
+        return f64::NEG_INFINITY;
+    }
+
+    let miss_penalty = 0.0;
+    let failure_penalty = if stats.requests_sent > 0 {
+        ((stats.failures + stats.timeouts) as f64 / stats.requests_sent as f64) * 0.3
+    } else {
+        0.0
+    };
+    let recency_bonus = if stats
+        .last_success
+        .is_some_and(|last| now.duration_since(last) < RECENT_SOURCE_SUCCESS_WINDOW)
+    {
+        0.1
+    } else {
+        0.0
+    };
+
+    0.6 * stats.success_rate()
+        + 0.3
+            * source_latency_score(&AdaptiveSourceStats {
+                srtt_ms: stats.srtt_ms,
+                ..AdaptiveSourceStats::default()
+            })
+        + recency_bonus
+        - miss_penalty
+        - failure_penalty
+}
+
 #[derive(Clone)]
 enum ReadRoute {
     Peers(Vec<String>),
@@ -203,6 +238,20 @@ impl ReadRoute {
             Self::Peers(_) => "peers",
             Self::Sources => "sources",
         }
+    }
+}
+
+struct RankedReadRoute {
+    route: ReadRoute,
+    best_endpoint_id: String,
+    score: f64,
+    has_history: bool,
+}
+
+fn ranked_route_kind(route: &ReadRoute) -> u8 {
+    match route {
+        ReadRoute::Sources => 0,
+        ReadRoute::Peers(_) => 1,
     }
 }
 
@@ -534,8 +583,6 @@ where
     read_source_stats: RwLock<HashMap<String, AdaptiveSourceStats>>,
     /// Shared in-flight upstream reads keyed by hash.
     inflight_source_fetches: Mutex<HashMap<String, InflightSourceFetch>>,
-    /// Adaptive route stats for choosing peers vs upstream sources.
-    read_route_stats: RwLock<HashMap<String, AdaptiveSourceStats>>,
     /// Adaptive selector for peer ordering.
     peer_selector: RwLock<PeerSelector>,
     /// Active per-peer in-flight reads so concurrent block fetches spread across peers.
@@ -607,7 +654,6 @@ where
             read_sources: RwLock::new(HashMap::new()),
             read_source_stats: RwLock::new(HashMap::new()),
             inflight_source_fetches: Mutex::new(HashMap::new()),
-            read_route_stats: RwLock::new(HashMap::new()),
             peer_selector: RwLock::new(selector),
             peer_active_requests: RwLock::new(HashMap::new()),
             peer_wire_stats: RwLock::new(HashMap::new()),
@@ -1247,48 +1293,6 @@ where
         *self.read_sources.write().await = by_id;
     }
 
-    fn route_stats_for<'a>(
-        stats: &'a mut HashMap<String, AdaptiveSourceStats>,
-        route_id: &str,
-    ) -> &'a mut AdaptiveSourceStats {
-        stats
-            .entry(route_id.to_string())
-            .or_insert_with(AdaptiveSourceStats::default)
-    }
-
-    async fn record_route_request(&self, route_id: &str) {
-        let mut stats = self.read_route_stats.write().await;
-        Self::route_stats_for(&mut stats, route_id).requests += 1;
-    }
-
-    async fn record_route_success(&self, route_id: &str, elapsed_ms: u64) {
-        let now = Instant::now();
-        let mut stats = self.read_route_stats.write().await;
-        let stats = Self::route_stats_for(&mut stats, route_id);
-        stats.successes += 1;
-        stats.last_success_at = Some(now);
-        stats.backoff_level = 0;
-        stats.backed_off_until = None;
-        if stats.srtt_ms <= 0.0 {
-            stats.srtt_ms = elapsed_ms as f64;
-            stats.rttvar_ms = elapsed_ms as f64 / 2.0;
-            return;
-        }
-        let elapsed = elapsed_ms as f64;
-        stats.rttvar_ms = 0.75 * stats.rttvar_ms + 0.25 * (stats.srtt_ms - elapsed).abs();
-        stats.srtt_ms = 0.875 * stats.srtt_ms + 0.125 * elapsed;
-    }
-
-    async fn record_route_miss(&self, route_id: &str) {
-        let mut stats = self.read_route_stats.write().await;
-        Self::route_stats_for(&mut stats, route_id).misses += 1;
-    }
-
-    async fn record_route_timeout(&self, route_id: &str) {
-        let mut stats = self.read_route_stats.write().await;
-        Self::route_stats_for(&mut stats, route_id).timeouts += 1;
-    }
-
     async fn record_read_source_request(&self, source_id: &str) {
         let mut stats = self.read_source_stats.write().await;
         stats
@@ -1414,7 +1418,7 @@ where
             .cloned()
             .unwrap_or_default();
         if !source_has_history(&best) || !source_has_history(&second) {
-            return true;
+            return false;
         }
         let now = Instant::now();
         adaptive_source_score(&best, now) - adaptive_source_score(&second, now)
@@ -1429,12 +1433,13 @@ where
         let probe_multiple = self
             .should_probe_multiple_read_sources(&ordered_sources)
             .await;
+        let initial_fanout = if probe_multiple {
+            source_count.min(2)
+        } else {
+            1
+        };
         RequestDispatchConfig {
-            initial_fanout: if probe_multiple {
-                source_count.min(2)
-            } else {
-                1
-            },
+            initial_fanout,
             hedge_fanout: self.routing.dispatch.hedge_fanout,
             max_fanout: self.routing.dispatch.max_fanout.min(source_count),
             hedge_interval_ms: self.routing.dispatch.hedge_interval_ms,
@@ -1969,7 +1974,7 @@ where
         result
     }
 
-    async fn available_read_routes(&self, context: &MeshReadContext) -> Vec<ReadRoute> {
+    async fn ranked_read_routes(&self, context: &MeshReadContext) -> Vec<RankedReadRoute> {
         let mut routes = Vec::new();
         let ordered_peers = if should_forward_htl(context.request_htl) {
             self.ordered_connected_peers(context.exclude_peer_id.as_deref())
@@ -1978,41 +1983,60 @@ where
             Vec::new()
         };
         if !ordered_peers.is_empty() {
-            routes.push(ReadRoute::Peers(ordered_peers));
+            let best_peer_id = ordered_peers[0].clone();
+            let selector = self.peer_selector.read().await;
+            let best_peer = selector.get_stats(&best_peer_id).cloned();
+            let now = Instant::now();
+            let (score, has_history) = match best_peer.as_ref() {
+                Some(stats) => (
+                    peer_endpoint_score(stats, now),
+                    peer_endpoint_has_history(stats),
+                ),
+                None => (0.0, false),
+            };
+            routes.push(RankedReadRoute {
+                route: ReadRoute::Peers(ordered_peers),
+                best_endpoint_id: format!("peer:{best_peer_id}"),
+                score,
+                has_history,
+            });
         }
-        if !self.ordered_read_sources().await.is_empty() {
-            routes.push(ReadRoute::Sources);
+        let ordered_sources = self.ordered_read_sources().await;
+        if let Some(best_source) = ordered_sources.first() {
+            let stats = self.read_source_stats.read().await;
+            let best_source_stats = stats.get(best_source.id()).cloned().unwrap_or_default();
+            let now = Instant::now();
+            routes.push(RankedReadRoute {
+                route: ReadRoute::Sources,
+                best_endpoint_id: format!("source:{}", best_source.id()),
+                score: adaptive_source_score(&best_source_stats, now),
+                has_history: source_has_history(&best_source_stats),
+            });
         }
         if routes.len() <= 1 {
             return routes;
         }
 
-        let now = Instant::now();
-        let stats = self.read_route_stats.read().await;
         routes.sort_by(|left, right| {
-            let left_stats = stats.get(left.id()).cloned().unwrap_or_default();
-            let right_stats = stats.get(right.id()).cloned().unwrap_or_default();
-            adaptive_source_score(&right_stats, now)
-                .partial_cmp(&adaptive_source_score(&left_stats, now))
+            right
+                .score
+                .partial_cmp(&left.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.id().cmp(right.id()))
+                .then_with(|| ranked_route_kind(&left.route).cmp(&ranked_route_kind(&right.route)))
+                .then_with(|| left.best_endpoint_id.cmp(&right.best_endpoint_id))
+                .then_with(|| left.route.id().cmp(right.route.id()))
         });
         routes
     }
 
-    async fn should_probe_multiple_routes(&self, routes: &[ReadRoute]) -> bool {
+    fn should_probe_multiple_routes(&self, routes: &[RankedReadRoute]) -> bool {
         if routes.len() <= 1 {
             return false;
         }
-        let stats = self.read_route_stats.read().await;
-        let best = stats.get(routes[0].id()).cloned().unwrap_or_default();
-        let second = stats.get(routes[1].id()).cloned().unwrap_or_default();
-        if !source_has_history(&best) || !source_has_history(&second) {
-            return true;
+        if !routes[0].has_history || !routes[1].has_history {
+            return false;
         }
-        let now = Instant::now();
-        adaptive_source_score(&best, now) - adaptive_source_score(&second, now)
-            < SOURCE_SCORE_TIE_DELTA
+        (routes[0].score - routes[1].score) < SOURCE_SCORE_TIE_DELTA
     }
 
     async fn run_read_route(
@@ -2021,29 +2045,13 @@ where
         route: &ReadRoute,
         context: &MeshReadContext,
     ) -> RouteFetchOutcome {
-        let route_id = route.id();
-        self.record_route_request(route_id).await;
-        let started_at = Instant::now();
-        let result = match route {
+        match route {
             ReadRoute::Peers(peer_ids) => {
                 self.request_from_ordered_peers(hash, peer_ids, context.request_htl)
                     .await
             }
             ReadRoute::Sources => self.request_from_read_sources(hash).await,
-        };
-        match &result {
-            RouteFetchOutcome::Hit(_) => {
-                self.record_route_success(route_id, started_at.elapsed().as_millis().max(1) as u64)
-                    .await;
-            }
-            RouteFetchOutcome::Miss => {
-                self.record_route_miss(route_id).await;
-            }
-            RouteFetchOutcome::Timeout => {
-                self.record_route_timeout(route_id).await;
-            }
         }
-        result
     }
 
     async fn request_from_mesh_with_context(
@@ -2051,17 +2059,17 @@ where
         hash: &Hash,
         context: &MeshReadContext,
     ) -> Option<Vec<u8>> {
-        let routes = self.available_read_routes(context).await;
+        let routes = self.ranked_read_routes(context).await;
         match routes.as_slice() {
             [] => None,
-            [route] => match self.run_read_route(hash, route, context).await {
+            [ranked] => match self.run_read_route(hash, &ranked.route, context).await {
                 RouteFetchOutcome::Hit(data) => Some(data),
                 RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
             },
             [first, second, ..] => {
-                if self.should_probe_multiple_routes(&routes).await {
-                    let first_fut = self.run_read_route(hash, first, context);
-                    let second_fut = self.run_read_route(hash, second, context);
+                if self.should_probe_multiple_routes(&routes) {
+                    let first_fut = self.run_read_route(hash, &first.route, context);
+                    let second_fut = self.run_read_route(hash, &second.route, context);
                     tokio::pin!(first_fut);
                     tokio::pin!(second_fut);
                     let mut first_done = false;
@@ -2088,14 +2096,17 @@ where
                     }
                     None
                 } else {
-                    match self.run_read_route(hash, first, context).await {
+                    match self.run_read_route(hash, &first.route, context).await {
                         RouteFetchOutcome::Hit(data) => return Some(data),
                         RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => {}
                     }
-                    match self.run_read_route(hash, second, context).await {
-                        RouteFetchOutcome::Hit(data) => Some(data),
-                        RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
+                    for ranked in routes.iter().skip(1) {
+                        match self.run_read_route(hash, &ranked.route, context).await {
+                            RouteFetchOutcome::Hit(data) => return Some(data),
+                            RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => {}
+                        }
                     }
+                    None
                 }
             }
         }

@@ -163,6 +163,34 @@ describe('WebRTCController routing', () => {
     await expect(pending).resolves.toBeNull();
   });
 
+  it('can target a specific peer endpoint without querying the rest', async () => {
+    vi.useFakeTimers();
+    const { controller, internal, sentData } = createRoutingController({
+      requestDispatch: {
+        initialFanout: 2,
+        hedgeFanout: 1,
+        maxFanout: 3,
+        hedgeIntervalMs: 50,
+      },
+    });
+
+    connectPeer(internal, 'peer-a', 'pub-a');
+    connectPeer(internal, 'peer-b', 'pub-b');
+    connectPeer(internal, 'peer-c', 'pub-c');
+
+    const payload = new TextEncoder().encode('peer-b-hit');
+    const hash = await sha256(payload);
+    const pending = controller.getFromPeer('peer-b', hash);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentData).toHaveLength(1);
+    expect(sentData[0]?.peerId).toBe('peer-b');
+
+    const response = createResponse(hash, payload);
+    await internal.onDataChannelMessage('peer-b', encodeResponse(response));
+    await expect(pending).resolves.toEqual(payload);
+  });
+
   it('persists and reloads peer metadata snapshots', async () => {
     const localStore = new MemoryStore();
 

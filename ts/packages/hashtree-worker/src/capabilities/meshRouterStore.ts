@@ -21,9 +21,14 @@ const SCORE_TIE_DELTA = 0.15;
 
 export interface MeshReadSource {
   id: string;
+  groupId?: string;
+  canWrite?: boolean;
   get(hash: Hash): Promise<Uint8Array | null>;
   isAvailable?: () => boolean;
 }
+
+export type MeshReadEndpoint = MeshReadSource;
+export type MeshReadEndpointProvider = () => MeshReadEndpoint[];
 
 export interface MeshRouterGetOptions {
   sourceIds?: readonly string[];
@@ -38,6 +43,7 @@ export interface MeshRouterGetResult {
 export interface MeshRouterStoreConfig {
   primary: Store;
   sources?: MeshReadSource[];
+  sourceProviders?: MeshReadEndpointProvider[];
   dispatch?: RequestDispatchConfig;
   requestTimeoutMs?: number;
   primaryReadTimeoutMs?: number;
@@ -119,6 +125,7 @@ export class MeshRouterStore implements Store {
   private readonly requestTimeoutMs: number;
   private readonly primaryReadTimeoutMs: number;
   private readonly sources = new Map<string, MeshReadSource>();
+  private readonly sourceProviders: MeshReadEndpointProvider[];
   private readonly statsBySource = new Map<string, SourceStats>();
   private readonly inflightReads = new Map<string, Promise<MeshRouterGetResult | null>>();
 
@@ -128,6 +135,7 @@ export class MeshRouterStore implements Store {
     this.dispatch = config.dispatch ?? DEFAULT_DISPATCH;
     this.requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.primaryReadTimeoutMs = config.primaryReadTimeoutMs ?? DEFAULT_PRIMARY_READ_TIMEOUT_MS;
+    this.sourceProviders = [...(config.sourceProviders ?? [])];
     this.setSources(config.sources ?? []);
   }
 
@@ -232,8 +240,22 @@ export class MeshRouterStore implements Store {
     const requested = sourceIds && sourceIds.length > 0
       ? new Set(sourceIds)
       : null;
-    const available = Array.from(this.sources.values()).filter((source) => {
-      if (requested && !requested.has(source.id)) return false;
+    const combined = new Map<string, MeshReadSource>();
+    for (const provider of this.sourceProviders) {
+      for (const source of provider()) {
+        if (!combined.has(source.id)) {
+          combined.set(source.id, source);
+        }
+        this.statsBySource.set(source.id, this.statsBySource.get(source.id) ?? defaultStats());
+      }
+    }
+    for (const source of this.sources.values()) {
+      if (!combined.has(source.id)) {
+        combined.set(source.id, source);
+      }
+    }
+    const available = Array.from(combined.values()).filter((source) => {
+      if (requested && !requested.has(source.id) && !requested.has(source.groupId ?? '')) return false;
       return source.isAvailable ? source.isAvailable() : true;
     });
     if (available.length === 0) return [];
@@ -266,7 +288,7 @@ export class MeshRouterStore implements Store {
     const bestStats = this.statsBySource.get(best.id) ?? defaultStats();
     const secondStats = this.statsBySource.get(secondBest.id) ?? defaultStats();
     if (!hasHistory(bestStats) || !hasHistory(secondStats)) {
-      return true;
+      return false;
     }
 
     const now = Date.now();
@@ -323,6 +345,21 @@ export class MeshRouterStore implements Store {
     return task;
   }
 
+  private sourceGroupKey(source: MeshReadSource): string {
+    return source.groupId ?? '';
+  }
+
+  private hasPendingCrossGroupRequests(
+    inFlight: InFlightSourceRequest[],
+    nextSources: readonly MeshReadSource[],
+  ): boolean {
+    if (nextSources.length === 0) {
+      return false;
+    }
+    const nextGroups = new Set(nextSources.map((source) => this.sourceGroupKey(source)));
+    return inFlight.some((task) => !task.settled && !nextGroups.has(this.sourceGroupKey(task.source)));
+  }
+
   private async waitForNextResult(
     inFlight: InFlightSourceRequest[],
     waitMs?: number,
@@ -351,6 +388,7 @@ export class MeshRouterStore implements Store {
     if (orderedSources.length === 0) {
       return null;
     }
+    const probeMultiple = this.shouldProbeMultipleSources(orderedSources);
 
     const dispatch = normalizeDispatchConfig(
       this.dispatchFor(orderedSources.length, orderedSources),
@@ -366,9 +404,25 @@ export class MeshRouterStore implements Store {
       const waveSize = wavePlan[waveIdx];
       const from = nextSourceIdx;
       const to = Math.min(from + waveSize, orderedSources.length);
+      const waveSources = orderedSources.slice(from, to);
       nextSourceIdx = to;
 
-      for (const source of orderedSources.slice(from, to)) {
+      if (!probeMultiple && this.hasPendingCrossGroupRequests(inFlight, waveSources)) {
+        while (this.hasPendingCrossGroupRequests(inFlight, waveSources)) {
+          const result = await this.waitForNextResult(inFlight);
+          if (!result) {
+            break;
+          }
+          if (result.data) {
+            return {
+              data: result.data,
+              sourceId: result.sourceId,
+            };
+          }
+        }
+      }
+
+      for (const source of waveSources) {
         inFlight.push(this.createInFlightSourceRequest(source, hash));
       }
 

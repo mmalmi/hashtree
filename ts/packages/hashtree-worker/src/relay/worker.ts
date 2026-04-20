@@ -960,17 +960,22 @@ function createMeshStore(primary: DexieStore): MeshRouterStore {
     primary,
     primarySourceId: 'idb',
     requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
-    sources: [
-      {
-        id: 'webrtc',
-        isAvailable: () => !!webrtc && webrtc.getConnectedCount() > 0,
-        get: async (hash) => webrtc ? webrtc.get(hash) : null,
-      },
-      {
-        id: 'blossom',
-        isAvailable: () => !!blossomStore,
-        get: async (hash) => blossomStore ? blossomStore.get(hash) : null,
-      },
+    sourceProviders: [
+      () => webrtc
+        ? webrtc.getConnectedPeerIds().map((peerId) => ({
+          id: `peer:${peerId}`,
+          groupId: 'webrtc',
+          get: async (hash: Uint8Array) => webrtc ? webrtc.getFromPeer(peerId, hash) : null,
+        }))
+        : [],
+      () => blossomStore
+        ? blossomStore.getReadServers().map((server) => ({
+          id: `blossom:${server.url}`,
+          groupId: 'blossom',
+          canWrite: !!server.write,
+          get: async (hash: Uint8Array) => blossomStore ? blossomStore.getFromServers(hash, [server.url]) : null,
+        }))
+        : [],
     ],
   });
 }

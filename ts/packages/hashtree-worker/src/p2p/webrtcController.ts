@@ -1280,6 +1280,21 @@ export class WebRTCController {
     return this.queryPeersWithDispatch(hash, { htl: MAX_HTL });
   }
 
+  getConnectedPeerIds(excludePeerId?: string): string[] {
+    return this.orderedConnectedPeers(excludePeerId).map((peer) => peer.peerId);
+  }
+
+  async getFromPeer(peerId: string, hash: Uint8Array, htl = MAX_HTL): Promise<Uint8Array | null> {
+    const peer = this.peers.get(peerId);
+    if (!peer || !peer.dataChannelReady || !peer.hashGet) {
+      return null;
+    }
+
+    const hashKey = hashToKey(hash);
+    this.recentRequests.set(hashKey, Date.now());
+    return (await this.createInFlightRequest(peer, hash, htl).promise).data;
+  }
+
   /**
    * Get peer stats for UI
    */

@@ -38,6 +38,7 @@ const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_SLOW_LOG_MS = 15_000;
 const PRIMARY_READ_TIMEOUT_MS = 300;
+const REMOTE_HEDGE_INTERVAL_MS = 250;
 
 export interface HashtreeWorkerMessageEndpoint {
   postMessage(message: WorkerResponse): void;
@@ -565,7 +566,7 @@ type LoadedBlobData = {
 function toBlobSource(sourceId: string): BlobSource {
   return sourceId === 'idb'
     ? 'idb'
-    : sourceId === 'blossom'
+    : sourceId === 'blossom' || sourceId.startsWith('blossom:')
       ? 'blossom'
       : 'p2p';
 }
@@ -663,16 +664,28 @@ function createMeshStore(): MeshRouterStore {
     primarySourceId: 'idb',
     requestTimeoutMs: MESH_READ_TIMEOUT_MS,
     primaryReadTimeoutMs: PRIMARY_READ_TIMEOUT_MS,
+    dispatch: {
+      initialFanout: 1,
+      hedgeFanout: 1,
+      maxFanout: 2,
+      hedgeIntervalMs: REMOTE_HEDGE_INTERVAL_MS,
+    },
     sources: [
       {
         id: 'p2p',
+        groupId: 'p2p',
         get: async (hash) => requestP2PBlob(toHex(hash)),
       },
-      {
-        id: 'blossom',
-        isAvailable: () => !!blossom && blossom.getServers().some((server) => server.read !== false),
-        get: async (hash) => blossom ? blossom.fetch(toHex(hash)) : null,
-      },
+    ],
+    sourceProviders: [
+      () => blossom
+        ? blossom.getReadServers().map((server) => ({
+          id: `blossom:${server.url}`,
+          groupId: 'blossom',
+          canWrite: !!server.write,
+          get: async (hash: Hash) => blossom ? blossom.fetchFromServer(toHex(hash), server.url) : null,
+        }))
+        : [],
     ],
   });
 }

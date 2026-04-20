@@ -27,7 +27,7 @@ describe('MeshRouterStore', () => {
     vi.useRealTimers();
   });
 
-  it('probes multiple unknown sources immediately so the fastest one wins', async () => {
+  it('does not hedge to an unproven second source during a cold remote read', async () => {
     vi.useFakeTimers();
     const primary = new MemoryStore();
     const slowCalls = { count: 0 };
@@ -48,12 +48,13 @@ describe('MeshRouterStore', () => {
     const pending = router.getDetailed(HASH_A);
     await Promise.resolve();
     await Promise.resolve();
+    await Promise.resolve();
 
-    expect(slowCalls.count).toBe(1);
-    expect(fastCalls.count).toBe(1);
-
+    await vi.advanceTimersByTimeAsync(75);
     await vi.advanceTimersByTimeAsync(50);
     await expect(pending).resolves.toEqual({ data: fastData, sourceId: 'blossom' });
+    expect(slowCalls.count).toBe(0);
+    expect(fastCalls.count).toBe(1);
     await expect(primary.get(HASH_A)).resolves.toEqual(fastData);
   });
 
@@ -78,10 +79,9 @@ describe('MeshRouterStore', () => {
     const first = router.getDetailed(HASH_A);
     await Promise.resolve();
     await Promise.resolve();
-    expect(peerCalls.count).toBe(1);
-    expect(blossomCalls.count).toBe(1);
+    await Promise.resolve();
 
-    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(100);
     await expect(first).resolves.toEqual({ data: peerData, sourceId: 'webrtc' });
 
     const second = router.getDetailed(HASH_B);
@@ -89,12 +89,8 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(peerCalls.count).toBe(2);
-    expect(blossomCalls.count).toBe(1);
-
-    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(100);
     await expect(second).resolves.toEqual({ data: peerData, sourceId: 'webrtc' });
-    expect(blossomCalls.count).toBe(1);
   });
 
   it('supports remote-only filtered reads without consulting primary storage', async () => {
@@ -201,11 +197,13 @@ describe('MeshRouterStore', () => {
     const warm = router.getDetailed(HASH_B, { skipPrimary: true });
     await Promise.resolve();
     await Promise.resolve();
+    await Promise.resolve();
     await vi.advanceTimersByTimeAsync(20);
     await expect(warm).resolves.toEqual({ data: warmData, sourceId: 'first-miss' });
-    expect(slowWarmMissCalls.count).toBe(1);
+    expect(slowWarmMissCalls.count).toBe(0);
 
     const pending = router.getDetailed(HASH_A, { skipPrimary: true });
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(missCalls.count).toBe(1);
@@ -248,6 +246,44 @@ describe('MeshRouterStore', () => {
     await vi.advanceTimersByTimeAsync(50);
     await expect(first).resolves.toEqual({ data, sourceId: 'blossom' });
     await expect(second).resolves.toEqual({ data, sourceId: 'blossom' });
+  });
+
+  it('matches grouped dynamic endpoints when filtering by sourceIds', async () => {
+    const primary = new MemoryStore();
+    const aCalls = { count: 0 };
+    const bCalls = { count: 0 };
+    const aData = new Uint8Array([1, 2, 3]);
+    const router = new MeshRouterStore({
+      primary,
+      sourceProviders: [
+        () => [
+          {
+            id: 'blossom:https://a.example',
+            groupId: 'blossom',
+            get: async () => {
+              aCalls.count += 1;
+              return aData;
+            },
+          },
+          {
+            id: 'peer:nostr-peer',
+            groupId: 'p2p',
+            get: async () => {
+              bCalls.count += 1;
+              return new Uint8Array([9]);
+            },
+          },
+        ],
+      ],
+    });
+
+    await expect(router.getDetailed(HASH_A, {
+      skipPrimary: true,
+      sourceIds: ['blossom'],
+    })).resolves.toEqual({ data: aData, sourceId: 'blossom:https://a.example' });
+
+    expect(aCalls.count).toBe(1);
+    expect(bCalls.count).toBe(0);
   });
 
   it('copies remote source bytes before caching and returning them', async () => {

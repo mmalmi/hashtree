@@ -130,6 +130,10 @@ export class BlossomTransport {
     return this.servers;
   }
 
+  getReadServers(): BlossomServerConfig[] {
+    return this.servers.filter((server) => server.read !== false);
+  }
+
   getWriteServers(): BlossomServerConfig[] {
     return this.servers.filter(server => !!server.write);
   }
@@ -176,7 +180,36 @@ export class BlossomTransport {
       return inflight;
     }
 
-    const pending = withReadFetchSlot(() => new Promise<Uint8Array | null>((resolve, reject) => {
+    const pending = this.fetchInternal(hashHex, () => this.store.get(fromHex(hashHex)));
+    this.inflightFetches.set(hashHex, pending);
+    return await pending;
+  }
+
+  async fetchFromServer(hashHex: string, serverUrl: string): Promise<Uint8Array | null> {
+    const normalizedServerUrl = normalizeServerUrl(serverUrl.trim());
+    if (!normalizedServerUrl) {
+      return null;
+    }
+    const key = `${normalizedServerUrl}::${hashHex}`;
+    const inflight = this.inflightFetches.get(key);
+    if (inflight) {
+      return inflight;
+    }
+
+    const pending = this.fetchInternal(key, () => (
+      this.store as BlossomStore & {
+        getFromServers(hash: ReturnType<typeof fromHex>, serverUrls: readonly string[]): Promise<Uint8Array | null>;
+      }
+    ).getFromServers(fromHex(hashHex), [normalizedServerUrl]));
+    this.inflightFetches.set(key, pending);
+    return await pending;
+  }
+
+  private fetchInternal(
+    inflightKey: string,
+    loader: () => Promise<Uint8Array | null>,
+  ): Promise<Uint8Array | null> {
+    return withReadFetchSlot(() => new Promise<Uint8Array | null>((resolve, reject) => {
       let settled = false;
       const timeoutId = setTimeout(() => {
         if (settled) return;
@@ -184,7 +217,7 @@ export class BlossomTransport {
         resolve(null);
       }, this.fetchTimeoutMs);
 
-      this.store.get(fromHex(hashHex))
+      loader()
         .then((data) => {
           if (settled) return;
           settled = true;
@@ -199,9 +232,7 @@ export class BlossomTransport {
         });
     }))
       .finally(() => {
-        this.inflightFetches.delete(hashHex);
+        this.inflightFetches.delete(inflightKey);
       });
-    this.inflightFetches.set(hashHex, pending);
-    return await pending;
   }
 }

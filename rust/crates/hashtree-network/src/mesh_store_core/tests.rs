@@ -1012,10 +1012,152 @@ async fn test_read_source_timeout_records_timeout_not_miss() {
     let result = store.get(&hash).await.expect("get");
     assert!(result.is_none());
 
-    let stats = store.read_route_stats.read().await;
-    let route = stats.get("sources").expect("sources route stats");
+    let stats = store.read_source_stats.read().await;
+    let route = stats.get("slow").expect("slow source stats");
     assert_eq!(route.timeouts, 1);
     assert_eq!(route.misses, 0);
+}
+
+#[tokio::test]
+async fn test_read_sources_do_not_hedge_to_unproven_second_source() {
+    let local_store = Arc::new(MemoryStore::new());
+    let store = make_test_store_with_routing(
+        local_store,
+        "source-no-hedge",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 2,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+
+    let fast_store = Arc::new(MemoryStore::new());
+    let slow_store = Arc::new(MemoryStore::new());
+    let fast_calls = Arc::new(AtomicUsize::new(0));
+    let slow_calls = Arc::new(AtomicUsize::new(0));
+
+    let payload = b"fast-source-data".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    fast_store
+        .put(hash, payload.clone())
+        .await
+        .expect("put fast");
+
+    store
+        .set_read_sources(vec![
+            Arc::new(MockReadSource::new(
+                "fast",
+                fast_store,
+                fast_calls.clone(),
+                Duration::ZERO,
+            )) as Arc<dyn MeshReadSource>,
+            Arc::new(MockReadSource::new(
+                "slow",
+                slow_store,
+                slow_calls.clone(),
+                Duration::from_millis(25),
+            )) as Arc<dyn MeshReadSource>,
+        ])
+        .await;
+
+    let result = store.get(&hash).await.expect("get");
+    assert_eq!(result, Some(payload));
+    assert_eq!(fast_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(slow_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn test_route_choice_follows_the_best_endpoint_not_a_peers_bucket() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let requester = make_shared_test_node(
+        relay.clone(),
+        "requester-route-choice",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 1,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+    let peer = make_shared_test_node(relay, "peer-route-choice", MeshRoutingConfig::default());
+    let nodes = [&requester, &peer];
+
+    requester.transport.connect(&[]).await.expect("connect");
+    peer.transport.connect(&[]).await.expect("connect");
+    requester.store.start().await.expect("start requester");
+    peer.store.start().await.expect("start peer");
+    pump_test_network(&nodes, 8).await;
+
+    let source_store = Arc::new(MemoryStore::new());
+    let source_calls = Arc::new(AtomicUsize::new(0));
+    let payload_a = b"route-choice-a".to_vec();
+    let payload_b = b"route-choice-b".to_vec();
+    let hash_a = hashtree_core::sha256(&payload_a);
+    let hash_b = hashtree_core::sha256(&payload_b);
+    source_store
+        .put(hash_a, payload_a.clone())
+        .await
+        .expect("put a");
+    source_store
+        .put(hash_b, payload_b.clone())
+        .await
+        .expect("put b");
+    requester
+        .store
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "upstream",
+            source_store,
+            source_calls.clone(),
+            Duration::ZERO,
+        )) as Arc<dyn MeshReadSource>])
+        .await;
+
+    let first = run_get_with_pumps(requester.store.clone(), hash_a, &nodes).await;
+    assert_eq!(first, Some(payload_a));
+
+    let peer_stats_after_first = requester
+        .store
+        .peer_selector
+        .read()
+        .await
+        .get_stats("peer-route-choice")
+        .cloned()
+        .expect("peer stats after first");
+    assert_eq!(peer_stats_after_first.requests_sent, 0);
+    assert_eq!(peer_stats_after_first.timeouts, 0);
+
+    let second = run_get_with_pumps(requester.store.clone(), hash_b, &nodes).await;
+    assert_eq!(second, Some(payload_b));
+    assert_eq!(
+        source_calls.load(Ordering::Relaxed),
+        2,
+        "source should serve both uncached hashes",
+    );
+
+    let peer_stats_after_second = requester
+        .store
+        .peer_selector
+        .read()
+        .await
+        .get_stats("peer-route-choice")
+        .cloned()
+        .expect("peer stats after second");
+    assert_eq!(
+        peer_stats_after_second.requests_sent, 0,
+        "once the source endpoint is the clear winner, the peer bucket should not get probed again",
+    );
+
+    crate::mock::clear_channel_registry().await;
 }
 
 #[tokio::test]
