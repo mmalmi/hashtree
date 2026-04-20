@@ -28,6 +28,7 @@
 
 use base64::Engine;
 use nostr::prelude::*;
+use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use thiserror::Error;
@@ -64,6 +65,40 @@ pub struct BlossomClient {
     write_servers: Vec<String>,
     http: reqwest::Client,
     timeout: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadOutcome {
+    Uploaded,
+    AlreadyExists,
+}
+
+impl UploadOutcome {
+    fn was_uploaded(self) -> bool {
+        matches!(self, Self::Uploaded)
+    }
+}
+
+#[derive(Debug)]
+struct UploadAttemptError {
+    detail: String,
+    retryable: bool,
+}
+
+impl UploadAttemptError {
+    fn retryable(detail: String) -> Self {
+        Self {
+            detail,
+            retryable: true,
+        }
+    }
+
+    fn fatal(detail: String) -> Self {
+        Self {
+            detail,
+            retryable: false,
+        }
+    }
 }
 
 impl BlossomClient {
@@ -200,7 +235,7 @@ impl BlossomClient {
                     return Ok(hash);
                 }
                 Err(e) => {
-                    warn!("Upload to {} failed: {}", server, e);
+                    warn!("Upload to {} failed: {}", server, e.detail);
                     continue;
                 }
             }
@@ -234,18 +269,16 @@ impl BlossomClient {
             return Ok((hash, false));
         }
 
-        const MAX_RETRIES: u32 = 3;
         let mut last_error = String::new();
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..Self::max_upload_retries() {
             if attempt > 0 {
-                // Exponential backoff: 100ms, 200ms, 400ms
-                let delay = Duration::from_millis(100 * (1 << (attempt - 1)));
+                let delay = Self::upload_retry_delay(attempt - 1);
                 debug!(
                     "Retrying upload {} (attempt {}/{}), waiting {:?}",
                     &hash[..12],
                     attempt + 1,
-                    MAX_RETRIES,
+                    Self::max_upload_retries(),
                     delay
                 );
                 tokio::time::sleep(delay).await;
@@ -253,32 +286,39 @@ impl BlossomClient {
 
             // Regenerate auth header for each retry (in case of expiration)
             let auth_header = self.create_upload_auth(&hash).await?;
+            let mut saw_retryable_error = false;
 
             for server in &self.write_servers {
                 match self
                     .upload_to_server(server, data, &hash, &auth_header)
                     .await
                 {
-                    Ok(was_new) => {
-                        if was_new {
+                    Ok(outcome) => {
+                        if outcome.was_uploaded() {
                             debug!("Uploaded {} to {}", &hash[..12], server);
                         } else {
                             debug!("Blob {} already exists on {}", &hash[..12], server);
                         }
-                        return Ok((hash, was_new));
+                        return Ok((hash, outcome.was_uploaded()));
                     }
-                    Err(e) => {
-                        last_error = format!("{}: {}", server, e);
-                        warn!("Upload to {} failed: {}", server, e);
+                    Err(error) => {
+                        last_error = format!("{}: {}", server, error.detail);
+                        warn!("Upload to {} failed: {}", server, error.detail);
+                        saw_retryable_error |= error.retryable;
                         continue;
                     }
                 }
+            }
+
+            if !saw_retryable_error {
+                break;
             }
         }
 
         Err(BlossomError::UploadFailed(format!(
             "all servers failed after {} retries (last: {})",
-            MAX_RETRIES, last_error
+            Self::max_upload_retries(),
+            last_error
         )))
     }
 
@@ -362,19 +402,66 @@ impl BlossomClient {
             return Err(BlossomError::NoServers);
         }
         let hash = compute_sha256(data);
-        let auth = self.create_upload_auth(&hash).await?;
-        let uploads: Vec<_> = servers
-            .iter()
-            .map(|s| self.upload_to_server(s, data, &hash, &auth))
-            .collect();
-        let results = join_all(uploads).await;
-        let ok_count = results.iter().filter(|r| r.is_ok()).count();
-        if ok_count == 0 {
-            return Err(BlossomError::UploadFailed(
-                "all selected servers failed".to_string(),
-            ));
+        let mut succeeded = 0usize;
+        let mut pending: Vec<String> = servers.to_vec();
+        let mut last_error = String::new();
+
+        for attempt in 0..Self::max_upload_retries() {
+            if pending.is_empty() {
+                break;
+            }
+            if attempt > 0 {
+                tokio::time::sleep(Self::upload_retry_delay(attempt - 1)).await;
+            }
+
+            let auth = self.create_upload_auth(&hash).await?;
+            let uploads: Vec<_> = pending
+                .iter()
+                .map(|server| {
+                    let server = server.clone();
+                    let hash = hash.clone();
+                    let auth = auth.clone();
+                    async move {
+                        (
+                            server.clone(),
+                            self.upload_to_server(&server, data, &hash, &auth).await,
+                        )
+                    }
+                })
+                .collect();
+            let results = join_all(uploads).await;
+            let mut retryable_servers = Vec::new();
+
+            for (server, result) in results {
+                match result {
+                    Ok(_) => {
+                        succeeded += 1;
+                    }
+                    Err(error) => {
+                        last_error = format!("{server}: {}", error.detail);
+                        warn!("Upload to {} failed: {}", server, error.detail);
+                        if error.retryable {
+                            retryable_servers.push(server);
+                        }
+                    }
+                }
+            }
+
+            pending = retryable_servers;
         }
-        Ok((hash, ok_count))
+
+        if succeeded == 0 {
+            return Err(BlossomError::UploadFailed(format!(
+                "all selected servers failed after {} retries{}",
+                Self::max_upload_retries(),
+                if last_error.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (last: {last_error})")
+                }
+            )));
+        }
+        Ok((hash, succeeded))
     }
 
     /// Download data from Blossom servers
@@ -459,14 +546,14 @@ impl BlossomClient {
     }
 
     /// Upload to a single server
-    /// Returns Ok(true) if uploaded, Ok(false) if already exists (409)
+    /// Returns Ok(Uploaded) if uploaded, Ok(AlreadyExists) if already exists (409)
     async fn upload_to_server(
         &self,
         server: &str,
         data: &[u8],
         hash: &str,
         auth_header: &str,
-    ) -> Result<bool, BlossomError> {
+    ) -> Result<UploadOutcome, UploadAttemptError> {
         let url = format!("{}/upload", server.trim_end_matches('/'));
 
         let resp = self
@@ -477,17 +564,44 @@ impl BlossomClient {
             .header("X-SHA-256", hash)
             .body(data.to_vec())
             .send()
-            .await?;
+            .await
+            .map_err(|error| {
+                if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+                {
+                    UploadAttemptError::retryable(error.to_string())
+                } else {
+                    UploadAttemptError::fatal(error.to_string())
+                }
+            })?;
 
         let status = resp.status();
         if status.is_success() {
-            Ok(true) // Actually uploaded
+            Ok(UploadOutcome::Uploaded)
         } else if status.as_u16() == 409 {
-            Ok(false) // Already exists
+            Ok(UploadOutcome::AlreadyExists)
         } else {
             let text = resp.text().await.unwrap_or_default();
-            Err(BlossomError::UploadFailed(format!("{}: {}", status, text)))
+            let detail = format!("{}: {}", status, text);
+            if Self::is_retryable_status(status) {
+                Err(UploadAttemptError::retryable(detail))
+            } else {
+                Err(UploadAttemptError::fatal(detail))
+            }
         }
+    }
+
+    fn is_retryable_status(status: StatusCode) -> bool {
+        status == StatusCode::REQUEST_TIMEOUT
+            || status == StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error()
+    }
+
+    fn max_upload_retries() -> u32 {
+        5
+    }
+
+    fn upload_retry_delay(attempt: u32) -> Duration {
+        Duration::from_millis(100 * (1 << attempt.min(4)))
     }
 
     async fn create_upload_auth(&self, hash: &str) -> Result<String, BlossomError> {
@@ -623,6 +737,107 @@ pub use store_impl::BlossomStore;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    struct TestUploadServer {
+        url: String,
+        request_count: Arc<AtomicUsize>,
+        done: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    impl TestUploadServer {
+        fn new(statuses: Vec<u16>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let request_count = Arc::new(AtomicUsize::new(0));
+            let request_count_for_thread = Arc::clone(&request_count);
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+            thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                for status in statuses {
+                    let (mut stream, _) = listener.accept().expect("accept request");
+                    request_count_for_thread.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    let header_end = loop {
+                        let bytes = stream.read(&mut buffer).expect("read request");
+                        if bytes == 0 {
+                            break None;
+                        }
+                        request.extend_from_slice(&buffer[..bytes]);
+                        if let Some(pos) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break Some(pos + 4);
+                        }
+                    };
+
+                    if let Some(header_end) = header_end {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let content_length = headers.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(content_length) = content_length {
+                            let mut remaining = content_length
+                                .saturating_sub(request.len().saturating_sub(header_end));
+                            while remaining > 0 {
+                                let bytes = stream.read(&mut buffer).expect("drain body");
+                                if bytes == 0 {
+                                    break;
+                                }
+                                remaining = remaining.saturating_sub(bytes);
+                            }
+                        }
+                    }
+
+                    let reason = match status {
+                        200 => "OK",
+                        403 => "Forbidden",
+                        409 => "Conflict",
+                        429 => "Too Many Requests",
+                        500 => "Internal Server Error",
+                        503 => "Service Unavailable",
+                        _ => "Test Status",
+                    };
+                    let body = format!("status {status}");
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("write response");
+                    stream.flush().expect("flush response");
+                }
+
+                let _ = done_tx.send(());
+            });
+
+            Self {
+                url: format!("http://{}", addr),
+                request_count,
+                done: Some(done_rx),
+            }
+        }
+
+        async fn wait_for_requests(&mut self) {
+            if let Some(done) = self.done.take() {
+                let _ = done.await;
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.request_count.load(Ordering::SeqCst)
+        }
+    }
 
     #[test]
     fn test_compute_sha256() {
@@ -680,6 +895,56 @@ mod tests {
         // Will fail since servers don't exist, but should compile
         let result = client.upload_to_all_servers(b"test data").await;
         assert!(result.is_err()); // Expected to fail - servers don't exist
+    }
+
+    #[tokio::test]
+    async fn test_upload_if_missing_retries_transient_server_errors() {
+        let mut server = TestUploadServer::new(vec![500, 500, 200]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys).with_write_servers(vec![server.url.clone()]);
+
+        let (hash, uploaded) = client
+            .upload_if_missing(b"test data")
+            .await
+            .expect("upload");
+        assert!(uploaded);
+        assert_eq!(hash, compute_sha256(b"test data"));
+
+        server.wait_for_requests().await;
+        assert_eq!(server.request_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_upload_if_missing_stops_retrying_on_non_retryable_error() {
+        let mut server = TestUploadServer::new(vec![403]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys).with_write_servers(vec![server.url.clone()]);
+
+        let err = client
+            .upload_if_missing(b"test data")
+            .await
+            .expect_err("upload should fail");
+        assert!(err.to_string().contains("403"));
+
+        server.wait_for_requests().await;
+        assert_eq!(server.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_upload_to_selected_servers_retries_transient_failures() {
+        let mut server = TestUploadServer::new(vec![503, 200]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let servers = vec![server.url.clone()];
+
+        let (_hash, success_count) = client
+            .upload_to_selected_servers(b"test data", &servers)
+            .await
+            .expect("selected upload");
+        assert_eq!(success_count, 1);
+
+        server.wait_for_requests().await;
+        assert_eq!(server.request_count(), 2);
     }
 
     #[test]
