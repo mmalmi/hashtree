@@ -74,6 +74,24 @@ interface ServerHealth {
   consecutiveErrors: number;
 }
 
+interface ReadServerStats {
+  requests: number;
+  successes: number;
+  misses: number;
+  failures: number;
+  timeouts: number;
+  srttMs: number;
+  rttvarMs: number;
+  lastSuccessMs?: number;
+  lastFailureMs?: number;
+}
+
+interface InFlightReadRequest {
+  server: BlossomServer;
+  settled: boolean;
+  promise: Promise<{ serverUrl: string; data: Uint8Array | null }>;
+}
+
 /** Backoff config */
 const BASE_BACKOFF_MS = 1000; // 1 second
 const MAX_BACKOFF_MS = 60000; // 1 minute
@@ -85,11 +103,25 @@ const EXISTENCE_CHECK_THRESHOLD = 256 * 1024;
 /** Timeout for HEAD requests (5 seconds) */
 const HEAD_TIMEOUT_MS = 15_000;
 const GET_TIMEOUT_MS = 15_000;
+const GET_HEDGE_INTERVAL_MS = 75;
+const READ_SCORE_TIE_DELTA = 0.12;
 
 /** Per-hash failure tracking */
 interface HashAttempts {
   attempts: number;
   lastAttempt: number;
+}
+
+function defaultReadStats(): ReadServerStats {
+  return {
+    requests: 0,
+    successes: 0,
+    misses: 0,
+    failures: 0,
+    timeouts: 0,
+    srttMs: 0,
+    rttvarMs: 0,
+  };
 }
 
 export class BlossomStore implements StoreWithMeta {
@@ -98,6 +130,7 @@ export class BlossomStore implements StoreWithMeta {
   private logger?: BlossomLogger;
   private onUploadProgress?: BlossomUploadCallback;
   private serverHealth: Map<string, ServerHealth> = new Map();
+  private readStats: Map<string, ReadServerStats> = new Map();
   private hashAttempts: Map<string, HashAttempts> = new Map();
   private writeQueue: Promise<boolean> = Promise.resolve(true);
 
@@ -138,6 +171,226 @@ export class BlossomStore implements StoreWithMeta {
   /** Record server success - reset backoff */
   private recordSuccess(serverUrl: string): void {
     this.serverHealth.delete(serverUrl);
+  }
+
+  private readStatsFor(serverUrl: string): ReadServerStats {
+    const existing = this.readStats.get(serverUrl);
+    if (existing) {
+      return existing;
+    }
+    const created = defaultReadStats();
+    this.readStats.set(serverUrl, created);
+    return created;
+  }
+
+  private recordReadRequest(serverUrl: string): void {
+    this.readStatsFor(serverUrl).requests += 1;
+  }
+
+  private recordReadMiss(serverUrl: string): void {
+    this.readStatsFor(serverUrl).misses += 1;
+  }
+
+  private recordReadSuccess(serverUrl: string, elapsedMs: number): void {
+    const stats = this.readStatsFor(serverUrl);
+    const now = Date.now();
+    stats.successes += 1;
+    stats.lastSuccessMs = now;
+    if (stats.srttMs === 0) {
+      stats.srttMs = elapsedMs;
+      stats.rttvarMs = elapsedMs / 2;
+    } else {
+      stats.rttvarMs = 0.75 * stats.rttvarMs + 0.25 * Math.abs(stats.srttMs - elapsedMs);
+      stats.srttMs = 0.875 * stats.srttMs + 0.125 * elapsedMs;
+    }
+    this.recordSuccess(serverUrl);
+  }
+
+  private recordReadFailure(serverUrl: string): void {
+    const stats = this.readStatsFor(serverUrl);
+    stats.failures += 1;
+    stats.lastFailureMs = Date.now();
+    this.recordError(serverUrl);
+  }
+
+  private recordReadTimeout(serverUrl: string): void {
+    const stats = this.readStatsFor(serverUrl);
+    stats.timeouts += 1;
+    stats.lastFailureMs = Date.now();
+    this.recordError(serverUrl);
+  }
+
+  private readReliabilityScore(stats: ReadServerStats): number {
+    return (stats.successes + 1) / (stats.requests + 2);
+  }
+
+  private readLatencyScore(stats: ReadServerStats): number {
+    if (stats.srttMs <= 0) {
+      return 0.5;
+    }
+    return Math.min(1, 500 / (stats.srttMs + 50));
+  }
+
+  private hasReadHistory(stats: ReadServerStats): boolean {
+    return stats.requests > 0
+      || stats.successes > 0
+      || stats.misses > 0
+      || stats.failures > 0
+      || stats.timeouts > 0;
+  }
+
+  private defaultReadPreference(server: BlossomServer): number {
+    let score = server.write ? 0 : 0.08;
+    try {
+      const hostname = new URL(server.url).hostname.toLowerCase();
+      if (hostname.includes('cdn') || hostname.includes('cache') || hostname.includes('edge')) {
+        score += 0.06;
+      }
+      if (hostname.includes('upload') || hostname.includes('origin')) {
+        score -= 0.04;
+      }
+    } catch {
+      // Ignore invalid URLs and use the basic read/write preference only.
+    }
+    return score;
+  }
+
+  private scoreReadServer(server: BlossomServer, now: number): number {
+    if (this.isServerInBackoff(server.url)) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    const stats = this.readStatsFor(server.url);
+    const missPenalty = stats.requests > 0 ? (stats.misses / stats.requests) * 0.2 : 0;
+    const failurePenalty = stats.requests > 0 ? ((stats.failures + stats.timeouts) / stats.requests) * 0.35 : 0;
+    const recencyBonus = stats.lastSuccessMs && now - stats.lastSuccessMs < 60_000 ? 0.1 : 0;
+    return this.defaultReadPreference(server)
+      + 0.55 * this.readReliabilityScore(stats)
+      + 0.3 * this.readLatencyScore(stats)
+      + recencyBonus
+      - missPenalty
+      - failurePenalty;
+  }
+
+  private orderedReadServers(readServers: BlossomServer[]): BlossomServer[] {
+    const now = Date.now();
+    return [...readServers].sort((left, right) => {
+      const scoreDiff = this.scoreReadServer(right, now) - this.scoreReadServer(left, now);
+      if (Math.abs(scoreDiff) > Number.EPSILON) {
+        return scoreDiff;
+      }
+      const leftPreference = this.defaultReadPreference(left);
+      const rightPreference = this.defaultReadPreference(right);
+      if (leftPreference !== rightPreference) {
+        return rightPreference - leftPreference;
+      }
+      return left.url.localeCompare(right.url);
+    });
+  }
+
+  private shouldProbeMultipleReadServers(readServers: BlossomServer[]): boolean {
+    if (readServers.length <= 1) {
+      return false;
+    }
+    const [best, next] = readServers;
+    if (!best || !next) {
+      return false;
+    }
+    const bestStats = this.readStatsFor(best.url);
+    const nextStats = this.readStatsFor(next.url);
+    if (!this.hasReadHistory(bestStats) || !this.hasReadHistory(nextStats)) {
+      return false;
+    }
+    const now = Date.now();
+    return (this.scoreReadServer(best, now) - this.scoreReadServer(next, now)) < READ_SCORE_TIE_DELTA;
+  }
+
+  private isTimeoutError(error: unknown): boolean {
+    if (error instanceof Error) {
+      return error.name === 'AbortError'
+        || error.name === 'TimeoutError'
+        || /timed?\s*out/i.test(error.message);
+    }
+    return false;
+  }
+
+  private createInFlightReadRequest(server: BlossomServer, hashHex: string): InFlightReadRequest {
+    const startedAt = Date.now();
+    this.recordReadRequest(server.url);
+    return {
+      server,
+      settled: false,
+      promise: fetch(`${server.url}/${hashHex}.bin`, {
+        signal: AbortSignal.timeout(GET_TIMEOUT_MS),
+      })
+        .then(async (response) => {
+          const elapsedMs = Math.max(1, Date.now() - startedAt);
+          if (response.ok) {
+            const data = new Uint8Array(await response.arrayBuffer());
+            const computed = await sha256(data);
+            if (toHex(computed) === hashHex) {
+              this.log({ operation: 'get', server: server.url, hash: hashHex, success: true, bytes: data.length });
+              this.recordReadSuccess(server.url, elapsedMs);
+              return { serverUrl: server.url, data };
+            }
+            this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: 'Hash mismatch' });
+            this.recordReadFailure(server.url);
+            return { serverUrl: server.url, data: null };
+          }
+
+          if (response.status === 404) {
+            this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: '404' });
+            this.recordReadMiss(server.url);
+            return { serverUrl: server.url, data: null };
+          }
+
+          this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: `${response.status}` });
+          this.recordReadFailure(server.url);
+          return { serverUrl: server.url, data: null };
+        })
+        .catch((error) => {
+          this.log({
+            operation: 'get',
+            server: server.url,
+            hash: hashHex,
+            success: false,
+            error: error instanceof Error ? error.message : 'Network error',
+          });
+          if (this.isTimeoutError(error)) {
+            this.recordReadTimeout(server.url);
+          } else {
+            this.recordReadFailure(server.url);
+          }
+          return { serverUrl: server.url, data: null };
+        }),
+    };
+  }
+
+  private hasPendingReadRequests(requests: InFlightReadRequest[]): boolean {
+    return requests.some((request) => !request.settled);
+  }
+
+  private async waitForNextReadResult(
+    requests: InFlightReadRequest[],
+    waitMs?: number,
+  ): Promise<{ request: InFlightReadRequest; serverUrl: string; data: Uint8Array | null } | null> {
+    const active = requests.filter((request) => !request.settled);
+    if (active.length === 0) {
+      return null;
+    }
+    const outcomes = active.map((request) => request.promise.then((value) => ({ request, ...value })));
+    const result = waitMs === undefined
+      ? await Promise.race(outcomes)
+      : await Promise.race([
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), waitMs);
+        }),
+        ...outcomes,
+      ]);
+    if (!result) {
+      return null;
+    }
+    result.request.settled = true;
+    return result;
   }
 
   /** Check if we should give up on a hash (too many failures) */
@@ -341,68 +594,38 @@ export class BlossomStore implements StoreWithMeta {
     if (readServers.length === 0) {
       return null;
     }
+    const orderedServers = this.orderedReadServers(readServers);
+    const requests: InFlightReadRequest[] = [];
+    let nextServerIndex = 0;
 
-    const pendingFetches = readServers.map(async (server): Promise<Uint8Array | null> => {
-      try {
-        const response = await fetch(`${server.url}/${hashHex}.bin`, {
-          signal: AbortSignal.timeout(GET_TIMEOUT_MS),
-        });
-        if (response.ok) {
-          const data = new Uint8Array(await response.arrayBuffer());
-          const computed = await sha256(data);
-          if (toHex(computed) === hashHex) {
-            this.log({ operation: 'get', server: server.url, hash: hashHex, success: true, bytes: data.length });
-            this.recordSuccess(server.url);
-            return data;
-          }
-          this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: 'Hash mismatch' });
-          this.recordError(server.url);
-          return null;
-        }
-
-        if (response.status === 404) {
-          // 404 is not an error - blob just doesn't exist on this server
-          this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: '404' });
-          return null;
-        }
-
-        this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: `${response.status}` });
-        this.recordError(server.url);
-        return null;
-      } catch (e) {
-        this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: e instanceof Error ? e.message : 'Network error' });
-        this.recordError(server.url);
-        return null;
+    const launchNext = (count: number): void => {
+      for (let launched = 0; launched < count && nextServerIndex < orderedServers.length; launched += 1) {
+        const server = orderedServers[nextServerIndex];
+        nextServerIndex += 1;
+        requests.push(this.createInFlightReadRequest(server, hashHex));
       }
-    });
+    };
 
-    return await new Promise<Uint8Array | null>((resolve) => {
-      let settled = false;
-      let remaining = pendingFetches.length;
+    launchNext(this.shouldProbeMultipleReadServers(orderedServers) ? Math.min(2, orderedServers.length) : 1);
 
-      for (const fetchPromise of pendingFetches) {
-        fetchPromise
-          .then((result) => {
-            if (settled) return;
-            if (result) {
-              settled = true;
-              resolve(result);
-              return;
-            }
-            remaining -= 1;
-            if (remaining === 0) {
-              resolve(null);
-            }
-          })
-          .catch(() => {
-            if (settled) return;
-            remaining -= 1;
-            if (remaining === 0) {
-              resolve(null);
-            }
-          });
+    while (this.hasPendingReadRequests(requests) || nextServerIndex < orderedServers.length) {
+      const result = await this.waitForNextReadResult(
+        requests,
+        nextServerIndex < orderedServers.length ? GET_HEDGE_INTERVAL_MS : undefined,
+      );
+      if (result?.data) {
+        return result.data;
       }
-    });
+      if (result === null && nextServerIndex < orderedServers.length) {
+        launchNext(1);
+        continue;
+      }
+      if (nextServerIndex < orderedServers.length && !this.hasPendingReadRequests(requests)) {
+        launchNext(1);
+      }
+    }
+
+    return null;
   }
 
   async has(hash: Hash): Promise<boolean> {

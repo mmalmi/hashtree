@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BlossomStore } from '../src/store/blossom.js';
 import { sha256 } from '../src/hash.js';
+import { toHex } from '../src/types.js';
 import type { Hash } from '../src/types.js';
 
 const DATA = new Uint8Array([1, 2, 3, 4, 5]);
@@ -23,20 +24,20 @@ describe('BlossomStore', () => {
     vi.useRealTimers();
   });
 
-  it('returns the first successful read server instead of waiting in server order', async () => {
+  it('prefers a single best read server instead of blasting every server', async () => {
     vi.useFakeTimers();
     const hash = await makeHash();
 
     const fetchMock = vi.fn((input: string | URL | RequestInfo) => {
       const url = String(input);
-      if (url.startsWith('https://slow.example/')) {
-        return new Promise<Response>((resolve) => {
-          setTimeout(() => resolve(makeResponse(404)), 200);
-        });
-      }
       if (url.startsWith('https://fast.example/')) {
         return new Promise<Response>((resolve) => {
-          setTimeout(() => resolve(makeResponse(200, DATA)), 50);
+          setTimeout(() => resolve(makeResponse(200, DATA)), 20);
+        });
+      }
+      if (url.startsWith('https://slow.example/')) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(makeResponse(200, DATA)), 200);
         });
       }
       return Promise.resolve(makeResponse(404));
@@ -52,24 +53,25 @@ describe('BlossomStore', () => {
     });
 
     const readPromise = store.get(hash);
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(20);
 
     await expect(readPromise).resolves.toEqual(DATA);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('https://fast.example/');
   });
 
-  it('keeps waiting for a later success when another read server returns 404 first', async () => {
+  it('falls through immediately when the preferred server returns 404', async () => {
     vi.useFakeTimers();
     const hash = await makeHash();
 
     const fetchMock = vi.fn((input: string | URL | RequestInfo) => {
       const url = String(input);
-      if (url.startsWith('https://missing.example/')) {
+      if (url.startsWith('https://aaa-missing.example/')) {
         return Promise.resolve(makeResponse(404));
       }
-      if (url.startsWith('https://later.example/')) {
+      if (url.startsWith('https://zzz-later.example/')) {
         return new Promise<Response>((resolve) => {
-          setTimeout(() => resolve(makeResponse(200, DATA)), 80);
+          setTimeout(() => resolve(makeResponse(200, DATA)), 10);
         });
       }
       return Promise.resolve(makeResponse(404));
@@ -79,14 +81,69 @@ describe('BlossomStore', () => {
 
     const store = new BlossomStore({
       servers: [
-        { url: 'https://missing.example', read: true },
-        { url: 'https://later.example', read: true },
+        { url: 'https://aaa-missing.example', read: true },
+        { url: 'https://zzz-later.example', read: true },
       ],
     });
 
     const readPromise = store.get(hash);
-    await vi.advanceTimersByTimeAsync(80);
+    await vi.advanceTimersByTimeAsync(10);
 
     await expect(readPromise).resolves.toEqual(DATA);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining('https://aaa-missing.example/'),
+      expect.stringContaining('https://zzz-later.example/'),
+    ]);
+  });
+
+  it('hedges to a fallback server when the preferred server stalls', async () => {
+    vi.useFakeTimers();
+    const firstData = DATA;
+    const secondData = new Uint8Array([9, 8, 7, 6, 5]);
+    const firstHash = await sha256(firstData) as Hash;
+    const secondHash = await sha256(secondData) as Hash;
+    const firstHashHex = toHex(firstHash);
+    const secondHashHex = toHex(secondHash);
+
+    const fetchMock = vi.fn((input: string | URL | RequestInfo) => {
+      const url = String(input);
+      if (url === `https://fast.example/${firstHashHex}.bin`) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(makeResponse(200, firstData)), 10);
+        });
+      }
+      if (url === `https://fast.example/${secondHashHex}.bin`) {
+        return new Promise<Response>(() => {});
+      }
+      if (url === `https://slow.example/${secondHashHex}.bin`) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(makeResponse(200, secondData)), 10);
+        });
+      }
+      return Promise.resolve(makeResponse(404));
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [
+        { url: 'https://slow.example', read: true },
+        { url: 'https://fast.example', read: true },
+      ],
+    });
+
+    const warmRead = store.get(firstHash);
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(warmRead).resolves.toEqual(firstData);
+
+    const hedgedRead = store.get(secondHash);
+    await vi.advanceTimersByTimeAsync(74);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(hedgedRead).resolves.toEqual(secondData);
   });
 });

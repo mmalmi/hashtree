@@ -7,20 +7,12 @@ describe('BlossomTransport.fetch', () => {
     vi.unstubAllGlobals();
   });
 
-  it('queries read servers in parallel so a stalled first server does not block a fast second server', async () => {
+  it('starts with the most promising read server instead of querying every server', async () => {
     const data = new TextEncoder().encode('parallel-blossom-thumb');
     const hashHex = toHex(await sha256(data));
-    const slowBase = 'https://slow.example';
     const fastBase = 'https://fast.example';
-
-    let resolveSlow: ((value: unknown) => void) | null = null;
     const fetchMock = vi.fn((input: string | URL) => {
       const url = String(input);
-      if (url === `${slowBase}/${hashHex}.bin`) {
-        return new Promise((resolve) => {
-          resolveSlow = resolve;
-        });
-      }
       if (url === `${fastBase}/${hashHex}.bin`) {
         return Promise.resolve({
           ok: true,
@@ -35,8 +27,8 @@ describe('BlossomTransport.fetch', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const transport = new BlossomTransport([
-      { url: slowBase, read: true, write: false },
       { url: fastBase, read: true, write: false },
+      { url: 'https://slow.example', read: true, write: false },
     ]);
 
     const resultPromise = transport.fetch(hashHex);
@@ -44,13 +36,7 @@ describe('BlossomTransport.fetch', () => {
     await Promise.resolve();
 
     const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));
-    expect(requestedUrls).toContain(`${slowBase}/${hashHex}.bin`);
-    expect(requestedUrls).toContain(`${fastBase}/${hashHex}.bin`);
-
-    resolveSlow?.({
-      ok: false,
-      arrayBuffer: async () => new ArrayBuffer(0),
-    });
+    expect(requestedUrls).toEqual([`${fastBase}/${hashHex}.bin`]);
 
     await expect(resultPromise).resolves.toEqual(data);
   });
@@ -77,13 +63,39 @@ describe('BlossomTransport.fetch', () => {
 
     const transport = new BlossomTransport([
       { url: base, read: true, write: false },
-    ]);
+    ], undefined, 60_000);
 
     const first = transport.fetch(hashHex);
     const second = transport.fetch(hashHex);
 
     await expect(Promise.all([first, second])).resolves.toEqual([data, data]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears timed-out inflight reads so later retries can refetch', async () => {
+    vi.useFakeTimers();
+    const hashHex = 'a'.repeat(64);
+    const base = 'https://slow.example';
+    const fetchMock = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const transport = new BlossomTransport([
+      { url: base, read: true, write: false },
+    ], undefined, 25);
+
+    const first = transport.fetch(hashHex);
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(first).resolves.toBeNull();
+
+    const second = transport.fetch(hashHex);
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(second).resolves.toBeNull();
   });
 
   it('limits concurrent read fetches across hashes', async () => {
@@ -123,21 +135,26 @@ describe('BlossomTransport.fetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(concurrencyLimit);
     expect(maxActive).toBe(concurrencyLimit);
 
-    while (fetchMock.mock.calls.length < hashes.length || active > 0) {
-      const batch = releases.splice(0, releases.length);
-      if (batch.length === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        continue;
-      }
-      for (const release of batch) {
-        release();
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
+    const firstBatch = releases.splice(0, releases.length);
+    expect(firstBatch).toHaveLength(concurrencyLimit);
+    for (const release of firstBatch) {
+      release();
+    }
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(hashes.length);
+    });
+    expect(active).toBe(hashes.length - concurrencyLimit);
+
+    const secondBatch = releases.splice(0, releases.length);
+    expect(secondBatch).toHaveLength(hashes.length - concurrencyLimit);
+    for (const release of secondBatch) {
+      release();
     }
 
     await expect(Promise.all(requests)).resolves.toEqual(Array(hashes.length).fill(null));
     expect(maxActive).toBeLessThanOrEqual(concurrencyLimit);
-  });
+  }, 10_000);
 
   it('reuses BlossomStore backoff so failed servers are skipped on immediate retries', async () => {
     const data = new TextEncoder().encode('backoff-blossom-thumb');
