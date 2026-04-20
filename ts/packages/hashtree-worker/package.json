@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -85,9 +85,9 @@
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
-    "@hashtree/core": "0.1.4",
-    "@hashtree/dexie": "0.1.4",
-    "@hashtree/nostr": "0.1.9",
+    "@hashtree/core": "0.1.5",
+    "@hashtree/dexie": "0.1.5",
+    "@hashtree/nostr": "0.1.10",
     "dexie": "^4.2.1",
     "nostr-tools": "^2.18.2"
   },

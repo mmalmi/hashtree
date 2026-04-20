@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/index",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "B-Tree and index structures for hashtree",
   "type": "module",
   "main": "dist/index.js",

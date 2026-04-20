@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/merge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deterministic path-based merge primitives for hashtree",
   "type": "module",
   "main": "dist/index.js",
