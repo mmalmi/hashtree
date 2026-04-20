@@ -1,4 +1,5 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use hashtree_network::{should_forward_htl, PeerHTLConfig, PeerSelector, MAX_HTL};
 

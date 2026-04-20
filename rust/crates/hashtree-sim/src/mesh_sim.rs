@@ -381,6 +381,15 @@ impl Simulation {
         tokio::task::yield_now().await;
     }
 
+    async fn advance_virtual_tick(&self, virtual_time_paused: bool, tick_delay: Duration) {
+        if !virtual_time_paused || tick_delay.is_zero() {
+            tokio::task::yield_now().await;
+            return;
+        }
+        tokio::time::advance(tick_delay).await;
+        tokio::task::yield_now().await;
+    }
+
     pub fn new(config: SimConfig) -> Self {
         let cashu_mint = config
             .cashu_incentives
@@ -515,6 +524,8 @@ impl Simulation {
 
             self.update_resource_peaks().await;
             tick_durations_us.push(tick_started.elapsed().as_micros() as u64);
+            self.advance_virtual_tick(virtual_time.is_paused(), Duration::from_millis(tick_ms))
+                .await;
         }
 
         // Final processing

@@ -13,8 +13,9 @@ use std::hash::{Hash as _, Hasher};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::time::Instant;
 
 use hashtree_core::{Hash, Store, StoreError};
 

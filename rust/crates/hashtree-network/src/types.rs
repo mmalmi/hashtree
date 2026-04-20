@@ -8,7 +8,8 @@ use hashtree_core::Hash;
 use nostr_sdk::nostr::{Event, Kind};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::mesh_store_core::RequestDispatchConfig;
 use crate::peer_selector::SelectionStrategy;

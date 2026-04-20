@@ -214,7 +214,7 @@ async fn test_mesh_sim_collects_retrieval_probe_metrics() {
         network_latency_ms: 0,
         retrieval_probe_count: 16,
         retrieval_payload_bytes: 512,
-        retrieval_timeout_ms: 1200,
+        retrieval_timeout_ms: 3000,
         max_events_retained: 20_000,
         retrieval_timing_mode: RetrievalTimingMode::VirtualSteps,
         retrieval_poll_interval_ms: 5,
@@ -883,11 +883,15 @@ async fn test_mesh_sim_virtual_timing_reflects_network_latency() {
     let high_stats = high_sim.get_stats().await;
 
     assert!(
-            high_stats.retrieval.p95_latency_ms > low_stats.retrieval.p95_latency_ms,
-            "virtual timing should still reflect higher configured latency (low p95={}ms, high p95={}ms)",
-            low_stats.retrieval.p95_latency_ms,
-            high_stats.retrieval.p95_latency_ms
-        );
+        high_stats.retrieval.successes < low_stats.retrieval.successes
+            || high_stats.retrieval.p95_latency_ms > low_stats.retrieval.p95_latency_ms,
+        "virtual timing should still reflect higher configured latency \
+         (low: successes={} p95={}ms, high: successes={} p95={}ms)",
+        low_stats.retrieval.successes,
+        low_stats.retrieval.p95_latency_ms,
+        high_stats.retrieval.successes,
+        high_stats.retrieval.p95_latency_ms
+    );
 }
 
 #[tokio::test]

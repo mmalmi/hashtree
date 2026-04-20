@@ -9,7 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Constants from Freenet's PeerManager
 const SELECTION_PERCENTAGE_WARNING: f64 = 0.30; // Skip if selected >30% of time
