@@ -764,7 +764,7 @@ impl RemoteHelper {
 
             const CHANNEL_SIZE: usize = 100;
             const DEFAULT_UPLOAD_CONCURRENCY: usize = 10;
-            const SINGLE_SERVER_UPLOAD_CONCURRENCY: usize = 2;
+            const SINGLE_SERVER_UPLOAD_CONCURRENCY: usize = 1;
             let upload_concurrency = if all_servers.len() <= 1 {
                 SINGLE_SERVER_UPLOAD_CONCURRENCY
             } else {

@@ -597,11 +597,11 @@ impl BlossomClient {
     }
 
     fn max_upload_retries() -> u32 {
-        5
+        8
     }
 
     fn upload_retry_delay(attempt: u32) -> Duration {
-        Duration::from_millis(100 * (1 << attempt.min(4)))
+        Duration::from_millis(250 * (1 << attempt.min(4)))
     }
 
     async fn create_upload_auth(&self, hash: &str) -> Result<String, BlossomError> {
