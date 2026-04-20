@@ -26,6 +26,40 @@ const { hashHex } = await client.putBlob(data);
 const { data: blob } = await client.getBlob(hashHex);
 ```
 
+## Plain Worker + App-Owned Nostr
+
+For simple apps, keep ordinary Nostr reads in app code and let the worker focus on
+storage, Blossom, and mesh transport:
+
+```typescript
+import { HashtreeWorkerClient } from '@hashtree/worker';
+import { ManagedWebRTCMeshHost } from '@hashtree/worker/p2p';
+import { SimplePool } from 'nostr-tools/pool';
+
+const client = new HashtreeWorkerClient(HashtreeWorker, {
+  storeName: 'demo-worker',
+});
+await client.init();
+
+const meshHost = new ManagedWebRTCMeshHost();
+meshHost.attachWorkerClient(client);
+
+const pool = new SimplePool();
+const profileSub = pool.subscribeMany(
+  ['wss://relay.damus.io'],
+  [{ kinds: [0], authors: ['pubkey-hex'] }],
+  {
+    onevent(event) {
+      console.log('profile metadata', event.content);
+    },
+  },
+);
+```
+
+That split keeps `HashtreeWorkerClient` reusable for apps that only need blob/media
+transport, while still allowing each app to use `nostr-tools` or another thin client
+for profiles, follows, search, or other product-specific Nostr queries.
+
 ## Relay Worker Client
 
 If you are using `@hashtree/worker/relay-entry?worker` and need relay-backed tree-root

@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SignalingMessage } from '@hashtree/nostr';
+import type { Event as NostrEvent } from 'nostr-tools';
 import {
   SIGNALING_KIND,
   HELLO_TAG,
   createSignalingFilters,
+  createSimplePoolSignalingSender,
   sendSignalingMessage,
   decodeSignalingEvent,
   type SignalingEventLike,
@@ -87,6 +89,88 @@ describe('p2p signaling core', () => {
     expect(signEvent).not.toHaveBeenCalled();
     expect(giftWrap).toHaveBeenCalledTimes(1);
     expect(published).toHaveLength(1);
+  });
+
+  it('creates a simple-pool sender that requires one relay publish when configured', async () => {
+    const signEvent = vi.fn(async (template: { kind: number; created_at: number; tags: string[][]; content: string }) => ({
+      id: '1'.repeat(64),
+      pubkey: 'signer',
+      kind: template.kind,
+      created_at: template.created_at,
+      tags: template.tags,
+      content: template.content,
+      sig: '2'.repeat(128),
+    } satisfies NostrEvent));
+    const giftWrap = vi.fn();
+    const publishAttempt = vi.fn(async () => undefined);
+    const signalPool = {
+      publish: vi.fn(() => [publishAttempt()]),
+    };
+
+    const sender = createSimplePoolSignalingSender({
+      signEvent,
+      giftWrap,
+      publishMode: 'require-one',
+      publishMaxWaitMs: 15_000,
+    })({
+      signalPool: signalPool as never,
+      relayUrls: ['wss://relay.example'],
+    });
+
+    await sender({ type: 'hello', peerId: 'peer-a' });
+
+    expect(signalPool.publish).toHaveBeenCalledTimes(1);
+    expect(signalPool.publish).toHaveBeenCalledWith(
+      ['wss://relay.example'],
+      expect.objectContaining({
+        tags: expect.arrayContaining([
+          ['l', HELLO_TAG],
+          ['peerId', 'peer-a'],
+        ]),
+      }),
+    );
+  });
+
+  it('creates a simple-pool sender that best-effort publishes to all relays when configured', async () => {
+    const directedEvent: NostrEvent = {
+      id: '3'.repeat(64),
+      pubkey: 'ephemeral',
+      kind: SIGNALING_KIND,
+      created_at: 1700000000,
+      tags: [['p', 'recipient']],
+      content: 'ciphertext',
+      sig: '4'.repeat(128),
+    };
+    const signEvent = vi.fn();
+    const giftWrap = vi.fn(async () => directedEvent);
+    const signalPool = {
+      publish: vi.fn(() => [
+        Promise.resolve(undefined),
+        Promise.reject(new Error('offline relay')),
+      ]),
+    };
+
+    const sender = createSimplePoolSignalingSender({
+      signEvent,
+      giftWrap,
+      publishMode: 'best-effort',
+    })({
+      signalPool: signalPool as never,
+      relayUrls: ['wss://relay.one', 'wss://relay.two'],
+    });
+
+    await sender({
+      type: 'offer',
+      peerId: 'sender',
+      targetPeerId: 'recipient',
+      sdp: 'v=0',
+    }, 'recipient');
+
+    expect(giftWrap).toHaveBeenCalledTimes(1);
+    expect(signalPool.publish).toHaveBeenCalledWith(
+      ['wss://relay.one', 'wss://relay.two'],
+      directedEvent,
+    );
   });
 
   it('decodes hello events', async () => {

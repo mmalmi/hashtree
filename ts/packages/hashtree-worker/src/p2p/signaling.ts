@@ -1,4 +1,6 @@
 import type { SignalingMessage } from '@hashtree/nostr';
+import type { Event as NostrEvent } from 'nostr-tools';
+import type { SimplePool } from 'nostr-tools/pool';
 
 type DirectedSignalingMessage = Exclude<SignalingMessage, { type: 'hello' }>;
 type HelloSignalingMessage = Extract<SignalingMessage, { type: 'hello' }> & {
@@ -70,6 +72,16 @@ interface DecodeSignalingEventOptions<TEvent extends SignalingEventLike> {
 export interface DecodedSignalingEvent {
   senderPubkey: string;
   message: SignalingMessage;
+}
+
+export type SimplePoolPublishMode = 'require-one' | 'best-effort';
+
+export interface CreateSimplePoolSignalingSenderOptions<TEvent extends NostrEvent> {
+  signEvent: (template: SignalingTemplate) => Promise<TEvent>;
+  giftWrap: (innerEvent: SignalingInnerEvent, recipientPubkey: string) => Promise<TEvent>;
+  publishMode?: SimplePoolPublishMode;
+  publishMaxWaitMs?: number;
+  nowMs?: () => number;
 }
 
 function getSince(nowMs: number, maxEventAgeSec: number): number {
@@ -245,6 +257,47 @@ export async function sendSignalingMessage<TEvent extends SignalingEventLike>({
     content: '',
   });
   await publish(event);
+}
+
+export function createSimplePoolSignalingSender<TEvent extends NostrEvent>({
+  signEvent,
+  giftWrap,
+  publishMode = 'require-one',
+  publishMaxWaitMs,
+  nowMs,
+}: CreateSimplePoolSignalingSenderOptions<TEvent>) {
+  return ({ signalPool, relayUrls }: { signalPool: SimplePool; relayUrls: string[] }) => {
+    return async (msg: SignalingMessage, recipientPubkey?: string): Promise<void> => {
+      await sendSignalingMessage({
+        msg,
+        recipientPubkey,
+        signEvent,
+        giftWrap,
+        publish: async (event) => {
+          const publishPromises = signalPool.publish(relayUrls, event);
+
+          if (publishMode === 'best-effort') {
+            await Promise.allSettled(publishPromises);
+            return;
+          }
+
+          const publishResult = Promise.any(publishPromises);
+          if (publishMaxWaitMs === undefined) {
+            await publishResult;
+            return;
+          }
+
+          await Promise.race([
+            publishResult,
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('Timed out publishing signaling event')), publishMaxWaitMs);
+            }),
+          ]);
+        },
+        nowMs,
+      });
+    };
+  };
 }
 
 export async function decodeSignalingEvent<TEvent extends SignalingEventLike>({

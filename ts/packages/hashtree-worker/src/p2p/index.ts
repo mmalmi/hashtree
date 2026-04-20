@@ -52,11 +52,14 @@ export {
   HELLO_TAG,
   MAX_EVENT_AGE_SEC,
   createSignalingFilters,
+  createSimplePoolSignalingSender,
   sendSignalingMessage,
   decodeSignalingEvent,
 } from './signaling.js';
 
 export type {
+  CreateSimplePoolSignalingSenderOptions,
+  SimplePoolPublishMode,
   SignalingEventLike,
   GiftSeal,
   SignalingTemplate,
