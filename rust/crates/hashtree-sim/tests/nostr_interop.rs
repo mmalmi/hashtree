@@ -5,7 +5,7 @@ mod nostr_interop {
     use hashtree_resolver::RootResolver;
     use hashtree_sim::WsRelay;
     use nostr_sdk::prelude::*;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn unique_tree_name(prefix: &str) -> String {
         let ts = SystemTime::now()
@@ -24,11 +24,33 @@ mod nostr_interop {
         let client = Client::new(keys.clone());
         client.add_relay(relay_url).await?;
         client.connect().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let event = EventBuilder::new(Kind::Custom(30078), content, tags);
-        client.send_event_builder(event).await?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let event = EventBuilder::new(Kind::Custom(30078), content, tags.clone());
+            match client.send_event_builder(event).await {
+                Ok(_) => break,
+                Err(err) if Instant::now() < deadline => {
+                    let _ = err;
+                    tokio::task::yield_now().await;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
         Ok(())
+    }
+
+    async fn wait_for_relay_events(relay: &WsRelay, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if relay.event_count().await >= expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "relay did not receive {expected} event(s) in time"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     #[tokio::test]
@@ -53,8 +75,7 @@ mod nostr_interop {
         publish_event(&relay_url, &keys, tags, "")
             .await
             .expect("publish");
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_relay_events(&relay, 1).await;
 
         let resolver = NostrRootResolver::new(NostrResolverConfig {
             relays: vec![relay_url],
@@ -90,8 +111,7 @@ mod nostr_interop {
         publish_event(&relay_url, &keys, tags, &content)
             .await
             .expect("publish");
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_relay_events(&relay, 1).await;
 
         let resolver = NostrRootResolver::new(NostrResolverConfig {
             relays: vec![relay_url],

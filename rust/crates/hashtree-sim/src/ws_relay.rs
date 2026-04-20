@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
 /// Nostr event structure (simplified for testing)
@@ -152,10 +152,17 @@ impl WsRelay {
                 .ok();
         });
 
-        // Give the server a moment to start
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        for _ in 0..256 {
+            if TcpStream::connect(addr).await.is_ok() {
+                return Ok(addr);
+            }
+            tokio::task::yield_now().await;
+        }
 
-        Ok(addr)
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "test relay did not become ready",
+        ))
     }
 
     /// Get the WebSocket URL for connecting

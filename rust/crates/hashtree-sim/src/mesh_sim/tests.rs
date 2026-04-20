@@ -1,4 +1,46 @@
 use super::*;
+use std::fs;
+use std::path::Path;
+
+fn collect_rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = fs::read_dir(dir).expect("read dir");
+    for entry in entries {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, out);
+            continue;
+        }
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn test_hashtree_sim_has_no_plain_sleep_calls() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    collect_rust_files(&crate_root.join("src"), &mut files);
+    collect_rust_files(&crate_root.join("tests"), &mut files);
+
+    let forbidden = [
+        ["tokio::time::", "sleep"].concat(),
+        ["std::thread::", "sleep"].concat(),
+        ["thread::", "sleep"].concat(),
+    ];
+
+    for path in files {
+        let body = fs::read_to_string(&path).expect("read source");
+        for pattern in &forbidden {
+            assert!(
+                !body.contains(pattern),
+                "forbidden plain sleep `{pattern}` found in {}",
+                path.display()
+            );
+        }
+    }
+}
 
 fn goofball_behavior() -> ResponseBehaviorConfig {
     ResponseBehaviorConfig {

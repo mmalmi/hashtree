@@ -168,6 +168,11 @@ struct RunningNode {
     joined_at_ms: u64,
 }
 
+struct RetrievalAttempt {
+    data: Option<Vec<u8>>,
+    latency_ms: u64,
+}
+
 /// Topology analysis results
 #[derive(Debug, Clone)]
 pub struct TopologyStats {
@@ -326,8 +331,18 @@ impl VirtualTimeGuard {
             return Self { paused: false };
         }
 
-        let paused = std::panic::catch_unwind(tokio::time::pause).is_ok();
-        Self { paused }
+        if std::panic::catch_unwind(tokio::time::pause).is_err() {
+            panic!(
+                "hashtree-sim VirtualSteps requires Tokio time to pause successfully; \
+                 real-time sleep in the simulation path is forbidden"
+            );
+        }
+
+        Self { paused: true }
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused
     }
 }
 
@@ -350,6 +365,20 @@ impl Simulation {
         }
         let divisor = self.virtual_sleep_divisor();
         (self.config.network_latency_ms / divisor).max(1)
+    }
+
+    async fn wait_for_virtual_step(&self, virtual_time_paused: bool, step_delay: Duration) {
+        if step_delay.is_zero() {
+            tokio::task::yield_now().await;
+            return;
+        }
+
+        assert!(
+            virtual_time_paused,
+            "VirtualSteps must use paused Tokio time instead of real-time sleeping"
+        );
+        tokio::time::advance(step_delay).await;
+        tokio::task::yield_now().await;
     }
 
     pub fn new(config: SimConfig) -> Self {
@@ -424,7 +453,7 @@ impl Simulation {
         // Mock negotiated channels share a global registry; each simulation run must
         // start from a clean slate or later runs inherit stale links.
         hashtree_network::clear_channel_registry().await;
-        let _virtual_time = VirtualTimeGuard::maybe_pause(self.config.retrieval_timing_mode);
+        let virtual_time = VirtualTimeGuard::maybe_pause(self.config.retrieval_timing_mode);
         let run_started = Instant::now();
         let total_ms = self.config.duration.as_millis() as u64;
         let tick_ms = self.config.discovery_interval_ms;
@@ -493,7 +522,8 @@ impl Simulation {
             self.process_all_messages(total_ms).await;
         }
 
-        self.run_retrieval_probes(total_ms).await;
+        self.run_retrieval_probes(total_ms, virtual_time.is_paused())
+            .await;
         self.finalize_cashu_stats().await;
         self.update_resource_peaks().await;
 
@@ -860,7 +890,7 @@ impl Simulation {
         stats.cashu.settlements_finalized = settlements_finalized;
     }
 
-    async fn run_retrieval_probes(&self, time_ms: u64) {
+    async fn run_retrieval_probes(&self, time_ms: u64, virtual_time_paused: bool) {
         if self.config.retrieval_probe_count == 0 {
             return;
         }
@@ -906,16 +936,17 @@ impl Simulation {
             let _ = source_store.put(hash, payload.clone()).await;
 
             let bytes_before = self.stats.read().await.data_bytes_processed;
-            let start = Instant::now();
-            let result = self
+            let attempt = self
                 .retrieve_with_processing(
                     target_store.clone(),
                     hash,
                     Duration::from_millis(self.config.retrieval_timeout_ms),
                     time_ms + probe_idx as u64,
+                    virtual_time_paused,
                 )
                 .await;
-            let latency_ms = start.elapsed().as_millis() as u64;
+            let latency_ms = attempt.latency_ms;
+            let result = attempt.data;
             let bytes_after = self.stats.read().await.data_bytes_processed;
             let success = matches!(result.as_ref(), Some(data) if data == &payload);
             let transfer_bytes = bytes_after.saturating_sub(bytes_before);
@@ -983,7 +1014,8 @@ impl Simulation {
         hash: hashtree_core::Hash,
         timeout: Duration,
         time_ms: u64,
-    ) -> Option<Vec<u8>> {
+        virtual_time_paused: bool,
+    ) -> RetrievalAttempt {
         let quote_terms = self.active_cashu_config().map(|cashu| {
             (
                 cashu.payment_per_probe_sat,
@@ -1009,12 +1041,18 @@ impl Simulation {
                 let started = Instant::now();
                 loop {
                     if get_task.is_finished() {
-                        return get_task.await.ok().flatten();
+                        return RetrievalAttempt {
+                            data: get_task.await.ok().flatten(),
+                            latency_ms: started.elapsed().as_millis() as u64,
+                        };
                     }
 
                     if started.elapsed() >= timeout {
                         get_task.abort();
-                        return None;
+                        return RetrievalAttempt {
+                            data: None,
+                            latency_ms: timeout.as_millis() as u64,
+                        };
                     }
 
                     self.process_all_messages(time_ms + started.elapsed().as_millis() as u64)
@@ -1030,25 +1068,43 @@ impl Simulation {
 
                 for poll in 0..max_polls {
                     if get_task.is_finished() {
-                        return get_task.await.ok().flatten();
+                        return RetrievalAttempt {
+                            data: get_task.await.ok().flatten(),
+                            latency_ms: poll.saturating_mul(poll_interval_ms).min(timeout_ms),
+                        };
                     }
 
                     let simulated_now =
                         time_ms.saturating_add(poll.saturating_mul(poll_interval_ms));
                     self.process_all_messages(simulated_now).await;
-                    if step_sleep_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(step_sleep_ms)).await;
-                    } else {
-                        tokio::task::yield_now().await;
+                    self.wait_for_virtual_step(
+                        virtual_time_paused,
+                        Duration::from_millis(step_sleep_ms),
+                    )
+                    .await;
+
+                    if get_task.is_finished() {
+                        return RetrievalAttempt {
+                            data: get_task.await.ok().flatten(),
+                            latency_ms: (poll.saturating_add(1))
+                                .saturating_mul(poll_interval_ms)
+                                .min(timeout_ms),
+                        };
                     }
                 }
 
                 if get_task.is_finished() {
-                    return get_task.await.ok().flatten();
+                    return RetrievalAttempt {
+                        data: get_task.await.ok().flatten(),
+                        latency_ms: timeout_ms,
+                    };
                 }
 
                 get_task.abort();
-                None
+                RetrievalAttempt {
+                    data: None,
+                    latency_ms: timeout_ms,
+                }
             }
         }
     }
