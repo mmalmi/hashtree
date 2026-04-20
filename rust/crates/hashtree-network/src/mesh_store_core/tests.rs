@@ -96,18 +96,29 @@ fn make_shared_test_node(
     node_id: &str,
     routing: MeshRoutingConfig,
 ) -> TestNode {
+    make_shared_test_node_with_hash_get(relay, node_id, routing, true)
+}
+
+fn make_shared_test_node_with_hash_get(
+    relay: Arc<crate::mock::MockRelay>,
+    node_id: &str,
+    routing: MeshRoutingConfig,
+    hash_get_enabled: bool,
+) -> TestNode {
     let transport = Arc::new(relay.create_transport(node_id.to_string()));
     let conn_factory = Arc::new(crate::mock::MockConnectionFactory::new(
         node_id.to_string(),
         0,
     ));
-    let signaling = Arc::new(crate::signaling::MeshRouter::new(
+    let mut router = crate::signaling::MeshRouter::new(
         node_id.to_string(),
         transport.clone(),
         conn_factory,
         crate::types::PoolSettings::default(),
         false,
-    ));
+    );
+    router.set_hash_get_enabled(hash_get_enabled);
+    let signaling = Arc::new(router);
     let local_store = Arc::new(MemoryStore::new());
     let store = Arc::new(TestStore::new_with_routing(
         local_store.clone(),
@@ -1155,6 +1166,250 @@ async fn test_route_choice_follows_the_best_endpoint_not_a_peers_bucket() {
     assert_eq!(
         peer_stats_after_second.requests_sent, 0,
         "once the source endpoint is the clear winner, the peer bucket should not get probed again",
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_parallel_route_cleanup_releases_losing_peer_state() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let requester = make_shared_test_node(
+        relay.clone(),
+        "requester-route-cleanup-peer",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 1,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+    let peer = make_shared_test_node(
+        relay,
+        "peer-route-cleanup-peer",
+        MeshRoutingConfig::default(),
+    );
+    let nodes = [&requester, &peer];
+
+    requester.transport.connect(&[]).await.expect("connect");
+    peer.transport.connect(&[]).await.expect("connect");
+    requester.store.start().await.expect("start requester");
+    peer.store.start().await.expect("start peer");
+    pump_test_network(&nodes, 8).await;
+
+    {
+        let mut selector = requester.store.peer_selector.write().await;
+        selector.record_request("peer-route-cleanup-peer", 40);
+        selector.record_success("peer-route-cleanup-peer", 10, 128);
+    }
+
+    let payload = b"route-cleanup-source-wins".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    let source_store = Arc::new(MemoryStore::new());
+    source_store
+        .put(hash, payload.clone())
+        .await
+        .expect("put source payload");
+    requester
+        .store
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "cleanup-upstream",
+            source_store,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::ZERO,
+        )) as Arc<dyn MeshReadSource>])
+        .await;
+    requester.store.read_source_stats.write().await.insert(
+        "cleanup-upstream".to_string(),
+        AdaptiveSourceStats {
+            requests: 1,
+            successes: 1,
+            srtt_ms: 10.0,
+            rttvar_ms: 5.0,
+            ..AdaptiveSourceStats::default()
+        },
+    );
+
+    let result = run_get_with_pumps(requester.store.clone(), hash, &nodes).await;
+    assert_eq!(result, Some(payload));
+    assert!(
+        requester.store.pending_requests.read().await.is_empty(),
+        "parallel source win should cancel the losing peer request state",
+    );
+    assert!(
+        requester.store.peer_active_requests.read().await.is_empty(),
+        "parallel source win should release active peer request slots",
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_parallel_route_cleanup_releases_losing_source_state() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let requester = make_shared_test_node(
+        relay.clone(),
+        "requester-route-cleanup-source",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 1,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+    let peer = make_shared_test_node(
+        relay,
+        "peer-route-cleanup-source",
+        MeshRoutingConfig::default(),
+    );
+    let nodes = [&requester, &peer];
+
+    requester.transport.connect(&[]).await.expect("connect");
+    peer.transport.connect(&[]).await.expect("connect");
+    requester.store.start().await.expect("start requester");
+    peer.store.start().await.expect("start peer");
+    pump_test_network(&nodes, 8).await;
+
+    {
+        let mut selector = requester.store.peer_selector.write().await;
+        selector.record_request("peer-route-cleanup-source", 40);
+        selector.record_success("peer-route-cleanup-source", 10, 128);
+    }
+
+    let payload = b"route-cleanup-peer-wins".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    peer.local_store
+        .put(hash, payload.clone())
+        .await
+        .expect("put peer payload");
+
+    let source_store = Arc::new(MemoryStore::new());
+    source_store
+        .put(hash, payload.clone())
+        .await
+        .expect("put source payload");
+    requester
+        .store
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "cleanup-upstream",
+            source_store,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::from_millis(50),
+        )) as Arc<dyn MeshReadSource>])
+        .await;
+    requester.store.read_source_stats.write().await.insert(
+        "cleanup-upstream".to_string(),
+        AdaptiveSourceStats {
+            requests: 1,
+            successes: 1,
+            srtt_ms: 10.0,
+            rttvar_ms: 5.0,
+            ..AdaptiveSourceStats::default()
+        },
+    );
+
+    let result = run_get_with_pumps(requester.store.clone(), hash, &nodes).await;
+    assert_eq!(result, Some(payload));
+    assert!(
+        requester
+            .store
+            .inflight_source_fetches
+            .lock()
+            .await
+            .is_empty(),
+        "parallel peer win should remove the losing read-source inflight entry",
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_request_from_mesh_skips_peers_with_hash_get_disabled() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let requester = make_shared_test_node(
+        relay.clone(),
+        "requester-hash-get-filter",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 1,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+    let assist = make_shared_test_node_with_hash_get(
+        relay.clone(),
+        "a-assist-hash-get-filter",
+        MeshRoutingConfig::default(),
+        false,
+    );
+    let capable = make_shared_test_node_with_hash_get(
+        relay,
+        "b-capable-hash-get-filter",
+        MeshRoutingConfig::default(),
+        true,
+    );
+    let nodes = [&requester, &assist, &capable];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 12).await;
+
+    {
+        let mut selector = requester.store.peer_selector.write().await;
+        selector.record_request("a-assist-hash-get-filter", 40);
+        selector.record_success("a-assist-hash-get-filter", 10, 128);
+    }
+
+    let payload = b"hash-get-capable-route".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    capable
+        .local_store
+        .put(hash, payload.clone())
+        .await
+        .expect("put capable payload");
+
+    let result = run_get_with_pumps(requester.store.clone(), hash, &nodes).await;
+    assert_eq!(result, Some(payload));
+    assert_eq!(
+        requester
+            .store
+            .peer_selector
+            .read()
+            .await
+            .get_stats("a-assist-hash-get-filter")
+            .expect("assist stats")
+            .requests_sent,
+        1,
+        "requester should skip sending fresh hash_get traffic to assist-only peers",
+    );
+    assert!(
+        requester
+            .store
+            .signaling()
+            .peer_supports_hash_get("a-assist-hash-get-filter")
+            .await
+            .eq(&false),
+        "router should retain the remote hash_get capability from hello messages",
     );
 
     crate::mock::clear_channel_registry().await;

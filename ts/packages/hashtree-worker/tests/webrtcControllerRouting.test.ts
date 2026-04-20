@@ -360,4 +360,33 @@ describe('WebRTCController routing', () => {
 
     await expect(pending).resolves.toEqual(payload);
   });
+
+  it('records timeout penalties for hedged peers that miss the global deadline', async () => {
+    vi.useFakeTimers();
+    const { controller, internal } = createRoutingController({
+      requestDispatch: {
+        initialFanout: 1,
+        hedgeFanout: 1,
+        maxFanout: 3,
+        hedgeIntervalMs: 100,
+      },
+    });
+
+    connectPeer(internal, 'peer-a', 'pub-a');
+    connectPeer(internal, 'peer-b', 'pub-b');
+    connectPeer(internal, 'peer-c', 'pub-c');
+
+    const hash = await sha256(new TextEncoder().encode('global-deadline-timeouts'));
+    const pending = controller.get(hash);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(20);
+    await expect(pending).resolves.toBeNull();
+
+    const snapshot = (controller as any).peerSelector.exportPeerMetadataSnapshot();
+    expect(snapshot.peers.find((peer: { principal: string; timeouts: number }) => peer.principal === 'peer-a')?.timeouts).toBe(1);
+    expect(snapshot.peers.find((peer: { principal: string; timeouts: number }) => peer.principal === 'peer-b')?.timeouts).toBe(1);
+    expect(snapshot.peers.find((peer: { principal: string; timeouts: number }) => peer.principal === 'peer-c')?.timeouts).toBe(0);
+  });
 });

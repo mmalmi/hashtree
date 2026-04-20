@@ -4,7 +4,10 @@ const postMessageMock = vi.hoisted(() => vi.fn());
 const idbDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
 const blossomDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
 const peerFetchResponder = vi.hoisted(() => ({
-  handle: null as null | ((ctx: FakeWorkerGlobal, requestId: string, hashHex: string) => void),
+  handle: null as null | ((ctx: FakeWorkerGlobal, requestId: string, hashHex: string, peerId?: string) => void),
+}));
+const peerListResponder = vi.hoisted(() => ({
+  peerIds: [] as string[],
 }));
 
 class FakeWorkerGlobal {
@@ -13,10 +16,21 @@ class FakeWorkerGlobal {
   postMessage(message: unknown): void {
     postMessageMock(message);
     const candidate = message as { type?: string; requestId?: string };
+    if (candidate?.type === 'p2pPeerList' && typeof candidate.requestId === 'string') {
+      queueMicrotask(() => {
+        this.dispatch({
+          type: 'p2pPeerListResult',
+          id: `peer-list-${candidate.requestId}`,
+          requestId: candidate.requestId,
+          peerIds: peerListResponder.peerIds,
+        });
+      });
+      return;
+    }
     if (candidate?.type === 'p2pFetch' && typeof candidate.requestId === 'string') {
-      const request = message as { hashHex?: string };
+      const request = message as { hashHex?: string; peerId?: string };
       if (peerFetchResponder.handle) {
-        peerFetchResponder.handle(this, candidate.requestId, `${request.hashHex ?? ''}`);
+        peerFetchResponder.handle(this, candidate.requestId, `${request.hashHex ?? ''}`, request.peerId);
         return;
       }
       queueMicrotask(() => {
@@ -100,9 +114,18 @@ class FakeBlossomTransport {
     return [{ read: true, write: false }];
   }
 
+  getReadServers(): Array<{ url: string; read: boolean; write: boolean }> {
+    return [{ url: 'https://cdn.example', read: true, write: false }];
+  }
+
   setServers(_servers: unknown): void {}
 
   async fetch(hashHex: string): Promise<Uint8Array | null> {
+    const found = blossomDataByHash.get(hashHex);
+    return found ? found.slice() : null;
+  }
+
+  async fetchFromServer(hashHex: string, _serverUrl: string): Promise<Uint8Array | null> {
     const found = blossomDataByHash.get(hashHex);
     return found ? found.slice() : null;
   }
@@ -191,6 +214,7 @@ describe('worker peer blob sharing', () => {
     idbDataByHash.clear();
     blossomDataByHash.clear();
     peerFetchResponder.handle = null;
+    peerListResponder.peerIds = [];
     Object.defineProperty(globalThis, 'self', {
       configurable: true,
       writable: true,
@@ -319,5 +343,58 @@ describe('worker peer blob sharing', () => {
       data: blobData,
       source: 'p2p',
     });
+  });
+
+  it('targets specific p2p peer endpoints when the client exposes them', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    const hashHex = '44'.repeat(32);
+    const blobData = new Uint8Array([8, 9, 10]);
+    peerListResponder.peerIds = ['peer-a'];
+    peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
+      expect(requestedHashHex).toBe(hashHex);
+      expect(peerId).toBe('peer-a');
+      queueMicrotask(() => {
+        target.dispatch({
+          type: 'p2pFetchResult',
+          id: `peer-hit-${requestId}`,
+          requestId,
+          data: blobData,
+        });
+      });
+    };
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-4',
+      config: {
+        relays: [],
+        blossomServers: [],
+      },
+    });
+    await flush();
+
+    ctx.dispatch({
+      type: 'getBlob',
+      id: 'blob-4',
+      hashHex,
+    });
+
+    expect(await waitForBlobResponse('blob-4')).toEqual({
+      type: 'blob',
+      id: 'blob-4',
+      data: blobData,
+      source: 'p2p',
+    });
+    expect(
+      postMessageMock.mock.calls.some(
+        ([message]) => (
+          (message as { type?: string; peerId?: string }).type === 'p2pFetch'
+          && (message as { peerId?: string }).peerId === 'peer-a'
+        ),
+      ),
+    ).toBe(true);
   });
 });

@@ -18,6 +18,7 @@ use crate::types::{is_polite_peer, ClassifyRequest, PeerPool, PoolSettings, Sign
 pub struct PeerEntry {
     pub channel: Arc<dyn PeerLink>,
     pub pool: PeerPool,
+    pub hash_get: bool,
 }
 
 /// Mesh router handles peer discovery and negotiated link establishment.
@@ -45,6 +46,8 @@ pub struct MeshRouter<R: SignalingTransport, F: PeerLinkFactory> {
     pools: PoolSettings,
     /// Known peer roots (for future use)
     peer_roots: RwLock<HashMap<String, Vec<String>>>,
+    /// Last advertised `hash_get` capability per peer.
+    peer_hash_get: RwLock<HashMap<String, bool>>,
     /// Classifier channel (optional)
     classifier_tx: Option<tokio::sync::mpsc::Sender<ClassifyRequest>>,
     /// Debug mode
@@ -70,6 +73,7 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
             pending_offers: RwLock::new(HashMap::new()),
             pools,
             peer_roots: RwLock::new(HashMap::new()),
+            peer_hash_get: RwLock::new(HashMap::new()),
             classifier_tx: None,
             debug,
             hash_get_enabled: true,
@@ -83,6 +87,35 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
 
     pub fn set_hash_get_enabled(&mut self, enabled: bool) {
         self.hash_get_enabled = enabled;
+    }
+
+    pub async fn set_peer_hash_get(&self, peer_id: &str, enabled: bool) {
+        self.peer_hash_get
+            .write()
+            .await
+            .insert(peer_id.to_string(), enabled);
+        if let Some(entry) = self.peers.write().await.get_mut(peer_id) {
+            entry.hash_get = enabled;
+        }
+    }
+
+    pub async fn peer_supports_hash_get(&self, peer_id: &str) -> bool {
+        self.peer_hash_get
+            .read()
+            .await
+            .get(peer_id)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    pub async fn hash_get_peer_ids(&self) -> Vec<String> {
+        let peers = self.peers.read().await;
+        let peer_hash_get = self.peer_hash_get.read().await;
+        peers
+            .keys()
+            .filter(|peer_id| peer_hash_get.get(*peer_id).copied().unwrap_or(true))
+            .cloned()
+            .collect()
     }
 
     /// Get our peer ID
@@ -152,8 +185,13 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
     /// This is the core signaling logic shared between production and simulation.
     pub async fn handle_message(&self, msg: SignalingMessage) -> Result<(), TransportError> {
         match &msg {
-            SignalingMessage::Hello { peer_id, roots, .. } => {
-                self.handle_hello(peer_id, roots).await
+            SignalingMessage::Hello {
+                peer_id,
+                roots,
+                hash_get,
+            } => {
+                self.set_peer_hash_get(peer_id, *hash_get).await;
+                self.handle_hello(peer_id, roots, *hash_get).await
             }
             SignalingMessage::Offer {
                 peer_id,
@@ -223,9 +261,19 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
         &self,
         from_peer_id: &str,
         roots: &[String],
+        hash_get: bool,
     ) -> Result<(), TransportError> {
         // Ignore our own hello
         if from_peer_id == self.peer_id {
+            return Ok(());
+        }
+
+        self.peer_roots
+            .write()
+            .await
+            .insert(from_peer_id.to_string(), roots.to_vec());
+        if let Some(entry) = self.peers.write().await.get_mut(from_peer_id) {
+            entry.hash_get = hash_get;
             return Ok(());
         }
 
@@ -248,12 +296,6 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
             }
             return Ok(());
         }
-
-        // Store peer roots
-        self.peer_roots
-            .write()
-            .await
-            .insert(from_peer_id.to_string(), roots.to_vec());
 
         // Shared perfect negotiation: send offer if we NEED more peers
         // Both sides may send offers - collision handled in handle_offer
@@ -283,10 +325,14 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
             let (channel, sdp) = self.conn_factory.create_offer(from_peer_id).await?;
 
             // Add peer (will be confirmed when we get answer)
-            self.peers
-                .write()
-                .await
-                .insert(from_peer_id.to_string(), PeerEntry { channel, pool });
+            self.peers.write().await.insert(
+                from_peer_id.to_string(),
+                PeerEntry {
+                    channel,
+                    pool,
+                    hash_get,
+                },
+            );
 
             // Send offer
             let offer_msg = SignalingMessage::Offer {
@@ -365,12 +411,17 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
 
         // Accept offer
         let (channel, answer_sdp) = self.conn_factory.accept_offer(from_peer_id, sdp).await?;
+        let hash_get = self.peer_supports_hash_get(from_peer_id).await;
 
         // Add peer
-        self.peers
-            .write()
-            .await
-            .insert(from_peer_id.to_string(), PeerEntry { channel, pool });
+        self.peers.write().await.insert(
+            from_peer_id.to_string(),
+            PeerEntry {
+                channel,
+                pool,
+                hash_get,
+            },
+        );
 
         // Send answer
         let answer_msg = SignalingMessage::Answer {

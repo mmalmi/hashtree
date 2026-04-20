@@ -95,6 +95,7 @@ export type WorkerRequest =
   | { type: 'finishPutBlobStream'; id: string; streamId: string }
   | { type: 'cancelPutBlobStream'; id: string; streamId: string }
   | { type: 'p2pFetchResult'; id: string; requestId: string; data?: Uint8Array; error?: string }
+  | { type: 'p2pPeerListResult'; id: string; requestId: string; peerIds?: string[]; error?: string }
   | { type: 'getBlob'; id: string; hashHex: string; forPeer?: boolean }
   | { type: 'registerMediaPort'; id: string; port: MessagePort }
   | { type: 'setBlossomServers'; id: string; servers: BlossomServerConfig[] }
@@ -109,7 +110,8 @@ export type WorkerResponse =
   | { type: 'ready'; id: string }
   | { type: 'error'; id?: string; error: string }
   | { type: 'diagnostic'; event: WorkerDiagnosticEvent }
-  | { type: 'p2pFetch'; requestId: string; hashHex: string }
+  | { type: 'p2pFetch'; requestId: string; hashHex: string; peerId?: string }
+  | { type: 'p2pPeerList'; requestId: string }
   | { type: 'blobStreamStarted'; id: string; streamId: string }
   | { type: 'blobStored'; id: string; hashHex: string; nhash: string }
   | { type: 'blob'; id: string; data?: Uint8Array; source?: BlobSource; error?: string }

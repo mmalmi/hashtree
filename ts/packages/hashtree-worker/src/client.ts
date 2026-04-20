@@ -19,7 +19,8 @@ type PendingRequest = {
 };
 
 export type WorkerFactory = URL | string | (new () => Worker);
-export type P2PFetchHandler = (hashHex: string) => Promise<Uint8Array | null>;
+export type P2PFetchHandler = (hashHex: string, peerId?: string) => Promise<Uint8Array | null>;
+export type P2PPeerListHandler = () => string[] | Promise<string[]>;
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const PUT_BLOB_TIMEOUT_MS = 15 * 60_000;
@@ -43,6 +44,7 @@ export class HashtreeWorkerClient {
   private rootWatchListeners = new Map<string, (cid: CID | null) => void>();
   private pendingRootWatchUpdates = new Map<string, CID | null>();
   private p2pFetchHandler: P2PFetchHandler | null = null;
+  private p2pPeerListHandler: P2PPeerListHandler | null = null;
 
   constructor(workerFactory: WorkerFactory, config: WorkerConfig = {}) {
     this.workerFactory = workerFactory;
@@ -134,7 +136,12 @@ export class HashtreeWorkerClient {
       }
 
       if (message.type === 'p2pFetch') {
-        void this.handleP2PFetch(message.requestId, message.hashHex);
+        void this.handleP2PFetch(message.requestId, message.hashHex, message.peerId);
+        return;
+      }
+
+      if (message.type === 'p2pPeerList') {
+        void this.handleP2PPeerList(message.requestId);
         return;
       }
 
@@ -178,7 +185,7 @@ export class HashtreeWorkerClient {
     this.pending.delete(id);
   }
 
-  private async handleP2PFetch(requestId: string, hashHex: string): Promise<void> {
+  private async handleP2PFetch(requestId: string, hashHex: string, peerId?: string): Promise<void> {
     if (!this.worker) return;
     const id = generateRequestId();
 
@@ -192,7 +199,7 @@ export class HashtreeWorkerClient {
     }
 
     try {
-      const data = await this.p2pFetchHandler(hashHex);
+      const data = await this.p2pFetchHandler(hashHex, peerId);
       if (data && data.byteLength > 0) {
         const transferableData = data.slice();
         this.worker.postMessage(
@@ -216,6 +223,39 @@ export class HashtreeWorkerClient {
       const error = err instanceof Error ? err.message : String(err);
       this.worker.postMessage({
         type: 'p2pFetchResult',
+        id,
+        requestId,
+        error,
+      } as WorkerRequest);
+    }
+  }
+
+  private async handleP2PPeerList(requestId: string): Promise<void> {
+    if (!this.worker) return;
+    const id = generateRequestId();
+
+    if (!this.p2pPeerListHandler) {
+      this.worker.postMessage({
+        type: 'p2pPeerListResult',
+        id,
+        requestId,
+        peerIds: [],
+      } as WorkerRequest);
+      return;
+    }
+
+    try {
+      const peerIds = await this.p2pPeerListHandler();
+      this.worker.postMessage({
+        type: 'p2pPeerListResult',
+        id,
+        requestId,
+        peerIds: Array.isArray(peerIds) ? peerIds : [],
+      } as WorkerRequest);
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      this.worker.postMessage({
+        type: 'p2pPeerListResult',
         id,
         requestId,
         error,
@@ -484,6 +524,10 @@ export class HashtreeWorkerClient {
 
   setP2PFetchHandler(handler: P2PFetchHandler | null): void {
     this.p2pFetchHandler = handler;
+  }
+
+  setP2PPeerListHandler(handler: P2PPeerListHandler | null): void {
+    this.p2pPeerListHandler = handler;
   }
 
   async close(): Promise<void> {

@@ -58,6 +58,7 @@ let nostrRelays: string[] = [];
 let probeInterval: ReturnType<typeof setInterval> | null = null;
 let probeIntervalMs = DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;
 let p2pFetchCounter = 0;
+let p2pPeerListCounter = 0;
 let rootWatchCounter = 0;
 let diagnosticsEnabled = false;
 let diagnosticsMirrorToConsole = false;
@@ -65,6 +66,9 @@ const pendingP2PFetches = new Map<
   string,
   { resolve: (data: Uint8Array | null) => void; slowLogId: ReturnType<typeof setTimeout> | null; startedAt: number }
 >();
+const pendingP2PPeerLists = new Map<string, { resolve: (peerIds: string[]) => void }>();
+let inflightP2PPeerList: Promise<string[]> | null = null;
+let p2pPeerIds: string[] = [];
 const peerShareableEncryptedHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
 let putBlobStreamCounter = 0;
@@ -462,6 +466,9 @@ function resetState(): void {
     }
   }
   pendingP2PFetches.clear();
+  pendingP2PPeerLists.clear();
+  inflightP2PPeerList = null;
+  p2pPeerIds = [];
   peerShareableEncryptedHashes.clear();
   activePutBlobStreams.clear();
   clearMemoryCache();
@@ -506,12 +513,18 @@ function nextRootWatchId(): string {
   return `root_${Date.now()}_${rootWatchCounter}`;
 }
 
-async function requestP2PBlob(hashHex: string): Promise<Uint8Array | null> {
+function nextP2PPeerListRequestId(): string {
+  p2pPeerListCounter += 1;
+  return `p2p_peers_${Date.now()}_${p2pPeerListCounter}`;
+}
+
+async function requestP2PBlob(hashHex: string, peerId?: string): Promise<Uint8Array | null> {
   const requestId = nextP2PFetchRequestId();
   const startedAt = Date.now();
   emitDiagnostic('debug', 'mesh', 'p2p-fetch-start', 'Requesting blob over P2P', {
     requestId,
     hashHex: hashHex.slice(0, 16),
+    peerId: peerId ?? null,
   });
   const data = await new Promise<Uint8Array | null>((resolve) => {
     const slowLogId = setTimeout(() => {
@@ -525,10 +538,38 @@ async function requestP2PBlob(hashHex: string): Promise<Uint8Array | null> {
       });
     }, P2P_FETCH_SLOW_LOG_MS);
     pendingP2PFetches.set(requestId, { resolve, slowLogId, startedAt });
-    respond({ type: 'p2pFetch', requestId, hashHex });
+    respond({ type: 'p2pFetch', requestId, hashHex, peerId });
   });
 
   return data;
+}
+
+async function requestP2PPeerIds(): Promise<string[]> {
+  if (inflightP2PPeerList) {
+    return inflightP2PPeerList;
+  }
+
+  const requestId = nextP2PPeerListRequestId();
+  let pending: Promise<string[]>;
+  pending = new Promise<string[]>((resolve) => {
+    pendingP2PPeerLists.set(requestId, { resolve });
+    respond({ type: 'p2pPeerList', requestId });
+  }).finally(() => {
+    if (inflightP2PPeerList === pending) {
+      inflightP2PPeerList = null;
+    }
+  });
+  inflightP2PPeerList = pending;
+  return pending;
+}
+
+async function refreshP2PPeerIds(): Promise<void> {
+  try {
+    const peerIds = await requestP2PPeerIds();
+    p2pPeerIds = Array.from(new Set(peerIds.filter((peerId) => `${peerId}`.length > 0))).sort();
+  } catch {
+    p2pPeerIds = [];
+  }
 }
 
 function resolveP2PFetch(requestId: string, data?: Uint8Array, error?: string): void {
@@ -557,6 +598,17 @@ function resolveP2PFetch(requestId: string, data?: Uint8Array, error?: string): 
   pending.resolve(data);
 }
 
+function resolveP2PPeerList(requestId: string, peerIds?: string[], error?: string): void {
+  const pending = pendingP2PPeerLists.get(requestId);
+  if (!pending) return;
+  pendingP2PPeerLists.delete(requestId);
+  if (error) {
+    pending.resolve([]);
+    return;
+  }
+  pending.resolve(Array.isArray(peerIds) ? peerIds : []);
+}
+
 type LoadedBlobData = {
   data: Uint8Array;
   source: BlobSource;
@@ -576,6 +628,7 @@ async function loadBlobData(
   options: MeshRouterGetOptions = {},
 ): Promise<LoadedBlobData | null> {
   if (!meshStore) return null;
+  await refreshP2PPeerIds();
   const result = await meshStore.getDetailed(fromHex(hashHex) as Hash, options);
   if (!result) {
     emitDiagnostic('debug', 'mesh', 'blob-load-miss', 'Blob was not available from any source', {
@@ -674,10 +727,16 @@ function createMeshStore(): MeshRouterStore {
       {
         id: 'p2p',
         groupId: 'p2p',
+        isAvailable: () => p2pPeerIds.length === 0,
         get: async (hash) => requestP2PBlob(toHex(hash)),
       },
     ],
     sourceProviders: [
+      () => p2pPeerIds.map((peerId) => ({
+        id: `peer:${peerId}`,
+        groupId: 'p2p',
+        get: async (hash: Hash) => requestP2PBlob(toHex(hash), peerId),
+      })),
       () => blossom
         ? blossom.getReadServers().map((server) => ({
           id: `blossom:${server.url}`,
@@ -1422,6 +1481,11 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
 
     case 'p2pFetchResult': {
       resolveP2PFetch(req.requestId, req.data, req.error);
+      return;
+    }
+
+    case 'p2pPeerListResult': {
+      resolveP2PPeerList(req.requestId, req.peerIds, req.error);
       return;
     }
 

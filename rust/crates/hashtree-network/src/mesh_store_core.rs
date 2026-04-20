@@ -974,8 +974,15 @@ where
         }
 
         sync_selector_peers(&self.peer_selector, &current_peer_ids).await;
+        let hash_get_peer_ids: HashSet<String> = self
+            .signaling
+            .hash_get_peer_ids()
+            .await
+            .into_iter()
+            .collect();
         let mut candidate_peer_ids: Vec<String> = current_peer_ids
             .into_iter()
+            .filter(|peer_id| hash_get_peer_ids.contains(peer_id))
             .filter(|peer_id| exclude_peer_id.is_none_or(|exclude| peer_id != exclude))
             .collect();
         if candidate_peer_ids.is_empty() {
@@ -1959,19 +1966,45 @@ where
         if let RouteFetchOutcome::Hit(hit) = &result {
             let _ = self.local_store.put(*hash, hit.clone()).await;
         }
+        self.complete_inflight_source_fetch(&hash_key, result.clone())
+            .await;
 
+        result
+    }
+
+    async fn complete_inflight_source_fetch(&self, hash_key: &str, result: RouteFetchOutcome) {
         let waiters = self
             .inflight_source_fetches
             .lock()
             .await
-            .remove(&hash_key)
+            .remove(hash_key)
             .map(|inflight| inflight.waiters)
             .unwrap_or_default();
         for waiter in waiters {
             let _ = waiter.send(result.clone());
         }
+    }
 
-        result
+    async fn cancel_pending_peer_route(&self, hash: &Hash) {
+        let hash_key = hash_to_key(hash);
+        if let Some(pending) = self.pending_requests.write().await.remove(&hash_key) {
+            self.release_queried_peer_requests(&pending.queried_peers)
+                .await;
+        }
+    }
+
+    async fn cancel_losing_route(&self, hash: &Hash, route: &ReadRoute, winner_data: &[u8]) {
+        match route {
+            ReadRoute::Peers(_) => self.cancel_pending_peer_route(hash).await,
+            ReadRoute::Sources => {
+                let hash_key = hash_to_key(hash);
+                self.complete_inflight_source_fetch(
+                    &hash_key,
+                    RouteFetchOutcome::Hit(winner_data.to_vec()),
+                )
+                .await;
+            }
+        }
     }
 
     async fn ranked_read_routes(&self, context: &MeshReadContext) -> Vec<RankedReadRoute> {
@@ -2079,12 +2112,18 @@ where
                             result = &mut first_fut, if !first_done => {
                                 first_done = true;
                                 if let RouteFetchOutcome::Hit(data) = result {
+                                    if !second_done {
+                                        self.cancel_losing_route(hash, &second.route, &data).await;
+                                    }
                                     return Some(data);
                                 }
                             }
                             result = &mut second_fut, if !second_done => {
                                 second_done = true;
                                 if let RouteFetchOutcome::Hit(data) = result {
+                                    if !first_done {
+                                        self.cancel_losing_route(hash, &first.route, &data).await;
+                                    }
                                     return Some(data);
                                 }
                             }

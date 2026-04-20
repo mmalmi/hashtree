@@ -934,7 +934,7 @@ export class WebRTCController {
     return outcome;
   }
 
-  private clearPendingHashFromPeers(hashKey: string, keepPeerId?: string): void {
+  private clearPendingHashFromPeers(hashKey: string, keepPeerId?: string, recordTimeout = false): void {
     for (const peer of this.peers.values()) {
       if (keepPeerId && peer.peerId === keepPeerId) continue;
       const pending = peer.pendingRequests.get(hashKey);
@@ -942,6 +942,9 @@ export class WebRTCController {
       clearTimeout(pending.timeout);
       peer.pendingRequests.delete(hashKey);
       this.releasePeerRequest(peer.peerId);
+      if (recordTimeout) {
+        this.peerSelector.recordTimeout(peer.peerId);
+      }
       pending.resolve(null);
     }
   }
@@ -1263,7 +1266,7 @@ export class WebRTCController {
       if (!isLastWave && Date.now() >= deadline) break;
     }
 
-    this.clearPendingHashFromPeers(hashToKey(hash));
+    this.clearPendingHashFromPeers(hashToKey(hash), undefined, true);
     return null;
   }
 

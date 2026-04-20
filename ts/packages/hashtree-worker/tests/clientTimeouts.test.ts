@@ -127,4 +127,36 @@ describe('HashtreeWorkerClient timeouts', () => {
 
     await client.close();
   });
+
+  it('returns the current p2p peer list to the worker when requested', async () => {
+    const worker = new FakeWorker();
+    const WorkerFactory = class {
+      constructor() {
+        return worker;
+      }
+    } as unknown as new () => Worker;
+    const client = new HashtreeWorkerClient(WorkerFactory);
+
+    client.setP2PPeerListHandler(() => ['peer-a', 'peer-b']);
+    await client.init();
+
+    worker.emitMessage({
+      type: 'p2pPeerList',
+      requestId: 'peers-1',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(worker.postedMessages).toContainEqual({
+      message: {
+        type: 'p2pPeerListResult',
+        id: expect.any(String),
+        requestId: 'peers-1',
+        peerIds: ['peer-a', 'peer-b'],
+      },
+      transfer: undefined,
+    });
+
+    await client.close();
+  });
 });
