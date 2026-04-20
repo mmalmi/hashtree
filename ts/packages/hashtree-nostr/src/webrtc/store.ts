@@ -207,7 +207,8 @@ export class WebRTCStore implements Store {
         : DEFAULT_REQUEST_DISPATCH
     );
     this.routing = {
-      selectionStrategy: config.requestSelectionStrategy ?? 'titForTat',
+      // Retrieval should prefer the peer with the best reply odds.
+      selectionStrategy: config.requestSelectionStrategy ?? 'weighted',
       fairnessEnabled: config.requestFairnessEnabled ?? true,
       dispatch,
     };

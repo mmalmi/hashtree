@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::{Hash as _, Hasher};
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -47,6 +48,21 @@ struct PendingQuoteRequest {
 
 struct PendingForwardRequest {
     requester_ids: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PeerWireStats {
+    bytes_sent: u64,
+    bytes_received: u64,
+    bandwidth_debt: f64,
+}
+
+struct PendingResponseSend {
+    job_id: u64,
+    peer_id: String,
+    bytes: Vec<u8>,
+    ready_at: Instant,
+    queue_sequence: u64,
 }
 
 #[async_trait]
@@ -519,6 +535,14 @@ where
     peer_selector: RwLock<PeerSelector>,
     /// Active per-peer in-flight reads so concurrent block fetches spread across peers.
     peer_active_requests: RwLock<HashMap<String, usize>>,
+    /// Actual wire traffic stats used for upload-side reciprocity scheduling.
+    peer_wire_stats: RwLock<HashMap<String, PeerWireStats>>,
+    /// Pending content responses waiting for upload arbitration.
+    pending_response_sends: Mutex<Vec<PendingResponseSend>>,
+    /// Upload response scheduler state.
+    response_scheduler_running: AtomicBool,
+    /// Monotonic id for queued response sends.
+    next_response_job_id: AtomicU64,
     /// Routing/dispatch configuration.
     routing: MeshRoutingConfig,
     /// Request timeout
@@ -577,6 +601,10 @@ where
             read_route_stats: RwLock::new(HashMap::new()),
             peer_selector: RwLock::new(selector),
             peer_active_requests: RwLock::new(HashMap::new()),
+            peer_wire_stats: RwLock::new(HashMap::new()),
+            pending_response_sends: Mutex::new(Vec::new()),
+            response_scheduler_running: AtomicBool::new(false),
+            next_response_job_id: AtomicU64::new(1),
             routing,
             request_timeout,
             debug,
@@ -621,6 +649,183 @@ where
 
     fn response_behavior(&self) -> ResponseBehaviorConfig {
         self.routing.response_behavior.normalized()
+    }
+
+    async fn record_peer_wire_sent(&self, peer_id: &str, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let mut stats = self.peer_wire_stats.write().await;
+        let entry = stats.entry(peer_id.to_string()).or_default();
+        entry.bytes_sent = entry.bytes_sent.saturating_add(bytes);
+    }
+
+    async fn record_peer_wire_received(&self, peer_id: &str, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let mut stats = self.peer_wire_stats.write().await;
+        let entry = stats.entry(peer_id.to_string()).or_default();
+        entry.bytes_received = entry.bytes_received.saturating_add(bytes);
+    }
+
+    fn peer_upload_weight(stats: &PeerWireStats) -> f64 {
+        let raw_ratio = (stats.bytes_received.saturating_add(1024) as f64)
+            / (stats.bytes_sent.saturating_add(1024) as f64);
+        let bounded_ratio = raw_ratio / (1.0 + raw_ratio);
+        0.5 + 1.5 * bounded_ratio
+    }
+
+    fn choose_ready_response_job(
+        ready_jobs: &[(u64, String, usize, Instant, u64)],
+        stats: &HashMap<String, PeerWireStats>,
+    ) -> Option<(u64, f64)> {
+        ready_jobs
+            .iter()
+            .map(|job| {
+                let peer_stats = stats.get(&job.1).cloned().unwrap_or_default();
+                let finish = peer_stats.bandwidth_debt
+                    + (job.2 as f64 / Self::peer_upload_weight(&peer_stats));
+                (job.0, job.1.as_str(), job.4, finish)
+            })
+            .min_by(|left, right| {
+                left.3
+                    .partial_cmp(&right.3)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.2.cmp(&right.2))
+                    .then_with(|| left.1.cmp(right.1))
+            })
+            .map(|choice| (choice.0, choice.3))
+    }
+
+    async fn enqueue_response_send(
+        self: &Arc<Self>,
+        peer_id: String,
+        bytes: Vec<u8>,
+        ready_at: Instant,
+    ) {
+        let job_id = self.next_response_job_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut queue = self.pending_response_sends.lock().await;
+            queue.push(PendingResponseSend {
+                job_id,
+                peer_id,
+                bytes,
+                ready_at,
+                queue_sequence: job_id,
+            });
+        }
+
+        if self
+            .response_scheduler_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.run_response_scheduler().await;
+            });
+        }
+    }
+
+    async fn run_response_scheduler(self: Arc<Self>) {
+        loop {
+            let snapshot = {
+                let queue = self.pending_response_sends.lock().await;
+                if queue.is_empty() {
+                    self.response_scheduler_running
+                        .store(false, Ordering::Release);
+                    return;
+                }
+                queue
+                    .iter()
+                    .map(|job| {
+                        (
+                            job.job_id,
+                            job.peer_id.clone(),
+                            job.bytes.len(),
+                            job.ready_at,
+                            job.queue_sequence,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let now = Instant::now();
+            let mut earliest_ready_at: Option<Instant> = None;
+            let mut ready_jobs = Vec::new();
+            for job in &snapshot {
+                if job.3 <= now {
+                    ready_jobs.push(job.clone());
+                } else {
+                    earliest_ready_at = Some(match earliest_ready_at {
+                        Some(current) => current.min(job.3),
+                        None => job.3,
+                    });
+                }
+            }
+
+            if ready_jobs.is_empty() {
+                if let Some(ready_at) = earliest_ready_at {
+                    tokio::time::sleep(ready_at.saturating_duration_since(Instant::now())).await;
+                    continue;
+                }
+                self.response_scheduler_running
+                    .store(false, Ordering::Release);
+                return;
+            }
+
+            let (selected_job_id, selected_finish) = {
+                let stats = self.peer_wire_stats.read().await;
+                Self::choose_ready_response_job(&ready_jobs, &stats).expect("ready response job")
+            };
+
+            let selected = {
+                let mut queue = self.pending_response_sends.lock().await;
+                let Some(index) = queue.iter().position(|job| job.job_id == selected_job_id) else {
+                    continue;
+                };
+                queue.swap_remove(index)
+            };
+
+            let sent = if let Some(channel) = self.signaling.get_channel(&selected.peer_id).await {
+                channel.send(selected.bytes.clone()).await.is_ok()
+            } else {
+                false
+            };
+
+            let queued_peers = {
+                let queue = self.pending_response_sends.lock().await;
+                queue
+                    .iter()
+                    .map(|job| job.peer_id.clone())
+                    .collect::<HashSet<_>>()
+            };
+            let mut stats = self.peer_wire_stats.write().await;
+            let entry = stats.entry(selected.peer_id.clone()).or_default();
+            if sent {
+                entry.bytes_sent = entry.bytes_sent.saturating_add(selected.bytes.len() as u64);
+                entry.bandwidth_debt = selected_finish;
+            }
+            if queued_peers.is_empty() {
+                for peer_stats in stats.values_mut() {
+                    peer_stats.bandwidth_debt = 0.0;
+                }
+            } else {
+                let floor = queued_peers
+                    .iter()
+                    .filter_map(|peer_id| stats.get(peer_id).map(|peer| peer.bandwidth_debt))
+                    .fold(f64::INFINITY, f64::min);
+                if floor.is_finite() && floor > 0.0 {
+                    for peer_id in queued_peers {
+                        if let Some(peer_stats) = stats.get_mut(&peer_id) {
+                            peer_stats.bandwidth_debt =
+                                (peer_stats.bandwidth_debt - floor).max(0.0);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn deterministic_actor_draw_for(peer_id: &str, hash: &Hash, salt: u64) -> f64 {
@@ -962,14 +1167,18 @@ where
             None => create_request(hash, send_htl),
         };
         let request_bytes = encode_request(&req);
+        let request_len = request_bytes.len() as u64;
 
         {
             let mut selector = self.peer_selector.write().await;
-            selector.record_request(peer_id, request_bytes.len() as u64);
+            selector.record_request(peer_id, request_len);
         }
 
         match channel.send(request_bytes).await {
-            Ok(()) => true,
+            Ok(()) => {
+                self.record_peer_wire_sent(peer_id, request_len).await;
+                true
+            }
             Err(_) => {
                 self.peer_selector.write().await.record_failure(peer_id);
                 false
@@ -992,9 +1201,13 @@ where
 
         let req = create_quote_request(hash, ttl_ms, payment_sat, mint_url);
         let request_bytes = encode_quote_request(&req);
+        let request_len = request_bytes.len() as u64;
 
         match channel.send(request_bytes).await {
-            Ok(()) => true,
+            Ok(()) => {
+                self.record_peer_wire_sent(peer_id, request_len).await;
+                true
+            }
             Err(_) => false,
         }
     }
@@ -1894,7 +2107,7 @@ where
     }
 
     async fn complete_pending_response(
-        &self,
+        self: &Arc<Self>,
         from_peer: &str,
         hash: &Hash,
         hash_key: String,
@@ -1918,9 +2131,9 @@ where
             let _ = pending.response_tx.send(Some(payload));
             if let Some(response_bytes) = response_bytes {
                 for requester_id in forward_requesters {
-                    if let Some(channel) = self.signaling.get_channel(&requester_id).await {
-                        let _ = channel.send(response_bytes.clone()).await;
-                    }
+                    Arc::clone(&self)
+                        .enqueue_response_send(requester_id, response_bytes.clone(), Instant::now())
+                        .await;
                 }
             }
         }
@@ -1967,7 +2180,11 @@ where
         }
     }
 
-    async fn handle_response_message(&self, from_peer: &str, res: crate::protocol::DataResponse) {
+    async fn handle_response_message(
+        self: &Arc<Self>,
+        from_peer: &str,
+        res: crate::protocol::DataResponse,
+    ) {
         let hash_key = hash_to_key(&res.h);
         let hash = match crate::protocol::bytes_to_hash(&res.h) {
             Some(h) => h,
@@ -2022,7 +2239,10 @@ where
         };
         let response_bytes = encode_quote_response(&res);
         if let Some(channel) = self.signaling.get_channel(from_peer).await {
-            let _ = channel.send(response_bytes).await;
+            if channel.send(response_bytes.clone()).await.is_ok() {
+                self.record_peer_wire_sent(from_peer, response_bytes.len() as u64)
+                    .await;
+            }
         }
     }
 
@@ -2067,10 +2287,6 @@ where
             }
 
             let response_delay = self.response_send_delay(&hash, data.len());
-            if !response_delay.is_zero() {
-                tokio::time::sleep(response_delay).await;
-            }
-
             if self.should_corrupt_response(&hash) {
                 if data.is_empty() {
                     data.push(0x80);
@@ -2082,9 +2298,10 @@ where
             // Send response
             let res = create_response(&hash, data);
             let response_bytes = encode_response(&res);
-            if let Some(channel) = self.signaling.get_channel(from_peer).await {
-                let _ = channel.send(response_bytes).await;
-            }
+            let ready_at = Instant::now() + response_delay;
+            Arc::clone(self)
+                .enqueue_response_send(from_peer.to_string(), response_bytes, ready_at)
+                .await;
             return;
         }
 
@@ -2121,12 +2338,13 @@ where
             };
             let requester_ids = this.take_forward_requesters(&hash_key).await;
             if let Some(data) = result {
+                let ready_at = Instant::now() + this.response_send_delay(&hash, data.len());
                 let res = create_response(&hash, data);
                 let response_bytes = encode_response(&res);
                 for requester_id in requester_ids {
-                    if let Some(channel) = this.signaling.get_channel(&requester_id).await {
-                        let _ = channel.send(response_bytes.clone()).await;
-                    }
+                    Arc::clone(&this)
+                        .enqueue_response_send(requester_id, response_bytes.clone(), ready_at)
+                        .await;
                 }
             }
         });
@@ -2134,6 +2352,8 @@ where
 
     /// Handle incoming data message
     pub async fn handle_data_message(self: &Arc<Self>, from_peer: &str, data: &[u8]) {
+        self.record_peer_wire_received(from_peer, data.len() as u64)
+            .await;
         let parsed = match parse_message(data) {
             Some(m) => m,
             None => return,

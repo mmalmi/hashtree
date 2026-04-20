@@ -111,7 +111,7 @@ impl Default for WebRTCConfig {
             wifi_aware: WifiAwareConfig::default(),
             bluetooth: BluetoothConfig::default(),
             pools: crate::PoolSettings::default(),
-            request_selection_strategy: crate::SelectionStrategy::TitForTat,
+            request_selection_strategy: crate::SelectionStrategy::Weighted,
             request_fairness_enabled: true,
             request_dispatch: RequestDispatchConfig {
                 initial_fanout: 2,

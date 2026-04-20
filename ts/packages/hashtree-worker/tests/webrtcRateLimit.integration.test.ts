@@ -47,6 +47,12 @@ class FakeRTCPeerConnection {
     return this.dataChannel as unknown as RTCDataChannel;
   }
 
+  async createOffer(): Promise<RTCSessionDescriptionInit> {
+    return { type: 'offer', sdp: 'fake-offer-sdp' };
+  }
+
+  async setLocalDescription(): Promise<void> {}
+
   close(): void {}
 }
 
@@ -135,7 +141,7 @@ function createIntegratedHarness(options: {
   return {
     controller,
     addPeer: (peerId: string) => {
-      const peer = controllerPrivate.createPeer(peerId, `${peerId}-pubkey`, 'other', 'inbound');
+      const peer = controllerPrivate.createPeer(peerId, `${peerId}-pubkey`, 'other', 'outbound');
       peer.state = 'connected';
 
       const channel = proxyPrivate.peers.get(peerId)?.dataChannel;

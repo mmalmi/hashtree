@@ -497,7 +497,7 @@ impl Default for MeshStoreConfig {
             debug: false,
             pools: PoolSettings::default(),
             classifier_tx: None,
-            request_selection_strategy: SelectionStrategy::TitForTat,
+            request_selection_strategy: SelectionStrategy::Weighted,
             request_fairness_enabled: true,
             request_dispatch: RequestDispatchConfig {
                 initial_fanout: 2,

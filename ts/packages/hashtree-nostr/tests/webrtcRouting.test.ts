@@ -41,6 +41,11 @@ afterEach(() => {
 });
 
 describe('WebRTCStore routing', () => {
+  it('defaults retrieval routing to weighted reply-likelihood ordering', () => {
+    const store = createStore();
+    expect((store as any).routing.selectionStrategy).toBe('weighted');
+  });
+
   it('uses staged hedged fanout rather than querying all peers at once', async () => {
     vi.useFakeTimers();
     const store = createStore({
@@ -62,9 +67,9 @@ describe('WebRTCStore routing', () => {
     const peerC = { peerId: 'peer-c', isConnected: true, request: async () => { calls.push('c'); return goodData; } };
 
     (store as any).peers = new Map([
-      ['peer-a', { pool: 'other', peer: peerA }],
-      ['peer-b', { pool: 'other', peer: peerB }],
-      ['peer-c', { pool: 'other', peer: peerC }],
+      ['peer-a', { pool: 'other', peer: peerA, hashGet: true }],
+      ['peer-b', { pool: 'other', peer: peerB, hashGet: true }],
+      ['peer-c', { pool: 'other', peer: peerC, hashGet: true }],
     ]);
 
     const pending = (store as any).fetchFromPeers(hash);
@@ -98,8 +103,8 @@ describe('WebRTCStore routing', () => {
     const peerGood = { peerId: 'peer-good', isConnected: true, request: async () => goodData };
 
     (store as any).peers = new Map([
-      ['peer-bad', { pool: 'other', peer: peerBad }],
-      ['peer-good', { pool: 'other', peer: peerGood }],
+      ['peer-bad', { pool: 'other', peer: peerBad, hashGet: true }],
+      ['peer-good', { pool: 'other', peer: peerGood, hashGet: true }],
     ]);
 
     const result = await (store as any).fetchFromPeers(hash);

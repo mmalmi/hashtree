@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/nostr",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Nostr integration for hashtree - WebRTC P2P store and ref resolver",
   "type": "module",
   "main": "dist/index.js",

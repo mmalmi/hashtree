@@ -71,6 +71,11 @@ function connectPeer(
 }
 
 describe('WebRTCController routing', () => {
+  it('defaults read routing to weighted reply-likelihood ordering', () => {
+    const { controller } = createRoutingController({});
+    expect((controller as any).routing.selectionStrategy).toBe('weighted');
+  });
+
   it('sends staged hedged waves instead of flooding all peers immediately', async () => {
     vi.useFakeTimers();
     const { controller, internal, sentData } = createRoutingController({

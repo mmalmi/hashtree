@@ -187,7 +187,7 @@ fn test_mesh_store_config_default() {
     assert!(config.classifier_tx.is_none());
     assert_eq!(
         config.request_selection_strategy,
-        SelectionStrategy::TitForTat
+        SelectionStrategy::Weighted
     );
     assert!(config.request_fairness_enabled);
     assert_eq!(config.request_dispatch.initial_fanout, 2);

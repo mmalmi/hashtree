@@ -165,7 +165,8 @@ export class WebRTCController {
     this.requestTimeout = config.requestTimeout ?? 1000;
     this.debug = config.debug ?? false;
     this.routing = {
-      selectionStrategy: config.requestSelectionStrategy ?? 'titForTat',
+      // Read-side routing should chase the peer most likely to answer.
+      selectionStrategy: config.requestSelectionStrategy ?? 'weighted',
       fairnessEnabled: config.requestFairnessEnabled ?? true,
       dispatch: config.requestDispatch ?? DEFAULT_REQUEST_DISPATCH,
     };

@@ -1,6 +1,7 @@
 use super::*;
 use async_trait::async_trait;
 use hashtree_core::MemoryStore;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -417,6 +418,41 @@ fn test_response_behavior_delay_models_first_byte_throughput_and_stall() {
     let delay = store.response_send_delay(&hash, 5000);
     // 12ms baseline + 18ms first-byte + ceil(5000/2000 * 1000)=2500ms throughput + 25ms forced stall
     assert_eq!(delay, Duration::from_millis(2555));
+}
+
+#[test]
+fn test_response_scheduler_prefers_helpful_peer_over_queue_order() {
+    let ready_at = Instant::now();
+    let ready_jobs = vec![
+        (1, "leecher".to_string(), 4096usize, ready_at, 1),
+        (2, "helper".to_string(), 4096usize, ready_at, 2),
+    ];
+
+    let mut stats = HashMap::new();
+    stats.insert(
+        "leecher".to_string(),
+        PeerWireStats {
+            bytes_sent: 16 * 1024,
+            bytes_received: 0,
+            bandwidth_debt: 0.0,
+        },
+    );
+    stats.insert(
+        "helper".to_string(),
+        PeerWireStats {
+            bytes_sent: 1024,
+            bytes_received: 16 * 1024,
+            bandwidth_debt: 0.0,
+        },
+    );
+
+    let (selected_job_id, _) = TestStore::choose_ready_response_job(&ready_jobs, &stats)
+        .expect("selected ready response job");
+
+    assert_eq!(
+        selected_job_id, 2,
+        "reciprocity should outrank queue order when payloads are otherwise equal",
+    );
 }
 
 #[test]

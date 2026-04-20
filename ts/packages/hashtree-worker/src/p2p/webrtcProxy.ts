@@ -30,9 +30,11 @@ interface PeerConnection {
   pubkey: string;
   pendingCandidates: RTCIceCandidateInit[];
   sendQueue: BoundedQueue<Uint8Array>;
-  sending: boolean;
   bufferHighSignaled: boolean;  // Track if we've signaled high buffer to worker
-  drainTimeoutId: ReturnType<typeof setTimeout> | null;
+  bytesSent: number;
+  bytesReceived: number;
+  bandwidthDebt: number;
+  queueSequence: number;
 }
 
 type EventCallback = (event: WebRTCEvent) => void;
@@ -44,6 +46,9 @@ export class WebRTCProxy {
   private peers = new Map<string, PeerConnection>();
   private onEvent: EventCallback;
   private readonly uploadRateLimiter: UploadRateLimiter;
+  private draining = false;
+  private drainTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private nextQueueSequence = 1;
 
   // Queue limits to prevent memory blowup on slow/stalled connections
   private static readonly MAX_QUEUE_BYTES = 8 * 1024 * 1024;  // 8MB per peer
@@ -113,19 +118,15 @@ export class WebRTCProxy {
       pubkey,
       pendingCandidates: [],
       sendQueue: this.createSendQueue(peerId),
-      sending: false,
       bufferHighSignaled: false,
-      drainTimeoutId: null,
+      bytesSent: 0,
+      bytesReceived: 0,
+      bandwidthDebt: 0,
+      queueSequence: 0,
     };
 
-    // Create data channel (offerer creates, answerer receives via ondatachannel)
-    const dc = pc.createDataChannel('hashtree', {
-      ordered: true,
-    });
-    this.setupDataChannel(peerId, dc);
-    peer.dataChannel = dc;
-
-    // Handle incoming data channel (for answerer)
+    // Only the offerer should create the data channel. The answerer receives
+    // it via ondatachannel after the remote offer is applied.
     pc.ondatachannel = (event) => {
       this.setupDataChannel(peerId, event.channel);
       peer.dataChannel = event.channel;
@@ -190,6 +191,10 @@ export class WebRTCProxy {
       const data = event.data instanceof ArrayBuffer
         ? new Uint8Array(event.data)
         : new Uint8Array(0);
+      const peer = this.peers.get(peerId);
+      if (peer) {
+        peer.bytesReceived += data.byteLength;
+      }
 
       this.onEvent({
         type: 'rtc:dataChannelMessage',
@@ -204,6 +209,13 @@ export class WebRTCProxy {
     if (!peer) return;
 
     try {
+      if (!peer.dataChannel || peer.dataChannel.readyState === 'closed') {
+        const dc = peer.pc.createDataChannel('hashtree', {
+          ordered: true,
+        });
+        this.setupDataChannel(peerId, dc);
+        peer.dataChannel = dc;
+      }
       const offer = await peer.pc.createOffer();
       this.onEvent({
         type: 'rtc:offerCreated',
@@ -314,12 +326,18 @@ export class WebRTCProxy {
       return;
     }
 
+    const wasEmpty = peer.sendQueue.isEmpty;
+
     // Small request frames should overtake bulky response traffic so cache misses
     // are not starved by background uploads on the same peer connection.
     if (this.isPriorityDataMessage(data)) {
       peer.sendQueue.unshift(data);
     } else {
       peer.sendQueue.push(data);
+    }
+
+    if (wasEmpty) {
+      peer.queueSequence = this.nextQueueSequence++;
     }
 
     // Check if queue is getting too large - signal worker to slow down
@@ -329,71 +347,185 @@ export class WebRTCProxy {
       this.onEvent({ type: 'rtc:bufferHigh', peerId });
     }
 
-    // Start draining if not already
-    if (!peer.sending) {
-      this.drainQueue(peerId);
+    this.drainQueuedPeers();
+  }
+
+  private drainQueuedPeers(): void {
+    if (this.draining) {
+      return;
+    }
+    if (this.drainTimeoutId) {
+      clearTimeout(this.drainTimeoutId);
+      this.drainTimeoutId = null;
+    }
+
+    this.draining = true;
+    try {
+      while (true) {
+        const next = this.selectNextQueuedPeer();
+        if (!next) {
+          break;
+        }
+
+        const reservation = this.uploadRateLimiter.reserve(next.data.byteLength);
+        if (!reservation.allowed) {
+          this.scheduleRateLimitedDrain(reservation.delayMs);
+          break;
+        }
+
+        const peer = next.peer;
+        const dc = peer.dataChannel;
+        if (!dc || dc.readyState !== 'open') {
+          peer.sendQueue.shift();
+          if (peer.sendQueue.isEmpty) {
+            peer.queueSequence = 0;
+          }
+          continue;
+        }
+
+        const data = peer.sendQueue.shift();
+        if (!data) {
+          continue;
+        }
+
+        try {
+          const payload = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+            ? data.buffer
+            : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+          dc.send(payload as ArrayBuffer);
+          peer.bytesSent += data.byteLength;
+          peer.bandwidthDebt = next.finish;
+        } catch {
+          // Drop on failure instead of infinite re-queue (prevents memory blowup)
+          console.warn(`[WebRTCProxy] Send failed for ${next.peerId.slice(0, 8)}, dropped ${data.byteLength}B`);
+        }
+
+        if (peer.sendQueue.isEmpty) {
+          peer.queueSequence = 0;
+        }
+        this.maybeSignalBufferLow(next.peerId, peer);
+        this.normalizeBandwidthDebt();
+      }
+    } finally {
+      this.draining = false;
+    }
+
+    this.refreshBufferedAmountWatchers();
+    if (!this.hasQueuedTraffic()) {
+      this.resetBandwidthDebt();
     }
   }
 
-  private drainQueue(peerId: string): void {
-    const peer = this.peers.get(peerId);
-    if (!peer?.dataChannel || peer.dataChannel.readyState !== 'open') {
+  private selectNextQueuedPeer(): { peerId: string; peer: PeerConnection; data: Uint8Array; finish: number } | null {
+    const ready: Array<{ peerId: string; peer: PeerConnection; data: Uint8Array; finish: number }> = [];
+    const readyPriority: Array<{ peerId: string; peer: PeerConnection; data: Uint8Array; finish: number }> = [];
+
+    for (const [peerId, peer] of this.peers) {
+      const dc = peer.dataChannel;
+      if (!dc || dc.readyState !== 'open' || peer.sendQueue.isEmpty) {
+        continue;
+      }
+      if (dc.bufferedAmount >= WebRTCProxy.BUFFER_THRESHOLD) {
+        continue;
+      }
+
+      const data = peer.sendQueue.peek();
+      if (!data) {
+        continue;
+      }
+
+      const weight = this.reciprocityWeight(peer);
+      const finish = peer.bandwidthDebt + data.byteLength / weight;
+      const entry = { peerId, peer, data, finish };
+      ready.push(entry);
+      if (this.isPriorityDataMessage(data)) {
+        readyPriority.push(entry);
+      }
+    }
+
+    const candidates = readyPriority.length > 0 ? readyPriority : ready;
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort((left, right) =>
+      (left.finish - right.finish)
+      || (left.peer.queueSequence - right.peer.queueSequence)
+      || left.peerId.localeCompare(right.peerId));
+    return candidates[0] ?? null;
+  }
+
+  private reciprocityWeight(peer: PeerConnection): number {
+    const sent = peer.bytesSent;
+    const received = peer.bytesReceived;
+    const rawRatio = (received + 1024) / (sent + 1024);
+    const boundedRatio = rawRatio / (1 + rawRatio);
+    return 0.5 + 1.5 * boundedRatio;
+  }
+
+  private normalizeBandwidthDebt(): void {
+    const queued = Array.from(this.peers.values()).filter((peer) => !peer.sendQueue.isEmpty);
+    if (queued.length === 0) {
+      this.resetBandwidthDebt();
       return;
     }
 
-    if (peer.drainTimeoutId) {
-      clearTimeout(peer.drainTimeoutId);
-      peer.drainTimeoutId = null;
+    const floor = Math.min(...queued.map((peer) => peer.bandwidthDebt));
+    if (!Number.isFinite(floor) || floor <= 0) {
+      return;
     }
 
-    peer.sending = true;
-    const dc = peer.dataChannel;
+    for (const peer of queued) {
+      peer.bandwidthDebt = Math.max(0, peer.bandwidthDebt - floor);
+    }
+  }
 
-    // Send as much as we can without overflowing the buffer
-    while (!peer.sendQueue.isEmpty && dc.bufferedAmount < WebRTCProxy.BUFFER_THRESHOLD) {
-      const nextData = peer.sendQueue.peek();
-      if (!nextData) {
-        break;
-      }
-
-      const reservation = this.uploadRateLimiter.reserve(nextData.byteLength);
-      if (!reservation.allowed) {
-        peer.sending = false;
-        this.scheduleRateLimitedDrain(peerId, reservation.delayMs);
-        return;
-      }
-
-      const data = peer.sendQueue.shift()!;
-      try {
-        const payload = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
-          ? data.buffer
-          : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-        dc.send(payload as ArrayBuffer);
-      } catch {
-        // Drop on failure instead of infinite re-queue (prevents memory blowup)
-        console.warn(`[WebRTCProxy] Send failed for ${peerId.slice(0, 8)}, dropped ${data.byteLength}B`);
-        break;
+  private resetBandwidthDebt(): void {
+    for (const peer of this.peers.values()) {
+      peer.bandwidthDebt = 0;
+      if (peer.sendQueue.isEmpty) {
+        peer.queueSequence = 0;
       }
     }
+  }
 
-    // Check if queue has drained enough to signal worker to resume
-    if (peer.bufferHighSignaled) {
-      const queueSize = this.getQueueSize(peer);
-      if (queueSize < WebRTCProxy.QUEUE_LOW_THRESHOLD) {
-        peer.bufferHighSignaled = false;
-        this.onEvent({ type: 'rtc:bufferLow', peerId });
+  private hasQueuedTraffic(): boolean {
+    for (const peer of this.peers.values()) {
+      if (!peer.sendQueue.isEmpty) {
+        return true;
       }
     }
+    return false;
+  }
 
-    // If there's more to send, wait for buffer to drain
-    if (!peer.sendQueue.isEmpty) {
-      dc.bufferedAmountLowThreshold = WebRTCProxy.BUFFER_THRESHOLD / 2;
-      dc.onbufferedamountlow = () => {
-        dc.onbufferedamountlow = null;
-        this.drainQueue(peerId);
-      };
-    } else {
-      peer.sending = false;
+  private maybeSignalBufferLow(peerId: string, peer: PeerConnection): void {
+    if (!peer.bufferHighSignaled) {
+      return;
+    }
+    const queueSize = this.getQueueSize(peer);
+    if (queueSize < WebRTCProxy.QUEUE_LOW_THRESHOLD) {
+      peer.bufferHighSignaled = false;
+      this.onEvent({ type: 'rtc:bufferLow', peerId });
+    }
+  }
+
+  private refreshBufferedAmountWatchers(): void {
+    for (const [peerId, peer] of this.peers) {
+      const dc = peer.dataChannel;
+      if (!dc || dc.readyState !== 'open') {
+        continue;
+      }
+
+      if (!peer.sendQueue.isEmpty && dc.bufferedAmount >= WebRTCProxy.BUFFER_THRESHOLD) {
+        dc.bufferedAmountLowThreshold = WebRTCProxy.BUFFER_THRESHOLD / 2;
+        dc.onbufferedamountlow = () => {
+          dc.onbufferedamountlow = null;
+          this.drainQueuedPeers();
+        };
+        continue;
+      }
+
+      dc.onbufferedamountlow = null;
     }
   }
 
@@ -411,11 +543,6 @@ export class WebRTCProxy {
 
     // Clear send queue
     peer.sendQueue.clear();
-    peer.sending = false;
-    if (peer.drainTimeoutId) {
-      clearTimeout(peer.drainTimeoutId);
-      peer.drainTimeoutId = null;
-    }
 
     // Close data channel
     if (peer.dataChannel) {
@@ -434,6 +561,9 @@ export class WebRTCProxy {
     peer.pc.close();
 
     this.peers.delete(peerId);
+    if (!this.hasQueuedTraffic()) {
+      this.resetBandwidthDebt();
+    }
   }
 
   /**
@@ -468,30 +598,17 @@ export class WebRTCProxy {
 
   setUploadLimitBytesPerSecond(maxUploadBytesPerSecond?: number | null): void {
     this.uploadRateLimiter.setBytesPerSecond(maxUploadBytesPerSecond);
-    for (const peerId of this.peers.keys()) {
-      const peer = this.peers.get(peerId);
-      if (!peer || peer.sendQueue.isEmpty) {
-        continue;
-      }
-      if (!peer.sending) {
-        this.drainQueue(peerId);
-      }
-    }
+    this.drainQueuedPeers();
   }
 
-  private scheduleRateLimitedDrain(peerId: string, delayMs: number): void {
-    const peer = this.peers.get(peerId);
-    if (!peer || peer.drainTimeoutId) {
+  private scheduleRateLimitedDrain(delayMs: number): void {
+    if (this.drainTimeoutId) {
       return;
     }
 
-    peer.drainTimeoutId = setTimeout(() => {
-      const activePeer = this.peers.get(peerId);
-      if (!activePeer) {
-        return;
-      }
-      activePeer.drainTimeoutId = null;
-      this.drainQueue(peerId);
+    this.drainTimeoutId = setTimeout(() => {
+      this.drainTimeoutId = null;
+      this.drainQueuedPeers();
     }, delayMs);
   }
 }
