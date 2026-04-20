@@ -939,7 +939,7 @@ mod tests {
         Arc::new(CashuQuoteState::new(
             routing,
             Arc::new(RwLock::new(PeerSelector::with_strategy(
-                SelectionStrategy::TitForTat,
+                SelectionStrategy::Weighted,
             ))),
             with_client
                 .then_some(Arc::new(NoopPaymentClient::default()) as Arc<dyn CashuPaymentClient>),

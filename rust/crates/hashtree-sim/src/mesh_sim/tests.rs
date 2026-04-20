@@ -668,7 +668,7 @@ async fn test_mesh_sim_goofballs_reduce_reference_success() {
         cashu_incentives: None,
     };
 
-    let mixed_config = mixed_bad_actor_config(honest_config.seed, SelectionStrategy::TitForTat);
+    let mixed_config = mixed_bad_actor_config(honest_config.seed, SelectionStrategy::Weighted);
 
     let honest = Simulation::new(honest_config);
     honest.run().await;
@@ -718,7 +718,7 @@ async fn test_mesh_sim_report_json_includes_extended_response_behavior_fields() 
                 max_connections: 4,
                 satisfied_connections: 2,
             },
-            selection_strategy: SelectionStrategy::TitForTat,
+            selection_strategy: SelectionStrategy::Weighted,
             fairness_enabled: true,
             dispatch: RequestDispatchConfig::default(),
             response_behavior: ResponseBehaviorConfig {

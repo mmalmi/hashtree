@@ -239,7 +239,6 @@ export type SelectionStrategy =
   | 'random'
   | 'lowestLatency'
   | 'highestSuccessRate'
-  | 'titForTat'
   | 'utilityUcb';
 
 // Hedged request dispatch policy

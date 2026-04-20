@@ -287,8 +287,8 @@ fn approach_profiles() -> Vec<(
             flood_runtime(SelectionStrategy::Weighted),
         ),
         (
-            "hedged_titfortat",
-            hedged_runtime(SelectionStrategy::TitForTat, 2, 2, usize::MAX, 5),
+            "hedged_weighted",
+            hedged_runtime(SelectionStrategy::Weighted, 2, 2, usize::MAX, 5),
             hedged_runtime(SelectionStrategy::HighestSuccessRate, 1, 1, usize::MAX, 8),
             hedged_runtime(SelectionStrategy::Weighted, 3, 2, usize::MAX, 5),
         ),

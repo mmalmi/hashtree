@@ -856,12 +856,12 @@ async fn test_request_quote_from_peers_returns_matching_mint() {
 }
 
 #[tokio::test]
-async fn test_tit_for_tat_store_path_recovers_after_bad_peer_observation() {
-    let tit_for_tat_successes = run_bad_peer_series(SelectionStrategy::TitForTat).await;
+async fn test_weighted_store_path_recovers_after_bad_peer_observation() {
+    let weighted_successes = run_bad_peer_series(SelectionStrategy::Weighted).await;
 
     assert!(
-            tit_for_tat_successes >= 5,
-            "expected tit-for-tat path to recover after the first consistently bad peer observation (successes={tit_for_tat_successes})"
+            weighted_successes >= 5,
+            "expected weighted path to recover after the first consistently bad peer observation (successes={weighted_successes})"
         );
 }
 

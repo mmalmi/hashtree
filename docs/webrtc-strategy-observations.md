@@ -8,7 +8,7 @@ Scope: `hashtree-sim` / `hashtree-webrtc` routing and actor strategy tuning
 We keep a small stable strategy set and iterate inside it:
 
 1. `flood_weighted` (baseline)
-2. `hedged_titfortat` (primary challenger)
+2. `hedged_weighted` (primary challenger)
 3. `hedged_utility`
 4. `hedged_latency`
 
@@ -16,7 +16,7 @@ We keep a small stable strategy set and iterate inside it:
 
 ## Actor Model Notes
 
-`TitForTat` in selector now uses:
+The retired reciprocity-heavy selector used:
 
 - reliability (`successes / requests_sent`)
 - reciprocity (`bytes_received / bytes_sent`)
@@ -33,17 +33,17 @@ Command:
 cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual
 ```
 
-Result file: `/tmp/hsim_manual_titfortat.out`
+Result file: `/tmp/hsim_manual_weighted.out`
 
 Top exploration rows (score descending):
 
-1. `manual:24/12:hedged_titfortat`
+1. `manual:24/12:hedged_weighted`
 2. `manual:20/10:hedged_latency`
 3. `manual:24/12:hedged_latency`
 
 Key observation:
 
-- `hedged_titfortat` can outperform `flood_weighted` in exploration score under current topology/churn settings (better overhead with acceptable success).
+- `hedged_weighted` is the relevant hedged challenger now that the older reciprocity-heavy selector has been removed.
 - Promotion gates are currently too strict for this scenario mix (all candidates failed promotion). This indicates gate thresholds need environment-specific profiles, not that strategies are unusable.
 
 ## Scalability Checks

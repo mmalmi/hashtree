@@ -130,7 +130,7 @@ const store = new WebRTCStore({
   decrypt,
   localStore,       // Fallback store
   relays: ['wss://relay.example.com'],
-  requestSelectionStrategy: 'titForTat',
+  requestSelectionStrategy: 'weighted',
   requestFairnessEnabled: true,
   requestDispatch: {
     initialFanout: 2,

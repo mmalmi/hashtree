@@ -93,7 +93,7 @@ fn mixed_bad_actor_config(seed: u64, cashu: Option<CashuIncentiveConfig>) -> Sim
                     max_connections: 18,
                     satisfied_connections: 9,
                 },
-                selection_strategy: SelectionStrategy::TitForTat,
+                selection_strategy: SelectionStrategy::Weighted,
                 fairness_enabled: true,
                 dispatch: reference_dispatch,
                 response_behavior: ResponseBehaviorConfig::default(),

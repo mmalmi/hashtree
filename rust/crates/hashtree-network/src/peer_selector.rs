@@ -417,54 +417,6 @@ impl PeerStats {
         exploitation + exploration_bonus
     }
 
-    /// Tit-for-tat style score:
-    /// - reward peers that answer our requests with useful bytes (reciprocity)
-    /// - reward reliable responders
-    /// - penalize timeout/failure-heavy peers (retaliation)
-    /// - keep a small exploration term for under-sampled peers
-    pub fn tit_for_tat_score(&self, total_requests: u64) -> f64 {
-        // Beta prior keeps cold-start behavior neutral while converging quickly.
-        let reliability = (self.successes as f64 + 1.0) / (self.requests_sent as f64 + 2.0);
-
-        // Reciprocity should not be dominated by one lucky large payload. We
-        // gate byte-ratio impact with success confidence.
-        let reciprocity_raw = if self.bytes_sent == 0 {
-            1.0
-        } else {
-            self.bytes_received as f64 / self.bytes_sent as f64
-        };
-        let reciprocity_ratio = reciprocity_raw / (1.0 + reciprocity_raw);
-        let reciprocity_confidence = self.successes as f64 / (self.successes as f64 + 4.0);
-        let reciprocity =
-            (1.0 - reciprocity_confidence) * 0.5 + reciprocity_confidence * reciprocity_ratio;
-
-        let rtt_score = if self.srtt_ms <= 0.0 {
-            0.5
-        } else {
-            (400.0 / (self.srtt_ms + 50.0)).min(1.0)
-        };
-
-        let timeout_rate = if self.requests_sent == 0 {
-            0.0
-        } else {
-            self.timeouts as f64 / self.requests_sent as f64
-        };
-        let failure_rate = if self.requests_sent == 0 {
-            0.0
-        } else {
-            self.failures as f64 / self.requests_sent as f64
-        };
-        let retaliation_penalty =
-            (0.60 * timeout_rate + 0.45 * failure_rate + 0.10 * self.backoff_level as f64)
-                .min(0.95);
-
-        let cooperative = 0.65 * reliability + 0.25 * reciprocity + 0.10 * rtt_score;
-        let exploration = 0.03
-            * (((total_requests as f64) + 2.0).ln() / ((self.requests_sent as f64) + 2.0)).sqrt();
-
-        (cooperative + exploration - retaliation_penalty).max(0.0)
-    }
-
     /// Normalize paid amount to a bounded priority score in [0, 1).
     pub fn cashu_priority_boost(&self) -> f64 {
         if self.cashu_paid_sat == 0 {
@@ -503,8 +455,6 @@ pub enum SelectionStrategy {
     LowestLatency,
     /// Highest success rate first
     HighestSuccessRate,
-    /// Tit-for-tat style utility (reciprocity + reliability + retaliation + exploration)
-    TitForTat,
     /// Utility + exploration (good/bad ratio + RTT/efficiency + UCB bonus)
     UtilityUcb,
 }
@@ -817,23 +767,6 @@ impl PeerSelector {
                         id_a.cmp(id_b)
                     } else {
                         rate_cmp
-                    }
-                });
-            }
-            SelectionStrategy::TitForTat => {
-                let total_requests: u64 = sorted.iter().map(|(_, s)| s.requests_sent).sum();
-                sorted.sort_by(|(id_a, a), (id_b, b)| {
-                    let score_a =
-                        self.blend_with_payment_priority(a, a.tit_for_tat_score(total_requests));
-                    let score_b =
-                        self.blend_with_payment_priority(b, b.tit_for_tat_score(total_requests));
-                    let score_cmp = score_b
-                        .partial_cmp(&score_a)
-                        .unwrap_or(std::cmp::Ordering::Equal);
-                    if score_cmp == std::cmp::Ordering::Equal {
-                        id_a.cmp(id_b)
-                    } else {
-                        score_cmp
                     }
                 });
             }
@@ -1220,33 +1153,6 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_stats_tit_for_tat_score_prefers_reciprocal_peer() {
-        let mut reciprocal = PeerStats::new("reciprocal");
-        reciprocal.requests_sent = 100;
-        reciprocal.successes = 90;
-        reciprocal.failures = 5;
-        reciprocal.timeouts = 5;
-        reciprocal.srtt_ms = 40.0;
-        reciprocal.bytes_sent = 100 * 40;
-        reciprocal.bytes_received = 90 * 1024;
-
-        let mut leecher = PeerStats::new("leecher");
-        leecher.requests_sent = 100;
-        leecher.successes = 40;
-        leecher.failures = 30;
-        leecher.timeouts = 30;
-        leecher.srtt_ms = 120.0;
-        leecher.bytes_sent = 100 * 40;
-        leecher.bytes_received = 10 * 1024;
-
-        let total_requests = reciprocal.requests_sent + leecher.requests_sent;
-        assert!(
-            reciprocal.tit_for_tat_score(total_requests)
-                > leecher.tit_for_tat_score(total_requests)
-        );
-    }
-
-    #[test]
     fn test_utility_ucb_strategy_explores_less_sampled_peer() {
         let mut selector = PeerSelector::with_strategy(SelectionStrategy::UtilityUcb);
         selector.add_peer("stable");
@@ -1275,37 +1181,6 @@ mod tests {
 
         let peers = selector.select_peers();
         assert_eq!(peers[0], "new");
-    }
-
-    #[test]
-    fn test_tit_for_tat_strategy_prioritizes_reciprocity() {
-        let mut selector = PeerSelector::with_strategy(SelectionStrategy::TitForTat);
-        selector.add_peer("reciprocal");
-        selector.add_peer("leecher");
-
-        {
-            let reciprocal = selector.get_stats_mut("reciprocal").unwrap();
-            reciprocal.requests_sent = 120;
-            reciprocal.successes = 102;
-            reciprocal.failures = 8;
-            reciprocal.timeouts = 10;
-            reciprocal.srtt_ms = 45.0;
-            reciprocal.bytes_sent = 120 * 40;
-            reciprocal.bytes_received = 102 * 1024;
-        }
-        {
-            let leecher = selector.get_stats_mut("leecher").unwrap();
-            leecher.requests_sent = 120;
-            leecher.successes = 70;
-            leecher.failures = 20;
-            leecher.timeouts = 30;
-            leecher.srtt_ms = 35.0;
-            leecher.bytes_sent = 120 * 40;
-            leecher.bytes_received = 8 * 1024;
-        }
-
-        let peers = selector.select_peers();
-        assert_eq!(peers[0], "reciprocal");
     }
 
     #[test]

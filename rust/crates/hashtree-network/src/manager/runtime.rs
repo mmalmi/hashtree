@@ -576,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn request_from_peers_with_source_waits_full_timeout_for_last_generic_peer() {
         let state = WebRTCState::new_with_routing_and_cashu(
-            SelectionStrategy::TitForTat,
+            SelectionStrategy::Weighted,
             true,
             RequestDispatchConfig {
                 initial_fanout: 1,

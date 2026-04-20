@@ -96,15 +96,6 @@ function scoreUtilityUcb(stats: PeerStats, totalRequests: number): number {
   return exploitation + 0.2 * uncertainty;
 }
 
-function scoreTitForTat(stats: PeerStats, totalRequests: number): number {
-  const reliability = (stats.successes + 1) / (stats.requestsSent + 2);
-  const reciprocity = stats.bytesSent > 0 ? Math.min(1, stats.bytesReceived / stats.bytesSent) : 0.5;
-  const retaliation = (stats.timeouts + stats.failures) / Math.max(1, stats.requestsSent);
-  const latencyScore = stats.srttMs > 0 ? Math.min(1, 350 / (stats.srttMs + 50)) : 0.5;
-  const exploration = Math.sqrt(Math.log(totalRequests + 1) / (stats.requestsSent + 1));
-  return 0.45 * reliability + 0.25 * reciprocity + 0.2 * latencyScore - 0.25 * retaliation + 0.1 * exploration;
-}
-
 function peerMetadataFromStats(principal: string, stats: PeerStats): PersistedPeerMetadata {
   return {
     principal,
@@ -337,8 +328,6 @@ export class PeerSelector {
         return stats.srttMs > 0 ? -stats.srttMs : -1_000_000;
       case 'highestSuccessRate':
         return successRate(stats);
-      case 'titForTat':
-        return scoreTitForTat(stats, allTotalRequests);
       case 'utilityUcb':
         return scoreUtilityUcb(stats, allTotalRequests);
       case 'weighted':
