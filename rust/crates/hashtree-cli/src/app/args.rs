@@ -210,6 +210,9 @@ pub(crate) enum Commands {
         /// Publish to Nostr under this ref name (e.g., "mydata" -> npub.../mydata)
         #[arg(long)]
         publish: Option<String>,
+        /// Override content chunk size in bytes for stored files
+        #[arg(long)]
+        chunk_size: Option<usize>,
         /// Don't push to file servers (local only)
         #[arg(long)]
         local: bool,

@@ -6,22 +6,39 @@ use std::io::Read;
 impl HashtreeStore {
     /// Upload a file as raw plaintext and return its CID, with auto-pin
     pub fn upload_file<P: AsRef<Path>>(&self, file_path: P) -> Result<String> {
-        self.upload_file_internal(file_path, true)
+        self.upload_file_with_chunk_size(file_path, None)
     }
 
     /// Upload a file without pinning (for blossom uploads that can be evicted)
     pub fn upload_file_no_pin<P: AsRef<Path>>(&self, file_path: P) -> Result<String> {
-        self.upload_file_internal(file_path, false)
+        self.upload_file_internal(file_path, false, None)
     }
 
-    fn upload_file_internal<P: AsRef<Path>>(&self, file_path: P, pin: bool) -> Result<String> {
+    pub fn upload_file_with_chunk_size<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        chunk_size: Option<usize>,
+    ) -> Result<String> {
+        self.upload_file_internal(file_path, true, chunk_size)
+    }
+
+    fn upload_file_internal<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        pin: bool,
+        chunk_size: Option<usize>,
+    ) -> Result<String> {
         let file_path = file_path.as_ref();
         let file = std::fs::File::open(file_path)
             .with_context(|| format!("Failed to open file {}", file_path.display()))?;
 
         // Store raw plaintext blobs without CHK encryption, streaming from disk.
         let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let mut config = HashTreeConfig::new(store).public();
+        if let Some(chunk_size) = chunk_size {
+            config = config.with_chunk_size(chunk_size);
+        }
+        let tree = HashTree::new(config);
 
         let (cid, _size) = sync_block_on(async { tree.put_stream(AllowStdIo::new(file)).await })
             .context("Failed to store file")?;
@@ -76,10 +93,23 @@ impl HashtreeStore {
         dir_path: P,
         respect_gitignore: bool,
     ) -> Result<String> {
+        self.upload_dir_with_options_and_chunk_size(dir_path, respect_gitignore, None)
+    }
+
+    pub fn upload_dir_with_options_and_chunk_size<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+        respect_gitignore: bool,
+        chunk_size: Option<usize>,
+    ) -> Result<String> {
         let dir_path = dir_path.as_ref();
 
         let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let mut config = HashTreeConfig::new(store).public();
+        if let Some(chunk_size) = chunk_size {
+            config = config.with_chunk_size(chunk_size);
+        }
+        let tree = HashTree::new(config);
 
         let root_cid = sync_block_on(async {
             self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore)
@@ -205,13 +235,25 @@ impl HashtreeStore {
 
     /// Upload a file with CHK encryption, returns CID in format "hash:key"
     pub fn upload_file_encrypted<P: AsRef<Path>>(&self, file_path: P) -> Result<String> {
+        self.upload_file_encrypted_with_chunk_size(file_path, None)
+    }
+
+    pub fn upload_file_encrypted_with_chunk_size<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        chunk_size: Option<usize>,
+    ) -> Result<String> {
         let file_path = file_path.as_ref();
         let file = std::fs::File::open(file_path)
             .with_context(|| format!("Failed to open file {}", file_path.display()))?;
 
         // Use unified API with encryption enabled (default), streaming from disk.
         let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store));
+        let mut config = HashTreeConfig::new(store);
+        if let Some(chunk_size) = chunk_size {
+            config = config.with_chunk_size(chunk_size);
+        }
+        let tree = HashTree::new(config);
 
         let (cid, _size) = sync_block_on(async { tree.put_stream(AllowStdIo::new(file)).await })
             .map_err(|e| anyhow::anyhow!("Failed to encrypt file: {}", e))?;
@@ -238,11 +280,24 @@ impl HashtreeStore {
         dir_path: P,
         respect_gitignore: bool,
     ) -> Result<String> {
+        self.upload_dir_encrypted_with_options_and_chunk_size(dir_path, respect_gitignore, None)
+    }
+
+    pub fn upload_dir_encrypted_with_options_and_chunk_size<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+        respect_gitignore: bool,
+        chunk_size: Option<usize>,
+    ) -> Result<String> {
         let dir_path = dir_path.as_ref();
         let store = self.store_arc();
 
         // Use unified API with encryption enabled (default)
-        let tree = HashTree::new(HashTreeConfig::new(store));
+        let mut config = HashTreeConfig::new(store);
+        if let Some(chunk_size) = chunk_size {
+            config = config.with_chunk_size(chunk_size);
+        }
+        let tree = HashTree::new(config);
 
         let root_cid = sync_block_on(async {
             self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore)

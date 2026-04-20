@@ -136,6 +136,35 @@ export interface WebRTCControllerConfig {
 
 type PeerClassifier = (pubkey: string) => PeerPool;
 type PoolConnectionConfig = { maxConnections: number; satisfiedConnections: number };
+type PublicPoolConfig = {
+  follows: { max: number; satisfied: number };
+  other: { max: number; satisfied: number };
+};
+
+const DEFAULT_POOL_CONFIG: Record<PeerPool, PoolConnectionConfig> = {
+  follows: { maxConnections: 20, satisfiedConnections: 10 },
+  other: { maxConnections: 16, satisfiedConnections: 8 },
+};
+
+function clonePoolConfig(
+  config: Record<PeerPool, PoolConnectionConfig>,
+): Record<PeerPool, PoolConnectionConfig> {
+  return {
+    follows: { ...config.follows },
+    other: { ...config.other },
+  };
+}
+
+function normalizePoolConfig(config: PublicPoolConfig | null): Record<PeerPool, PoolConnectionConfig> {
+  if (!config) {
+    return clonePoolConfig(DEFAULT_POOL_CONFIG);
+  }
+
+  return {
+    follows: { maxConnections: config.follows.max, satisfiedConnections: config.follows.satisfied },
+    other: { maxConnections: config.other.max, satisfiedConnections: config.other.satisfied },
+  };
+}
 
 // ============================================================================
 // Controller
@@ -162,10 +191,7 @@ export class WebRTCController {
   };
 
   // Pool configuration - reasonable defaults, settings sync will override
-  private poolConfig: Record<PeerPool, PoolConnectionConfig> = {
-    follows: { maxConnections: 20, satisfiedConnections: 10 },
-    other: { maxConnections: 16, satisfiedConnections: 8 },
-  };
+  private poolConfig: Record<PeerPool, PoolConnectionConfig> = clonePoolConfig(DEFAULT_POOL_CONFIG);
 
   // Hello interval - 5s for faster peer discovery
   private helloInterval?: ReturnType<typeof setInterval>;
@@ -1356,11 +1382,8 @@ export class WebRTCController {
   /**
    * Set pool configuration
    */
-  setPoolConfig(config: { follows: { max: number; satisfied: number }; other: { max: number; satisfied: number } }): void {
-    this.poolConfig = {
-      follows: { maxConnections: config.follows.max, satisfiedConnections: config.follows.satisfied },
-      other: { maxConnections: config.other.max, satisfiedConnections: config.other.satisfied },
-    };
+  setPoolConfig(config: PublicPoolConfig | null): void {
+    this.poolConfig = normalizePoolConfig(config);
     this.log('Pool config updated:', this.poolConfig);
 
     // Re-broadcast hello to trigger peer discovery with new limits

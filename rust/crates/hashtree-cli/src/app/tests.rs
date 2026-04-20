@@ -665,6 +665,15 @@ fn test_cli_add_uses_unencrypted_flag_with_public_alias() {
 }
 
 #[test]
+fn test_cli_add_parses_chunk_size_override() {
+    let cli = Cli::parse_from(["htree", "add", "site", "--chunk-size", "33554432"]);
+    match cli.command {
+        Commands::Add { chunk_size, .. } => assert_eq!(chunk_size, Some(33_554_432)),
+        _ => panic!("expected add command"),
+    }
+}
+
+#[test]
 fn test_cli_parses_socialgraph_rebuild_profile_index_command() {
     let cli = Cli::parse_from(["htree", "socialgraph", "rebuild-profile-index"]);
 

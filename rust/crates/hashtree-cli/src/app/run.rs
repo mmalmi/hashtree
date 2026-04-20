@@ -789,6 +789,7 @@ pub(crate) async fn run() -> Result<()> {
             unencrypted,
             no_ignore,
             publish,
+            chunk_size,
             local,
         } => {
             run_add(
@@ -798,6 +799,7 @@ pub(crate) async fn run() -> Result<()> {
                 unencrypted,
                 no_ignore,
                 publish,
+                chunk_size,
                 local,
             )
             .await?

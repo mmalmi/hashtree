@@ -25,6 +25,7 @@ pub(crate) async fn run_add(
     unencrypted: bool,
     no_ignore: bool,
     publish: Option<String>,
+    chunk_size: Option<usize>,
     local: bool,
 ) -> Result<()> {
     let is_dir = path.is_dir();
@@ -34,11 +35,14 @@ pub(crate) async fn run_add(
         use hashtree_core::store::MemoryStore;
 
         let store = Arc::new(MemoryStore::new());
-        let config = if unencrypted {
+        let mut config = if unencrypted {
             HashTreeConfig::new(store.clone()).public()
         } else {
             HashTreeConfig::new(store.clone())
         };
+        if let Some(chunk_size) = chunk_size {
+            config = config.with_chunk_size(chunk_size);
+        }
         let tree = HashTree::new(config);
 
         if is_dir {
@@ -73,10 +77,12 @@ pub(crate) async fn run_add(
         if unencrypted {
             let hash_hex = if is_dir {
                 store
-                    .upload_dir_with_options(&path, !no_ignore)
+                    .upload_dir_with_options_and_chunk_size(&path, !no_ignore, chunk_size)
                     .context("Failed to add directory")?
             } else {
-                store.upload_file(&path).context("Failed to add file")?
+                store
+                    .upload_file_with_chunk_size(&path, chunk_size)
+                    .context("Failed to add file")?
             };
             let hash = from_hex(&hash_hex).context("Invalid hash")?;
             let nhash = nhash_encode(&hash)
@@ -85,11 +91,11 @@ pub(crate) async fn run_add(
         } else {
             let cid_str = if is_dir {
                 store
-                    .upload_dir_encrypted_with_options(&path, !no_ignore)
+                    .upload_dir_encrypted_with_options_and_chunk_size(&path, !no_ignore, chunk_size)
                     .context("Failed to add directory")?
             } else {
                 store
-                    .upload_file_encrypted(&path)
+                    .upload_file_encrypted_with_chunk_size(&path, chunk_size)
                     .context("Failed to add file")?
             };
             let (hash_hex, key_hex) = if let Some((h, k)) = cid_str.split_once(':') {

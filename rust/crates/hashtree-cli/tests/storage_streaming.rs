@@ -1,5 +1,5 @@
 use hashtree_cli::HashtreeStore;
-use hashtree_core::{from_hex, Cid};
+use hashtree_core::{from_hex, is_tree_node, Cid};
 
 #[test]
 fn upload_and_download_streaming_roundtrip_preserves_bytes() {
@@ -47,6 +47,31 @@ fn upload_public_and_write_by_hash_streaming_roundtrip_preserves_bytes() {
 
     let restored = std::fs::read(&out_path).expect("read restored");
     assert_eq!(restored, source);
+}
+
+#[test]
+fn upload_file_with_large_chunk_size_stores_single_blob() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = HashtreeStore::new(tmp.path().join("store")).expect("store");
+
+    let source = vec![7u8; 3_000_000];
+    let source_path = tmp.path().join("single-blob.bin");
+    std::fs::write(&source_path, &source).expect("write source");
+
+    let hash_hex = store
+        .upload_file_with_chunk_size(&source_path, Some(8 * 1024 * 1024))
+        .expect("upload public with large chunk size");
+    let hash = from_hex(&hash_hex).expect("hash");
+    let stored = store
+        .get_chunk(&hash)
+        .expect("chunk lookup")
+        .expect("stored bytes");
+
+    assert!(
+        !is_tree_node(&stored),
+        "expected direct blob storage when chunk size exceeds file size"
+    );
+    assert_eq!(stored, source);
 }
 
 #[test]

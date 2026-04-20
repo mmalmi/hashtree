@@ -32,6 +32,16 @@ export type {
   WebRTCWorkerP2PProviderOptions,
 } from './clientBridge.js';
 
+export {
+  ManagedWebRTCMeshHost,
+} from './managedMeshHost.js';
+
+export type {
+  ManagedWebRTCMeshHostOptions,
+  ManagedWebRTCMeshSessionConfig,
+  WebRTCMeshPoolConfig,
+} from './managedMeshHost.js';
+
 export type {
   WebRTCCommand,
   WebRTCEvent,
