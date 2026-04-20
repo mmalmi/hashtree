@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.35 - 2026-04-20
+
+Changes since the `0.2.34` crates.io release.
+
+### Added
+
+- Added a reciprocity-aware upload scheduler in `hashtree-network` so peers that have previously seeded us are preferred when outbound response bandwidth is contested.
+- Added Blossom push helpers, storage compaction coverage, and broader social-graph/profile-index maintenance coverage across the CLI and Nostr crates.
+
+### Improved
+
+- Switched default read-side peer selection to weighted reply-likelihood ordering across the Rust and TypeScript mesh stacks.
+- Improved CLI mirror, crawler, storage-maintenance, and relay-backed indexing behavior for larger profile/event histories.
+
+### Fixed
+
+- Fixed Rust package version wiring so the `0.2.35` workspace resolves cleanly from a fresh checkout.
+- Fixed the worker/mesh upload path so capped WebRTC upload bandwidth is still enforced while reciprocal peers receive priority under contention.
+
 ## 0.2.34 - 2026-04-17
 
 Changes since the `0.2.33` crates.io release.
