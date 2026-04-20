@@ -763,7 +763,13 @@ impl RemoteHelper {
             };
 
             const CHANNEL_SIZE: usize = 100;
-            const UPLOAD_CONCURRENCY: usize = 10;
+            const DEFAULT_UPLOAD_CONCURRENCY: usize = 10;
+            const SINGLE_SERVER_UPLOAD_CONCURRENCY: usize = 2;
+            let upload_concurrency = if all_servers.len() <= 1 {
+                SINGLE_SERVER_UPLOAD_CONCURRENCY
+            } else {
+                DEFAULT_UPLOAD_CONCURRENCY
+            };
             let (tx, rx) = mpsc::channel::<(Vec<u8>, bool, bool)>(CHANNEL_SIZE);
 
             let upload_handle = {
@@ -784,7 +790,7 @@ impl RemoteHelper {
                     let stream = ReceiverStream::new(rx);
                     stream
                         .map(|(data, from_old_tree, force_all_servers)| {
-                            let blossom = &blossom;
+                            let blossom = blossom.clone();
                             let uploaded = Arc::clone(&uploaded);
                             let skipped_server = Arc::clone(&skipped_server);
                             let failed = Arc::clone(&failed);
@@ -795,18 +801,30 @@ impl RemoteHelper {
                             let servers_needing_full = Arc::clone(&servers_needing_full);
                             async move {
                                 let result = if force_all_servers {
-                                    blossom
-                                        .upload_to_all_servers(&data)
-                                        .await
-                                        .map(|(h, c)| (h, c > 0))
+                                    if blossom.write_servers().len() <= 1 {
+                                        blossom.upload_if_missing(&data).await
+                                    } else {
+                                        blossom
+                                            .upload_to_all_servers(&data)
+                                            .await
+                                            .map(|(h, c)| (h, c > 0))
+                                    }
                                 } else if from_old_tree && !servers_needing_full.is_empty() {
-                                    blossom
-                                        .upload_to_selected_servers(
-                                            &data,
-                                            servers_needing_full.as_ref().as_slice(),
-                                        )
-                                        .await
-                                        .map(|(h, c)| (h, c > 0))
+                                    if servers_needing_full.len() == 1 {
+                                        blossom
+                                            .clone()
+                                            .with_write_servers(servers_needing_full.as_ref().clone())
+                                            .upload_if_missing(&data)
+                                            .await
+                                    } else {
+                                        blossom
+                                            .upload_to_selected_servers(
+                                                &data,
+                                                servers_needing_full.as_ref().as_slice(),
+                                            )
+                                            .await
+                                            .map(|(h, c)| (h, c > 0))
+                                    }
                                 } else {
                                     blossom.upload_if_missing(&data).await
                                 };
@@ -841,7 +859,7 @@ impl RemoteHelper {
                                 }
                             }
                         })
-                        .buffer_unordered(UPLOAD_CONCURRENCY)
+                        .buffer_unordered(upload_concurrency)
                         .for_each(|_| async {})
                         .await;
                 })
