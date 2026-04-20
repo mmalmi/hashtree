@@ -122,6 +122,13 @@ Behavior:
 - `runtime.urls.media(...)` handles `/htree/...` URL generation plus the per-client `htree_c` and optional `htree_t` query params.
 - `runtime.media.ensureReady(...)` handles the common page-side service-worker/media-port handshake.
 
+## Transport Notes
+
+- If you expect media or files to keep working through the worker, daemon, or WebRTC peers, app-facing URLs should stay in `htree://...` or `/htree/...` form. Raw `https://` Blossom URLs bypass the runtime routing and will fail when a client intentionally has no direct Blossom access.
+- Mesh reads should be treated as liveness-based, not fixed-timeout-based. Slow peers are normal on cold paths; callers should hedge to more peers instead of converting a slow in-flight read into a synthetic not-found.
+- After bytes or fragments start flowing, prefer idle/progress-based expiry over total wall-clock deadlines. That keeps large media transfers alive without giving malicious peers an unlimited pin.
+- For realistic verification, test cold direct navigation with requester-side Blossom disabled and assert that artwork/audio loads from `/htree/...` without any fallback requests to default Blossom servers.
+
 ## Service Worker Client Keys
 
 If your service worker intercepts `/htree/...` media requests and forwards them to a worker over `MessagePort`, use a stable per-tab client key:

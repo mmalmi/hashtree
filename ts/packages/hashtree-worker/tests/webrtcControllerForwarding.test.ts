@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sha256, type Store } from '@hashtree/core';
 import {
+  FRAGMENT_SIZE,
   MSG_TYPE_RESPONSE,
   createRequest,
+  createFragmentResponse,
   createResponse,
   encodeRequest,
   encodeResponse,
@@ -35,6 +37,7 @@ function createForwardingController(
   localStore: Store,
   options: {
     upstreamFetch?: (hash: Uint8Array) => Promise<Uint8Array | null>;
+    requestTimeout?: number;
     requestDispatch?: {
       initialFanout: number;
       hedgeFanout: number;
@@ -57,7 +60,7 @@ function createForwardingController(
       }
     },
     sendSignaling: async () => {},
-    requestTimeout: 100,
+    requestTimeout: options.requestTimeout ?? 100,
     upstreamFetch: options.upstreamFetch,
     requestDispatch: options.requestDispatch,
   });
@@ -260,6 +263,41 @@ describe('WebRTCController forwarding behavior', () => {
 
     expect(countResponseMessages(sentData, requesterA.peerId)).toBe(1);
     expect(countResponseMessages(sentData, requesterB.peerId)).toBe(1);
+  });
+
+  it('keeps large fragmented responses alive for the full request timeout window', async () => {
+    vi.useFakeTimers();
+    const localStore: Store = {
+      put: vi.fn().mockResolvedValue(true),
+      get: vi.fn().mockResolvedValue(null),
+      has: async () => false,
+      delete: async () => false,
+    };
+    const { controller, internal } = createForwardingController(localStore, {
+      requestTimeout: 15_000,
+    });
+    const upstream = connectPeer(internal, 'peer-upstream', 'upstream-pubkey');
+
+    const payload = new Uint8Array(FRAGMENT_SIZE * 3 + 1024);
+    payload.fill(7);
+    const hash = await sha256(payload);
+
+    const pending = controller.get(hash);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const totalFragments = Math.ceil(payload.length / FRAGMENT_SIZE);
+    for (let index = 0; index < totalFragments; index += 1) {
+      const start = index * FRAGMENT_SIZE;
+      const end = Math.min(start + FRAGMENT_SIZE, payload.length);
+      const fragment = payload.slice(start, end);
+      const responseBytes = new Uint8Array(encodeResponse(createFragmentResponse(hash, fragment, index, totalFragments)));
+      await internal.onDataChannelMessage(upstream.peerId, responseBytes);
+      if (index < totalFragments - 1) {
+        await vi.advanceTimersByTimeAsync(6_000);
+      }
+    }
+
+    await expect(pending).resolves.toEqual(payload);
   });
 
   it('uses the same staged peer scheduler for forwarded requests instead of flooding every peer', async () => {

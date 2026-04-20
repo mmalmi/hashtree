@@ -13,11 +13,13 @@ use nostr::{
     Timestamp,
 };
 use nostr_sdk::{
-    pool::RelayLimits, prelude::RelayPoolNotification, Client, Keys, Options, RelayStatus,
+    pool::RelayLimits, prelude::RelayPoolNotification, Client, EventSource, Keys, Options,
+    RelayStatus,
 };
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use crate::blossom_push::background_blossom_push;
 use crate::socialgraph::crawler::SOCIALGRAPH_RELAY_EVENT_MAX_SIZE;
 use crate::socialgraph::{self, SocialGraphBackend, SocialGraphStore};
 use crate::HashtreeStore;
@@ -45,6 +47,12 @@ const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_millis(1
 const DEFAULT_HISTORY_KINDS: [u16; 6] = [0, 1, 3, 6, 7, 9735];
 const DEFAULT_EVENT_TREE_NAME: &str = "nostr-event-index";
 const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
+const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
+const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
+const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
+const LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER: usize = 8;
+const LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 16;
+const LARGE_HISTORY_SYNC_MAX_RELAY_PAGES: usize = 20;
 
 #[cfg(not(test))]
 const MIRROR_MISSING_PROFILE_BACKFILL_INTERVAL: Duration = Duration::from_secs(300);
@@ -65,6 +73,7 @@ const MIRROR_ROOT_PUBLISH_MAX_STALENESS: Duration = Duration::from_millis(100);
 pub struct NostrMirrorConfig {
     pub relays: Vec<String>,
     pub publish_relays: Vec<String>,
+    pub blossom_write_servers: Vec<String>,
     pub max_follow_distance: u32,
     pub overmute_threshold: f64,
     pub author_batch_size: usize,
@@ -79,6 +88,7 @@ pub struct NostrMirrorConfig {
     pub history_sync_on_reconnect: bool,
     pub published_event_tree_name: Option<String>,
     pub published_profile_search_tree_name: Option<String>,
+    pub published_profiles_by_pubkey_tree_name: Option<String>,
 }
 
 impl Default for NostrMirrorConfig {
@@ -86,6 +96,7 @@ impl Default for NostrMirrorConfig {
         Self {
             relays: Vec::new(),
             publish_relays: Vec::new(),
+            blossom_write_servers: Vec::new(),
             max_follow_distance: 2,
             overmute_threshold: 1.0,
             author_batch_size: 256,
@@ -100,6 +111,9 @@ impl Default for NostrMirrorConfig {
             history_sync_on_reconnect: true,
             published_event_tree_name: Some(DEFAULT_EVENT_TREE_NAME.to_string()),
             published_profile_search_tree_name: Some(DEFAULT_PROFILE_SEARCH_TREE_NAME.to_string()),
+            published_profiles_by_pubkey_tree_name: Some(
+                DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME.to_string(),
+            ),
         }
     }
 }
@@ -111,6 +125,18 @@ struct RootPublishState {
     dirty_since: Option<Instant>,
     last_published_root: Option<hashtree_core::Cid>,
     last_published_at: Option<Instant>,
+    last_published_created_at: Option<Timestamp>,
+    last_uploaded_root: Option<hashtree_core::Cid>,
+    last_uploaded_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HistorySyncPlan {
+    relay_fetch_mode: RelayFetchMode,
+    author_batch_size: usize,
+    per_author_event_limit: usize,
+    relay_page_size: usize,
+    max_relay_pages: usize,
 }
 
 pub struct BackgroundNostrMirror {
@@ -119,8 +145,10 @@ pub struct BackgroundNostrMirror {
     graph_store: Arc<SocialGraphStore>,
     client: Client,
     publish_client: Option<Client>,
+    publish_pubkey: Option<PublicKey>,
     event_publish_state: Mutex<RootPublishState>,
     profile_search_publish_state: Mutex<RootPublishState>,
+    profiles_by_pubkey_publish_state: Mutex<RootPublishState>,
     pending_live_events: Mutex<BTreeMap<String, Event>>,
     missing_profile_cursor: Mutex<usize>,
     shutdown_tx: watch::Sender<bool>,
@@ -149,6 +177,7 @@ impl BackgroundNostrMirror {
         }
         client.connect().await;
 
+        let publish_pubkey = publish_keys.as_ref().map(Keys::public_key);
         let publish_client = if let Some(keys) = publish_keys {
             if config.publish_relays.is_empty() {
                 None
@@ -174,8 +203,10 @@ impl BackgroundNostrMirror {
             graph_store,
             client,
             publish_client,
+            publish_pubkey,
             event_publish_state: Mutex::new(RootPublishState::default()),
             profile_search_publish_state: Mutex::new(RootPublishState::default()),
+            profiles_by_pubkey_publish_state: Mutex::new(RootPublishState::default()),
             pending_live_events: Mutex::new(BTreeMap::new()),
             missing_profile_cursor: Mutex::new(0),
             shutdown_tx,
@@ -190,7 +221,21 @@ impl BackgroundNostrMirror {
     fn sync_publish_roots_from_store(&self) -> Result<()> {
         self.note_public_events_root_change()?;
         self.note_profile_search_root_change()?;
+        self.note_profiles_by_pubkey_root_change()?;
         Ok(())
+    }
+
+    async fn publish_pending_roots(
+        &self,
+        force_event: bool,
+        force_profile_search: bool,
+        force_profiles_by_pubkey: bool,
+    ) -> (Result<()>, Result<()>, Result<()>) {
+        tokio::join!(
+            self.maybe_publish_event_root(force_event),
+            self.maybe_publish_profile_search_root(force_profile_search),
+            self.maybe_publish_profiles_by_pubkey_root(force_profiles_by_pubkey),
+        )
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -298,11 +343,17 @@ impl BackgroundNostrMirror {
                     if let Err(err) = self.flush_live_events().await {
                         warn!("Nostr mirror live event flush failed: {:#}", err);
                     }
-                    if let Err(err) = self.maybe_publish_event_root(false).await {
+                    let (event_result, profile_search_result, profiles_by_pubkey_result) = self
+                        .publish_pending_roots(false, false, false)
+                        .await;
+                    if let Err(err) = event_result {
                         warn!("Nostr mirror event-root publish failed: {:#}", err);
                     }
-                    if let Err(err) = self.maybe_publish_profile_search_root(false).await {
+                    if let Err(err) = profile_search_result {
                         warn!("Nostr mirror profile-search publish failed: {:#}", err);
+                    }
+                    if let Err(err) = profiles_by_pubkey_result {
+                        warn!("Nostr mirror profiles-by-pubkey publish failed: {:#}", err);
                     }
                 }
                 notification = notifications.recv() => {
@@ -357,15 +408,23 @@ impl BackgroundNostrMirror {
                 err
             );
         }
-        if let Err(err) = self.maybe_publish_event_root(true).await {
+        let (event_result, profile_search_result, profiles_by_pubkey_result) =
+            self.publish_pending_roots(true, true, true).await;
+        if let Err(err) = event_result {
             warn!(
                 "Nostr mirror event-root publish failed during shutdown: {:#}",
                 err
             );
         }
-        if let Err(err) = self.maybe_publish_profile_search_root(true).await {
+        if let Err(err) = profile_search_result {
             warn!(
                 "Nostr mirror profile-search publish failed during shutdown: {:#}",
+                err
+            );
+        }
+        if let Err(err) = profiles_by_pubkey_result {
+            warn!(
+                "Nostr mirror profiles-by-pubkey publish failed during shutdown: {:#}",
                 err
             );
         }
@@ -497,6 +556,55 @@ impl BackgroundNostrMirror {
         }
     }
 
+    fn is_metadata_only_history_sync(kinds: &[u16]) -> bool {
+        !kinds.is_empty() && kinds.iter().all(|kind| *kind == Kind::Metadata.as_u16())
+    }
+
+    fn history_sync_plan_for(
+        config: &NostrMirrorConfig,
+        authors: usize,
+        kinds: &[u16],
+    ) -> HistorySyncPlan {
+        let author_batch_size = config.author_batch_size.max(1);
+        let per_author_event_limit = config.history_sync_per_author_event_limit.max(1);
+        let relay_page_size = 1_000;
+        let max_relay_pages = 10;
+
+        if Self::is_metadata_only_history_sync(kinds) {
+            return HistorySyncPlan {
+                relay_fetch_mode: RelayFetchMode::AuthorBatches,
+                author_batch_size: author_batch_size.min(METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE),
+                per_author_event_limit: METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT,
+                relay_page_size,
+                max_relay_pages,
+            };
+        }
+
+        if authors > author_batch_size.saturating_mul(LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER) {
+            return HistorySyncPlan {
+                relay_fetch_mode: RelayFetchMode::GlobalRecent,
+                author_batch_size,
+                per_author_event_limit: per_author_event_limit
+                    .min(LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT)
+                    .max(1),
+                relay_page_size,
+                max_relay_pages: LARGE_HISTORY_SYNC_MAX_RELAY_PAGES,
+            };
+        }
+
+        HistorySyncPlan {
+            relay_fetch_mode: RelayFetchMode::AuthorBatches,
+            author_batch_size,
+            per_author_event_limit,
+            relay_page_size,
+            max_relay_pages,
+        }
+    }
+
+    fn history_sync_plan(&self, authors: usize, kinds: &[u16]) -> HistorySyncPlan {
+        Self::history_sync_plan_for(&self.config, authors, kinds)
+    }
+
     async fn history_sync_authors(&self, authors: Vec<String>) -> Result<()> {
         self.history_sync_authors_with_kinds(authors, &self.config.kinds)
             .await
@@ -604,6 +712,7 @@ impl BackgroundNostrMirror {
     ) -> Result<CrawlReport> {
         let mut last_error = None;
         let mut report = None;
+        let plan = self.history_sync_plan(authors.len(), kinds);
         for attempt in 0..3 {
             let mut last_logged_authors = 0usize;
             let bridge = NostrBridge::new(
@@ -615,16 +724,16 @@ impl BackgroundNostrMirror {
                     max_events_seen: None,
                     max_authors: None,
                     max_follow_distance: None,
-                    author_batch_size: self.config.author_batch_size.max(1),
-                    per_author_event_limit: self.config.history_sync_per_author_event_limit.max(1),
+                    author_batch_size: plan.author_batch_size,
+                    per_author_event_limit: plan.per_author_event_limit,
                     per_author_live_bytes: None,
                     fetch_timeout: self.config.fetch_timeout,
                     kinds: Some(kinds.to_vec()),
-                    relay_fetch_mode: RelayFetchMode::AuthorBatches,
+                    relay_fetch_mode: plan.relay_fetch_mode,
                     require_negentropy: self.config.require_negentropy,
                     relay_event_max_size: self.config.relay_event_max_size,
-                    relay_page_size: 1_000,
-                    max_relay_pages: 10,
+                    relay_page_size: plan.relay_page_size,
+                    max_relay_pages: plan.max_relay_pages,
                 },
             );
 
@@ -689,15 +798,24 @@ impl BackgroundNostrMirror {
             .context("sync mirrored social graph state")?;
         self.note_public_events_root_change()?;
         self.note_profile_search_root_change()?;
-        if let Err(err) = self.maybe_publish_event_root(true).await {
+        self.note_profiles_by_pubkey_root_change()?;
+        let (event_result, profile_search_result, profiles_by_pubkey_result) =
+            self.publish_pending_roots(true, true, true).await;
+        if let Err(err) = event_result {
             warn!(
                 "Nostr mirror event-root publish failed after root update: {:#}",
                 err
             );
         }
-        if let Err(err) = self.maybe_publish_profile_search_root(false).await {
+        if let Err(err) = profile_search_result {
             warn!(
                 "Nostr mirror profile-search publish failed after root update: {:#}",
+                err
+            );
+        }
+        if let Err(err) = profiles_by_pubkey_result {
+            warn!(
+                "Nostr mirror profiles-by-pubkey publish failed after root update: {:#}",
                 err
             );
         }
@@ -766,6 +884,7 @@ impl BackgroundNostrMirror {
         let event_count = events.len();
         let previous_event_root = self.graph_store.public_events_root()?;
         let previous_profile_search_root = self.graph_store.profile_search_root()?;
+        let previous_profiles_by_pubkey_root = self.graph_store.profiles_by_pubkey_root()?;
 
         socialgraph::ingest_parsed_events_with_storage_class(
             self.graph_store.as_ref(),
@@ -776,8 +895,11 @@ impl BackgroundNostrMirror {
 
         let next_event_root = self.graph_store.public_events_root()?;
         let next_profile_search_root = self.graph_store.profile_search_root()?;
+        let next_profiles_by_pubkey_root = self.graph_store.profiles_by_pubkey_root()?;
         let event_root_changed = next_event_root != previous_event_root;
         let profile_search_root_changed = next_profile_search_root != previous_profile_search_root;
+        let profiles_by_pubkey_root_changed =
+            next_profiles_by_pubkey_root != previous_profiles_by_pubkey_root;
 
         if event_root_changed {
             self.note_public_events_root_change()?;
@@ -785,16 +907,25 @@ impl BackgroundNostrMirror {
         if profile_search_root_changed {
             self.note_profile_search_root_change()?;
         }
+        if profiles_by_pubkey_root_changed {
+            self.note_profiles_by_pubkey_root_change()?;
+        }
         if event_root_changed {
             self.maybe_publish_event_root(true).await?;
         }
         if profile_search_root_changed {
             self.maybe_publish_profile_search_root(true).await?;
         }
+        if profiles_by_pubkey_root_changed {
+            self.maybe_publish_profiles_by_pubkey_root(true).await?;
+        }
 
         info!(
-            "Nostr mirror flushed live events: events={} event_root_changed={} profile_search_root_changed={}",
-            event_count, event_root_changed, profile_search_root_changed
+            "Nostr mirror flushed live events: events={} event_root_changed={} profile_search_root_changed={} profiles_by_pubkey_root_changed={}",
+            event_count,
+            event_root_changed,
+            profile_search_root_changed,
+            profiles_by_pubkey_root_changed
         );
         Ok(())
     }
@@ -813,6 +944,17 @@ impl BackgroundNostrMirror {
         Self::note_root_change(
             self.config.published_profile_search_tree_name.as_deref(),
             &self.profile_search_publish_state,
+            root,
+        )
+    }
+
+    fn note_profiles_by_pubkey_root_change(&self) -> Result<()> {
+        let root = self.graph_store.profiles_by_pubkey_root()?;
+        Self::note_root_change(
+            self.config
+                .published_profiles_by_pubkey_tree_name
+                .as_deref(),
+            &self.profiles_by_pubkey_publish_state,
             root,
         )
     }
@@ -861,6 +1003,18 @@ impl BackgroundNostrMirror {
         .await
     }
 
+    async fn maybe_publish_profiles_by_pubkey_root(&self, force: bool) -> Result<()> {
+        self.maybe_publish_root(
+            self.config
+                .published_profiles_by_pubkey_tree_name
+                .as_deref(),
+            &self.profiles_by_pubkey_publish_state,
+            "profiles-by-pubkey root",
+            force,
+        )
+        .await
+    }
+
     async fn maybe_publish_root(
         &self,
         tree_name: Option<&str>,
@@ -871,21 +1025,12 @@ impl BackgroundNostrMirror {
         let Some(tree_name) = tree_name else {
             return Ok(());
         };
-        let Some(publish_client) = self.publish_client.as_ref() else {
-            return Ok(());
-        };
-        if !self.has_connected_publish_relay().await {
-            return Ok(());
-        }
 
         let pending_root = {
             let state = publish_state.lock().expect("root publish state");
             let Some(pending_root) = state.pending_root.clone() else {
                 return Ok(());
             };
-            if state.last_published_root.as_ref() == Some(&pending_root) {
-                return Ok(());
-            }
 
             let now = Instant::now();
             let debounce_ready = state.last_changed_at.is_some_and(|changed_at| {
@@ -901,34 +1046,204 @@ impl BackgroundNostrMirror {
             pending_root
         };
 
-        let event = Self::build_public_root_event(tree_name, &pending_root);
-        let output = publish_client
-            .send_event_builder(event)
+        let needs_upload = {
+            let state = publish_state.lock().expect("root publish state");
+            !self.config.blossom_write_servers.is_empty()
+                && state.last_uploaded_root.as_ref() != Some(&pending_root)
+        };
+        if needs_upload {
+            background_blossom_push(
+                self.store.base_path(),
+                &pending_root.to_string(),
+                &self.config.blossom_write_servers,
+            )
             .await
-            .with_context(|| format!("publish {log_label} event"))?;
-        if output.failed.is_empty() && output.success.is_empty() {
-            return Ok(());
+            .with_context(|| format!("upload {log_label} DAG to Blossom"))?;
+
+            let mut state = publish_state.lock().expect("root publish state");
+            if state.pending_root.as_ref() == Some(&pending_root) {
+                state.last_uploaded_root = Some(pending_root.clone());
+                state.last_uploaded_at = Some(Instant::now());
+            }
+        }
+
+        let mut successful_relays = Vec::new();
+        let mut failed_relays = Vec::new();
+        let publish_required =
+            self.publish_client.is_some() && !self.config.publish_relays.is_empty();
+        if publish_required {
+            let Some(publish_client) = self.publish_client.as_ref() else {
+                unreachable!("publish_required implies publish_client");
+            };
+            if !self.has_connected_publish_relay().await {
+                return Ok(());
+            }
+
+            let already_published = {
+                let state = publish_state.lock().expect("root publish state");
+                state.last_published_root.as_ref() == Some(&pending_root)
+            };
+            if !already_published {
+                let publish_relays = self.config.publish_relays.clone();
+                let latest_known_created_at = {
+                    let state = publish_state.lock().expect("root publish state");
+                    state.last_published_created_at
+                };
+                let publish_created_at = next_replaceable_created_at(
+                    Timestamp::now(),
+                    later_timestamp(
+                        latest_known_created_at,
+                        self.latest_root_event_created_at(tree_name).await,
+                    ),
+                );
+                let event = publish_client
+                    .sign_event_builder(Self::build_public_root_event(
+                        tree_name,
+                        &pending_root,
+                        publish_created_at,
+                    ))
+                    .await
+                    .with_context(|| format!("sign {log_label} event"))?;
+                let publish_result = self
+                    .publish_root_event_to_relays(publish_client, &publish_relays, &event)
+                    .await
+                    .with_context(|| format!("publish {log_label} event"))?;
+                successful_relays = publish_result.0;
+                failed_relays = publish_result.1;
+                if successful_relays.is_empty() {
+                    let failure_summary = if failed_relays.is_empty() {
+                        "no publish relays accepted the event".to_string()
+                    } else {
+                        failed_relays.join("; ")
+                    };
+                    anyhow::bail!("no publish relays accepted the event ({failure_summary})");
+                }
+
+                let mut state = publish_state.lock().expect("root publish state");
+                if state.pending_root.as_ref() == Some(&pending_root) {
+                    state.last_published_root = Some(pending_root.clone());
+                    state.last_published_at = Some(Instant::now());
+                    state.last_published_created_at = Some(event.created_at);
+                }
+            }
         }
 
         {
             let mut state = publish_state.lock().expect("root publish state");
             if state.pending_root.as_ref() == Some(&pending_root) {
-                state.last_published_root = Some(pending_root.clone());
-                state.last_published_at = Some(Instant::now());
-                state.dirty_since = None;
+                let upload_satisfied = self.config.blossom_write_servers.is_empty()
+                    || state.last_uploaded_root.as_ref() == Some(&pending_root);
+                let publish_satisfied =
+                    !publish_required || state.last_published_root.as_ref() == Some(&pending_root);
+                if upload_satisfied && publish_satisfied {
+                    state.dirty_since = None;
+                }
             }
         }
 
         info!(
-            "Nostr mirror published {}: tree={} hash={}",
+            "Nostr mirror published {}: tree={} hash={} relays={:?}",
             log_label,
             tree_name,
-            hex::encode(pending_root.hash)
+            hex::encode(pending_root.hash),
+            successful_relays,
         );
+        if !failed_relays.is_empty() {
+            warn!(
+                "Nostr mirror publish had relay failures: tree={} failures={:?}",
+                tree_name, failed_relays
+            );
+        }
         Ok(())
     }
 
-    fn build_public_root_event(tree_name: &str, cid: &hashtree_core::Cid) -> EventBuilder {
+    async fn publish_root_event_to_relays(
+        &self,
+        publish_client: &Client,
+        relays: &[String],
+        event: &Event,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let mut successful_relays = Vec::new();
+        let mut failed_relays = Vec::new();
+
+        for relay in relays {
+            match publish_client
+                .send_event_to([relay.as_str()], event.clone())
+                .await
+            {
+                Ok(output) => {
+                    if output.success.is_empty() {
+                        failed_relays.push(format!("{relay}: relay did not acknowledge publish"));
+                        continue;
+                    }
+                    successful_relays.push(relay.clone());
+                    failed_relays.extend(output.failed.into_iter().map(
+                        |(url, reason)| match reason {
+                            Some(reason) => format!("{url}: {reason}"),
+                            None => format!("{url}: relay rejected publish"),
+                        },
+                    ));
+                }
+                Err(err) => {
+                    failed_relays.push(format!("{relay}: {err}"));
+                }
+            }
+        }
+
+        Ok((successful_relays, failed_relays))
+    }
+
+    async fn latest_root_event_created_at(&self, tree_name: &str) -> Option<Timestamp> {
+        let publish_client = self.publish_client.as_ref()?;
+        let author = self.publish_pubkey?;
+        let events = publish_client
+            .get_events_of(
+                vec![Self::build_public_root_filter(author, tree_name)],
+                EventSource::relays(Some(self.config.fetch_timeout)),
+            )
+            .await
+            .ok()?;
+        events
+            .iter()
+            .filter(|event| Self::matches_public_root_event(event, tree_name))
+            .max_by_key(|event| (event.created_at, event.id))
+            .map(|event| event.created_at)
+    }
+
+    fn build_public_root_filter(author: PublicKey, tree_name: &str) -> Filter {
+        Filter::new()
+            .kind(Kind::Custom(30078))
+            .author(author)
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                vec![tree_name.to_string()],
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                vec!["hashtree".to_string()],
+            )
+            .limit(50)
+    }
+
+    fn matches_public_root_event(event: &Event, tree_name: &str) -> bool {
+        event.kind == Kind::Custom(30078)
+            && event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().is_some_and(|value| value == "d")
+                    && values.get(1).is_some_and(|value| value == tree_name)
+            })
+            && event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().is_some_and(|value| value == "l")
+                    && values.get(1).is_some_and(|value| value == "hashtree")
+            })
+    }
+
+    fn build_public_root_event(
+        tree_name: &str,
+        cid: &hashtree_core::Cid,
+        created_at: Timestamp,
+    ) -> EventBuilder {
         let mut tags = vec![
             Tag::identifier(tree_name.to_string()),
             Tag::custom(
@@ -944,7 +1259,23 @@ impl BackgroundNostrMirror {
             ));
         }
 
-        EventBuilder::new(Kind::Custom(30078), "", tags)
+        EventBuilder::new(Kind::Custom(30078), "", tags).custom_created_at(created_at)
+    }
+}
+
+fn later_timestamp(left: Option<Timestamp>, right: Option<Timestamp>) -> Option<Timestamp> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(std::cmp::max(left, right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn next_replaceable_created_at(now: Timestamp, latest_existing: Option<Timestamp>) -> Timestamp {
+    match latest_existing {
+        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_u64().saturating_add(1)),
+        _ => now,
     }
 }
 

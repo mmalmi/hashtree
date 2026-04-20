@@ -101,41 +101,15 @@ fn seed_default_alias() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
-
-    static CONFIG_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    struct ConfigDirGuard {
-        previous: Option<String>,
-    }
-
-    impl ConfigDirGuard {
-        fn set(path: &Path) -> Self {
-            let previous = std::env::var("HTREE_CONFIG_DIR").ok();
-            std::env::set_var("HTREE_CONFIG_DIR", path);
-            Self { previous }
-        }
-    }
-
-    impl Drop for ConfigDirGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.as_deref() {
-                std::env::set_var("HTREE_CONFIG_DIR", previous);
-            } else {
-                std::env::remove_var("HTREE_CONFIG_DIR");
-            }
-        }
-    }
 
     #[test]
     fn seed_identity_defaults_creates_contacts_and_aliases() {
-        let _lock = CONFIG_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _lock = crate::test_support::test_env_lock()
             .lock()
-            .unwrap();
+            .unwrap_or_else(|err| err.into_inner());
         let temp = TempDir::new().expect("temp dir");
-        let _guard = ConfigDirGuard::set(temp.path());
+        let _guard = crate::test_support::EnvVarGuard::set("HTREE_CONFIG_DIR", temp.path());
 
         let mut config = Config::default();
         config.storage.data_dir = temp.path().join("data").to_string_lossy().to_string();
@@ -169,12 +143,11 @@ mod tests {
 
     #[test]
     fn seed_identity_defaults_respects_existing_contacts_and_opt_out() {
-        let _lock = CONFIG_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _lock = crate::test_support::test_env_lock()
             .lock()
-            .unwrap();
+            .unwrap_or_else(|err| err.into_inner());
         let temp = TempDir::new().expect("temp dir");
-        let _guard = ConfigDirGuard::set(temp.path());
+        let _guard = crate::test_support::EnvVarGuard::set("HTREE_CONFIG_DIR", temp.path());
 
         let data_dir = temp.path().join("data");
         fs::create_dir_all(&data_dir).expect("create data dir");

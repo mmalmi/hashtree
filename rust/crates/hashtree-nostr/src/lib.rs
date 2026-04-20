@@ -680,6 +680,24 @@ impl<S: Store> NostrEventStore<S> {
         .await
     }
 
+    pub async fn list_by_author_lossy(
+        &self,
+        root: Option<&Cid>,
+        pubkey: &str,
+        options: ListEventsOptions,
+    ) -> Result<Vec<StoredNostrEvent>, NostrEventStoreError> {
+        let manifest = self.get_manifest(root).await?;
+        let Some(by_author_time) = manifest.by_author_time.as_ref() else {
+            return Ok(Vec::new());
+        };
+        self.collect_events_lossy(
+            by_author_time,
+            &format!("{}:", validate_lower_hex(pubkey, 64, "pubkey")?),
+            &options,
+        )
+        .await
+    }
+
     pub async fn list_by_author_and_kind(
         &self,
         root: Option<&Cid>,

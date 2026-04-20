@@ -7,21 +7,18 @@ pub use cashu_service::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::test_env_lock;
     use serde_json::json;
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn test_helper_binary_path_prefers_env_override() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         let override_path = temp_dir.path().join("custom-helper");
         std::fs::write(&override_path, b"").unwrap();
@@ -37,7 +34,9 @@ mod tests {
 
     #[test]
     fn test_helper_binary_path_falls_back_to_sibling_binary() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         env::remove_var(CASHU_HELPER_ENV);
         env::remove_var(CARGO_HELPER_ENV);
 
@@ -55,7 +54,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_cashu_helper_client_send_and_receive_json() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         env::remove_var(CARGO_HELPER_ENV);
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -109,7 +110,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_cashu_helper_client_queries_mint_balance_json() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         env::remove_var(CARGO_HELPER_ENV);
 
         let temp_dir = tempfile::tempdir().unwrap();

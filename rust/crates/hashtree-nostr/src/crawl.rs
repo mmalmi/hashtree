@@ -11,6 +11,7 @@ use nostr_sdk::{
 use nostr_social_graph::SocialGraphBackend;
 
 const NEGENTROPY_FETCH_CHUNK_SIZE: usize = 256;
+const METADATA_KIND: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayFetchMode {
     AuthorBatches,
@@ -152,6 +153,12 @@ struct BatchCrawlReport {
     events_seen: usize,
     events: Vec<StoredNostrEvent>,
     live_bytes_selected: u64,
+}
+
+#[derive(Debug, Default)]
+struct ProfileBatchReport {
+    events_seen: usize,
+    events_by_author: BTreeMap<String, Vec<StoredNostrEvent>>,
 }
 
 #[derive(Debug, Default)]
@@ -610,7 +617,7 @@ impl<S: Store> NostrBridge<S> {
         mut state: GlobalRecentState,
         on_progress: &mut impl FnMut(&CrawlReport),
     ) -> Result<CrawlReport> {
-        let authors = authors.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let author_set = authors.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let mut known_ids = state
             .retained_by_author
             .values()
@@ -622,7 +629,31 @@ impl<S: Store> NostrBridge<S> {
             .filter(|events| !events.is_empty())
             .count();
         let mut failed_relays = BTreeSet::<String>::new();
+        let mut relay_negentropy_support = BTreeMap::<String, bool>::new();
         let mut events_seen = 0usize;
+
+        self.hydrate_global_recent_profiles(
+            client,
+            authors,
+            &mut state,
+            &mut known_ids,
+            &mut authors_processed,
+            &mut relay_negentropy_support,
+            &mut failed_relays,
+            &mut events_seen,
+            on_progress,
+        )
+        .await?;
+        if self.reached_events_seen_limit(events_seen) {
+            return Ok(CrawlReport {
+                root: state.current_root,
+                authors_considered: authors.len(),
+                authors_processed,
+                events_seen,
+                events_selected: state.events_selected,
+                live_bytes_selected: state.live_bytes_selected,
+            });
+        }
 
         for relay in &self.config.relays {
             if failed_relays.contains(relay) {
@@ -649,7 +680,7 @@ impl<S: Store> NostrBridge<S> {
                 }
 
                 let mut min_created_at = u64::MAX;
-                let mut pending_apply = Vec::new();
+                let mut incoming_by_author = BTreeMap::<String, Vec<StoredNostrEvent>>::new();
                 for event in events {
                     min_created_at = min_created_at.min(event.created_at.as_u64());
                     if event.kind.is_ephemeral() {
@@ -657,49 +688,23 @@ impl<S: Store> NostrBridge<S> {
                     }
 
                     let stored = stored_event_from_nostr(&event);
-                    if !authors.contains(stored.pubkey.as_str()) || !self.kind_allowed(stored.kind)
+                    if !author_set.contains(stored.pubkey.as_str())
+                        || !self.kind_allowed(stored.kind)
                     {
                         continue;
                     }
-
-                    let retained = state
-                        .retained_by_author
+                    incoming_by_author
                         .entry(stored.pubkey.clone())
-                        .or_default();
-                    let was_empty = retained.is_empty();
-                    let old_len = retained.len();
-                    let old_live_bytes = self.encoded_events_size(retained)?;
-                    let mut merged = BTreeMap::<String, StoredNostrEvent>::new();
-                    for existing in retained.drain(..) {
-                        merged.insert(existing.id.clone(), existing);
-                    }
-                    merged.insert(stored.id.clone(), stored);
-
-                    let selected = self.select_author_events(merged.into_values().collect())?;
-                    let selected_live_bytes = self.encoded_events_size(&selected)?;
-                    let mut newly_retained = Vec::new();
-                    for selected_event in &selected {
-                        if !known_ids.contains(&selected_event.id) {
-                            known_ids.insert(selected_event.id.clone());
-                            newly_retained.push(selected_event.clone());
-                        }
-                    }
-
-                    state.events_selected = state
-                        .events_selected
-                        .saturating_sub(old_len)
-                        .saturating_add(selected.len());
-                    state.live_bytes_selected = state
-                        .live_bytes_selected
-                        .saturating_sub(old_live_bytes)
-                        .saturating_add(selected_live_bytes);
-                    if was_empty && !selected.is_empty() {
-                        authors_processed = authors_processed.saturating_add(1);
-                    }
-                    *retained = selected;
-                    pending_apply.extend(newly_retained);
+                        .or_default()
+                        .push(stored);
                 }
 
+                let pending_apply = self.merge_author_events_into_state(
+                    &mut state,
+                    incoming_by_author,
+                    &mut known_ids,
+                    &mut authors_processed,
+                )?;
                 if !pending_apply.is_empty() {
                     state.current_root = self
                         .event_store
@@ -748,10 +753,17 @@ impl<S: Store> NostrBridge<S> {
         if let Some(kinds) = &self.config.kinds {
             filter = filter.kinds(kinds.iter().copied().map(Kind::from));
         }
-        let relay_limit = self
+        let mut relay_limit = self
             .config
             .author_batch_size
             .saturating_mul(self.config.per_author_event_limit);
+        let relay_page_budget = self
+            .config
+            .relay_page_size
+            .saturating_mul(self.config.max_relay_pages.max(1));
+        if relay_page_budget > 0 {
+            relay_limit = relay_limit.min(relay_page_budget);
+        }
         if relay_limit > 0 {
             filter = filter.limit(relay_limit);
         }
@@ -811,28 +823,234 @@ impl<S: Store> NostrBridge<S> {
             .collect()
     }
 
+    fn local_items_for_batch_by_kind<'a, I>(
+        &self,
+        known_events: I,
+        author_batch: &[String],
+        kind: u32,
+    ) -> Vec<(EventId, Timestamp)>
+    where
+        I: Iterator<Item = &'a StoredNostrEvent>,
+    {
+        let authors = author_batch
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+
+        known_events
+            .filter(|event| {
+                authors.contains(event.pubkey.as_str())
+                    && event.kind == kind
+                    && self.kind_allowed(event.kind)
+            })
+            .filter_map(|event| {
+                let event_id = EventId::parse(&event.id).ok()?;
+                Some((event_id, Timestamp::from_secs(event.created_at)))
+            })
+            .collect()
+    }
+
     async fn load_retained_events(
         &self,
         root: Option<&Cid>,
         author: &str,
     ) -> Result<Vec<StoredNostrEvent>> {
-        match self
-            .event_store
-            .list_by_author(root, author, ListEventsOptions::default())
+        self.event_store
+            .list_by_author_lossy(root, author, ListEventsOptions::default())
             .await
-        {
-            Ok(events) => Ok(events),
-            Err(NostrEventStoreError::Validation(message))
-                if message == "stored nostr event blob is missing" =>
-            {
-                eprintln!(
-                    "Ignoring stale indexed event references for author {}: {}",
-                    author, message
-                );
-                Ok(Vec::new())
+            .map_err(Into::into)
+    }
+
+    fn merge_author_events_into_state(
+        &self,
+        state: &mut GlobalRecentState,
+        incoming_by_author: BTreeMap<String, Vec<StoredNostrEvent>>,
+        known_ids: &mut BTreeSet<String>,
+        authors_processed: &mut usize,
+    ) -> Result<Vec<StoredNostrEvent>> {
+        let mut pending_apply = Vec::new();
+
+        for (author, incoming) in incoming_by_author {
+            let retained = state.retained_by_author.entry(author).or_default();
+            let was_empty = retained.is_empty();
+            let old_len = retained.len();
+            let old_live_bytes = self.encoded_events_size(retained)?;
+
+            let mut merged = BTreeMap::<String, StoredNostrEvent>::new();
+            for existing in retained.drain(..) {
+                merged.insert(existing.id.clone(), existing);
             }
-            Err(err) => Err(err.into()),
+            for event in incoming {
+                merged.insert(event.id.clone(), event);
+            }
+
+            let selected = self.select_author_events(merged.into_values().collect())?;
+            let selected_live_bytes = self.encoded_events_size(&selected)?;
+
+            for selected_event in &selected {
+                if known_ids.insert(selected_event.id.clone()) {
+                    pending_apply.push(selected_event.clone());
+                }
+            }
+
+            state.events_selected = state
+                .events_selected
+                .saturating_sub(old_len)
+                .saturating_add(selected.len());
+            state.live_bytes_selected = state
+                .live_bytes_selected
+                .saturating_sub(old_live_bytes)
+                .saturating_add(selected_live_bytes);
+            if was_empty && !selected.is_empty() {
+                *authors_processed = authors_processed.saturating_add(1);
+            }
+            *retained = selected;
         }
+
+        Ok(pending_apply)
+    }
+
+    async fn hydrate_global_recent_profiles(
+        &self,
+        client: &Client,
+        authors: &[String],
+        state: &mut GlobalRecentState,
+        known_ids: &mut BTreeSet<String>,
+        authors_processed: &mut usize,
+        relay_negentropy_support: &mut BTreeMap<String, bool>,
+        failed_relays: &mut BTreeSet<String>,
+        events_seen: &mut usize,
+        on_progress: &mut impl FnMut(&CrawlReport),
+    ) -> Result<()> {
+        if !self.kind_allowed(METADATA_KIND) {
+            return Ok(());
+        }
+
+        let authors_missing_profiles = authors
+            .iter()
+            .filter(|author| {
+                !state
+                    .retained_by_author
+                    .get(*author)
+                    .is_some_and(|events| events.iter().any(|event| event.kind == METADATA_KIND))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if authors_missing_profiles.is_empty() {
+            return Ok(());
+        }
+
+        for author_batch in authors_missing_profiles.chunks(self.config.author_batch_size.max(1)) {
+            let batch = self
+                .crawl_profile_batch(
+                    client,
+                    author_batch,
+                    state
+                        .retained_by_author
+                        .values()
+                        .flat_map(|events| events.iter()),
+                    relay_negentropy_support,
+                    failed_relays,
+                )
+                .await?;
+
+            *events_seen = events_seen.saturating_add(batch.events_seen);
+            let pending_apply = self.merge_author_events_into_state(
+                state,
+                batch.events_by_author,
+                known_ids,
+                authors_processed,
+            )?;
+            if !pending_apply.is_empty() {
+                state.current_root = self
+                    .event_store
+                    .build(state.current_root.as_ref(), pending_apply)
+                    .await?;
+            }
+
+            on_progress(&CrawlReport {
+                root: state.current_root.clone(),
+                authors_considered: authors.len(),
+                authors_processed: *authors_processed,
+                events_seen: *events_seen,
+                events_selected: state.events_selected,
+                live_bytes_selected: state.live_bytes_selected,
+            });
+
+            if self.reached_events_seen_limit(*events_seen) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn crawl_profile_batch<'a, I>(
+        &self,
+        client: &Client,
+        author_batch: &[String],
+        known_events: I,
+        relay_negentropy_support: &mut BTreeMap<String, bool>,
+        failed_relays: &mut BTreeSet<String>,
+    ) -> Result<ProfileBatchReport>
+    where
+        I: Iterator<Item = &'a StoredNostrEvent>,
+    {
+        let pubkeys: Vec<PublicKey> = author_batch
+            .iter()
+            .filter_map(|author| author.parse::<PublicKey>().ok())
+            .collect();
+        if pubkeys.is_empty() {
+            return Ok(ProfileBatchReport::default());
+        }
+
+        let filter = Filter::new()
+            .authors(pubkeys)
+            .kind(Kind::Metadata)
+            .limit(author_batch.len().saturating_mul(2).max(1));
+        let local_items =
+            self.local_items_for_batch_by_kind(known_events, author_batch, METADATA_KIND);
+        let mut fetched_by_author = BTreeMap::<String, Vec<StoredNostrEvent>>::new();
+        let mut events_seen = 0usize;
+
+        for relay in &self.config.relays {
+            if failed_relays.contains(relay) {
+                continue;
+            }
+            let relay_support = relay_negentropy_support.get(relay).copied();
+            let fetched_from_relay = match self
+                .fetch_events_from_relay(
+                    client,
+                    relay,
+                    filter.clone(),
+                    local_items.clone(),
+                    relay_support,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    eprintln!("Skipping relay {relay}: {err}");
+                    failed_relays.insert(relay.clone());
+                    continue;
+                }
+            };
+            relay_negentropy_support.insert(relay.clone(), fetched_from_relay.supports_negentropy);
+            events_seen = events_seen.saturating_add(fetched_from_relay.events_seen);
+            for event in fetched_from_relay.events {
+                if event.kind == METADATA_KIND && self.kind_allowed(event.kind) {
+                    fetched_by_author
+                        .entry(event.pubkey.clone())
+                        .or_default()
+                        .push(event);
+                }
+            }
+        }
+
+        Ok(ProfileBatchReport {
+            events_seen,
+            events_by_author: fetched_by_author,
+        })
     }
 
     async fn fetch_events_from_relay(
@@ -978,6 +1196,12 @@ impl<S: Store> NostrBridge<S> {
         event_limit: usize,
         live_byte_limit: Option<u64>,
     ) -> Result<Vec<StoredNostrEvent>> {
+        let sticky_events = self.select_sticky_author_events(&events);
+        let sticky_ids = sticky_events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+        events.retain(|event| !sticky_ids.contains(&event.id));
         events.sort_by(|left, right| {
             self.policy
                 .priority(right)
@@ -987,8 +1211,11 @@ impl<S: Store> NostrBridge<S> {
         });
 
         if let Some(max_live_bytes) = live_byte_limit {
-            let mut selected = Vec::new();
-            let mut live_bytes_selected = 0u64;
+            let mut selected = sticky_events.clone();
+            let mut live_bytes_selected = self.encoded_events_size(&selected)?;
+            if live_bytes_selected > max_live_bytes {
+                return Ok(selected);
+            }
             for event in events {
                 let encoded_len = self.event_store.encode_event(&event)?.len() as u64;
                 if live_bytes_selected.saturating_add(encoded_len) > max_live_bytes {
@@ -996,13 +1223,30 @@ impl<S: Store> NostrBridge<S> {
                 }
                 live_bytes_selected = live_bytes_selected.saturating_add(encoded_len);
                 selected.push(event);
+                if selected.len().saturating_sub(sticky_events.len()) >= event_limit {
+                    break;
+                }
             }
-            selected.truncate(event_limit);
             return Ok(selected);
         }
 
-        events.truncate(event_limit);
-        Ok(events)
+        let mut selected = sticky_events;
+        selected.extend(events.into_iter().take(event_limit));
+        Ok(selected)
+    }
+
+    fn select_sticky_author_events(&self, events: &[StoredNostrEvent]) -> Vec<StoredNostrEvent> {
+        let latest_metadata = events
+            .iter()
+            .filter(|event| event.kind == METADATA_KIND)
+            .cloned()
+            .max_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+
+        latest_metadata.into_iter().collect()
     }
 
     fn apply_live_byte_cap_from(

@@ -178,21 +178,22 @@ export class MeshQueryRouter {
       requester.onForwardedSuppressed?.();
       return;
     }
-    if (begin === 'rate_limited') {
-      return;
-    }
 
-    const peerQueryActive = this.startPeerQuery(hashKey, req.h, requesterId, req.htl ?? MAX_HTL);
+    const shouldAttemptPeerQuery = this.shouldAttemptPeerQuery(requesterId, req.htl ?? MAX_HTL);
+    const peerQueryAllowed = !shouldAttemptPeerQuery || this.rateLimiter.allow(requesterId);
+    const peerQueryActive = peerQueryAllowed
+      ? this.startPeerQuery(hashKey, req.h, requesterId, req.htl ?? MAX_HTL)
+      : false;
     const upstreamActive = this.startUpstreamFetch(hashKey, req.h);
-    const forwarded = peerQueryActive ? 1 : this.forwardRequest(requesterId, req.h, req.htl ?? MAX_HTL);
-    if (forwarded > 0 || upstreamActive) {
+    const forwarded = peerQueryAllowed && !peerQueryActive
+      ? this.forwardRequest(requesterId, req.h, req.htl ?? MAX_HTL)
+      : 0;
+    if (peerQueryActive || forwarded > 0 || upstreamActive) {
       requester.onForwardedRequest?.();
       return;
     }
 
-    if (!upstreamActive) {
-      this.clearQuery(hashKey);
-    }
+    this.clearQuery(hashKey);
   }
 
   async resolve(hash: Uint8Array, data: Uint8Array): Promise<void> {
@@ -213,15 +214,11 @@ export class MeshQueryRouter {
     }
   }
 
-  private beginQuery(hashKey: string, requesterId: string): 'new' | 'suppressed' | 'rate_limited' {
+  private beginQuery(hashKey: string, requesterId: string): 'new' | 'suppressed' {
     const existing = this.inFlightByHash.get(hashKey);
     if (existing) {
       this.trackRequester(hashKey, existing.requesterIds, requesterId);
       return 'suppressed';
-    }
-
-    if (!this.rateLimiter.allow(requesterId)) {
-      return 'rate_limited';
     }
 
     const requesterIds = new Set<string>();
@@ -232,6 +229,18 @@ export class MeshQueryRouter {
 
     this.inFlightByHash.set(hashKey, { requesterIds, timeoutId });
     return 'new';
+  }
+
+  private shouldAttemptPeerQuery(requesterId: string, htl: number): boolean {
+    if (!shouldForward(htl)) {
+      return false;
+    }
+    for (const peer of this.peers.values()) {
+      if (peer.peerId !== requesterId && peer.canSend()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private clearQuery(hashKey: string): string[] {

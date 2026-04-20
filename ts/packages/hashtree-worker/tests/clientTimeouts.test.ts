@@ -5,32 +5,34 @@ import type { WorkerRequest, WorkerResponse } from '../src/protocol.js';
 class FakeWorker {
   onmessage: ((event: MessageEvent<WorkerResponse>) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
+  postedMessages: Array<{ message: WorkerRequest; transfer?: Transferable[] }> = [];
   private streamCounter = 0;
 
-  postMessage(message: WorkerRequest, _transfer?: Transferable[]): void {
+  postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
+    this.postedMessages.push({ message, transfer });
     if (message.type === 'init') {
-      this.emit({ type: 'ready', id: message.id });
+      this.emitMessage({ type: 'ready', id: message.id });
       return;
     }
 
     if (message.type === 'beginPutBlobStream') {
       this.streamCounter += 1;
-      this.emit({ type: 'blobStreamStarted', id: message.id, streamId: `stream-${this.streamCounter}` });
+      this.emitMessage({ type: 'blobStreamStarted', id: message.id, streamId: `stream-${this.streamCounter}` });
       return;
     }
 
     if (message.type === 'appendPutBlobStream' || message.type === 'cancelPutBlobStream') {
-      this.emit({ type: 'void', id: message.id });
+      this.emitMessage({ type: 'void', id: message.id });
       return;
     }
 
     if (message.type === 'finishPutBlobStream') {
-      this.emit({ type: 'blobStored', id: message.id, hashHex: 'abc', nhash: 'nhash1abc' });
+      this.emitMessage({ type: 'blobStored', id: message.id, hashHex: 'abc', nhash: 'nhash1abc' });
       return;
     }
 
     if (message.type === 'close') {
-      this.emit({ type: 'void', id: message.id });
+      this.emitMessage({ type: 'void', id: message.id });
     }
   }
 
@@ -38,7 +40,7 @@ class FakeWorker {
     // no-op for tests
   }
 
-  private emit(message: WorkerResponse): void {
+  emitMessage(message: WorkerResponse): void {
     this.onmessage?.({ data: message } as MessageEvent<WorkerResponse>);
   }
 }
@@ -91,6 +93,38 @@ describe('HashtreeWorkerClient timeouts', () => {
     expect(stored).toEqual({ hashHex: 'abc', nhash: 'nhash1abc' });
 
     await client.cancelPutBlobStream(streamId);
+    await client.close();
+  });
+
+  it('clones p2p fetch handler bytes before transferring them to the worker', async () => {
+    const worker = new FakeWorker();
+    const WorkerFactory = class {
+      constructor() {
+        return worker;
+      }
+    } as unknown as new () => Worker;
+    const client = new HashtreeWorkerClient(WorkerFactory);
+    const sourceData = new Uint8Array([1, 2, 3]);
+
+    client.setP2PFetchHandler(async () => sourceData);
+    await client.init();
+
+    worker.emitMessage({
+      type: 'p2pFetch',
+      requestId: 'req-1',
+      hashHex: 'deadbeef',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const posted = worker.postedMessages.find((entry) => entry.message.type === 'p2pFetchResult');
+    expect(posted?.message.type).toBe('p2pFetchResult');
+    expect(sourceData.buffer.byteLength).toBe(3);
+    if (posted?.message.type === 'p2pFetchResult' && posted.message.data) {
+      expect(posted.message.data).toEqual(new Uint8Array([1, 2, 3]));
+      expect(posted.message.data).not.toBe(sourceData);
+    }
+
     await client.close();
   });
 });

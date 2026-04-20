@@ -1862,3 +1862,86 @@ async fn global_recent_scan_reuses_existing_root_events_before_fetching() -> io:
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_recent_scan_keeps_latest_metadata_available_for_feed_authors() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = EventBuilder::new(
+        Kind::ContactList,
+        "",
+        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag")],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .to_event(&root_keys)
+    .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let alice_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Alice"}"#, [])
+        .custom_created_at(Timestamp::from_secs(20))
+        .to_event(&alice_keys)
+        .expect("alice profile");
+    let alice_note = EventBuilder::new(Kind::TextNote, "alice note", [])
+        .custom_created_at(Timestamp::from_secs(199))
+        .to_event(&alice_keys)
+        .expect("alice note");
+    let bob_note = EventBuilder::new(Kind::TextNote, "bob noise", [])
+        .custom_created_at(Timestamp::from_secs(200))
+        .to_event(&bob_keys)
+        .expect("bob note");
+
+    let publisher = Client::new(Keys::generate());
+    publisher.add_relay(&relay_url).await.expect("add relay");
+    publisher.connect().await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    for event in [&alice_profile, &alice_note, &bob_note] {
+        publisher
+            .send_event(event.clone())
+            .await
+            .expect("publish test event");
+    }
+
+    let store = Arc::new(MemoryStore::new());
+    let bridge = NostrBridge::new(
+        store.clone(),
+        CrawlConfig {
+            relays: vec![relay_url],
+            relay_fetch_mode: RelayFetchMode::GlobalRecent,
+            relay_page_size: 2,
+            max_relay_pages: 1,
+            per_author_event_limit: 1,
+            kinds: Some(vec![0, 1]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    let root = report.root.expect("index root");
+    let retained = NostrEventStore::new(store)
+        .list_by_author(
+            Some(&root),
+            &alice_keys.public_key().to_hex(),
+            ListEventsOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list retained");
+
+    assert_eq!(report.events_selected, 2);
+    assert_eq!(retained.len(), 2);
+    assert!(retained.iter().any(|event| event.kind == 0));
+    assert!(retained
+        .iter()
+        .any(|event| event.id == alice_note.id.to_hex()));
+
+    Ok(())
+}

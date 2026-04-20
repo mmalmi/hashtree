@@ -13,6 +13,8 @@ use hashtree_lmdb::LmdbBlobStore;
 use heed::types::*;
 use heed::{Database, EnvOpenOptions};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "s3")]
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,7 +25,7 @@ mod upload;
 mod maintenance;
 mod retention;
 
-pub use maintenance::VerifyResult;
+pub use maintenance::{compact_lmdb_environments_under, CompactResult, VerifyResult};
 pub use retention::{PinnedItem, StorageByPriority, StorageStats, TreeMeta};
 
 /// Priority levels for tree eviction
@@ -96,7 +98,10 @@ impl LocalStore {
         Self::new_unbounded(path, backend)
     }
 
-    /// Create a new local store with an explicit LMDB map size when using the LMDB backend.
+    /// Create a new local store with an explicit LMDB logical size cap when using the LMDB backend.
+    ///
+    /// The requested size is used for both the LMDB map and the store's built-in
+    /// byte quota, so standalone blob envs can evict instead of growing forever.
     pub fn new_with_lmdb_map_size<P: AsRef<Path>>(
         path: P,
         backend: &StorageBackend,
@@ -109,11 +114,9 @@ impl LocalStore {
                 Some(map_size_bytes) => {
                     std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
                     remove_stale_fs_blob_shards(path.as_ref())?;
-                    let map_size = usize::try_from(map_size_bytes).map_err(|_| {
-                        StoreError::Other("LMDB map size exceeds usize".to_string())
-                    })?;
-                    Ok(LocalStore::Lmdb(LmdbBlobStore::with_map_size(
-                        path, map_size,
+                    Ok(LocalStore::Lmdb(LmdbBlobStore::with_max_bytes(
+                        path,
+                        map_size_bytes,
                     )?))
                 }
                 None => {
@@ -287,6 +290,34 @@ pub struct StorageRouter {
 }
 
 impl StorageRouter {
+    #[cfg(feature = "s3")]
+    fn run_s3_future_sync<F, T>(future: F) -> Result<T, StoreError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::Builder::new()
+                .name("storage-s3-sync".to_string())
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build storage s3 sync runtime")
+                        .block_on(future)
+                })
+                .map_err(|err| StoreError::Other(format!("spawn S3 sync helper thread: {err}")))?
+                .join()
+                .map_err(|_| StoreError::Other("S3 sync helper thread panicked".to_string()));
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| StoreError::Other(format!("build storage s3 sync runtime: {err}")))?;
+        Ok(runtime.block_on(future))
+    }
+
     /// Create router with local storage only
     pub fn new(local: Arc<LocalStore>) -> Self {
         Self {
@@ -409,21 +440,22 @@ impl StorageRouter {
         // Always write to local first
         let is_new = self.local.put_sync(hash, data)?;
 
-        // Queue S3 upload if configured (non-blocking)
-        // Always upload to S3 (even if not new locally) to ensure S3 has all blobs
+        // Queue S3 upload only for newly inserted blobs.
+        // Existing local blobs were already persisted or are handled by explicit repair/push flows.
         #[cfg(feature = "s3")]
-        if let Some(ref tx) = self.sync_tx {
-            tracing::info!(
-                "Queueing S3 upload for {} ({} bytes, is_new={})",
-                crate::storage::to_hex(&hash)[..16].to_string(),
-                data.len(),
-                is_new
-            );
-            if let Err(e) = tx.send(S3SyncMessage::Upload {
-                hash,
-                data: data.to_vec(),
-            }) {
-                tracing::error!("Failed to queue S3 upload: {}", e);
+        if is_new {
+            if let Some(ref tx) = self.sync_tx {
+                tracing::debug!(
+                    "Queueing S3 upload for {} ({} bytes)",
+                    crate::storage::to_hex(&hash)[..16].to_string(),
+                    data.len(),
+                );
+                if let Err(e) = tx.send(S3SyncMessage::Upload {
+                    hash,
+                    data: data.to_vec(),
+                }) {
+                    tracing::error!("Failed to queue S3 upload: {}", e);
+                }
             }
         }
 
@@ -432,15 +464,25 @@ impl StorageRouter {
 
     /// Store multiple blobs with a single local batch write when supported.
     pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        #[cfg(feature = "s3")]
+        let pending_uploads = if self.sync_tx.is_some() {
+            let mut pending = Vec::new();
+            for (hash, data) in items {
+                if !self.local.exists(hash)? {
+                    pending.push((*hash, data.clone()));
+                }
+            }
+            pending
+        } else {
+            Vec::new()
+        };
+
         let inserted = self.local.put_many_sync(items)?;
 
         #[cfg(feature = "s3")]
         if let Some(ref tx) = self.sync_tx {
-            for (hash, data) in items {
-                if let Err(e) = tx.send(S3SyncMessage::Upload {
-                    hash: *hash,
-                    data: data.clone(),
-                }) {
+            for (hash, data) in pending_uploads {
+                if let Err(e) = tx.send(S3SyncMessage::Upload { hash, data }) {
                     tracing::error!("Failed to queue S3 upload: {}", e);
                 }
             }
@@ -460,22 +502,36 @@ impl StorageRouter {
         #[cfg(feature = "s3")]
         if let (Some(ref client), Some(ref bucket)) = (&self.s3_client, &self.s3_bucket) {
             let key = format!("{}{}.bin", self.s3_prefix, to_hex(hash));
+            let client = client.clone();
+            let bucket = bucket.clone();
 
-            match sync_block_on(async { client.get_object().bucket(bucket).key(&key).send().await })
-            {
-                Ok(output) => {
-                    if let Ok(body) = sync_block_on(output.body.collect()) {
-                        let data = body.into_bytes().to_vec();
-                        // Cache locally for future reads
-                        let _ = self.local.put_sync(*hash, &data);
-                        return Ok(Some(data));
+            match Self::run_s3_future_sync(async move {
+                client.get_object().bucket(bucket).key(key).send().await
+            }) {
+                Ok(Ok(output)) => {
+                    match Self::run_s3_future_sync(async move { output.body.collect().await }) {
+                        Ok(Ok(body)) => {
+                            let data = body.into_bytes().to_vec();
+                            // Cache locally for future reads
+                            let _ = self.local.put_sync(*hash, &data);
+                            return Ok(Some(data));
+                        }
+                        Ok(Err(err)) => {
+                            tracing::warn!("S3 body collect failed: {}", err);
+                        }
+                        Err(err) => {
+                            tracing::warn!("S3 body collect runtime failed: {}", err);
+                        }
                     }
                 }
-                Err(e) => {
-                    let service_err = e.into_service_error();
+                Ok(Err(err)) => {
+                    let service_err = err.into_service_error();
                     if !service_err.is_no_such_key() {
                         tracing::warn!("S3 get failed: {}", service_err);
                     }
+                }
+                Err(err) => {
+                    tracing::warn!("S3 get runtime failed: {}", err);
                 }
             }
         }
@@ -494,16 +550,21 @@ impl StorageRouter {
         #[cfg(feature = "s3")]
         if let (Some(ref client), Some(ref bucket)) = (&self.s3_client, &self.s3_bucket) {
             let key = format!("{}{}.bin", self.s3_prefix, to_hex(hash));
+            let client = client.clone();
+            let bucket = bucket.clone();
 
-            match sync_block_on(async {
+            match Self::run_s3_future_sync(async move {
                 client.head_object().bucket(bucket).key(&key).send().await
             }) {
-                Ok(_) => return Ok(true),
-                Err(e) => {
-                    let service_err = e.into_service_error();
+                Ok(Ok(_)) => return Ok(true),
+                Ok(Err(err)) => {
+                    let service_err = err.into_service_error();
                     if !service_err.is_not_found() {
                         tracing::warn!("S3 head failed: {}", service_err);
                     }
+                }
+                Err(err) => {
+                    tracing::warn!("S3 head runtime failed: {}", err);
                 }
             }
         }
@@ -1615,7 +1676,6 @@ impl crate::webrtc::ContentStore for HashtreeStore {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "lmdb")]
     use super::*;
     #[cfg(feature = "lmdb")]
     use tempfile::TempDir;
@@ -1748,6 +1808,50 @@ mod tests {
         );
         assert!(store.is_pinned(&new_root)?);
         assert!(store.get_tree_meta(&new_root)?.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn async_store_s3_fallback_does_not_reenter_futures_executor() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let local = Arc::new(LocalStore::new(
+            temp.path().join("blobs"),
+            &StorageBackend::Fs,
+        )?);
+
+        let outcome = std::panic::catch_unwind(|| {
+            sync_block_on(async {
+                let aws_config = aws_config::from_env()
+                    .region(aws_sdk_s3::config::Region::new("auto"))
+                    .load()
+                    .await;
+                let s3_client = aws_sdk_s3::Client::from_conf(
+                    aws_sdk_s3::config::Builder::from(&aws_config)
+                        .endpoint_url("http://127.0.0.1:9")
+                        .force_path_style(true)
+                        .build(),
+                );
+
+                let router = StorageRouter {
+                    local,
+                    s3_client: Some(s3_client),
+                    s3_bucket: Some("test-bucket".to_string()),
+                    s3_prefix: String::new(),
+                    sync_tx: None,
+                };
+                let hash = [0u8; 32];
+
+                let _ = Store::has(&router, &hash).await;
+                let _ = Store::get(&router, &hash).await;
+            });
+        });
+
+        assert!(
+            outcome.is_ok(),
+            "S3-backed async store methods should not panic inside futures::block_on"
+        );
 
         Ok(())
     }

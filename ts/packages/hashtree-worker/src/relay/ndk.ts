@@ -39,6 +39,45 @@ let onEoseCallback: ((subId: string) => void) | null = null;
 
 // Active subscriptions
 const subscriptions = new Map<string, ReturnType<NDK['subscribe']>>();
+const RELAY_PUBLISH_TIMEOUT_MS = 4000;
+
+function normalizeRelayUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function getConnectedRelays(): Array<{ url: string; publish: (event: NDKEvent) => Promise<void> }> {
+  if (!ndk?.pool) {
+    return [];
+  }
+
+  const relaySet = ndk.pool.connectedRelays();
+  if (!relaySet || relaySet.size === 0) {
+    return [];
+  }
+
+  return Array.from(relaySet).map((relay) => ({
+    url: normalizeRelayUrl(relay.url),
+    publish: async (event: NDKEvent) => {
+      await relay.publish(event);
+    },
+  }));
+}
 
 /**
  * Load nostr-wasm from public wasm file (not base64 inlined)
@@ -276,7 +315,28 @@ export async function publish(event: SignedEvent): Promise<void> {
     sig: event.sig,
   });
 
-  await ndkEvent.publish();
+  const connectedRelays = getConnectedRelays();
+  if (connectedRelays.length === 0) {
+    throw new Error('No connected relays available for publish');
+  }
+
+  const publishResults = await Promise.allSettled(
+    connectedRelays.map(async (relay) => {
+      await withTimeout(
+        relay.publish(ndkEvent),
+        RELAY_PUBLISH_TIMEOUT_MS,
+        `Publish to ${relay.url}`,
+      );
+      return relay.url;
+    }),
+  );
+
+  if (!publishResults.some((result) => result.status === 'fulfilled')) {
+    const firstFailure = publishResults.find((result) => result.status === 'rejected');
+    throw firstFailure?.reason instanceof Error
+      ? firstFailure.reason
+      : new Error('Failed to publish to any connected relay');
+  }
 
   // Dispatch to local subscriptions that match this event
   // NDK doesn't echo published events back to sender, so we do it locally
@@ -361,7 +421,7 @@ export async function setRelays(relays: string[]): Promise<void> {
       console.warn('[Worker NDK] Connect timeout/error, proceeding anyway:', e);
     });
 
-    console.log('[Worker NDK] Relays updated, connected to', relays.length, 'relays');
+    console.log('[Worker NDK] Relays updated, connected to', getConnectedRelays().length, 'relays');
   } catch (e) {
     console.error('[Worker NDK] Error in setRelays:', e);
   }
@@ -377,7 +437,7 @@ export function getRelayStats(): { url: string; connected: boolean; eventsReceiv
 
   for (const relay of ndk.pool.relays.values()) {
     stats.push({
-      url: relay.url,
+      url: normalizeRelayUrl(relay.url),
       connected: relay.status >= 5, // NDKRelayStatus.CONNECTED = 5
       eventsReceived: 0, // TODO: track this
       eventsSent: 0,

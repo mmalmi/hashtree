@@ -870,6 +870,7 @@ pub fn generate_auth_cookie() -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{test_env_lock, EnvVarGuard};
     use tempfile::TempDir;
 
     #[test]
@@ -1071,10 +1072,11 @@ chunk_target_bytes = 65536
 
     #[test]
     fn test_auth_cookie_generation() -> Result<()> {
+        let _lock = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let temp_dir = TempDir::new()?;
-
-        // Mock the cookie path
-        std::env::set_var("HOME", temp_dir.path());
+        let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", temp_dir.path());
 
         let (username, password) = generate_auth_cookie()?;
 

@@ -62,6 +62,8 @@ class MeshQuerySimulation {
       localPayloads?: Uint8Array[];
       upstreamPayloads?: Uint8Array[];
       upstreamDelayMs?: number;
+      maxForwardsPerPeerWindow?: number;
+      forwardRateLimitWindowMs?: number;
     } = {},
   ): Promise<void> {
     const localStore = new MemoryStore();
@@ -98,8 +100,8 @@ class MeshQuerySimulation {
             });
           }
         : undefined,
-      maxForwardsPerPeerWindow: 1000,
-      forwardRateLimitWindowMs: 1000,
+      maxForwardsPerPeerWindow: options.maxForwardsPerPeerWindow ?? 1000,
+      forwardRateLimitWindowMs: options.forwardRateLimitWindowMs ?? 1000,
     });
 
     this.nodes.set(id, {
@@ -290,5 +292,33 @@ describe('MeshQueryRouter multi-peer simulation', () => {
     expect(summary.responses).toBe(0);
     expect(summary.requests).toBeLessThanOrEqual(6);
     expect(simulation.statsFor('F').requestsReceived).toBe(0);
+  });
+
+  it('does not let the forward limiter block upstream-backed misses from a provider peer', async () => {
+    vi.useFakeTimers();
+    const payloadA = new TextEncoder().encode('upstream-a');
+    const payloadB = new TextEncoder().encode('upstream-b');
+    const hashA = await sha256(payloadA);
+    const hashB = await sha256(payloadB);
+
+    const simulation = new MeshQuerySimulation();
+    await simulation.addNode('A', ['B']);
+    await simulation.addNode('B', ['A'], {
+      upstreamPayloads: [payloadA, payloadB],
+      upstreamDelayMs: 10,
+      maxForwardsPerPeerWindow: 1,
+      forwardRateLimitWindowMs: 10_000,
+    });
+    simulation.connect();
+
+    await simulation.startLookup('A', hashA, 3);
+    await simulation.startLookup('A', hashB, 3);
+    const summary = await simulation.runUntilIdle();
+    simulation.stop();
+
+    expect(simulation.wasResolved('A', hashA)).toBe(true);
+    expect(simulation.wasResolved('A', hashB)).toBe(true);
+    expect(simulation.statsFor('B').upstreamFetches).toBe(2);
+    expect(summary.responses).toBeGreaterThanOrEqual(2);
   });
 });

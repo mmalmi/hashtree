@@ -102,24 +102,50 @@ mod imp {
             Self { store }
         }
 
-        fn ingest(&self, event: &Event) -> Result<()> {
-            crate::socialgraph::ingest_parsed_event(self.store.as_ref(), event)
+        async fn ingest(&self, event: Event) -> Result<()> {
+            let store = Arc::clone(&self.store);
+            tokio::task::spawn_blocking(move || {
+                crate::socialgraph::ingest_parsed_event(store.as_ref(), &event)
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("trusted nostr store ingest task failed: {err}"))?
         }
 
-        fn ingest_with_storage_class(
+        async fn ingest_with_storage_class(
             &self,
-            event: &Event,
+            event: Event,
             storage_class: EventStorageClass,
         ) -> Result<()> {
-            crate::socialgraph::ingest_parsed_event_with_storage_class(
-                self.store.as_ref(),
-                event,
-                storage_class,
-            )
+            let store = Arc::clone(&self.store);
+            tokio::task::spawn_blocking(move || {
+                crate::socialgraph::ingest_parsed_event_with_storage_class(
+                    store.as_ref(),
+                    &event,
+                    storage_class,
+                )
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("trusted nostr store ingest task failed: {err}"))?
         }
 
-        fn query(&self, filter: &NostrFilter, limit: usize) -> Vec<Event> {
-            crate::socialgraph::query_events(self.store.as_ref(), filter, limit)
+        async fn query(&self, filter: NostrFilter, limit: usize) -> Vec<Event> {
+            let store = Arc::clone(&self.store);
+            match std::thread::Builder::new()
+                .name("nostr-relay-query".to_string())
+                .spawn(move || crate::socialgraph::query_events(store.as_ref(), &filter, limit))
+            {
+                Ok(join) => match join.join() {
+                    Ok(events) => events,
+                    Err(_) => {
+                        warn!("trusted nostr store query thread panicked");
+                        Vec::new()
+                    }
+                },
+                Err(err) => {
+                    warn!("failed to spawn trusted nostr store query thread: {}", err);
+                    Vec::new()
+                }
+            }
         }
     }
 
@@ -240,7 +266,7 @@ mod imp {
     impl SpamboxStore {
         async fn ingest(&self, event: &Event) -> bool {
             match self {
-                SpamboxStore::Persistent(store) => store.ingest(event).is_ok(),
+                SpamboxStore::Persistent(store) => store.ingest(event.clone()).await.is_ok(),
                 SpamboxStore::Memory(store) => store.ingest(event).await,
             }
         }
@@ -414,7 +440,7 @@ mod imp {
                 }
             }
 
-            for event in self.trusted.query(filter, limit) {
+            for event in self.trusted.query(filter.clone(), limit).await {
                 if seen.insert(event.id) {
                     events.push(event);
                     added += 1;
@@ -452,7 +478,7 @@ mod imp {
                 }
             }
 
-            for event in self.trusted.query(filter, limit) {
+            for event in self.trusted.query(filter.clone(), limit).await {
                 if seen.insert(event.id) {
                     added += 1;
                     if added >= limit {
@@ -554,7 +580,8 @@ mod imp {
             if !is_ephemeral {
                 let storage_class = self.event_storage_class(&event);
                 self.trusted
-                    .ingest_with_storage_class(&event, storage_class)?;
+                    .ingest_with_storage_class(event.clone(), storage_class)
+                    .await?;
             }
 
             if broadcast {
@@ -587,7 +614,7 @@ mod imp {
                 }
             }
 
-            for event in self.trusted.query(filter, limit) {
+            for event in self.trusted.query(filter.clone(), limit).await {
                 if seen.insert(event.id) {
                     events.push(event);
                     if events.len() >= limit {
@@ -742,7 +769,8 @@ mod imp {
                 let stored = if trusted {
                     let storage_class = self.event_storage_class(&event);
                     self.trusted
-                        .ingest_with_storage_class(&event, storage_class)
+                        .ingest_with_storage_class(event.clone(), storage_class)
+                        .await
                         .is_ok()
                 } else {
                     match self.spambox.as_ref() {

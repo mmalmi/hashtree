@@ -766,7 +766,11 @@ fn store_blossom_blob(
 ) -> anyhow::Result<()> {
     // Store as raw blob only - no tree creation needed for blossom
     // This avoids sync_block_on which can deadlock under load
-    state.store.put_blob(data)?;
+    if track_ownership {
+        state.store.put_blob(data)?;
+    } else {
+        state.store.put_cached_blob(data)?;
+    }
 
     // Only track ownership for social graph members
     // Non-members can upload (if public_writes=true) but can't delete
@@ -799,6 +803,41 @@ fn mime_to_extension(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::auth::WsRelayState;
+    use crate::storage::HashtreeStore;
+    use hashtree_core::sha256;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tempfile::TempDir;
+
+    fn test_app_state(store: Arc<HashtreeStore>) -> AppState {
+        AppState {
+            store,
+            auth: None,
+            peer_mode: crate::config::ServerMode::Normal,
+            hash_get_enabled: true,
+            webrtc_peers: None,
+            ws_relay: Arc::new(WsRelayState::new()),
+            max_upload_bytes: 5 * 1024 * 1024,
+            public_writes: true,
+            allowed_pubkeys: HashSet::new(),
+            upstream_blossom: Vec::new(),
+            social_graph: None,
+            social_graph_store: None,
+            social_graph_root: None,
+            socialgraph_snapshot_public: false,
+            nostr_relay: None,
+            nostr_relay_urls: Vec::new(),
+            tree_root_cache: Arc::new(StdMutex::new(std::collections::HashMap::new())),
+            inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            directory_listing_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
+            resolved_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
+            thumbnail_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
+            cid_size_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
+        }
+    }
 
     #[test]
     fn test_is_valid_sha256() {
@@ -845,5 +884,47 @@ mod tests {
         assert_eq!(mime_to_extension("video/mp4"), ".mp4");
         assert_eq!(mime_to_extension("application/octet-stream"), "");
         assert_eq!(mime_to_extension("unknown/type"), "");
+    }
+
+    #[test]
+    fn unowned_public_uploads_use_cache_storage_semantics() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store =
+            Arc::new(HashtreeStore::with_options(temp_dir.path(), None, 700).expect("store"));
+        let state = test_app_state(Arc::clone(&store));
+
+        let owned = vec![1u8; 280];
+        let owned_hash = sha256(&owned);
+        store_blossom_blob(&state, &owned, &owned_hash, &[2u8; 32], true).expect("owned upload");
+
+        let public_upload = vec![3u8; 280];
+        let public_hash = sha256(&public_upload);
+        store_blossom_blob(&state, &public_upload, &public_hash, &[4u8; 32], false)
+            .expect("public upload");
+
+        let replacement = vec![5u8; 280];
+        let replacement_hash = sha256(&replacement);
+        state
+            .store
+            .put_cached_blob(&replacement)
+            .expect("replacement cached blob");
+
+        assert!(state.store.blob_exists(&owned_hash).expect("owned exists"));
+        assert!(!state
+            .store
+            .blob_exists(&public_hash)
+            .expect("public upload evicted"));
+        assert!(state
+            .store
+            .blob_exists(&replacement_hash)
+            .expect("replacement exists"));
+        assert!(state
+            .store
+            .is_blob_owner(&owned_hash, &[2u8; 32])
+            .expect("owned tracked"));
+        assert!(!state
+            .store
+            .blob_has_owners(&public_hash)
+            .expect("public upload unowned"));
     }
 }

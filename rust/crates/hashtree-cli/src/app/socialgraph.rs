@@ -1,20 +1,33 @@
 use anyhow::{Context, Result};
-use hashtree_cli::{Config, HashtreeStore};
-use hashtree_core::{nhash_encode_full, NHashData};
+use hashtree_cli::blossom_push::background_blossom_push;
+use hashtree_cli::{Config, HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver};
+use hashtree_core::{nhash_encode_full, Cid, NHashData};
 use nostr::nips::nip19::ToBech32;
 use nostr::PublicKey;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hashtree_cli::config::ensure_keys;
+use hashtree_cli::config::{ensure_keys, ensure_keys_string};
 use hashtree_cli::socialgraph::{
     sync_local_list_files_force, SocialGraphBackend, SocialGraphCrawler,
 };
+use hashtree_cli::RootResolver;
 
 const SOCIALGRAPH_SYNC_CURSOR_FILE: &str = "socialgraph-last-sync.txt";
+const PUBLISHED_EVENT_TREE_NAME: &str = "nostr-event-index";
+const PUBLISHED_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
+const PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
+const MIRROR_PUBLISH_RELAY_PRIORITY: &[&str] = &[
+    "wss://temp.iris.to",
+    "wss://vault.iris.to",
+    "wss://relay.damus.io",
+    "wss://relay.primal.net",
+];
+const MIRROR_PUBLISH_RELAY_BLOCKLIST: &[&str] =
+    &["wss://graph-relay.iris.to", "wss://upload.iris.to/nostr"];
 
 fn parse_pubkey_hex(hex_str: &str) -> Option<[u8; 32]> {
     if hex_str.len() != 64 {
@@ -157,6 +170,101 @@ fn format_socialgraph_root(root: Option<&str>) -> String {
         .ok()
         .and_then(|pubkey| pubkey.to_bech32().ok())
         .unwrap_or_else(|| root.to_string())
+}
+
+fn mirror_publish_relays(active_relays: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let active_relays = active_relays
+        .iter()
+        .filter(|relay| seen.insert((*relay).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if active_relays.is_empty() {
+        return Vec::new();
+    }
+
+    let active_relay_set = active_relays.iter().cloned().collect::<HashSet<_>>();
+    let preferred = MIRROR_PUBLISH_RELAY_PRIORITY
+        .iter()
+        .filter(|relay| active_relay_set.contains(**relay))
+        .map(|relay| (*relay).to_string())
+        .collect::<Vec<_>>();
+    if !preferred.is_empty() {
+        return preferred;
+    }
+
+    let filtered = active_relays
+        .iter()
+        .filter(|relay| !MIRROR_PUBLISH_RELAY_BLOCKLIST.contains(&relay.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !filtered.is_empty() {
+        return filtered;
+    }
+
+    active_relays
+}
+
+async fn publish_socialgraph_roots(
+    data_dir: &Path,
+    config: &Config,
+    roots: &[(&str, Option<Cid>)],
+) -> Result<()> {
+    let roots = roots
+        .iter()
+        .filter_map(|(tree_name, root)| root.clone().map(|cid| ((*tree_name).to_string(), cid)))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(());
+    }
+
+    let write_servers = config.blossom.all_write_servers();
+    for (tree_name, root) in &roots {
+        if write_servers.is_empty() {
+            continue;
+        }
+        background_blossom_push(data_dir, &root.to_string(), &write_servers)
+            .await
+            .with_context(|| format!("push rebuilt {tree_name} DAG to Blossom"))?;
+    }
+
+    let publish_relays = mirror_publish_relays(&config.nostr.active_relays());
+    if publish_relays.is_empty() {
+        return Ok(());
+    }
+
+    let (nsec_str, _was_generated) = ensure_keys_string()?;
+    let keys = NostrKeys::parse(&nsec_str).context("Failed to parse nsec for publishing")?;
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .context("Failed to encode npub for publishing")?;
+    let resolver = NostrRootResolver::new(NostrResolverConfig {
+        relays: publish_relays,
+        resolve_timeout: Duration::from_secs(5),
+        secret_key: Some(keys),
+    })
+    .await
+    .context("Failed to create Nostr resolver for rebuilt socialgraph roots")?;
+
+    for (tree_name, root) in &roots {
+        let nostr_key = format!("{npub}/{tree_name}");
+        match resolver.publish(&nostr_key, root).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = resolver.stop().await;
+                anyhow::bail!("no relay accepted rebuilt {tree_name} root");
+            }
+            Err(err) => {
+                let _ = resolver.stop().await;
+                return Err(err)
+                    .with_context(|| format!("publish rebuilt {tree_name} root to relays"));
+            }
+        }
+    }
+
+    let _ = resolver.stop().await;
+    Ok(())
 }
 
 pub(crate) fn run_socialgraph_filter(
@@ -304,14 +412,25 @@ pub(crate) fn run_socialgraph_stats(data_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_socialgraph_rebuild_profile_index(data_dir: PathBuf) -> Result<()> {
+pub(crate) async fn run_socialgraph_rebuild_profile_index(data_dir: PathBuf) -> Result<()> {
     let config = Config::load()?;
     let (graph_store, _social_graph_root_bytes) =
         init_socialgraph_with_shared_storage(&data_dir, &config)?;
     let rebuilt = graph_store
-        .rebuild_profile_index_from_stored_events()
+        .rebuild_profile_index_from_stored_events_async()
+        .await
         .context("rebuild profile search index from stored metadata events")?;
     let root = graph_store.profile_search_root()?;
+    let by_pubkey_root = graph_store.profiles_by_pubkey_root()?;
+    publish_socialgraph_roots(
+        &data_dir,
+        &config,
+        &[
+            (PUBLISHED_PROFILE_SEARCH_TREE_NAME, root.clone()),
+            (PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME, by_pubkey_root),
+        ],
+    )
+    .await?;
 
     println!(
         "Rebuilt profile search index from {} latest profiles",
@@ -338,14 +457,30 @@ pub(crate) fn run_socialgraph_rebuild_profile_index(data_dir: PathBuf) -> Result
     Ok(())
 }
 
-pub(crate) fn run_socialgraph_rebuild_event_index(data_dir: PathBuf) -> Result<()> {
+pub(crate) async fn run_socialgraph_rebuild_event_index(data_dir: PathBuf) -> Result<()> {
     let config = Config::load()?;
     let (graph_store, _social_graph_root_bytes) =
         init_socialgraph_with_shared_storage(&data_dir, &config)?;
     let (public_count, ambient_count) = graph_store
-        .rebuild_event_indexes_from_stored_events()
+        .rebuild_event_indexes_from_stored_events_async()
+        .await
         .context("rebuild event indexes from stored events")?;
     let public_root = graph_store.public_events_root()?;
+    let profile_search_root = graph_store.profile_search_root()?;
+    let profiles_by_pubkey_root = graph_store.profiles_by_pubkey_root()?;
+    publish_socialgraph_roots(
+        &data_dir,
+        &config,
+        &[
+            (PUBLISHED_EVENT_TREE_NAME, public_root.clone()),
+            (PUBLISHED_PROFILE_SEARCH_TREE_NAME, profile_search_root),
+            (
+                PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME,
+                profiles_by_pubkey_root,
+            ),
+        ],
+    )
+    .await?;
 
     println!(
         "Rebuilt event indexes from stored events: public={}, ambient={}",

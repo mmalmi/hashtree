@@ -169,6 +169,18 @@ export async function setCachedRoot(
   const updatedAt = options?.updatedAt ?? Math.floor(Date.now() / 1000);
   const eventId = options?.eventId;
   const sameHash = !!existing && hashEquals(existing.hash, cid.hash);
+  const preserveKey = sameHash
+    && visibility !== 'public'
+    && cid.key === undefined
+    && existing?.key !== undefined;
+  const preserveLinkVisibleMetadata = sameHash
+    && visibility === 'link-visible'
+    && options?.encryptedKey === undefined
+    && options?.keyId === undefined
+    && options?.selfEncryptedLinkKey === undefined;
+  const preservePrivateMetadata = sameHash
+    && visibility === 'private'
+    && options?.selfEncryptedKey === undefined;
 
   if (existing && compareReplaceableEventOrder(updatedAt, eventId, existing.updatedAt, existing.eventId) < 0) {
     return { applied: false, record: existing };
@@ -176,16 +188,17 @@ export async function setCachedRoot(
 
   const cached: CachedRoot = {
     hash: cid.hash,
-    key: cid.key ?? (sameHash ? existing?.key : undefined),
+    key: cid.key ?? (preserveKey ? existing?.key : undefined),
     visibility,
     labels: options?.labels ?? existing?.labels,
     updatedAt,
     eventId: eventId ?? (sameHash ? existing?.eventId : undefined),
     snapshotNhash: options?.snapshotNhash ?? (sameHash ? existing?.snapshotNhash : undefined),
-    encryptedKey: options?.encryptedKey ?? (sameHash ? existing?.encryptedKey : undefined),
-    keyId: options?.keyId ?? (sameHash ? existing?.keyId : undefined),
-    selfEncryptedKey: options?.selfEncryptedKey ?? (sameHash ? existing?.selfEncryptedKey : undefined),
-    selfEncryptedLinkKey: options?.selfEncryptedLinkKey ?? (sameHash ? existing?.selfEncryptedLinkKey : undefined),
+    encryptedKey: options?.encryptedKey ?? (preserveLinkVisibleMetadata ? existing?.encryptedKey : undefined),
+    keyId: options?.keyId ?? (preserveLinkVisibleMetadata ? existing?.keyId : undefined),
+    selfEncryptedKey: options?.selfEncryptedKey ?? (preservePrivateMetadata ? existing?.selfEncryptedKey : undefined),
+    selfEncryptedLinkKey: options?.selfEncryptedLinkKey
+      ?? (preserveLinkVisibleMetadata ? existing?.selfEncryptedLinkKey : undefined),
   };
 
   if (existing && cachedRootEquals(existing, cached)) {

@@ -1,3 +1,4 @@
+pub mod blossom_push;
 pub mod bootstrap;
 #[cfg(feature = "cashu")]
 pub mod cashu;
@@ -26,6 +27,9 @@ pub use webrtc_stub as webrtc;
 pub mod p2p_common;
 
 pub mod socialgraph;
+
+#[cfg(test)]
+pub mod test_support;
 
 pub use config::Config;
 pub use eviction::{spawn_background_eviction_task, BACKGROUND_EVICTION_INTERVAL};

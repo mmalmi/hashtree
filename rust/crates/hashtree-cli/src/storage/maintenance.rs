@@ -1,5 +1,7 @@
 use anyhow::Result;
+use heed::{CompactionOption, EnvOpenOptions};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use super::{GcStats, HashtreeStore};
 
@@ -15,6 +17,18 @@ pub struct VerifyResult {
     pub corrupted: usize,
     pub deleted: usize,
 }
+
+#[derive(Debug, Clone)]
+pub struct CompactResult {
+    pub env_dir: PathBuf,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+}
+
+const COMPACT_MAX_DBS: u32 = 64;
+const COMPACT_MAX_READERS: u32 = 2048;
+const COMPACT_OPEN_MAP_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const COMPACT_PAGE_SIZE_BYTES: u64 = 4096;
 
 impl HashtreeStore {
     /// Garbage collect unpinned content
@@ -289,4 +303,134 @@ impl HashtreeStore {
     pub async fn verify_r2_integrity(&self, _delete: bool) -> Result<VerifyResult> {
         Err(anyhow::anyhow!("S3 feature not enabled"))
     }
+
+    pub fn compact_lmdb_environments(
+        &self,
+        env_dirs: &[PathBuf],
+        keep_backup: bool,
+    ) -> Result<Vec<CompactResult>> {
+        compact_lmdb_environments_under(self.base_path(), env_dirs, keep_backup)
+    }
+}
+
+pub fn compact_lmdb_environments_under(
+    base_path: &Path,
+    env_dirs: &[PathBuf],
+    keep_backup: bool,
+) -> Result<Vec<CompactResult>> {
+    let targets = if env_dirs.is_empty() {
+        discover_lmdb_environment_dirs(base_path)?
+    } else {
+        env_dirs
+            .iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path.clone()
+                } else {
+                    base_path.join(path)
+                }
+            })
+            .collect()
+    };
+
+    let mut results = Vec::new();
+    for env_dir in targets {
+        results.push(compact_lmdb_environment_dir(&env_dir, keep_backup)?);
+    }
+    Ok(results)
+}
+
+fn discover_lmdb_environment_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    collect_lmdb_environment_dirs(root, &mut dirs)?;
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn collect_lmdb_environment_dirs(root: &Path, dirs: &mut Vec<PathBuf>) -> Result<()> {
+    if root.join("data.mdb").exists() {
+        dirs.push(root.to_path_buf());
+    }
+
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lmdb_environment_dirs(&path, dirs)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn compact_lmdb_environment_dir(env_dir: &Path, keep_backup: bool) -> Result<CompactResult> {
+    let data_path = env_dir.join("data.mdb");
+    if !data_path.exists() {
+        anyhow::bail!("No data.mdb found in {}", env_dir.display());
+    }
+
+    let before_bytes = std::fs::metadata(&data_path)?.len();
+    let compact_path = env_dir.join("data.mdb.compact");
+    let backup_path = env_dir.join("data.mdb.bak");
+
+    if compact_path.exists() {
+        std::fs::remove_file(&compact_path)?;
+    }
+    if !keep_backup && backup_path.exists() {
+        std::fs::remove_file(&backup_path)?;
+    }
+
+    let open_map_size = existing_lmdb_map_size_bytes(&data_path)?;
+
+    {
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(open_map_size)
+                .max_dbs(COMPACT_MAX_DBS)
+                .max_readers(COMPACT_MAX_READERS)
+                .open(env_dir)
+        }?;
+        env.force_sync()?;
+        env.copy_to_file(&compact_path, CompactionOption::Enabled)?;
+    }
+
+    let after_bytes = std::fs::metadata(&compact_path)?.len();
+
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path)?;
+    }
+
+    std::fs::rename(&data_path, &backup_path)?;
+    if let Err(error) = std::fs::rename(&compact_path, &data_path) {
+        let _ = std::fs::rename(&backup_path, &data_path);
+        return Err(error.into());
+    }
+
+    if !keep_backup {
+        std::fs::remove_file(&backup_path)?;
+    }
+
+    Ok(CompactResult {
+        env_dir: env_dir.to_path_buf(),
+        before_bytes,
+        after_bytes,
+    })
+}
+
+fn existing_lmdb_map_size_bytes(data_path: &Path) -> Result<usize> {
+    let file_bytes = std::fs::metadata(data_path)?.len();
+    let aligned_bytes = if file_bytes == 0 {
+        COMPACT_OPEN_MAP_SIZE_BYTES as u64
+    } else {
+        let remainder = file_bytes % COMPACT_PAGE_SIZE_BYTES;
+        if remainder == 0 {
+            file_bytes
+        } else {
+            file_bytes.saturating_add(COMPACT_PAGE_SIZE_BYTES - remainder)
+        }
+    };
+
+    Ok(usize::try_from(aligned_bytes)
+        .unwrap_or(usize::MAX)
+        .max(COMPACT_OPEN_MAP_SIZE_BYTES))
 }

@@ -1114,12 +1114,16 @@ pub(crate) async fn run() -> Result<()> {
 
             // Publish
             match resolver.publish(&nostr_key, &cid).await {
-                Ok(_) => {
+                Ok(true) => {
                     println!("Published: {}", nostr_key);
                     println!("  hash: {}", hash);
                     if let Some(k) = key {
                         println!("  key:  {}", k);
                     }
+                }
+                Ok(false) => {
+                    eprintln!("Publish failed: no relay accepted the event");
+                    std::process::exit(1);
                 }
                 Err(e) => {
                     eprintln!("Publish failed: {}", e);
@@ -1215,10 +1219,10 @@ pub(crate) async fn run() -> Result<()> {
                 )?;
             }
             SocialGraphCommands::RebuildProfileIndex => {
-                run_socialgraph_rebuild_profile_index(data_dir)?;
+                run_socialgraph_rebuild_profile_index(data_dir).await?;
             }
             SocialGraphCommands::RebuildEventIndex => {
-                run_socialgraph_rebuild_event_index(data_dir)?;
+                run_socialgraph_rebuild_event_index(data_dir).await?;
             }
             SocialGraphCommands::Index {
                 warm_secs,
@@ -1301,12 +1305,61 @@ pub(crate) async fn run() -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(&config.storage.data_dir));
 
-            let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
-            let store =
-                HashtreeStore::with_options(&data_dir, config.storage.s3.as_ref(), max_size_bytes)?;
-
             match command {
+                StorageCommands::TrimLmdb { env_dir, max_gb } => {
+                    #[cfg(feature = "lmdb")]
+                    {
+                        use hashtree_core::store::Store;
+                        use hashtree_lmdb::LmdbBlobStore;
+
+                        let env_dir = if env_dir.is_absolute() {
+                            env_dir
+                        } else {
+                            data_dir.join(env_dir)
+                        };
+                        let max_bytes = max_gb.saturating_mul(1024 * 1024 * 1024);
+                        let file_bytes_before = std::fs::metadata(env_dir.join("data.mdb"))
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0);
+                        let blob_store = LmdbBlobStore::with_max_bytes(&env_dir, max_bytes)?;
+                        let freed = blob_store.evict_if_needed().await?;
+                        let stats = blob_store.stats()?;
+
+                        println!("Trimmed {}", env_dir.display());
+                        println!(
+                            "  File bytes before: {} ({:.2} GB)",
+                            file_bytes_before,
+                            file_bytes_before as f64 / 1024.0 / 1024.0 / 1024.0
+                        );
+                        println!(
+                            "  Logical bytes after: {} ({:.2} GB)",
+                            stats.total_bytes,
+                            stats.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+                        );
+                        println!(
+                            "  Logical limit: {} ({:.2} GB)",
+                            max_bytes,
+                            max_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+                        );
+                        println!(
+                            "  Additional bytes freed on explicit pass: {} ({:.2} GB)",
+                            freed,
+                            freed as f64 / 1024.0 / 1024.0 / 1024.0
+                        );
+                        println!("  Blobs remaining: {}", stats.count);
+                    }
+                    #[cfg(not(feature = "lmdb"))]
+                    {
+                        anyhow::bail!("LMDB support not enabled in this build");
+                    }
+                }
                 StorageCommands::Stats => {
+                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+                    let store = HashtreeStore::with_options(
+                        &data_dir,
+                        config.storage.s3.as_ref(),
+                        max_size_bytes,
+                    )?;
                     let stats = store.get_storage_stats()?;
                     let by_priority = store.storage_by_priority()?;
                     let tracked = store.tracked_size()?;
@@ -1358,6 +1411,12 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 StorageCommands::Trees => {
                     use hashtree_core::to_hex;
+                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+                    let store = HashtreeStore::with_options(
+                        &data_dir,
+                        config.storage.s3.as_ref(),
+                        max_size_bytes,
+                    )?;
                     let trees = store.list_indexed_trees()?;
 
                     if trees.is_empty() {
@@ -1386,6 +1445,12 @@ pub(crate) async fn run() -> Result<()> {
                     }
                 }
                 StorageCommands::Evict => {
+                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+                    let store = HashtreeStore::with_options(
+                        &data_dir,
+                        config.storage.s3.as_ref(),
+                        max_size_bytes,
+                    )?;
                     println!("Running eviction...");
                     let freed = store.evict_if_needed()?;
                     if freed > 0 {
@@ -1398,7 +1463,39 @@ pub(crate) async fn run() -> Result<()> {
                         println!("No eviction needed (storage under limit)");
                     }
                 }
+                StorageCommands::Compact {
+                    env_dirs,
+                    keep_backup,
+                } => {
+                    let results = hashtree_cli::storage::compact_lmdb_environments_under(
+                        &data_dir,
+                        &env_dirs,
+                        keep_backup,
+                    )?;
+                    if results.is_empty() {
+                        println!("No LMDB environments found under {}", data_dir.display());
+                    } else {
+                        for result in &results {
+                            let saved_bytes =
+                                result.before_bytes.saturating_sub(result.after_bytes);
+                            println!(
+                                "{}: {} -> {} bytes (saved {} / {:.2} GB)",
+                                result.env_dir.display(),
+                                result.before_bytes,
+                                result.after_bytes,
+                                saved_bytes,
+                                saved_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                            );
+                        }
+                    }
+                }
                 StorageCommands::Verify { delete, r2 } => {
+                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+                    let store = HashtreeStore::with_options(
+                        &data_dir,
+                        config.storage.s3.as_ref(),
+                        max_size_bytes,
+                    )?;
                     println!("Verifying blob integrity...");
                     if !delete {
                         println!(

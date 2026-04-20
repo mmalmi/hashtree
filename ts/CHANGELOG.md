@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.2.4 - 2026-04-17
+
+Changes since the previous npm package publish.
+
+### Fixed
+
+- Stabilized `@hashtree/worker` media reads over WebRTC by retrying transient path misses and missing chunks, honoring startup range requests more robustly, and allowing apps to pass file-size hints for media streaming.
+- Fixed peer blob serving in `@hashtree/worker` so encrypted blobs are only shared with peers after they are confirmed reachable from a shared read source instead of leaking local-only cache state.
+- Fixed `@hashtree/worker/client` and the underlying mesh store to clone transferred byte buffers before handing them across worker boundaries, avoiding detached-buffer corruption during media fetches.
+
+### Improved
+
+- Improved `@hashtree/worker` Blossom and primary-store read behavior with bounded local/read timeouts so mesh fallback can recover sooner on stalled reads.
+
 ## 0.2.2 - 2026-04-11
 
 Changes since the previous npm package publish.

@@ -17,8 +17,12 @@ const DEFAULT_ROOT_RESOLVE_RELAYS = [
 function withUniqueRelays(relays?: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
+  const configuredRelays = (relays ?? []).map((relay) => relay.trim()).filter(Boolean);
+  const relayCandidates = configuredRelays.length > 0
+    ? configuredRelays
+    : DEFAULT_ROOT_RESOLVE_RELAYS;
 
-  for (const relay of [...(relays ?? []), ...DEFAULT_ROOT_RESOLVE_RELAYS]) {
+  for (const relay of relayCandidates) {
     const normalized = relay.trim();
     if (!normalized || seen.has(normalized)) continue;
     seen.add(normalized);
@@ -114,6 +118,14 @@ function updateLatestRecord(
   }
 
   return { createdAt, eventId, cid };
+}
+
+function preferLatestRecord(current: RootRecord | null, candidate: RootRecord | null): RootRecord | null {
+  if (!candidate) {
+    return current;
+  }
+
+  return updateLatestRecord(current, candidate.createdAt, candidate.eventId, candidate.cid) ?? current ?? candidate;
 }
 
 function createSubscriptionId(): string {
@@ -371,6 +383,12 @@ export async function watchRootPathFromRelays(
 
   const { treeName, subPath } = parseRootLookupPath(path);
   let treeRecord: RootRecord | null = cachedRootToRecord(await getCachedRootInfo(npub, treeName));
+  if (!treeRecord) {
+    const initialRecord = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs);
+    if (initialRecord) {
+      treeRecord = initialRecord;
+    }
+  }
   let subscription: { close(): Promise<void> } | null = null;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -505,7 +523,23 @@ export async function resolveRootPathFromRelays(
   const { treeName, subPath } = parseRootLookupPath(path);
   const cachedTreeRoot = cachedRootToRecord(await getCachedRootInfo(npub, treeName));
   if (cachedTreeRoot) {
-    return await resolvePreferredCid(tree, cachedTreeRoot, subPath);
+    const shouldRefreshCachedRoot = !!cachedTreeRoot.cid.key;
+    if (!shouldRefreshCachedRoot) {
+      try {
+        return await resolvePreferredCid(tree, cachedTreeRoot, subPath);
+      } catch {
+        // Fall through to a fresh relay lookup when the cached root no longer decodes locally.
+      }
+    }
+
+    const refreshedTreeRoot = preferLatestRecord(
+      cachedTreeRoot,
+      await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs),
+    );
+    if (refreshedTreeRoot) {
+      return await resolvePreferredCid(tree, refreshedTreeRoot, subPath);
+    }
+    return null;
   }
 
   const root = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs);

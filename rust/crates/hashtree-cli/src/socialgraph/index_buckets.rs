@@ -446,6 +446,48 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
+    pub(super) async fn rebuild_profile_events_async<'a, I>(
+        &self,
+        events: I,
+    ) -> Result<(Option<Cid>, Option<Cid>)>
+    where
+        I: IntoIterator<Item = &'a Event>,
+    {
+        let mut by_pubkey_entries = Vec::<(String, Cid)>::new();
+        let mut search_entries = Vec::<(String, String)>::new();
+
+        for event in events {
+            let pubkey = event.pubkey.to_hex();
+            let bytes = event.as_json().into_bytes();
+            let (mirrored_cid, _size) = self
+                .tree
+                .put_file(&bytes)
+                .await
+                .context("store mirrored profile event")?;
+            let search_value =
+                serialize_profile_search_entry(&build_profile_search_entry(event, &mirrored_cid)?)?;
+            by_pubkey_entries.push((pubkey.clone(), mirrored_cid.clone()));
+            for term in profile_search_terms_for_event(event) {
+                search_entries.push((
+                    format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"),
+                    search_value.clone(),
+                ));
+            }
+        }
+
+        let by_pubkey_root = self
+            .index
+            .build_links(by_pubkey_entries)
+            .await
+            .context("bulk build mirrored profile-by-pubkey index")?;
+        let search_root = self
+            .index
+            .build(search_entries)
+            .await
+            .context("bulk build mirrored profile search index")?;
+        Ok((by_pubkey_root, search_root))
+    }
+
     pub(super) fn update_profile_event(
         &self,
         by_pubkey_root: Option<&Cid>,

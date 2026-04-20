@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.34 - 2026-04-15
+## 0.2.34 - 2026-04-17
 
 Changes since the `0.2.33` crates.io release.
 
@@ -9,12 +9,18 @@ Changes since the `0.2.33` crates.io release.
 - Added a hashtree-first app-building guide and library-side query surfaces for relay-backed event stores and collection sources, so apps can stream and query mutable data without rebuilding ad hoc Nostr HTTP layers.
 - Added a portable PWA export helper plus broader live export coverage for manifest metadata, route metadata, and link-hinted assets.
 - Added a Cashu send-payment helper and broader mirror/event-index maintenance improvements, including root republish support and expanded mirror history coverage.
+- Added heavier media-oriented `hashtree-sim` transport scenarios plus a Tokio virtual-clock mode for `VirtualSteps`, so slow first-byte, throughput, and stall behavior can be tuned without waiting on wall-clock sleeps.
+
+### Improved
+
+- Improved mesh request handling so slow or hedged sources are tracked as timeouts instead of synthetic misses, making peer selection and retry behavior more stable on cold media reads.
 
 ### Fixed
 
 - Fixed mutable root resolution so relay lookups only use the encoded tree name and resolve slash-separated subpaths inside the published tree instead of treating them as Nostr `d` tags.
 - Fixed PWA export metadata preservation so released shells keep the intended manifest fields, route metadata, and asset links.
 - Simplified the repo release pipeline by removing the obsolete sibling Iris packaging path from hashtree releases.
+- Fixed mesh-store read accounting so late or slow responders no longer poison route quality as hard misses when the request was still in flight.
 
 ## 0.2.33 - 2026-04-13
 

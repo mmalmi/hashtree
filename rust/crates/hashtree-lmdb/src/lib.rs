@@ -17,6 +17,10 @@ const DEFAULT_MAP_SIZE: usize = 10 * 1024 * 1024 * 1024;
 const DEFAULT_MAP_SIZE: usize = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READERS: u32 = 1024;
 const DATABASE_COUNT: u32 = 4;
+const REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+const LMDB_PAGE_SIZE_BYTES: u64 = 4096;
+const EVICTION_BATCH_TARGET_BYTES: u64 = 256 * 1024 * 1024;
+const EVICTION_BATCH_MAX_ITEMS: usize = 4096;
 const BLOB_META_BYTES: usize = 16;
 const ORDER_KEY_BYTES: usize = 40;
 const PIN_COUNT_BYTES: usize = 4;
@@ -51,12 +55,44 @@ impl LmdbBlobStore {
 
     /// Open or create with a maximum logical storage size.
     pub fn with_max_bytes<P: AsRef<Path>>(path: P, max_bytes: u64) -> Result<Self, StoreError> {
-        let requested_map_size = usize::try_from(max_bytes)
-            .unwrap_or(usize::MAX)
-            .max(DEFAULT_MAP_SIZE);
-        let store = Self::with_map_size(path, requested_map_size)?;
+        let path_ref = path.as_ref();
+        let existing_map_size = std::fs::metadata(path_ref.join("data.mdb"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let existing_headroom = if existing_map_size == 0 {
+            0
+        } else {
+            existing_map_size
+                .saturating_div(10)
+                .max(REOPEN_HEADROOM_BYTES)
+        };
+        let requested_map_size = usize::try_from(Self::align_map_size_bytes(
+            existing_map_size
+                .saturating_add(existing_headroom)
+                .max(max_bytes),
+        ))
+        .unwrap_or(usize::MAX)
+        .max(DEFAULT_MAP_SIZE);
+        let store = Self::with_map_size(path_ref, requested_map_size)?;
         store.max_bytes.store(max_bytes, Ordering::Relaxed);
+        let current = store.current_bytes.load(Ordering::Relaxed);
+        if max_bytes > 0 && current > max_bytes {
+            let target = max_bytes.saturating_mul(9) / 10;
+            store.evict_to_target(current, target)?;
+        }
         Ok(store)
+    }
+
+    fn align_map_size_bytes(bytes: u64) -> u64 {
+        if bytes == 0 {
+            return 0;
+        }
+        let remainder = bytes % LMDB_PAGE_SIZE_BYTES;
+        if remainder == 0 {
+            bytes
+        } else {
+            bytes.saturating_add(LMDB_PAGE_SIZE_BYTES - remainder)
+        }
     }
 
     /// Open or create with custom map size.
@@ -443,50 +479,70 @@ impl LmdbBlobStore {
             return Ok(0);
         }
 
-        let mut wtxn = self
+        let rtxn = self
             .env
-            .write_txn()
+            .read_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
         let order_keys: Vec<Vec<u8>> = self
             .eviction_order
-            .iter(&wtxn)
+            .iter(&rtxn)
             .map_err(|e| StoreError::Other(e.to_string()))?
             .map(|item| {
                 item.map(|(key, _)| key.to_vec())
                     .map_err(|e| StoreError::Other(e.to_string()))
             })
             .collect::<Result<_, _>>()?;
+        drop(rtxn);
 
-        let mut freed = 0u64;
+        let mut freed_total = 0u64;
         let to_free = current_bytes - target_bytes;
+        let mut index = 0usize;
 
-        for order_key in order_keys {
-            if freed >= to_free {
-                break;
+        while freed_total < to_free && index < order_keys.len() {
+            let mut wtxn = self
+                .env
+                .write_txn()
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            let mut batch_freed = 0u64;
+            let mut batch_items = 0usize;
+
+            while freed_total + batch_freed < to_free && index < order_keys.len() {
+                let order_key = &order_keys[index];
+                index += 1;
+
+                let hash = Self::decode_hash_from_order_key(order_key)?;
+                if self.read_pin_count(&wtxn, &hash)? > 0 {
+                    continue;
+                }
+
+                let (_, bytes_freed) = self.delete_blob_in_txn(&mut wtxn, &hash)?;
+                if bytes_freed == 0 {
+                    let _ = self
+                        .eviction_order
+                        .delete(&mut wtxn, order_key)
+                        .map_err(|e| StoreError::Other(e.to_string()))?;
+                    continue;
+                }
+
+                batch_freed = batch_freed.saturating_add(bytes_freed);
+                batch_items += 1;
+
+                if batch_freed >= EVICTION_BATCH_TARGET_BYTES
+                    || batch_items >= EVICTION_BATCH_MAX_ITEMS
+                {
+                    break;
+                }
             }
 
-            let hash = Self::decode_hash_from_order_key(&order_key)?;
-            if self.read_pin_count(&wtxn, &hash)? > 0 {
-                continue;
+            wtxn.commit()
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            if batch_freed > 0 {
+                self.current_bytes.fetch_sub(batch_freed, Ordering::Relaxed);
+                freed_total = freed_total.saturating_add(batch_freed);
             }
-
-            let (_, bytes_freed) = self.delete_blob_in_txn(&mut wtxn, &hash)?;
-            if bytes_freed == 0 {
-                let _ = self
-                    .eviction_order
-                    .delete(&mut wtxn, &order_key)
-                    .map_err(|e| StoreError::Other(e.to_string()))?;
-                continue;
-            }
-            freed += bytes_freed;
         }
 
-        wtxn.commit()
-            .map_err(|e| StoreError::Other(e.to_string()))?;
-        if freed > 0 {
-            self.current_bytes.fetch_sub(freed, Ordering::Relaxed);
-        }
-        Ok(freed)
+        Ok(freed_total)
     }
 
     fn delete_blob_in_txn(
@@ -972,6 +1028,42 @@ mod tests {
         let h3 = sha256(b"cccccccccc");
         assert!(reopened.put(h3, b"cccccccccc".to_vec()).await?);
         assert!(reopened.has(&h3).await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_reopen_with_lower_max_bytes_evicts_existing_blobs() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blobs");
+
+        {
+            let store = LmdbBlobStore::new(&path)?;
+            let h1 = sha256(b"aaaaaaaaaa");
+            let h2 = sha256(b"bbbbbbbbbb");
+            let h3 = sha256(b"cccccccccc");
+            store.put(h1, b"aaaaaaaaaa".to_vec()).await?;
+            store.put(h2, b"bbbbbbbbbb".to_vec()).await?;
+            store.put(h3, b"cccccccccc".to_vec()).await?;
+        }
+
+        let reopened = LmdbBlobStore::with_max_bytes(&path, 25)?;
+        let h1 = sha256(b"aaaaaaaaaa");
+        let h2 = sha256(b"bbbbbbbbbb");
+        let h3 = sha256(b"cccccccccc");
+
+        assert!(
+            !reopened.has(&h1).await?,
+            "oldest blob should be evicted when reopening over the new cap"
+        );
+        assert!(reopened.has(&h2).await?);
+        assert!(reopened.has(&h3).await?);
+
+        let stats = reopened.stats()?;
+        assert!(
+            stats.total_bytes <= 22,
+            "reopened store should be reduced to the 90% target"
+        );
 
         Ok(())
     }

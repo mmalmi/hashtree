@@ -46,6 +46,8 @@ git remote add origin htree://self/myrepo#private
 git push origin main
 ```
 
+Each pusher should use their own identity-specific remote instead of sharing one private key. If multiple people push with the same key and their local refs are not in sync, a later push can overwrite refs published by someone else.
+
 ## P2P
 
 For P2P sharing between peers, run the hashtree daemon:

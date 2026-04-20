@@ -57,6 +57,10 @@ const DEFAULT_REQUEST_DISPATCH: RequestDispatchConfig = {
   hedgeIntervalMs: 120,
 };
 const ACTIVE_REQUEST_RANK_PENALTY = 3;
+const DISCONNECTED_PEER_RETRY_DELAY_MS = 2_500;
+const STALE_CONNECTING_PEER_MS = 15_000;
+const STALE_DATA_CHANNEL_WAIT_MS = 5_000;
+const MIN_FRAGMENT_STALL_TIMEOUT_MS = 5_000;
 type HelloSignalingMessage = Extract<SignalingMessage, { type: 'hello' }> & {
   hashGet?: boolean;
 };
@@ -76,9 +80,12 @@ interface WorkerPeer {
   answerCreated: boolean;  // Track if we've already created an answer (inbound only)
   htlConfig: PeerHTLConfig;
   pendingRequests: Map<string, PendingRequest>;
+  pendingReassemblies: Map<string, PendingReassembly>;
   stats: PeerStats;
   createdAt: number;
   connectedAt?: number;
+  disconnectedAt?: number;
+  recoveryTimer?: ReturnType<typeof setTimeout>;
   // Backpressure state
   bufferPaused: boolean;
   deferredRequests: DataRequest[];
@@ -100,6 +107,13 @@ interface InFlightPeerRequest {
   peerId: string;
   settled: boolean;
   promise: Promise<{ peerId: string; data: Uint8Array | null; elapsedMs: number }>;
+}
+
+interface PendingReassembly {
+  fragments: Map<number, Uint8Array>;
+  totalExpected: number;
+  receivedBytes: number;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 export interface WebRTCControllerConfig {
@@ -322,7 +336,11 @@ export class WebRTCController {
     const existing = this.peers.get(peerId);
     if (existing) {
       existing.hashGet = hashGet;
-      return;
+      if (!this.shouldReplacePeer(existing)) {
+        return;
+      }
+      this.log(`Replacing stale peer before hello handling: ${peerId.slice(0, 20)}`);
+      this.closePeer(peerId);
     }
 
     // Check pool limits
@@ -351,6 +369,11 @@ export class WebRTCController {
   private async handleOffer(peerId: string, pubkey: string, offer: RTCSessionDescriptionInit): Promise<void> {
     this.log(`handleOffer from ${pubkey.slice(0, 8)}, peerId: ${peerId.slice(0, 20)}`);
     let peer = this.peers.get(peerId);
+    if (peer && this.shouldReplacePeer(peer)) {
+      this.log(`Replacing stale peer before offer handling: ${peerId.slice(0, 20)}`);
+      this.closePeer(peerId);
+      peer = undefined;
+    }
     if (!peer) {
       const pool = this.classifyPeer(pubkey);
       if (!this.shouldConnect(pool)) {
@@ -435,6 +458,41 @@ export class WebRTCController {
     return false;
   }
 
+  private clearPeerRecoveryTimer(peer: WorkerPeer): void {
+    if (!peer.recoveryTimer) {
+      return;
+    }
+    clearTimeout(peer.recoveryTimer);
+    peer.recoveryTimer = undefined;
+  }
+
+  private schedulePeerRecovery(peer: WorkerPeer): void {
+    this.clearPeerRecoveryTimer(peer);
+    peer.recoveryTimer = setTimeout(() => {
+      const activePeer = this.peers.get(peer.peerId);
+      if (!activePeer || activePeer.state !== 'disconnected') {
+        return;
+      }
+      this.log(`Recovering disconnected peer: ${peer.peerId.slice(0, 20)}`);
+      this.closePeer(peer.peerId);
+      this.sendHello();
+    }, DISCONNECTED_PEER_RETRY_DELAY_MS);
+  }
+
+  private shouldReplacePeer(peer: WorkerPeer, now = Date.now()): boolean {
+    if (peer.state === 'disconnected') {
+      return true;
+    }
+    if (peer.state === 'connecting') {
+      return now - peer.createdAt >= STALE_CONNECTING_PEER_MS;
+    }
+    if (peer.state === 'connected' && !peer.dataChannelReady) {
+      const connectedAt = peer.connectedAt ?? peer.createdAt;
+      return now - connectedAt >= STALE_DATA_CHANNEL_WAIT_MS;
+    }
+    return false;
+  }
+
   private createPeer(
     peerId: string,
     pubkey: string,
@@ -453,6 +511,7 @@ export class WebRTCController {
       answerCreated: false,
       htlConfig: generatePeerHTLConfig(),
       pendingRequests: new Map(),
+      pendingReassemblies: new Map(),
       stats: {
         requestsSent: 0,
         requestsReceived: 0,
@@ -465,6 +524,8 @@ export class WebRTCController {
         forwardedSuppressed: 0,
       },
       createdAt: Date.now(),
+      disconnectedAt: undefined,
+      recoveryTimer: undefined,
       bufferPaused: false,
       deferredRequests: [],
     };
@@ -506,12 +567,18 @@ export class WebRTCController {
     const peer = this.peers.get(peerId);
     if (!peer) return;
 
+    this.clearPeerRecoveryTimer(peer);
+
     // Clear pending requests
     for (const [hashKey, pending] of peer.pendingRequests.entries()) {
       clearTimeout(pending.timeout);
       peer.pendingRequests.delete(hashKey);
       this.releasePeerRequest(peer.peerId);
       pending.resolve(null);
+    }
+    for (const [hashKey, pending] of peer.pendingReassemblies.entries()) {
+      clearTimeout(pending.timeout);
+      peer.pendingReassemblies.delete(hashKey);
     }
 
     peer.state = 'disconnected';
@@ -614,12 +681,25 @@ export class WebRTCController {
     if (state === 'connected') {
       peer.state = 'connected';
       peer.connectedAt = Date.now();
+      peer.disconnectedAt = undefined;
+      this.clearPeerRecoveryTimer(peer);
+    } else if (state === 'connecting') {
+      peer.state = 'connecting';
+    } else if (state === 'disconnected') {
+      peer.state = 'disconnected';
+      peer.dataChannelReady = false;
+      peer.disconnectedAt = Date.now();
+      this.schedulePeerRecovery(peer);
     } else if (state === 'failed' || state === 'closed') {
       this.closePeer(peerId);
     }
   }
 
   private onPeerClosed(peerId: string): void {
+    const peer = this.peers.get(peerId);
+    if (peer) {
+      this.clearPeerRecoveryTimer(peer);
+    }
     this.peers.delete(peerId);
     this.peerSelector.removePeer(peerId);
   }
@@ -705,6 +785,8 @@ export class WebRTCController {
     if (!peer) return;
 
     peer.dataChannelReady = true;
+    peer.disconnectedAt = undefined;
+    this.clearPeerRecoveryTimer(peer);
     this.log(`Data channel open: ${peerId.slice(0, 20)}`);
   }
 
@@ -816,23 +898,37 @@ export class WebRTCController {
     };
   }
 
+  private resetPendingRequestTimeout(peer: WorkerPeer, hashKey: string, pending: PendingRequest): void {
+    clearTimeout(pending.timeout);
+    pending.timeout = setTimeout(() => {
+      peer.pendingRequests.delete(hashKey);
+      peer.pendingReassemblies.delete(hashKey);
+      this.releasePeerRequest(peer.peerId);
+      this.peerSelector.recordTimeout(peer.peerId);
+      pending.resolve(null);
+    }, this.requestTimeout);
+  }
+
   private async waitForInFlightResult(
     inFlight: InFlightPeerRequest[],
-    waitMs: number,
+    waitMs?: number,
   ): Promise<{ task: InFlightPeerRequest; data: Uint8Array | null; elapsedMs: number } | null> {
     const active = inFlight.filter((task) => !task.settled);
-    if (active.length === 0 || waitMs <= 0) return null;
-    const timeout = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), waitMs);
-    });
-    const outcome = await Promise.race([
-      timeout,
-      ...active.map((task) => task.promise.then((result) => ({
-        task,
-        data: result.data,
-        elapsedMs: result.elapsedMs,
-      }))),
-    ]);
+    if (active.length === 0) return null;
+    if (waitMs !== undefined && waitMs <= 0) return null;
+    const outcomes = active.map((task) => task.promise.then((result) => ({
+      task,
+      data: result.data,
+      elapsedMs: result.elapsedMs,
+    })));
+    const outcome = waitMs === undefined
+      ? await Promise.race(outcomes)
+      : await Promise.race([
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), waitMs);
+        }),
+        ...outcomes,
+      ]);
     if (!outcome) return null;
     outcome.task.settled = true;
     return outcome;
@@ -955,10 +1051,93 @@ export class WebRTCController {
     await this.meshRouter.handleRequest(peer.peerId, req);
   }
 
+  private isFragmentedResponse(res: DataResponse): boolean {
+    return Number.isInteger(res.i) && Number.isInteger(res.n) && (res.n ?? 0) > 0;
+  }
+
+  private handleFragmentResponse(peer: WorkerPeer, res: DataResponse): Uint8Array | null {
+    const hashKey = hashToKey(res.h);
+    const fragmentIndex = res.i ?? 0;
+    const totalExpected = res.n ?? 0;
+    if (fragmentIndex < 0 || totalExpected <= 0 || fragmentIndex >= totalExpected) {
+      return null;
+    }
+
+    let pending = peer.pendingReassemblies.get(hashKey);
+    if (!pending) {
+      pending = {
+        fragments: new Map(),
+        totalExpected,
+        receivedBytes: 0,
+        timeout: setTimeout(() => {
+          peer.pendingReassemblies.delete(hashKey);
+          const pendingRequest = peer.pendingRequests.get(hashKey);
+          if (!pendingRequest) {
+            return;
+          }
+          clearTimeout(pendingRequest.timeout);
+          peer.pendingRequests.delete(hashKey);
+          this.releasePeerRequest(peer.peerId);
+          pendingRequest.resolve(null);
+        }, this.fragmentStallTimeoutMs()),
+      };
+      peer.pendingReassemblies.set(hashKey, pending);
+    } else {
+      clearTimeout(pending.timeout);
+      pending.timeout = setTimeout(() => {
+        peer.pendingReassemblies.delete(hashKey);
+        const pendingRequest = peer.pendingRequests.get(hashKey);
+        if (!pendingRequest) {
+          return;
+        }
+        clearTimeout(pendingRequest.timeout);
+        peer.pendingRequests.delete(hashKey);
+        this.releasePeerRequest(peer.peerId);
+        pendingRequest.resolve(null);
+      }, this.fragmentStallTimeoutMs());
+    }
+
+    const pendingRequest = peer.pendingRequests.get(hashKey);
+    if (pendingRequest) {
+      this.resetPendingRequestTimeout(peer, hashKey, pendingRequest);
+    }
+
+    if (!pending.fragments.has(fragmentIndex)) {
+      const fragment = res.d.slice();
+      pending.fragments.set(fragmentIndex, fragment);
+      pending.receivedBytes += fragment.byteLength;
+    }
+
+    if (pending.fragments.size !== pending.totalExpected) {
+      return null;
+    }
+
+    clearTimeout(pending.timeout);
+    peer.pendingReassemblies.delete(hashKey);
+
+    const assembled = new Uint8Array(pending.receivedBytes);
+    let offset = 0;
+    for (let index = 0; index < pending.totalExpected; index += 1) {
+      const fragment = pending.fragments.get(index);
+      if (!fragment) {
+        return null;
+      }
+      assembled.set(fragment, offset);
+      offset += fragment.byteLength;
+    }
+    return assembled;
+  }
+
   private async handleResponse(peer: WorkerPeer, res: DataResponse): Promise<void> {
     peer.stats.responsesReceived++;
 
     const hashKey = hashToKey(res.h);
+    const responseData = this.isFragmentedResponse(res)
+      ? this.handleFragmentResponse(peer, res)
+      : res.d.slice();
+    if (!responseData) {
+      return;
+    }
     const pending = peer.pendingRequests.get(hashKey);
 
     if (!pending) {
@@ -971,14 +1150,15 @@ export class WebRTCController {
         if (!hasRequesters) return;
       }
 
-      const valid = await verifyHash(res.d, res.h);
+      const valid = await verifyHash(responseData, res.h);
       if (valid) {
-        await this.localStore.put(res.h, res.d);
+        const stableData = responseData.slice();
+        await this.localStore.put(res.h, stableData);
         if (requestedAt) {
           this.recentRequests.delete(hashKey);
         }
         if (hasRequesters) {
-          await this.meshRouter.resolve(res.h, res.d);
+          await this.meshRouter.resolve(res.h, stableData);
         }
       }
       return;
@@ -989,15 +1169,16 @@ export class WebRTCController {
     this.releasePeerRequest(peer.peerId);
 
     // Verify hash
-    const valid = await verifyHash(res.d, res.h);
+    const valid = await verifyHash(responseData, res.h);
     const elapsedMs = pending.startedAt ? Math.max(1, Date.now() - pending.startedAt) : this.requestTimeout;
     if (valid) {
+      const stableData = responseData.slice();
       // Store locally
-      await this.localStore.put(res.h, res.d);
-      this.peerSelector.recordSuccess(peer.peerId, elapsedMs, res.d.length);
-      pending.resolve(res.d);
+      await this.localStore.put(res.h, stableData);
+      this.peerSelector.recordSuccess(peer.peerId, elapsedMs, stableData.length);
+      pending.resolve(stableData);
 
-      await this.meshRouter.resolve(res.h, res.d);
+      await this.meshRouter.resolve(res.h, stableData);
     } else {
       this.log(`Hash mismatch from ${peer.peerId}`);
       this.peerSelector.recordFailure(peer.peerId);
@@ -1026,6 +1207,10 @@ export class WebRTCController {
       const encoded = new Uint8Array(encodeResponse(res));
       this.sendDataToPeer(peer, encoded);
     }
+  }
+
+  private fragmentStallTimeoutMs(): number {
+    return Math.max(MIN_FRAGMENT_STALL_TIMEOUT_MS, this.requestTimeout);
   }
 
   private sendRequestToPeer(peer: WorkerPeer, hash: Uint8Array, htl: number): boolean {
@@ -1065,8 +1250,8 @@ export class WebRTCController {
         ? deadline
         : Math.min(deadline, Date.now() + dispatch.hedgeIntervalMs);
 
-      while (Date.now() < windowEnd) {
-        const remaining = windowEnd - Date.now();
+      while (isLastWave || Date.now() < windowEnd) {
+        const remaining = isLastWave ? undefined : windowEnd - Date.now();
         const result = await this.waitForInFlightResult(inFlight, remaining);
         if (!result) break;
         if (!result.data) continue;
@@ -1075,7 +1260,7 @@ export class WebRTCController {
         return result.data;
       }
 
-      if (Date.now() >= deadline) break;
+      if (!isLastWave && Date.now() >= deadline) break;
     }
 
     this.clearPendingHashFromPeers(hashToKey(hash));

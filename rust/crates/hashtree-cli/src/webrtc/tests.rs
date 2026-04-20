@@ -67,7 +67,7 @@ fn test_webrtc_config_default() {
     assert_eq!(config.bluetooth.max_peers, 0);
     assert_eq!(
         config.request_selection_strategy,
-        SelectionStrategy::TitForTat
+        SelectionStrategy::Weighted
     );
     assert!(config.request_fairness_enabled);
     assert_eq!(config.request_dispatch.initial_fanout, 2);

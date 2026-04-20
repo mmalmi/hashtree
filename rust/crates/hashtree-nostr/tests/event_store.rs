@@ -453,6 +453,37 @@ fn lossy_kind_listing_skips_missing_event_blobs() {
 }
 
 #[test]
+fn lossy_author_listing_skips_missing_event_blobs() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let nostr_store = NostrEventStore::new(Arc::clone(&store));
+        let author = "a".repeat(64);
+        let older = canonical_store_event(&author, 10, 0, Vec::new(), r#"{"name":"older"}"#);
+        let newer = canonical_store_event(&author, 20, 1, Vec::new(), "newer");
+
+        let mut root = nostr_store.add(None, older.clone()).await.unwrap();
+        root = nostr_store.add(Some(&root), newer.clone()).await.unwrap();
+
+        let missing_cid = by_id_event_cid(Arc::clone(&store), &root, &newer.id)
+            .await
+            .expect("event cid");
+        assert!(store.delete(&missing_cid.hash).await.unwrap());
+
+        assert!(nostr_store
+            .list_by_author(Some(&root), &author, ListEventsOptions::default())
+            .await
+            .is_err());
+        assert_eq!(
+            nostr_store
+                .list_by_author_lossy(Some(&root), &author, ListEventsOptions::default())
+                .await
+                .unwrap(),
+            vec![older]
+        );
+    });
+}
+
+#[test]
 fn signed_event_json_snapshot_roundtrips_deterministically() {
     let event = event(
         "1195275911eb877e6687b4f8a3495de1e0719280e7fc1fb229a9de37b2d87bea",

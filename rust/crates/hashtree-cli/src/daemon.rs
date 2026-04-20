@@ -146,8 +146,46 @@ pub struct EmbeddedBackgroundServicesController {
 }
 
 impl EmbeddedBackgroundServicesController {
+    const MIRROR_PUBLISH_RELAY_PRIORITY: &[&str] = &[
+        "wss://temp.iris.to",
+        "wss://vault.iris.to",
+        "wss://relay.damus.io",
+        "wss://relay.primal.net",
+    ];
+    const MIRROR_PUBLISH_RELAY_BLOCKLIST: &[&str] =
+        &["wss://graph-relay.iris.to", "wss://upload.iris.to/nostr"];
+
     fn mirror_publish_relays(active_relays: &[String], _bind_address: &str) -> Vec<String> {
-        active_relays.to_vec()
+        let mut seen = HashSet::new();
+        let active_relays = active_relays
+            .iter()
+            .filter(|relay| seen.insert((*relay).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if active_relays.is_empty() {
+            return Vec::new();
+        }
+        let active_relay_set = active_relays.iter().cloned().collect::<HashSet<_>>();
+
+        let preferred = Self::MIRROR_PUBLISH_RELAY_PRIORITY
+            .iter()
+            .filter(|relay| active_relay_set.contains(**relay))
+            .map(|relay| (*relay).to_string())
+            .collect::<Vec<_>>();
+        if !preferred.is_empty() {
+            return preferred;
+        }
+
+        let filtered = active_relays
+            .iter()
+            .filter(|relay| !Self::MIRROR_PUBLISH_RELAY_BLOCKLIST.contains(&relay.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !filtered.is_empty() {
+            return filtered;
+        }
+
+        active_relays
     }
 
     pub fn new(
@@ -289,6 +327,7 @@ impl EmbeddedBackgroundServicesController {
                             &active_relays,
                             &config.server.bind_address,
                         ),
+                        blossom_write_servers: config.blossom.all_write_servers(),
                         max_follow_distance: config.nostr.social_graph_crawl_depth,
                         overmute_threshold: config.nostr.overmute_threshold,
                         require_negentropy: config.nostr.negentropy_only,
@@ -828,19 +867,44 @@ mod tests {
     use super::EmbeddedBackgroundServicesController;
 
     #[test]
-    fn mirror_publish_relays_match_upstream_relays_only() {
+    fn mirror_publish_relays_prefers_known_root_publish_relays() {
         let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
             &[
+                "wss://graph-relay.iris.to".to_string(),
                 "wss://relay.example".to_string(),
-                "wss://relay.two".to_string(),
+                "wss://relay.damus.io".to_string(),
+                "wss://temp.iris.to".to_string(),
+                "wss://vault.iris.to".to_string(),
+                "wss://upload.iris.to/nostr".to_string(),
             ],
             "0.0.0.0:8080",
         );
         assert_eq!(
             relays,
             vec![
-                "wss://relay.example".to_string(),
-                "wss://relay.two".to_string(),
+                "wss://temp.iris.to".to_string(),
+                "wss://vault.iris.to".to_string(),
+                "wss://relay.damus.io".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mirror_publish_relays_filters_known_bad_publish_targets_when_no_preferred_remain() {
+        let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
+            &[
+                "wss://graph-relay.iris.to".to_string(),
+                "wss://relay.snort.social".to_string(),
+                "wss://relay.nostr.band".to_string(),
+                "wss://upload.iris.to/nostr".to_string(),
+            ],
+            "0.0.0.0:8080",
+        );
+        assert_eq!(
+            relays,
+            vec![
+                "wss://relay.snort.social".to_string(),
+                "wss://relay.nostr.band".to_string(),
             ]
         );
     }

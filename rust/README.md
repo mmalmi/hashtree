@@ -147,6 +147,8 @@ git push origin main
 git clone htree://self/myrepo#private
 ```
 
+Each pusher should use their own identity-specific remote instead of sharing one private key. If multiple people push with the same key and their local refs are not in sync, a later push can overwrite refs published by someone else.
+
 Cashu wallet commands are provided by the separate `htree-cashu` helper. Install it next to `htree`:
 
 ```bash

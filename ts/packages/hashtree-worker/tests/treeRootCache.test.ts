@@ -55,4 +55,28 @@ describe('treeRootCache', () => {
     const cached = await getCachedRootInfo(npub, treeName);
     expect(cached?.snapshotNhash).toBe('nhash1snapshotcache');
   });
+
+  it('clears stale key metadata when a newer same-hash event makes the tree public', async () => {
+    const npub = 'npub-worker-cache-public-reset';
+    const treeName = 'profiles/public-reset';
+
+    await setCachedRoot(npub, treeName, { hash: HASH_A, key: KEY_A }, 'link-visible', {
+      updatedAt: 100,
+      encryptedKey: 'aa'.repeat(32),
+      keyId: 'key-id-9',
+      selfEncryptedLinkKey: 'bb'.repeat(32),
+    });
+
+    await setCachedRoot(npub, treeName, { hash: HASH_A }, 'public', {
+      updatedAt: 200,
+    });
+
+    const cached = await getCachedRootInfo(npub, treeName);
+    expect(cached).toBeTruthy();
+    expect(cached?.key).toBeUndefined();
+    expect(cached?.encryptedKey).toBeUndefined();
+    expect(cached?.keyId).toBeUndefined();
+    expect(cached?.selfEncryptedLinkKey).toBeUndefined();
+    expect(cached?.visibility).toBe('public');
+  });
 });

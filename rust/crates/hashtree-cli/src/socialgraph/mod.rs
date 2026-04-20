@@ -174,7 +174,10 @@ static NDB_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(test)]
 pub fn test_lock() -> TestLockGuard {
-    NDB_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    NDB_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
 }
 
 pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>> {
@@ -504,6 +507,11 @@ impl SocialGraphStore {
         self.profile_index.search_root()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn profiles_by_pubkey_root(&self) -> Result<Option<Cid>> {
+        self.profile_index.by_pubkey_root()
+    }
+
     pub fn public_events_root(&self) -> Result<Option<Cid>> {
         self.public_events.events_root()
     }
@@ -534,6 +542,21 @@ impl SocialGraphStore {
         let (by_pubkey_root, search_root) = self
             .profile_index
             .rebuild_profile_events(latest_by_pubkey.into_values())?;
+        self.profile_index
+            .write_by_pubkey_root(by_pubkey_root.as_ref())?;
+        self.profile_index.write_search_root(search_root.as_ref())?;
+        Ok(())
+    }
+
+    pub(crate) async fn rebuild_profile_index_for_events_async(
+        &self,
+        events: &[Event],
+    ) -> Result<()> {
+        let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
+        let (by_pubkey_root, search_root) = self
+            .profile_index
+            .rebuild_profile_events_async(latest_by_pubkey.into_values())
+            .await?;
         self.profile_index
             .write_by_pubkey_root(by_pubkey_root.as_ref())?;
         self.profile_index.write_search_root(search_root.as_ref())?;
@@ -578,12 +601,65 @@ impl SocialGraphStore {
         Ok(latest_count)
     }
 
+    pub async fn rebuild_profile_index_from_stored_events_async(&self) -> Result<usize> {
+        let public_events_root = self.public_events.events_root()?;
+        let ambient_events_root = self.ambient_events.events_root()?;
+        if public_events_root.is_none() && ambient_events_root.is_none() {
+            self.profile_index.write_by_pubkey_root(None)?;
+            self.profile_index.write_search_root(None)?;
+            return Ok(0);
+        }
+
+        let mut events = Vec::new();
+        for (bucket, root) in [
+            (&self.public_events, public_events_root),
+            (&self.ambient_events, ambient_events_root),
+        ] {
+            let Some(root) = root else {
+                continue;
+            };
+            let stored = bucket
+                .event_store
+                .list_by_kind_lossy(
+                    Some(&root),
+                    Kind::Metadata.as_u16() as u32,
+                    ListEventsOptions::default(),
+                )
+                .await
+                .map_err(map_event_store_error)?;
+            events.extend(
+                stored
+                    .into_iter()
+                    .map(nostr_event_from_stored)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+
+        let latest_count = self
+            .filtered_latest_metadata_events_by_pubkey(&events)?
+            .len();
+        self.rebuild_profile_index_for_events_async(&events).await?;
+        Ok(latest_count)
+    }
+
     pub fn rebuild_event_indexes_from_stored_events(&self) -> Result<(usize, usize)> {
         let public_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.public_events)?;
         let ambient_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.ambient_events)?;
         self.rebuild_profile_index_from_stored_events()?;
+        Ok((public_count, ambient_count))
+    }
+
+    pub async fn rebuild_event_indexes_from_stored_events_async(&self) -> Result<(usize, usize)> {
+        let public_count = self
+            .rebuild_event_index_bucket_from_stored_events_async(&self.public_events)
+            .await?;
+        let ambient_count = self
+            .rebuild_event_index_bucket_from_stored_events_async(&self.ambient_events)
+            .await?;
+        self.rebuild_profile_index_from_stored_events_async()
+            .await?;
         Ok((public_count, ambient_count))
     }
 
@@ -616,6 +692,47 @@ impl SocialGraphStore {
         let count = stored.len();
         let next_root =
             block_on(bucket.event_store.build(None, stored)).map_err(map_event_store_error)?;
+        bucket.write_events_root(next_root.as_ref())?;
+        Ok(count)
+    }
+
+    async fn rebuild_event_index_bucket_from_stored_events_async(
+        &self,
+        bucket: &EventIndexBucket,
+    ) -> Result<usize> {
+        let Some(root) = bucket.events_root()? else {
+            bucket.write_events_root(None)?;
+            return Ok(0);
+        };
+
+        let manifest = bucket
+            .event_store
+            .get_manifest(Some(&root))
+            .await
+            .map_err(map_event_store_error)?;
+        if manifest.by_kind_time_author.is_none() {
+            let next_root = bucket
+                .event_store
+                .upgrade_manifest_indexes(Some(&root))
+                .await
+                .map_err(map_event_store_error)?;
+            if next_root.as_ref() != Some(&root) {
+                bucket.write_events_root(next_root.as_ref())?;
+                return Ok(0);
+            }
+        }
+
+        let stored = bucket
+            .event_store
+            .list_recent_lossy(Some(&root), ListEventsOptions::default())
+            .await
+            .map_err(map_event_store_error)?;
+        let count = stored.len();
+        let next_root = bucket
+            .event_store
+            .build(None, stored)
+            .await
+            .map_err(map_event_store_error)?;
         bucket.write_events_root(next_root.as_ref())?;
         Ok(count)
     }

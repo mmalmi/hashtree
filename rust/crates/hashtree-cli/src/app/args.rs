@@ -475,6 +475,24 @@ pub(crate) enum StorageCommands {
     Trees,
     /// Manually trigger eviction
     Evict,
+    /// Compact LMDB environments to reclaim freed pages on disk
+    Compact {
+        /// Specific LMDB environment directory to compact (repeatable)
+        #[arg(long = "env-dir")]
+        env_dirs: Vec<PathBuf>,
+        /// Keep the original data.mdb as a .bak file after swapping
+        #[arg(long)]
+        keep_backup: bool,
+    },
+    /// Trim a specific LMDB blob environment down to a logical size limit
+    TrimLmdb {
+        /// LMDB environment directory to trim
+        #[arg(long = "env-dir")]
+        env_dir: PathBuf,
+        /// Logical size target in GB
+        #[arg(long = "max-gb")]
+        max_gb: u64,
+    },
     /// Verify blob integrity and delete corrupted entries
     Verify {
         /// Actually delete corrupted entries (default: dry-run)

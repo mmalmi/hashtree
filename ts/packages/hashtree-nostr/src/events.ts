@@ -763,6 +763,9 @@ export class NostrEventStore {
     try {
       return await this.readStoredEvent(eventCid);
     } catch (error) {
+      if (error instanceof Error && error.message === 'Stored Nostr event blob is missing') {
+        return null;
+      }
       console.warn('Skipping unreadable stored Nostr event', error);
       return null;
     }

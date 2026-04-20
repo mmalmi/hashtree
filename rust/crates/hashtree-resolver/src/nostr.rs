@@ -103,6 +103,13 @@ where
         .max_by_key(|event| (event.created_at, event.id))
 }
 
+fn next_replaceable_created_at(now: Timestamp, latest_existing: Option<Timestamp>) -> Timestamp {
+    match latest_existing {
+        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_u64().saturating_add(1)),
+        _ => now,
+    }
+}
+
 fn is_newer_event(
     event: &Event,
     current_created_at: Timestamp,
@@ -247,6 +254,16 @@ impl NostrRootResolver {
         self.config.secret_key.as_ref().map(|k| k.public_key())
     }
 
+    fn build_tree_filter(pubkey: PublicKey, tree_name: &str) -> Filter {
+        Filter::new()
+            .kind(Kind::Custom(HASHTREE_KIND))
+            .author(pubkey)
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                vec![tree_name.to_string()],
+            )
+    }
+
     /// Extract Cid from event tags
     fn cid_from_event(&self, event: &Event) -> Option<Cid> {
         Self::cid_from_event_with_keys(event, self.config.secret_key.as_ref())
@@ -333,6 +350,20 @@ impl NostrRootResolver {
         }
 
         Ok(events_by_id.into_values().collect())
+    }
+
+    async fn latest_existing_created_at(
+        &self,
+        pubkey: PublicKey,
+        tree_name: &str,
+    ) -> Result<Option<Timestamp>, ResolverError> {
+        let events = self
+            .fetch_events_from_relays(Self::build_tree_filter(pubkey, tree_name))
+            .await?;
+        Ok(pick_latest_event(events.iter().filter(|event| {
+            event_identifier(event).as_deref() == Some(tree_name) && is_hashtree_event(event)
+        }))
+        .map(|event| event.created_at))
     }
 
     fn cid_from_event_with_keys(event: &Event, keys: Option<&Keys>) -> Option<Cid> {
@@ -523,11 +554,36 @@ impl NostrRootResolver {
             ),
         ];
 
-        let event = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags);
+        let created_at = next_replaceable_created_at(
+            Timestamp::now(),
+            self.latest_existing_created_at(pubkey, &tree_name)
+                .await
+                .ok()
+                .flatten(),
+        );
+        let event = self
+            .client
+            .sign_event_builder(
+                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags)
+                    .custom_created_at(created_at),
+            )
+            .await
+            .map_err(|e| ResolverError::Network(e.to_string()))?;
 
         let client = self.client.clone();
+        let event_for_send = event.clone();
         let output =
-            await_publish_result(async move { client.send_event_builder(event).await }).await?;
+            await_publish_result(async move { client.send_event(event_for_send).await }).await?;
+
+        {
+            let mut subs = self.subscriptions.write().await;
+            if let Some(sub) = subs.get_mut(key) {
+                sub.current_cid = Some(cid.clone());
+                sub.latest_created_at = event.created_at;
+                sub.latest_event_id = Some(event.id);
+                let _ = sub.tx.send(Some(cid.clone())).await;
+            }
+        }
 
         Ok(publish_succeeded(output.success.len()))
     }
@@ -538,14 +594,7 @@ impl RootResolver for NostrRootResolver {
     async fn resolve(&self, key: &str) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
 
-        // Create filter for this specific tree
-        let filter = Filter::new()
-            .kind(Kind::Custom(HASHTREE_KIND))
-            .author(pubkey)
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.clone()],
-            );
+        let filter = Self::build_tree_filter(pubkey, &tree_name);
 
         // Fetch events from relays
         let events = self.fetch_events_from_relays(filter).await?;
@@ -568,13 +617,7 @@ impl RootResolver for NostrRootResolver {
     ) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
 
-        let filter = Filter::new()
-            .kind(Kind::Custom(HASHTREE_KIND))
-            .author(pubkey)
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.clone()],
-            );
+        let filter = Self::build_tree_filter(pubkey, &tree_name);
 
         let events = self.fetch_events_from_relays(filter).await?;
 
@@ -605,13 +648,7 @@ impl RootResolver for NostrRootResolver {
         }
 
         // Create filter
-        let filter = Filter::new()
-            .kind(Kind::Custom(HASHTREE_KIND))
-            .author(pubkey)
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.clone()],
-            );
+        let filter = Self::build_tree_filter(pubkey, &tree_name);
 
         // Store subscription state
         {
@@ -711,21 +748,33 @@ impl RootResolver for NostrRootResolver {
             ));
         }
 
-        // Content is empty - all data in tags
-        let event = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags);
+        let created_at = next_replaceable_created_at(
+            Timestamp::now(),
+            self.latest_existing_created_at(pubkey, &tree_name)
+                .await
+                .ok()
+                .flatten(),
+        );
+        let event = self
+            .client
+            .sign_event_builder(
+                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags)
+                    .custom_created_at(created_at),
+            )
+            .await
+            .map_err(|e| ResolverError::Network(e.to_string()))?;
 
-        // Publish
         let client = self.client.clone();
+        let event_for_send = event.clone();
         let output =
-            await_publish_result(async move { client.send_event_builder(event).await }).await?;
+            await_publish_result(async move { client.send_event(event_for_send).await }).await?;
 
-        // Update local subscription state
         {
             let mut subs = self.subscriptions.write().await;
             if let Some(sub) = subs.get_mut(key) {
                 sub.current_cid = Some(cid.clone());
-                sub.latest_created_at = Timestamp::now();
-                sub.latest_event_id = None;
+                sub.latest_created_at = event.created_at;
+                sub.latest_event_id = Some(event.id);
                 let _ = sub.tx.send(Some(cid.clone())).await;
             }
         }
@@ -764,11 +813,36 @@ impl RootResolver for NostrRootResolver {
             ));
         }
 
-        let event = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags);
+        let created_at = next_replaceable_created_at(
+            Timestamp::now(),
+            self.latest_existing_created_at(pubkey, &tree_name)
+                .await
+                .ok()
+                .flatten(),
+        );
+        let event = self
+            .client
+            .sign_event_builder(
+                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags)
+                    .custom_created_at(created_at),
+            )
+            .await
+            .map_err(|e| ResolverError::Network(e.to_string()))?;
 
         let client = self.client.clone();
+        let event_for_send = event.clone();
         let output =
-            await_publish_result(async move { client.send_event_builder(event).await }).await?;
+            await_publish_result(async move { client.send_event(event_for_send).await }).await?;
+
+        {
+            let mut subs = self.subscriptions.write().await;
+            if let Some(sub) = subs.get_mut(key) {
+                sub.current_cid = Some(cid.clone());
+                sub.latest_created_at = event.created_at;
+                sub.latest_event_id = Some(event.id);
+                let _ = sub.tx.send(Some(cid.clone())).await;
+            }
+        }
 
         Ok(publish_succeeded(output.success.len()))
     }
@@ -837,6 +911,7 @@ mod tests {
 
     struct TestRelay {
         port: u16,
+        events: Arc<Mutex<Vec<Value>>>,
         shutdown: broadcast::Sender<()>,
     }
 
@@ -898,11 +973,40 @@ mod tests {
 
             std::thread::sleep(Duration::from_millis(100));
 
-            Self { port, shutdown }
+            Self {
+                port,
+                events: stored_events,
+                shutdown,
+            }
         }
 
         fn url(&self) -> String {
             format!("ws://127.0.0.1:{}", self.port)
+        }
+
+        fn latest_tree_created_at(&self, tree_name: &str) -> Option<u64> {
+            self.events
+                .lock()
+                .expect("relay events")
+                .iter()
+                .filter(|event| {
+                    event.get("kind").and_then(Value::as_u64) == Some(HASHTREE_KIND as u64)
+                        && event_tag_matches(event, "d", &[tree_name.to_string()])
+                })
+                .max_by_key(|event| {
+                    (
+                        event
+                            .get("created_at")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_default(),
+                        event
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+                .and_then(|event| event.get("created_at").and_then(Value::as_u64))
         }
     }
 
@@ -1251,6 +1355,58 @@ mod tests {
             second.id
         };
         assert_eq!(selected.id, expected);
+    }
+
+    #[test]
+    fn test_publish_bumps_replaceable_timestamp_past_existing_event() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+
+        runtime.block_on(async {
+            let keys = Keys::generate();
+            let npub = keys.public_key().to_bech32().expect("npub");
+            let key = format!("{npub}/tree");
+            let stale_created_at = Timestamp::now().as_u64().saturating_add(30);
+            let stale = build_hashtree_event(
+                &keys,
+                "tree",
+                stale_created_at,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "stale",
+            );
+            let relay = TestRelay::with_events(vec![stale]);
+            let resolver = NostrRootResolver::new(NostrResolverConfig {
+                relays: vec![relay.url()],
+                resolve_timeout: Duration::from_secs(2),
+                secret_key: Some(keys.clone()),
+            })
+            .await
+            .expect("resolver");
+
+            let cid = Cid {
+                hash: [0x22; 32],
+                key: None,
+            };
+            let published = resolver.publish(&key, &cid).await.expect("publish");
+            assert!(published);
+
+            let resolved = resolver
+                .resolve(&key)
+                .await
+                .expect("resolve")
+                .expect("published cid");
+            assert_eq!(resolved, cid);
+            assert!(
+                relay
+                    .latest_tree_created_at("tree")
+                    .is_some_and(|created_at| created_at > stale_created_at),
+                "publish should advance created_at beyond the existing replaceable event"
+            );
+            resolver.stop().await.expect("stop resolver");
+        });
     }
 
     #[test]

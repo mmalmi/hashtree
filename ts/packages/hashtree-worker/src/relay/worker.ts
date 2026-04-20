@@ -630,7 +630,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         await ndkSetRelays(msg.relays);
         // Re-subscribe to WebRTC signaling on new relays
         resubscribeWebRTCSignaling();
-        console.log('[Worker] Relays updated to', msg.relays.length, 'relays');
+        if (webrtcStarted) {
+          webrtc?.broadcastHello();
+        }
+        console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
         break;
 

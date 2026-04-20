@@ -93,6 +93,7 @@ Hashtree is the canonical remote for this repository:
 
 - `origin = htree://self/hashtree`
 - Add mirrors on separate remotes only when you need them.
+- Each pusher should use their own identity-specific htree remote instead of sharing one private key, because out-of-sync pushes from the same identity can overwrite published refs.
 
 ## Design highlights
 
