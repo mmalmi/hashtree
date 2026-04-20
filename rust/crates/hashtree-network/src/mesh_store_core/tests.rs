@@ -1137,6 +1137,45 @@ async fn test_blocked_requester_miss_can_still_be_served_from_read_source() {
 }
 
 #[tokio::test]
+async fn test_forwarded_request_with_exhausted_htl_does_not_forward_to_peers() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let gateway = make_shared_test_node(relay.clone(), "a-gateway", MeshRoutingConfig::default());
+    let provider = make_shared_test_node(relay, "b-provider", MeshRoutingConfig::default());
+    let nodes = [&gateway, &provider];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    let payload = b"should-not-forward".to_vec();
+    let hash = hashtree_core::sha256(&payload);
+    provider
+        .local_store
+        .put(hash, payload)
+        .await
+        .expect("put provider");
+
+    gateway
+        .store
+        .handle_request_message("requester", create_request(&hash, 0))
+        .await;
+
+    tokio::task::yield_now().await;
+    let provider_stats = provider.store.drain_available_data_messages().await;
+    assert_eq!(
+        provider_stats.request_messages, 0,
+        "gateway must not forward peer requests once HTL is exhausted",
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
 async fn test_forwarded_request_can_be_served_from_another_peer() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;
@@ -1164,6 +1203,59 @@ async fn test_forwarded_request_can_be_served_from_another_peer() {
 
     let result = run_forwarded_request_with_pumps(&requester, "b-gateway", hash, &nodes).await;
     assert_eq!(result, Some(payload));
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_recent_forward_miss_suppresses_immediate_reforward() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let gateway = make_shared_test_node(relay.clone(), "a-gateway", MeshRoutingConfig::default());
+    let provider = make_shared_test_node(relay, "b-provider", MeshRoutingConfig::default());
+    let nodes = [&gateway, &provider];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    let hash = hashtree_core::sha256(b"recent-forward-miss");
+    gateway
+        .store
+        .handle_request_message("requester", create_request(&hash, MAX_HTL))
+        .await;
+
+    tokio::task::yield_now().await;
+    let first_attempt = provider.store.drain_available_data_messages().await;
+    assert_eq!(first_attempt.request_messages, 1);
+
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    tokio::task::yield_now().await;
+
+    let hash_key = hash_to_key(&hash);
+    assert!(!gateway
+        .store
+        .pending_requests
+        .read()
+        .await
+        .contains_key(&hash_key));
+    assert!(gateway.store.was_recent_forward_miss(&hash_key).await);
+
+    gateway
+        .store
+        .handle_request_message("requester", create_request(&hash, MAX_HTL))
+        .await;
+
+    tokio::task::yield_now().await;
+    let second_attempt = provider.store.drain_available_data_messages().await;
+    assert_eq!(
+        second_attempt.request_messages, 0,
+        "gateway should suppress immediate reflood of a recently missed hash",
+    );
 
     crate::mock::clear_channel_registry().await;
 }

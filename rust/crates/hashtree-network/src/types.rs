@@ -612,6 +612,12 @@ impl TimedSeenSet {
         true
     }
 
+    pub fn contains(&mut self, key: &str) -> bool {
+        let now = Instant::now();
+        self.prune(now);
+        self.entries.contains_key(key)
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

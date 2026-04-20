@@ -27,11 +27,13 @@ use crate::protocol::{
 };
 use crate::signaling::MeshRouter;
 use crate::transport::{PeerLinkFactory, SignalingTransport, TransportError};
-use crate::types::{PeerHTLConfig, SignalingMessage, MAX_HTL};
+use crate::types::{should_forward_htl, PeerHTLConfig, SignalingMessage, TimedSeenSet, MAX_HTL};
 
 // Keep the on-disk namespace stable across the crate rename so existing peer
 // metadata does not disappear for users upgrading from the old package name.
 const PEER_METADATA_POINTER_SLOT_KEY: &[u8] = b"hashtree-webrtc/peer-metadata/latest/v1";
+const RECENT_FORWARD_MISS_CAPACITY: usize = 4096;
+const MIN_RECENT_FORWARD_MISS_TTL_MS: u64 = 250;
 
 /// Pending request awaiting response
 struct PendingRequest {
@@ -519,6 +521,8 @@ where
     pending_quotes: RwLock<HashMap<String, PendingQuoteRequest>>,
     /// Forwarded peer requests currently being resolved through the mesh/upstream.
     pending_forward_requests: RwLock<HashMap<String, PendingForwardRequest>>,
+    /// Bounded negative cache for recently forwarded misses/timeouts.
+    recent_forward_misses: Mutex<TimedSeenSet>,
     /// Quotes we issued to peers and will accept exactly once until expiry.
     issued_quotes: RwLock<HashMap<(String, String, u64), IssuedQuote>>,
     /// Monotonic quote identifier generator.
@@ -593,6 +597,10 @@ where
             pending_requests: RwLock::new(HashMap::new()),
             pending_quotes: RwLock::new(HashMap::new()),
             pending_forward_requests: RwLock::new(HashMap::new()),
+            recent_forward_misses: Mutex::new(TimedSeenSet::new(
+                RECENT_FORWARD_MISS_CAPACITY,
+                Self::recent_forward_miss_ttl(request_timeout),
+            )),
             issued_quotes: RwLock::new(HashMap::new()),
             next_quote_id: RwLock::new(1),
             read_sources: RwLock::new(HashMap::new()),
@@ -610,6 +618,15 @@ where
             debug,
             running: RwLock::new(false),
         }
+    }
+
+    fn recent_forward_miss_ttl(request_timeout: Duration) -> Duration {
+        let ttl_ms = request_timeout
+            .as_millis()
+            .saturating_mul(2)
+            .max(MIN_RECENT_FORWARD_MISS_TTL_MS as u128)
+            .min(u64::MAX as u128) as u64;
+        Duration::from_millis(ttl_ms)
     }
 
     /// Start the store (begin listening for messages)
@@ -1148,6 +1165,10 @@ where
         request_htl: u8,
         quote_id: Option<u64>,
     ) -> bool {
+        if !should_forward_htl(request_htl) {
+            return false;
+        }
+
         let channel = match self.signaling.get_channel(peer_id).await {
             Some(c) => c,
             None => return false,
@@ -1949,9 +1970,12 @@ where
 
     async fn available_read_routes(&self, context: &MeshReadContext) -> Vec<ReadRoute> {
         let mut routes = Vec::new();
-        let ordered_peers = self
-            .ordered_connected_peers(context.exclude_peer_id.as_deref())
-            .await;
+        let ordered_peers = if should_forward_htl(context.request_htl) {
+            self.ordered_connected_peers(context.exclude_peer_id.as_deref())
+                .await
+        } else {
+            Vec::new()
+        };
         if !ordered_peers.is_empty() {
             routes.push(ReadRoute::Peers(ordered_peers));
         }
@@ -2095,6 +2119,18 @@ where
             PendingForwardRequest { requester_ids },
         );
         true
+    }
+
+    async fn was_recent_forward_miss(&self, hash_key: &str) -> bool {
+        self.recent_forward_misses.lock().await.contains(hash_key)
+    }
+
+    async fn mark_recent_forward_miss(&self, hash_key: &str) {
+        let _ = self
+            .recent_forward_misses
+            .lock()
+            .await
+            .insert_if_new(hash_key.to_string());
     }
 
     async fn take_forward_requesters(&self, hash_key: &str) -> Vec<String> {
@@ -2310,6 +2346,16 @@ where
             return;
         }
 
+        if self.was_recent_forward_miss(&hash_key).await {
+            if self.debug {
+                println!(
+                    "[MeshStoreCore] Suppressing recently missed forwarded request for {}",
+                    hash_key
+                );
+            }
+            return;
+        }
+
         if !self.begin_forward_request(&hash_key, from_peer).await {
             return;
         }
@@ -2346,6 +2392,8 @@ where
                         .enqueue_response_send(requester_id, response_bytes.clone(), ready_at)
                         .await;
                 }
+            } else {
+                this.mark_recent_forward_miss(&hash_key).await;
             }
         });
     }
