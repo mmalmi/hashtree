@@ -30,6 +30,7 @@ pub struct HostDaemonStatus {
 pub struct HostDaemonRuntime {
     runtime: tokio::runtime::Runtime,
     info: EmbeddedDaemonInfo,
+    bind_address: String,
     config_dir: PathBuf,
     data_dir: PathBuf,
 }
@@ -71,9 +72,12 @@ impl HostDaemonRuntime {
             ))
             .context("start embedded hashtree daemon")?;
 
+        let bind_address = info.addr.clone();
+
         Ok(Self {
             runtime,
             info,
+            bind_address,
             config_dir,
             data_dir,
         })
@@ -94,6 +98,29 @@ impl HostDaemonRuntime {
 
     pub fn self_npub(&self) -> &str {
         &self.info.npub
+    }
+
+    pub fn reload(&mut self) -> Result<HostDaemonStatus> {
+        let controller = self.info.daemon_controller.clone();
+        self.runtime.block_on(async move {
+            controller.shutdown().await;
+        });
+
+        let config = browser_config(&self.data_dir, &self.config_dir);
+        self.info = self
+            .runtime
+            .block_on(hashtree_cli::daemon::start_embedded(EmbeddedDaemonOptions {
+                config,
+                data_dir: self.data_dir.clone(),
+                config_dir: Some(self.config_dir.clone()),
+                bind_address: self.bind_address.clone(),
+                relays: None,
+                extra_routes: None,
+                cors: None,
+            }))
+            .context("reload embedded hashtree daemon")?;
+        self.bind_address = self.info.addr.clone();
+        Ok(self.status())
     }
 
     pub fn shutdown(&mut self) {
@@ -315,5 +342,48 @@ mod tests {
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(2));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
         assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn host_runtime_reload_applies_updated_browser_settings() {
+        let temp = TempDir::new().expect("temp dir");
+        let mut runtime =
+            HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
+        let initial_status = runtime.status();
+
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("browser_settings.json"),
+            serde_json::to_vec_pretty(&json!({
+                "nostrRelays": ["wss://relay.example-one"],
+                "blossomReadServers": ["https://cdn.example"],
+                "blossomWriteServers": ["https://upload.example"],
+                "enableWebrtc": true
+            }))
+            .expect("serialize browser settings"),
+        )
+        .expect("write browser settings");
+
+        let reloaded_status = runtime.reload().expect("reload daemon");
+        let response = reqwest::blocking::get(format!("{}/api/status", reloaded_status.base_url))
+            .expect("fetch daemon status after reload");
+        assert!(
+            response.status().is_success(),
+            "reloaded daemon should answer"
+        );
+        let payload: serde_json::Value = response.json().expect("parse daemon status");
+
+        assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(1));
+        assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
+        assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(true));
+        assert!(
+            !reloaded_status.base_url.is_empty(),
+            "reload should keep serving from some loopback endpoint"
+        );
+        assert_eq!(
+            reloaded_status.self_npub, initial_status.self_npub,
+            "reload should keep the same browser-owned identity"
+        );
     }
 }

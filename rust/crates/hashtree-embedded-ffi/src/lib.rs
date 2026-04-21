@@ -69,6 +69,25 @@ pub extern "C" fn hashtree_embedded_shutdown(handle: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn hashtree_embedded_reload(handle: *mut c_void) -> bool {
+    clear_last_error();
+    if handle.is_null() {
+        set_last_error("embedded daemon handle was null");
+        return false;
+    }
+    let handle = unsafe { &mut *handle.cast::<EmbeddedDaemonHandle>() };
+    match handle.runtime.reload() {
+        Ok(_) => true,
+        Err(error) => {
+            set_last_error(format!(
+                "failed to reload embedded hashtree daemon: {error:#}"
+            ));
+            false
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn hashtree_embedded_get_base_url(handle: *const c_void) -> *mut c_char {
     clear_last_error();
     if handle.is_null() {
