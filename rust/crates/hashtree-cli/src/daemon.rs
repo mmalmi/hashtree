@@ -797,8 +797,10 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         )
         .with_nostr_relay(nostr_relay.clone());
 
-    if let Some(ref state) = webrtc_state {
-        server = server.with_webrtc_peers(state.clone());
+    if crate::p2p_common::peer_router_enabled(&config) {
+        if let Some(ref state) = webrtc_state {
+            server = server.with_webrtc_peers(state.clone());
+        }
     }
 
     if let Some(extra) = opts.extra_routes {

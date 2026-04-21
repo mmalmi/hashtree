@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use hashtree_cli::daemon::{EmbeddedDaemonInfo, EmbeddedDaemonOptions};
 use hashtree_cli::Config;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,16 @@ pub struct HostDaemonRuntime {
     data_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSettings {
+    nostr_relays: Option<Vec<String>>,
+    blossom_read_servers: Option<Vec<String>>,
+    blossom_write_servers: Option<Vec<String>>,
+    enable_webrtc: Option<bool>,
+}
+
 impl HostDaemonRuntime {
     pub fn start(options: HostDaemonOptions) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -45,7 +56,7 @@ impl HostDaemonRuntime {
         std::fs::create_dir_all(&config_dir).context("create embedded config dir")?;
         std::fs::create_dir_all(&data_dir).context("create embedded data dir")?;
 
-        let config = browser_config(&data_dir);
+        let config = browser_config(&data_dir, &config_dir);
         let info = runtime
             .block_on(hashtree_cli::daemon::start_embedded(
                 EmbeddedDaemonOptions {
@@ -99,20 +110,59 @@ impl Drop for HostDaemonRuntime {
     }
 }
 
-fn browser_config(data_dir: &Path) -> Config {
+fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
     let mut config = Config::default();
+    if let Some(settings) = load_browser_settings(config_dir) {
+        if let Some(nostr_relays) = settings.nostr_relays {
+            config.nostr.relays = normalize_server_list(nostr_relays);
+            config.nostr.enabled = !config.nostr.relays.is_empty();
+        }
+
+        if let Some(blossom_read_servers) = settings.blossom_read_servers {
+            config.blossom.read_servers = normalize_server_list(blossom_read_servers);
+            config.blossom.servers.clear();
+        }
+        if let Some(blossom_write_servers) = settings.blossom_write_servers {
+            config.blossom.write_servers = normalize_server_list(blossom_write_servers);
+            config.blossom.servers.clear();
+        }
+        config.blossom.enabled =
+            !config.blossom.read_servers.is_empty() || !config.blossom.write_servers.is_empty();
+
+        config.server.enable_webrtc = settings.enable_webrtc.unwrap_or(false);
+        if !config.server.enable_webrtc {
+            config.server.stun_port = 0;
+        }
+    } else {
+        config.server.enable_webrtc = false;
+        config.server.stun_port = 0;
+    }
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
     config.server.public_writes = false;
-    config.server.enable_webrtc = false;
     config.server.enable_multicast = false;
     config.server.max_multicast_peers = 0;
     config.server.enable_bluetooth = false;
     config.server.max_bluetooth_peers = 0;
-    config.server.stun_port = 0;
     config.sync.enabled = false;
-    config.nostr.relays.clear();
     config
+}
+
+fn load_browser_settings(config_dir: &Path) -> Option<BrowserSettings> {
+    let settings_path = config_dir.join("browser_settings.json");
+    let raw = std::fs::read_to_string(settings_path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn normalize_server_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 #[cfg(test)]
@@ -121,6 +171,7 @@ mod tests {
     use base64::Engine;
     use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
     use reqwest::blocking::Client;
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn create_blossom_auth(keys: &Keys, action: &str) -> String {
@@ -186,5 +237,83 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
             "browser-mode daemon must not accept public Blossom uploads"
         );
+    }
+
+    #[test]
+    fn host_runtime_keeps_default_relays_and_file_servers() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime =
+            HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
+        let status = runtime.status();
+
+        let response = reqwest::blocking::get(format!("{}/api/status", status.base_url))
+            .expect("fetch daemon status");
+        assert!(
+            response.status().is_success(),
+            "status endpoint should answer"
+        );
+        let payload: serde_json::Value = response.json().expect("parse daemon status");
+
+        assert!(
+            payload["upstream"]["nostr_relays"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "browser mode should keep default relays for profile lookups",
+        );
+        assert!(
+            payload["upstream"]["blossom_servers"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "browser mode should keep default file servers for content fetches",
+        );
+        assert_eq!(
+            payload["mesh"]["enabled"].as_bool(),
+            Some(false),
+            "browser mode should still keep peer discovery off until enabled",
+        );
+    }
+
+    #[test]
+    fn host_runtime_applies_browser_settings_overrides() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("browser_settings.json"),
+            serde_json::to_vec_pretty(&json!({
+                "nostrRelays": [
+                    "wss://relay.example-two",
+                    "wss://relay.example-one",
+                    "wss://relay.example-two"
+                ],
+                "blossomReadServers": [
+                    "https://cdn.example"
+                ],
+                "blossomWriteServers": [
+                    "https://upload.example"
+                ],
+                "enableWebrtc": true
+            }))
+            .expect("serialize browser settings"),
+        )
+        .expect("write browser settings");
+
+        let runtime =
+            HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
+        let status = runtime.status();
+
+        let response = reqwest::blocking::get(format!("{}/api/status", status.base_url))
+            .expect("fetch daemon status");
+        assert!(
+            response.status().is_success(),
+            "status endpoint should answer"
+        );
+        let payload: serde_json::Value = response.json().expect("parse daemon status");
+
+        assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(2));
+        assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
+        assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(true));
     }
 }
