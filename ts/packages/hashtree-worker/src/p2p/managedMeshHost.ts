@@ -1,8 +1,8 @@
 import type { Store } from '@hashtree/core';
+import type { SignalingMessage } from '@hashtree/mesh';
 import type { HashtreeWorkerClient } from '../client.js';
 import { createWebRTCWorkerP2PProvider } from './clientBridge.js';
 import type { WebRTCEvent } from './protocol.js';
-import type { SignalingMessage } from '@hashtree/nostr';
 import { createSignalingFilters, decodeSignalingEvent, type GiftSeal, type SignalingEventLike } from './signaling.js';
 import { SimplePool } from 'nostr-tools/pool';
 import { WebRTCController, type WebRTCControllerConfig } from './webrtcController.js';
@@ -349,7 +349,7 @@ export class ManagedWebRTCMeshHost {
       subscriptions,
       closeLocalStore: session.closeLocalStore,
     };
-    this.lastHealthyAt = Date.now();
+    this.lastHealthyAt = 0;
     this.lastHelloAt = 0;
   }
 

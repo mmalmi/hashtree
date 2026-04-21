@@ -76,6 +76,7 @@ class FakeController {
   loadPeerMetadataCalls = 0;
   persistPeerMetadataCalls = 0;
   poolConfigCalls: unknown[] = [];
+  broadcastHelloCalls = 0;
   connectedCount = 0;
   peerIds = ['peer-a'];
 
@@ -106,7 +107,7 @@ class FakeController {
   }
 
   broadcastHello(): void {
-    // no-op
+    this.broadcastHelloCalls += 1;
   }
 
   getPeerStats(): Array<{ peerId: string }> {
@@ -301,5 +302,51 @@ describe('ManagedWebRTCMeshHost', () => {
     expect(proxies[1]?.closed).toBe(true);
     expect(signalPools[1]?.destroyed).toBe(true);
     expect(closeLocalStoreB).toHaveBeenCalledTimes(1);
+  });
+
+  it('reannounces instead of restarting while a relay is connected but no peers have connected yet', async () => {
+    vi.useFakeTimers();
+    try {
+      const signalPools: FakeSignalPool[] = [];
+      const controllers: FakeController[] = [];
+      const host = new ManagedWebRTCMeshHost({
+        healthCheckIntervalMs: 10,
+        reannounceIntervalMs: 20,
+        restartIntervalMs: 40,
+        createSignalPool: () => {
+          const pool = new FakeSignalPool();
+          pool.connectionStatus.set('wss://relay.example', true);
+          signalPools.push(pool);
+          return pool as unknown as any;
+        },
+        createProxy: () => new FakeProxy() as unknown as any,
+        createController: () => {
+          const controller = new FakeController();
+          controllers.push(controller);
+          return controller as unknown as any;
+        },
+      });
+
+      await host.setSession({
+        signature: 'session-a',
+        pubkey: 'pubkey-a',
+        relayUrls: ['wss://relay.example'],
+        localStore: {} as any,
+        sendSignaling: async () => undefined,
+        unwrapGift: async () => null,
+      });
+
+      expect(controllers).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(120);
+
+      expect(controllers).toHaveLength(1);
+      expect(controllers[0]?.stopped).toBe(false);
+      expect(controllers[0]?.broadcastHelloCalls).toBeGreaterThan(0);
+
+      await host.close();
+      expect(signalPools[0]?.destroyed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -153,6 +153,39 @@ describe('MeshRouterStore', () => {
     await expect(pending).resolves.toEqual({ data: remoteData, sourceId: 'blossom' });
   });
 
+  it('keeps a slow primary read alive after hedging and prefers its eventual local hit', async () => {
+    vi.useFakeTimers();
+    const localData = new Uint8Array([6, 7, 8]);
+    const remoteCalls = { count: 0 };
+    const primary = {
+      put: vi.fn(async () => true),
+      get: vi.fn(() => new Promise<Uint8Array | null>((resolve) => {
+        setTimeout(() => resolve(localData), 400);
+      })),
+      has: vi.fn(async () => false),
+      delete: vi.fn(async () => false),
+    };
+    const router = new MeshRouterStore({
+      primary,
+      primarySourceId: 'idb',
+      primaryReadTimeoutMs: 250,
+      requestTimeoutMs: 1_000,
+      sources: [
+        delayedSource('p2p', 5_000, null, remoteCalls),
+      ],
+    });
+
+    const pending = router.getDetailed(HASH_A);
+    await Promise.resolve();
+    expect(remoteCalls.count).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(remoteCalls.count).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(150);
+    await expect(pending).resolves.toEqual({ data: localData, sourceId: 'idb' });
+  });
+
   it('gives the last hedged source a full chance instead of clipping it at query start', async () => {
     vi.useFakeTimers();
     const primary = new MemoryStore();
@@ -246,6 +279,42 @@ describe('MeshRouterStore', () => {
     await vi.advanceTimersByTimeAsync(50);
     await expect(first).resolves.toEqual({ data, sourceId: 'blossom' });
     await expect(second).resolves.toEqual({ data, sourceId: 'blossom' });
+  });
+
+  it('coalesces concurrent remote reads after primary misses for the same hash', async () => {
+    vi.useFakeTimers();
+    const primary = new MemoryStore();
+    let calls = 0;
+    const data = new Uint8Array([88]);
+    const router = new MeshRouterStore({
+      primary,
+      primarySourceId: 'idb',
+      primaryReadTimeoutMs: 0,
+      requestTimeoutMs: 500,
+      sources: [
+        {
+          id: 'p2p',
+          get: () => {
+            calls += 1;
+            return new Promise<Uint8Array | null>((resolve) => {
+              setTimeout(() => resolve(data), 50);
+            });
+          },
+        },
+      ],
+    });
+
+    const first = router.getDetailed(HASH_A);
+    const second = router.getDetailed(HASH_A);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(first).resolves.toEqual({ data, sourceId: 'p2p' });
+    await expect(second).resolves.toEqual({ data, sourceId: 'p2p' });
   });
 
   it('matches grouped dynamic endpoints when filtering by sourceIds', async () => {

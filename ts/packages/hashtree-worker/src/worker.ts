@@ -37,6 +37,8 @@ const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_SLOW_LOG_MS = 15_000;
+// Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
+// keeps the local read alive after this delay instead of treating it as a miss.
 const PRIMARY_READ_TIMEOUT_MS = 300;
 const REMOTE_HEDGE_INTERVAL_MS = 250;
 
@@ -179,9 +181,14 @@ function parseHttpByteRange(
   };
 }
 
-const MEDIA_CHUNK_SIZE = 64 * 1024;
-// Match videoChunker's first chunk so startup buffering does not refetch the same encrypted media block.
-const OPEN_ENDED_RANGE_WINDOW_BYTES = 256 * 1024;
+const MEDIA_CHUNK_SIZE = 256 * 1024;
+// Keep startup-at-zero aligned with videoChunker's first chunk so the browser
+// does not immediately refetch the same encrypted media block.
+const STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES = 256 * 1024;
+// After a seek, browsers typically ask for an open-ended range from a nonzero
+// offset and expect a substantially larger contiguous window than startup.
+const SEEK_OPEN_ENDED_RANGE_WINDOW_BYTES = 8 * 1024 * 1024;
+const MEDIA_STREAM_PREFETCH = 4;
 const MESH_READ_TIMEOUT_MS = 20_000;
 const MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS = [100, 300, 900] as const;
 const STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS = [250, 1_000, 2_500, 5_000] as const;
@@ -278,6 +285,12 @@ async function readStartupMediaRangeWithRetries(
   throw lastError instanceof Error ? lastError : new Error(getErrorMessage(lastError));
 }
 
+function getOpenEndedRangeWindowBytes(start: number): number {
+  return start <= 0
+    ? STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES
+    : SEEK_OPEN_ENDED_RANGE_WINDOW_BYTES;
+}
+
 async function resolveMediaPathWithRetries(
   tree: HashTree,
   rootCid: CID,
@@ -341,7 +354,7 @@ async function* readFileStreamWithRetries(
   cid: CID,
   offset: number,
   requestId: string,
-  prefetch: number = 2,
+  prefetch: number = MEDIA_STREAM_PREFETCH,
 ): AsyncGenerator<Uint8Array> {
   let nextOffset = Math.max(0, offset);
   let attempt = 0;
@@ -862,7 +875,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     : undefined;
   const isStreamingStartupRequestWithoutKnownSize = !request.head
     && !sizeHint
-    && (!request.rangeHeader || isOpenEndedHttpByteRange(request.rangeHeader))
+    && !request.rangeHeader
     && (!Number.isFinite(request.start) || request.start <= 0)
     && typeof request.end !== 'number'
     && (!request.rangeHeader || shouldSendMediaHeadersBeforeFirstChunk(request.mimeType));
@@ -899,7 +912,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       tree,
       cid,
       0,
-      OPEN_ENDED_RANGE_WINDOW_BYTES,
+      STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES,
     );
     let startupBytesSent = 0;
     if (!sendHeadersBeforeStartupChunk) {
@@ -936,7 +949,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       port.postMessage(chunkMessage, [transferableChunk.buffer]);
     }
 
-    const stream = readFileStreamWithRetries(tree, cid, startupBytesSent, request.requestId, 2);
+    const stream = readFileStreamWithRetries(tree, cid, startupBytesSent, request.requestId, MEDIA_STREAM_PREFETCH);
     for await (const chunk of stream) {
       emittedChunks += 1;
       const transferableChunk = cloneTransferableBytes(chunk);
@@ -1027,8 +1040,9 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     : Number.isFinite(request.end) && typeof request.end === 'number'
       ? Math.floor(request.end)
       : totalSize - 1;
+  const openEndedRangeWindowBytes = getOpenEndedRangeWindowBytes(start);
   const cappedRequestedEnd = parsedRange.kind === 'range' && isOpenEndedHttpByteRange(request.rangeHeader)
-    ? Math.min(requestedEnd, start + OPEN_ENDED_RANGE_WINDOW_BYTES - 1)
+    ? Math.min(requestedEnd, start + openEndedRangeWindowBytes - 1)
     : requestedEnd;
   const end = Math.min(totalSize - 1, Math.max(start, cappedRequestedEnd));
   const isPartial = parsedRange.kind === 'range' || start !== 0 || end !== totalSize - 1;
@@ -1062,7 +1076,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     && parsedRange.kind === 'range'
     && isOpenEndedHttpByteRange(request.rangeHeader)
     && start === 0
-    && expectedLength <= OPEN_ENDED_RANGE_WINDOW_BYTES;
+    && expectedLength <= STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES;
 
   if (shouldBufferStartupRange) {
     if (sendHeadersBeforeFirstChunk) {
@@ -1115,7 +1129,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
   }
 
   if (!request.head) {
-    const stream = streamFileRangeChunks(tree, cid, start, end, MEDIA_CHUNK_SIZE);
+    const stream = streamFileRangeChunks(tree, cid, start, end, MEDIA_CHUNK_SIZE, MEDIA_STREAM_PREFETCH);
     const iterator = stream[Symbol.asyncIterator]();
     let firstChunk: Uint8Array | null = null;
     if (sendHeadersBeforeFirstChunk) {

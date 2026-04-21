@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HashtreeWorkerClient } from '../src/client.js';
 import { createWebRTCWorkerP2PProvider } from '../src/p2p/clientBridge.js';
 import type { WorkerRequest, WorkerResponse } from '../src/protocol.js';
@@ -191,5 +191,68 @@ describe('createWebRTCWorkerP2PProvider', () => {
     expect(resumedFetch?.transfer).toHaveLength(1);
 
     await client.close();
+  });
+
+  it('waits briefly for a generic fetch when peers are still reconnecting', async () => {
+    vi.useFakeTimers();
+    try {
+      let connectedPeerIds: string[] = [];
+      let genericFetchCalls = 0;
+      const provider = createWebRTCWorkerP2PProvider({
+        getController: () => ({
+          get: async (_hash: Uint8Array) => {
+            genericFetchCalls += 1;
+            return new Uint8Array([7, 7, 7]);
+          },
+          getFromPeer: async () => null,
+          getConnectedHashGetPeerIds: () => connectedPeerIds,
+        }) as any,
+        startupPeerWaitMs: 500,
+        peerPollIntervalMs: 50,
+      });
+
+      const pendingFetch = provider.fetch('55'.repeat(32));
+      await vi.advanceTimersByTimeAsync(200);
+      expect(genericFetchCalls).toBe(0);
+
+      connectedPeerIds = ['peer-a'];
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(pendingFetch).resolves.toEqual(new Uint8Array([7, 7, 7]));
+      expect(genericFetchCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits briefly for the controller to start before giving up on a generic fetch', async () => {
+    vi.useFakeTimers();
+    try {
+      let controller: {
+        get: (_hash: Uint8Array) => Promise<Uint8Array | null>;
+        getFromPeer: (_peerId: string, _hash: Uint8Array) => Promise<Uint8Array | null>;
+        getConnectedHashGetPeerIds: () => string[];
+      } | null = null;
+      const provider = createWebRTCWorkerP2PProvider({
+        getController: () => controller as any,
+        ensureController: async () => controller as any,
+        startupPeerWaitMs: 500,
+        peerPollIntervalMs: 50,
+      });
+
+      const pendingFetch = provider.fetch('66'.repeat(32));
+      await vi.advanceTimersByTimeAsync(200);
+
+      controller = {
+        get: async (_hash: Uint8Array) => new Uint8Array([6, 6, 6]),
+        getFromPeer: async () => null,
+        getConnectedHashGetPeerIds: () => ['peer-a'],
+      };
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(pendingFetch).resolves.toEqual(new Uint8Array([6, 6, 6]));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

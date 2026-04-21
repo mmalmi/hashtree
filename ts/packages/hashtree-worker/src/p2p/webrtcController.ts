@@ -17,7 +17,6 @@
 
 import type { Store } from '@hashtree/core';
 import { fromHex, sha256, toHex } from '@hashtree/core';
-import type { WebRTCCommand, WebRTCEvent } from './protocol.js';
 import {
   MAX_HTL,
   MSG_TYPE_REQUEST,
@@ -45,7 +44,8 @@ import {
   buildHedgedWavePlan,
   normalizeDispatchConfig,
   syncSelectorPeers,
-} from '@hashtree/nostr';
+} from '@hashtree/mesh';
+import type { WebRTCCommand, WebRTCEvent } from './protocol.js';
 import { LRUCache } from './lruCache.js';
 import { MeshQueryRouter, encodeForwardRequest, type MeshPeerQueryOptions } from './meshQueryRouter.js';
 

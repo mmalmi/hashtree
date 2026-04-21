@@ -238,6 +238,40 @@ impl BackgroundNostrMirror {
         )
     }
 
+    async fn publish_priority_roots(
+        &self,
+        force_event: bool,
+        force_profile_search: bool,
+        force_profiles_by_pubkey: bool,
+    ) -> (Result<()>, Result<()>, Result<()>) {
+        let (profile_search_result, profiles_by_pubkey_result) = tokio::join!(
+            async {
+                if force_profile_search {
+                    self.maybe_publish_profile_search_root(true).await
+                } else {
+                    Ok(())
+                }
+            },
+            async {
+                if force_profiles_by_pubkey {
+                    self.maybe_publish_profiles_by_pubkey_root(true).await
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        let event_result = if force_event {
+            self.maybe_publish_event_root(true).await
+        } else {
+            Ok(())
+        };
+        (
+            event_result,
+            profile_search_result,
+            profiles_by_pubkey_result,
+        )
+    }
+
     pub async fn run(&self) -> Result<()> {
         if self.config.relays.is_empty() || self.config.max_follow_distance == 0 {
             return Ok(());
@@ -800,7 +834,7 @@ impl BackgroundNostrMirror {
         self.note_profile_search_root_change()?;
         self.note_profiles_by_pubkey_root_change()?;
         let (event_result, profile_search_result, profiles_by_pubkey_result) =
-            self.publish_pending_roots(true, true, true).await;
+            self.publish_priority_roots(true, true, true).await;
         if let Err(err) = event_result {
             warn!(
                 "Nostr mirror event-root publish failed after root update: {:#}",
@@ -910,16 +944,15 @@ impl BackgroundNostrMirror {
         if profiles_by_pubkey_root_changed {
             self.note_profiles_by_pubkey_root_change()?;
         }
-        if event_root_changed {
-            self.maybe_publish_event_root(true).await?;
-        }
         if profile_search_root_changed {
             self.maybe_publish_profile_search_root(true).await?;
         }
         if profiles_by_pubkey_root_changed {
             self.maybe_publish_profiles_by_pubkey_root(true).await?;
         }
-
+        if event_root_changed {
+            self.maybe_publish_event_root(true).await?;
+        }
         info!(
             "Nostr mirror flushed live events: events={} event_root_changed={} profile_search_root_changed={} profiles_by_pubkey_root_changed={}",
             event_count,

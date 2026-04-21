@@ -4,8 +4,10 @@ const endpointMessages = vi.hoisted(() => [] as unknown[]);
 const workerState = vi.hoisted(() => ({
   isDirectory: false,
   isDirectoryPlans: [] as boolean[],
+  fileSize: 512 * 1024,
   readFileRangeImpl: vi.fn<(...args: unknown[]) => Promise<Uint8Array | null>>(),
   readFileStreamChunks: [] as Uint8Array[],
+  readFileStreamPrefetches: [] as number[],
   readFileStreamPlans: [] as Array<{ chunks?: Uint8Array[]; error?: Error | null }>,
   readFileStreamOffsets: [] as number[],
   resolvePathImpl: vi.fn<(...args: unknown[]) => Promise<{ cid: { hash: Uint8Array }; type: number } | null>>(),
@@ -70,6 +72,7 @@ class FakeHashTree {
 
   async *readFileStream(_cid?: unknown, options?: { offset?: number }): AsyncGenerator<Uint8Array> {
     workerState.readFileStreamOffsets.push(options?.offset ?? 0);
+    workerState.readFileStreamPrefetches.push((options as { prefetch?: number } | undefined)?.prefetch ?? 1);
     const plan = workerState.readFileStreamPlans.shift() ?? {
       chunks: workerState.readFileStreamChunks,
       error: null,
@@ -83,7 +86,7 @@ class FakeHashTree {
   }
 
   async getSize(): Promise<number> {
-    return 512 * 1024;
+    return workerState.fileSize;
   }
 }
 
@@ -190,6 +193,8 @@ describe('worker media headers', () => {
     workerState.readFileRangeImpl.mockReset();
     workerState.readFileStreamPlans = [];
     workerState.readFileStreamOffsets = [];
+    workerState.readFileStreamPrefetches = [];
+    workerState.fileSize = 512 * 1024;
     workerState.resolvePathImpl.mockReset();
     workerState.readFileStreamChunks = [];
     Object.defineProperty(globalThis, 'self', {
@@ -204,7 +209,7 @@ describe('worker media headers', () => {
     delete globalThis.self;
   });
 
-  it('sends audio startup range headers before the first mesh chunk finishes loading', async () => {
+  it('honors startup byte-range requests with partial-content headers before the first chunk finishes loading', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -251,16 +256,90 @@ describe('worker media headers', () => {
     expect(mediaPort.messages).toContainEqual(expect.objectContaining({
       type: 'headers',
       requestId: 'audio-1',
-      status: 200,
+      status: 206,
+      headers: expect.objectContaining({
+        'content-range': 'bytes 0-262143/524288',
+        'content-length': '262144',
+      }),
     }));
 
-    resolveRange?.(new Uint8Array([1, 2, 3, 4]));
+    resolveRange?.(new Uint8Array(256 * 1024));
     await vi.waitFor(() => {
       expect(mediaPort.messages).toContainEqual(expect.objectContaining({
         type: 'done',
         requestId: 'audio-1',
       }));
     });
+  });
+
+  it('returns a larger partial-content window for nonzero open-ended video ranges', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const { streamFileRangeChunks } = await import('../src/mediaStreaming.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    workerState.isDirectory = true;
+    workerState.fileSize = 16 * 1024 * 1024;
+    workerState.resolvePathImpl.mockResolvedValue({
+      cid: { hash: new Uint8Array([6, 6, 6]) },
+      type: 1,
+    });
+    vi.mocked(streamFileRangeChunks).mockReturnValue((async function* () {
+      yield new Uint8Array([1, 2, 3, 4]);
+    })());
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-video-seek',
+      config: {
+        relays: [],
+        blossomServers: [],
+      },
+    });
+    await flush();
+
+    const mediaPort = new FakeMessagePort();
+    ctx.dispatch({
+      type: 'registerMediaPort',
+      id: 'register-video-seek-port',
+      port: mediaPort,
+    });
+    await flush();
+
+    mediaPort.dispatch({
+      type: 'hashtree-file',
+      requestId: 'video-seek-1',
+      nhash: 'nhash1video',
+      path: 'episode.mkv',
+      start: 8 * 1024 * 1024,
+      rangeHeader: 'bytes=8388608-',
+      mimeType: 'video/x-matroska',
+    });
+
+    await vi.waitFor(() => {
+      expect(mediaPort.messages).toContainEqual(expect.objectContaining({
+        type: 'headers',
+        requestId: 'video-seek-1',
+        status: 206,
+        headers: expect.objectContaining({
+          'content-range': `bytes 8388608-16777215/${16 * 1024 * 1024}`,
+          'content-length': String(8 * 1024 * 1024),
+        }),
+      }));
+      expect(mediaPort.messages).toContainEqual(expect.objectContaining({
+        type: 'done',
+        requestId: 'video-seek-1',
+      }));
+    });
+
+    expect(vi.mocked(streamFileRangeChunks)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      8 * 1024 * 1024,
+      16 * 1024 * 1024 - 1,
+      256 * 1024,
+      4,
+    );
   });
 
   it('keeps non-audio requests waiting for the first chunk before replying', async () => {
@@ -462,7 +541,6 @@ describe('worker media headers', () => {
       nhash: 'nhash1audio',
       path: 'song.mp3',
       start: 0,
-      rangeHeader: 'bytes=0-',
       mimeType: 'audio/mpeg',
     });
 
@@ -476,6 +554,7 @@ describe('worker media headers', () => {
         requestId: 'audio-retry-1',
       }));
       expect(workerState.readFileStreamOffsets).toEqual([4, 6]);
+      expect(workerState.readFileStreamPrefetches).toEqual([4, 4]);
     });
   });
 });

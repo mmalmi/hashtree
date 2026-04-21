@@ -1,5 +1,11 @@
-import type { SignalingMessage } from '@hashtree/nostr';
-import type { Event as NostrEvent } from 'nostr-tools';
+import type { SignalingMessage } from '@hashtree/mesh';
+import {
+  finalizeEvent,
+  generateSecretKey,
+  nip44,
+  type Event as NostrEvent,
+  type VerifiedEvent,
+} from 'nostr-tools';
 import type { SimplePool } from 'nostr-tools/pool';
 
 type DirectedSignalingMessage = Exclude<SignalingMessage, { type: 'hello' }>;
@@ -83,6 +89,16 @@ export interface CreateSimplePoolSignalingSenderOptions<TEvent extends NostrEven
   publishMaxWaitMs?: number;
   nowMs?: () => number;
 }
+
+export interface CreateNip44GiftWrapOptions {
+  expirationSec?: number;
+  nowMs?: () => number;
+}
+
+export type GiftCiphertextDecryptor = (
+  senderPubkey: string,
+  ciphertext: string,
+) => string | Promise<string>;
 
 function getSince(nowMs: number, maxEventAgeSec: number): number {
   return Math.floor((nowMs - maxEventAgeSec * 1000) / 1000);
@@ -298,6 +314,61 @@ export function createSimplePoolSignalingSender<TEvent extends NostrEvent>({
       });
     };
   };
+}
+
+export function createSecretKeyEventSigner(secretKey: Uint8Array) {
+  return async (template: SignalingTemplate): Promise<VerifiedEvent> => finalizeEvent(template, secretKey);
+}
+
+export function createNip44GiftWrap<TEvent extends NostrEvent = VerifiedEvent>(
+  senderPubkey: string,
+  options: CreateNip44GiftWrapOptions = {},
+) {
+  const nowMs = options.nowMs ?? (() => Date.now());
+  const expirationSec = options.expirationSec ?? HELLO_EXPIRATION_SEC;
+
+  return async (innerEvent: SignalingInnerEvent, recipientPubkey: string): Promise<TEvent> => {
+    const seal: GiftSeal = {
+      pubkey: senderPubkey,
+      kind: innerEvent.kind,
+      content: innerEvent.content,
+      tags: innerEvent.tags,
+    };
+
+    const ephemeralSecretKey = generateSecretKey();
+    const conversationKey = nip44.v2.utils.getConversationKey(ephemeralSecretKey, recipientPubkey);
+    const createdAt = Math.floor(nowMs() / 1000);
+
+    return finalizeEvent({
+      kind: SIGNALING_KIND,
+      created_at: createdAt,
+      tags: [
+        ['p', recipientPubkey],
+        ['expiration', String(createdAt + expirationSec)],
+      ],
+      content: nip44.v2.encrypt(JSON.stringify(seal), conversationKey),
+    }, ephemeralSecretKey) as TEvent;
+  };
+}
+
+export function createDecryptingGiftUnwrapper(
+  decrypt: GiftCiphertextDecryptor,
+) {
+  return async (event: SignalingEventLike): Promise<GiftSeal | null> => {
+    try {
+      const content = await decrypt(event.pubkey, event.content);
+      return JSON.parse(content) as GiftSeal;
+    } catch {
+      return null;
+    }
+  };
+}
+
+export function createSecretKeyGiftUnwrapper(secretKey: Uint8Array) {
+  return createDecryptingGiftUnwrapper((senderPubkey, ciphertext) => {
+    const conversationKey = nip44.v2.utils.getConversationKey(secretKey, senderPubkey);
+    return nip44.v2.decrypt(ciphertext, conversationKey);
+  });
 }
 
 export async function decodeSignalingEvent<TEvent extends SignalingEventLike>({

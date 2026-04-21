@@ -4,7 +4,7 @@ import {
   buildHedgedWavePlan,
   normalizeDispatchConfig,
   type RequestDispatchConfig,
-} from '@hashtree/nostr';
+} from '@hashtree/mesh';
 
 const DEFAULT_DISPATCH: RequestDispatchConfig = {
   initialFanout: 1,
@@ -158,13 +158,64 @@ export class MeshRouterStore implements Store {
 
   async getDetailed(hash: Hash, options: MeshRouterGetOptions = {}): Promise<MeshRouterGetResult | null> {
     if (!options.skipPrimary) {
-      const local = await this.readPrimary(hash);
-      if (local) {
-        return { data: local, sourceId: this.primarySourceId };
+      const primary = this.readPrimary(hash);
+      if (this.primaryReadTimeoutMs <= 0) {
+        const local = await primary;
+        if (local) {
+          return this.primaryResult(local);
+        }
+        return await this.loadFromSourcesShared(hash, options);
+      } else {
+        const localWindowResult = await Promise.race<
+          | { kind: 'primary'; data: Uint8Array | null }
+          | { kind: 'timeout' }
+        >([
+          primary.then((data) => ({ kind: 'primary' as const, data })),
+          new Promise<{ kind: 'timeout' }>((resolve) => {
+            setTimeout(() => resolve({ kind: 'timeout' }), this.primaryReadTimeoutMs);
+          }),
+        ]);
+
+        if (localWindowResult.kind === 'primary') {
+          if (localWindowResult.data) {
+            return this.primaryResult(localWindowResult.data);
+          }
+          return await this.loadFromSourcesShared(hash, options);
+        }
+
+        const remotePromise = this.loadFromSourcesShared(hash, options);
+        const firstResolved = await Promise.race<
+          | { source: 'primary'; result: MeshRouterGetResult | null }
+          | { source: 'remote'; result: MeshRouterGetResult | null }
+        >([
+          primary.then((data) => ({
+            source: 'primary' as const,
+            result: data ? this.primaryResult(data) : null,
+          })),
+          remotePromise.then((result) => ({
+            source: 'remote' as const,
+            result,
+          })),
+        ]);
+
+        if (firstResolved.result) {
+          return firstResolved.result;
+        }
+
+        if (firstResolved.source === 'primary') {
+          return await remotePromise;
+        }
+
+        const eventualPrimary = await primary;
+        return eventualPrimary ? this.primaryResult(eventualPrimary) : null;
       }
     }
 
-    const pendingKey = this.pendingReadKey(hash, options);
+    return await this.loadFromSourcesShared(hash, options);
+  }
+
+  private loadFromSourcesShared(hash: Hash, options: MeshRouterGetOptions): Promise<MeshRouterGetResult | null> {
+    const pendingKey = this.pendingReadKey(hash, { ...options, skipPrimary: true });
     let pending = this.inflightReads.get(pendingKey);
     if (!pending) {
       pending = this.loadFromSources(hash, options).finally(() => {
@@ -201,32 +252,18 @@ export class MeshRouterStore implements Store {
   }
 
   private async readPrimary(hash: Hash): Promise<Uint8Array | null> {
-    if (this.primaryReadTimeoutMs <= 0) {
+    try {
       return await this.primary.get(hash);
+    } catch {
+      return null;
     }
+  }
 
-    return await new Promise<Uint8Array | null>((resolve) => {
-      let settled = false;
-      const timeoutId = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        resolve(null);
-      }, this.primaryReadTimeoutMs);
-
-      this.primary.get(hash)
-        .then((data) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeoutId);
-          resolve(data);
-        })
-        .catch(() => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeoutId);
-          resolve(null);
-        });
-    });
+  private primaryResult(data: Uint8Array): MeshRouterGetResult {
+    return {
+      data: data.slice(),
+      sourceId: this.primarySourceId,
+    };
   }
 
   private pendingReadKey(hash: Hash, options: MeshRouterGetOptions): string {

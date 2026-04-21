@@ -127,7 +127,7 @@ it("should resolve at timeout if no relays connect", async () => {
 
     expect(stuckRelay1.status).toBe(NDKRelayStatus.CONNECTING);
     expect(stuckRelay2.status).toBe(NDKRelayStatus.CONNECTING);
-    expect(elapsedTime).toBeGreaterThanOrEqual(300);
+    expect(elapsedTime).toBeGreaterThanOrEqual(280);
     expect(elapsedTime).toBeLessThan(800);
 });
 

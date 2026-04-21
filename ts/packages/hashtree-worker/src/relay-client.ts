@@ -1,6 +1,13 @@
 import type { WorkerFactory } from './client.js';
+import { WebRTCProxy } from './p2p/webrtcProxy.js';
 import type {
+  BlossomBandwidthStats,
+  BlossomServerConfig,
+  PeerStats as RelayPeerStats,
+  RelayStats,
+  SignedEvent as RelayWorkerSignedEvent,
   TreeRootInfo,
+  UnsignedEvent as RelayWorkerUnsignedEvent,
   WorkerConfig as RelayWorkerConfig,
   WorkerRequest as RelayWorkerRequest,
   WorkerResponse as RelayWorkerResponse,
@@ -14,18 +21,57 @@ type PendingRequest = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
+type NostrExtension = {
+  signEvent?: (event: RelayWorkerUnsignedEvent) => Promise<RelayWorkerSignedEvent>;
+  nip44?: {
+    encrypt?: (pubkey: string, plaintext: string) => Promise<string>;
+    decrypt?: (pubkey: string, ciphertext: string) => Promise<string>;
+  };
+};
+
 type RelayWorkerRequestPayload = RelayWorkerRequest extends infer T
   ? T extends { id: string }
     ? Omit<T, 'id'>
     : never
   : never;
 
+type SignEventMessage = Extract<RelayWorkerResponse, { type: 'signEvent' }>;
+type EncryptMessage = Extract<RelayWorkerResponse, { type: 'nip44Encrypt' }>;
+type DecryptMessage = Extract<RelayWorkerResponse, { type: 'nip44Decrypt' }>;
+type RelayWorkerRtcCommand = Extract<
+  RelayWorkerResponse,
+  { type: 'rtc:createPeer' | 'rtc:closePeer' | 'rtc:createOffer' | 'rtc:createAnswer' | 'rtc:setLocalDescription' | 'rtc:setRemoteDescription' | 'rtc:addIceCandidate' | 'rtc:sendData' }
+>;
+
+const WEBRTC_COMMAND_TYPES = new Set([
+  'rtc:createPeer',
+  'rtc:closePeer',
+  'rtc:createOffer',
+  'rtc:createAnswer',
+  'rtc:setLocalDescription',
+  'rtc:setRemoteDescription',
+  'rtc:addIceCandidate',
+  'rtc:sendData',
+]);
+
+function isRelayWorkerRtcCommand(message: RelayWorkerResponse): message is RelayWorkerRtcCommand {
+  return WEBRTC_COMMAND_TYPES.has(message.type);
+}
+
 export interface TreeRootUpdate extends TreeRootInfo {
   npub: string;
   treeName: string;
 }
 
+export interface RelayWorkerClientConfig extends RelayWorkerConfig {
+  maxWebRTCUploadBytesPerSecond?: number | null;
+}
+
 export type {
+  BlossomBandwidthStats,
+  BlossomServerConfig,
+  RelayPeerStats,
+  RelayStats,
   TreeRootInfo,
   RelayWorkerConfig,
   RelayWorkerRequest,
@@ -34,8 +80,9 @@ export type {
 
 export class RelayWorkerClient {
   private readonly workerFactory: WorkerFactory;
-  private readonly config: RelayWorkerConfig;
+  private readonly config: RelayWorkerClientConfig;
   private worker: Worker | null = null;
+  private webrtcProxy: WebRTCProxy | null = null;
   private initPromise: Promise<void> | null = null;
   private initPending:
     | {
@@ -46,8 +93,9 @@ export class RelayWorkerClient {
     | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
   private treeRootListeners = new Set<(update: TreeRootUpdate) => void>();
+  private blossomBandwidthListeners = new Set<(stats: BlossomBandwidthStats) => void>();
 
-  constructor(workerFactory: WorkerFactory, config: RelayWorkerConfig) {
+  constructor(workerFactory: WorkerFactory, config: RelayWorkerClientConfig) {
     this.workerFactory = workerFactory;
     this.config = config;
   }
@@ -79,10 +127,11 @@ export class RelayWorkerClient {
         timeoutId,
       };
 
+      const { maxWebRTCUploadBytesPerSecond: _maxUploadBytesPerSecond, ...workerConfig } = this.config;
       this.worker.postMessage({
         type: 'init',
         id: this.nextRequestId('worker_init'),
-        config: this.config,
+        config: workerConfig as RelayWorkerConfig,
       } as RelayWorkerRequest);
     });
 
@@ -98,6 +147,16 @@ export class RelayWorkerClient {
       this.worker = new this.workerFactory();
     }
 
+    this.webrtcProxy = new WebRTCProxy((event) => {
+      if (event.type === 'rtc:dataChannelMessage' && event.data?.buffer) {
+        this.worker?.postMessage(event, [event.data.buffer]);
+        return;
+      }
+      this.worker?.postMessage(event);
+    }, {
+      maxUploadBytesPerSecond: this.config.maxWebRTCUploadBytesPerSecond ?? null,
+    });
+
     this.worker.onmessage = (event: MessageEvent<RelayWorkerResponse>) => {
       const message = event.data;
 
@@ -110,11 +169,38 @@ export class RelayWorkerClient {
         return;
       }
 
+      if (message.type === 'blossomBandwidth') {
+        for (const listener of this.blossomBandwidthListeners) {
+          listener(message.stats);
+        }
+        return;
+      }
+
       if (message.type === 'treeRootUpdate') {
         for (const listener of this.treeRootListeners) {
           const { type: _type, ...update } = message;
           listener(update);
         }
+        return;
+      }
+
+      if (isRelayWorkerRtcCommand(message)) {
+        this.webrtcProxy?.handleCommand(message);
+        return;
+      }
+
+      if (message.type === 'signEvent') {
+        void this.handleSignRequest(message);
+        return;
+      }
+
+      if (message.type === 'nip44Encrypt') {
+        void this.handleEncryptRequest(message);
+        return;
+      }
+
+      if (message.type === 'nip44Decrypt') {
+        void this.handleDecryptRequest(message);
         return;
       }
 
@@ -131,8 +217,84 @@ export class RelayWorkerClient {
 
     this.worker.onerror = (event) => {
       const errorMessage = event instanceof ErrorEvent ? event.message : 'Worker error';
+      this.webrtcProxy?.close();
+      this.webrtcProxy = null;
       this.rejectAllPending(new Error(errorMessage));
     };
+  }
+
+  private getNostrExtension(): NostrExtension | null {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    return (window as typeof window & { nostr?: NostrExtension }).nostr ?? null;
+  }
+
+  private async handleSignRequest(message: SignEventMessage): Promise<void> {
+    try {
+      const nostr = this.getNostrExtension();
+      if (!nostr?.signEvent) {
+        throw new Error('NIP-07 extension not available');
+      }
+
+      const signed = await nostr.signEvent(message.event);
+      this.worker?.postMessage({
+        type: 'signed',
+        id: message.id,
+        event: signed,
+      } satisfies RelayWorkerRequest);
+    } catch (error) {
+      this.worker?.postMessage({
+        type: 'signed',
+        id: message.id,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies RelayWorkerRequest);
+    }
+  }
+
+  private async handleEncryptRequest(message: EncryptMessage): Promise<void> {
+    try {
+      const nostr = this.getNostrExtension();
+      if (!nostr?.nip44?.encrypt) {
+        throw new Error('NIP-44 encryption not available');
+      }
+
+      const ciphertext = await nostr.nip44.encrypt(message.pubkey, message.plaintext);
+      this.worker?.postMessage({
+        type: 'encrypted',
+        id: message.id,
+        ciphertext,
+      } satisfies RelayWorkerRequest);
+    } catch (error) {
+      this.worker?.postMessage({
+        type: 'encrypted',
+        id: message.id,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies RelayWorkerRequest);
+    }
+  }
+
+  private async handleDecryptRequest(message: DecryptMessage): Promise<void> {
+    try {
+      const nostr = this.getNostrExtension();
+      if (!nostr?.nip44?.decrypt) {
+        throw new Error('NIP-44 decryption not available');
+      }
+
+      const plaintext = await nostr.nip44.decrypt(message.pubkey, message.ciphertext);
+      this.worker?.postMessage({
+        type: 'decrypted',
+        id: message.id,
+        plaintext,
+      } satisfies RelayWorkerRequest);
+    } catch (error) {
+      this.worker?.postMessage({
+        type: 'decrypted',
+        id: message.id,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies RelayWorkerRequest);
+    }
   }
 
   private nextRequestId(prefix: string): string {
@@ -218,6 +380,99 @@ export class RelayWorkerClient {
     return res.record ?? null;
   }
 
+  async getPeerStats(): Promise<RelayPeerStats[]> {
+    const res = await this.request({ type: 'getPeerStats' });
+    if (res.type !== 'peerStats') {
+      throw new Error('Unexpected peer stats response');
+    }
+    return res.stats ?? [];
+  }
+
+  async getRelayStats(): Promise<RelayStats[]> {
+    const res = await this.request({ type: 'getRelayStats' });
+    if (res.type !== 'relayStats') {
+      throw new Error('Unexpected relay stats response');
+    }
+    return res.stats ?? [];
+  }
+
+  async setIdentity(pubkey: string, nsecHex?: string): Promise<void> {
+    const res = await this.request({ type: 'setIdentity', pubkey, nsec: nsecHex });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected setIdentity response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
+  async setWebRTCPools(
+    pools: { follows: { max: number; satisfied: number }; other: { max: number; satisfied: number } },
+  ): Promise<void> {
+    const res = await this.request({ type: 'setWebRTCPools', pools });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected setWebRTCPools response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
+  setUploadLimitBytesPerSecond(maxUploadBytesPerSecond?: number | null): void {
+    this.config.maxWebRTCUploadBytesPerSecond = maxUploadBytesPerSecond ?? null;
+    this.webrtcProxy?.setUploadLimitBytesPerSecond(maxUploadBytesPerSecond ?? null);
+  }
+
+  async setFollows(follows: string[]): Promise<void> {
+    const res = await this.request({ type: 'setFollows', follows });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected setFollows response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
+  async sendHello(): Promise<void> {
+    const res = await this.request({ type: 'sendWebRTCHello' });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected sendWebRTCHello response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
+  async setBlossomServers(servers: BlossomServerConfig[]): Promise<void> {
+    const res = await this.request({ type: 'setBlossomServers', servers });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected setBlossomServers response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
+  async setStorageMaxBytes(maxBytes: number): Promise<void> {
+    const res = await this.request({ type: 'setStorageMaxBytes', maxBytes });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected setStorageMaxBytes response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
+  async setRelays(relays: string[]): Promise<void> {
+    const res = await this.request({ type: 'setRelays', relays });
+    if (res.type !== 'void') {
+      throw new Error('Unexpected setRelays response');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+  }
+
   async subscribeTreeRoots(pubkey: string): Promise<void> {
     const res = await this.request({ type: 'subscribeTreeRoots', pubkey });
     if (res.type !== 'void') {
@@ -245,6 +500,13 @@ export class RelayWorkerClient {
     };
   }
 
+  onBlossomBandwidth(listener: (stats: BlossomBandwidthStats) => void): () => void {
+    this.blossomBandwidthListeners.add(listener);
+    return () => {
+      this.blossomBandwidthListeners.delete(listener);
+    };
+  }
+
   async close(): Promise<void> {
     try {
       const res = await this.request({ type: 'close' });
@@ -255,7 +517,10 @@ export class RelayWorkerClient {
       // Ignore close errors and always terminate locally.
     }
 
+    this.blossomBandwidthListeners.clear();
     this.treeRootListeners.clear();
+    this.webrtcProxy?.close();
+    this.webrtcProxy = null;
     this.worker?.terminate();
     this.worker = null;
     this.initPromise = null;

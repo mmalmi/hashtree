@@ -51,6 +51,10 @@ export {
   SIGNALING_KIND,
   HELLO_TAG,
   MAX_EVENT_AGE_SEC,
+  createDecryptingGiftUnwrapper,
+  createNip44GiftWrap,
+  createSecretKeyEventSigner,
+  createSecretKeyGiftUnwrapper,
   createSignalingFilters,
   createSimplePoolSignalingSender,
   sendSignalingMessage,
@@ -58,6 +62,8 @@ export {
 } from './signaling.js';
 
 export type {
+  CreateNip44GiftWrapOptions,
+  GiftCiphertextDecryptor,
   CreateSimplePoolSignalingSenderOptions,
   SimplePoolPublishMode,
   SignalingEventLike,
@@ -67,3 +73,11 @@ export type {
   SignalingFilters,
   DecodedSignalingEvent,
 } from './signaling.js';
+
+export {
+  createManagedNostrMeshSession,
+} from './session.js';
+
+export type {
+  CreateManagedNostrMeshSessionOptions,
+} from './session.js';

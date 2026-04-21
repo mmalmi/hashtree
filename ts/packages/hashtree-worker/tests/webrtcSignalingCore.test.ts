@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SignalingMessage } from '@hashtree/nostr';
-import type { Event as NostrEvent } from 'nostr-tools';
+import type { SignalingMessage } from '@hashtree/mesh';
+import {
+  generateSecretKey,
+  getPublicKey,
+  type Event as NostrEvent,
+} from 'nostr-tools';
 import {
   SIGNALING_KIND,
   HELLO_TAG,
+  createDecryptingGiftUnwrapper,
+  createNip44GiftWrap,
+  createSecretKeyEventSigner,
+  createSecretKeyGiftUnwrapper,
   createSignalingFilters,
   createSimplePoolSignalingSender,
   sendSignalingMessage,
@@ -171,6 +179,80 @@ describe('p2p signaling core', () => {
       ['wss://relay.one', 'wss://relay.two'],
       directedEvent,
     );
+  });
+
+  it('creates a secret-key event signer', async () => {
+    const secretKey = generateSecretKey();
+    const signEvent = createSecretKeyEventSigner(secretKey);
+    const event = await signEvent({
+      kind: SIGNALING_KIND,
+      created_at: 1700000000,
+      tags: [['l', HELLO_TAG]],
+      content: '',
+    });
+
+    expect(event.pubkey).toBe(getPublicKey(secretKey));
+    expect(event.sig).toHaveLength(128);
+  });
+
+  it('round-trips a NIP-44 gift wrap with a secret-key unwrap helper', async () => {
+    const senderSecretKey = generateSecretKey();
+    const recipientSecretKey = generateSecretKey();
+    const recipientPubkey = getPublicKey(recipientSecretKey);
+    const senderPubkey = getPublicKey(senderSecretKey);
+    const giftWrap = createNip44GiftWrap(senderPubkey, { nowMs: () => 1700000000000 });
+    const unwrapGift = createSecretKeyGiftUnwrapper(recipientSecretKey);
+
+    const wrapped = await giftWrap({
+      kind: SIGNALING_KIND,
+      content: JSON.stringify({
+        type: 'offer',
+        peerId: senderPubkey,
+        targetPeerId: recipientPubkey,
+        sdp: 'v=0',
+      } satisfies SignalingMessage),
+      tags: [],
+    }, recipientPubkey);
+
+    const unwrapped = await unwrapGift(wrapped);
+
+    expect(unwrapped).toEqual({
+      pubkey: senderPubkey,
+      kind: SIGNALING_KIND,
+      content: JSON.stringify({
+        type: 'offer',
+        peerId: senderPubkey,
+        targetPeerId: recipientPubkey,
+        sdp: 'v=0',
+      }),
+      tags: [],
+    });
+  });
+
+  it('creates a decrypting gift unwrap helper from an injected decrypt function', async () => {
+    const decrypt = vi.fn(async () => JSON.stringify({
+      pubkey: 'sender',
+      kind: SIGNALING_KIND,
+      content: 'payload',
+      tags: [['x', '1']],
+    }));
+    const unwrapGift = createDecryptingGiftUnwrapper(decrypt);
+    const event: SignalingEventLike = {
+      pubkey: 'ephemeral-pubkey',
+      created_at: 1700000000,
+      tags: [['p', 'recipient']],
+      content: 'ciphertext',
+    };
+
+    const unwrapped = await unwrapGift(event);
+
+    expect(decrypt).toHaveBeenCalledWith('ephemeral-pubkey', 'ciphertext');
+    expect(unwrapped).toEqual({
+      pubkey: 'sender',
+      kind: SIGNALING_KIND,
+      content: 'payload',
+      tags: [['x', '1']],
+    });
   });
 
   it('decodes hello events', async () => {

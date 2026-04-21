@@ -7,6 +7,10 @@ export type {
 } from './client.js';
 export { RelayWorkerClient } from './relay-client.js';
 export type {
+  RelayWorkerClientConfig,
+  RelayPeerStats,
+  RelayStats,
+  BlossomBandwidthStats as RelayBlossomBandwidthStats,
   TreeRootInfo as RelayTreeRootInfo,
   TreeRootUpdate as RelayTreeRootUpdate,
   RelayWorkerConfig,

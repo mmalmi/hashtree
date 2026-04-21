@@ -123,6 +123,9 @@ export type WorkerRequest =
   // Storage configuration
   | { type: 'setStorageMaxBytes'; id: string; maxBytes: number }
 
+  // Relay configuration
+  | { type: 'setRelays'; id: string; relays: string[] }
+
   // Blossom upload
   | { type: 'pushToBlossom'; id: string; cidHash: Uint8Array; cidKey?: Uint8Array; treeName?: string }
   | { type: 'startBlossomSession'; id: string; sessionId: string; totalChunks: number }

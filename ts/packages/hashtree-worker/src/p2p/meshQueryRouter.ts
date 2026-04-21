@@ -9,7 +9,7 @@ import {
   verifyHash,
   type DataRequest,
   type PeerHTLConfig,
-} from '@hashtree/nostr';
+} from '@hashtree/mesh';
 
 type TimeoutHandle = ReturnType<typeof setTimeout>;
 
