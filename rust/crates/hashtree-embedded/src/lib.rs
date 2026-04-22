@@ -43,6 +43,15 @@ struct BrowserSettings {
     blossom_read_servers: Option<Vec<String>>,
     blossom_write_servers: Option<Vec<String>>,
     enable_webrtc: Option<bool>,
+    enable_multicast: Option<bool>,
+    max_multicast_peers: Option<usize>,
+    sync_enabled: Option<bool>,
+    sync_own: Option<bool>,
+    sync_followed: Option<bool>,
+    sync_max_concurrent: Option<usize>,
+    public_writes: Option<bool>,
+    allowed_npubs: Option<Vec<String>>,
+    socialgraph_root: Option<String>,
 }
 
 impl HostDaemonRuntime {
@@ -139,39 +148,61 @@ impl Drop for HostDaemonRuntime {
 
 fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
     let mut config = Config::default();
-    if let Some(settings) = load_browser_settings(config_dir) {
-        if let Some(nostr_relays) = settings.nostr_relays {
-            config.nostr.relays = normalize_server_list(nostr_relays);
-            config.nostr.enabled = !config.nostr.relays.is_empty();
-        }
+    let settings = load_browser_settings(config_dir).unwrap_or_else(default_browser_settings);
 
-        if let Some(blossom_read_servers) = settings.blossom_read_servers {
-            config.blossom.read_servers = normalize_server_list(blossom_read_servers);
-            config.blossom.servers.clear();
-        }
-        if let Some(blossom_write_servers) = settings.blossom_write_servers {
-            config.blossom.write_servers = normalize_server_list(blossom_write_servers);
-            config.blossom.servers.clear();
-        }
-        config.blossom.enabled =
-            !config.blossom.read_servers.is_empty() || !config.blossom.write_servers.is_empty();
+    if let Some(nostr_relays) = settings.nostr_relays {
+        config.nostr.relays = normalize_server_list(nostr_relays);
+        config.nostr.enabled = !config.nostr.relays.is_empty();
+    }
 
-        config.server.enable_webrtc = settings.enable_webrtc.unwrap_or(false);
-        if !config.server.enable_webrtc {
-            config.server.stun_port = 0;
-        }
-    } else {
-        config.server.enable_webrtc = false;
+    if let Some(blossom_read_servers) = settings.blossom_read_servers {
+        config.blossom.read_servers = normalize_server_list(blossom_read_servers);
+        config.blossom.servers.clear();
+    }
+    if let Some(blossom_write_servers) = settings.blossom_write_servers {
+        config.blossom.write_servers = normalize_server_list(blossom_write_servers);
+        config.blossom.servers.clear();
+    }
+    config.blossom.enabled =
+        !config.blossom.read_servers.is_empty() || !config.blossom.write_servers.is_empty();
+
+    config.server.enable_webrtc = settings.enable_webrtc.unwrap_or(false);
+    if !config.server.enable_webrtc {
         config.server.stun_port = 0;
+    }
+
+    config.server.enable_multicast = settings.enable_multicast.unwrap_or(false);
+    if let Some(max_multicast_peers) = settings.max_multicast_peers {
+        config.server.max_multicast_peers = max_multicast_peers;
+    }
+
+    config.sync.enabled = settings.sync_enabled.unwrap_or(false);
+    if let Some(sync_own) = settings.sync_own {
+        config.sync.sync_own = sync_own;
+    }
+    if let Some(sync_followed) = settings.sync_followed {
+        config.sync.sync_followed = sync_followed;
+    }
+    if let Some(sync_max_concurrent) = settings.sync_max_concurrent {
+        config.sync.max_concurrent = sync_max_concurrent.max(1);
+    }
+
+    config.server.public_writes = settings.public_writes.unwrap_or(false);
+    if let Some(allowed_npubs) = settings.allowed_npubs {
+        config.nostr.allowed_npubs = normalize_server_list(allowed_npubs);
+    }
+    if let Some(socialgraph_root) = settings.socialgraph_root {
+        let socialgraph_root = socialgraph_root.trim().to_string();
+        config.nostr.socialgraph_root = if socialgraph_root.is_empty() {
+            None
+        } else {
+            Some(socialgraph_root)
+        };
     }
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.public_writes = false;
-    config.server.enable_multicast = false;
-    config.server.max_multicast_peers = 0;
     config.server.enable_bluetooth = false;
     config.server.max_bluetooth_peers = 0;
-    config.sync.enabled = false;
     config
 }
 
@@ -179,6 +210,24 @@ fn load_browser_settings(config_dir: &Path) -> Option<BrowserSettings> {
     let settings_path = config_dir.join("browser_settings.json");
     let raw = std::fs::read_to_string(settings_path).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+fn default_browser_settings() -> BrowserSettings {
+    BrowserSettings {
+        nostr_relays: None,
+        blossom_read_servers: None,
+        blossom_write_servers: None,
+        enable_webrtc: Some(false),
+        enable_multicast: Some(false),
+        max_multicast_peers: None,
+        sync_enabled: Some(false),
+        sync_own: Some(true),
+        sync_followed: Some(true),
+        sync_max_concurrent: Some(3),
+        public_writes: Some(false),
+        allowed_npubs: None,
+        socialgraph_root: None,
+    }
 }
 
 fn normalize_server_list(values: Vec<String>) -> Vec<String> {
