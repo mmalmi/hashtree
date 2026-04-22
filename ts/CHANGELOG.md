@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.6 - 2026-04-22
+
+Changes since the previous npm package publish.
+
+### Changed
+
+- Published `@hashtree/collection@0.2.1`.
+- Changed `CollectionSource.count()` to use the manifest's published `itemCount` by default and added `exactCount()` for callers that need a full `by-id` walk. This removes unnecessary whole-tree scans in large collection consumers and snapshot validators.
+
 ## 0.2.5 - 2026-04-22
 
 Changes since the previous npm package publish.
