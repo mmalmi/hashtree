@@ -173,6 +173,7 @@ const results = await source.search('songs', 'starlight');
 - `put(...)` requires `options.previous` when replacing an existing item in a collection with key/search indexes, so the library can remove stale derived entries deterministically.
 - `replace(item, cid, previous)` is the explicit helper for indexed updates.
 - `delete(item)` requires the indexed fields of the item being removed.
+- `count()` uses the manifest's published `itemCount` when available; use `exactCount()` if you explicitly need to walk the `byId` tree.
 - `reindex(entries)` is the explicit way to rebuild all derived roots after adding indexes or changing derivation rules. It needs canonical item snapshots plus their CIDs; roots alone are not enough.
 - Schemas are intentionally small: use `defaults`, `normalize`, `validate`, and `migrate` instead of a large schema framework.
 - Federated search is multi-query first. You do not need to physically merge roots just to search across many sources.

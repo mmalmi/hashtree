@@ -70,6 +70,7 @@ describe('@hashtree/collection', () => {
     let source = new CollectionSource(store, writer.manifest());
     expect(await source.get('song-a')).toEqual(cidFromSeed(1));
     expect(await source.count()).toBe(2);
+    expect(await source.exactCount()).toBe(2);
     expect((await source.queryById()).map((result) => result.key)).toEqual(['song-a', 'song-b']);
     expect((await source.search('songs', 'midnight')).map((result) => result.id)).toEqual(['song-a']);
     expect((await source.queryIndex('artist', { prefix: 'artist:ada' })).map((result) => result.key)).toEqual(['artist:ada']);
@@ -79,6 +80,7 @@ describe('@hashtree/collection', () => {
     source = new CollectionSource(store, writer.manifest());
     expect(await source.get('song-a')).toBeNull();
     expect(await source.count()).toBe(1);
+    expect(await source.exactCount()).toBe(1);
     expect((await source.queryById()).map((result) => result.key)).toEqual(['song-b']);
     expect(await source.search('songs', 'midnight')).toEqual([]);
     expect(await source.queryIndex('artist', { prefix: 'artist:ada' })).toEqual([]);
@@ -98,6 +100,22 @@ describe('@hashtree/collection', () => {
       { key: 'song-c', cid: cidFromSeed(5) },
       { key: 'song-a', cid: cidFromSeed(3) },
     ]);
+  });
+
+  it('uses the published manifest item count as the fast default count', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, songDefinition);
+
+    await writer.put({ id: 'song-a', title: 'Midnight Orchard', artist: 'Ada' }, cidFromSeed(90));
+    await writer.put({ id: 'song-b', title: 'Sun Clock', artist: 'Bea' }, cidFromSeed(91));
+
+    const source = new CollectionSource(store, {
+      ...writer.manifest(),
+      itemCount: 7,
+    });
+
+    expect(await source.count()).toBe(7);
+    expect(await source.exactCount()).toBe(2);
   });
 
   it('streams by-id and key indexes without materializing the whole result set first', async () => {
