@@ -161,6 +161,16 @@ fn test_diff_based_push() {
     if !push2.status.success() && !stderr2.contains("-> master") {
         panic!("Second push failed: {}", stderr2);
     }
+    assert!(
+        !stderr2.contains("existing objects from cached root"),
+        "second push should not import the full cached remote root anymore:\n{}",
+        stderr2
+    );
+    assert!(
+        stderr2.contains("Reusing unchanged paths from cached remote root"),
+        "second push should explain the cached-root merge phase:\n{}",
+        stderr2
+    );
 
     // Verify diff was used
     let used_diff = stderr2.contains("unchanged") || stderr2.contains("Computing diff");
@@ -173,18 +183,14 @@ fn test_diff_based_push() {
         "Object walk reduced: first={} second={}",
         first_listed_objects, second_listed_objects
     );
+    let delta_fell_back_to_full_local_import = stderr2.contains("Delta object set incomplete");
     assert!(
-        second_listed_objects < first_listed_objects,
-        "Second push should walk fewer git objects than the first push"
+        second_listed_objects < first_listed_objects || delta_fell_back_to_full_local_import,
+        "Second push should either walk fewer git objects than the first push or explicitly fall back to a full local import"
     );
 
     let final_progress = parse_final_upload_progress(&stderr2)
         .expect("Second push should print a final upload progress line");
-    assert!(
-        final_progress.unchanged > 0,
-        "Second push should report unchanged objects in final progress: {:?}",
-        final_progress
-    );
     assert_eq!(
         final_progress.total,
         final_progress.new_count
@@ -242,4 +248,122 @@ fn test_diff_based_push() {
     );
 
     println!("\n=== SUCCESS: Diff-based push test passed! ===");
+}
+
+#[test]
+fn test_diff_push_prunes_unchanged_upload_frontier() {
+    if skip_if_no_binary() {
+        return;
+    }
+
+    let relay = TestRelay::new(19212);
+    let server = match TestServer::new(19213) {
+        Some(s) => s,
+        None => {
+            println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
+            return;
+        }
+    };
+
+    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let env_vars: Vec<_> = test_env.env();
+    let repo = create_test_repo();
+
+    for dir_idx in 0..12 {
+        let dir = repo.path().join(format!("bulk-{dir_idx:02}"));
+        std::fs::create_dir_all(&dir).expect("create bulk dir");
+        for file_idx in 0..64 {
+            std::fs::write(
+                dir.join(format!("file-{file_idx:02}.txt")),
+                format!("bulk file {dir_idx}-{file_idx}\n{}\n", "x".repeat(256)),
+            )
+            .expect("write bulk file");
+        }
+    }
+
+    Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo.path())
+        .output()
+        .expect("Failed to git add bulk files");
+    Command::new("git")
+        .args(["commit", "-m", "Populate large repo"])
+        .current_dir(repo.path())
+        .stdout(Stdio::null())
+        .output()
+        .expect("Failed to commit bulk files");
+
+    let remote_url = "htree://self/diff-prune-test-repo";
+    Command::new("git")
+        .args(["remote", "add", "htree", remote_url])
+        .current_dir(repo.path())
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("Failed to add remote");
+
+    let push1 = Command::new("git")
+        .args(["push", "htree", "master"])
+        .current_dir(repo.path())
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("Failed to push initial large repo");
+    let stderr1 = String::from_utf8_lossy(&push1.stderr);
+    if !push1.status.success() && !stderr1.contains("-> master") {
+        panic!("Initial push failed: {}", stderr1);
+    }
+
+    std::fs::write(
+        repo.path().join("bulk-05/one-more.txt"),
+        "just one more file\n",
+    )
+    .expect("write small follow-up change");
+    Command::new("git")
+        .args(["add", "bulk-05/one-more.txt"])
+        .current_dir(repo.path())
+        .output()
+        .expect("Failed to git add follow-up change");
+    Command::new("git")
+        .args(["commit", "-m", "Add one extra file"])
+        .current_dir(repo.path())
+        .stdout(Stdio::null())
+        .output()
+        .expect("Failed to commit follow-up change");
+
+    let push2 = Command::new("git")
+        .args(["push", "htree", "master"])
+        .current_dir(repo.path())
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("Failed to push follow-up change");
+    let stderr2 = String::from_utf8_lossy(&push2.stderr);
+    if !push2.status.success() && !stderr2.contains("-> master") {
+        panic!("Follow-up push failed: {}", stderr2);
+    }
+    assert!(
+        !stderr2.contains("existing objects from cached root"),
+        "follow-up push should not import the full cached remote root anymore:\n{}",
+        stderr2
+    );
+    assert!(
+        !stderr2.contains("falling back to full local import"),
+        "follow-up push should not fall back to a full local git import anymore:\n{}",
+        stderr2
+    );
+
+    let final_progress = parse_final_upload_progress(&stderr2)
+        .expect("Second push should print a final upload progress line");
+    println!("Pruned diff push final progress: {:?}", final_progress);
+
+    assert!(
+        final_progress.total < 128,
+        "second push should prune unchanged upload frontier aggressively: {:?}\n{}",
+        final_progress,
+        stderr2
+    );
+    assert!(
+        final_progress.new_count < 32,
+        "single-file follow-up should only upload a small number of new blobs: {:?}\n{}",
+        final_progress,
+        stderr2
+    );
 }

@@ -10,6 +10,26 @@ use std::io::Write;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
+pub(super) fn queue_links_for_diff_upload(
+    queue: &mut Vec<([u8; 32], Option<[u8; 32]>)>,
+    queued: &mut HashSet<[u8; 32]>,
+    links: &[hashtree_core::Link],
+    old_hashes: &HashSet<[u8; 32]>,
+    prune_known_subtrees: bool,
+    discovered_total: &std::sync::atomic::AtomicUsize,
+) {
+    use std::sync::atomic::Ordering;
+
+    for link in links {
+        if prune_known_subtrees && old_hashes.contains(&link.hash) {
+            continue;
+        }
+        if queue_hash_if_new(queue, queued, link.hash, link.key) {
+            discovered_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 impl RemoteHelper {
     /// Queue a push operation
     pub(super) fn queue_push(&mut self, arg: &str) -> Result<()> {
@@ -172,11 +192,6 @@ impl RemoteHelper {
             }
         }
 
-        let updating_existing_remote_ref = self
-            .push_specs
-            .iter()
-            .any(|spec| self.remote_refs.contains_key(&spec.dst));
-
         for (ref_name, ref_value) in &refs {
             let is_being_pushed = self.push_specs.iter().any(|s| s.dst == *ref_name);
             if !is_being_pushed {
@@ -198,16 +213,6 @@ impl RemoteHelper {
             })
             .map(|(ref_name, ref_value)| (ref_name.clone(), ref_value.clone()))
             .collect();
-
-        if updating_existing_remote_ref {
-            if let Some(root) = root_hash.as_deref() {
-                if self.import_existing_remote_objects_from_cached_root(root)? {
-                    self.detail("  Reused existing remote objects from cached hashtree root");
-                    self.detail("  Remote state loaded");
-                    return Ok(());
-                }
-            }
-        }
 
         if preserved_refs.is_empty() {
             self.detail("  No untouched direct refs to preserve");
@@ -234,30 +239,6 @@ impl RemoteHelper {
         self.detail("  Remote state loaded");
         Ok(())
     }
-
-    fn import_existing_remote_objects_from_cached_root(&self, root_hash: &str) -> Result<bool> {
-        let objects = match self.fetch_all_git_objects(root_hash) {
-            Ok(objects) => objects,
-            Err(err) => {
-                self.detail(&format!(
-                    "  Could not import existing remote objects from cached root: {}",
-                    err
-                ));
-                return Ok(false);
-            }
-        };
-
-        self.detail(&format!(
-            "  Importing {} existing objects from cached root",
-            objects.len()
-        ));
-        for (oid, content) in objects {
-            self.storage.import_compressed_object(&oid, content)?;
-        }
-
-        Ok(true)
-    }
-
     pub(super) fn import_preserved_remote_objects_from_local_git(
         &self,
         preserved_refs: &[(String, String)],
@@ -460,28 +441,130 @@ impl RemoteHelper {
             Err(err) if delta_base.is_some() => {
                 let base = delta_base.as_deref().unwrap_or_default();
                 eprintln!(
-                    "  Delta object set incomplete ({}); falling back to full local import",
+                    "  Delta object set incomplete ({}); retrying against cached remote root",
                     err
                 );
+                if self.is_slow() {
+                    eprintln!("  Reusing unchanged paths from cached remote root...");
+                }
                 debug!(
-                    "Delta object set for {} via {} was incomplete: {}. Falling back to full import.",
+                    "Delta object set for {} via {} was incomplete: {}. Retrying build against cached remote root.",
                     dst_ref, base, err
                 );
 
-                eprint!("  Listing objects...");
-                let _ = std::io::stderr().flush();
-                objects = self.list_objects_to_push(sha, &[])?;
-                eprintln!(" {} objects", objects.len());
+                let mut retried_with_cached_root = false;
+                let mut cached_root_error: Option<String> = None;
+                let cached_retry = if let Some(root_hash) =
+                    self.nostr.get_cached_root_hash(&self.repo_name).cloned()
+                {
+                    let encryption_key = self
+                        .nostr
+                        .get_cached_encryption_key(&self.repo_name)
+                        .copied();
+                    match self.build_cached_fetch_tree() {
+                        Ok((cached_tree, _)) => {
+                            let root_bytes =
+                                hex::decode(&root_hash).context("Invalid cached root hash hex")?;
+                            let root_arr: [u8; 32] = root_bytes.try_into().map_err(|_| {
+                                anyhow::anyhow!("Cached root hash must be 32 bytes")
+                            })?;
+                            let cached_root_cid = hashtree_core::Cid {
+                                hash: root_arr,
+                                key: encryption_key,
+                            };
+                            retried_with_cached_root = true;
+                            Some(self.storage.build_tree_with_base_objects(
+                                Some(&cached_tree),
+                                Some(&cached_root_cid),
+                                delta_base.as_deref(),
+                            ))
+                        }
+                        Err(build_err) => {
+                            cached_root_error =
+                                Some(format!("build cached fetch tree: {}", build_err));
+                            None
+                        }
+                    }
+                } else {
+                    cached_root_error = Some("no cached remote root".to_string());
+                    None
+                };
 
-                let objects_with_content = self.read_git_objects_batch(&objects)?;
-                eprintln!();
+                match cached_retry.unwrap_or_else(|| self.storage.build_tree()) {
+                    Ok(root_cid) => root_cid,
+                    Err(retry_err) => {
+                        if retried_with_cached_root {
+                            eprintln!(
+                                "  Cached-root retry still incomplete ({}); hydrating existing remote objects from cached root",
+                                retry_err
+                            );
+                            debug!(
+                                "Cached remote retry did not complete {} via {}: {}. Hydrating cached remote objects before full local import.",
+                                dst_ref, base, retry_err
+                            );
+                        } else {
+                            eprintln!(
+                                "  Cached remote retry unavailable ({}); hydrating existing remote objects from cached root",
+                                cached_root_error
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown cached-root error".to_string())
+                            );
+                            debug!(
+                                "Cached remote retry unavailable for {} via {}: {}. Hydrating cached remote objects before full local import.",
+                                dst_ref,
+                                base,
+                                cached_root_error
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown cached-root error".to_string())
+                            );
+                        }
 
-                eprint!("  Writing to local store...");
-                let _ = std::io::stderr().flush();
-                Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-                eprintln!();
+                        if let Some(root_hash) =
+                            self.nostr.get_cached_root_hash(&self.repo_name).cloned()
+                        {
+                            let existing_objects = self.fetch_all_git_objects(&root_hash)?;
+                            eprintln!(
+                                "  Importing {} cached remote object(s)",
+                                existing_objects.len()
+                            );
+                            for (oid, content) in existing_objects {
+                                self.storage.import_compressed_object(&oid, content)?;
+                            }
+                        }
 
-                self.storage.build_tree()?
+                        match self.storage.build_tree() {
+                            Ok(root_cid) => root_cid,
+                            Err(post_hydration_err) => {
+                                eprintln!(
+                                    "  Cached-root hydration still incomplete ({}); falling back to full local import",
+                                    post_hydration_err
+                                );
+                                debug!(
+                                    "Cached remote hydration still incomplete for {} via {}: {}. Falling back to full local import.",
+                                    dst_ref, base, post_hydration_err
+                                );
+
+                                eprint!("  Listing objects...");
+                                let _ = std::io::stderr().flush();
+                                objects = self.list_objects_to_push(sha, &[])?;
+                                eprintln!(" {} objects", objects.len());
+
+                                let objects_with_content = self.read_git_objects_batch(&objects)?;
+                                eprintln!();
+
+                                eprint!("  Writing to local store...");
+                                let _ = std::io::stderr().flush();
+                                Self::write_objects_to_local_store(
+                                    &self.storage,
+                                    objects_with_content,
+                                )?;
+                                eprintln!();
+
+                                self.storage.build_tree()?
+                            }
+                        }
+                    }
+                }
             }
             Err(err) => return Err(err.into()),
         };
@@ -797,12 +880,37 @@ impl RemoteHelper {
                         }
                         hashes
                     }
-                    Err(e) => {
-                        if verbose {
-                            eprintln!(" failed: {}", e);
-                            eprintln!("  Falling back to full upload");
+                    Err(local_err) => {
+                        match self.build_cached_fetch_tree() {
+                            Ok((cached_tree, _)) => match collect_hashes(&cached_tree, &old_cid, 32).await {
+                                Ok(hashes) => {
+                                    if verbose {
+                                        eprintln!(
+                                            " {} hashes in old tree (via cached fetch tree after local miss: {})",
+                                            hashes.len(),
+                                            local_err
+                                        );
+                                    }
+                                    hashes
+                                }
+                                Err(cached_err) => {
+                                    if verbose {
+                                        eprintln!(" failed locally: {}", local_err);
+                                        eprintln!("  Cached old-tree walk failed too: {}", cached_err);
+                                        eprintln!("  Falling back to full upload");
+                                    }
+                                    HashSet::new()
+                                }
+                            },
+                            Err(build_err) => {
+                                if verbose {
+                                    eprintln!(" failed locally: {}", local_err);
+                                    eprintln!("  Could not build cached fetch tree: {}", build_err);
+                                    eprintln!("  Falling back to full upload");
+                                }
+                                HashSet::new()
+                            }
                         }
-                        HashSet::new()
                     }
                 }
             } else {
@@ -857,6 +965,8 @@ impl RemoteHelper {
             } else {
                 Arc::new(Vec::new())
             };
+            let prune_known_subtrees =
+                has_old_tree && trust_server_old_tree_coverage && servers_needing_full.is_empty();
 
             const CHANNEL_SIZE: usize = 100;
             const DEFAULT_UPLOAD_CONCURRENCY: usize = 10;
@@ -1090,11 +1200,14 @@ impl RemoteHelper {
                 };
 
                 if let Some(node) = try_decode_tree_node(&plaintext) {
-                    for link in node.links {
-                        if queue_hash_if_new(&mut queue, &mut queued, link.hash, link.key) {
-                            discovered_total.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+                    queue_links_for_diff_upload(
+                        &mut queue,
+                        &mut queued,
+                        &node.links,
+                        &old_hashes,
+                        prune_known_subtrees,
+                        &discovered_total,
+                    );
                 }
 
                 if tx

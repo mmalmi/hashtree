@@ -6,7 +6,7 @@ use axum::{
     routing::put,
     Router,
 };
-use hashtree_core::{collect_hashes, DirEntry, HashTree, HashTreeConfig, MemoryStore, Store};
+use hashtree_core::{collect_hashes, DirEntry, HashTree, HashTreeConfig, Link, MemoryStore, Store};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -916,5 +916,33 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
         "expected only sampled HEAD probes, got {} for {} old hashes",
         fake_blossom.get_head_request_count(),
         old_hash_count
+    );
+}
+
+#[test]
+fn test_queue_links_for_diff_upload_prunes_known_subtrees() {
+    let old_hash = [1u8; 32];
+    let new_hash = [2u8; 32];
+    let links = vec![Link::new(old_hash), Link::new(new_hash)];
+    let old_hashes = HashSet::from([old_hash]);
+    let mut queue = Vec::new();
+    let mut queued = HashSet::new();
+    let discovered = std::sync::atomic::AtomicUsize::new(0);
+
+    super::push::queue_links_for_diff_upload(
+        &mut queue,
+        &mut queued,
+        &links,
+        &old_hashes,
+        true,
+        &discovered,
+    );
+
+    assert_eq!(queue.len(), 1, "known old subtrees should not be queued");
+    assert_eq!(queue[0].0, new_hash);
+    assert_eq!(
+        discovered.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "only the new child should count as discovered work"
     );
 }
