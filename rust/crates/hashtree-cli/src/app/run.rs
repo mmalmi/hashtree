@@ -21,7 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::add::run_add;
 use super::args::{
-    Cli, Commands, PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands, StorageCommands,
+    Cli, Commands, MirrorCommands, PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands,
+    StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -164,7 +165,7 @@ fn normalized_pin_label(input: &str) -> String {
 fn ensure_supported_pin_target(input: &str) -> Result<()> {
     let normalized = normalized_pin_label(input);
     if normalized.starts_with("npub1") && !normalized.contains('/') {
-        anyhow::bail!("Author-wide mirroring is a tracking policy. Use `htree track <npub>`.");
+        anyhow::bail!("Author-wide mirroring is a mirror policy. Use `htree mirror add <npub>`.");
     }
     Ok(())
 }
@@ -957,36 +958,38 @@ pub(crate) async fn run() -> Result<()> {
                 println!("Unpinned: {}", format_cid_for_display(&target));
             }
         }
-        Commands::Track { npub } => {
-            parse_npub(&npub).context("Invalid npub")?;
-            let store = HashtreeStore::new(&data_dir)?;
-            if store.add_tracked_author(&npub)? {
-                println!("Tracking author: {}", npub);
-            } else {
-                println!("Already tracking author: {}", npub);
-            }
-        }
-        Commands::Untrack { npub } => {
-            parse_npub(&npub).context("Invalid npub")?;
-            let store = HashtreeStore::new(&data_dir)?;
-            if store.remove_tracked_author(&npub)? {
-                println!("Stopped tracking author: {}", npub);
-            } else {
-                println!("Not tracking author: {}", npub);
-            }
-        }
-        Commands::Tracking => {
-            let store = HashtreeStore::new(&data_dir)?;
-            let authors = store.list_tracked_authors()?;
-            if authors.is_empty() {
-                println!("No tracked authors");
-            } else {
-                println!("Tracked authors ({}):", authors.len());
-                for npub in authors {
-                    println!("  {}", npub);
+        Commands::Mirror { command } => match command {
+            MirrorCommands::Add { npub } => {
+                parse_npub(&npub).context("Invalid npub")?;
+                let store = HashtreeStore::new(&data_dir)?;
+                if store.add_tracked_author(&npub)? {
+                    println!("Mirroring author: {}", npub);
+                } else {
+                    println!("Already mirroring author: {}", npub);
                 }
             }
-        }
+            MirrorCommands::Rm { npub } => {
+                parse_npub(&npub).context("Invalid npub")?;
+                let store = HashtreeStore::new(&data_dir)?;
+                if store.remove_tracked_author(&npub)? {
+                    println!("Stopped mirroring author: {}", npub);
+                } else {
+                    println!("Not mirroring author: {}", npub);
+                }
+            }
+            MirrorCommands::Ls => {
+                let store = HashtreeStore::new(&data_dir)?;
+                let authors = store.list_tracked_authors()?;
+                if authors.is_empty() {
+                    println!("No mirrored authors");
+                } else {
+                    println!("Mirrored authors ({}):", authors.len());
+                    for npub in authors {
+                        println!("  {}", npub);
+                    }
+                }
+            }
+        },
         Commands::Info { cid: cid_input } => {
             // Resolve npub/repo or htree:// URLs to CID
             let resolved = resolve_cid_input(&cid_input).await?;

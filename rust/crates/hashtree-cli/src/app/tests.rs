@@ -20,7 +20,9 @@ use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_load_target_cid,
     stored_published_pin_hash, warn_if_stun_unavailable,
 };
-use crate::app::args::{CashuCommands, CashuMintCommands, ReleaseCommands, SocialGraphCommands};
+use crate::app::args::{
+    CashuCommands, CashuMintCommands, MirrorCommands, ReleaseCommands, SocialGraphCommands,
+};
 use crate::app::args::{Cli, Commands};
 #[cfg(feature = "fuse")]
 use crate::app::mount_registry::ActiveMount;
@@ -393,26 +395,31 @@ fn test_cli_parses_release_publish_command() {
 }
 
 #[test]
-fn test_cli_parses_track_commands() {
+fn test_cli_parses_mirror_commands() {
     let cli = Cli::parse_from([
         "htree",
-        "track",
+        "mirror",
+        "add",
         "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm",
     ]);
     match cli.command {
-        Commands::Track { npub } => {
+        Commands::Mirror {
+            command: MirrorCommands::Add { npub },
+        } => {
             assert_eq!(
                 npub,
                 "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm"
             );
         }
-        _ => panic!("expected track command"),
+        _ => panic!("expected mirror add command"),
     }
 
-    let cli = Cli::parse_from(["htree", "tracking"]);
+    let cli = Cli::parse_from(["htree", "mirror", "ls"]);
     match cli.command {
-        Commands::Tracking => {}
-        _ => panic!("expected tracking command"),
+        Commands::Mirror {
+            command: MirrorCommands::Ls,
+        } => {}
+        _ => panic!("expected mirror ls command"),
     }
 }
 

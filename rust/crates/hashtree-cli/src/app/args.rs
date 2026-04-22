@@ -45,9 +45,7 @@ Publishing & Git Commands:
 Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
-  track        Mirror all readable hashtree trees for an author
-  untrack      Stop mirroring an author's hashtree trees
-  tracking     List tracked authors
+  mirror       Manage mirrored authors
   follow       Follow a user (adds to your contact list)
   unfollow     Unfollow a user (removes from your contact list)
   following    List users you follow
@@ -97,9 +95,7 @@ Publishing & Git Commands:
 Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
-  track        Mirror all readable hashtree trees for an author
-  untrack      Stop mirroring an author's hashtree trees
-  tracking     List tracked authors
+  mirror       Manage mirrored authors
   follow       Follow a user (adds to your contact list)
   unfollow     Unfollow a user (removes from your contact list)
   following    List users you follow
@@ -376,20 +372,11 @@ pub(crate) enum Commands {
         picture: Option<String>,
     },
 
-    /// Mirror all readable hashtree trees for an author
-    Track {
-        /// npub of author to mirror continuously
-        npub: String,
+    /// Manage mirrored authors
+    Mirror {
+        #[command(subcommand)]
+        command: MirrorCommands,
     },
-
-    /// Stop mirroring an author's hashtree trees
-    Untrack {
-        /// npub of author to stop mirroring
-        npub: String,
-    },
-
-    /// List authors whose hashtree trees are mirrored continuously
-    Tracking,
 
     /// Follow a user (adds to your contact list)
     Follow {
@@ -468,6 +455,24 @@ pub(crate) enum PrCommands {
         #[arg(long, value_enum, default_value_t = PrListState::Open)]
         state: PrListState,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MirrorCommands {
+    /// Mirror all readable hashtree trees for an author
+    Add {
+        /// npub of author to mirror continuously
+        npub: String,
+    },
+    /// Stop mirroring an author's hashtree trees
+    #[command(name = "rm", alias = "remove")]
+    Rm {
+        /// npub of author to stop mirroring
+        npub: String,
+    },
+    /// List authors whose hashtree trees are mirrored continuously
+    #[command(name = "ls", alias = "list")]
+    Ls,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
