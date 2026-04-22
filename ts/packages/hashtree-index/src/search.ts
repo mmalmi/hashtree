@@ -14,12 +14,16 @@ export interface SearchResult {
   id: string;
   value: string;
   score: number;
+  exactMatches?: number;
+  prefixDistance?: number;
 }
 
 export interface SearchLinkResult {
   id: string;
   cid: CID;
   score: number;
+  exactMatches?: number;
+  prefixDistance?: number;
 }
 
 export interface SearchOptions {
@@ -27,6 +31,8 @@ export interface SearchOptions {
   limit?: number;
   /** Require full keyword match vs prefix match. Default: false (prefix) */
   fullMatch?: boolean;
+  /** Max prefix-scan results to inspect per query term. Default: limit * 2 */
+  scanLimit?: number;
 }
 
 // Default English stop words
@@ -163,73 +169,52 @@ export class SearchIndex {
     query: string,
     options: SearchOptions = {}
   ): Promise<SearchResult[]> {
+    return await this.searchTerms(root, prefix, this.parseKeywords(query), options);
+  }
+
+  /**
+   * Search for items using caller-supplied normalized terms.
+   * This is useful when the app wants custom term expansion without reimplementing ranking.
+   */
+  async searchTerms(
+    root: CID | null,
+    prefix: string,
+    terms: Iterable<string>,
+    options: SearchOptions = {}
+  ): Promise<SearchResult[]> {
     if (!root) return [];
 
-    const { limit = 20, fullMatch = false } = options;
-    const keywords = this.parseKeywords(query);
+    const limit = normalizeResultLimit(options.limit);
+    if (limit === 0) {
+      return [];
+    }
 
-    // If parseKeywords filtered everything (stop words only), return empty
-    // This ensures stop word queries don't match
+    const keywords = normalizeSearchTerms(terms);
     if (keywords.length === 0) {
       return [];
     }
 
-    const results = new Map<
-      string,
-      { value: string; score: number; exactMatches: number; prefixDistance: number }
-    >();
+    const fullMatch = options.fullMatch ?? false;
+    const scanLimit = normalizeScanLimit(options.scanLimit, limit);
+    const results = await collectRankedMatches({
+      prefix,
+      keywords,
+      fullMatch,
+      scanLimit,
+      iterate: (searchPrefix) => this.btree.prefix(root, searchPrefix),
+      onError: (keyword, error) => {
+        console.error('Search error for keyword:', keyword, error);
+      },
+    });
 
-    for (const keyword of keywords) {
-      try {
-        const searchPrefix = `${prefix}${keyword}${fullMatch ? ':' : ''}`;
-        let count = 0;
-
-        for await (const [key, value] of this.btree.prefix(root, searchPrefix)) {
-          if (count++ >= limit * 2) break;
-
-          // Extract id from key: prefix + term + ":" + id
-          const afterPrefix = key.slice(prefix.length);
-          const colonIndex = afterPrefix.indexOf(':');
-          if (colonIndex === -1) continue;
-          const term = afterPrefix.slice(0, colonIndex);
-          const id = afterPrefix.slice(colonIndex + 1);
-          const exactMatch = term === keyword ? 1 : 0;
-          const prefixDistance = Math.max(0, term.length - keyword.length);
-
-          const existing = results.get(id);
-          if (existing) {
-            existing.score += 1;
-            existing.exactMatches += exactMatch;
-            existing.prefixDistance += prefixDistance;
-          } else {
-            results.set(id, {
-              value,
-              score: 1,
-              exactMatches: exactMatch,
-              prefixDistance,
-            });
-          }
-        }
-      } catch (e) {
-        console.error('Search error for keyword:', keyword, e);
-      }
-    }
-
-    // Sort by score desc, then exact token matches, then shorter prefix distance, then id.
-    const sorted = [...results.entries()]
-      .sort((a, b) => {
-        if (b[1].score !== a[1].score) return b[1].score - a[1].score;
-        if (b[1].exactMatches !== a[1].exactMatches) {
-          return b[1].exactMatches - a[1].exactMatches;
-        }
-        if (a[1].prefixDistance !== b[1].prefixDistance) {
-          return a[1].prefixDistance - b[1].prefixDistance;
-        }
-        return a[0].localeCompare(b[0]);
-      })
-      .slice(0, limit);
-
-    return sorted.map(([id, { value, score }]) => ({ id, value, score }));
+    return sortRankedMatches(results, limit)
+      .map(([id, { value, score, exactMatches, prefixDistance }]) => ({
+        id,
+        value,
+        score,
+        exactMatches,
+        prefixDistance,
+      }));
   }
 
   /**
@@ -322,68 +307,51 @@ export class SearchIndex {
     query: string,
     options: SearchOptions = {}
   ): Promise<SearchLinkResult[]> {
+    return await this.searchLinkTerms(root, prefix, this.parseKeywords(query), options);
+  }
+
+  /**
+   * Search for CID links using caller-supplied normalized terms.
+   */
+  async searchLinkTerms(
+    root: CID | null,
+    prefix: string,
+    terms: Iterable<string>,
+    options: SearchOptions = {}
+  ): Promise<SearchLinkResult[]> {
     if (!root) return [];
 
-    const { limit = 20, fullMatch = false } = options;
-    const keywords = this.parseKeywords(query);
-    if (keywords.length === 0) return [];
-
-    const results = new Map<
-      string,
-      { cid: CID; score: number; exactMatches: number; prefixDistance: number }
-    >();
-
-    for (const keyword of keywords) {
-      try {
-        const searchPrefix = `${prefix}${keyword}${fullMatch ? ':' : ''}`;
-        let count = 0;
-
-        for await (const [key, cid] of this.btree.prefixLinks(root, searchPrefix)) {
-          if (count++ >= limit * 2) break;
-
-          // Extract id from key: prefix + term + ":" + id
-          const afterPrefix = key.slice(prefix.length);
-          const colonIndex = afterPrefix.indexOf(':');
-          if (colonIndex === -1) continue;
-          const term = afterPrefix.slice(0, colonIndex);
-          const id = afterPrefix.slice(colonIndex + 1);
-          const exactMatch = term === keyword ? 1 : 0;
-          const prefixDistance = Math.max(0, term.length - keyword.length);
-
-          const existing = results.get(id);
-          if (existing) {
-            existing.score += 1;
-            existing.exactMatches += exactMatch;
-            existing.prefixDistance += prefixDistance;
-          } else {
-            results.set(id, {
-              cid,
-              score: 1,
-              exactMatches: exactMatch,
-              prefixDistance,
-            });
-          }
-        }
-      } catch (e) {
-        console.error('Search error for keyword:', keyword, e);
-      }
+    const limit = normalizeResultLimit(options.limit);
+    if (limit === 0) {
+      return [];
     }
 
-    // Sort by score desc, then exact token matches, then shorter prefix distance, then id.
-    const sorted = [...results.entries()]
-      .sort((a, b) => {
-        if (b[1].score !== a[1].score) return b[1].score - a[1].score;
-        if (b[1].exactMatches !== a[1].exactMatches) {
-          return b[1].exactMatches - a[1].exactMatches;
-        }
-        if (a[1].prefixDistance !== b[1].prefixDistance) {
-          return a[1].prefixDistance - b[1].prefixDistance;
-        }
-        return a[0].localeCompare(b[0]);
-      })
-      .slice(0, limit);
+    const keywords = normalizeSearchTerms(terms);
+    if (keywords.length === 0) {
+      return [];
+    }
 
-    return sorted.map(([id, { cid, score }]) => ({ id, cid, score }));
+    const fullMatch = options.fullMatch ?? false;
+    const scanLimit = normalizeScanLimit(options.scanLimit, limit);
+    const results = await collectRankedMatches({
+      prefix,
+      keywords,
+      fullMatch,
+      scanLimit,
+      iterate: (searchPrefix) => this.btree.prefixLinks(root, searchPrefix),
+      onError: (keyword, error) => {
+        console.error('Search error for keyword:', keyword, error);
+      },
+    });
+
+    return sortRankedMatches(results, limit)
+      .map(([id, { value: cid, score, exactMatches, prefixDistance }]) => ({
+        id,
+        cid,
+        score,
+        exactMatches,
+        prefixDistance,
+      }));
   }
 
   /**
@@ -393,4 +361,121 @@ export class SearchIndex {
   async mergeLinks(base: CID | null, other: CID | null, preferOther = false): Promise<CID | null> {
     return this.btree.mergeLinks(base, other, preferOther);
   }
+}
+
+type RankedMatch<T> = {
+  value: T;
+  score: number;
+  exactMatches: number;
+  prefixDistance: number;
+};
+
+function normalizeResultLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return 20;
+  }
+  if (!Number.isFinite(limit)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, Math.floor(limit));
+}
+
+function normalizeScanLimit(scanLimit: number | undefined, limit: number): number {
+  const fallback = Number.isFinite(limit) ? limit * 2 : Number.POSITIVE_INFINITY;
+  if (scanLimit === undefined) {
+    return fallback;
+  }
+  if (!Number.isFinite(scanLimit)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(limit, Math.floor(scanLimit ?? fallback));
+}
+
+function normalizeSearchTerms(terms: Iterable<string>): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const term of terms) {
+    const nextTerm = `${term ?? ''}`.trim().toLowerCase();
+    if (!nextTerm || seen.has(nextTerm)) {
+      continue;
+    }
+    seen.add(nextTerm);
+    normalized.push(nextTerm);
+  }
+
+  return normalized;
+}
+
+async function collectRankedMatches<T>(options: {
+  prefix: string;
+  keywords: string[];
+  fullMatch: boolean;
+  scanLimit: number;
+  iterate: (searchPrefix: string) => AsyncIterable<[string, T]>;
+  onError: (keyword: string, error: unknown) => void;
+}): Promise<Map<string, RankedMatch<T>>> {
+  const results = new Map<string, RankedMatch<T>>();
+
+  for (const keyword of options.keywords) {
+    try {
+      const searchPrefix = `${options.prefix}${keyword}${options.fullMatch ? ':' : ''}`;
+      let count = 0;
+
+      for await (const [key, value] of options.iterate(searchPrefix)) {
+        if (count++ >= options.scanLimit) {
+          break;
+        }
+
+        const afterPrefix = key.slice(options.prefix.length);
+        const colonIndex = afterPrefix.indexOf(':');
+        if (colonIndex === -1) {
+          continue;
+        }
+
+        const term = afterPrefix.slice(0, colonIndex);
+        const id = afterPrefix.slice(colonIndex + 1);
+        const exactMatch = term === keyword ? 1 : 0;
+        const prefixDistance = Math.max(0, term.length - keyword.length);
+        const existing = results.get(id);
+
+        if (existing) {
+          existing.score += 1;
+          existing.exactMatches += exactMatch;
+          existing.prefixDistance += prefixDistance;
+        } else {
+          results.set(id, {
+            value,
+            score: 1,
+            exactMatches: exactMatch,
+            prefixDistance,
+          });
+        }
+      }
+    } catch (error) {
+      options.onError(keyword, error);
+    }
+  }
+
+  return results;
+}
+
+function sortRankedMatches<T>(
+  results: Map<string, RankedMatch<T>>,
+  limit: number,
+): Array<[string, RankedMatch<T>]> {
+  return [...results.entries()]
+    .sort((left, right) => {
+      if (right[1].score !== left[1].score) {
+        return right[1].score - left[1].score;
+      }
+      if (right[1].exactMatches !== left[1].exactMatches) {
+        return right[1].exactMatches - left[1].exactMatches;
+      }
+      if (left[1].prefixDistance !== right[1].prefixDistance) {
+        return left[1].prefixDistance - right[1].prefixDistance;
+      }
+      return left[0].localeCompare(right[0]);
+    })
+    .slice(0, limit);
 }

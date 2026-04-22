@@ -117,6 +117,38 @@ describe('@hashtree/collection', () => {
     expect(artistKeys).toEqual(['artist:ada']);
   });
 
+  it('exposes pre-tokenized collection search through the source API', async () => {
+    const store = new MemoryStore();
+    const definition: CollectionDefinition<Song> = {
+      ...songDefinition,
+      searchIndexes: [
+        {
+          name: 'songs',
+          prefix: 's:',
+          options: { minKeywordLength: 1 },
+          text: (song) => [song.title, song.artist, ...(song.tags ?? [])],
+        },
+      ],
+    };
+    const writer = new CollectionWriter(store, definition);
+
+    await writer.put({ id: 'song-a', title: 'X', artist: 'Ada' }, cidFromSeed(9));
+
+    const source = new CollectionSource(store, writer.manifest());
+    expect(await source.search('songs', 'x', {
+      fullMatch: true,
+    })).toEqual([
+      { id: 'song-a', cid: cidFromSeed(9), score: 1, exactMatches: 1, prefixDistance: 0 },
+    ]);
+    expect(await source.searchTerms('songs', ['X'], {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([
+      { id: 'song-a', cid: cidFromSeed(9), score: 1, exactMatches: 1, prefixDistance: 0 },
+    ]);
+  });
+
   it('removes stale index entries when an item is replaced in batch', async () => {
     const store = new MemoryStore();
     const writer = new CollectionWriter(store, songDefinition);

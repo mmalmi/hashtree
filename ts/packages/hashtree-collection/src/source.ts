@@ -128,6 +128,25 @@ export class CollectionSource {
     return await searchIndex.searchLinks(root, manifestIndex.prefix, query, options);
   }
 
+  async searchTerms(
+    indexName: string,
+    terms: Iterable<string>,
+    options: SearchOptions = {},
+  ): Promise<SearchLinkResult[]> {
+    const manifestIndex = this.manifest.indexes[indexName];
+    if (!manifestIndex || manifestIndex.kind !== 'search') {
+      return [];
+    }
+
+    const root = deserializeCid(manifestIndex.root);
+    const searchIndex = this.searchIndexes.get(indexName);
+    if (!root || !searchIndex) {
+      return [];
+    }
+
+    return await searchIndex.searchLinkTerms(root, manifestIndex.prefix, terms, options);
+  }
+
   async queryIndex(
     indexName: string,
     options: { prefix?: string; limit?: number } = {},
