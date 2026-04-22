@@ -164,7 +164,7 @@ fn normalized_pin_label(input: &str) -> String {
 fn ensure_supported_pin_target(input: &str) -> Result<()> {
     let normalized = normalized_pin_label(input);
     if normalized.starts_with("npub1") && !normalized.contains('/') {
-        anyhow::bail!("Author-wide pinning is not implemented yet. Use npub.../reponame.");
+        anyhow::bail!("Author-wide mirroring is a tracking policy. Use `htree track <npub>`.");
     }
     Ok(())
 }
@@ -955,6 +955,36 @@ pub(crate) async fn run() -> Result<()> {
                     store.remove_pinned_ref(&ref_key)?;
                 }
                 println!("Unpinned: {}", format_cid_for_display(&target));
+            }
+        }
+        Commands::Track { npub } => {
+            parse_npub(&npub).context("Invalid npub")?;
+            let store = HashtreeStore::new(&data_dir)?;
+            if store.add_tracked_author(&npub)? {
+                println!("Tracking author: {}", npub);
+            } else {
+                println!("Already tracking author: {}", npub);
+            }
+        }
+        Commands::Untrack { npub } => {
+            parse_npub(&npub).context("Invalid npub")?;
+            let store = HashtreeStore::new(&data_dir)?;
+            if store.remove_tracked_author(&npub)? {
+                println!("Stopped tracking author: {}", npub);
+            } else {
+                println!("Not tracking author: {}", npub);
+            }
+        }
+        Commands::Tracking => {
+            let store = HashtreeStore::new(&data_dir)?;
+            let authors = store.list_tracked_authors()?;
+            if authors.is_empty() {
+                println!("No tracked authors");
+            } else {
+                println!("Tracked authors ({}):", authors.len());
+                for npub in authors {
+                    println!("  {}", npub);
+                }
             }
         }
         Commands::Info { cid: cid_input } => {

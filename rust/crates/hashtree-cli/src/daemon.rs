@@ -380,9 +380,17 @@ impl EmbeddedBackgroundServicesController {
             .list_pinned_refs()
             .map(|refs| !refs.is_empty())
             .unwrap_or(false);
+        let has_tracked_authors = self
+            .store
+            .list_tracked_authors()
+            .map(|authors| !authors.is_empty())
+            .unwrap_or(false);
 
         if config.sync.enabled
-            && (config.sync.sync_own || config.sync.sync_followed || has_pinned_refs)
+            && (config.sync.sync_own
+                || config.sync.sync_followed
+                || has_pinned_refs
+                || has_tracked_authors)
             && !active_relays.is_empty()
         {
             let sync_config = crate::sync::SyncConfig {

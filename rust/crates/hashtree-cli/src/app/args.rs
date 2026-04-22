@@ -45,6 +45,9 @@ Publishing & Git Commands:
 Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
+  track        Mirror all readable hashtree trees for an author
+  untrack      Stop mirroring an author's hashtree trees
+  tracking     List tracked authors
   follow       Follow a user (adds to your contact list)
   unfollow     Unfollow a user (removes from your contact list)
   following    List users you follow
@@ -94,6 +97,9 @@ Publishing & Git Commands:
 Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
+  track        Mirror all readable hashtree trees for an author
+  untrack      Stop mirroring an author's hashtree trees
+  tracking     List tracked authors
   follow       Follow a user (adds to your contact list)
   unfollow     Unfollow a user (removes from your contact list)
   following    List users you follow
@@ -369,6 +375,21 @@ pub(crate) enum Commands {
         #[arg(long)]
         picture: Option<String>,
     },
+
+    /// Mirror all readable hashtree trees for an author
+    Track {
+        /// npub of author to mirror continuously
+        npub: String,
+    },
+
+    /// Stop mirroring an author's hashtree trees
+    Untrack {
+        /// npub of author to stop mirroring
+        npub: String,
+    },
+
+    /// List authors whose hashtree trees are mirrored continuously
+    Tracking,
 
     /// Follow a user (adds to your contact list)
     Follow {

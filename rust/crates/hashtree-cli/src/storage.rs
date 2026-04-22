@@ -639,6 +639,8 @@ pub struct HashtreeStore {
     pins: Database<Bytes, Unit>,
     /// Mutable published refs that should stay subscribed and keep following updates
     pinned_refs: Database<Str, Unit>,
+    /// Authors whose hashtree publications should be mirrored continuously
+    tracked_authors: Database<Str, Unit>,
     /// Blob ownership: sha256 (32 bytes) ++ pubkey (32 bytes) -> () (composite key for multi-owner)
     blob_owners: Database<Bytes, Unit>,
     /// Maps pubkey (32 bytes) -> blob metadata JSON (for blossom list)
@@ -734,7 +736,7 @@ impl HashtreeStore {
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(10 * 1024 * 1024 * 1024) // 10GB virtual address space
-                .max_dbs(9) // pins, pinned_refs, blob_owners, pubkey_blobs, tree_meta, blob_trees, tree_refs, cached_roots, blobs
+                .max_dbs(10) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, tree_meta, blob_trees, tree_refs, cached_roots, blobs
                 .max_readers(LMDB_MAX_READERS)
                 .open(path)?
         };
@@ -743,6 +745,7 @@ impl HashtreeStore {
         let mut wtxn = env.write_txn()?;
         let pins = env.create_database(&mut wtxn, Some("pins"))?;
         let pinned_refs = env.create_database(&mut wtxn, Some("pinned_refs"))?;
+        let tracked_authors = env.create_database(&mut wtxn, Some("tracked_authors"))?;
         let blob_owners = env.create_database(&mut wtxn, Some("blob_owners"))?;
         let pubkey_blobs = env.create_database(&mut wtxn, Some("pubkey_blobs"))?;
         let tree_meta = env.create_database(&mut wtxn, Some("tree_meta"))?;
@@ -813,6 +816,7 @@ impl HashtreeStore {
             env,
             pins,
             pinned_refs,
+            tracked_authors,
             blob_owners,
             pubkey_blobs,
             tree_meta,
@@ -1492,6 +1496,37 @@ impl HashtreeStore {
         Ok(refs)
     }
 
+    /// Persist an author whose published trees should stay mirrored.
+    pub fn add_tracked_author(&self, npub: &str) -> Result<bool> {
+        let mut wtxn = self.env.write_txn()?;
+        let inserted = self.tracked_authors.get(&wtxn, npub)?.is_none();
+        self.tracked_authors.put(&mut wtxn, npub, &())?;
+        wtxn.commit()?;
+        Ok(inserted)
+    }
+
+    /// Remove an author from the continuous mirror set.
+    pub fn remove_tracked_author(&self, npub: &str) -> Result<bool> {
+        let mut wtxn = self.env.write_txn()?;
+        let removed = self.tracked_authors.delete(&mut wtxn, npub)?;
+        wtxn.commit()?;
+        Ok(removed)
+    }
+
+    /// List authors whose published trees should stay mirrored.
+    pub fn list_tracked_authors(&self) -> Result<Vec<String>> {
+        let rtxn = self.env.read_txn()?;
+        let mut authors = Vec::new();
+
+        for item in self.tracked_authors.iter(&rtxn)? {
+            let (npub, _) = item?;
+            authors.push(npub.to_string());
+        }
+
+        authors.sort();
+        Ok(authors)
+    }
+
     /// Get cached root for a pubkey/tree_name pair
     pub fn get_cached_root(&self, pubkey_hex: &str, tree_name: &str) -> Result<Option<CachedRoot>> {
         let key = format!("{}/{}", pubkey_hex, tree_name);
@@ -1808,6 +1843,39 @@ mod tests {
         );
         assert!(store.is_pinned(&new_root)?);
         assert!(store.get_tree_meta(&new_root)?.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn tracked_authors_round_trip_sorted_and_deduplicated() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = HashtreeStore::with_options(temp.path(), None, 1024 * 1024)?;
+
+        store
+            .add_tracked_author("npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzs9d3kk")?;
+        store
+            .add_tracked_author("npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaqf5slm")?;
+        store
+            .add_tracked_author("npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzs9d3kk")?;
+
+        assert_eq!(
+            store.list_tracked_authors()?,
+            vec![
+                "npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaqf5slm".to_string(),
+                "npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzs9d3kk".to_string(),
+            ]
+        );
+        assert!(store.remove_tracked_author(
+            "npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaqf5slm"
+        )?);
+        assert!(!store.remove_tracked_author(
+            "npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbpqqqqq"
+        )?);
+        assert_eq!(
+            store.list_tracked_authors()?,
+            vec!["npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzs9d3kk".to_string()]
+        );
 
         Ok(())
     }

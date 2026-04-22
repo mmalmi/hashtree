@@ -393,6 +393,30 @@ fn test_cli_parses_release_publish_command() {
 }
 
 #[test]
+fn test_cli_parses_track_commands() {
+    let cli = Cli::parse_from([
+        "htree",
+        "track",
+        "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm",
+    ]);
+    match cli.command {
+        Commands::Track { npub } => {
+            assert_eq!(
+                npub,
+                "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm"
+            );
+        }
+        _ => panic!("expected track command"),
+    }
+
+    let cli = Cli::parse_from(["htree", "tracking"]);
+    match cli.command {
+        Commands::Tracking => {}
+        _ => panic!("expected tracking command"),
+    }
+}
+
+#[test]
 fn test_cli_parses_load_command() {
     let cli = Cli::parse_from(["htree", "load", "htree://self/releases%2Fapp/index.html"]);
 

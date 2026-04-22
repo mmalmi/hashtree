@@ -7,6 +7,7 @@
 //! Uses WebRTC peers first, falls back to Blossom HTTP servers
 
 use anyhow::Result;
+use git_remote_htree::nostr_client::load_keys;
 use hashtree_core::{from_hex, to_hex, Cid};
 use nostr_sdk::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -25,10 +26,12 @@ use crate::webrtc::WebRTCState;
 pub enum SyncPriority {
     /// Explicitly pinned mutable refs - highest priority
     Pinned = 0,
+    /// Explicitly tracked authors - mirrors all readable trees for that author
+    TrackedAuthor = 1,
     /// Own trees - high priority
-    Own = 1,
+    Own = 2,
     /// Followed users' trees - lower priority
-    Followed = 2,
+    Followed = 3,
 }
 
 /// A tree to sync
@@ -117,15 +120,100 @@ fn build_exact_tree_filter(key: &str) -> Result<Filter> {
         .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"]))
 }
 
+fn build_author_tree_filter(author: PublicKey) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(30078))
+        .author(author)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"])
+}
+
+fn load_author_signing_keys() -> HashMap<String, Keys> {
+    load_keys()
+        .into_iter()
+        .filter_map(|stored| {
+            let secret_hex = stored.secret_hex?;
+            let secret_bytes = hex::decode(&secret_hex).ok()?;
+            let secret = SecretKey::from_slice(&secret_bytes).ok()?;
+            Some((stored.pubkey_hex, Keys::new(secret)))
+        })
+        .collect()
+}
+
+fn cid_from_tree_event(event: &Event, author_keys: Option<&Keys>) -> Option<Cid> {
+    let mut hash_hex: Option<String> = None;
+    let mut key_hex: Option<String> = None;
+    let mut encrypted_key: Option<String> = None;
+    let mut self_encrypted_key: Option<String> = None;
+
+    for tag in event.tags.iter() {
+        let tag_vec = tag.as_slice();
+        if tag_vec.len() < 2 {
+            continue;
+        }
+
+        match tag_vec[0].as_str() {
+            "hash" => hash_hex = Some(tag_vec[1].clone()),
+            "key" => key_hex = Some(tag_vec[1].clone()),
+            "encryptedKey" => encrypted_key = Some(tag_vec[1].clone()),
+            "selfEncryptedKey" => self_encrypted_key = Some(tag_vec[1].clone()),
+            _ => {}
+        }
+    }
+
+    let hash = from_hex(&hash_hex?).ok()?;
+
+    if let Some(key_hex) = key_hex {
+        let bytes = hex::decode(&key_hex).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Some(Cid {
+            hash,
+            key: Some(key),
+        });
+    }
+
+    if let Some(ciphertext) = self_encrypted_key {
+        let keys = author_keys?;
+        if keys.public_key() != event.pubkey {
+            return None;
+        }
+        let key_hex = nip44::decrypt(keys.secret_key(), &event.pubkey, &ciphertext).ok()?;
+        let bytes = hex::decode(&key_hex).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Some(Cid {
+            hash,
+            key: Some(key),
+        });
+    }
+
+    if encrypted_key.is_some() {
+        return None;
+    }
+
+    Some(Cid { hash, key: None })
+}
+
 fn classify_sync_event(
     key: &str,
     author_hex: &str,
     my_pubkey: &PublicKey,
     pinned_refs: &HashSet<String>,
+    tracked_authors: &HashSet<String>,
     followed_authors: &HashSet<String>,
 ) -> Option<SyncPriority> {
     if pinned_refs.contains(key) {
         return Some(SyncPriority::Pinned);
+    }
+
+    if tracked_authors.contains(author_hex) {
+        return Some(SyncPriority::TrackedAuthor);
     }
 
     if author_hex == my_pubkey.to_hex() {
@@ -147,11 +235,14 @@ fn apply_synced_tree_update(store: &HashtreeStore, task: &SyncTask) -> Result<()
         .unwrap_or((task.key.clone(), None));
 
     let storage_priority = match task.priority {
-        SyncPriority::Pinned | SyncPriority::Own => PRIORITY_OWN,
+        SyncPriority::Pinned | SyncPriority::TrackedAuthor | SyncPriority::Own => PRIORITY_OWN,
         SyncPriority::Followed => PRIORITY_FOLLOWED,
     };
 
-    if task.priority == SyncPriority::Pinned {
+    if matches!(
+        task.priority,
+        SyncPriority::Pinned | SyncPriority::TrackedAuthor
+    ) {
         store.pin(&task.cid.hash)?;
     }
 
@@ -182,8 +273,14 @@ pub struct BackgroundSync {
     followed_authors: Arc<RwLock<HashSet<String>>>,
     /// Currently pinned mutable refs that should keep following updates
     pinned_refs: Arc<RwLock<HashSet<String>>>,
+    /// Authors whose readable trees should be mirrored continuously
+    tracked_authors: Arc<RwLock<HashSet<String>>>,
     /// Exact pinned refs already subscribed at the relay layer
     subscribed_pinned_refs: Arc<RwLock<HashSet<String>>>,
+    /// Tracked authors already subscribed at the relay layer
+    subscribed_tracked_authors: Arc<RwLock<HashSet<String>>>,
+    /// Local signing keys available for decrypting owner-private roots
+    author_signing_keys: Arc<RwLock<HashMap<String, Keys>>>,
     /// Sync queue
     queue: Arc<RwLock<VecDeque<SyncTask>>>,
     /// Currently syncing hashes
@@ -235,7 +332,10 @@ impl BackgroundSync {
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             followed_authors: Arc::new(RwLock::new(HashSet::new())),
             pinned_refs: Arc::new(RwLock::new(HashSet::new())),
+            tracked_authors: Arc::new(RwLock::new(HashSet::new())),
             subscribed_pinned_refs: Arc::new(RwLock::new(HashSet::new())),
+            subscribed_tracked_authors: Arc::new(RwLock::new(HashSet::new())),
+            author_signing_keys: Arc::new(RwLock::new(load_author_signing_keys())),
             queue: Arc::new(RwLock::new(VecDeque::new())),
             syncing: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
@@ -251,7 +351,9 @@ impl BackgroundSync {
         // Wait for relays to connect before subscribing
         tokio::time::sleep(Duration::from_secs(3)).await;
 
+        self.refresh_author_signing_keys().await;
         self.refresh_pinned_ref_subscriptions().await?;
+        self.refresh_tracked_author_subscriptions().await?;
 
         // Subscribe to own trees
         if self.config.sync_own {
@@ -372,8 +474,12 @@ impl BackgroundSync {
                     }
                 }
                 _ = pinned_refresh.tick() => {
+                    self.refresh_author_signing_keys().await;
                     if let Err(err) = self.refresh_pinned_ref_subscriptions().await {
                         warn!("Failed to refresh pinned ref subscriptions: {}", err);
+                    }
+                    if let Err(err) = self.refresh_tracked_author_subscriptions().await {
+                        warn!("Failed to refresh tracked author subscriptions: {}", err);
                     }
                 }
                 notification = notifications.recv() => {
@@ -443,12 +549,90 @@ impl BackgroundSync {
         Ok(())
     }
 
+    async fn refresh_author_signing_keys(&self) {
+        let mut author_signing_keys = self.author_signing_keys.write().await;
+        *author_signing_keys = load_author_signing_keys();
+    }
+
+    async fn refresh_tracked_author_subscriptions(&self) -> Result<()> {
+        let tracked_npubs = self.store.list_tracked_authors()?;
+        let parsed_authors: Vec<(String, PublicKey, String)> = tracked_npubs
+            .into_iter()
+            .filter_map(|npub| match PublicKey::from_bech32(&npub) {
+                Ok(pubkey) => Some((npub, pubkey, pubkey.to_hex())),
+                Err(err) => {
+                    warn!("Ignoring invalid tracked author {}: {}", npub, err);
+                    None
+                }
+            })
+            .collect();
+        let current_authors: HashSet<String> = parsed_authors
+            .iter()
+            .map(|(_, _, author_hex)| author_hex.clone())
+            .collect();
+
+        {
+            let mut tracked_authors = self.tracked_authors.write().await;
+            *tracked_authors = current_authors.clone();
+        }
+
+        {
+            let mut subscriptions = self.subscriptions.write().await;
+            subscriptions.retain(|key, sub| {
+                if sub.priority != SyncPriority::TrackedAuthor {
+                    return true;
+                }
+
+                let Some((npub, _)) = key.split_once('/') else {
+                    return false;
+                };
+                let Ok(author) = PublicKey::from_bech32(npub) else {
+                    return false;
+                };
+                current_authors.contains(&author.to_hex())
+            });
+        }
+
+        let new_authors: Vec<(String, PublicKey)> = {
+            let subscribed = self.subscribed_tracked_authors.read().await;
+            parsed_authors
+                .iter()
+                .filter(|(_, _, author_hex)| !subscribed.contains(author_hex))
+                .map(|(_, pubkey, author_hex)| (author_hex.clone(), *pubkey))
+                .collect()
+        };
+
+        for (author_hex, author) in new_authors {
+            match self
+                .client
+                .subscribe(vec![build_author_tree_filter(author)], None)
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        "Subscribed to tracked author {}",
+                        author.to_bech32().unwrap_or(author_hex.clone())
+                    );
+                    self.subscribed_tracked_authors
+                        .write()
+                        .await
+                        .insert(author_hex);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to subscribe to tracked author (will retry on refresh): {}",
+                        err
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Subscribe to own trees (kind 30078 events from our pubkey)
     async fn subscribe_own_trees(&self) -> Result<()> {
-        let filter = Filter::new()
-            .kind(Kind::Custom(30078))
-            .author(self.my_pubkey)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"]);
+        let filter = build_author_tree_filter(self.my_pubkey);
 
         match self.client.subscribe(vec![filter], None).await {
             Ok(_) => {
@@ -551,39 +735,6 @@ impl BackgroundSync {
             None => return,
         };
 
-        // Extract hash and key from tags
-        let mut hash_hex: Option<String> = None;
-        let mut key_hex: Option<String> = None;
-
-        for tag in event.tags.iter() {
-            let tag_vec = tag.as_slice();
-            if tag_vec.len() >= 2 {
-                match tag_vec[0].as_str() {
-                    "hash" => hash_hex = Some(tag_vec[1].clone()),
-                    "key" => key_hex = Some(tag_vec[1].clone()),
-                    _ => {}
-                }
-            }
-        }
-
-        let hash = match hash_hex.and_then(|h| from_hex(&h).ok()) {
-            Some(h) => h,
-            None => return,
-        };
-
-        let key = key_hex.and_then(|k| {
-            let bytes = hex::decode(&k).ok()?;
-            if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Some(arr)
-            } else {
-                None
-            }
-        });
-
-        let cid = Cid { hash, key };
-
         // Build key
         let npub = event
             .pubkey
@@ -593,6 +744,7 @@ impl BackgroundSync {
 
         let author_hex = event.pubkey.to_hex();
         let pinned_refs = self.pinned_refs.read().await.clone();
+        let tracked_authors = self.tracked_authors.read().await.clone();
         let followed_authors = self.followed_authors.read().await.clone();
 
         // Determine priority and ignore stale events from refs we no longer care about.
@@ -601,8 +753,19 @@ impl BackgroundSync {
             &author_hex,
             &self.my_pubkey,
             &pinned_refs,
+            &tracked_authors,
             &followed_authors,
         ) else {
+            return;
+        };
+
+        let author_keys = self
+            .author_signing_keys
+            .read()
+            .await
+            .get(&author_hex)
+            .cloned();
+        let Some(cid) = cid_from_tree_event(event, author_keys.as_ref()) else {
             return;
         };
 
@@ -732,9 +895,65 @@ mod tests {
             &keys.public_key(),
             &HashSet::new(),
             &HashSet::new(),
+            &HashSet::new(),
         );
 
         assert_eq!(priority, None);
+    }
+
+    #[test]
+    fn classify_sync_event_prioritizes_tracked_authors() {
+        let keys = Keys::generate();
+        let author = Keys::generate().public_key();
+        let key = format!("{}/repo", author.to_bech32().expect("author npub"));
+
+        let mut tracked_authors = HashSet::new();
+        tracked_authors.insert(author.to_hex());
+
+        let priority = classify_sync_event(
+            &key,
+            &author.to_hex(),
+            &keys.public_key(),
+            &HashSet::new(),
+            &tracked_authors,
+            &HashSet::new(),
+        );
+
+        assert_eq!(priority, Some(SyncPriority::TrackedAuthor));
+    }
+
+    #[test]
+    fn tracked_author_private_event_uses_matching_local_key() {
+        let author = Keys::generate();
+        let root_hash = [0x11; 32];
+        let root_key = [0x22; 32];
+        let ciphertext = nip44::encrypt(
+            author.secret_key(),
+            &author.public_key(),
+            hex::encode(root_key),
+            nip44::Version::V2,
+        )
+        .expect("encrypt private root key");
+        let event = EventBuilder::new(
+            Kind::Custom(30078),
+            "",
+            vec![
+                Tag::identifier("backup".to_string()),
+                Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                    vec!["hashtree"],
+                ),
+                Tag::custom(TagKind::Custom("hash".into()), vec![hex::encode(root_hash)]),
+                Tag::custom(TagKind::Custom("selfEncryptedKey".into()), vec![ciphertext]),
+            ],
+        )
+        .to_event(&author)
+        .expect("sign private root event");
+
+        let cid = cid_from_tree_event(&event, Some(&author)).expect("decrypt tracked private cid");
+
+        assert_eq!(cid.hash, root_hash);
+        assert_eq!(cid.key, Some(root_key));
     }
 
     #[test]
@@ -792,6 +1011,57 @@ mod tests {
                 .expect("first meta lookup")
                 .is_none(),
             "superseded pinned root should be unindexed after update"
+        );
+    }
+
+    #[test]
+    fn tracked_author_sync_update_replaces_old_root_pin() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::new(temp_dir.path().join("store")).expect("store");
+        let first_cid = upload_repo_root(&store, temp_dir.path(), "repo-v1", "version one\n");
+        let second_cid = upload_repo_root(&store, temp_dir.path(), "repo-v2", "version two\n");
+        let repo_key = format!(
+            "{}/repo",
+            Keys::generate()
+                .public_key()
+                .to_bech32()
+                .expect("repo owner npub")
+        );
+
+        let first_task = SyncTask {
+            key: repo_key.clone(),
+            cid: first_cid.clone(),
+            priority: SyncPriority::TrackedAuthor,
+            queued_at: Instant::now(),
+        };
+        apply_synced_tree_update(&store, &first_task).expect("apply first tracked sync update");
+
+        assert!(store.is_pinned(&first_cid.hash).expect("first root pinned"));
+        assert_eq!(
+            store.get_tree_ref(&repo_key).expect("first tree ref"),
+            Some(first_cid.hash)
+        );
+
+        let second_task = SyncTask {
+            key: repo_key.clone(),
+            cid: second_cid.clone(),
+            priority: SyncPriority::TrackedAuthor,
+            queued_at: Instant::now(),
+        };
+        apply_synced_tree_update(&store, &second_task).expect("apply second tracked sync update");
+
+        assert!(
+            !store
+                .is_pinned(&first_cid.hash)
+                .expect("first root pin status"),
+            "updating a tracked author ref should unpin the superseded root"
+        );
+        assert!(store
+            .is_pinned(&second_cid.hash)
+            .expect("second root pinned"));
+        assert_eq!(
+            store.get_tree_ref(&repo_key).expect("updated tree ref"),
+            Some(second_cid.hash)
         );
     }
 }
