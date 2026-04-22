@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-04-22
+
+Changes since the previous npm package publish.
+
+### Added
+
+- Added `@hashtree/index@0.1.8` with pre-tokenized `searchTerms(...)` and `searchLinksTerms(...)` helpers plus explicit `scanLimit` control, so consumers can share ranking logic while still expanding their own query terms.
+- Added explicit `replace(...)` helpers to `@hashtree/collection` in both TypeScript and Rust so indexed record replacement is a first-class operation instead of an options convention.
+
+### Changed
+
+- Published `@hashtree/collection@0.2.0` and changed indexed overwrite semantics to fail fast when callers try to replace an existing item without supplying the previous indexed snapshot. This removes a silent stale-index footgun and pushes full rebuilds/reindexing into the explicit path for cases where the old item is unavailable.
+
 ## 0.2.4 - 2026-04-17
 
 Changes since the previous npm package publish.

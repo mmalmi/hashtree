@@ -328,9 +328,11 @@ export class NostrEventStore {
     const eventBytes = this.encodeEvent(normalized);
     const { cid: eventCid } = await this.tree.putFile(eventBytes);
     const writer = this.collectionWriterFromManifest(manifest);
-    await writer.put(normalized, eventCid, {
-      previous: decision.replaced?.event,
-    });
+    if (decision.replaced?.event) {
+      await writer.replace(normalized, eventCid, decision.replaced.event);
+    } else {
+      await writer.put(normalized, eventCid);
+    }
 
     const nextManifest = collectionManifestToNostrEventManifest(writer.manifest());
     const manifestRoot = await this.writeManifest(nextManifest);

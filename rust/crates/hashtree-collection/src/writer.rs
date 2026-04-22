@@ -148,6 +148,10 @@ impl<S: Store, T> CollectionWriter<S, T> {
             }
         }
     }
+
+    fn has_derived_indexes(&self) -> bool {
+        !self.definition.key_indexes().is_empty() || !self.definition.search_indexes().is_empty()
+    }
 }
 
 impl<S: Store, T: Clone> CollectionWriter<S, T> {
@@ -164,6 +168,15 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         self.put_with_context(item, cid, previous, None, None).await
     }
 
+    pub async fn replace(
+        &mut self,
+        item: &T,
+        cid: &Cid,
+        previous: &T,
+    ) -> Result<CollectionState, CollectionError> {
+        self.replace_with_context(item, cid, previous, None, None).await
+    }
+
     pub async fn put_with_context(
         &mut self,
         item: &T,
@@ -173,9 +186,21 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         previous_context: Option<&CollectionWriteContext>,
     ) -> Result<CollectionState, CollectionError> {
         let next_item = self.normalize(item)?;
+        let id = self.definition.item_id(&next_item)?;
         let previous_item = previous
             .map(|previous| self.normalize(previous))
             .transpose()?;
+
+        if previous_item.is_none() && self.has_derived_indexes() {
+            let existing = if let Some(root) = self.state.by_id_root.as_ref() {
+                self.index.get_link(Some(root), &id).await?
+            } else {
+                None
+            };
+            if existing.is_some() {
+                return Err(CollectionError::MissingPreviousForOverwrite { id });
+            }
+        }
 
         if let Some(previous_item) = previous_item.as_ref() {
             self.delete_normalized_with_context(previous_item, previous_context.or(context))
@@ -183,6 +208,18 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         }
 
         self.put_normalized_with_context(&next_item, cid, context)
+            .await
+    }
+
+    pub async fn replace_with_context(
+        &mut self,
+        item: &T,
+        cid: &Cid,
+        previous: &T,
+        context: Option<&CollectionWriteContext>,
+        previous_context: Option<&CollectionWriteContext>,
+    ) -> Result<CollectionState, CollectionError> {
+        self.put_with_context(item, cid, Some(previous), context, previous_context)
             .await
     }
 

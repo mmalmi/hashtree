@@ -70,6 +70,10 @@ fn song_definition() -> CollectionDefinition<Song> {
         )
 }
 
+fn by_id_only_song_definition() -> CollectionDefinition<Song> {
+    CollectionDefinition::new(|song: &Song| song.id.clone())
+}
+
 fn catalog_definition() -> CollectionDefinition<CatalogSong> {
     CollectionDefinition::new(|song: &CatalogSong| song.id.clone())
         .with_search_index(
@@ -295,7 +299,7 @@ async fn previous_item_cleanup_and_root_reload_remove_stale_search_terms() {
         .await
         .unwrap();
     writer
-        .put(&replacement, &cid_from_seed(11), Some(&original))
+        .replace(&replacement, &cid_from_seed(11), &original)
         .await
         .unwrap();
 
@@ -330,6 +334,91 @@ async fn previous_item_cleanup_and_root_reload_remove_stale_search_terms() {
             .collect::<Vec<_>>(),
         vec!["song-a".to_string()]
     );
+}
+
+#[tokio::test]
+async fn indexed_overwrite_requires_previous_item() {
+    let store = Arc::new(MemoryStore::new());
+    let definition = song_definition();
+    let mut writer = CollectionWriter::new(Arc::clone(&store), definition.clone());
+    let original = Song {
+        id: "song-a".to_string(),
+        title: "Old Horizon".to_string(),
+        artist: "Ada".to_string(),
+        tags: vec!["night".to_string()],
+    };
+    let replacement = Song {
+        id: "song-a".to_string(),
+        title: "New Horizon".to_string(),
+        artist: "Bea".to_string(),
+        tags: vec!["day".to_string()],
+    };
+
+    writer
+        .put(&original, &cid_from_seed(12), None)
+        .await
+        .unwrap();
+
+    let error = writer
+        .put(&replacement, &cid_from_seed(13), None)
+        .await
+        .expect_err("indexed overwrite should require previous item");
+    assert!(matches!(
+        error,
+        hashtree_collection::CollectionError::MissingPreviousForOverwrite { ref id }
+            if id == "song-a"
+    ));
+
+    let source =
+        CollectionSource::with_definition(Arc::clone(&store), writer.snapshot(), &definition);
+    assert_eq!(source.get("song-a").await.unwrap(), Some(cid_from_seed(12)));
+    assert_eq!(
+        source
+            .search("songs", "old", SearchOptions::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec!["song-a".to_string()]
+    );
+    assert!(source
+        .search("songs", "new", SearchOptions::default())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn by_id_only_overwrite_does_not_require_previous_item() {
+    let store = Arc::new(MemoryStore::new());
+    let definition = by_id_only_song_definition();
+    let mut writer = CollectionWriter::new(Arc::clone(&store), definition.clone());
+    let original = Song {
+        id: "song-a".to_string(),
+        title: "Old Horizon".to_string(),
+        artist: "Ada".to_string(),
+        tags: vec![],
+    };
+    let replacement = Song {
+        id: "song-a".to_string(),
+        title: "New Horizon".to_string(),
+        artist: "Bea".to_string(),
+        tags: vec![],
+    };
+
+    writer
+        .put(&original, &cid_from_seed(14), None)
+        .await
+        .unwrap();
+    writer
+        .put(&replacement, &cid_from_seed(15), None)
+        .await
+        .unwrap();
+
+    let source =
+        CollectionSource::with_definition(Arc::clone(&store), writer.snapshot(), &definition);
+    assert_eq!(source.get("song-a").await.unwrap(), Some(cid_from_seed(15)));
 }
 
 #[tokio::test]

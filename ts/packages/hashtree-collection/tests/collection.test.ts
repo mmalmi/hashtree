@@ -51,6 +51,12 @@ const songDefinition: CollectionDefinition<Song> = {
   ],
 };
 
+const byIdOnlySongDefinition: CollectionDefinition<Song> = {
+  sourceId: 'npub1test/audio/by-id-only',
+  schemaVersion: 1,
+  getId: (song) => song.id,
+};
+
 describe('@hashtree/collection', () => {
   it('autoupdates by-id, key, and search indexes on put and delete', async () => {
     const store = new MemoryStore();
@@ -167,6 +173,49 @@ describe('@hashtree/collection', () => {
 
     const source = new CollectionSource(store, writer.manifest());
     expect(await source.get('song-a')).toEqual(cidFromSeed(11));
+    expect(await source.search('songs', 'old')).toEqual([]);
+    expect((await source.search('songs', 'new')).map((result) => result.id)).toEqual(['song-a']);
+  });
+
+  it('requires previous when replacing an indexed item', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, songDefinition);
+    const original: Song = { id: 'song-a', title: 'Old Horizon', artist: 'Ada' };
+    const replacement: Song = { id: 'song-a', title: 'New Horizon', artist: 'Bea' };
+
+    await writer.put(original, cidFromSeed(15));
+
+    await expect(writer.put(replacement, cidFromSeed(16))).rejects.toThrow(/requires options\.previous/);
+
+    const source = new CollectionSource(store, writer.manifest());
+    expect(await source.get('song-a')).toEqual(cidFromSeed(15));
+    expect((await source.search('songs', 'old')).map((result) => result.id)).toEqual(['song-a']);
+    expect(await source.search('songs', 'new')).toEqual([]);
+  });
+
+  it('allows by-id-only overwrites without a previous item snapshot', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, byIdOnlySongDefinition);
+
+    await writer.put({ id: 'song-a', title: 'Old Horizon', artist: 'Ada' }, cidFromSeed(17));
+    await writer.put({ id: 'song-a', title: 'New Horizon', artist: 'Bea' }, cidFromSeed(18));
+
+    const source = new CollectionSource(store, writer.manifest());
+    expect(await source.get('song-a')).toEqual(cidFromSeed(18));
+    expect(await source.count()).toBe(1);
+  });
+
+  it('exposes an explicit replace helper for indexed updates', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, songDefinition);
+    const original: Song = { id: 'song-a', title: 'Old Horizon', artist: 'Ada' };
+    const replacement: Song = { id: 'song-a', title: 'New Horizon', artist: 'Bea' };
+
+    await writer.put(original, cidFromSeed(19));
+    await writer.replace(replacement, cidFromSeed(20), original);
+
+    const source = new CollectionSource(store, writer.manifest());
+    expect(await source.get('song-a')).toEqual(cidFromSeed(20));
     expect(await source.search('songs', 'old')).toEqual([]);
     expect((await source.search('songs', 'new')).map((result) => result.id)).toEqual(['song-a']);
   });

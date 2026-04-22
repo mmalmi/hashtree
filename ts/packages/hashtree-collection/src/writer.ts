@@ -15,6 +15,7 @@ import { normalizeCollectionItem } from './schema.js';
 export class CollectionWriter<T> {
   private readonly store: Store;
   private readonly definition: CollectionDefinition<T>;
+  private readonly hasDerivedIndexes: boolean;
   private readonly byIdIndex: BTree;
   private readonly linkIndex: BTree;
   private readonly searchIndexes = new Map<string, ReturnType<typeof createSearchIndex>>();
@@ -23,6 +24,7 @@ export class CollectionWriter<T> {
   constructor(store: Store, definition: CollectionDefinition<T>, initialManifest?: CollectionManifest | null) {
     this.store = store;
     this.definition = definition;
+    this.hasDerivedIndexes = (definition.keyIndexes?.length ?? 0) > 0 || (definition.searchIndexes?.length ?? 0) > 0;
     this.byIdIndex = new BTree(store);
     this.linkIndex = new BTree(store);
     this.state = initialManifest
@@ -52,6 +54,21 @@ export class CollectionWriter<T> {
     return normalizeCollectionItem(this.definition, item, { fromVersion });
   }
 
+  async replace(
+    item: T,
+    cid: CID,
+    previous: T,
+    options: {
+      context?: CollectionWriteContext;
+      previousContext?: CollectionWriteContext;
+    } = {},
+  ): Promise<CollectionState> {
+    return this.put(item, cid, {
+      ...options,
+      previous,
+    });
+  }
+
   async put(
     item: T,
     cid: CID,
@@ -62,15 +79,26 @@ export class CollectionWriter<T> {
     } = {},
   ): Promise<CollectionState> {
     const nextItem = this.normalize(item);
+    const id = this.definition.getId(nextItem).trim();
+    if (!id) {
+      throw new Error('Collection item id must not be empty');
+    }
+
+    if (!options.previous && this.hasDerivedIndexes) {
+      const existingCid = this.state.byIdRoot
+        ? await this.byIdIndex.getLink(this.state.byIdRoot, id)
+        : null;
+      if (existingCid) {
+        throw new Error(
+          `CollectionWriter.put requires options.previous when replacing existing id "${id}" in a collection with derived indexes; use replace(...) or reindex(...) when the previous item is unavailable`,
+        );
+      }
+    }
+
     if (options.previous) {
       await this.delete(options.previous, {
         context: options.previousContext ?? options.context,
       });
-    }
-
-    const id = this.definition.getId(nextItem).trim();
-    if (!id) {
-      throw new Error('Collection item id must not be empty');
     }
 
     const existed = this.state.byIdRoot
