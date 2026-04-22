@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   htree start [--addr 127.0.0.1:8080] [--daemon]
+//!   htree reload [--pid-file <path>]
 //!   htree stop [--pid-file <path>]
 //!   htree add <path> [--only-hash] [--unencrypted] [--no-ignore] [--publish <ref_name>]
 //!   htree load <cid>

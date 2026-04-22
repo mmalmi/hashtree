@@ -102,6 +102,7 @@ Run `htree start` to enable P2P sharing via WebRTC:
 
 ```bash
 htree start                  # Start daemon (default port 8080)
+htree reload                 # Reload config by restarting daemonized instance
 htree status                 # Check daemon status, connected peers
 ```
 

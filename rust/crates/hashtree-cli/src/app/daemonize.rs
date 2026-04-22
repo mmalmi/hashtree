@@ -1,6 +1,8 @@
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(unix)]
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::util::format_bytes;
@@ -96,6 +98,39 @@ fn default_daemon_pid_file() -> PathBuf {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DaemonLaunchState {
+    pub(crate) addr: String,
+    pub(crate) relays: Option<String>,
+    pub(crate) mode: Option<hashtree_cli::config::ServerMode>,
+    pub(crate) data_dir: Option<PathBuf>,
+    pub(crate) log_file: PathBuf,
+}
+
+#[cfg(unix)]
+pub(crate) fn daemon_state_file_path(pid_file: &std::path::Path) -> PathBuf {
+    pid_file.with_extension("daemon.toml")
+}
+
+#[cfg(unix)]
+pub(crate) fn read_daemon_launch_state(path: &std::path::Path) -> Result<DaemonLaunchState> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read daemon state file {}", path.display()))?;
+    toml::from_str(&raw)
+        .with_context(|| format!("Failed to parse daemon state file {}", path.display()))
+}
+
+#[cfg(unix)]
+pub(crate) fn write_daemon_launch_state(
+    path: &std::path::Path,
+    state: &DaemonLaunchState,
+) -> Result<()> {
+    let raw = toml::to_string(state).context("Failed to serialize daemon state")?;
+    std::fs::write(path, raw)
+        .with_context(|| format!("Failed to write daemon state file {}", path.display()))
+}
+
+#[cfg(unix)]
 pub(crate) fn build_daemon_args(
     addr: &str,
     relays: Option<&str>,
@@ -136,6 +171,7 @@ pub(crate) fn spawn_daemon(
 
         let log_path = log_file.cloned().unwrap_or_else(default_daemon_log_file);
         let pid_path = pid_file.cloned().unwrap_or_else(default_daemon_pid_file);
+        let state_path = daemon_state_file_path(&pid_path);
         if let Some(parent) = log_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create log dir {}", parent.display()))?;
@@ -143,6 +179,10 @@ pub(crate) fn spawn_daemon(
         if let Some(parent) = pid_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create pid dir {}", parent.display()))?;
+        }
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create state dir {}", parent.display()))?;
         }
 
         if pid_path.exists() {
@@ -163,10 +203,24 @@ pub(crate) fn spawn_daemon(
             .with_context(|| format!("Failed to open log file {}", log_path.display()))?;
         let log_err = log.try_clone().context("Failed to clone log file handle")?;
 
+        let launch_state = DaemonLaunchState {
+            addr: addr.to_string(),
+            relays: relays.map(ToOwned::to_owned),
+            mode,
+            data_dir,
+            log_file: log_path.clone(),
+        };
+        write_daemon_launch_state(&state_path, &launch_state)?;
+
         let exe = std::env::current_exe().context("Failed to locate htree binary")?;
         let mut cmd = Command::new(exe);
         cmd.arg("start")
-            .args(build_daemon_args(addr, relays, mode, data_dir.as_ref()))
+            .args(build_daemon_args(
+                &launch_state.addr,
+                launch_state.relays.as_deref(),
+                launch_state.mode,
+                launch_state.data_dir.as_ref(),
+            ))
             .env("HTREE_DAEMONIZED", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
@@ -274,5 +328,38 @@ pub(crate) fn stop_daemon(pid_file: Option<&PathBuf>) -> Result<()> {
     {
         let _ = pid_path;
         anyhow::bail!("Daemon stop is only supported on Unix systems");
+    }
+}
+
+pub(crate) fn reload_daemon(pid_file: Option<&PathBuf>) -> Result<()> {
+    let pid_path = pid_file.cloned().unwrap_or_else(default_daemon_pid_file);
+
+    #[cfg(unix)]
+    {
+        let state_path = daemon_state_file_path(&pid_path);
+        let state = read_daemon_launch_state(&state_path).with_context(|| {
+            format!(
+                "Reload needs daemon launch state. Start the daemon with `htree start --daemon` so {} exists",
+                state_path.display()
+            )
+        })?;
+        let pid = read_pid_file(&pid_path)?;
+        println!("Reloading hashtree daemon (pid {})", pid);
+        stop_daemon(Some(&pid_path))?;
+        spawn_daemon(
+            &state.addr,
+            state.relays.as_deref(),
+            state.mode,
+            state.data_dir,
+            Some(&state.log_file),
+            Some(&pid_path),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid_path;
+        anyhow::bail!("Daemon reload is only supported on Unix systems");
     }
 }

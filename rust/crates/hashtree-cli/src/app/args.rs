@@ -13,6 +13,7 @@ Options:\n\
 const CLI_GROUPED_COMMANDS: &str = "\
 \nDaemon Commands:
   start        Start the hashtree daemon
+  reload       Reload daemon config by restarting with saved launch args
   stop         Stop the hashtree daemon
   status       Show daemon status (peers, storage, etc.)
   peer         Show connected P2P peers
@@ -64,6 +65,7 @@ General Commands:
 const CLI_GROUPED_COMMANDS: &str = "\
 \nDaemon Commands:
   start        Start the hashtree daemon
+  reload       Reload daemon config by restarting with saved launch args
   stop         Stop the hashtree daemon
   status       Show daemon status (peers, storage, etc.)
   peer         Show connected P2P peers
@@ -176,6 +178,13 @@ pub(crate) enum Commands {
 
     /// Stop the hashtree daemon
     Stop {
+        /// PID file (default: ~/.hashtree/htree.pid)
+        #[arg(long)]
+        pid_file: Option<PathBuf>,
+    },
+
+    /// Reload the hashtree daemon config by restarting the daemon
+    Reload {
         /// PID file (default: ~/.hashtree/htree.pid)
         #[arg(long)]
         pid_file: Option<PathBuf>,

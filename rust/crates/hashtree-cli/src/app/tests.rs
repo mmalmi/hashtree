@@ -4,6 +4,10 @@ use super::add::{
     build_sites_iris_to_url_for_published_ref, detect_site_entry_for_path,
 };
 use super::daemonize::{build_daemon_args, parse_pid, read_pid_file, write_pid_file};
+#[cfg(unix)]
+use super::daemonize::{
+    daemon_state_file_path, read_daemon_launch_state, write_daemon_launch_state, DaemonLaunchState,
+};
 use super::lists::{
     build_mute_list_event, load_mute_entries, update_hex_list_file,
     update_mute_list_file_with_status, MuteEntry, MuteUpdate,
@@ -86,6 +90,25 @@ fn test_pid_file_roundtrip() {
     write_pid_file(&path, 42).unwrap();
     let pid = read_pid_file(&path).unwrap();
     assert_eq!(pid, 42);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_daemon_launch_state_roundtrip() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("htree.pid");
+    let state_path = daemon_state_file_path(&path);
+    let state = DaemonLaunchState {
+        addr: "127.0.0.1:18080".to_string(),
+        relays: Some("wss://relay.example,wss://relay.two".to_string()),
+        mode: Some(ServerMode::Assist),
+        data_dir: Some(PathBuf::from("/tmp/htree-data")),
+        log_file: PathBuf::from("/tmp/htree.log"),
+    };
+
+    write_daemon_launch_state(&state_path, &state).unwrap();
+    let reloaded = read_daemon_launch_state(&state_path).unwrap();
+    assert_eq!(reloaded, state);
 }
 
 #[test]
@@ -537,6 +560,7 @@ fn test_cli_help_groups_commands_by_purpose() {
     let help = cmd.render_long_help().to_string();
 
     assert!(help.contains("Daemon Commands:"));
+    assert!(help.contains("reload       Reload daemon config by restarting with saved launch args"));
     assert!(help.contains("Content Commands:"));
     assert!(help.contains("Storage Commands:"));
     assert!(help.contains("mounts       List active hashtree mounts"));
@@ -545,6 +569,18 @@ fn test_cli_help_groups_commands_by_purpose() {
     assert!(help.contains("Wallet Commands:"));
     assert!(help.contains("General Commands:"));
     assert!(!help.contains("\nCommands:\n"));
+}
+
+#[test]
+fn test_cli_parses_reload_command() {
+    let cli = Cli::parse_from(["htree", "reload"]);
+
+    match cli.command {
+        Commands::Reload { pid_file } => {
+            assert_eq!(pid_file, None);
+        }
+        _ => panic!("expected reload command"),
+    }
 }
 
 #[test]

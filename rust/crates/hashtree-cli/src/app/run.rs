@@ -26,7 +26,7 @@ use super::args::{
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
-use super::daemonize::{format_daemon_status, spawn_daemon, stop_daemon};
+use super::daemonize::{format_daemon_status, reload_daemon, spawn_daemon, stop_daemon};
 use super::lists::{follow_user, list_following, list_muted, mute_user, update_profile};
 #[cfg(feature = "fuse")]
 use super::mount::mount_fuse;
@@ -1044,6 +1044,9 @@ pub(crate) async fn run() -> Result<()> {
         }
         Commands::Stop { pid_file } => {
             stop_daemon(pid_file.as_ref())?;
+        }
+        Commands::Reload { pid_file } => {
+            reload_daemon(pid_file.as_ref())?;
         }
         Commands::Gc => {
             let store = HashtreeStore::new(&data_dir)?;
