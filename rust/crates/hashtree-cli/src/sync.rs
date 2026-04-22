@@ -418,10 +418,10 @@ impl BackgroundSync {
                             let fetcher_clone = fetcher.clone();
 
                             tokio::spawn(async move {
-                                let result = fetcher_clone.fetch_tree(
+                                let result = fetcher_clone.fetch_cid_tree(
                                     &store_clone,
                                     webrtc_clone.as_ref(),
-                                    &task.cid.hash,
+                                    &task.cid,
                                 ).await;
 
                                 match result {
@@ -438,6 +438,29 @@ impl BackgroundSync {
                                                 "Tree {} already present locally; applying ref update",
                                                 &hash_hex[..12]
                                             );
+                                        }
+
+                                        match store_clone.blob_exists(&task.cid.hash) {
+                                            Ok(true) => {}
+                                            Ok(false) => {
+                                                warn!(
+                                                    "Skipping ref update for {} because root {} is still missing locally",
+                                                    task.key,
+                                                    &hash_hex[..12]
+                                                );
+                                                syncing_clone.write().await.remove(&hash_hex);
+                                                return;
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "Failed to verify synced root {} before indexing {}: {}",
+                                                    &hash_hex[..12],
+                                                    task.key,
+                                                    err
+                                                );
+                                                syncing_clone.write().await.remove(&hash_hex);
+                                                return;
+                                            }
                                         }
 
                                         if let Err(e) = apply_synced_tree_update(&store_clone, &task) {
