@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use futures::executor::block_on as sync_block_on;
 use futures::stream::{self, StreamExt};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::fetch::{FetchConfig, Fetcher};
 use crate::config::ensure_keys_string;
 use crate::HashtreeStore;
 use hashtree_core::{Cid, HashTree, HashTreeConfig, Link};
@@ -36,7 +36,33 @@ fn child_cid(parent: &Cid, link: &Link) -> Cid {
     }
 }
 
-pub(crate) fn collect_cids_for_push(store: &HashtreeStore, root_cid: Cid) -> Result<Vec<Cid>> {
+async fn ensure_local_blob_for_push(
+    store: &HashtreeStore,
+    fetcher: Option<&Fetcher>,
+    cid: &Cid,
+) -> Result<()> {
+    if store.get_blob(&cid.hash)?.is_some() {
+        return Ok(());
+    }
+
+    if let Some(fetcher) = fetcher {
+        fetcher
+            .fetch_chunk_with_store(store, None, &cid.hash)
+            .await
+            .with_context(|| format!("failed to hydrate missing local blob {}", cid))?;
+        if store.get_blob(&cid.hash)?.is_some() {
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!("missing local blob while pushing DAG: {}", cid);
+}
+
+pub(crate) async fn collect_cids_for_push(
+    store: &HashtreeStore,
+    root_cid: Cid,
+    fetcher: Option<&Fetcher>,
+) -> Result<Vec<Cid>> {
     let mut cids_to_push = Vec::new();
     let mut visited: HashSet<[u8; 32]> = HashSet::new();
     let mut queue = vec![root_cid];
@@ -47,12 +73,12 @@ pub(crate) fn collect_cids_for_push(store: &HashtreeStore, root_cid: Cid) -> Res
             continue;
         }
 
-        if store.get_blob(&cid.hash)?.is_none() {
-            anyhow::bail!("missing local blob while pushing DAG: {}", cid);
-        }
+        ensure_local_blob_for_push(store, fetcher, &cid).await?;
         cids_to_push.push(cid.clone());
 
-        let node = sync_block_on(async { tree.get_node(&cid).await })
+        let node = tree
+            .get_node(&cid)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to inspect {}: {}", cid, e))?;
 
         if let Some(node) = node {
@@ -146,10 +172,11 @@ pub async fn push_to_blossom(
     }
 
     let store = Arc::new(HashtreeStore::new(data_dir)?);
+    let fetcher = Fetcher::new(FetchConfig::default());
 
     println!("Collecting blocks...");
     let root_cid = parse_root_cid(cid_str)?;
-    let cids_to_push = collect_cids_for_push(store.as_ref(), root_cid)?;
+    let cids_to_push = collect_cids_for_push(store.as_ref(), root_cid, Some(&fetcher)).await?;
 
     println!("Found {} blocks to push", cids_to_push.len());
     let (uploaded, skipped, errors, last_error) =
@@ -180,7 +207,9 @@ pub async fn background_blossom_push(
 
     let store = Arc::new(HashtreeStore::new(data_dir)?);
     let root_cid = parse_root_cid(cid_str)?;
-    let cids_to_push = collect_cids_for_push(store.as_ref(), root_cid)?;
+    let fetcher = Fetcher::new(FetchConfig::default());
+    println!("Collecting DAG for file-server push...");
+    let cids_to_push = collect_cids_for_push(store.as_ref(), root_cid, Some(&fetcher)).await?;
 
     if cids_to_push.is_empty() {
         return Ok(());
@@ -217,8 +246,8 @@ mod tests {
     use hashtree_core::{HashTree, HashTreeConfig};
     use tempfile::tempdir;
 
-    #[test]
-    fn collect_cids_for_push_fails_on_missing_descendant_blob() {
+    #[tokio::test]
+    async fn collect_cids_for_push_fails_on_missing_descendant_blob() {
         let tmp = tempdir().expect("tempdir");
         let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
         let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
@@ -244,7 +273,9 @@ mod tests {
             .delete_local_only(&child_hash)
             .expect("delete child locally");
 
-        let err = collect_cids_for_push(&store, root).expect_err("missing child should fail");
+        let err = collect_cids_for_push(&store, root, None)
+            .await
+            .expect_err("missing child should fail");
         assert!(err
             .to_string()
             .contains("missing local blob while pushing DAG"));

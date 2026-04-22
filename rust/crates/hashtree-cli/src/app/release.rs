@@ -50,6 +50,49 @@ fn latest_path_for(version_segments: &[String]) -> String {
     latest_segments.join("/")
 }
 
+async fn ensure_directory_path<S: Store>(
+    tree: &HashTree<S>,
+    mut root: Cid,
+    parent_segments: &[String],
+) -> Result<Cid> {
+    for depth in 0..parent_segments.len() {
+        let segment = &parent_segments[depth];
+        let path = parent_segments[..=depth].join("/");
+
+        match tree
+            .resolve_path(&root, &path)
+            .await
+            .with_context(|| format!("Failed to resolve {}", path))?
+        {
+            Some(existing) => {
+                if !tree
+                    .is_dir(&existing)
+                    .await
+                    .with_context(|| format!("Failed to inspect {}", path))?
+                {
+                    bail!("Release path component is not a directory: {}", path);
+                }
+            }
+            None => {
+                let empty_dir = tree
+                    .put_directory(Vec::new())
+                    .await
+                    .context("Failed to create release directory")?;
+                let parent_path: Vec<&str> = parent_segments[..depth]
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                root = tree
+                    .set_entry(&root, &parent_path, segment, &empty_dir, 0, LinkType::Dir)
+                    .await
+                    .with_context(|| format!("Failed to create release directory {}", path))?;
+            }
+        }
+    }
+
+    Ok(root)
+}
+
 async fn fetch_existing_directory_chain<S: Store>(
     store: &HashtreeStore,
     fetcher: &Fetcher,
@@ -97,49 +140,6 @@ async fn fetch_existing_directory_chain<S: Store>(
     }
 
     Ok(())
-}
-
-async fn ensure_directory_path<S: Store>(
-    tree: &HashTree<S>,
-    mut root: Cid,
-    parent_segments: &[String],
-) -> Result<Cid> {
-    for depth in 0..parent_segments.len() {
-        let segment = &parent_segments[depth];
-        let path = parent_segments[..=depth].join("/");
-
-        match tree
-            .resolve_path(&root, &path)
-            .await
-            .with_context(|| format!("Failed to resolve {}", path))?
-        {
-            Some(existing) => {
-                if !tree
-                    .is_dir(&existing)
-                    .await
-                    .with_context(|| format!("Failed to inspect {}", path))?
-                {
-                    bail!("Release path component is not a directory: {}", path);
-                }
-            }
-            None => {
-                let empty_dir = tree
-                    .put_directory(Vec::new())
-                    .await
-                    .context("Failed to create release directory")?;
-                let parent_path: Vec<&str> = parent_segments[..depth]
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                root = tree
-                    .set_entry(&root, &parent_path, segment, &empty_dir, 0, LinkType::Dir)
-                    .await
-                    .with_context(|| format!("Failed to create release directory {}", path))?;
-            }
-        }
-    }
-
-    Ok(root)
 }
 
 async fn publish_release_root<S: Store>(
@@ -249,6 +249,7 @@ pub(crate) async fn publish_release_version(
         .with_context(|| format!("Failed to resolve existing release tree {}", nostr_key))?;
 
     if let Some(root) = current_root.as_ref() {
+        println!("Loading existing release path...");
         fetch_existing_directory_chain(
             store.as_ref(),
             &fetcher,
@@ -265,6 +266,7 @@ pub(crate) async fn publish_release_version(
         let mut write_servers = config.blossom.servers.clone();
         write_servers.extend(config.blossom.write_servers.clone());
         if !write_servers.is_empty() {
+            println!("Pushing updated release root to file servers...");
             background_blossom_push(
                 &data_dir.to_path_buf(),
                 &new_root.to_string(),

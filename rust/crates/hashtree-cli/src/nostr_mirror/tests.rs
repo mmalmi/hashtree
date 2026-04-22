@@ -738,11 +738,15 @@ async fn apply_history_root_publishes_profile_indexes_even_if_event_upload_is_sl
 
     let relay = TestRelay::new(Vec::new());
     let blossom = TestBlossom::new().await;
-    let delayed_hashes =
-        crate::blossom_push::collect_cids_for_push(&store, root.clone().expect("event root"))?
-            .into_iter()
-            .map(|cid| hex::encode(cid.hash))
-            .collect::<Vec<_>>();
+    let delayed_hashes = crate::blossom_push::collect_cids_for_push(
+        &store,
+        root.clone().expect("event root"),
+        None,
+    )
+    .await?
+    .into_iter()
+    .map(|cid| hex::encode(cid.hash))
+    .collect::<Vec<_>>();
     let delayed_upload_timeout = Duration::from_secs(15);
     for hash in &delayed_hashes {
         blossom.set_put_delay(hash, delayed_upload_timeout);

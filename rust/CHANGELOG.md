@@ -12,6 +12,7 @@ Changes since the `0.2.37` release.
 
 - Fixed repeated `git-remote-htree` pushes against large published repos such as `iris-chromium` so the helper no longer falls into a long-running cached-root object-decrypt walk after already reducing the Git-object enumeration to the real delta.
 - Fixed long cached-root merge phases to print an explicit progress label (`Reusing unchanged paths from cached remote root...`) instead of going quiet after the initial fallback line.
+- Fixed mutable `htree release publish` updates so repointing `latest` survives missing local LMDB blobs by hydrating needed DAG chunks on demand, while keeping the release updater on the cheap parent-path fetch instead of silently reloading the entire release history first.
 
 ## 0.2.37 - 2026-04-22
 
