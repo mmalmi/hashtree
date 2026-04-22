@@ -118,15 +118,17 @@ impl HostDaemonRuntime {
         let config = browser_config(&self.data_dir, &self.config_dir);
         self.info = self
             .runtime
-            .block_on(hashtree_cli::daemon::start_embedded(EmbeddedDaemonOptions {
-                config,
-                data_dir: self.data_dir.clone(),
-                config_dir: Some(self.config_dir.clone()),
-                bind_address: self.bind_address.clone(),
-                relays: None,
-                extra_routes: None,
-                cors: None,
-            }))
+            .block_on(hashtree_cli::daemon::start_embedded(
+                EmbeddedDaemonOptions {
+                    config,
+                    data_dir: self.data_dir.clone(),
+                    config_dir: Some(self.config_dir.clone()),
+                    bind_address: self.bind_address.clone(),
+                    relays: None,
+                    extra_routes: None,
+                    cors: None,
+                },
+            ))
             .context("reload embedded hashtree daemon")?;
         self.bind_address = self.info.addr.clone();
         Ok(self.status())

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.37 - 2026-04-22
+
+Changes since the `0.2.35` crates.io release.
+
+### Added
+
+- Added tracked author mirroring plus end-to-end mirror coverage in `hashtree-cli`, so mirrored author trees and the renamed `htree mirror` flow are exercised against real daemon/test environments instead of only helper seams.
+- Added an explicit embedded-daemon reload API for native hosts, making it possible for browser and app integrations to refresh transport and server settings without rebuilding the host-side bridge object.
+
+### Improved
+
+- Improved the embedded browser/native daemon runtime so host-managed relay, Blossom, and transport settings are honored consistently across startup and reload.
+- Improved `git-remote-htree` repeated fast-forward pushes by hydrating existing remote objects from the cached hashtree root and enumerating only the Git-object delta instead of rewalking the full reachable history on every push.
+- Improved the worker/mesh runtime with the current streaming/provider-bridge updates that keep the shared P2P stack aligned across the Rust and TypeScript hosts.
+
+### Fixed
+
+- Fixed repeated `git-remote-htree` fast-forward pushes so the helper can reuse cached remote objects and fall back cleanly when the delta set is incomplete instead of forcing a full-history local import on every push.
+
 ## 0.2.35 - 2026-04-20
 
 Changes since the `0.2.34` crates.io release.
