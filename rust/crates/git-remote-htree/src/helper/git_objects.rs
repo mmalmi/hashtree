@@ -76,9 +76,13 @@ impl RemoteHelper {
         Ok(())
     }
 
-    /// List objects that need to be pushed (not on remote)
-    pub(super) fn list_objects_to_push(&self, sha: &str) -> Result<Vec<String>> {
-        self.list_objects_for_shas(&[sha.to_string()], &[])
+    /// List objects that need to be pushed.
+    pub(super) fn list_objects_to_push(
+        &self,
+        sha: &str,
+        exclude: &[String],
+    ) -> Result<Vec<String>> {
+        self.list_objects_for_shas(&[sha.to_string()], exclude)
     }
 
     pub(super) fn list_objects_for_shas(

@@ -128,7 +128,8 @@ impl RemoteHelper {
                     }
                 }
 
-                match self.push_objects(&sha, &spec.dst, spec.force) {
+                let remote_tip = self.remote_refs.get(&spec.dst).cloned();
+                match self.push_objects(&sha, &spec.dst, spec.force, remote_tip.as_deref()) {
                     Ok(()) => {
                         results.push(format!("ok {}", spec.dst));
                         pushed_refs.push((spec.dst, sha));
@@ -171,6 +172,11 @@ impl RemoteHelper {
             }
         }
 
+        let updating_existing_remote_ref = self
+            .push_specs
+            .iter()
+            .any(|spec| self.remote_refs.contains_key(&spec.dst));
+
         for (ref_name, ref_value) in &refs {
             let is_being_pushed = self.push_specs.iter().any(|s| s.dst == *ref_name);
             if !is_being_pushed {
@@ -192,6 +198,16 @@ impl RemoteHelper {
             })
             .map(|(ref_name, ref_value)| (ref_name.clone(), ref_value.clone()))
             .collect();
+
+        if updating_existing_remote_ref {
+            if let Some(root) = root_hash.as_deref() {
+                if self.import_existing_remote_objects_from_cached_root(root)? {
+                    self.detail("  Reused existing remote objects from cached hashtree root");
+                    self.detail("  Remote state loaded");
+                    return Ok(());
+                }
+            }
+        }
 
         if preserved_refs.is_empty() {
             self.detail("  No untouched direct refs to preserve");
@@ -217,6 +233,29 @@ impl RemoteHelper {
 
         self.detail("  Remote state loaded");
         Ok(())
+    }
+
+    fn import_existing_remote_objects_from_cached_root(&self, root_hash: &str) -> Result<bool> {
+        let objects = match self.fetch_all_git_objects(root_hash) {
+            Ok(objects) => objects,
+            Err(err) => {
+                self.detail(&format!(
+                    "  Could not import existing remote objects from cached root: {}",
+                    err
+                ));
+                return Ok(false);
+            }
+        };
+
+        self.detail(&format!(
+            "  Importing {} existing objects from cached root",
+            objects.len()
+        ));
+        for (oid, content) in objects {
+            self.storage.import_compressed_object(&oid, content)?;
+        }
+
+        Ok(true)
     }
 
     pub(super) fn import_preserved_remote_objects_from_local_git(
@@ -366,11 +405,24 @@ impl RemoteHelper {
         sha: &str,
         dst_ref: &str,
         force_push: bool,
+        remote_tip_sha: Option<&str>,
     ) -> Result<()> {
         eprint!("  Listing objects...");
         let _ = std::io::stderr().flush();
-        let objects = self.list_objects_to_push(sha)?;
-        eprintln!(" {} objects", objects.len());
+        let delta_base = (!force_push)
+            .then(|| remote_tip_sha)
+            .flatten()
+            .map(str::to_string);
+        let mut objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
+        if let Some(base) = delta_base.as_deref() {
+            eprintln!(
+                " {} objects (delta from {})",
+                objects.len(),
+                &base[..12.min(base.len())]
+            );
+        } else {
+            eprintln!(" {} objects", objects.len());
+        }
 
         info!("Pushing {} objects for {}", objects.len(), sha);
 
@@ -379,14 +431,7 @@ impl RemoteHelper {
 
         eprint!("  Writing to local store...");
         let _ = std::io::stderr().flush();
-        let total = objects_with_content.len();
-        for (i, (obj_type, content)) in objects_with_content.into_iter().enumerate() {
-            self.storage.write_raw_object(obj_type, &content)?;
-            if (i + 1) % 1000 == 0 || i + 1 == total {
-                eprint!("\r  Writing to local store: {}/{}", i + 1, total);
-                let _ = std::io::stderr().flush();
-            }
-        }
+        Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
         eprintln!();
 
         let oid = crate::git::object::ObjectId::from_hex(sha)
@@ -410,7 +455,36 @@ impl RemoteHelper {
             eprint!("  Building merkle tree...");
             let _ = std::io::stderr().flush();
         }
-        let root_cid = self.storage.build_tree()?;
+        let root_cid = match self.storage.build_tree() {
+            Ok(root_cid) => root_cid,
+            Err(err) if delta_base.is_some() => {
+                let base = delta_base.as_deref().unwrap_or_default();
+                eprintln!(
+                    "  Delta object set incomplete ({}); falling back to full local import",
+                    err
+                );
+                debug!(
+                    "Delta object set for {} via {} was incomplete: {}. Falling back to full import.",
+                    dst_ref, base, err
+                );
+
+                eprint!("  Listing objects...");
+                let _ = std::io::stderr().flush();
+                objects = self.list_objects_to_push(sha, &[])?;
+                eprintln!(" {} objects", objects.len());
+
+                let objects_with_content = self.read_git_objects_batch(&objects)?;
+                eprintln!();
+
+                eprint!("  Writing to local store...");
+                let _ = std::io::stderr().flush();
+                Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+                eprintln!();
+
+                self.storage.build_tree()?
+            }
+            Err(err) => return Err(err.into()),
+        };
         let root_hash_hex = hex::encode(root_cid.hash);
         let chk_key = root_cid.key;
         let is_link_visible = self.url_secret.is_some();
@@ -496,6 +570,28 @@ impl RemoteHelper {
             }
         }
 
+        Ok(())
+    }
+
+    fn list_objects_for_push(&self, sha: &str, delta_base: Option<&str>) -> Result<Vec<String>> {
+        let exclude: Vec<String> = delta_base
+            .map(|base| vec![base.to_string()])
+            .unwrap_or_default();
+        self.list_objects_to_push(sha, &exclude)
+    }
+
+    fn write_objects_to_local_store(
+        storage: &crate::git::storage::GitStorage,
+        objects_with_content: Vec<(crate::git::object::ObjectType, Vec<u8>)>,
+    ) -> Result<()> {
+        let total = objects_with_content.len();
+        for (i, (obj_type, content)) in objects_with_content.into_iter().enumerate() {
+            storage.write_raw_object(obj_type, &content)?;
+            if (i + 1) % 1000 == 0 || i + 1 == total {
+                eprint!("\r  Writing to local store: {}/{}", i + 1, total);
+                let _ = std::io::stderr().flush();
+            }
+        }
         Ok(())
     }
 

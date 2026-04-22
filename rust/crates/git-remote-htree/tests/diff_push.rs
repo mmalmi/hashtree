@@ -56,6 +56,18 @@ fn parse_final_upload_progress(stderr: &str) -> Option<UploadProgress> {
         .last()
 }
 
+fn parse_last_listed_object_count(stderr: &str) -> Option<u32> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix("Listing objects... ")?;
+            let count = rest.split_whitespace().next()?;
+            count.parse::<u32>().ok()
+        })
+        .last()
+}
+
 /// Test diff-based push - second push should upload fewer blobs
 #[test]
 fn test_diff_based_push() {
@@ -110,6 +122,8 @@ fn test_diff_based_push() {
     if !push1.status.success() && !stderr1.contains("-> master") {
         panic!("First push failed: {}", stderr1);
     }
+    let first_listed_objects =
+        parse_last_listed_object_count(&stderr1).expect("first push should list objects");
 
     // Make a small change
     println!("\n=== Making small change ===");
@@ -152,6 +166,17 @@ fn test_diff_based_push() {
     let used_diff = stderr2.contains("unchanged") || stderr2.contains("Computing diff");
     println!("\nDiff optimization used: {}", used_diff);
     assert!(used_diff, "Second push should use diff optimization");
+
+    let second_listed_objects =
+        parse_last_listed_object_count(&stderr2).expect("second push should list objects");
+    println!(
+        "Object walk reduced: first={} second={}",
+        first_listed_objects, second_listed_objects
+    );
+    assert!(
+        second_listed_objects < first_listed_objects,
+        "Second push should walk fewer git objects than the first push"
+    );
 
     let final_progress = parse_final_upload_progress(&stderr2)
         .expect("Second push should print a final upload progress line");
@@ -203,6 +228,13 @@ fn test_diff_based_push() {
     println!(
         "No-change optimization used: {} (minimal_upload: {})",
         no_changes, minimal_upload
+    );
+    let third_listed_objects =
+        parse_last_listed_object_count(&stderr3).expect("third push should list objects");
+    println!("Third push listed objects: {}", third_listed_objects);
+    assert!(
+        third_listed_objects <= second_listed_objects,
+        "Third push should not walk more git objects than the second push"
     );
     assert!(
         no_changes || minimal_upload,
