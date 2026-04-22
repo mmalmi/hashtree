@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
+
 ## 0.2.6 - 2026-04-22
 
 Changes since the previous npm package publish.

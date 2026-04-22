@@ -112,6 +112,35 @@ const root = await resolver.resolve('npub1.../myfiles');
 
 The resolver does not require NDK. Any raw relay client is fine as long as it can subscribe and publish signed events.
 
+### Coalescing Replaceable Publishes
+
+When app code signs replaceable events directly, publishing several updates inside one second can leave relays choosing by event id instead of the last UI state. `createReplaceablePublishQueue()` avoids app-side future timestamps by serializing publishes per replaceable coordinate and only sending the latest queued update in a one-second window.
+
+```typescript
+import {
+  createReplaceablePublishQueue,
+  replaceableEventCoordinateFromTemplate,
+} from '@hashtree/nostr';
+
+const publishQueue = createReplaceablePublishQueue();
+
+await publishQueue.publish({
+  coordinate: replaceableEventCoordinateFromTemplate(pubkey, {
+    kind: 30078,
+    tags: [['d', treeName]],
+  }),
+  publish: async (createdAt) => {
+    const signed = await signEvent({
+      kind: 30078,
+      created_at: createdAt,
+      tags: [['d', treeName], ['hash', rootHash]],
+      content: '',
+    });
+    return publishSignedEvent(signed);
+  },
+});
+```
+
 ## Signed Tree Snapshots
 
 For immutable permalinks, store a copy of the signed kind `30078` root event as a plain hashtree blob. The snapshot gives you one signed root even when relays do not answer, and you can still watch for newer events later.

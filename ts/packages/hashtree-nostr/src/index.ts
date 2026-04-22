@@ -152,3 +152,14 @@ export {
   type TreeEventSnapshotPermalink,
   type BuildTreeEventSnapshotPermalinkOptions,
 } from './treeEventSnapshotPermalinks.js';
+
+export {
+  createReplaceablePublishQueue,
+  replaceableEventCoordinateFromTemplate,
+  replaceableEventCoordinateKey,
+  type ReplaceableEventCoordinate,
+  type ReplaceableEventTemplateLike,
+  type ReplaceablePublishQueueConfig,
+  type ReplaceablePublishRequest,
+  type ReplaceablePublishOutcome,
+} from './replaceablePublish.js';
