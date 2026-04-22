@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.38 - 2026-04-22
+
+Changes since the `0.2.37` release.
+
+### Improved
+
+- Improved `git-remote-htree` cached-root fast-forward pushes so large repos reuse unchanged working-tree subtrees, index metadata, and object-prefix directories from the previous published root instead of recursively hydrating the whole old repo into the local cache before every push.
+
+### Fixed
+
+- Fixed repeated `git-remote-htree` pushes against large published repos such as `iris-chromium` so the helper no longer falls into a long-running cached-root object-decrypt walk after already reducing the Git-object enumeration to the real delta.
+- Fixed long cached-root merge phases to print an explicit progress label (`Reusing unchanged paths from cached remote root...`) instead of going quiet after the initial fallback line.
+
 ## 0.2.37 - 2026-04-22
 
 Changes since the `0.2.35` crates.io release.
