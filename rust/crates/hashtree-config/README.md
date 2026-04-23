@@ -13,6 +13,7 @@ Provides configuration loading and key management used by hashtree-cli and git-r
 read_servers = ["https://cdn.iris.to", "https://hashtree.iris.to"]
 write_servers = ["https://hashtree.iris.to"]
 max_upload_mb = 100
+upload_concurrency = 10
 
 [nostr]
 relays = [

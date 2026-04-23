@@ -11,6 +11,15 @@ use std::io::Write;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
+fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize {
+    let configured = configured.max(1);
+    if server_count == 0 {
+        1
+    } else {
+        configured
+    }
+}
+
 pub(super) fn queue_links_for_diff_upload(
     queue: &mut Vec<([u8; 32], Option<[u8; 32]>)>,
     queued: &mut HashSet<[u8; 32]>,
@@ -32,6 +41,10 @@ pub(super) fn queue_links_for_diff_upload(
 }
 
 impl RemoteHelper {
+    fn upload_concurrency(&self, server_count: usize) -> usize {
+        effective_upload_concurrency(server_count, self.config.blossom.upload_concurrency)
+    }
+
     fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
         if self.is_slow() {
             eprint!("  {}...", label);
@@ -1040,13 +1053,7 @@ impl RemoteHelper {
                 has_old_tree && trust_server_old_tree_coverage && servers_needing_full.is_empty();
 
             const CHANNEL_SIZE: usize = 100;
-            const DEFAULT_UPLOAD_CONCURRENCY: usize = 10;
-            const SINGLE_SERVER_UPLOAD_CONCURRENCY: usize = 1;
-            let upload_concurrency = if all_servers.len() <= 1 {
-                SINGLE_SERVER_UPLOAD_CONCURRENCY
-            } else {
-                DEFAULT_UPLOAD_CONCURRENCY
-            };
+            let upload_concurrency = self.upload_concurrency(all_servers.len());
             let (tx, rx) = mpsc::channel::<(Vec<u8>, bool, bool)>(CHANNEL_SIZE);
 
             let upload_handle = {
@@ -1403,5 +1410,21 @@ impl RemoteHelper {
             &root_hash[..12]
         );
         Ok(hashes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_upload_concurrency;
+
+    #[test]
+    fn upload_concurrency_uses_configured_parallelism_for_single_server() {
+        assert_eq!(effective_upload_concurrency(1, 10), 10);
+    }
+
+    #[test]
+    fn upload_concurrency_clamps_zero_to_one() {
+        assert_eq!(effective_upload_concurrency(1, 0), 1);
+        assert_eq!(effective_upload_concurrency(0, 10), 1);
     }
 }
