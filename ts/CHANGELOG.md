@@ -6,6 +6,17 @@
 
 - Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
 
+## 0.2.7 - 2026-04-23
+
+Changes since the previous npm package publish.
+
+### Changed
+
+- Published `@hashtree/collection@0.2.3`.
+- Changed `@hashtree/collection` search index definitions so `searchIndexes[].terms(...)` now drives writer updates, deletes, and rebuilds instead of only query-side helpers.
+- Added optional query-side term reuse to `CollectionSource` by allowing readers with the original definition to pass `new CollectionSource(store, manifest, definition)` and keep `search(...)` aligned with the same custom query expansion.
+- Narrowed the new `CollectionSource` query-definition argument to the query-time search shape it actually consumes, so full collection definitions remain assignable in TypeScript consumers.
+
 ## 0.2.6 - 2026-04-22
 
 Changes since the previous npm package publish.

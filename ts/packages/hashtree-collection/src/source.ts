@@ -3,11 +3,13 @@ import type {
   CID,
   CollectionIndexLinkResult,
   CollectionManifest,
+  CollectionSourceQueryDefinition,
   CollectionSearchManifestIndex,
   SearchOptions,
   Store,
 } from './types.js';
 import { deserializeCid } from './cid.js';
+import { materializeSearchTerms } from './helpers.js';
 
 export class CollectionSource {
   readonly manifest: CollectionManifest;
@@ -16,8 +18,9 @@ export class CollectionSource {
   private readonly byIdRoot;
   private readonly itemCount;
   private readonly searchIndexes = new Map<string, SearchIndex>();
+  private readonly searchDefinitions = new Map<string, NonNullable<CollectionSourceQueryDefinition['searchIndexes']>[number]>();
 
-  constructor(store: Store, manifest: CollectionManifest) {
+  constructor(store: Store, manifest: CollectionManifest, definition?: CollectionSourceQueryDefinition | null) {
     this.manifest = manifest;
     this.byIdIndex = new BTree(store);
     this.linkIndex = new BTree(store);
@@ -34,6 +37,10 @@ export class CollectionSource {
           stopWords: index.options?.stopWords ? new Set(index.options.stopWords) : undefined,
         }));
       }
+    }
+
+    for (const searchIndex of definition?.searchIndexes ?? []) {
+      this.searchDefinitions.set(searchIndex.name, searchIndex);
     }
   }
 
@@ -137,7 +144,12 @@ export class CollectionSource {
       return [];
     }
 
-    return await searchIndex.searchLinks(root, manifestIndex.prefix, query, options);
+    return await searchIndex.searchLinkTerms(
+      root,
+      manifestIndex.prefix,
+      this.parseSearchTerms(indexName, query),
+      options,
+    );
   }
 
   async searchTerms(
@@ -157,6 +169,20 @@ export class CollectionSource {
     }
 
     return await searchIndex.searchLinkTerms(root, manifestIndex.prefix, terms, options);
+  }
+
+  parseSearchTerms(indexName: string, query: string): string[] {
+    const searchIndex = this.searchIndexes.get(indexName);
+    if (!searchIndex) {
+      return [];
+    }
+
+    const definition = this.searchDefinitions.get(indexName);
+    if (!definition) {
+      return searchIndex.parseKeywords(query);
+    }
+
+    return materializeSearchTerms(definition, searchIndex, query);
   }
 
   async queryIndex(

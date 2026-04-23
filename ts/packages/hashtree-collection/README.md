@@ -175,6 +175,9 @@ const results = await source.search('songs', 'starlight');
 - `delete(item)` requires the indexed fields of the item being removed.
 - `count()` uses the manifest's published `itemCount` when available; use `exactCount()` if you explicitly need to walk the `byId` tree.
 - `reindex(entries)` is the explicit way to rebuild all derived roots after adding indexes or changing derivation rules. It needs canonical item snapshots plus their CIDs; roots alone are not enough.
+- If query-time normalization differs from the default keyword parser, define `searchIndexes[].terms(text, { parseKeywords })`.
+- When the reader still has the collection definition, pass it to `new CollectionSource(store, manifest, definition)` so `source.search(...)` reuses the same term expansion.
+- When the reader only has the manifest, pair `searchIndexes[].terms(...)` with `CollectionSource.searchTerms(...)` and app-side query parsing so indexing and querying stay in sync.
 - Schemas are intentionally small: use `defaults`, `normalize`, `validate`, and `migrate` instead of a large schema framework.
 - Federated search is multi-query first. You do not need to physically merge roots just to search across many sources.
 

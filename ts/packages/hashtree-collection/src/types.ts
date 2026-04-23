@@ -34,13 +34,27 @@ export interface CollectionSearchEntry {
   prefix?: string;
 }
 
+export interface CollectionSearchTermContext {
+  parseKeywords: (text: string) => string[];
+}
+
 export interface CollectionSearchIndexDefinition<T> {
   name: string;
   rootName?: string;
   prefix?: string;
   text?: (item: T) => Iterable<string> | string;
   entries?: (item: T, context: CollectionEntryContext) => Iterable<CollectionSearchEntry> | CollectionSearchEntry;
+  terms?: (text: string, context: CollectionSearchTermContext) => Iterable<string> | string;
   options?: CollectionSearchIndexOptions;
+}
+
+export interface CollectionSourceQueryIndexDefinition {
+  name: string;
+  terms?: (text: string, context: CollectionSearchTermContext) => Iterable<string> | string;
+}
+
+export interface CollectionSourceQueryDefinition {
+  searchIndexes?: CollectionSourceQueryIndexDefinition[];
 }
 
 export interface CollectionSchema<T> {

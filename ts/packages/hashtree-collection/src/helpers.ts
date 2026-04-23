@@ -36,6 +36,20 @@ export function materializeSearchText<T>(definition: CollectionSearchIndexDefini
   return normalizeStringInput(definition.text?.(item) ?? []);
 }
 
+export function materializeSearchTerms<T>(
+  definition: CollectionSearchIndexDefinition<T>,
+  searchIndex: SearchIndex,
+  text: string,
+): string[] {
+  const rawTerms = definition.terms
+    ? definition.terms(text, {
+        parseKeywords: (value) => searchIndex.parseKeywords(value),
+      })
+    : searchIndex.parseKeywords(text);
+
+  return uniqueStrings(readStringInput(rawTerms).map((term) => term.toLowerCase()));
+}
+
 export function materializeSearchEntries<T>(
   definition: CollectionSearchIndexDefinition<T>,
   item: T,

@@ -57,6 +57,35 @@ const byIdOnlySongDefinition: CollectionDefinition<Song> = {
   getId: (song) => song.id,
 };
 
+const oneLetterFriendlySongDefinition: CollectionDefinition<Song> = {
+  sourceId: 'npub1test/audio/one-letter',
+  schemaVersion: 1,
+  getId: (song) => song.id,
+  searchIndexes: [
+    {
+      name: 'songs',
+      prefix: 's:',
+      options: { minKeywordLength: 1 },
+      text: (song) => song.title,
+      terms: (text, { parseKeywords }) => {
+        const terms = parseKeywords(text);
+        const seen = new Set(terms);
+        for (const rawWord of `${text ?? ''}`.split(/[^\p{L}\p{N}]+/u)) {
+          if (!rawWord) {
+            continue;
+          }
+          const normalized = rawWord.toLowerCase();
+          if (normalized.length === 1 && !/^\d$/u.test(normalized) && !seen.has(normalized)) {
+            seen.add(normalized);
+            terms.push(normalized);
+          }
+        }
+        return terms;
+      },
+    },
+  ],
+};
+
 describe('@hashtree/collection', () => {
   it('autoupdates by-id, key, and search indexes on put and delete', async () => {
     const store = new MemoryStore();
@@ -170,6 +199,86 @@ describe('@hashtree/collection', () => {
       fullMatch: true,
     })).toEqual([
       { id: 'song-a', cid: cidFromSeed(9), score: 1, exactMatches: 1, prefixDistance: 0 },
+    ]);
+  });
+
+  it('uses custom search term extraction for indexed updates and deletes', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, oneLetterFriendlySongDefinition);
+    const original: Song = { id: 'song-a', title: 'A Team', artist: 'Ada' };
+    const replacement: Song = { id: 'song-a', title: 'B Team', artist: 'Ada' };
+
+    await writer.put(original, cidFromSeed(92));
+
+    let source = new CollectionSource(store, writer.manifest());
+    expect(await source.searchTerms('songs', ['a'], {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([
+      { id: 'song-a', cid: cidFromSeed(92), score: 1, exactMatches: 1, prefixDistance: 0 },
+    ]);
+
+    await writer.replace(replacement, cidFromSeed(93), original);
+
+    source = new CollectionSource(store, writer.manifest());
+    expect(await source.searchTerms('songs', ['a'], {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([]);
+    expect(await source.searchTerms('songs', ['b'], {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([
+      { id: 'song-a', cid: cidFromSeed(93), score: 1, exactMatches: 1, prefixDistance: 0 },
+    ]);
+
+    await writer.delete(replacement);
+    source = new CollectionSource(store, writer.manifest());
+    expect(await source.searchTerms('songs', ['b'], {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([]);
+  });
+
+  it('uses custom search term extraction for query parsing when the source has a definition', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, oneLetterFriendlySongDefinition);
+
+    await writer.put({ id: 'song-a', title: 'A Team', artist: 'Ada' }, cidFromSeed(96));
+
+    const source = new CollectionSource(store, writer.manifest(), oneLetterFriendlySongDefinition);
+    expect(source.parseSearchTerms('songs', 'A Team')).toEqual(['team', 'a']);
+    expect(await source.search('songs', 'A', {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([
+      { id: 'song-a', cid: cidFromSeed(96), score: 1, exactMatches: 1, prefixDistance: 0 },
+    ]);
+  });
+
+  it('uses custom search term extraction when rebuilding derived roots', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, oneLetterFriendlySongDefinition);
+
+    await writer.reindex([
+      {
+        item: { id: 'song-a', title: 'A Team', artist: 'Ada' },
+        cid: cidFromSeed(94),
+      },
+    ]);
+
+    const source = new CollectionSource(store, writer.manifest());
+    expect(await source.searchTerms('songs', ['a'], {
+      limit: 10,
+      scanLimit: 10,
+      fullMatch: true,
+    })).toEqual([
+      { id: 'song-a', cid: cidFromSeed(94), score: 1, exactMatches: 1, prefixDistance: 0 },
     ]);
   });
 

@@ -8,7 +8,13 @@ import type {
   CollectionWriteContext,
   Store,
 } from './types.js';
-import { createSearchIndex, defaultSearchPrefix, materializeKeyValues, materializeSearchEntries } from './helpers.js';
+import {
+  createSearchIndex,
+  defaultSearchPrefix,
+  materializeKeyValues,
+  materializeSearchEntries,
+  materializeSearchTerms,
+} from './helpers.js';
 import { collectionManifestFromState, collectionStateFromManifest, createEmptyCollectionState } from './manifest.js';
 import { normalizeCollectionItem } from './schema.js';
 
@@ -132,7 +138,7 @@ export class CollectionWriter<T> {
         cid,
         writeContext: options.context,
       })) {
-        const terms = searchIndex.parseKeywords(entry.text);
+        const terms = materializeSearchTerms(index, searchIndex, entry.text);
         if (terms.length === 0) {
           continue;
         }
@@ -204,7 +210,7 @@ export class CollectionWriter<T> {
         cid: null,
         writeContext: options.context,
       })) {
-        const terms = searchIndex.parseKeywords(entry.text);
+        const terms = materializeSearchTerms(index, searchIndex, entry.text);
         const entryId = entry.id ?? id;
         const prefix = entry.prefix ?? index.prefix ?? defaultSearchPrefix(index.name);
         for (const term of terms) {
@@ -313,7 +319,7 @@ export class CollectionWriter<T> {
           if (!targetCid) {
             continue;
           }
-          const terms = searchIndex.parseKeywords(searchEntry.text);
+          const terms = materializeSearchTerms(index, searchIndex, searchEntry.text);
           if (terms.length === 0) {
             continue;
           }
