@@ -805,6 +805,50 @@ impl GitStorage {
         self.build_tree_with_base_objects::<LocalStore>(None, None, None)
     }
 
+    pub fn validate_root_contains_direct_refs(&self, root_cid: &Cid) -> Result<()> {
+        let direct_refs: Vec<String> = {
+            let refs = self
+                .refs
+                .read()
+                .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+            refs.values()
+                .filter(|value| {
+                    !value.starts_with("ref: ")
+                        && value.len() == 40
+                        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .cloned()
+                .collect()
+        };
+
+        if direct_refs.is_empty() {
+            return Ok(());
+        }
+
+        let objects_dir = self
+            .runtime
+            .block_on(self.tree.resolve_path(root_cid, ".git/objects"))
+            .map_err(|e| Error::StorageError(format!("resolve .git/objects: {}", e)))?;
+        if objects_dir.is_none() {
+            return Err(Error::StorageError(
+                "built root is missing .git/objects".to_string(),
+            ));
+        }
+
+        for oid in direct_refs {
+            let object_path = format!(".git/objects/{}/{}", &oid[..2], &oid[2..]);
+            let object_cid = self
+                .runtime
+                .block_on(self.tree.resolve_path(root_cid, &object_path))
+                .map_err(|e| Error::StorageError(format!("resolve {}: {}", object_path, e)))?;
+            if object_cid.is_none() {
+                return Err(Error::ObjectNotFound(oid));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn build_tree_with_base_objects<S: Store>(
         &self,
         base_tree: Option<&HashTree<S>>,
@@ -2485,6 +2529,55 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(clone_path.join("README.md")).unwrap(),
             "hello from hashtree\n"
+        );
+    }
+
+    #[test]
+    fn test_validate_root_contains_direct_refs_rejects_missing_tip_object() {
+        let (storage, _temp) = create_test_storage();
+        let commit_oid = write_test_commit(&storage);
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(commit_oid))
+            .unwrap();
+        storage
+            .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+            .unwrap();
+
+        let empty_objects_dir = storage
+            .runtime
+            .block_on(storage.tree.put_directory(vec![]))
+            .unwrap();
+        let refs_dir = storage
+            .runtime
+            .block_on(storage.tree.put_directory(vec![]))
+            .unwrap();
+        let info_dir = storage
+            .runtime
+            .block_on(storage.tree.put_directory(vec![]))
+            .unwrap();
+        let git_dir = storage
+            .runtime
+            .block_on(storage.tree.put_directory(vec![
+                DirEntry::from_cid("HEAD", &info_dir).with_size(0),
+                DirEntry::from_cid("info", &info_dir).with_link_type(LinkType::Dir),
+                DirEntry::from_cid("objects", &empty_objects_dir).with_link_type(LinkType::Dir),
+                DirEntry::from_cid("refs", &refs_dir).with_link_type(LinkType::Dir),
+            ]))
+            .unwrap();
+        let root_cid = storage
+            .runtime
+            .block_on(storage.tree.put_directory(vec![
+                DirEntry::from_cid(".git", &git_dir).with_link_type(LinkType::Dir),
+            ]))
+            .unwrap();
+
+        let err = storage
+            .validate_root_contains_direct_refs(&root_cid)
+            .expect_err("missing ref-tip object should fail validation");
+        assert!(
+            err.to_string().contains(&commit_oid.to_hex()),
+            "validation error should mention missing commit oid: {}",
+            err
         );
     }
 }

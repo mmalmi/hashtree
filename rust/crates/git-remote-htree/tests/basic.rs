@@ -143,3 +143,160 @@ fn test_git_remote_htree_binary_exists() {
     let binary = bin_dir.join("git-remote-htree");
     assert!(binary.exists(), "git-remote-htree binary should exist");
 }
+
+#[test]
+fn test_git_push_clone_and_pull_across_two_clients_local() {
+    if skip_if_no_binary() {
+        return;
+    }
+
+    let relay = TestRelay::new(19310);
+    let server = match TestServer::new(19311) {
+        Some(s) => s,
+        None => {
+            println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
+            return;
+        }
+    };
+
+    let author_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let consumer_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let author_env_fresh = TestEnv::with_nsec(
+        Some(&server.base_url()),
+        Some(&relay.url()),
+        &author_env.nsec,
+    );
+    let author_env_vars: Vec<_> = author_env.env();
+    let consumer_env_vars: Vec<_> = consumer_env.env();
+    let author_env_fresh_vars: Vec<_> = author_env_fresh.env();
+
+    let repo = create_test_repo();
+    let remote_url = "htree://self/test-repo-pull-roundtrip";
+    Command::new("git")
+        .args(["remote", "add", "htree", remote_url])
+        .current_dir(repo.path())
+        .envs(
+            author_env_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .output()
+        .expect("Failed to add remote");
+
+    let push1 = Command::new("git")
+        .args(["push", "htree", "master"])
+        .current_dir(repo.path())
+        .envs(
+            author_env_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .output()
+        .expect("Failed first push");
+    let stderr1 = String::from_utf8_lossy(&push1.stderr);
+    assert!(
+        push1.status.success() || stderr1.contains("-> master") || stderr1.contains("-> main"),
+        "first push failed: {}",
+        stderr1
+    );
+
+    let clone_url = format!("htree://{}/test-repo-pull-roundtrip", author_env.npub);
+    let clone_dir = TempDir::new().expect("Failed to create clone dir");
+    let clone_path = clone_dir.path().join("clone");
+    let clone = Command::new("git")
+        .args(["clone", &clone_url, clone_path.to_str().unwrap()])
+        .envs(
+            consumer_env_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .output()
+        .expect("Failed clone");
+    assert!(
+        clone.status.success(),
+        "initial clone failed:\n{}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+
+    let configure_clone = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&clone_path)
+            .output()
+            .expect("failed to configure clone repo");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    configure_clone(&["config", "user.name", "Test User"]);
+    configure_clone(&["config", "user.email", "test@example.com"]);
+
+    std::fs::write(repo.path().join("shared.txt"), "version 2\n").expect("write shared.txt");
+    Command::new("git")
+        .args(["add", "shared.txt"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git add shared.txt");
+    Command::new("git")
+        .args(["commit", "-m", "Add shared file"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git commit shared.txt");
+
+    let push2 = Command::new("git")
+        .args(["push", "htree", "master"])
+        .current_dir(repo.path())
+        .envs(
+            author_env_fresh_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .output()
+        .expect("Failed second push");
+    let stderr2 = String::from_utf8_lossy(&push2.stderr);
+    assert!(
+        push2.status.success() || stderr2.contains("-> master") || stderr2.contains("-> main"),
+        "second push failed: {}",
+        stderr2
+    );
+
+    let pull = Command::new("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(&clone_path)
+        .envs(
+            consumer_env_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .output()
+        .expect("Failed pull");
+    assert!(
+        pull.status.success(),
+        "git pull failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&pull.stdout),
+        String::from_utf8_lossy(&pull.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(clone_path.join("shared.txt")).unwrap(),
+        "version 2\n"
+    );
+    let author_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .expect("Failed to read author HEAD");
+    let consumer_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&clone_path)
+        .output()
+        .expect("Failed to read consumer HEAD");
+    assert_eq!(
+        String::from_utf8_lossy(&author_head.stdout).trim(),
+        String::from_utf8_lossy(&consumer_head.stdout).trim(),
+        "consumer clone should fast-forward to author's pushed HEAD"
+    );
+}

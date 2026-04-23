@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::fetch::{FetchConfig, Fetcher};
 use crate::config::ensure_keys_string;
+use crate::fetch::{FetchConfig, Fetcher};
 use crate::HashtreeStore;
 use hashtree_core::{Cid, HashTree, HashTreeConfig, Link};
 

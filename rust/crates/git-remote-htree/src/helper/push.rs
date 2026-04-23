@@ -5,6 +5,7 @@ use crate::git::refs::Ref;
 use crate::nostr_client::{BlossomResult, PullRequestStateFilter};
 use crate::runtime::new_multi_thread_runtime;
 use anyhow::{bail, Context, Result};
+use hashtree_core::{HashTree, Store};
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::Command;
@@ -31,6 +32,44 @@ pub(super) fn queue_links_for_diff_upload(
 }
 
 impl RemoteHelper {
+    fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
+        if self.is_slow() {
+            eprint!("  {}...", label);
+            let _ = std::io::stderr().flush();
+        }
+        let result = self.storage.build_tree();
+        if self.is_slow() {
+            match &result {
+                Ok(_) => eprintln!(" done"),
+                Err(err) => eprintln!(" failed ({})", err),
+            }
+        }
+        Ok(result?)
+    }
+
+    fn build_tree_with_base_progress<S: Store>(
+        &self,
+        label: &str,
+        base_tree: Option<&HashTree<S>>,
+        base_root: Option<&hashtree_core::Cid>,
+        delta_base: Option<&str>,
+    ) -> Result<hashtree_core::Cid> {
+        if self.is_slow() {
+            eprint!("  {}...", label);
+            let _ = std::io::stderr().flush();
+        }
+        let result = self
+            .storage
+            .build_tree_with_base_objects(base_tree, base_root, delta_base);
+        if self.is_slow() {
+            match &result {
+                Ok(_) => eprintln!(" done"),
+                Err(err) => eprintln!(" failed ({})", err),
+            }
+        }
+        Ok(result?)
+    }
+
     /// Queue a push operation
     pub(super) fn queue_push(&mut self, arg: &str) -> Result<()> {
         // Format: [+]<src>:<dst>
@@ -432,11 +471,7 @@ impl RemoteHelper {
             );
         }
 
-        if self.is_slow() {
-            eprint!("  Building merkle tree...");
-            let _ = std::io::stderr().flush();
-        }
-        let root_cid = match self.storage.build_tree() {
+        let mut root_cid = match self.build_tree_with_progress("Building repo tree") {
             Ok(root_cid) => root_cid,
             Err(err) if delta_base.is_some() => {
                 let base = delta_base.as_deref().unwrap_or_default();
@@ -473,7 +508,8 @@ impl RemoteHelper {
                                 key: encryption_key,
                             };
                             retried_with_cached_root = true;
-                            Some(self.storage.build_tree_with_base_objects(
+                            Some(self.build_tree_with_base_progress(
+                                "Retrying repo tree against cached remote root",
                                 Some(&cached_tree),
                                 Some(&cached_root_cid),
                                 delta_base.as_deref(),
@@ -490,7 +526,9 @@ impl RemoteHelper {
                     None
                 };
 
-                match cached_retry.unwrap_or_else(|| self.storage.build_tree()) {
+                match cached_retry
+                    .unwrap_or_else(|| self.build_tree_with_progress("Retrying repo tree"))
+                {
                     Ok(root_cid) => root_cid,
                     Err(retry_err) => {
                         if retried_with_cached_root {
@@ -532,7 +570,9 @@ impl RemoteHelper {
                             }
                         }
 
-                        match self.storage.build_tree() {
+                        match self.build_tree_with_progress(
+                            "Retrying repo tree after cached-object hydration",
+                        ) {
                             Ok(root_cid) => root_cid,
                             Err(post_hydration_err) => {
                                 eprintln!(
@@ -560,7 +600,9 @@ impl RemoteHelper {
                                 )?;
                                 eprintln!();
 
-                                self.storage.build_tree()?
+                                self.build_tree_with_progress(
+                                    "Building repo tree from repaired local store",
+                                )?
                             }
                         }
                     }
@@ -568,6 +610,18 @@ impl RemoteHelper {
             }
             Err(err) => return Err(err.into()),
         };
+        if let Err(validation_err) = self.storage.validate_root_contains_direct_refs(&root_cid) {
+            eprintln!(
+                "  Built repo tree is missing ref object(s) ({}); rebuilding from full local import",
+                validation_err
+            );
+            self.import_full_local_revision(sha)?;
+            root_cid =
+                self.build_tree_with_progress("Rebuilding repo tree after full local import")?;
+            self.storage
+                .validate_root_contains_direct_refs(&root_cid)
+                .context("rebuilt repo tree is still missing ref objects")?;
+        }
         let root_hash_hex = hex::encode(root_cid.hash);
         let chk_key = root_cid.key;
         let is_link_visible = self.url_secret.is_some();
@@ -675,6 +729,23 @@ impl RemoteHelper {
                 let _ = std::io::stderr().flush();
             }
         }
+        Ok(())
+    }
+
+    fn import_full_local_revision(&mut self, sha: &str) -> Result<()> {
+        eprint!("  Listing objects...");
+        let _ = std::io::stderr().flush();
+        let objects = self.list_objects_to_push(sha, &[])?;
+        eprintln!(" {} objects (full rebuild)", objects.len());
+
+        let objects_with_content = self.read_git_objects_batch(&objects)?;
+        eprintln!();
+
+        eprint!("  Writing to local store...");
+        let _ = std::io::stderr().flush();
+        Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+        eprintln!();
+
         Ok(())
     }
 

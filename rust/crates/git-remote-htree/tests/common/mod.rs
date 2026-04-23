@@ -671,11 +671,21 @@ fn cargo_target_dir(workspace_root: &std::path::Path) -> PathBuf {
 pub struct TestEnv {
     _data_dir: TempDir,
     pub home_dir: PathBuf,
+    pub nsec: String,
     pub npub: String,
 }
 
 impl TestEnv {
     pub fn new(blossom_server: Option<&str>, nostr_relay: Option<&str>) -> Self {
+        let keys = nostr::Keys::generate();
+        let nsec = keys
+            .secret_key()
+            .to_bech32()
+            .expect("Failed to encode nsec");
+        Self::with_nsec(blossom_server, nostr_relay, &nsec)
+    }
+
+    pub fn with_nsec(blossom_server: Option<&str>, nostr_relay: Option<&str>, nsec: &str) -> Self {
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let home_dir = data_dir.path().to_path_buf();
 
@@ -725,12 +735,9 @@ social_graph_crawl_depth = 0
         std::fs::write(config_dir.join("config.toml"), config_content)
             .expect("Failed to write config");
 
-        // Generate a random test key for isolation
-        let keys = nostr::Keys::generate();
-        let nsec = keys
-            .secret_key()
-            .to_bech32()
-            .expect("Failed to encode nsec");
+        // Reuse or generate a test key for isolation.
+        let secret = nostr::SecretKey::parse(nsec).expect("Failed to parse nsec");
+        let keys = nostr::Keys::new(secret);
         let npub = keys
             .public_key()
             .to_bech32()
@@ -742,6 +749,7 @@ social_graph_crawl_depth = 0
         TestEnv {
             _data_dir: data_dir,
             home_dir,
+            nsec: nsec.to_string(),
             npub,
         }
     }

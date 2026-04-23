@@ -238,13 +238,28 @@ fn test_diff_based_push() {
     let third_listed_objects =
         parse_last_listed_object_count(&stderr3).expect("third push should list objects");
     println!("Third push listed objects: {}", third_listed_objects);
+    let repaired_missing_ref_objects = stderr3.contains("Built repo tree is missing ref object(s)");
     assert!(
-        third_listed_objects <= second_listed_objects,
-        "Third push should not walk more git objects than the second push"
+        third_listed_objects <= second_listed_objects || repaired_missing_ref_objects,
+        "Third push should not walk more git objects than the second push unless it is repairing a missing-ref-object root"
     );
     assert!(
         no_changes || minimal_upload,
         "Third push should detect no changes or upload minimal blobs"
+    );
+
+    let clone_url = format!("htree://{}/diff-test-repo", test_env.npub);
+    let clone_dir = tempfile::TempDir::new().expect("Failed to create validation clone dir");
+    let clone_path = clone_dir.path().join("clone");
+    let clone = Command::new("git")
+        .args(["clone", &clone_url, clone_path.to_str().unwrap()])
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("Failed validation clone");
+    assert!(
+        clone.status.success(),
+        "Fresh clone after repaired/no-op push should succeed:\n{}",
+        String::from_utf8_lossy(&clone.stderr)
     );
 
     println!("\n=== SUCCESS: Diff-based push test passed! ===");

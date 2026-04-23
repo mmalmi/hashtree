@@ -174,7 +174,8 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         cid: &Cid,
         previous: &T,
     ) -> Result<CollectionState, CollectionError> {
-        self.replace_with_context(item, cid, previous, None, None).await
+        self.replace_with_context(item, cid, previous, None, None)
+            .await
     }
 
     pub async fn put_with_context(
