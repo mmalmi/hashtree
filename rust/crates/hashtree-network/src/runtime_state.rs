@@ -85,14 +85,14 @@ where
         self.peer_hash_get.read().await.clone()
     }
 
-    pub async fn record_known_peer_addresses(
+    pub async fn record_known_peer_signal_urls(
         &self,
         peer_id: &str,
-        addresses: &[String],
+        signal_urls: &[String],
         source: &str,
     ) {
-        let clean_addresses = normalize_peer_addresses(addresses);
-        if clean_addresses.is_empty() {
+        let clean_signal_urls = normalize_peer_signal_urls(signal_urls);
+        if clean_signal_urls.is_empty() {
             return;
         }
 
@@ -101,16 +101,16 @@ where
             .entry(peer_id.to_string())
             .or_insert_with(|| KnownPeerRecord {
                 peer_id: peer_id.to_string(),
-                addresses: Vec::new(),
+                signal_urls: Vec::new(),
                 last_seen_unix_ms: 0,
                 last_source: None,
             });
-        for address in clean_addresses {
-            if !entry.addresses.contains(&address) {
-                entry.addresses.push(address);
+        for signal_url in clean_signal_urls {
+            if !entry.signal_urls.contains(&signal_url) {
+                entry.signal_urls.push(signal_url);
             }
         }
-        entry.addresses.sort();
+        entry.signal_urls.sort();
         entry.last_seen_unix_ms = now_unix_ms();
         entry.last_source = Some(source.to_string());
     }
@@ -129,15 +129,15 @@ where
         let mut known = self.known_peers.write().await;
         known.clear();
         for peer in &snapshot.peers {
-            let addresses = normalize_peer_addresses(&peer.addresses);
-            if peer.peer_id.trim().is_empty() || addresses.is_empty() {
+            let signal_urls = normalize_peer_signal_urls(&peer.signal_urls);
+            if peer.peer_id.trim().is_empty() || signal_urls.is_empty() {
                 continue;
             }
             known.insert(
                 peer.peer_id.clone(),
                 KnownPeerRecord {
                     peer_id: peer.peer_id.clone(),
-                    addresses,
+                    signal_urls,
                     last_seen_unix_ms: peer.last_seen_unix_ms,
                     last_source: peer.last_source.clone(),
                 },
@@ -239,11 +239,11 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn normalize_peer_addresses(addresses: &[String]) -> Vec<String> {
+fn normalize_peer_signal_urls(signal_urls: &[String]) -> Vec<String> {
     let mut output = Vec::new();
-    for address in addresses {
-        let trimmed = address.trim().trim_end_matches('/').to_string();
-        if trimmed.is_empty() || output.contains(&trimmed) {
+    for signal_url in signal_urls {
+        let trimmed = signal_url.trim().trim_end_matches('/').to_string();
+        if trimmed.is_empty() || !trimmed.starts_with("http://") || output.contains(&trimmed) {
             continue;
         }
         output.push(trimmed);

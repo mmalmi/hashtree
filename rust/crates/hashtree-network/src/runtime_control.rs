@@ -21,6 +21,7 @@ use crate::types::{MeshNostrFrame, PeerId, SignalingMessage, TimedSeenSet, MESH_
 #[derive(Debug, Clone)]
 pub enum PeerStateEvent {
     Connected(PeerId),
+    SignalHints(PeerId, Vec<String>),
     Failed(PeerId),
     Disconnected(PeerId),
 }
@@ -150,22 +151,12 @@ where
         SignalingMessage::Hello { hash_get, .. } => Some(*hash_get),
         _ => None,
     };
-    let peer_addresses = match &msg {
-        SignalingMessage::Hello { addresses, .. } => addresses.clone(),
-        _ => Vec::new(),
-    };
     shared_router
         .handle_message(msg)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     if let Some(hash_get) = peer_hash_get {
         runtime.set_peer_hash_get(&peer_id, hash_get).await;
-    }
-    let peer_is_tracked = runtime.peers.read().await.contains_key(&peer_id);
-    if peer_is_tracked {
-        runtime
-            .record_known_peer_addresses(&peer_id, &peer_addresses, source)
-            .await;
     }
     remember_peer_signal_path(runtime.peers.as_ref(), &peer_id, source).await;
 
@@ -196,16 +187,6 @@ where
         return Ok(());
     }
 
-    if let Some(relay_transport) = relay_transport {
-        if let Err(err) = relay_transport.publish(msg.clone()).await {
-            debug!(
-                "Failed to publish signaling message {} via relay transport: {}",
-                msg.msg_type(),
-                err
-            );
-        }
-    }
-
     let event = create_signaling_event(keys, &msg, signaling_kind).await?;
 
     for bus in local_buses {
@@ -233,6 +214,30 @@ where
     let forwarded = forward_mesh_frame_from_runtime(runtime, &frame, None).await;
     if forwarded > 0 {
         runtime.record_mesh_forwarded(forwarded as u64);
+    }
+
+    if let Some(relay_transport) = relay_transport {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            relay_transport.publish(msg.clone()),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                debug!(
+                    "Failed to publish signaling message {} via relay transport: {}",
+                    msg.msg_type(),
+                    err
+                );
+            }
+            Err(_) => {
+                debug!(
+                    "Timed out publishing signaling message {} via relay transport",
+                    msg.msg_type()
+                );
+            }
+        }
     }
 
     Ok(())
@@ -268,6 +273,11 @@ pub async fn handle_peer_state_event<P, R, F>(
                     let _ = shared_router.send_hello(Vec::new()).await;
                 }
             }
+        }
+        PeerStateEvent::SignalHints(peer_id, signal_urls) => {
+            runtime
+                .record_known_peer_signal_urls(&peer_id.to_string(), &signal_urls, "peer-link")
+                .await;
         }
         PeerStateEvent::Failed(peer_id) => {
             remove_peer_from_runtime(runtime, shared_router, peer_id, "connection failed").await;

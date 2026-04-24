@@ -8,6 +8,7 @@
 //! - Payment:        [0x04][msgpack: {h: bytes32, q: u64, c: u32, p: u64, m?: string, tok: string}]
 //! - PaymentAck:     [0x05][msgpack: {h: bytes32, q: u64, c: u32, a: bool, e?: string}]
 //! - Chunk:          [0x06][msgpack: {h: bytes32, q: u64, c: u32, n: u32, p: u64, d: bytes}]
+//! - PeerHints:      [0x07][msgpack: {u: [WebRTC signaling endpoint URLs]}]
 //!
 //! Fragmented responses include `i` (index) and `n` (total), unfragmented omit them.
 
@@ -30,6 +31,7 @@ pub const MSG_TYPE_QUOTE_RESPONSE: u8 = 0x03;
 pub const MSG_TYPE_PAYMENT: u8 = 0x04;
 pub const MSG_TYPE_PAYMENT_ACK: u8 = 0x05;
 pub const MSG_TYPE_CHUNK: u8 = 0x06;
+pub const MSG_TYPE_PEER_HINTS: u8 = 0x07;
 
 /// Fragment size for large data (32KB - safe limit for WebRTC)
 pub const FRAGMENT_SIZE: usize = 32 * 1024;
@@ -140,6 +142,14 @@ pub struct DataChunk {
     pub d: Vec<u8>,
 }
 
+/// Private signaling hints exchanged over an established peer link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerHints {
+    /// Daemon signaling endpoint base URLs for this peer, never public relay tags.
+    #[serde(default, rename = "u")]
+    pub signal_urls: Vec<String>,
+}
+
 /// Parsed data message
 #[derive(Debug, Clone)]
 pub enum DataMessage {
@@ -150,6 +160,7 @@ pub enum DataMessage {
     Payment(DataPayment),
     PaymentAck(DataPaymentAck),
     Chunk(DataChunk),
+    PeerHints(PeerHints),
 }
 
 /// Encode a request message to wire format
@@ -217,6 +228,15 @@ pub fn encode_chunk(chunk: &DataChunk) -> Vec<u8> {
     result
 }
 
+/// Encode private peer hints to wire format.
+pub fn encode_peer_hints(hints: &PeerHints) -> Vec<u8> {
+    let body = rmp_serde::to_vec_named(hints).expect("Failed to encode peer hints");
+    let mut result = Vec::with_capacity(1 + body.len());
+    result.push(MSG_TYPE_PEER_HINTS);
+    result.extend(body);
+    result
+}
+
 /// Parse a wire format message
 pub fn parse_message(data: &[u8]) -> Option<DataMessage> {
     if data.len() < 2 {
@@ -248,6 +268,9 @@ pub fn parse_message(data: &[u8]) -> Option<DataMessage> {
         MSG_TYPE_CHUNK => rmp_serde::from_slice::<DataChunk>(body)
             .ok()
             .map(DataMessage::Chunk),
+        MSG_TYPE_PEER_HINTS => rmp_serde::from_slice::<PeerHints>(body)
+            .ok()
+            .map(DataMessage::PeerHints),
         _ => None,
     }
 }
@@ -565,6 +588,20 @@ mod tests {
                 assert_eq!(parsed.d, chunk.d);
             }
             _ => panic!("Expected chunk"),
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_peer_hints() {
+        let hints = PeerHints {
+            signal_urls: vec!["http://127.0.0.1:18080".to_string()],
+        };
+
+        match parse_message(&encode_peer_hints(&hints)).unwrap() {
+            DataMessage::PeerHints(parsed) => {
+                assert_eq!(parsed.signal_urls, hints.signal_urls);
+            }
+            _ => panic!("Expected peer hints"),
         }
     }
 }

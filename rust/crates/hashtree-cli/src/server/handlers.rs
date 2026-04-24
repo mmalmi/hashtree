@@ -70,6 +70,32 @@ pub async fn htree_test() -> impl IntoResponse {
         .unwrap()
 }
 
+pub async fn p2p_signal(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+    #[cfg(feature = "p2p")]
+    {
+        let Some(webrtc_state) = state.webrtc_peers.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let Ok(event) = serde_json::from_slice::<nostr_sdk::nostr::Event>(&body) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if webrtc_state
+            .submit_direct_signaling_event("direct-signal".to_string(), event)
+            .await
+        {
+            StatusCode::ACCEPTED.into_response()
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    }
+
+    #[cfg(not(feature = "p2p"))]
+    {
+        let _ = (state, body);
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
 async fn serve_virtual_tree_host_request(
     state: &AppState,
     virtual_root: &str,

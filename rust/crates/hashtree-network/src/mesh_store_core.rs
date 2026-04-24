@@ -1491,7 +1491,8 @@ where
                         DataMessage::QuoteResponse(_) => stats.quote_response_messages += 1,
                         DataMessage::Payment(_)
                         | DataMessage::PaymentAck(_)
-                        | DataMessage::Chunk(_) => {}
+                        | DataMessage::Chunk(_)
+                        | DataMessage::PeerHints(_) => {}
                     }
                 }
                 self.handle_data_message(&peer_id, &data).await;
@@ -2471,7 +2472,10 @@ where
             DataMessage::QuoteResponse(res) => {
                 self.handle_quote_response_message(from_peer, res).await;
             }
-            DataMessage::Payment(_) | DataMessage::PaymentAck(_) | DataMessage::Chunk(_) => {}
+            DataMessage::Payment(_)
+            | DataMessage::PaymentAck(_)
+            | DataMessage::Chunk(_)
+            | DataMessage::PeerHints(_) => {}
         }
     }
 }

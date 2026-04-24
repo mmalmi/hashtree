@@ -22,8 +22,9 @@ use std::cell::RefCell;
 
 use futures::{stream, StreamExt, TryStreamExt};
 use hashtree_collection::{
-    load_collection_state, CollectionDefinition, CollectionOptions, CollectionPublishedSchema,
-    CollectionSource, CollectionState, CollectionWriter,
+    load_collection_manifest_metadata, load_collection_state, CollectionDefinition,
+    CollectionOptions, CollectionPublishedSchema, CollectionSource, CollectionState,
+    CollectionWriter,
 };
 use hashtree_core::{
     sha256, BufferedStore, Cid, HashTree, HashTreeConfig, HashTreeError, Store, TreeVisibility,
@@ -539,6 +540,61 @@ impl<S: Store> NostrEventStore<S> {
 
     pub fn decode_event(&self, data: &[u8]) -> Result<StoredNostrEvent, NostrEventStoreError> {
         self.validate_event_shape(decode_stored_event_msgpack(data)?)
+    }
+
+    pub async fn validate_index_root(
+        &self,
+        root: Option<&Cid>,
+    ) -> Result<(), NostrEventStoreError> {
+        let Some(root) = root else {
+            return Ok(());
+        };
+
+        let manifest = self.get_manifest(Some(root)).await?;
+        let mut missing = Vec::new();
+        if manifest.by_id.is_none() {
+            missing.push("by-id");
+        }
+        if manifest.by_author_time.is_none() {
+            missing.push(MANIFEST_BY_AUTHOR_TIME);
+        }
+        if manifest.by_author_kind_time.is_none() {
+            missing.push(MANIFEST_BY_AUTHOR_KIND_TIME);
+        }
+        if manifest.by_kind_time.is_none() {
+            missing.push(MANIFEST_BY_KIND_TIME);
+        }
+        if manifest.by_time.is_none() {
+            missing.push(MANIFEST_BY_TIME);
+        }
+        if !missing.is_empty() {
+            return Err(NostrEventStoreError::Validation(format!(
+                "nostr event index root missing required manifest entries: {}",
+                missing.join(", ")
+            )));
+        }
+
+        if let Some(metadata) =
+            load_collection_manifest_metadata(Arc::clone(&self.store), Some(root)).await?
+        {
+            let schema = metadata.published_schema();
+            if let Some(item_format) = schema.and_then(|schema| schema.item_format()) {
+                if item_format != NOSTR_EVENT_ITEM_FORMAT {
+                    return Err(NostrEventStoreError::Validation(format!(
+                        "nostr event index item format mismatch: expected {NOSTR_EVENT_ITEM_FORMAT}, got {item_format}"
+                    )));
+                }
+            }
+            if let Some(projection_format) = schema.and_then(|schema| schema.projection_format()) {
+                if projection_format != NOSTR_EVENT_PROJECTION_FORMAT {
+                    return Err(NostrEventStoreError::Validation(format!(
+                        "nostr event index projection format mismatch: expected {NOSTR_EVENT_PROJECTION_FORMAT}, got {projection_format}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn add(

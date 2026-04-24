@@ -291,6 +291,7 @@ impl HashtreeServer {
             .route("/api/stats", get(handlers::storage_stats))
             .route("/api/peers", get(handlers::webrtc_peers))
             .route("/api/status", get(handlers::daemon_status))
+            .route("/api/p2p/signal", post(handlers::p2p_signal))
             .route("/api/socialgraph", get(handlers::socialgraph_stats))
             .route(
                 "/api/socialgraph/snapshot",

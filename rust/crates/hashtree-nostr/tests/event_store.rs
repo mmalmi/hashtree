@@ -592,6 +592,51 @@ fn manifest_exposes_by_id_key_only() {
 }
 
 #[test]
+fn validates_publishable_event_index_roots() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let author = "a".repeat(64);
+        let event = event(
+            "1195275911eb877e6687b4f8a3495de1e0719280e7fc1fb229a9de37b2d87bea",
+            &author,
+            10,
+            1,
+            "older",
+            &"2".repeat(128),
+        );
+
+        let root = store.add(None, event).await.unwrap();
+        store
+            .validate_index_root(Some(&root))
+            .await
+            .expect("event index root should validate");
+    });
+}
+
+#[test]
+fn rejects_file_blobs_as_event_index_roots() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&backing)));
+        let store = NostrEventStore::new(backing);
+        let (blob_root, _) = tree.put_file(b"not a nostr event index").await.unwrap();
+
+        let err = store
+            .validate_index_root(Some(&blob_root))
+            .await
+            .expect_err("file blob must not validate as an event index root");
+        assert!(
+            err.to_string().contains("hash tree error")
+                || err
+                    .to_string()
+                    .contains("missing required manifest entries"),
+            "unexpected validation error: {err}"
+        );
+    });
+}
+
+#[test]
 fn manifest_root_matches_typescript_fixture() {
     block_on(async {
         let store = NostrEventStore::new(Arc::new(MemoryStore::new()));

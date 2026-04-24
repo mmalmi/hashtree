@@ -33,8 +33,8 @@ use crate::types::{
     BLOB_REQUEST_POLICY, DATA_CHANNEL_LABEL,
 };
 use crate::{
-    encode_payment_ack, encode_quote_response, encode_request, encode_response, hash_to_key,
-    parse_message, DataChunk, DataMessage, DataRequest, DataResponse,
+    encode_payment_ack, encode_peer_hints, encode_quote_response, encode_request, encode_response,
+    hash_to_key, parse_message, DataChunk, DataMessage, DataRequest, DataResponse, PeerHints,
 };
 use nostr_sdk::nostr::{
     ClientMessage as NostrClientMessage, Event, Filter as NostrFilter, JsonUtil as NostrJsonUtil,
@@ -137,6 +137,7 @@ pub struct Peer {
     mesh_frame_tx: Option<mpsc::Sender<(PeerId, MeshNostrFrame)>>,
     cashu_quotes: Option<Arc<CashuQuoteState>>,
     htl_config: PeerHTLConfig,
+    signal_urls: Vec<String>,
 }
 
 impl Peer {
@@ -245,7 +246,12 @@ impl Peer {
             mesh_frame_tx,
             cashu_quotes,
             htl_config: PeerHTLConfig::random(),
+            signal_urls: Vec::new(),
         })
+    }
+
+    pub fn set_signal_urls(&mut self, signal_urls: Vec<String>) {
+        self.signal_urls = signal_urls;
     }
 
     pub fn set_store(&mut self, store: Arc<dyn ContentStore>) {
@@ -394,6 +400,8 @@ impl Peer {
         let mesh_frame_tx = self.mesh_frame_tx.clone();
         let cashu_quotes = self.cashu_quotes.clone();
         let peer_pubkey = Some(self.peer_id.pubkey.clone());
+        let state_event_tx = self.state_event_tx.clone();
+        let signal_urls = self.signal_urls.clone();
 
         self.pc
             .on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
@@ -407,6 +415,8 @@ impl Peer {
                 let mesh_frame_tx = mesh_frame_tx.clone();
                 let cashu_quotes = cashu_quotes.clone();
                 let peer_pubkey = peer_pubkey.clone();
+                let state_event_tx = state_event_tx.clone();
+                let signal_urls = signal_urls.clone();
 
                 Box::pin(async move {
                     info!(
@@ -431,6 +441,8 @@ impl Peer {
                         mesh_frame_tx,
                         cashu_quotes,
                         peer_pubkey,
+                        state_event_tx,
+                        signal_urls,
                     )
                     .await;
                 })
@@ -520,6 +532,8 @@ impl Peer {
         let mesh_frame_tx = self.mesh_frame_tx.clone();
         let cashu_quotes = self.cashu_quotes.clone();
         let peer_pubkey = Some(self.peer_id.pubkey.clone());
+        let state_event_tx = self.state_event_tx.clone();
+        let signal_urls = self.signal_urls.clone();
 
         Self::setup_dc_handlers(
             dc,
@@ -532,6 +546,8 @@ impl Peer {
             mesh_frame_tx,
             cashu_quotes,
             peer_pubkey,
+            state_event_tx,
+            signal_urls,
         )
         .await;
         Ok(())
@@ -551,6 +567,8 @@ impl Peer {
         mesh_frame_tx: Option<mpsc::Sender<(PeerId, MeshNostrFrame)>>,
         cashu_quotes: Option<Arc<CashuQuoteState>>,
         peer_pubkey: Option<String>,
+        state_event_tx: Option<mpsc::Sender<PeerStateEvent>>,
+        signal_urls: Vec<String>,
     ) {
         let label = dc.label().to_string();
         let peer_short = peer_id.short();
@@ -595,12 +613,16 @@ impl Peer {
         }
 
         let open_notify_clone = open_notify.clone();
+        let dc_for_hints = dc.clone();
+        let signal_urls_for_open = signal_urls.clone();
         let peer_short_open = peer_short.clone();
         let label_clone = label.clone();
         dc.on_open(Box::new(move || {
             let peer_short_open = peer_short_open.clone();
             let label_clone = label_clone.clone();
             let open_notify = open_notify_clone.clone();
+            let dc_for_hints = dc_for_hints.clone();
+            let signal_urls = signal_urls_for_open.clone();
             Box::pin(async move {
                 info!(
                     "[Peer {}] Data channel '{}' open",
@@ -609,8 +631,19 @@ impl Peer {
                 if let Some(notify) = open_notify {
                     notify.notify_one();
                 }
+                if !signal_urls.is_empty() {
+                    let hints = PeerHints { signal_urls };
+                    let _ = dc_for_hints
+                        .send(&Bytes::from(encode_peer_hints(&hints)))
+                        .await;
+                }
             })
         }));
+
+        if dc.ready_state() == RTCDataChannelState::Open && !signal_urls.is_empty() {
+            let hints = PeerHints { signal_urls };
+            let _ = dc.send(&Bytes::from(encode_peer_hints(&hints))).await;
+        }
 
         let dc_for_msg = dc.clone();
         let peer_short_msg = peer_short.clone();
@@ -634,6 +667,7 @@ impl Peer {
             let pending_nostr_queries = pending_nostr_queries_for_msg.clone();
             let mesh_frame_tx = mesh_frame_tx_for_msg.clone();
             let cashu_quotes = cashu_quotes.clone();
+            let state_event_tx = state_event_tx.clone();
             let peer_id = peer_id_for_msg.clone();
             let msg_data = msg.data.clone();
 
@@ -921,6 +955,16 @@ impl Peer {
                             )
                             .await;
                         }
+                        DataMessage::PeerHints(hints) => {
+                            if let Some(tx) = state_event_tx {
+                                let _ = tx
+                                    .send(PeerStateEvent::SignalHints(
+                                        peer_id.clone(),
+                                        hints.signal_urls,
+                                    ))
+                                    .await;
+                            }
+                        }
                     },
                     None => {
                         warn!("[Peer {}] Failed to parse message", peer_short);
@@ -1152,6 +1196,7 @@ fn encode_data_message(msg: &DataMessage) -> Vec<u8> {
         DataMessage::Payment(req) => crate::encode_payment(req),
         DataMessage::PaymentAck(res) => crate::encode_payment_ack(res),
         DataMessage::Chunk(chunk) => crate::encode_chunk(chunk),
+        DataMessage::PeerHints(hints) => crate::encode_peer_hints(hints),
     }
 }
 

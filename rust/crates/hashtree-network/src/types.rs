@@ -53,19 +53,24 @@ impl PeerId {
     }
 }
 
-/// Persistable reachability hints for a stable peer identity.
+/// Persisted private WebRTC signaling hints for a stable peer identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownPeerRecord {
     pub peer_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub addresses: Vec<String>,
+    #[serde(
+        default,
+        alias = "direct_urls",
+        alias = "addresses",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub signal_urls: Vec<String>,
     #[serde(default)]
     pub last_seen_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_source: Option<String>,
 }
 
-/// Snapshot of direct peer hints learned from signed signaling messages.
+/// Snapshot of private peer signaling hints learned over established peer links.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownPeerSnapshot {
     pub version: u32,
@@ -100,8 +105,6 @@ pub enum SignalingMessage {
         roots: Vec<String>,
         #[serde(rename = "hashGet", default = "default_hash_get_enabled")]
         hash_get: bool,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        addresses: Vec<String>,
     },
 
     /// Negotiation offer payload (currently SDP for WebRTC links).
