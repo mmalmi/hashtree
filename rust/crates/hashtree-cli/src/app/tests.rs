@@ -675,6 +675,7 @@ fn test_cli_parses_socialgraph_index_command() {
                     global_relay_scan,
                     author_allowlist_url,
                     negentropy_only,
+                    full_author_history,
                     relay_page_size,
                     max_relay_pages,
                     max_events_seen,
@@ -700,6 +701,7 @@ fn test_cli_parses_socialgraph_index_command() {
                 Some("https://graph-api.iris.to/allowlist?maxDistance=6")
             );
             assert!(negentropy_only);
+            assert!(!full_author_history);
             assert_eq!(relay_page_size, 2_000);
             assert_eq!(max_relay_pages, 6);
             assert_eq!(max_events_seen, Some(1_000_000));

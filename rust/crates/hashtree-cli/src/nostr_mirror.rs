@@ -50,6 +50,8 @@ const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
 const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
 const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
+const DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
+const DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES: usize = 1_000;
 const LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER: usize = 8;
 const LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 16;
 const LARGE_HISTORY_SYNC_MAX_RELAY_PAGES: usize = 20;
@@ -86,6 +88,8 @@ pub struct NostrMirrorConfig {
     pub kinds: Vec<u16>,
     pub history_sync_on_start: bool,
     pub history_sync_on_reconnect: bool,
+    pub full_text_note_history_follow_distance: Option<u32>,
+    pub full_text_note_history_max_relay_pages: usize,
     pub published_event_tree_name: Option<String>,
     pub published_profile_search_tree_name: Option<String>,
     pub published_profiles_by_pubkey_tree_name: Option<String>,
@@ -109,6 +113,10 @@ impl Default for NostrMirrorConfig {
             kinds: DEFAULT_HISTORY_KINDS.to_vec(),
             history_sync_on_start: true,
             history_sync_on_reconnect: true,
+            full_text_note_history_follow_distance: Some(
+                DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE,
+            ),
+            full_text_note_history_max_relay_pages: DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES,
             published_event_tree_name: Some(DEFAULT_EVENT_TREE_NAME.to_string()),
             published_profile_search_tree_name: Some(DEFAULT_PROFILE_SEARCH_TREE_NAME.to_string()),
             published_profiles_by_pubkey_tree_name: Some(
@@ -313,6 +321,8 @@ impl BackgroundNostrMirror {
                     .await?;
                 }
             }
+            self.history_sync_full_text_notes_for_reachable_authors()
+                .await?;
             self.history_sync_authors(initial_authors.clone()).await?;
         }
 
@@ -346,6 +356,8 @@ impl BackgroundNostrMirror {
                             "Nostr mirror discovered {} newly reachable author(s)",
                             new_authors.len()
                         );
+                        self.history_sync_full_text_notes_for_authors(new_authors.clone())
+                            .await?;
                         self.history_sync_authors(new_authors.clone()).await?;
                         self.subscribe_authors_since(
                             &new_authors,
@@ -494,9 +506,13 @@ impl BackgroundNostrMirror {
     }
 
     fn collect_authors(&self) -> Result<Vec<String>> {
+        self.collect_authors_with_max_distance(self.config.max_follow_distance)
+    }
+
+    fn collect_authors_with_max_distance(&self, max_distance: u32) -> Result<Vec<String>> {
         let mut authors = Vec::new();
         let mut seen = HashSet::new();
-        for distance in 0..=self.config.max_follow_distance {
+        for distance in 0..=max_distance {
             for pubkey in socialgraph::SocialGraphBackend::users_by_follow_distance(
                 self.graph_store.as_ref(),
                 distance,
@@ -516,6 +532,15 @@ impl BackgroundNostrMirror {
             }
         }
         Ok(authors)
+    }
+
+    fn full_text_note_history_follow_distance(&self) -> Option<u32> {
+        let distance = self.config.full_text_note_history_follow_distance?;
+        if self.config.kinds.contains(&Kind::TextNote.as_u16()) {
+            Some(distance.min(self.config.max_follow_distance))
+        } else {
+            None
+        }
     }
 
     fn collect_missing_profile_authors(&self, limit: usize) -> Result<Vec<String>> {
@@ -649,9 +674,73 @@ impl BackgroundNostrMirror {
         authors: Vec<String>,
         kinds: &[u16],
     ) -> Result<()> {
+        self.history_sync_authors_with_kinds_and_mode(authors, kinds, false, None)
+            .await
+    }
+
+    async fn history_sync_full_text_notes_for_reachable_authors(&self) -> Result<()> {
+        let Some(distance) = self.full_text_note_history_follow_distance() else {
+            return Ok(());
+        };
+        let authors = self.collect_authors_with_max_distance(distance)?;
+        self.history_sync_full_text_notes_for_authors(authors).await
+    }
+
+    async fn history_sync_full_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
+        let Some(distance) = self.full_text_note_history_follow_distance() else {
+            return Ok(());
+        };
+        let mut close_authors = Vec::new();
+        for author in authors {
+            let Ok(pubkey) = hex::decode(&author) else {
+                continue;
+            };
+            let Ok(pubkey) = <[u8; 32]>::try_from(pubkey.as_slice()) else {
+                continue;
+            };
+            if self
+                .graph_store
+                .follow_distance(&pubkey)?
+                .is_some_and(|actual_distance| actual_distance <= distance)
+            {
+                close_authors.push(author);
+            }
+        }
+        if close_authors.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "Nostr mirror full text-note history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
+            close_authors.len(),
+            distance,
+            self.config.full_text_note_history_max_relay_pages.max(1)
+        );
+        self.history_sync_authors_with_kinds_and_mode(
+            close_authors,
+            &[Kind::TextNote.as_u16()],
+            true,
+            Some(self.config.full_text_note_history_max_relay_pages.max(1)),
+        )
+        .await
+    }
+
+    async fn history_sync_authors_with_kinds_and_mode(
+        &self,
+        authors: Vec<String>,
+        kinds: &[u16],
+        full_author_history: bool,
+        max_relay_pages: Option<usize>,
+    ) -> Result<()> {
         self.history_sync_authors_chunked(authors, |current_root, author_chunk| async move {
-            self.history_sync_author_chunk(current_root, author_chunk, kinds)
-                .await
+            self.history_sync_author_chunk(
+                current_root,
+                author_chunk,
+                kinds,
+                full_author_history,
+                max_relay_pages,
+            )
+            .await
         })
         .await
     }
@@ -743,10 +832,16 @@ impl BackgroundNostrMirror {
         current_root: Option<hashtree_core::Cid>,
         authors: Vec<String>,
         kinds: &[u16],
+        full_author_history: bool,
+        max_relay_pages: Option<usize>,
     ) -> Result<CrawlReport> {
         let mut last_error = None;
         let mut report = None;
-        let plan = self.history_sync_plan(authors.len(), kinds);
+        let mut plan = self.history_sync_plan(authors.len(), kinds);
+        if full_author_history {
+            plan.relay_fetch_mode = RelayFetchMode::AuthorBatches;
+            plan.max_relay_pages = max_relay_pages.unwrap_or(plan.max_relay_pages).max(1);
+        }
         for attempt in 0..3 {
             let mut last_logged_authors = 0usize;
             let bridge = NostrBridge::new(
@@ -768,6 +863,7 @@ impl BackgroundNostrMirror {
                     relay_event_max_size: self.config.relay_event_max_size,
                     relay_page_size: plan.relay_page_size,
                     max_relay_pages: plan.max_relay_pages,
+                    full_author_history,
                 },
             );
 

@@ -700,6 +700,9 @@ pub(crate) enum SocialGraphCommands {
         /// Fetch recent relay pages without author filters and filter locally by social graph
         #[arg(long, default_value_t = false)]
         global_relay_scan: bool,
+        /// Page each author's relay history until exhausted instead of keeping only the newest per-author window
+        #[arg(long, default_value_t = false)]
+        full_author_history: bool,
         /// HTTP URL returning newline-delimited author pubkeys to index
         #[arg(long)]
         author_allowlist_url: Option<String>,

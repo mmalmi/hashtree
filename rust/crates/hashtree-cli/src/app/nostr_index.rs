@@ -50,6 +50,7 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) fetch_timeout: Duration,
     pub(crate) relay_event_max_bytes: Option<u32>,
     pub(crate) global_relay_scan: bool,
+    pub(crate) full_author_history: bool,
     pub(crate) negentropy_only: bool,
     pub(crate) relay_page_size: usize,
     pub(crate) max_relay_pages: usize,
@@ -90,6 +91,7 @@ pub(crate) struct IndexedNostrReport {
     pub(crate) per_author_live_bytes: Option<u64>,
     pub(crate) relay_event_max_bytes: Option<u32>,
     pub(crate) global_relay_scan: bool,
+    pub(crate) full_author_history: bool,
     pub(crate) negentropy_only: bool,
     pub(crate) relay_page_size: usize,
     pub(crate) max_relay_pages: usize,
@@ -194,7 +196,7 @@ pub(crate) async fn run_socialgraph_index(
             per_author_live_bytes: options.per_author_live_bytes,
             fetch_timeout: options.fetch_timeout,
             relay_event_max_size: options.relay_event_max_bytes,
-            relay_fetch_mode: if options.negentropy_only {
+            relay_fetch_mode: if options.full_author_history || options.negentropy_only {
                 RelayFetchMode::AuthorBatches
             } else if options.global_relay_scan {
                 RelayFetchMode::GlobalRecent
@@ -204,6 +206,7 @@ pub(crate) async fn run_socialgraph_index(
             require_negentropy: options.negentropy_only,
             relay_page_size: options.relay_page_size,
             max_relay_pages: options.max_relay_pages,
+            full_author_history: options.full_author_history,
             kinds: options.kinds.clone(),
         },
     );
@@ -357,6 +360,7 @@ async fn build_report(
         per_author_live_bytes: options.per_author_live_bytes,
         relay_event_max_bytes: options.relay_event_max_bytes,
         global_relay_scan: options.global_relay_scan,
+        full_author_history: options.full_author_history,
         negentropy_only: options.negentropy_only,
         relay_page_size: options.relay_page_size,
         max_relay_pages: options.max_relay_pages,
@@ -618,6 +622,11 @@ fn print_report(report: &IndexedNostrReport, data_dir: &Path) {
         "Relay mode: {}",
         if report.negentropy_only {
             "author batches with negentropy-only relays".to_string()
+        } else if report.full_author_history {
+            format!(
+                "full author history (page size {}, max pages {})",
+                report.relay_page_size, report.max_relay_pages
+            )
         } else if report.global_relay_scan {
             format!(
                 "global recent scan (page size {}, max pages {})",
@@ -1101,6 +1110,7 @@ mod tests {
                 fetch_timeout: Duration::from_secs(5),
                 relay_event_max_bytes: None,
                 global_relay_scan: false,
+                full_author_history: false,
                 negentropy_only: false,
                 relay_page_size: 1_000,
                 max_relay_pages: 10,
@@ -1218,6 +1228,7 @@ mod tests {
                 fetch_timeout: Duration::from_secs(5),
                 relay_event_max_bytes: None,
                 global_relay_scan: true,
+                full_author_history: false,
                 negentropy_only: false,
                 relay_page_size: 128,
                 max_relay_pages: 1,
@@ -1341,6 +1352,7 @@ mod tests {
             relay_event_max_bytes: None,
             global_relay_scan: false,
             negentropy_only: false,
+            full_author_history: false,
             relay_page_size: 1000,
             max_relay_pages: 10,
             relays: vec!["wss://example.com".to_string()],

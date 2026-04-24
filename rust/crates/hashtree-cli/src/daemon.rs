@@ -345,6 +345,13 @@ impl EmbeddedBackgroundServicesController {
                             .history_sync_author_chunk_size
                             .max(1),
                         history_sync_on_reconnect: config.nostr.history_sync_on_reconnect,
+                        full_text_note_history_follow_distance: config
+                            .nostr
+                            .full_text_note_history_follow_distance,
+                        full_text_note_history_max_relay_pages: config
+                            .nostr
+                            .full_text_note_history_max_relay_pages
+                            .max(1),
                         ..crate::nostr_mirror::NostrMirrorConfig::default()
                     },
                     self.store.clone(),

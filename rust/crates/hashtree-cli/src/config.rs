@@ -193,6 +193,13 @@ pub struct NostrConfig {
     /// Run a catch-up history sync after relay reconnects.
     #[serde(default = "default_nostr_history_sync_on_reconnect")]
     pub history_sync_on_reconnect: bool,
+    /// Fetch complete kind-1 history for authors up to this follow distance.
+    /// Set to null to disable.
+    #[serde(default = "default_nostr_full_text_note_history_follow_distance")]
+    pub full_text_note_history_follow_distance: Option<u32>,
+    /// Maximum relay pages per author for complete kind-1 history fetches.
+    #[serde(default = "default_nostr_full_text_note_history_max_relay_pages")]
+    pub full_text_note_history_max_relay_pages: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,6 +472,14 @@ fn default_nostr_history_sync_per_author_event_limit() -> usize {
     256
 }
 
+fn default_nostr_full_text_note_history_follow_distance() -> Option<u32> {
+    Some(2)
+}
+
+fn default_nostr_full_text_note_history_max_relay_pages() -> usize {
+    1_000
+}
+
 fn default_relays() -> Vec<String> {
     vec![
         "wss://relay.damus.io".to_string(),
@@ -589,6 +604,10 @@ impl Default for NostrConfig {
             history_sync_per_author_event_limit: default_nostr_history_sync_per_author_event_limit(
             ),
             history_sync_on_reconnect: default_nostr_history_sync_on_reconnect(),
+            full_text_note_history_follow_distance:
+                default_nostr_full_text_note_history_follow_distance(),
+            full_text_note_history_max_relay_pages:
+                default_nostr_full_text_note_history_max_relay_pages(),
         }
     }
 }
@@ -904,6 +923,8 @@ mod tests {
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
+        assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(2));
+        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 1_000);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
             config.nostr.bootstrap_follows,
@@ -944,6 +965,8 @@ relays = ["wss://relay.damus.io"]
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
+        assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(2));
+        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 1_000);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
             config.nostr.bootstrap_follows,
@@ -966,6 +989,8 @@ mirror_kinds = [0, 10000]
 history_sync_author_chunk_size = 250
 history_sync_per_author_event_limit = 128
 history_sync_on_reconnect = false
+full_text_note_history_follow_distance = 1
+full_text_note_history_max_relay_pages = 64
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.nostr.enabled);
@@ -982,6 +1007,8 @@ history_sync_on_reconnect = false
         assert_eq!(config.nostr.history_sync_author_chunk_size, 250);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 128);
         assert!(!config.nostr.history_sync_on_reconnect);
+        assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(1));
+        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 64);
     }
 
     #[test]

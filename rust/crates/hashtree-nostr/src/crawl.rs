@@ -36,6 +36,7 @@ pub struct CrawlConfig {
     pub relay_event_max_size: Option<u32>,
     pub relay_page_size: usize,
     pub max_relay_pages: usize,
+    pub full_author_history: bool,
 }
 
 impl Default for CrawlConfig {
@@ -57,6 +58,7 @@ impl Default for CrawlConfig {
             relay_event_max_size: None,
             relay_page_size: 1_000,
             max_relay_pages: 10,
+            full_author_history: false,
         }
     }
 }
@@ -540,6 +542,18 @@ impl<S: Store> NostrBridge<S> {
             });
         }
 
+        if self.config.full_author_history {
+            return self
+                .crawl_full_author_history_batch(
+                    client,
+                    author_batch,
+                    current_root,
+                    failed_relays,
+                    live_bytes_selected_so_far,
+                )
+                .await;
+        }
+
         let filter = self.batch_filter(pubkeys);
         let mut fetched = BTreeMap::<String, StoredNostrEvent>::new();
         let mut events_seen = 0usize;
@@ -606,6 +620,76 @@ impl<S: Store> NostrBridge<S> {
         Ok(BatchCrawlReport {
             events_seen,
             events: selected,
+            live_bytes_selected,
+        })
+    }
+
+    async fn crawl_full_author_history_batch(
+        &self,
+        client: &Client,
+        author_batch: &[String],
+        current_root: Option<&Cid>,
+        failed_relays: &mut BTreeSet<String>,
+        live_bytes_selected_so_far: u64,
+    ) -> Result<BatchCrawlReport> {
+        let mut events_seen = 0usize;
+        let mut selected = Vec::new();
+
+        for author in author_batch {
+            let mut merged = BTreeMap::<String, StoredNostrEvent>::new();
+            for event in self
+                .load_retained_events(current_root, author)
+                .await?
+                .into_iter()
+                .filter(|event| self.kind_allowed(event.kind))
+                .filter(|event| self.is_valid_stored_event(event))
+            {
+                merged.insert(event.id.clone(), event);
+            }
+
+            let Some(pubkey) = author.parse::<PublicKey>().ok() else {
+                continue;
+            };
+            for relay in &self.config.relays {
+                if failed_relays.contains(relay) {
+                    continue;
+                }
+                match self
+                    .fetch_full_author_history_from_relay(client, relay, pubkey)
+                    .await
+                {
+                    Ok(fetched_from_relay) => {
+                        events_seen = events_seen.saturating_add(fetched_from_relay.events_seen);
+                        for event in fetched_from_relay.events {
+                            if self.kind_allowed(event.kind) {
+                                merged.insert(event.id.clone(), event);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("Skipping relay {relay}: {err}");
+                        failed_relays.insert(relay.clone());
+                    }
+                }
+            }
+
+            let author_selected = self
+                .select_author_events_with_limits(
+                    merged.into_values().collect(),
+                    usize::MAX,
+                    self.config.per_author_live_bytes,
+                )?
+                .into_iter()
+                .filter(|event| self.is_valid_stored_event(event))
+                .collect::<Vec<_>>();
+            selected.extend(author_selected);
+        }
+
+        let (events, live_bytes_selected) =
+            self.apply_live_byte_cap_from(selected, live_bytes_selected_so_far)?;
+        Ok(BatchCrawlReport {
+            events_seen,
+            events,
             live_bytes_selected,
         })
     }
@@ -1180,6 +1264,67 @@ impl<S: Store> NostrBridge<S> {
         }
 
         Ok(out)
+    }
+
+    async fn fetch_full_author_history_from_relay(
+        &self,
+        client: &Client,
+        relay: &str,
+        pubkey: PublicKey,
+    ) -> Result<RelayFetchResult> {
+        let mut out = BTreeMap::<String, StoredNostrEvent>::new();
+        let mut events_seen = 0usize;
+        let mut until = None;
+
+        for _ in 0..self.config.max_relay_pages {
+            let mut filter = Filter::new()
+                .author(pubkey)
+                .limit(self.config.relay_page_size);
+            if let Some(kinds) = &self.config.kinds {
+                filter = filter.kinds(kinds.iter().copied().map(Kind::from));
+            }
+            if let Some(until) = until {
+                filter = filter.until(Timestamp::from_secs(until));
+            }
+
+            let events = client
+                .get_events_from([relay], vec![filter], Some(self.config.fetch_timeout))
+                .await
+                .map_err(|err| CrawlError::Nostr(err.to_string()))?;
+            let fetched_count = events.len();
+            events_seen = events_seen.saturating_add(fetched_count);
+            if fetched_count == 0 {
+                break;
+            }
+
+            let mut min_created_at = u64::MAX;
+            for event in events {
+                min_created_at = min_created_at.min(event.created_at.as_u64());
+                if event.kind.is_ephemeral() {
+                    continue;
+                }
+                let stored = stored_event_from_nostr(&event);
+                out.insert(stored.id.clone(), stored);
+            }
+
+            if min_created_at == u64::MAX || min_created_at == 0 {
+                break;
+            }
+            let next_until = min_created_at.saturating_sub(1);
+            if until == Some(next_until) {
+                break;
+            }
+            until = Some(next_until);
+            if self.reached_events_seen_limit(events_seen) {
+                break;
+            }
+        }
+
+        Ok(RelayFetchResult {
+            events_seen,
+            events: out.into_values().collect(),
+            supports_negentropy: false,
+        })
     }
 
     fn select_author_events(&self, events: Vec<StoredNostrEvent>) -> Result<Vec<StoredNostrEvent>> {
