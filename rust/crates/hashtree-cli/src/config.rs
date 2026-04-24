@@ -465,7 +465,7 @@ fn default_nostr_overmute_threshold() -> f64 {
 }
 
 fn default_nostr_mirror_kinds() -> Vec<u16> {
-    vec![0, 1, 3, 6, 7, 9_735]
+    vec![0, 1, 3, 6, 7, 9_735, 30_023]
 }
 
 fn default_nostr_history_sync_author_chunk_size() -> usize {
@@ -924,7 +924,10 @@ mod tests {
         assert_eq!(config.nostr.spambox_max_size_gb, 1);
         assert!(!config.nostr.negentropy_only);
         assert_eq!(config.nostr.overmute_threshold, 1.0);
-        assert_eq!(config.nostr.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
+        assert_eq!(
+            config.nostr.mirror_kinds,
+            vec![0, 1, 3, 6, 7, 9_735, 30_023]
+        );
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
@@ -966,7 +969,10 @@ relays = ["wss://relay.damus.io"]
         assert_eq!(config.nostr.spambox_max_size_gb, 1);
         assert!(!config.nostr.negentropy_only);
         assert_eq!(config.nostr.overmute_threshold, 1.0);
-        assert_eq!(config.nostr.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
+        assert_eq!(
+            config.nostr.mirror_kinds,
+            vec![0, 1, 3, 6, 7, 9_735, 30_023]
+        );
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);

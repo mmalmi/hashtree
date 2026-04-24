@@ -235,7 +235,7 @@ fn default_nostr_history_sync_on_reconnect() -> bool {
 }
 
 fn default_nostr_mirror_kinds() -> Vec<u16> {
-    vec![0, 1, 3, 6, 7, 9_735]
+    vec![0, 1, 3, 6, 7, 9_735, 30_023]
 }
 
 fn default_nostr_history_sync_author_chunk_size() -> usize {
@@ -958,7 +958,7 @@ nsec1ghi789
         );
         assert!(!config.negentropy_only);
         assert_eq!(config.overmute_threshold, 1.0);
-        assert_eq!(config.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735]);
+        assert_eq!(config.mirror_kinds, vec![0, 1, 3, 6, 7, 9_735, 30_023]);
         assert_eq!(config.history_sync_author_chunk_size, 5_000);
         assert!(config.history_sync_on_reconnect);
     }
