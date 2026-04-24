@@ -1003,7 +1003,7 @@ impl BackgroundNostrMirror {
                 self.apply_history_root_with_options(
                     report.root.as_ref(),
                     update_profile_and_graph,
-                    false,
+                    true,
                 )
                 .await?;
                 current_root = report.root.clone();
