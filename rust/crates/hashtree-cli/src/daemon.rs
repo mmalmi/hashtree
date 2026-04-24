@@ -294,6 +294,35 @@ impl EmbeddedBackgroundServicesController {
         }
     }
 
+    fn nostr_mirror_config(
+        config: &Config,
+        active_relays: &[String],
+    ) -> crate::nostr_mirror::NostrMirrorConfig {
+        crate::nostr_mirror::NostrMirrorConfig {
+            relays: active_relays.to_vec(),
+            publish_relays: Self::mirror_publish_relays(active_relays, &config.server.bind_address),
+            blossom_write_servers: config.blossom.all_write_servers(),
+            max_follow_distance: config.nostr.social_graph_crawl_depth,
+            overmute_threshold: config.nostr.overmute_threshold,
+            require_negentropy: config.nostr.negentropy_only,
+            kinds: config.nostr.mirror_kinds.clone(),
+            history_sync_author_chunk_size: config.nostr.history_sync_author_chunk_size.max(1),
+            history_sync_per_author_event_limit: config
+                .nostr
+                .history_sync_per_author_event_limit
+                .max(1),
+            missing_profile_backfill_batch_size: config.nostr.history_sync_author_chunk_size.max(1),
+            history_sync_on_reconnect: config.nostr.history_sync_on_reconnect,
+            full_text_note_history_follow_distance: config
+                .nostr
+                .full_text_note_history_follow_distance,
+            full_text_note_history_max_relay_pages: config
+                .nostr
+                .full_text_note_history_max_relay_pages,
+            ..crate::nostr_mirror::NostrMirrorConfig::default()
+        }
+    }
+
     pub async fn apply_config(&self, config: &Config) -> Result<EmbeddedBackgroundServicesStatus> {
         let mut runtime = self.runtime.lock().await;
 
@@ -322,39 +351,7 @@ impl EmbeddedBackgroundServicesController {
 
             let service = Arc::new(
                 crate::nostr_mirror::BackgroundNostrMirror::new(
-                    crate::nostr_mirror::NostrMirrorConfig {
-                        relays: active_relays.clone(),
-                        publish_relays: Self::mirror_publish_relays(
-                            &active_relays,
-                            &config.server.bind_address,
-                        ),
-                        blossom_write_servers: config.blossom.all_write_servers(),
-                        max_follow_distance: config.nostr.social_graph_crawl_depth,
-                        overmute_threshold: config.nostr.overmute_threshold,
-                        require_negentropy: config.nostr.negentropy_only,
-                        kinds: config.nostr.mirror_kinds.clone(),
-                        history_sync_author_chunk_size: config
-                            .nostr
-                            .history_sync_author_chunk_size
-                            .max(1),
-                        history_sync_per_author_event_limit: config
-                            .nostr
-                            .history_sync_per_author_event_limit
-                            .max(1),
-                        missing_profile_backfill_batch_size: config
-                            .nostr
-                            .history_sync_author_chunk_size
-                            .max(1),
-                        history_sync_on_reconnect: config.nostr.history_sync_on_reconnect,
-                        full_text_note_history_follow_distance: config
-                            .nostr
-                            .full_text_note_history_follow_distance,
-                        full_text_note_history_max_relay_pages: config
-                            .nostr
-                            .full_text_note_history_max_relay_pages
-                            .max(1),
-                        ..crate::nostr_mirror::NostrMirrorConfig::default()
-                    },
+                    Self::nostr_mirror_config(config, &active_relays),
                     self.store.clone(),
                     self.graph_store_concrete.clone(),
                     Some(
@@ -909,6 +906,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
 #[cfg(test)]
 mod tests {
     use super::EmbeddedBackgroundServicesController;
+    use crate::config::Config;
 
     #[test]
     fn mirror_publish_relays_prefers_known_root_publish_relays() {
@@ -951,5 +949,26 @@ mod tests {
                 "wss://relay.nostr.band".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn nostr_mirror_config_allows_disabling_full_note_paging() {
+        let mut config = Config::default();
+        config.nostr.full_text_note_history_max_relay_pages = 0;
+
+        let mirror_config = EmbeddedBackgroundServicesController::nostr_mirror_config(
+            &config,
+            &["wss://relay.example".to_string()],
+        );
+
+        assert_eq!(mirror_config.full_text_note_history_max_relay_pages, 0);
+
+        config.nostr.full_text_note_history_max_relay_pages = 64;
+        let mirror_config = EmbeddedBackgroundServicesController::nostr_mirror_config(
+            &config,
+            &["wss://relay.example".to_string()],
+        );
+
+        assert_eq!(mirror_config.full_text_note_history_max_relay_pages, 64);
     }
 }
