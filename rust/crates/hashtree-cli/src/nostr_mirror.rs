@@ -13,16 +13,16 @@ use nostr::{
     Timestamp,
 };
 use nostr_sdk::{
-    pool::RelayLimits, prelude::RelayPoolNotification, Client, EventSource, Keys, Options,
-    RelayStatus,
+    Client, EventSource, Keys, Options, RelayStatus, pool::RelayLimits,
+    prelude::RelayPoolNotification,
 };
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use crate::HashtreeStore;
 use crate::blossom_push::background_blossom_push_with_store;
 use crate::socialgraph::crawler::SOCIALGRAPH_RELAY_EVENT_MAX_SIZE;
 use crate::socialgraph::{self, SocialGraphBackend, SocialGraphStore};
-use crate::HashtreeStore;
 
 #[cfg(not(test))]
 const MIRROR_STARTUP_DELAY: Duration = Duration::from_secs(8);
@@ -70,6 +70,8 @@ const MIRROR_ROOT_PUBLISH_DEBOUNCE: Duration = Duration::from_millis(20);
 const MIRROR_ROOT_PUBLISH_MAX_STALENESS: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const MIRROR_ROOT_PUBLISH_MAX_STALENESS: Duration = Duration::from_millis(100);
+
+const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob while pushing DAG";
 
 #[derive(Debug, Clone)]
 pub struct NostrMirrorConfig {
@@ -842,8 +844,7 @@ impl BackgroundNostrMirror {
         if failed_chunks > 0 {
             warn!(
                 "Nostr mirror history sync completed with skipped chunks: applied_chunks={} failed_chunks={}",
-                applied_chunks,
-                failed_chunks
+                applied_chunks, failed_chunks
             );
         }
         Ok(())
@@ -1147,6 +1148,35 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_event_root(&self, force: bool) -> Result<()> {
+        let result = self
+            .maybe_publish_root(
+                self.config.published_event_tree_name.as_deref(),
+                &self.event_publish_state,
+                "event root",
+                force,
+            )
+            .await;
+        let Err(error) = result else {
+            return Ok(());
+        };
+        if !is_missing_local_blob_push_error(&error) {
+            return Err(error);
+        }
+
+        warn!(
+            "Nostr mirror event root DAG references missing local blobs; rebuilding event indexes from stored events"
+        );
+        let (public_count, ambient_count) = self
+            .graph_store
+            .rebuild_event_indexes_from_stored_events_async()
+            .await
+            .context("rebuild event indexes after missing event blobs")?;
+        info!(
+            "Nostr mirror rebuilt event indexes after missing blobs: public={} ambient={}",
+            public_count, ambient_count
+        );
+        self.sync_publish_roots_from_store()?;
+
         self.maybe_publish_root(
             self.config.published_event_tree_name.as_deref(),
             &self.event_publish_state,
@@ -1424,6 +1454,12 @@ impl BackgroundNostrMirror {
 
         EventBuilder::new(Kind::Custom(30078), "", tags).custom_created_at(created_at)
     }
+}
+
+fn is_missing_local_blob_push_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains(MISSING_LOCAL_BLOB_PUSH_ERROR))
 }
 
 fn later_timestamp(left: Option<Timestamp>, right: Option<Timestamp>) -> Option<Timestamp> {
