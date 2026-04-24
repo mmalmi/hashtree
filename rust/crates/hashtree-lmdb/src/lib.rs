@@ -97,14 +97,30 @@ impl LmdbBlobStore {
 
     /// Open or create with custom map size.
     pub fn with_map_size<P: AsRef<Path>>(path: P, map_size: usize) -> Result<Self, StoreError> {
-        std::fs::create_dir_all(&path).map_err(StoreError::Io)?;
+        let path_ref = path.as_ref();
+        std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
+        let existing_map_size = std::fs::metadata(path_ref.join("data.mdb"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let existing_headroom = if existing_map_size == 0 {
+            0
+        } else {
+            existing_map_size
+                .saturating_div(10)
+                .max(REOPEN_HEADROOM_BYTES)
+        };
+        let requested_map_size = u64::try_from(map_size).unwrap_or(u64::MAX);
+        let map_size = usize::try_from(Self::align_map_size_bytes(
+            requested_map_size.max(existing_map_size.saturating_add(existing_headroom)),
+        ))
+        .unwrap_or(usize::MAX);
 
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(map_size)
                 .max_dbs(DATABASE_COUNT)
                 .max_readers(DEFAULT_MAX_READERS)
-                .open(path)
+                .open(path_ref)
                 .map_err(map_heed_error)?
         };
         let _ = env.clear_stale_readers();
@@ -1151,6 +1167,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_reopens_existing_env_with_smaller_requested_map_size(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("blobs");
+        let hash = sha256(b"large existing blob");
+        run_helper("large-map", &path, &temp.path().join("large-map.marker"));
+
+        let existing_size = std::fs::metadata(path.join("data.mdb"))?.len();
+        assert!(
+            existing_size > 1024 * 1024,
+            "test setup should create an environment larger than the reopen request"
+        );
+
+        let reopened = LmdbBlobStore::with_map_size(&path, 1024 * 1024)?;
+        assert!(
+            reopened.map_size_bytes() as u64 >= existing_size,
+            "expected map size to cover existing data.mdb size {existing_size}, got {}",
+            reopened.map_size_bytes()
+        );
+        assert!(reopened.exists(&hash)?);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     #[ignore = "used as a subprocess helper by test_reclaims_stale_reader_slots"]
     fn lmdb_stale_reader_helper() {
         let Some(db_path) = std::env::var_os(STALE_READER_DB_PATH_ENV) else {
@@ -1164,9 +1206,14 @@ mod tests {
         let mode = std::env::var(STALE_READER_HELPER_MODE_ENV).expect("helper mode");
         let db_path = PathBuf::from(db_path);
         std::fs::create_dir_all(&db_path).expect("create helper db dir");
+        let helper_map_size = if mode == "large-map" {
+            8 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
         let env = unsafe {
             EnvOpenOptions::new()
-                .map_size(1024 * 1024)
+                .map_size(helper_map_size)
                 .max_dbs(DATABASE_COUNT)
                 .max_readers(TEST_MAX_READERS)
                 .open(&db_path)
@@ -1203,6 +1250,26 @@ mod tests {
                     .create_database(&mut wtxn, Some("pins"))
                     .expect("create pins database");
                 wtxn.commit().expect("commit small-map setup txn");
+                std::process::exit(0);
+            }
+            "large-map" => {
+                let mut wtxn = env.write_txn().expect("open write txn");
+                let blobs: Database<Bytes, Bytes> = env
+                    .create_database(&mut wtxn, Some("blobs"))
+                    .expect("create blobs database");
+                let _metadata: Database<Bytes, Bytes> = env
+                    .create_database(&mut wtxn, Some("metadata"))
+                    .expect("create metadata database");
+                let _eviction_order: Database<Bytes, Unit> = env
+                    .create_database(&mut wtxn, Some("eviction_order"))
+                    .expect("create eviction_order database");
+                let _pins: Database<Bytes, Bytes> = env
+                    .create_database(&mut wtxn, Some("pins"))
+                    .expect("create pins database");
+                let data = vec![42u8; 3 * 1024 * 1024];
+                let hash = sha256(b"large existing blob");
+                blobs.put(&mut wtxn, &hash, &data).expect("seed blob");
+                wtxn.commit().expect("commit large-map setup txn");
                 std::process::exit(0);
             }
             other => panic!("unknown helper mode: {other}"),

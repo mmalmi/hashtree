@@ -300,15 +300,17 @@ impl StorageRouter {
             return std::thread::Builder::new()
                 .name("storage-s3-sync".to_string())
                 .spawn(move || {
-                    tokio::runtime::Builder::new_current_thread()
+                    let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
-                        .expect("build storage s3 sync runtime")
-                        .block_on(future)
+                        .map_err(|err| {
+                            StoreError::Other(format!("build storage s3 sync runtime: {err}"))
+                        })?;
+                    Ok(runtime.block_on(future))
                 })
                 .map_err(|err| StoreError::Other(format!("spawn S3 sync helper thread: {err}")))?
                 .join()
-                .map_err(|_| StoreError::Other("S3 sync helper thread panicked".to_string()));
+                .map_err(|_| StoreError::Other("S3 sync helper thread panicked".to_string()))?;
         }
 
         let runtime = tokio::runtime::Builder::new_current_thread()
