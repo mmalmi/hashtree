@@ -434,12 +434,14 @@ impl ProfileIndexBucket {
             .collect()
     }
 
-    pub(super) fn rebuild_profile_events<'a, I>(
+    pub(super) fn rebuild_profile_events_with_distances<'a, I, F>(
         &self,
         events: I,
+        mut follow_distance_for_event: F,
     ) -> Result<(Option<Cid>, Option<Cid>)>
     where
         I: IntoIterator<Item = &'a Event>,
+        F: FnMut(&Event) -> Result<Option<u32>>,
     {
         let mut by_pubkey_entries = Vec::<(String, Cid)>::new();
         let mut search_entries = Vec::<(String, String)>::new();
@@ -447,8 +449,12 @@ impl ProfileIndexBucket {
         for event in events {
             let pubkey = event.pubkey.to_hex();
             let mirrored_cid = self.mirror_profile_event(event)?;
-            let search_value =
-                serialize_profile_search_entry(&build_profile_search_entry(event, &mirrored_cid)?)?;
+            let follow_distance = follow_distance_for_event(event)?;
+            let search_value = serialize_profile_search_entry(&build_profile_search_entry(
+                event,
+                &mirrored_cid,
+                follow_distance,
+            )?)?;
             by_pubkey_entries.push((pubkey.clone(), mirrored_cid.clone()));
             for term in profile_search_terms_for_event(event) {
                 search_entries.push((
@@ -465,12 +471,14 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
-    pub(super) async fn rebuild_profile_events_async<'a, I>(
+    pub(super) async fn rebuild_profile_events_async_with_distances<'a, I, F>(
         &self,
         events: I,
+        mut follow_distance_for_event: F,
     ) -> Result<(Option<Cid>, Option<Cid>)>
     where
         I: IntoIterator<Item = &'a Event>,
+        F: FnMut(&Event) -> Result<Option<u32>>,
     {
         let mut by_pubkey_entries = Vec::<(String, Cid)>::new();
         let mut search_entries = Vec::<(String, String)>::new();
@@ -483,8 +491,12 @@ impl ProfileIndexBucket {
                 .put_file(&bytes)
                 .await
                 .context("store mirrored profile event")?;
-            let search_value =
-                serialize_profile_search_entry(&build_profile_search_entry(event, &mirrored_cid)?)?;
+            let follow_distance = follow_distance_for_event(event)?;
+            let search_value = serialize_profile_search_entry(&build_profile_search_entry(
+                event,
+                &mirrored_cid,
+                follow_distance,
+            )?)?;
             by_pubkey_entries.push((pubkey.clone(), mirrored_cid.clone()));
             for term in profile_search_terms_for_event(event) {
                 search_entries.push((
@@ -512,6 +524,7 @@ impl ProfileIndexBucket {
         by_pubkey_root: Option<&Cid>,
         search_root: Option<&Cid>,
         event: &Event,
+        follow_distance: Option<u32>,
     ) -> Result<(Option<Cid>, Option<Cid>, bool)> {
         let pubkey = event.pubkey.to_hex();
         let existing_cid = block_on(self.index.get_link(by_pubkey_root, &pubkey))
@@ -552,8 +565,11 @@ impl ProfileIndexBucket {
             }
         }
 
-        let search_value =
-            serialize_profile_search_entry(&build_profile_search_entry(event, &mirrored_cid)?)?;
+        let search_value = serialize_profile_search_entry(&build_profile_search_entry(
+            event,
+            &mirrored_cid,
+            follow_distance,
+        )?)?;
         for term in profile_search_terms_for_event(event) {
             next_search_root = Some(
                 block_on(self.index.insert(
@@ -636,6 +652,7 @@ fn cid_to_nhash(cid: &Cid) -> Result<String> {
 fn build_profile_search_entry(
     event: &Event,
     mirrored_cid: &Cid,
+    follow_distance: Option<u32>,
 ) -> Result<StoredProfileSearchEntry> {
     let profile = match serde_json::from_str::<serde_json::Value>(&event.content) {
         Ok(serde_json::Value::Object(profile)) => profile,
@@ -654,6 +671,7 @@ fn build_profile_search_entry(
         name,
         aliases: names.into_iter().skip(1).collect(),
         nip05,
+        follow_distance,
         created_at: event.created_at.as_u64(),
         event_nhash: cid_to_nhash(mirrored_cid)?,
     })

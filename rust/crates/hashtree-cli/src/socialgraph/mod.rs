@@ -91,6 +91,8 @@ pub struct StoredProfileSearchEntry {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub nip05: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_distance: Option<u32>,
     pub created_at: u64,
     pub event_nhash: String,
 }
@@ -546,7 +548,9 @@ impl SocialGraphStore {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
         let (by_pubkey_root, search_root) = self
             .profile_index
-            .rebuild_profile_events(latest_by_pubkey.into_values())?;
+            .rebuild_profile_events_with_distances(latest_by_pubkey.into_values(), |event| {
+                self.follow_distance(&event.pubkey.to_bytes())
+            })?;
         self.profile_index
             .write_by_pubkey_root(by_pubkey_root.as_ref())?;
         self.profile_index.write_search_root(search_root.as_ref())?;
@@ -560,7 +564,9 @@ impl SocialGraphStore {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
         let (by_pubkey_root, search_root) = self
             .profile_index
-            .rebuild_profile_events_async(latest_by_pubkey.into_values())
+            .rebuild_profile_events_async_with_distances(latest_by_pubkey.into_values(), |event| {
+                self.follow_distance(&event.pubkey.to_bytes())
+            })
             .await?;
         self.profile_index
             .write_by_pubkey_root(by_pubkey_root.as_ref())?;
@@ -784,6 +790,7 @@ impl SocialGraphStore {
                     by_pubkey_root.as_ref(),
                     search_root.as_ref(),
                     event,
+                    self.follow_distance(&event.pubkey.to_bytes())?,
                 )?
             };
             if updated {
@@ -929,8 +936,6 @@ impl SocialGraphStore {
         self.bucket(storage_class)
             .write_events_root(Some(&next_root))?;
 
-        self.update_profile_index_for_events(std::slice::from_ref(event))?;
-
         if is_social_graph_event(event.kind) {
             {
                 let mut graph = self.graph.lock().unwrap();
@@ -940,6 +945,8 @@ impl SocialGraphStore {
             }
             self.invalidate_distance_cache();
         }
+
+        self.update_profile_index_for_events(std::slice::from_ref(event))?;
 
         Ok(())
     }
@@ -967,17 +974,11 @@ impl SocialGraphStore {
         .map_err(map_event_store_error)?;
         bucket.write_events_root(next_root.as_ref())?;
 
-        self.update_profile_index_for_events(events)?;
-
         let graph_events = events
             .iter()
             .filter(|event| is_social_graph_event(event.kind))
             .collect::<Vec<_>>();
-        if graph_events.is_empty() {
-            return Ok(());
-        }
-
-        {
+        if !graph_events.is_empty() {
             let mut graph = self.graph.lock().unwrap();
             let mut snapshot = SocialGraph::from_state(
                 graph
@@ -991,8 +992,10 @@ impl SocialGraphStore {
             graph
                 .replace_state(&snapshot.export_state())
                 .context("replace batched social graph state")?;
+            self.invalidate_distance_cache();
         }
-        self.invalidate_distance_cache();
+
+        self.update_profile_index_for_events(events)?;
 
         Ok(())
     }

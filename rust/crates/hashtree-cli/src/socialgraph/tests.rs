@@ -516,6 +516,73 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
 }
 
 #[test]
+fn test_profile_search_entries_include_follow_distance() {
+    let _guard = test_lock();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let stranger_keys = Keys::generate();
+
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+
+    let follow_alice = EventBuilder::new(
+        Kind::ContactList,
+        "",
+        vec![Tag::public_key(alice_keys.public_key())],
+    )
+    .custom_created_at(Timestamp::from_secs(4))
+    .to_event(&root_keys)
+    .unwrap();
+
+    let alice_profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({
+            "display_name": "Alice Search",
+        })
+        .to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .to_event(&alice_keys)
+    .unwrap();
+    let stranger_profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({
+            "display_name": "Stranger Search",
+        })
+        .to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .to_event(&stranger_keys)
+    .unwrap();
+    ingest_parsed_events(
+        &graph_store,
+        &[follow_alice, alice_profile, stranger_profile],
+    )
+    .unwrap();
+
+    let alice_pubkey = alice_keys.public_key().to_hex();
+    assert!(graph_store
+        .profile_search_entries_for_prefix("p:alice")
+        .unwrap()
+        .iter()
+        .any(|(key, entry)| {
+            key == &format!("p:alice:{alice_pubkey}") && entry.follow_distance == Some(1)
+        }));
+
+    let stranger_pubkey = stranger_keys.public_key().to_hex();
+    assert!(graph_store
+        .profile_search_entries_for_prefix("p:stranger")
+        .unwrap()
+        .iter()
+        .any(|(key, entry)| {
+            key == &format!("p:stranger:{stranger_pubkey}") && entry.follow_distance.is_none()
+        }));
+}
+
+#[test]
 fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
