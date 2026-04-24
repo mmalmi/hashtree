@@ -314,6 +314,26 @@ impl BackgroundNostrMirror {
         tokio::time::sleep(MIRROR_CONNECT_SETTLE_DELAY).await;
         let live_since = Timestamp::now();
         self.sync_publish_roots_from_store()?;
+        let (event_result, profile_search_result, profiles_by_pubkey_result) =
+            self.publish_priority_roots(true, true, true).await;
+        if let Err(err) = event_result {
+            warn!(
+                "Nostr mirror event-root publish failed on startup: {:#}",
+                err
+            );
+        }
+        if let Err(err) = profile_search_result {
+            warn!(
+                "Nostr mirror profile-search publish failed on startup: {:#}",
+                err
+            );
+        }
+        if let Err(err) = profiles_by_pubkey_result {
+            warn!(
+                "Nostr mirror profiles-by-pubkey publish failed on startup: {:#}",
+                err
+            );
+        }
 
         let initial_authors = self.collect_authors()?;
         if initial_authors.is_empty() {
