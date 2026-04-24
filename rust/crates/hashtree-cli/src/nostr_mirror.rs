@@ -201,7 +201,7 @@ impl BackgroundNostrMirror {
             if config.publish_relays.is_empty() {
                 None
             } else {
-                let client = Client::new(keys);
+                let client = Client::with_opts(keys, Options::new().wait_for_send(false));
                 for relay in &config.publish_relays {
                     client
                         .add_relay(relay)
@@ -1637,27 +1637,28 @@ impl BackgroundNostrMirror {
         let mut successful_relays = Vec::new();
         let mut failed_relays = Vec::new();
 
-        for relay in relays {
-            match publish_client
-                .send_event_to([relay.as_str()], event.clone())
-                .await
-            {
-                Ok(output) => {
-                    if output.success.is_empty() {
-                        failed_relays.push(format!("{relay}: relay did not acknowledge publish"));
-                        continue;
+        match publish_client
+            .send_event_to(relays.iter().map(|relay| relay.as_str()), event.clone())
+            .await
+        {
+            Ok(output) => {
+                for relay in relays {
+                    let relay_url = relay.trim_end_matches('/');
+                    if output
+                        .success
+                        .iter()
+                        .any(|url| url.as_str().trim_end_matches('/') == relay_url)
+                    {
+                        successful_relays.push(relay.clone());
                     }
-                    successful_relays.push(relay.clone());
-                    failed_relays.extend(output.failed.into_iter().map(
-                        |(url, reason)| match reason {
-                            Some(reason) => format!("{url}: {reason}"),
-                            None => format!("{url}: relay rejected publish"),
-                        },
-                    ));
                 }
-                Err(err) => {
-                    failed_relays.push(format!("{relay}: {err}"));
-                }
+                failed_relays.extend(output.failed.into_iter().map(|(url, reason)| match reason {
+                    Some(reason) => format!("{url}: {reason}"),
+                    None => format!("{url}: relay rejected publish"),
+                }));
+            }
+            Err(err) => {
+                failed_relays.push(format!("publish relays: {err}"));
             }
         }
 

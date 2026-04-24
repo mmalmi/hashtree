@@ -148,10 +148,13 @@ pub struct EmbeddedBackgroundServicesController {
 
 impl EmbeddedBackgroundServicesController {
     const MIRROR_PUBLISH_RELAY_PRIORITY: &[&str] = &[
+        "wss://relay.primal.net",
+        "wss://nos.lol",
+        "wss://relay.nostr.band",
+        "wss://relay.snort.social",
         "wss://temp.iris.to",
         "wss://vault.iris.to",
         "wss://relay.damus.io",
-        "wss://relay.primal.net",
     ];
     const MIRROR_PUBLISH_RELAY_BLOCKLIST: &[&str] =
         &["wss://graph-relay.iris.to", "wss://upload.iris.to/nostr"];
@@ -166,27 +169,29 @@ impl EmbeddedBackgroundServicesController {
         if active_relays.is_empty() {
             return Vec::new();
         }
-        let active_relay_set = active_relays.iter().cloned().collect::<HashSet<_>>();
-
-        let preferred = Self::MIRROR_PUBLISH_RELAY_PRIORITY
-            .iter()
-            .filter(|relay| active_relay_set.contains(**relay))
-            .map(|relay| (*relay).to_string())
-            .collect::<Vec<_>>();
-        if !preferred.is_empty() {
-            return preferred;
-        }
-
         let filtered = active_relays
             .iter()
             .filter(|relay| !Self::MIRROR_PUBLISH_RELAY_BLOCKLIST.contains(&relay.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        if !filtered.is_empty() {
-            return filtered;
+        if filtered.is_empty() {
+            return active_relays;
         }
 
-        active_relays
+        let filtered_set = filtered.iter().cloned().collect::<HashSet<_>>();
+        let mut selected = Self::MIRROR_PUBLISH_RELAY_PRIORITY
+            .iter()
+            .filter(|relay| filtered_set.contains(**relay))
+            .map(|relay| (*relay).to_string())
+            .collect::<Vec<_>>();
+        let mut selected_set = selected.iter().cloned().collect::<HashSet<_>>();
+        for relay in filtered {
+            if selected_set.insert(relay.clone()) {
+                selected.push(relay);
+            }
+        }
+
+        selected
     }
 
     pub fn new(
@@ -909,11 +914,12 @@ mod tests {
     use crate::config::Config;
 
     #[test]
-    fn mirror_publish_relays_prefers_known_root_publish_relays() {
+    fn mirror_publish_relays_orders_known_root_publish_relays_first() {
         let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
             &[
                 "wss://graph-relay.iris.to".to_string(),
                 "wss://relay.example".to_string(),
+                "wss://relay.primal.net".to_string(),
                 "wss://relay.damus.io".to_string(),
                 "wss://temp.iris.to".to_string(),
                 "wss://vault.iris.to".to_string(),
@@ -924,9 +930,11 @@ mod tests {
         assert_eq!(
             relays,
             vec![
+                "wss://relay.primal.net".to_string(),
                 "wss://temp.iris.to".to_string(),
                 "wss://vault.iris.to".to_string(),
                 "wss://relay.damus.io".to_string(),
+                "wss://relay.example".to_string(),
             ]
         );
     }
@@ -945,8 +953,8 @@ mod tests {
         assert_eq!(
             relays,
             vec![
-                "wss://relay.snort.social".to_string(),
                 "wss://relay.nostr.band".to_string(),
+                "wss://relay.snort.social".to_string(),
             ]
         );
     }
