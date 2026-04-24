@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::ensure_keys_string;
 use crate::fetch::{FetchConfig, Fetcher};
 use crate::HashtreeStore;
-use hashtree_core::{Cid, HashTree, HashTreeConfig, Link};
+use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link};
 
 const BLOSSOM_PUSH_CONCURRENCY: usize = 16;
 const BLOSSOM_PUSH_PROGRESS_EVERY: usize = 512;
@@ -46,10 +46,13 @@ async fn ensure_local_blob_for_push(
     }
 
     if let Some(fetcher) = fetcher {
-        fetcher
-            .fetch_chunk_with_store(store, None, &cid.hash)
+        let data = fetcher
+            .fetch_chunk(None, &to_hex(&cid.hash))
             .await
             .with_context(|| format!("failed to hydrate missing local blob {}", cid))?;
+        store
+            .put_blob(&data)
+            .with_context(|| format!("failed to persist hydrated blob {}", cid))?;
         if store.get_blob(&cid.hash)?.is_some() {
             return Ok(());
         }
@@ -95,6 +98,7 @@ pub(crate) async fn collect_cids_for_push(
 
 async fn upload_cids_with_client(
     store: Arc<HashtreeStore>,
+    fetcher: Option<Arc<Fetcher>>,
     client: hashtree_blossom::BlossomClient,
     cids_to_push: Vec<Cid>,
 ) -> Result<(usize, usize, usize, Option<String>)> {
@@ -107,8 +111,10 @@ async fn upload_cids_with_client(
 
     let mut uploads = stream::iter(cids_to_push.into_iter().map(|cid| {
         let store = Arc::clone(&store);
+        let fetcher = fetcher.clone();
         let client = client.clone();
         async move {
+            ensure_local_blob_for_push(store.as_ref(), fetcher.as_deref(), &cid).await?;
             let data = store
                 .get_blob(&cid.hash)?
                 .ok_or_else(|| anyhow::anyhow!("missing local blob while uploading {}", cid))?;
@@ -172,15 +178,16 @@ pub async fn push_to_blossom(
     }
 
     let store = Arc::new(HashtreeStore::new(data_dir)?);
-    let fetcher = Fetcher::new(FetchConfig::default());
+    let fetcher = Arc::new(Fetcher::new(FetchConfig::default()));
 
     println!("Collecting blocks...");
     let root_cid = parse_root_cid(cid_str)?;
-    let cids_to_push = collect_cids_for_push(store.as_ref(), root_cid, Some(&fetcher)).await?;
+    let cids_to_push =
+        collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?;
 
     println!("Found {} blocks to push", cids_to_push.len());
     let (uploaded, skipped, errors, last_error) =
-        upload_cids_with_client(store, client, cids_to_push).await?;
+        upload_cids_with_client(store, Some(fetcher), client, cids_to_push).await?;
 
     println!(
         "\nUploaded: {}, Skipped: {}, Errors: {}",
@@ -215,9 +222,10 @@ pub async fn background_blossom_push_with_store(
     let keys = Keys::parse(&nsec_str).context("Failed to parse nsec")?;
 
     let root_cid = parse_root_cid(cid_str)?;
-    let fetcher = Fetcher::new(FetchConfig::default());
+    let fetcher = Arc::new(Fetcher::new(FetchConfig::default()));
     println!("Collecting DAG for file-server push...");
-    let cids_to_push = collect_cids_for_push(store.as_ref(), root_cid, Some(&fetcher)).await?;
+    let cids_to_push =
+        collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?;
 
     if cids_to_push.is_empty() {
         return Ok(());
@@ -229,7 +237,7 @@ pub async fn background_blossom_push_with_store(
         BlossomClient::new(keys).with_write_servers(servers.to_vec())
     };
     let (_total_uploaded, _total_skipped, total_errors, last_error) =
-        upload_cids_with_client(store, client, cids_to_push).await?;
+        upload_cids_with_client(store, Some(fetcher), client, cids_to_push).await?;
 
     if total_errors > 0 {
         let detail = last_error

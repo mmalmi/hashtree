@@ -77,7 +77,7 @@ const MIRROR_ROOT_UPLOAD_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const MIRROR_ROOT_UPLOAD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob while pushing DAG";
+const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob";
 
 #[derive(Debug, Clone)]
 pub struct NostrMirrorConfig {
@@ -1444,6 +1444,11 @@ impl BackgroundNostrMirror {
 
         let upload_started =
             self.maybe_start_background_root_upload(&pending_root, publish_state, log_label);
+        let upload_required = !self.config.blossom_write_servers.is_empty();
+        let upload_ready = {
+            let state = publish_state.lock().expect("root publish state");
+            !upload_required || state.last_uploaded_root.as_ref() == Some(&pending_root)
+        };
 
         let mut successful_relays = Vec::new();
         let mut failed_relays = Vec::new();
@@ -1455,6 +1460,17 @@ impl BackgroundNostrMirror {
                 unreachable!("publish_required implies publish_client");
             };
             if !self.has_connected_publish_relay().await {
+                return Ok(());
+            }
+            if !upload_ready {
+                if upload_started {
+                    info!(
+                        "Nostr mirror uploading {} DAG before publish: tree={} hash={}",
+                        log_label,
+                        tree_name,
+                        hex::encode(pending_root.hash),
+                    );
+                }
                 return Ok(());
             }
 
@@ -1521,14 +1537,13 @@ impl BackgroundNostrMirror {
             }
         }
 
-        if published_now || upload_started {
+        if published_now {
             info!(
-                "Nostr mirror published {}: tree={} hash={} relays={:?} upload_started={}",
+                "Nostr mirror published {}: tree={} hash={} relays={:?}",
                 log_label,
                 tree_name,
                 hex::encode(pending_root.hash),
                 successful_relays,
-                upload_started,
             );
         }
         if !failed_relays.is_empty() {

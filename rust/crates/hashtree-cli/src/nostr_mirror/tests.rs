@@ -697,7 +697,7 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 }
 
 #[tokio::test]
-async fn apply_history_root_publishes_roots_even_if_event_upload_is_slow() -> Result<()> {
+async fn apply_history_root_defers_event_root_publish_until_event_upload_finishes() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
@@ -782,13 +782,25 @@ async fn apply_history_root_publishes_roots_even_if_event_upload_is_slow() -> Re
     );
 
     mirror.apply_history_root(root.as_ref()).await?;
+    let profile_publish_started = std::time::Instant::now();
+    while profile_publish_started.elapsed() < Duration::from_secs(5) {
+        mirror.maybe_publish_profile_search_root(false).await?;
+        mirror.maybe_publish_profiles_by_pubkey_root(false).await?;
+        mirror.maybe_publish_event_root(false).await?;
+        if published_root_event_count(&relay, "profile-search") == 1
+            && published_root_event_count(&relay, "profiles-by-pubkey") == 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(
         delayed_hashes.iter().all(|hash| !blossom.has_hash(hash)),
-        "delayed event upload completed before root events published"
+        "delayed event upload completed before event root publish was checked"
     );
     assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
     assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
-    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
     Ok(())
 }
 
