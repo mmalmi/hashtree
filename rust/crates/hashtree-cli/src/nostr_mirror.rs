@@ -147,6 +147,7 @@ struct RootPublishState {
     upload_in_progress_root: Option<hashtree_core::Cid>,
     last_upload_failed_at: Option<Instant>,
     last_upload_error: Option<String>,
+    missing_blob_rebuild_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1337,6 +1338,9 @@ impl BackgroundNostrMirror {
 
     async fn maybe_publish_event_root(&self, force: bool) -> Result<()> {
         self.ensure_public_events_root_is_publishable().await?;
+        if self.take_missing_blob_event_upload_error() {
+            return self.rebuild_event_indexes_after_missing_blobs(force).await;
+        }
         let result = self
             .maybe_publish_root(
                 self.config.published_event_tree_name.as_deref(),
@@ -1366,12 +1370,10 @@ impl BackgroundNostrMirror {
         if state.upload_in_progress_root.is_some() {
             return false;
         }
-        let Some(error) = state.last_upload_error.as_deref() else {
-            return false;
-        };
-        if !is_missing_local_blob_message(error) {
+        if !state.missing_blob_rebuild_required {
             return false;
         }
+        state.missing_blob_rebuild_required = false;
         state.last_upload_error = None;
         state.last_upload_failed_at = None;
         true
@@ -1635,6 +1637,7 @@ impl BackgroundNostrMirror {
                             state.last_uploaded_at = Some(Instant::now());
                             state.last_upload_failed_at = None;
                             state.last_upload_error = None;
+                            state.missing_blob_rebuild_required = false;
                         }
                         info!(
                             "Nostr mirror uploaded {} DAG to Blossom: hash={}",
@@ -1646,6 +1649,9 @@ impl BackgroundNostrMirror {
                         if state.pending_root.as_ref() == Some(&root) {
                             state.last_upload_failed_at = Some(Instant::now());
                             state.last_upload_error = Some(format!("{err:#}"));
+                        }
+                        if is_missing_local_blob_message(&format!("{err:#}")) {
+                            state.missing_blob_rebuild_required = true;
                         }
                         warn!(
                             "Nostr mirror {} DAG upload failed: hash={} error={:#}",
