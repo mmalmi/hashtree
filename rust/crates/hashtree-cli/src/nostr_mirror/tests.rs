@@ -1158,6 +1158,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
                 }
             },
             true,
+            None,
         )
         .await?;
 
@@ -1232,6 +1233,7 @@ async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
                 }
             },
             false,
+            None,
         )
         .await?;
 

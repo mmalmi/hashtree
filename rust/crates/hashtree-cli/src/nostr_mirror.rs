@@ -498,6 +498,8 @@ impl BackgroundNostrMirror {
     }
 
     async fn run_startup_history_sync(&self, initial_authors: Vec<String>) -> Result<()> {
+        self.history_sync_recent_text_notes_for_reachable_authors()
+            .await?;
         self.history_sync_full_text_notes_for_reachable_authors()
             .await?;
         if self.should_backfill_missing_profiles(None) {
@@ -563,6 +565,8 @@ impl BackgroundNostrMirror {
         include_full_text_notes: bool,
     ) -> Result<()> {
         if include_full_text_notes {
+            self.history_sync_recent_text_notes_for_authors(authors.clone())
+                .await?;
             self.history_sync_full_text_notes_for_authors(authors.clone())
                 .await?;
         }
@@ -815,6 +819,45 @@ impl BackgroundNostrMirror {
         self.history_sync_full_text_notes_for_authors(authors).await
     }
 
+    async fn history_sync_recent_text_notes_for_reachable_authors(&self) -> Result<()> {
+        let Some(distance) = self.full_text_note_history_follow_distance() else {
+            return Ok(());
+        };
+        info!(
+            "Nostr mirror recent text content catch-up author collection starting: max_follow_distance={distance}"
+        );
+        let authors = self.collect_authors_with_max_distance(distance)?;
+        self.history_sync_recent_text_notes_for_authors(authors)
+            .await
+    }
+
+    async fn history_sync_recent_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
+        if authors.is_empty() || self.full_text_note_history_follow_distance().is_none() {
+            return Ok(());
+        }
+
+        info!(
+            "Nostr mirror recent text content catch-up starting: authors={}",
+            authors.len()
+        );
+        let kinds = [Kind::TextNote.as_u16(), KIND_LONG_FORM_CONTENT];
+        let chunk_size = self
+            .config
+            .author_batch_size
+            .max(1)
+            .saturating_mul(LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER + 1);
+        self.history_sync_authors_chunked(
+            authors,
+            |current_root, author_chunk| async move {
+                self.history_sync_author_chunk(current_root, author_chunk, &kinds, false, None)
+                    .await
+            },
+            false,
+            Some(chunk_size),
+        )
+        .await
+    }
+
     async fn history_sync_full_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
         let Some(distance) = self.full_text_note_history_follow_distance() else {
             return Ok(());
@@ -876,6 +919,7 @@ impl BackgroundNostrMirror {
                 .await
             },
             update_profile_and_graph,
+            None,
         )
         .await
     }
@@ -885,6 +929,7 @@ impl BackgroundNostrMirror {
         authors: Vec<String>,
         mut run_chunk: F,
         update_profile_and_graph: bool,
+        chunk_size_override: Option<usize>,
     ) -> Result<()>
     where
         F: FnMut(Option<hashtree_core::Cid>, Vec<String>) -> Fut,
@@ -905,7 +950,9 @@ impl BackgroundNostrMirror {
         let mut last_error = None;
         let mut applied_chunks = 0usize;
         let mut failed_chunks = 0usize;
-        let chunk_size = self.config.history_sync_author_chunk_size.max(1);
+        let chunk_size = chunk_size_override
+            .unwrap_or(self.config.history_sync_author_chunk_size)
+            .max(1);
         let total_chunks = authors.len().div_ceil(chunk_size);
 
         for (chunk_index, author_chunk) in authors.chunks(chunk_size).enumerate() {
