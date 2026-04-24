@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{ListEventsOptions, NostrEventStore, NostrEventStoreError, StoredNostrEvent};
+use futures::{stream, StreamExt};
 use hashtree_core::{Cid, Store};
 use nostr_sdk::{
     pool::RelayLimits, Client, EventId, Filter, Keys, Kind, NegentropyOptions, Options, PublicKey,
@@ -153,6 +154,7 @@ struct RelayFetchResult {
 #[derive(Debug, Default)]
 struct BatchCrawlReport {
     events_seen: usize,
+    events_selected: usize,
     events: Vec<StoredNostrEvent>,
     live_bytes_selected: u64,
 }
@@ -262,7 +264,7 @@ impl<S: Store> NostrBridge<S> {
                 )
                 .await?;
             events_seen = events_seen.saturating_add(batch.events_seen);
-            events_selected = events_selected.saturating_add(batch.events.len());
+            events_selected = events_selected.saturating_add(batch.events_selected);
             live_bytes_selected = batch.live_bytes_selected;
             authors_processed = authors_processed.saturating_add(author_batch.len());
             if !batch.events.is_empty() {
@@ -537,11 +539,13 @@ impl<S: Store> NostrBridge<S> {
         if pubkeys.is_empty() {
             return Ok(BatchCrawlReport {
                 events_seen: 0,
+                events_selected: 0,
                 events: Vec::new(),
                 live_bytes_selected: live_bytes_selected_so_far,
             });
         }
 
+        let initial_known_ids = known.keys().cloned().collect::<BTreeSet<_>>();
         if self.config.full_author_history {
             return self
                 .crawl_full_author_history_batch(
@@ -549,6 +553,7 @@ impl<S: Store> NostrBridge<S> {
                     author_batch,
                     existing_by_author,
                     known,
+                    initial_known_ids,
                     relay_negentropy_support,
                     failed_relays,
                     live_bytes_selected_so_far,
@@ -618,10 +623,16 @@ impl<S: Store> NostrBridge<S> {
             .collect::<Vec<_>>();
         let (selected, live_bytes_selected) =
             self.apply_live_byte_cap_from(selected, live_bytes_selected_so_far)?;
+        let events_selected = selected.len();
+        let events_to_apply = selected
+            .into_iter()
+            .filter(|event| !initial_known_ids.contains(&event.id))
+            .collect::<Vec<_>>();
 
         Ok(BatchCrawlReport {
             events_seen,
-            events: selected,
+            events_selected,
+            events: events_to_apply,
             live_bytes_selected,
         })
     }
@@ -632,6 +643,7 @@ impl<S: Store> NostrBridge<S> {
         author_batch: &[String],
         mut existing_by_author: BTreeMap<String, Vec<StoredNostrEvent>>,
         mut known: BTreeMap<String, StoredNostrEvent>,
+        initial_known_ids: BTreeSet<String>,
         relay_negentropy_support: &mut BTreeMap<String, bool>,
         failed_relays: &mut BTreeSet<String>,
         live_bytes_selected_so_far: u64,
@@ -650,6 +662,7 @@ impl<S: Store> NostrBridge<S> {
         if pubkeys.is_empty() {
             return Ok(BatchCrawlReport {
                 events_seen: 0,
+                events_selected: 0,
                 events: Vec::new(),
                 live_bytes_selected: live_bytes_selected_so_far,
             });
@@ -658,21 +671,34 @@ impl<S: Store> NostrBridge<S> {
         let local_items = self.local_items_for_batch(known.values(), author_batch);
         let mut fetched_by_author = BTreeMap::<String, Vec<StoredNostrEvent>>::new();
 
-        for relay in &self.config.relays {
-            if failed_relays.contains(relay) {
-                continue;
+        let relays_to_fetch = self
+            .config
+            .relays
+            .iter()
+            .filter(|relay| !failed_relays.contains(*relay))
+            .map(|relay| (relay.clone(), relay_negentropy_support.get(relay).copied()))
+            .collect::<Vec<_>>();
+        let relay_fetches = relays_to_fetch.into_iter().map(|(relay, relay_support)| {
+            let local_items = local_items.clone();
+            let pubkeys = &pubkeys;
+            async move {
+                let result = self
+                    .fetch_full_history_from_relay(
+                        client,
+                        &relay,
+                        pubkeys,
+                        local_items,
+                        relay_support,
+                    )
+                    .await;
+                (relay, result)
             }
-            let relay_support = relay_negentropy_support.get(relay).copied();
-            match self
-                .fetch_full_history_from_relay(
-                    client,
-                    relay,
-                    &pubkeys,
-                    local_items.clone(),
-                    relay_support,
-                )
-                .await
-            {
+        });
+        let mut relay_fetches =
+            stream::iter(relay_fetches).buffer_unordered(self.config.relays.len().max(1));
+
+        while let Some((relay, result)) = relay_fetches.next().await {
+            match result {
                 Ok(fetched_from_relay) => {
                     relay_negentropy_support
                         .insert(relay.clone(), fetched_from_relay.supports_negentropy);
@@ -722,9 +748,15 @@ impl<S: Store> NostrBridge<S> {
 
         let (events, live_bytes_selected) =
             self.apply_live_byte_cap_from(selected, live_bytes_selected_so_far)?;
+        let events_selected = events.len();
+        let events_to_apply = events
+            .into_iter()
+            .filter(|event| !initial_known_ids.contains(&event.id))
+            .collect::<Vec<_>>();
         Ok(BatchCrawlReport {
             events_seen,
-            events,
+            events_selected,
+            events: events_to_apply,
             live_bytes_selected,
         })
     }
