@@ -305,6 +305,8 @@ impl BackgroundNostrMirror {
         if initial_authors.is_empty() {
             info!("Nostr mirror: no social-graph authors to mirror yet");
         } else if self.config.history_sync_on_start {
+            self.history_sync_full_text_notes_for_reachable_authors()
+                .await?;
             if self.should_backfill_missing_profiles(None) {
                 let missing_profile_authors = self.collect_missing_profile_authors(
                     self.config.missing_profile_backfill_batch_size,
@@ -321,8 +323,6 @@ impl BackgroundNostrMirror {
                     .await?;
                 }
             }
-            self.history_sync_full_text_notes_for_reachable_authors()
-                .await?;
             self.history_sync_authors(initial_authors.clone()).await?;
         }
 
@@ -682,6 +682,9 @@ impl BackgroundNostrMirror {
         let Some(distance) = self.full_text_note_history_follow_distance() else {
             return Ok(());
         };
+        info!(
+            "Nostr mirror full text-note history author collection starting: max_follow_distance={distance}"
+        );
         let authors = self.collect_authors_with_max_distance(distance)?;
         self.history_sync_full_text_notes_for_authors(authors).await
     }
