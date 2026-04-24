@@ -202,6 +202,7 @@ pub struct NostrConfig {
     #[serde(default = "default_nostr_full_text_note_history_follow_distance")]
     pub full_text_note_history_follow_distance: Option<u32>,
     /// Maximum relay pages per author for complete kind-1 history fetches.
+    /// Set to 0 to skip complete per-author history while keeping recent catch-up.
     #[serde(default = "default_nostr_full_text_note_history_max_relay_pages")]
     pub full_text_note_history_max_relay_pages: usize,
 }

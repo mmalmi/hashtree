@@ -686,6 +686,21 @@ impl BackgroundNostrMirror {
         }
     }
 
+    fn full_text_note_history_max_relay_pages(&self) -> Option<usize> {
+        Self::full_text_note_history_max_relay_pages_for_config(&self.config)
+    }
+
+    fn full_text_note_history_max_relay_pages_for_config(
+        config: &NostrMirrorConfig,
+    ) -> Option<usize> {
+        let pages = config.full_text_note_history_max_relay_pages;
+        if pages == 0 {
+            None
+        } else {
+            Some(pages)
+        }
+    }
+
     fn collect_missing_profile_authors(&self, limit: usize) -> Result<Vec<String>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -884,6 +899,10 @@ impl BackgroundNostrMirror {
         let Some(distance) = self.full_text_note_history_follow_distance() else {
             return Ok(());
         };
+        let Some(max_relay_pages) = self.full_text_note_history_max_relay_pages() else {
+            info!("Nostr mirror full text content history sync skipped: max_relay_pages=0");
+            return Ok(());
+        };
         let mut close_authors = Vec::new();
         for author in authors {
             let Ok(pubkey) = hex::decode(&author) else {
@@ -908,14 +927,14 @@ impl BackgroundNostrMirror {
             "Nostr mirror full text content history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
             close_authors.len(),
             distance,
-            self.config.full_text_note_history_max_relay_pages
+            max_relay_pages
         );
         let kinds = [Kind::TextNote.as_u16(), KIND_LONG_FORM_CONTENT];
         self.history_sync_authors_with_kinds_and_mode(
             close_authors,
             &kinds,
             true,
-            Some(self.config.full_text_note_history_max_relay_pages),
+            Some(max_relay_pages),
         )
         .await
     }
