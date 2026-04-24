@@ -701,6 +701,18 @@ impl BackgroundNostrMirror {
         }
     }
 
+    fn is_text_content_history_kind(kind: u16) -> bool {
+        kind == Kind::TextNote.as_u16() || kind == KIND_LONG_FORM_CONTENT
+    }
+
+    fn history_sync_kinds_for_config(config: &NostrMirrorConfig) -> Vec<u16> {
+        let mut kinds = config.kinds.clone();
+        if Self::full_text_note_history_max_relay_pages_for_config(config).is_none() {
+            kinds.retain(|kind| !Self::is_text_content_history_kind(*kind));
+        }
+        kinds
+    }
+
     fn collect_missing_profile_authors(&self, limit: usize) -> Result<Vec<String>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -831,9 +843,32 @@ impl BackgroundNostrMirror {
         Self::history_sync_plan_for(&self.config, authors, kinds)
     }
 
+    fn history_sync_chunk_size_for_config(
+        config: &NostrMirrorConfig,
+        authors: usize,
+        kinds: &[u16],
+        full_author_history: bool,
+        chunk_size_override: Option<usize>,
+    ) -> usize {
+        let configured_chunk_size = chunk_size_override
+            .unwrap_or(config.history_sync_author_chunk_size)
+            .max(1);
+        if !full_author_history
+            && Self::history_sync_plan_for(config, authors, kinds).relay_fetch_mode
+                == RelayFetchMode::GlobalRecent
+        {
+            return authors.max(1);
+        }
+        configured_chunk_size
+    }
+
     async fn history_sync_authors(&self, authors: Vec<String>) -> Result<()> {
-        self.history_sync_authors_with_kinds(authors, &self.config.kinds)
-            .await
+        let kinds = Self::history_sync_kinds_for_config(&self.config);
+        if kinds.is_empty() {
+            info!("Nostr mirror history sync skipped: no enabled history kinds");
+            return Ok(());
+        }
+        self.history_sync_authors_with_kinds(authors, &kinds).await
     }
 
     async fn history_sync_authors_with_kinds(
@@ -958,6 +993,13 @@ impl BackgroundNostrMirror {
         max_relay_pages: Option<usize>,
     ) -> Result<()> {
         let update_profile_and_graph = Self::history_sync_kinds_affect_profile_or_graph(kinds);
+        let chunk_size = Self::history_sync_chunk_size_for_config(
+            &self.config,
+            authors.len(),
+            kinds,
+            full_author_history,
+            None,
+        );
         self.history_sync_authors_chunked(
             authors,
             |current_root, author_chunk| async move {
@@ -971,7 +1013,7 @@ impl BackgroundNostrMirror {
                 .await
             },
             update_profile_and_graph,
-            None,
+            Some(chunk_size),
         )
         .await
     }

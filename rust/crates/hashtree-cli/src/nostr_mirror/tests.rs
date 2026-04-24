@@ -2051,6 +2051,27 @@ fn zero_full_text_history_pages_disables_startup_text_history() {
 }
 
 #[test]
+fn zero_full_text_history_pages_removes_text_kinds_from_general_history_sync() {
+    let config = NostrMirrorConfig {
+        full_text_note_history_max_relay_pages: 0,
+        ..NostrMirrorConfig::default()
+    };
+    let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
+    assert!(!kinds.contains(&Kind::TextNote.as_u16()));
+    assert!(!kinds.contains(&30_023));
+    assert!(kinds.contains(&Kind::Metadata.as_u16()));
+    assert!(kinds.contains(&Kind::ContactList.as_u16()));
+
+    let config = NostrMirrorConfig {
+        full_text_note_history_max_relay_pages: 3,
+        ..NostrMirrorConfig::default()
+    };
+    let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
+    assert!(kinds.contains(&Kind::TextNote.as_u16()));
+    assert!(kinds.contains(&30_023));
+}
+
+#[test]
 fn large_history_sync_prefers_global_recent() {
     let config = NostrMirrorConfig::default();
     let plan = BackgroundNostrMirror::history_sync_plan_for(
@@ -2062,4 +2083,34 @@ fn large_history_sync_prefers_global_recent() {
     assert_eq!(plan.relay_fetch_mode, RelayFetchMode::GlobalRecent);
     assert_eq!(plan.per_author_event_limit, 16);
     assert_eq!(plan.max_relay_pages, 20);
+}
+
+#[test]
+fn large_global_recent_history_sync_uses_one_chunk() {
+    let config = NostrMirrorConfig {
+        history_sync_author_chunk_size: 128,
+        ..NostrMirrorConfig::default()
+    };
+    let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
+    let authors = config.author_batch_size * 9;
+    let chunk_size = BackgroundNostrMirror::history_sync_chunk_size_for_config(
+        &config, authors, &kinds, false, None,
+    );
+
+    assert_eq!(chunk_size, authors);
+}
+
+#[test]
+fn full_author_history_keeps_configured_chunks() {
+    let config = NostrMirrorConfig {
+        history_sync_author_chunk_size: 128,
+        ..NostrMirrorConfig::default()
+    };
+    let kinds = [Kind::TextNote.as_u16(), 30_023];
+    let authors = config.author_batch_size * 9;
+    let chunk_size = BackgroundNostrMirror::history_sync_chunk_size_for_config(
+        &config, authors, &kinds, true, None,
+    );
+
+    assert_eq!(chunk_size, 128);
 }
