@@ -48,9 +48,13 @@ COPY crates ./crates
 
 # Build release binaries with persistent BuildKit caches. The target directory
 # is cache-mounted, so copy final artifacts to /out before the layer commits.
+# The deps stage builds placeholder local crates into the shared target cache.
+# Touch copied workspace sources so Cargo cannot reuse a placeholder htree binary
+# when Docker preserves older source mtimes.
 RUN --mount=type=cache,id=hashtree-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=hashtree-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=hashtree-target,target=/app/target,sharing=locked \
+    find crates -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'build.rs' \) -exec touch {} + && \
     cargo build --locked --release --package hashtree-cli --features s3 && \
     cargo build --locked --release --package hashtree-cashu-cli && \
     mkdir -p /out && \
