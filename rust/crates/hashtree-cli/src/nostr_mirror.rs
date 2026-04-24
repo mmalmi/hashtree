@@ -146,6 +146,7 @@ struct RootPublishState {
     last_uploaded_at: Option<Instant>,
     upload_in_progress_root: Option<hashtree_core::Cid>,
     last_upload_failed_at: Option<Instant>,
+    last_upload_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1325,6 +1326,8 @@ impl BackgroundNostrMirror {
         }
 
         state.pending_root = root;
+        state.last_upload_failed_at = None;
+        state.last_upload_error = None;
         state.last_changed_at = Some(now);
         if state.dirty_since.is_none() {
             state.dirty_since = Some(now);
@@ -1343,12 +1346,38 @@ impl BackgroundNostrMirror {
             )
             .await;
         let Err(error) = result else {
+            if self.take_missing_blob_event_upload_error() {
+                return self.rebuild_event_indexes_after_missing_blobs(force).await;
+            }
             return Ok(());
         };
         if !is_missing_local_blob_push_error(&error) {
             return Err(error);
         }
 
+        self.rebuild_event_indexes_after_missing_blobs(force).await
+    }
+
+    fn take_missing_blob_event_upload_error(&self) -> bool {
+        let mut state = self
+            .event_publish_state
+            .lock()
+            .expect("event root publish state");
+        if state.upload_in_progress_root.is_some() {
+            return false;
+        }
+        let Some(error) = state.last_upload_error.as_deref() else {
+            return false;
+        };
+        if !is_missing_local_blob_message(error) {
+            return false;
+        }
+        state.last_upload_error = None;
+        state.last_upload_failed_at = None;
+        true
+    }
+
+    async fn rebuild_event_indexes_after_missing_blobs(&self, force: bool) -> Result<()> {
         warn!(
             "Nostr mirror event root DAG references missing local blobs; rebuilding event indexes from stored events"
         );
@@ -1605,6 +1634,7 @@ impl BackgroundNostrMirror {
                             state.last_uploaded_root = Some(root.clone());
                             state.last_uploaded_at = Some(Instant::now());
                             state.last_upload_failed_at = None;
+                            state.last_upload_error = None;
                         }
                         info!(
                             "Nostr mirror uploaded {} DAG to Blossom: hash={}",
@@ -1613,7 +1643,10 @@ impl BackgroundNostrMirror {
                         );
                     }
                     Err(err) => {
-                        state.last_upload_failed_at = Some(Instant::now());
+                        if state.pending_root.as_ref() == Some(&root) {
+                            state.last_upload_failed_at = Some(Instant::now());
+                            state.last_upload_error = Some(format!("{err:#}"));
+                        }
                         warn!(
                             "Nostr mirror {} DAG upload failed: hash={} error={:#}",
                             log_label,
@@ -1739,6 +1772,10 @@ fn is_missing_local_blob_push_error(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.to_string().contains(MISSING_LOCAL_BLOB_PUSH_ERROR))
+}
+
+fn is_missing_local_blob_message(message: &str) -> bool {
+    message.contains(MISSING_LOCAL_BLOB_PUSH_ERROR)
 }
 
 fn later_timestamp(left: Option<Timestamp>, right: Option<Timestamp>) -> Option<Timestamp> {
