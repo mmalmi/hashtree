@@ -77,18 +77,35 @@ pub fn decode_signaling_event(
         return None;
     }
 
-    let inner_event: Event = match nip44::decrypt(keys.secret_key(), &event.pubkey, &event.content)
-    {
-        Ok(plaintext) => serde_json::from_str(&plaintext).ok()?,
+    let plaintext = match nip44::decrypt(keys.secret_key(), &event.pubkey, &event.content) {
+        Ok(plaintext) => plaintext,
         Err(_) => return None,
     };
+
+    if let Ok(inner_event) = serde_json::from_str::<Event>(&plaintext) {
+        return decode_signed_inner_event(inner_event, my_peer_id, my_pubkey);
+    }
+
+    let seal: serde_json::Value = serde_json::from_str(&plaintext).ok()?;
+    if let Some(inner_event_value) = seal.get("event") {
+        let inner_event = serde_json::from_value::<Event>(inner_event_value.clone()).ok()?;
+        return decode_signed_inner_event(inner_event, my_peer_id, my_pubkey);
+    }
+
+    decode_legacy_directed_seal(seal, my_peer_id, my_pubkey)
+}
+
+fn decode_signed_inner_event(
+    inner_event: Event,
+    my_peer_id: &str,
+    my_pubkey: &str,
+) -> Option<SignalingMessage> {
     if inner_event.verify().is_err()
         || (inner_event.kind != Kind::Custom(NOSTR_KIND_HASHTREE)
             && inner_event.kind != Kind::Ephemeral(NOSTR_KIND_HASHTREE))
     {
         return None;
     }
-
     let sender_pubkey = inner_event.pubkey.to_hex();
     if sender_pubkey == my_pubkey {
         return None;
@@ -98,6 +115,26 @@ pub fn decode_signaling_event(
         serde_json::from_str(&inner_event.content).ok()?,
         &sender_pubkey,
     )?;
+    let claimed_pubkey = crate::types::PeerId::from_peer_string(msg.peer_id())?.pubkey;
+    if claimed_pubkey.is_empty() || claimed_pubkey != sender_pubkey {
+        return None;
+    }
+
+    msg.is_for(my_peer_id).then_some(msg)
+}
+
+fn decode_legacy_directed_seal(
+    seal: serde_json::Value,
+    my_peer_id: &str,
+    my_pubkey: &str,
+) -> Option<SignalingMessage> {
+    let sender_pubkey = seal.get("pubkey").and_then(|v| v.as_str())?;
+    if sender_pubkey == my_pubkey {
+        return None;
+    }
+
+    let content = seal.get("content").and_then(|v| v.as_str())?;
+    let msg = normalize_signaling_message(serde_json::from_str(content).ok()?, sender_pubkey)?;
     let claimed_pubkey = crate::types::PeerId::from_peer_string(msg.peer_id())?.pubkey;
     if claimed_pubkey.is_empty() || claimed_pubkey != sender_pubkey {
         return None;
@@ -123,20 +160,27 @@ pub fn encode_signaling_event(
             .map_err(|e| TransportError::SendFailed(format!("Invalid recipient pubkey: {e}")))?;
 
         let expiration = Timestamp::now() + Duration::from_secs(5 * 60);
+        let message_json =
+            serde_json::to_string(msg).map_err(|e| TransportError::SendFailed(e.to_string()))?;
         let inner_tags = vec![Tag::public_key(recipient_pk), Tag::expiration(expiration)];
-        let inner_event = EventBuilder::new(
-            kind.clone(),
-            serde_json::to_string(msg).map_err(|e| TransportError::SendFailed(e.to_string()))?,
-            inner_tags,
-        )
-        .to_event(keys)
-        .map_err(|e| TransportError::SendFailed(format!("Failed to sign directed message: {e}")))?;
+        let inner_event = EventBuilder::new(kind.clone(), message_json.clone(), inner_tags)
+            .to_event(keys)
+            .map_err(|e| {
+                TransportError::SendFailed(format!("Failed to sign directed message: {e}"))
+            })?;
+        let seal = serde_json::json!({
+            "pubkey": keys.public_key().to_hex(),
+            "kind": NOSTR_KIND_HASHTREE,
+            "content": message_json,
+            "tags": [],
+            "event": inner_event,
+        });
 
         let ephemeral_keys = Keys::generate();
         let encrypted_content = nip44::encrypt(
             ephemeral_keys.secret_key(),
             &recipient_pk,
-            inner_event.as_json(),
+            seal.to_string(),
             nip44::Version::V2,
         )
         .map_err(|e| TransportError::SendFailed(format!("Encryption failed: {e}")))?;
@@ -546,8 +590,24 @@ mod tests {
 
         let plaintext = nip44::decrypt(recipient_keys.secret_key(), &event.pubkey, &event.content)
             .expect("decrypt directed signaling");
-        let inner_event: Event =
-            serde_json::from_str(&plaintext).expect("decode inner signaling event");
+        let seal: serde_json::Value =
+            serde_json::from_str(&plaintext).expect("decode directed signaling seal");
+        assert_eq!(
+            seal.get("pubkey").and_then(|value| value.as_str()),
+            Some(sender_peer_id.as_str())
+        );
+        let legacy_content = seal
+            .get("content")
+            .and_then(|value| value.as_str())
+            .expect("legacy content");
+        assert!(legacy_content.contains("\"targetPeerId\""));
+        assert!(!legacy_content.contains("\"recipient\""));
+        let inner_event: Event = serde_json::from_value(
+            seal.get("event")
+                .cloned()
+                .expect("signed inner signaling event"),
+        )
+        .expect("decode inner signaling event");
         assert!(inner_event.verify().is_ok());
         assert_eq!(inner_event.pubkey, sender_keys.public_key());
         assert!(inner_event.content.contains("\"targetPeerId\""));
@@ -605,6 +665,108 @@ mod tests {
 
         assert_eq!(decoded.peer_id(), attacker_keys.public_key().to_hex());
         assert_ne!(decoded.peer_id(), claimed_peer_id);
+    }
+
+    #[test]
+    fn decoder_accepts_legacy_directed_seal_for_transition() {
+        let sender_keys = Keys::generate();
+        let recipient_keys = Keys::generate();
+        let sender_peer_id = sender_keys.public_key().to_hex();
+        let recipient_peer_id = recipient_keys.public_key().to_hex();
+        let msg = SignalingMessage::Offer {
+            peer_id: sender_peer_id.clone(),
+            target_peer_id: recipient_peer_id.clone(),
+            sdp: "legacy-sdp".to_string(),
+        };
+        let seal = serde_json::json!({
+            "pubkey": sender_peer_id,
+            "kind": NOSTR_KIND_HASHTREE,
+            "content": serde_json::to_string(&msg).expect("legacy message json"),
+            "tags": []
+        });
+        let recipient_pk =
+            PublicKey::from_hex(&recipient_keys.public_key().to_hex()).expect("recipient pubkey");
+        let ephemeral_keys = Keys::generate();
+        let ciphertext = nip44::encrypt(
+            ephemeral_keys.secret_key(),
+            &recipient_pk,
+            seal.to_string(),
+            nip44::Version::V2,
+        )
+        .expect("encrypt legacy message");
+        let event = EventBuilder::new(
+            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            ciphertext,
+            vec![
+                Tag::public_key(recipient_pk),
+                Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
+            ],
+        )
+        .to_event(&ephemeral_keys)
+        .expect("build event");
+
+        let decoded = decode_signaling_event(
+            &event,
+            &recipient_peer_id,
+            &recipient_keys.public_key().to_hex(),
+            &recipient_keys,
+        )
+        .expect("decode legacy directed signaling");
+        assert_eq!(decoded.peer_id(), sender_keys.public_key().to_hex());
+    }
+
+    #[test]
+    fn decoder_rejects_tampered_inner_event_without_legacy_fallback() {
+        let sender_keys = Keys::generate();
+        let recipient_keys = Keys::generate();
+        let sender_peer_id = sender_keys.public_key().to_hex();
+        let recipient_peer_id = recipient_keys.public_key().to_hex();
+        let msg = SignalingMessage::Offer {
+            peer_id: sender_peer_id,
+            target_peer_id: recipient_peer_id.clone(),
+            sdp: "test-sdp".to_string(),
+        };
+        let event = encode_signaling_event(
+            &sender_keys,
+            msg.peer_id(),
+            &msg,
+            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+        )
+        .expect("encode signaling event");
+        let plaintext = nip44::decrypt(recipient_keys.secret_key(), &event.pubkey, &event.content)
+            .expect("decrypt directed signaling");
+        let mut seal: serde_json::Value =
+            serde_json::from_str(&plaintext).expect("decode directed signaling seal");
+        seal["event"]["content"] = serde_json::Value::String("tampered".to_string());
+
+        let recipient_pk =
+            PublicKey::from_hex(&recipient_keys.public_key().to_hex()).expect("recipient pubkey");
+        let ephemeral_keys = Keys::generate();
+        let ciphertext = nip44::encrypt(
+            ephemeral_keys.secret_key(),
+            &recipient_pk,
+            seal.to_string(),
+            nip44::Version::V2,
+        )
+        .expect("encrypt tampered message");
+        let tampered_event = EventBuilder::new(
+            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            ciphertext,
+            vec![
+                Tag::public_key(recipient_pk),
+                Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
+            ],
+        )
+        .to_event(&ephemeral_keys)
+        .expect("build tampered event");
+
+        assert!(decode_signaling_event(
+            &tampered_event,
+            &recipient_peer_id,
+            &recipient_keys.public_key().to_hex(),
+            &recipient_keys,
+        )
+        .is_none());
     }
 
     #[test]
