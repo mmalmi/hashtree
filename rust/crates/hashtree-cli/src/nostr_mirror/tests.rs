@@ -1555,6 +1555,98 @@ async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
 }
 
 #[tokio::test]
+async fn live_event_flush_recovers_invalid_public_event_root_before_publish() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let tree = hashtree_core::HashTree::new(hashtree_core::HashTreeConfig::new(store.store_arc()));
+    let (invalid_root, _) = tree
+        .put_file(b"this is a file blob, not a nostr event index")
+        .await?;
+    graph_store.write_public_events_root(Some(&invalid_root))?;
+
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: None,
+            published_event_tree_name: Some("nostr-event-index".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store.clone(),
+        graph_store.clone(),
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_note = EventBuilder::new(Kind::TextNote, "hello recovered index", [])
+        .custom_created_at(Timestamp::from(22))
+        .to_event(&alice_keys)
+        .expect("alice note");
+
+    mirror.ingest_live_event(&alice_note)?;
+    mirror.flush_live_events().await?;
+
+    let public_root = graph_store
+        .public_events_root()?
+        .expect("public event root");
+    assert_ne!(
+        public_root, invalid_root,
+        "flush should replace the invalid root before publishing"
+    );
+    let event_store = NostrEventStore::new(store.store_arc());
+    event_store.validate_index_root(Some(&public_root)).await?;
+    assert!(event_store
+        .get_by_id(Some(&public_root), &alice_note.id.to_hex())
+        .await?
+        .is_some());
+
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+    let resolved = resolver
+        .resolve(&format!("{npub}/nostr-event-index"))
+        .await?
+        .expect("published event root");
+    assert_eq!(resolved, public_root);
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
+
+    resolver.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_live_ingest_updates_profile_index() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");

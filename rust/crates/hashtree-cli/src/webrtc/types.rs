@@ -71,5 +71,6 @@ pub fn encode_message(msg: &DataMessage) -> Result<Vec<u8>, rmp_serde::encode::E
         DataMessage::Payment(req) => encode_payment(req),
         DataMessage::PaymentAck(res) => encode_payment_ack(res),
         DataMessage::Chunk(chunk) => encode_chunk(chunk),
+        DataMessage::PeerHints(hints) => Ok(hashtree_network::encode_peer_hints(hints)),
     }
 }

@@ -794,7 +794,7 @@ impl BackgroundNostrMirror {
             self.config.require_negentropy
         );
 
-        let mut current_root = self.graph_store.public_events_root()?;
+        let mut current_root = self.graph_store.public_events_root_for_write()?;
         let mut last_error = None;
         let mut applied_chunks = 0usize;
         let mut failed_chunks = 0usize;
@@ -1157,6 +1157,7 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_event_root(&self, force: bool) -> Result<()> {
+        self.ensure_public_events_root_is_publishable().await?;
         let result = self
             .maybe_publish_root(
                 self.config.published_event_tree_name.as_deref(),
@@ -1193,6 +1194,23 @@ impl BackgroundNostrMirror {
             force,
         )
         .await
+    }
+
+    async fn ensure_public_events_root_is_publishable(&self) -> Result<()> {
+        let Some(root) = self.graph_store.public_events_root()? else {
+            return Ok(());
+        };
+        let event_store = NostrEventStore::new(self.store.store_arc());
+        if let Err(err) = event_store.validate_index_root(Some(&root)).await {
+            warn!(
+                "Nostr mirror refusing to publish invalid event index root {}; clearing trusted root: {}",
+                hex::encode(root.hash),
+                err
+            );
+            self.graph_store.write_public_events_root(None)?;
+            self.note_public_events_root_change()?;
+        }
+        Ok(())
     }
 
     async fn maybe_publish_profile_search_root(&self, force: bool) -> Result<()> {

@@ -23,6 +23,25 @@ impl EventIndexBucket {
         write_root_file(&self.root_path, root)
     }
 
+    pub(super) fn events_root_for_write(&self) -> Result<Option<Cid>> {
+        let root = self.events_root()?;
+        let Some(root_ref) = root.as_ref() else {
+            return Ok(None);
+        };
+
+        if let Err(err) = block_on(self.event_store.validate_index_root(Some(root_ref))) {
+            tracing::warn!(
+                "Ignoring invalid social graph event index root {} before write: {}",
+                hex::encode(root_ref.hash),
+                err
+            );
+            self.write_events_root(None)?;
+            return Ok(None);
+        }
+
+        Ok(root)
+    }
+
     pub(super) fn store_event(&self, root: Option<&Cid>, event: &Event) -> Result<Cid> {
         let stored = stored_event_from_nostr(event);
         let _profile = NostrProfileGuard::new("socialgraph.event_store.add");

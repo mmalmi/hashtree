@@ -1389,8 +1389,22 @@ fn test_known_peers_fetch_after_restart_with_relay_down() -> Result<()> {
     )?;
     wait_for_peer_data_channel(&instance_b.addr, &pubkey_a, Duration::from_secs(45))?;
 
-    // Let the periodic peer-state writer flush the signed address hints learned from hello.
+    // Let the periodic peer-state writer flush the private signaling hints learned over WebRTC.
     std::thread::sleep(Duration::from_secs(6));
+    let peer_state_a = fs::read_to_string(instance_a.data_path.join("mesh-peer-state.json"))
+        .context("read persisted peer state for instance A")?;
+    if !peer_state_a.contains(&format!("http://127.0.0.1:{}", ports[1])) {
+        anyhow::bail!(
+            "instance A did not persist instance B WebRTC signaling endpoint; state={peer_state_a}"
+        );
+    }
+    let peer_state_b = fs::read_to_string(instance_b.data_path.join("mesh-peer-state.json"))
+        .context("read persisted peer state for instance B")?;
+    if !peer_state_b.contains(&format!("http://127.0.0.1:{}", ports[0])) {
+        anyhow::bail!(
+            "instance B did not persist instance A WebRTC signaling endpoint; state={peer_state_b}"
+        );
+    }
 
     let expected = b"relayless-restart-known-peer".to_vec();
     let store = HashtreeStore::new_with_backend(
@@ -1404,6 +1418,8 @@ fn test_known_peers_fetch_after_restart_with_relay_down() -> Result<()> {
     instance_a.restart()?;
     instance_b.restart()?;
 
+    wait_for_peer_data_channel(&instance_b.addr, &pubkey_a, Duration::from_secs(25))?;
+
     let url = format!("{}/{}", instance_b.base_url(), cid);
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
@@ -1414,7 +1430,7 @@ fn test_known_peers_fetch_after_restart_with_relay_down() -> Result<()> {
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "Timed out waiting for restarted peer to fetch from known HTTP peer without relay"
+                "Timed out waiting for restarted peer to fetch over rebuilt WebRTC without relay"
             );
         }
         std::thread::sleep(Duration::from_millis(250));

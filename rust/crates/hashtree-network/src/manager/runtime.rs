@@ -1,4 +1,7 @@
 use super::*;
+use nostr_sdk::nostr::JsonUtil;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 impl WebRTCManager {
     /// Start the native peer router - connects transports and handles signaling.
@@ -10,6 +13,9 @@ impl WebRTCManager {
 
         let (event_tx, mut event_rx) = mpsc::channel::<(String, nostr_sdk::nostr::Event)>(100);
         let (relay_msg_tx, mut relay_msg_rx) = mpsc::channel::<SignalingMessage>(100);
+        self.state
+            .set_direct_signaling_sender(Some(event_tx.clone()))
+            .await;
 
         // Take the signaling receiver
         let mut signaling_rx = self
@@ -147,6 +153,7 @@ impl WebRTCManager {
                 self.state_event_tx.clone(),
                 self.nostr_relay.clone(),
                 self.mesh_frame_tx.clone(),
+                self.config.signal_urls.clone(),
                 self.peer_classifier.clone(),
             ));
             let (classifier_tx, mut classifier_rx) = mpsc::channel::<SharedClassifyRequest>(32);
@@ -177,9 +184,7 @@ impl WebRTCManager {
             tokio::time::interval(Duration::from_millis(self.config.hello_interval_ms));
         if self.config.signaling_enabled {
             if let Some(shared_router) = self.shared_router.as_ref() {
-                let _ = shared_router
-                    .send_hello_with_addresses(Vec::new(), self.config.advertise_addresses.clone())
-                    .await;
+                let _ = shared_router.send_hello(Vec::new()).await;
             }
         }
         loop {
@@ -218,9 +223,7 @@ impl WebRTCManager {
                 }
                 _ = hello_ticker.tick(), if self.config.signaling_enabled => {
                     if let Some(shared_router) = self.shared_router.as_ref() {
-                        let _ = shared_router
-                            .send_hello_with_addresses(Vec::new(), self.config.advertise_addresses.clone())
-                            .await;
+                        let _ = shared_router.send_hello(Vec::new()).await;
                     }
                 }
                 _ = cleanup_interval.tick() => {
@@ -230,6 +233,7 @@ impl WebRTCManager {
             }
         }
 
+        self.state.set_direct_signaling_sender(None).await;
         Ok(())
     }
 
@@ -248,6 +252,7 @@ impl WebRTCManager {
         msg: SignalingMessage,
         relay_transport: Option<&Arc<NostrRelayTransport>>,
     ) {
+        self.dispatch_direct_signaling_message(&msg).await;
         if let Err(err) = crate::dispatch_signaling_message(
             self.config.signaling_enabled,
             &self.keys,
@@ -257,13 +262,55 @@ impl WebRTCManager {
             &self.local_buses,
             &self.seen_frame_ids,
             &self.seen_event_ids,
-            msg,
+            msg.clone(),
             MESH_SIGNALING_EVENT_KIND as u64,
         )
         .await
         {
             debug!("Failed to dispatch signaling message: {}", err);
         }
+    }
+
+    async fn dispatch_direct_signaling_message(&self, msg: &SignalingMessage) {
+        let endpoints = self.direct_signaling_endpoints(msg).await;
+        if endpoints.is_empty() {
+            return;
+        }
+
+        let Ok(event) =
+            crate::create_signaling_event(&self.keys, msg, MESH_SIGNALING_EVENT_KIND as u64).await
+        else {
+            return;
+        };
+        let body = event.as_json();
+        for endpoint in endpoints {
+            let body = body.clone();
+            tokio::spawn(async move {
+                if let Err(err) = post_direct_signaling_event(&endpoint, &body).await {
+                    debug!("Failed to post WebRTC signaling event to {endpoint}: {err}");
+                }
+            });
+        }
+    }
+
+    async fn direct_signaling_endpoints(&self, msg: &SignalingMessage) -> Vec<String> {
+        let target = msg.target_peer_id().map(str::to_string);
+        let mut endpoints = Vec::new();
+        for peer in self.state.ordered_known_peers().await {
+            if target
+                .as_deref()
+                .is_some_and(|target| target != peer.peer_id)
+            {
+                continue;
+            }
+            for signal_url in peer.signal_urls {
+                let endpoint = direct_signal_endpoint(&signal_url);
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+            }
+        }
+        endpoints
     }
 
     async fn forward_mesh_frame(
@@ -377,6 +424,51 @@ impl WebRTCManager {
     async fn cleanup_stale_peers(&self) {
         crate::cleanup_stale_peers(&self.state.runtime, Duration::from_secs(60)).await;
     }
+}
+
+fn direct_signal_endpoint(base_url: &str) -> String {
+    format!("{}/api/p2p/signal", base_url.trim().trim_end_matches('/'))
+}
+
+async fn post_direct_signaling_event(endpoint: &str, body: &str) -> Result<()> {
+    let Some((host, port, path)) = parse_http_endpoint(endpoint) else {
+        anyhow::bail!("unsupported WebRTC signaling endpoint");
+    };
+    let mut stream = TcpStream::connect((host.as_str(), port)).await?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await;
+    if response.starts_with(b"HTTP/1.1 2") || response.starts_with(b"HTTP/1.0 2") {
+        return Ok(());
+    }
+    anyhow::bail!("WebRTC signaling endpoint returned non-2xx response");
+}
+
+fn parse_http_endpoint(endpoint: &str) -> Option<(String, u16, String)> {
+    let rest = endpoint.strip_prefix("http://")?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
+        let (host, tail) = stripped.split_once(']')?;
+        let port = tail.strip_prefix(':')?.parse::<u16>().ok()?;
+        (host.to_string(), port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (host.to_string(), port.parse::<u16>().ok()?)
+    } else {
+        (authority.to_string(), 80)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, port, path))
 }
 
 // Keep the old PeerState for backward compatibility with tests
@@ -718,7 +810,6 @@ mod tests {
                     peer_id: manager.my_peer_id.to_string(),
                     roots: Vec::new(),
                     hash_get: true,
-                    addresses: Vec::new(),
                 },
                 None,
             )

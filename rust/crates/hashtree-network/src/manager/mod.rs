@@ -13,9 +13,9 @@ pub use crate::{ConnectionState, PeerSignalPath, PeerTransport};
 use anyhow::Result;
 use async_trait::async_trait;
 use cashu_service::CashuPaymentClient;
-use nostr_sdk::nostr::Keys;
 #[cfg(test)]
 use nostr_sdk::nostr::Kind;
+use nostr_sdk::nostr::{Event, Keys};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,7 +72,7 @@ pub struct WebRTCConfig {
     pub relays: Vec<String>,
     pub signaling_enabled: bool,
     pub hash_get_enabled: bool,
-    pub advertise_addresses: Vec<String>,
+    pub signal_urls: Vec<String>,
     pub max_outbound: usize,
     pub max_inbound: usize,
     pub hello_interval_ms: u64,
@@ -99,7 +99,7 @@ impl Default for WebRTCConfig {
             ],
             signaling_enabled: true,
             hash_get_enabled: true,
-            advertise_addresses: Vec::new(),
+            signal_urls: Vec::new(),
             max_outbound: 6,
             max_inbound: 6,
             hello_interval_ms: 3000,
@@ -148,6 +148,7 @@ pub struct WebRTCState {
     pub runtime: MeshRuntimeState<MeshPeer>,
     /// Shared peer selector used by live retrieval; aligned with simulation strategies.
     peer_selector: Arc<RwLock<PeerSelector>>,
+    direct_signaling_tx: RwLock<Option<mpsc::Sender<(String, Event)>>>,
     /// Hedged dispatch policy for retrieval requests.
     request_dispatch: RequestDispatchConfig,
     /// Retrieval timeout for quote negotiation and single-peer fetches.
@@ -221,6 +222,7 @@ struct SharedRouterPeerFactory {
     state_event_tx: mpsc::Sender<PeerStateEvent>,
     nostr_relay: Option<SharedMeshRelayClient>,
     mesh_frame_tx: mpsc::Sender<(PeerId, MeshNostrFrame)>,
+    signal_urls: Vec<String>,
     peer_classifier: PeerClassifier,
     peers: RwLock<HashMap<String, Arc<Peer>>>,
 }
@@ -235,6 +237,7 @@ impl SharedRouterPeerFactory {
         state_event_tx: mpsc::Sender<PeerStateEvent>,
         nostr_relay: Option<SharedMeshRelayClient>,
         mesh_frame_tx: mpsc::Sender<(PeerId, MeshNostrFrame)>,
+        signal_urls: Vec<String>,
         peer_classifier: PeerClassifier,
     ) -> Self {
         Self {
@@ -246,6 +249,7 @@ impl SharedRouterPeerFactory {
             state_event_tx,
             nostr_relay,
             mesh_frame_tx,
+            signal_urls,
             peer_classifier,
             peers: RwLock::new(HashMap::new()),
         }
@@ -282,7 +286,7 @@ impl SharedRouterPeerFactory {
         peer_id: PeerId,
         direction: PeerDirection,
     ) -> Result<Peer, SharedTransportError> {
-        Peer::new_with_store_and_events(
+        let mut peer = Peer::new_with_store_and_events(
             peer_id,
             direction,
             self.my_peer_id.clone(),
@@ -295,7 +299,9 @@ impl SharedRouterPeerFactory {
             Some(self.state.cashu_quotes.clone()),
         )
         .await
-        .map_err(|e| SharedTransportError::ConnectionFailed(e.to_string()))
+        .map_err(|e| SharedTransportError::ConnectionFailed(e.to_string()))?;
+        peer.set_signal_urls(self.signal_urls.clone());
+        Ok(peer)
     }
 }
 
@@ -464,6 +470,7 @@ impl WebRTCState {
         Self {
             runtime: MeshRuntimeState::new(),
             peer_selector,
+            direct_signaling_tx: RwLock::new(None),
             request_dispatch,
             request_timeout,
             cashu_quotes,
@@ -518,36 +525,6 @@ impl WebRTCState {
         self.runtime.import_known_peer_snapshot(snapshot).await;
     }
 
-    pub async fn record_direct_peer_request(&self, peer_id: &str, bytes: u64) {
-        let mut selector = self.peer_selector.write().await;
-        selector.add_peer(peer_id);
-        selector.record_request(peer_id, bytes);
-    }
-
-    pub async fn record_direct_peer_success(&self, peer_id: &str, rtt_ms: u64, bytes: u64) {
-        let mut selector = self.peer_selector.write().await;
-        selector.add_peer(peer_id);
-        selector.record_success(peer_id, rtt_ms, bytes);
-    }
-
-    pub async fn record_direct_peer_miss(&self, peer_id: &str) {
-        let mut selector = self.peer_selector.write().await;
-        selector.add_peer(peer_id);
-        selector.record_miss(peer_id);
-    }
-
-    pub async fn record_direct_peer_timeout(&self, peer_id: &str) {
-        let mut selector = self.peer_selector.write().await;
-        selector.add_peer(peer_id);
-        selector.record_timeout(peer_id);
-    }
-
-    pub async fn record_direct_peer_failure(&self, peer_id: &str) {
-        let mut selector = self.peer_selector.write().await;
-        selector.add_peer(peer_id);
-        selector.record_failure(peer_id);
-    }
-
     pub async fn ordered_known_peers(&self) -> Vec<KnownPeerRecord> {
         let snapshot = self.runtime.known_peer_snapshot().await;
         let mut by_peer = snapshot
@@ -574,6 +551,18 @@ impl WebRTCState {
         remaining.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
         ordered.extend(remaining);
         ordered
+    }
+
+    pub async fn set_direct_signaling_sender(&self, tx: Option<mpsc::Sender<(String, Event)>>) {
+        *self.direct_signaling_tx.write().await = tx;
+    }
+
+    pub async fn submit_direct_signaling_event(&self, source: String, event: Event) -> bool {
+        let tx = self.direct_signaling_tx.read().await.clone();
+        let Some(tx) = tx else {
+            return false;
+        };
+        tx.send((source, event)).await.is_ok()
     }
 
     /// Get current bandwidth stats (bytes sent/received)

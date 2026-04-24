@@ -220,14 +220,16 @@ impl<S: Store> NostrBridge<S> {
 
         let client = self.connect_client().await?;
 
+        let existing_root = self.usable_existing_root(existing_root).await?;
+
         if self.config.relay_fetch_mode == RelayFetchMode::AuthorBatches {
             return self
-                .crawl_author_batches(&client, &authors, existing_root, &mut on_progress)
+                .crawl_author_batches(&client, &authors, existing_root.as_ref(), &mut on_progress)
                 .await;
         }
 
         let state = self
-            .load_existing_global_state(existing_root, &authors)
+            .load_existing_global_state(existing_root.as_ref(), &authors)
             .await?;
 
         let report = self
@@ -235,6 +237,23 @@ impl<S: Store> NostrBridge<S> {
             .await?;
         on_progress(&report);
         Ok(report)
+    }
+
+    async fn usable_existing_root(&self, root: Option<&Cid>) -> Result<Option<Cid>> {
+        let Some(root) = root else {
+            return Ok(None);
+        };
+
+        match self.event_store.validate_index_root(Some(root)).await {
+            Ok(()) => Ok(Some(root.clone())),
+            Err(err) => {
+                eprintln!(
+                    "Ignoring invalid existing Nostr event index root {}: {err}",
+                    hex::encode(root.hash)
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn crawl_author_batches(

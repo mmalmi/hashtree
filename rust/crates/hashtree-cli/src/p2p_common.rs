@@ -40,7 +40,7 @@ fn bind_address_is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
 
-pub fn infer_loopback_peer_advertise_url(bind_address: &str) -> Option<String> {
+pub fn infer_loopback_peer_signal_url(bind_address: &str) -> Option<String> {
     let trimmed = bind_address.trim();
     let (host, port) = trimmed.rsplit_once(':')?;
     if port.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
@@ -140,17 +140,17 @@ pub fn default_webrtc_config(config: &Config) -> WebRTCConfig {
         } else {
             WebRTCConfig::default().stun_servers
         };
-    let advertise_addresses = if config.server.peer_advertise_urls.is_empty() {
-        infer_loopback_peer_advertise_url(&config.server.bind_address)
+    let signal_urls = if config.server.peer_signal_urls.is_empty() {
+        infer_loopback_peer_signal_url(&config.server.bind_address)
             .into_iter()
             .collect()
     } else {
         config
             .server
-            .peer_advertise_urls
+            .peer_signal_urls
             .iter()
             .map(|url| url.trim().trim_end_matches('/').to_string())
-            .filter(|url| !url.is_empty())
+            .filter(|url| url.starts_with("http://"))
             .collect()
     };
 
@@ -158,7 +158,7 @@ pub fn default_webrtc_config(config: &Config) -> WebRTCConfig {
         relays,
         signaling_enabled: config.server.enable_webrtc,
         hash_get_enabled: config.server.mode.hash_get_enabled(),
-        advertise_addresses,
+        signal_urls,
         stun_servers,
         multicast: MulticastConfig {
             enabled: config.server.enable_multicast,
@@ -261,27 +261,30 @@ mod tests {
     }
 
     #[test]
-    fn default_webrtc_config_advertises_loopback_bind_address() {
+    fn default_webrtc_config_uses_loopback_bind_address_for_webrtc_signaling() {
         let mut config = Config::default();
         config.server.bind_address = "127.0.0.1:18080".to_string();
 
         let webrtc = default_webrtc_config(&config);
         assert_eq!(
-            webrtc.advertise_addresses,
+            webrtc.signal_urls,
             vec!["http://127.0.0.1:18080".to_string()]
         );
     }
 
     #[test]
-    fn default_webrtc_config_prefers_explicit_peer_advertise_urls() {
+    fn default_webrtc_config_prefers_explicit_peer_signal_urls() {
         let mut config = Config::default();
         config.server.bind_address = "127.0.0.1:18080".to_string();
-        config.server.peer_advertise_urls = vec!["https://peer.example/".to_string()];
+        config.server.peer_signal_urls = vec![
+            "http://peer.example:18080/".to_string(),
+            "https://peer.example/".to_string(),
+        ];
 
         let webrtc = default_webrtc_config(&config);
         assert_eq!(
-            webrtc.advertise_addresses,
-            vec!["https://peer.example".to_string()]
+            webrtc.signal_urls,
+            vec!["http://peer.example:18080".to_string()]
         );
     }
 

@@ -516,6 +516,11 @@ impl SocialGraphStore {
         self.public_events.events_root()
     }
 
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn public_events_root_for_write(&self) -> Result<Option<Cid>> {
+        self.public_events.events_root_for_write()
+    }
+
     pub(crate) fn write_public_events_root(&self, root: Option<&Cid>) -> Result<()> {
         self.public_events.write_events_root(root)
     }
@@ -672,8 +677,18 @@ impl SocialGraphStore {
             return Ok(0);
         };
 
-        let manifest = block_on(bucket.event_store.get_manifest(Some(&root)))
-            .map_err(map_event_store_error)?;
+        let manifest = match block_on(bucket.event_store.get_manifest(Some(&root))) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                tracing::warn!(
+                    "Clearing invalid social graph event index root {} before rebuild: {}",
+                    hex::encode(root.hash),
+                    err
+                );
+                bucket.write_events_root(None)?;
+                return Ok(0);
+            }
+        };
         if manifest.by_kind_time_author.is_none() {
             let next_root = block_on(bucket.event_store.upgrade_manifest_indexes(Some(&root)))
                 .map_err(map_event_store_error)?;
@@ -705,11 +720,18 @@ impl SocialGraphStore {
             return Ok(0);
         };
 
-        let manifest = bucket
-            .event_store
-            .get_manifest(Some(&root))
-            .await
-            .map_err(map_event_store_error)?;
+        let manifest = match bucket.event_store.get_manifest(Some(&root)).await {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                tracing::warn!(
+                    "Clearing invalid social graph event index root {} before rebuild: {}",
+                    hex::encode(root.hash),
+                    err
+                );
+                bucket.write_events_root(None)?;
+                return Ok(0);
+            }
+        };
         if manifest.by_kind_time_author.is_none() {
             let next_root = bucket
                 .event_store
@@ -900,7 +922,7 @@ impl SocialGraphStore {
         event: &Event,
         storage_class: EventStorageClass,
     ) -> Result<()> {
-        let current_root = self.bucket(storage_class).events_root()?;
+        let current_root = self.bucket(storage_class).events_root_for_write()?;
         let next_root = self
             .bucket(storage_class)
             .store_event(current_root.as_ref(), event)?;
@@ -932,7 +954,7 @@ impl SocialGraphStore {
         }
 
         let bucket = self.bucket(storage_class);
-        let current_root = bucket.events_root()?;
+        let current_root = bucket.events_root_for_write()?;
         let stored_events = events
             .iter()
             .map(stored_event_from_nostr)

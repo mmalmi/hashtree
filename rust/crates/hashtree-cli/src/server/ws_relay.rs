@@ -828,7 +828,8 @@ async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
             | DataMessage::QuoteResponse(_)
             | DataMessage::Payment(_)
             | DataMessage::PaymentAck(_)
-            | DataMessage::Chunk(_) => {}
+            | DataMessage::Chunk(_)
+            | DataMessage::PeerHints(_) => {}
         }
         return;
     }
@@ -960,6 +961,7 @@ fn parse_msgpack_message(data: &[u8]) -> Option<DataMessage> {
                 None
             }
         }
+        DataMessage::PeerHints(_) => None,
     }
 }
 
