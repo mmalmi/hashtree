@@ -199,13 +199,21 @@ pub async fn background_blossom_push(
     cid_str: &str,
     servers: &[String],
 ) -> Result<()> {
+    let store = Arc::new(HashtreeStore::new(data_dir)?);
+    background_blossom_push_with_store(store, cid_str, servers).await
+}
+
+pub async fn background_blossom_push_with_store(
+    store: Arc<HashtreeStore>,
+    cid_str: &str,
+    servers: &[String],
+) -> Result<()> {
     use hashtree_blossom::BlossomClient;
     use nostr::Keys;
 
     let (nsec_str, _) = ensure_keys_string()?;
     let keys = Keys::parse(&nsec_str).context("Failed to parse nsec")?;
 
-    let store = Arc::new(HashtreeStore::new(data_dir)?);
     let root_cid = parse_root_cid(cid_str)?;
     let fetcher = Fetcher::new(FetchConfig::default());
     println!("Collecting DAG for file-server push...");

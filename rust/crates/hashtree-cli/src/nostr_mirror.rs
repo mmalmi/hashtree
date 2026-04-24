@@ -19,7 +19,7 @@ use nostr_sdk::{
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::blossom_push::background_blossom_push;
+use crate::blossom_push::background_blossom_push_with_store;
 use crate::socialgraph::crawler::SOCIALGRAPH_RELAY_EVENT_MAX_SIZE;
 use crate::socialgraph::{self, SocialGraphBackend, SocialGraphStore};
 use crate::HashtreeStore;
@@ -1215,8 +1215,8 @@ impl BackgroundNostrMirror {
                 && state.last_uploaded_root.as_ref() != Some(&pending_root)
         };
         if needs_upload {
-            background_blossom_push(
-                self.store.base_path(),
+            background_blossom_push_with_store(
+                Arc::clone(&self.store),
                 &pending_root.to_string(),
                 &self.config.blossom_write_servers,
             )
