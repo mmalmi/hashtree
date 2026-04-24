@@ -1135,7 +1135,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
         sig: alice_profile.sig.to_string(),
     };
     let event_store = NostrEventStore::new(store.store_arc());
-    let root = event_store.build(None, vec![alice_stored]).await?;
+    let root = event_store.build(None, vec![alice_stored.clone()]).await?;
     let mirror = BackgroundNostrMirror::new(
         NostrMirrorConfig::default(),
         store,
@@ -1154,6 +1154,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
                 move |_current_root, author_chunk| {
                     let call_index = Arc::clone(&call_index);
                     let root = root.clone();
+                    let alice_stored = alice_stored.clone();
                     std::future::ready(
                         match call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                             0 => Ok(CrawlReport {
@@ -1163,7 +1164,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
                                 events_seen: 1,
                                 events_selected: 1,
                                 live_bytes_selected: 0,
-                                applied_events: Vec::new(),
+                                applied_events: vec![alice_stored],
                             }),
                             _ => Err(anyhow::anyhow!("boom")),
                         },

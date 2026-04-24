@@ -160,6 +160,10 @@ pub struct NostrConfig {
     pub bootstrap_follows: Vec<String>,
     #[serde(default = "default_social_graph_crawl_depth", alias = "crawl_depth")]
     pub social_graph_crawl_depth: u32,
+    /// Max follow distance to mirror into public event/profile indexes.
+    /// Defaults to social_graph_crawl_depth when unset.
+    #[serde(default)]
+    pub mirror_max_follow_distance: Option<u32>,
     #[serde(default = "default_max_write_distance")]
     pub max_write_distance: u32,
     /// Max size for the trusted social graph store in GB (default: 10)
@@ -194,6 +198,7 @@ impl Default for NostrConfig {
             socialgraph_root: None,
             bootstrap_follows: default_nostr_bootstrap_follows(),
             social_graph_crawl_depth: default_social_graph_crawl_depth(),
+            mirror_max_follow_distance: None,
             max_write_distance: default_max_write_distance(),
             db_max_size_gb: default_nostr_db_max_size_gb(),
             spambox_max_size_gb: default_nostr_spambox_max_size_gb(),
@@ -950,6 +955,7 @@ nsec1ghi789
         let config = NostrConfig::default();
 
         assert_eq!(config.social_graph_crawl_depth, 2);
+        assert_eq!(config.mirror_max_follow_distance, None);
         assert_eq!(config.max_write_distance, 3);
         assert!(config.socialgraph_root.is_none());
         assert_eq!(
@@ -971,6 +977,7 @@ relays = ["wss://relay.example"]
 socialgraph_root = "npub1test"
 bootstrap_follows = []
 social_graph_crawl_depth = 6
+mirror_max_follow_distance = 2
 max_write_distance = 7
 negentropy_only = true
 overmute_threshold = 1.5
@@ -985,6 +992,7 @@ history_sync_on_reconnect = false
         assert_eq!(config.socialgraph_root.as_deref(), Some("npub1test"));
         assert!(config.bootstrap_follows.is_empty());
         assert_eq!(config.social_graph_crawl_depth, 6);
+        assert_eq!(config.mirror_max_follow_distance, Some(2));
         assert_eq!(config.max_write_distance, 7);
         assert!(config.negentropy_only);
         assert_eq!(config.overmute_threshold, 1.5);

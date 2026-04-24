@@ -307,7 +307,10 @@ impl EmbeddedBackgroundServicesController {
             relays: active_relays.to_vec(),
             publish_relays: Self::mirror_publish_relays(active_relays, &config.server.bind_address),
             blossom_write_servers: config.blossom.all_write_servers(),
-            max_follow_distance: config.nostr.social_graph_crawl_depth,
+            max_follow_distance: config
+                .nostr
+                .mirror_max_follow_distance
+                .unwrap_or(config.nostr.social_graph_crawl_depth),
             overmute_threshold: config.nostr.overmute_threshold,
             require_negentropy: config.nostr.negentropy_only,
             kinds: config.nostr.mirror_kinds.clone(),
@@ -978,5 +981,27 @@ mod tests {
         );
 
         assert_eq!(mirror_config.full_text_note_history_max_relay_pages, 64);
+    }
+
+    #[test]
+    fn nostr_mirror_config_can_limit_mirror_distance_independently() {
+        let mut config = Config::default();
+        config.nostr.social_graph_crawl_depth = 6;
+        config.nostr.mirror_max_follow_distance = Some(2);
+
+        let mirror_config = EmbeddedBackgroundServicesController::nostr_mirror_config(
+            &config,
+            &["wss://relay.example".to_string()],
+        );
+
+        assert_eq!(mirror_config.max_follow_distance, 2);
+
+        config.nostr.mirror_max_follow_distance = None;
+        let mirror_config = EmbeddedBackgroundServicesController::nostr_mirror_config(
+            &config,
+            &["wss://relay.example".to_string()],
+        );
+
+        assert_eq!(mirror_config.max_follow_distance, 6);
     }
 }

@@ -92,6 +92,7 @@ bootstrap_follows = [
   "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm"
 ]                                   # local-only seed for new identities; set to [] to opt out
 social_graph_crawl_depth = 2          # BFS depth for social graph crawl
+mirror_max_follow_distance = 2        # optional; defaults to social_graph_crawl_depth
 max_write_distance = 3                # max follow distance for write access
 negentropy_only = false         # require NIP-77 relays for mirror history sync
 history_sync_on_reconnect = true

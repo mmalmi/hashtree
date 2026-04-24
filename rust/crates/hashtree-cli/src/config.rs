@@ -169,6 +169,10 @@ pub struct NostrConfig {
     /// How many hops to crawl the social graph (default: 2)
     #[serde(default = "default_social_graph_crawl_depth", alias = "crawl_depth")]
     pub social_graph_crawl_depth: u32,
+    /// Max follow distance to mirror into public event/profile indexes.
+    /// Defaults to social_graph_crawl_depth when unset.
+    #[serde(default)]
+    pub mirror_max_follow_distance: Option<u32>,
     /// Max follow distance for write access (default: 3)
     #[serde(default = "default_max_write_distance")]
     pub max_write_distance: u32,
@@ -600,6 +604,7 @@ impl Default for NostrConfig {
             socialgraph_root: None,
             bootstrap_follows: default_nostr_bootstrap_follows(),
             social_graph_crawl_depth: default_social_graph_crawl_depth(),
+            mirror_max_follow_distance: None,
             max_write_distance: default_max_write_distance(),
             db_max_size_gb: default_nostr_db_max_size_gb(),
             spambox_max_size_gb: default_nostr_spambox_max_size_gb(),
@@ -920,6 +925,7 @@ mod tests {
             .contains(&"wss://upload.iris.to/nostr".to_string()));
         assert!(config.blossom.enabled);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);
+        assert_eq!(config.nostr.mirror_max_follow_distance, None);
         assert_eq!(config.nostr.max_write_distance, 3);
         assert_eq!(config.nostr.db_max_size_gb, 10);
         assert_eq!(config.nostr.spambox_max_size_gb, 1);
@@ -965,6 +971,7 @@ relays = ["wss://relay.damus.io"]
         assert_eq!(config.nostr.relays, vec!["wss://relay.damus.io"]);
         assert!(config.storage.evict_orphans);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);
+        assert_eq!(config.nostr.mirror_max_follow_distance, None);
         assert_eq!(config.nostr.max_write_distance, 3);
         assert_eq!(config.nostr.db_max_size_gb, 10);
         assert_eq!(config.nostr.spambox_max_size_gb, 1);
@@ -994,6 +1001,7 @@ relays = ["wss://relay.damus.io"]
 socialgraph_root = "npub1test"
 bootstrap_follows = []
 social_graph_crawl_depth = 3
+mirror_max_follow_distance = 2
 max_write_distance = 5
 negentropy_only = true
 overmute_threshold = 2.5
@@ -1010,6 +1018,7 @@ full_text_note_history_max_relay_pages = 64
         assert_eq!(config.nostr.socialgraph_root, Some("npub1test".to_string()));
         assert!(config.nostr.bootstrap_follows.is_empty());
         assert_eq!(config.nostr.social_graph_crawl_depth, 3);
+        assert_eq!(config.nostr.mirror_max_follow_distance, Some(2));
         assert_eq!(config.nostr.max_write_distance, 5);
         assert_eq!(config.nostr.db_max_size_gb, 10);
         assert_eq!(config.nostr.spambox_max_size_gb, 1);

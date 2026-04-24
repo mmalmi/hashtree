@@ -520,10 +520,6 @@ impl BackgroundNostrMirror {
     }
 
     async fn run_startup_history_sync(&self, initial_authors: Vec<String>) -> Result<()> {
-        self.history_sync_recent_text_notes_for_reachable_authors()
-            .await?;
-        self.history_sync_full_text_notes_for_reachable_authors()
-            .await?;
         if self.should_backfill_missing_profiles(None) {
             let missing_profile_authors = self
                 .collect_missing_profile_authors(self.config.missing_profile_backfill_batch_size)?;
@@ -539,6 +535,10 @@ impl BackgroundNostrMirror {
                 .await?;
             }
         }
+        self.history_sync_recent_text_notes_for_reachable_authors()
+            .await?;
+        self.history_sync_full_text_notes_for_reachable_authors()
+            .await?;
         self.history_sync_authors(initial_authors).await
     }
 
@@ -1058,6 +1058,7 @@ impl BackgroundNostrMirror {
                     report.root.as_ref(),
                     update_profile_and_graph,
                     true,
+                    Some(&report.applied_events),
                 )
                 .await?;
                 current_root = report.root.clone();
@@ -1168,7 +1169,8 @@ impl BackgroundNostrMirror {
 
     #[cfg(test)]
     async fn apply_history_root(&self, root: Option<&hashtree_core::Cid>) -> Result<()> {
-        self.apply_history_root_with_options(root, true, true).await
+        self.apply_history_root_with_options(root, true, true, None)
+            .await
     }
 
     async fn apply_history_root_with_options(
@@ -1176,6 +1178,7 @@ impl BackgroundNostrMirror {
         root: Option<&hashtree_core::Cid>,
         update_profile_and_graph: bool,
         publish_roots: bool,
+        applied_events: Option<&[hashtree_nostr::StoredNostrEvent]>,
     ) -> Result<()> {
         self.graph_store.write_public_events_root(root)?;
         let Some(root) = root else {
@@ -1184,20 +1187,35 @@ impl BackgroundNostrMirror {
 
         self.note_public_events_root_change()?;
         if update_profile_and_graph {
-            let event_store = NostrEventStore::new(self.store.store_arc());
-            let events = event_store
-                .list_recent_lossy(Some(root), ListEventsOptions::default())
-                .await
-                .context("list trusted mirrored events")?
-                .into_iter()
-                .map(socialgraph::stored_event_to_nostr_event)
-                .collect::<Result<Vec<_>>>()?;
+            let events = match applied_events {
+                Some(events) => events
+                    .iter()
+                    .cloned()
+                    .map(socialgraph::stored_event_to_nostr_event)
+                    .collect::<Result<Vec<_>>>()?,
+                None => {
+                    let event_store = NostrEventStore::new(self.store.store_arc());
+                    event_store
+                        .list_recent_lossy(Some(root), ListEventsOptions::default())
+                        .await
+                        .context("list trusted mirrored events")?
+                        .into_iter()
+                        .map(socialgraph::stored_event_to_nostr_event)
+                        .collect::<Result<Vec<_>>>()?
+                }
+            };
 
-            self.graph_store
-                .rebuild_profile_index_for_events(&events)
-                .context("rebuild mirrored profile search index")?;
             socialgraph::ingest_graph_parsed_events(self.graph_store.as_ref(), &events)
                 .context("sync mirrored social graph state")?;
+            if applied_events.is_some() {
+                self.graph_store
+                    .sync_profile_index_for_events(&events)
+                    .context("update mirrored profile search index")?;
+            } else {
+                self.graph_store
+                    .rebuild_profile_index_for_events(&events)
+                    .context("rebuild mirrored profile search index")?;
+            }
             self.note_profile_search_root_change()?;
             self.note_profiles_by_pubkey_root_change()?;
         }
