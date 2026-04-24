@@ -1464,6 +1464,7 @@ impl BackgroundNostrMirror {
                 &self.event_publish_state,
                 "event root",
                 force,
+                false,
             )
             .await;
         let Err(error) = result else {
@@ -1516,6 +1517,7 @@ impl BackgroundNostrMirror {
             &self.event_publish_state,
             "event root",
             force,
+            false,
         )
         .await
     }
@@ -1543,6 +1545,7 @@ impl BackgroundNostrMirror {
             &self.profile_search_publish_state,
             "profile search root",
             force,
+            true,
         )
         .await
     }
@@ -1555,6 +1558,7 @@ impl BackgroundNostrMirror {
             &self.profiles_by_pubkey_publish_state,
             "profiles-by-pubkey root",
             force,
+            true,
         )
         .await
     }
@@ -1565,6 +1569,7 @@ impl BackgroundNostrMirror {
         publish_state: &Arc<Mutex<RootPublishState>>,
         log_label: &str,
         force: bool,
+        publish_before_upload_ready_on_force: bool,
     ) -> Result<()> {
         let Some(tree_name) = tree_name else {
             return Ok(());
@@ -1597,7 +1602,8 @@ impl BackgroundNostrMirror {
             let state = publish_state.lock().expect("root publish state");
             !upload_required || state.last_uploaded_root.as_ref() == Some(&pending_root)
         };
-        let publish_before_upload_ready = force && upload_required && !upload_ready;
+        let publish_before_upload_ready =
+            force && upload_required && !upload_ready && publish_before_upload_ready_on_force;
 
         let mut successful_relays = Vec::new();
         let mut failed_relays = Vec::new();

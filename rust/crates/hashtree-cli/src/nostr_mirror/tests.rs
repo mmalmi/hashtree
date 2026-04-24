@@ -697,7 +697,7 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 }
 
 #[tokio::test]
-async fn apply_history_root_publishes_event_root_while_event_upload_continues() -> Result<()> {
+async fn apply_history_root_publishes_event_root_after_event_upload_completes() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
@@ -744,7 +744,7 @@ async fn apply_history_root_publishes_event_root_while_event_upload_continues() 
             .into_iter()
             .map(|cid| hex::encode(cid.hash))
             .collect::<Vec<_>>();
-    let delayed_upload_timeout = Duration::from_secs(15);
+    let delayed_upload_timeout = Duration::from_millis(250);
     for hash in &delayed_hashes {
         blossom.set_put_delay(hash, delayed_upload_timeout);
     }
@@ -796,10 +796,17 @@ async fn apply_history_root_publishes_event_root_while_event_upload_continues() 
     }
     assert!(
         delayed_hashes.iter().all(|hash| !blossom.has_hash(hash)),
-        "delayed event upload completed before event root publish was checked"
+        "delayed event upload completed before event root holdback was checked"
     );
     assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
     assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
+
+    wait_until("event DAG upload", Duration::from_secs(5), || {
+        delayed_hashes.iter().all(|hash| blossom.has_hash(hash))
+    })
+    .await;
+    mirror.maybe_publish_event_root(false).await?;
     assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
     Ok(())
 }
