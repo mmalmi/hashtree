@@ -1395,14 +1395,14 @@ fn test_known_peers_fetch_after_restart_with_relay_down() -> Result<()> {
         .context("read persisted peer state for instance A")?;
     if !peer_state_a.contains(&format!("http://127.0.0.1:{}", ports[1])) {
         anyhow::bail!(
-            "instance A did not persist instance B direct signaling URL; state={peer_state_a}"
+            "instance A did not persist instance B WebRTC signaling endpoint; state={peer_state_a}"
         );
     }
     let peer_state_b = fs::read_to_string(instance_b.data_path.join("mesh-peer-state.json"))
         .context("read persisted peer state for instance B")?;
     if !peer_state_b.contains(&format!("http://127.0.0.1:{}", ports[0])) {
         anyhow::bail!(
-            "instance B did not persist instance A direct signaling URL; state={peer_state_b}"
+            "instance B did not persist instance A WebRTC signaling endpoint; state={peer_state_b}"
         );
     }
 

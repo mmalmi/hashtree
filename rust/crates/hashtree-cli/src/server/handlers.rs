@@ -80,7 +80,7 @@ pub async fn p2p_signal(State(state): State<AppState>, body: Bytes) -> impl Into
             return StatusCode::BAD_REQUEST.into_response();
         };
         if webrtc_state
-            .submit_direct_signaling_event("direct-signal".to_string(), event)
+            .submit_direct_signaling_event("webrtc-signal".to_string(), event)
             .await
         {
             StatusCode::ACCEPTED.into_response()

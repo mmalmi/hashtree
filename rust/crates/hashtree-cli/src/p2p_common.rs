@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn default_webrtc_config_uses_loopback_bind_address_for_direct_signaling() {
+    fn default_webrtc_config_uses_loopback_bind_address_for_webrtc_signaling() {
         let mut config = Config::default();
         config.server.bind_address = "127.0.0.1:18080".to_string();
 

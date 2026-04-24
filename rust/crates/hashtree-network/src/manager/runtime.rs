@@ -287,7 +287,7 @@ impl WebRTCManager {
             let body = body.clone();
             tokio::spawn(async move {
                 if let Err(err) = post_direct_signaling_event(&endpoint, &body).await {
-                    debug!("Failed to post direct signaling event to {endpoint}: {err}");
+                    debug!("Failed to post WebRTC signaling event to {endpoint}: {err}");
                 }
             });
         }
@@ -432,7 +432,7 @@ fn direct_signal_endpoint(base_url: &str) -> String {
 
 async fn post_direct_signaling_event(endpoint: &str, body: &str) -> Result<()> {
     let Some((host, port, path)) = parse_http_endpoint(endpoint) else {
-        anyhow::bail!("unsupported direct signaling endpoint");
+        anyhow::bail!("unsupported WebRTC signaling endpoint");
     };
     let mut stream = TcpStream::connect((host.as_str(), port)).await?;
     let request = format!(
@@ -447,7 +447,7 @@ async fn post_direct_signaling_event(endpoint: &str, body: &str) -> Result<()> {
     if response.starts_with(b"HTTP/1.1 2") || response.starts_with(b"HTTP/1.0 2") {
         return Ok(());
     }
-    anyhow::bail!("direct signaling endpoint returned non-2xx response");
+    anyhow::bail!("WebRTC signaling endpoint returned non-2xx response");
 }
 
 fn parse_http_endpoint(endpoint: &str) -> Option<(String, u16, String)> {
