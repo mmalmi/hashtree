@@ -306,7 +306,13 @@ impl BackgroundNostrMirror {
         let initial_authors = self.collect_authors()?;
         if initial_authors.is_empty() {
             info!("Nostr mirror: no social-graph authors to mirror yet");
-        } else if self.config.history_sync_on_start {
+        }
+
+        let mut subscribed_authors = HashSet::new();
+        self.subscribe_authors_since(&initial_authors, live_since, &mut subscribed_authors)
+            .await?;
+
+        if !initial_authors.is_empty() && self.config.history_sync_on_start {
             self.history_sync_full_text_notes_for_reachable_authors()
                 .await?;
             if self.should_backfill_missing_profiles(None) {
@@ -327,10 +333,6 @@ impl BackgroundNostrMirror {
             }
             self.history_sync_authors(initial_authors.clone()).await?;
         }
-
-        let mut subscribed_authors = HashSet::new();
-        self.subscribe_authors_since(&initial_authors, live_since, &mut subscribed_authors)
-            .await?;
 
         let mut relay_statuses = self.capture_relay_statuses().await;
         let mut last_reconnect_history_sync_at: Option<Instant> = None;
