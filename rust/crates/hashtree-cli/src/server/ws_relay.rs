@@ -1,7 +1,7 @@
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
@@ -18,7 +18,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessag
 
 use super::auth::{AppState, PendingRequest, UpstreamNostrSubscription, WsProtocol};
 use crate::webrtc::types::{
-    encode_request, encode_response, parse_message, DataMessage, DataRequest, DataResponse, MAX_HTL,
+    DataMessage, DataRequest, DataResponse, MAX_HTL, encode_request, encode_response, parse_message,
 };
 use hex::encode as hex_encode;
 
@@ -828,7 +828,8 @@ async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
             | DataMessage::QuoteResponse(_)
             | DataMessage::Payment(_)
             | DataMessage::PaymentAck(_)
-            | DataMessage::Chunk(_) => {}
+            | DataMessage::Chunk(_)
+            | DataMessage::PeerHints(_) => {}
         }
         return;
     }
@@ -960,6 +961,7 @@ fn parse_msgpack_message(data: &[u8]) -> Option<DataMessage> {
                 None
             }
         }
+        DataMessage::PeerHints(hints) => Some(DataMessage::PeerHints(hints)),
     }
 }
 
@@ -1334,12 +1336,14 @@ mod tests {
         assert_eq!(events[0].id, event.id);
 
         close_upstream_nostr_subscription(&state, client_id, &subscription_id).await;
-        assert!(state
-            .ws_relay
-            .upstream_nostr_subscriptions
-            .lock()
-            .await
-            .is_empty());
+        assert!(
+            state
+                .ws_relay
+                .upstream_nostr_subscriptions
+                .lock()
+                .await
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -1392,9 +1396,11 @@ mod tests {
 
         let request = NostrClientMessage::req(
             SubscriptionId::new("feed"),
-            vec![Filter::new()
-                .authors(vec![event.pubkey])
-                .kinds(vec![event.kind])],
+            vec![
+                Filter::new()
+                    .authors(vec![event.pubkey])
+                    .kinds(vec![event.kind]),
+            ],
         )
         .as_json();
 

@@ -1,15 +1,15 @@
 //! Mesh signaling and transport types compatible with hashtree-ts.
 
 pub use hashtree_network::{
-    decrement_htl_with_policy, should_forward_htl, validate_mesh_frame, DataChunk, DataMessage,
+    BLOB_REQUEST_POLICY, DECREMENT_AT_MAX_PROB, DECREMENT_AT_MIN_PROB, DataChunk, DataMessage,
     DataPayment, DataPaymentAck, DataQuoteRequest, DataQuoteResponse, DataRequest, DataResponse,
-    HtlMode, HtlPolicy, IceCandidate, MeshNostrFrame, MeshNostrPayload, PeerDirection,
-    PeerHTLConfig, PeerId, PeerPool, PeerStateEvent, PeerStatus, PoolConfig, PoolSettings,
-    RequestDispatchConfig, SelectionStrategy, SignalingMessage, TimedSeenSet, WebRTCConfig,
-    BLOB_REQUEST_POLICY, DECREMENT_AT_MAX_PROB, DECREMENT_AT_MIN_PROB, MAX_HTL, MESH_DEFAULT_HTL,
-    MESH_EVENT_POLICY, MESH_MAX_HTL, MESH_PROTOCOL, MESH_PROTOCOL_VERSION, MSG_TYPE_CHUNK,
-    MSG_TYPE_PAYMENT, MSG_TYPE_PAYMENT_ACK, MSG_TYPE_QUOTE_REQUEST, MSG_TYPE_QUOTE_RESPONSE,
-    MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE,
+    HtlMode, HtlPolicy, IceCandidate, MAX_HTL, MESH_DEFAULT_HTL, MESH_EVENT_POLICY, MESH_MAX_HTL,
+    MESH_PROTOCOL, MESH_PROTOCOL_VERSION, MSG_TYPE_CHUNK, MSG_TYPE_PAYMENT, MSG_TYPE_PAYMENT_ACK,
+    MSG_TYPE_PEER_HINTS, MSG_TYPE_QUOTE_REQUEST, MSG_TYPE_QUOTE_RESPONSE, MSG_TYPE_REQUEST,
+    MSG_TYPE_RESPONSE, MeshNostrFrame, MeshNostrPayload, PeerDirection, PeerHTLConfig, PeerHints,
+    PeerId, PeerPool, PeerStateEvent, PeerStatus, PoolConfig, PoolSettings, RequestDispatchConfig,
+    SelectionStrategy, SignalingMessage, TimedSeenSet, WebRTCConfig, decrement_htl_with_policy,
+    encode_peer_hints, should_forward_htl, validate_mesh_frame,
 };
 
 pub fn decrement_htl(htl: u8, config: &PeerHTLConfig) -> u8 {
@@ -71,5 +71,6 @@ pub fn encode_message(msg: &DataMessage) -> Result<Vec<u8>, rmp_serde::encode::E
         DataMessage::Payment(req) => encode_payment(req),
         DataMessage::PaymentAck(res) => encode_payment_ack(res),
         DataMessage::Chunk(chunk) => encode_chunk(chunk),
+        DataMessage::PeerHints(hints) => Ok(encode_peer_hints(hints)),
     }
 }
