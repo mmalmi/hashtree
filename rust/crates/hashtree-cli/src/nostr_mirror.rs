@@ -13,16 +13,16 @@ use nostr::{
     Timestamp,
 };
 use nostr_sdk::{
-    Client, EventSource, Keys, Options, RelayStatus, pool::RelayLimits,
-    prelude::RelayPoolNotification,
+    pool::RelayLimits, prelude::RelayPoolNotification, Client, EventSource, Keys, Options,
+    RelayStatus,
 };
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::HashtreeStore;
 use crate::blossom_push::background_blossom_push_with_store;
 use crate::socialgraph::crawler::SOCIALGRAPH_RELAY_EVENT_MAX_SIZE;
 use crate::socialgraph::{self, SocialGraphBackend, SocialGraphStore};
+use crate::HashtreeStore;
 
 #[cfg(not(test))]
 const MIRROR_STARTUP_DELAY: Duration = Duration::from_secs(8);
@@ -44,7 +44,8 @@ const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_secs(30)
 #[cfg(test)]
 const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_millis(100);
 
-const DEFAULT_HISTORY_KINDS: [u16; 6] = [0, 1, 3, 6, 7, 9735];
+const KIND_LONG_FORM_CONTENT: u16 = 30_023;
+const DEFAULT_HISTORY_KINDS: [u16; 7] = [0, 1, 3, 6, 7, 9735, KIND_LONG_FORM_CONTENT];
 const DEFAULT_EVENT_TREE_NAME: &str = "nostr-event-index";
 const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
@@ -540,7 +541,12 @@ impl BackgroundNostrMirror {
 
     fn full_text_note_history_follow_distance(&self) -> Option<u32> {
         let distance = self.config.full_text_note_history_follow_distance?;
-        if self.config.kinds.contains(&Kind::TextNote.as_u16()) {
+        if self
+            .config
+            .kinds
+            .iter()
+            .any(|kind| *kind == Kind::TextNote.as_u16() || *kind == KIND_LONG_FORM_CONTENT)
+        {
             Some(distance.min(self.config.max_follow_distance))
         } else {
             None
@@ -696,7 +702,7 @@ impl BackgroundNostrMirror {
             return Ok(());
         };
         info!(
-            "Nostr mirror full text-note history author collection starting: max_follow_distance={distance}"
+            "Nostr mirror full text content history author collection starting: max_follow_distance={distance}"
         );
         let authors = self.collect_authors_with_max_distance(distance)?;
         self.history_sync_full_text_notes_for_authors(authors).await
@@ -727,14 +733,15 @@ impl BackgroundNostrMirror {
         }
 
         info!(
-            "Nostr mirror full text-note history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
+            "Nostr mirror full text content history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
             close_authors.len(),
             distance,
             self.config.full_text_note_history_max_relay_pages
         );
+        let kinds = [Kind::TextNote.as_u16(), KIND_LONG_FORM_CONTENT];
         self.history_sync_authors_with_kinds_and_mode(
             close_authors,
-            &[Kind::TextNote.as_u16()],
+            &kinds,
             true,
             Some(self.config.full_text_note_history_max_relay_pages),
         )

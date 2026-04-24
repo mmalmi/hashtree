@@ -1789,7 +1789,8 @@ fn metadata_only_history_sync_uses_small_author_batches() {
 fn text_note_history_sync_is_event_root_only() {
     assert!(
         !BackgroundNostrMirror::history_sync_kinds_affect_profile_or_graph(&[
-            Kind::TextNote.as_u16()
+            Kind::TextNote.as_u16(),
+            30_023,
         ])
     );
     assert!(
