@@ -697,7 +697,7 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 }
 
 #[tokio::test]
-async fn apply_history_root_publishes_profile_indexes_even_if_event_upload_is_slow() -> Result<()> {
+async fn apply_history_root_publishes_roots_even_if_event_upload_is_slow() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
@@ -781,46 +781,13 @@ async fn apply_history_root_publishes_profile_indexes_even_if_event_upload_is_sl
         "publisher relay should connect"
     );
 
-    let apply_future = mirror.apply_history_root(root.as_ref());
-    tokio::pin!(apply_future);
-    let started = std::time::Instant::now();
-    let mut apply_result = None;
-    loop {
-        if published_root_event_count(&relay, "profile-search") == 1
-            && published_root_event_count(&relay, "profiles-by-pubkey") == 1
-        {
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "profile index roots should publish before delayed event upload finishes"
-        );
-        assert!(
-            delayed_hashes.iter().all(|hash| !blossom.has_hash(hash)),
-            "delayed event upload completed before profile indexes published"
-        );
-        if apply_result.is_none() {
-            tokio::select! {
-                result = &mut apply_future => {
-                    apply_result = Some(result);
-                }
-                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-            }
-        } else {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
+    mirror.apply_history_root(root.as_ref()).await?;
     assert!(
-        apply_result.is_none(),
-        "event-root publish should still be pending while profile indexes publish"
+        delayed_hashes.iter().all(|hash| !blossom.has_hash(hash)),
+        "delayed event upload completed before root events published"
     );
-
-    if let Some(result) = apply_result {
-        result?;
-    } else {
-        apply_future.await?;
-    }
+    assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
+    assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
     assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
     Ok(())
 }
