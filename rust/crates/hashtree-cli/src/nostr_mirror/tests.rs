@@ -2029,7 +2029,7 @@ fn text_note_history_sync_is_event_root_only() {
 }
 
 #[test]
-fn zero_full_text_history_pages_disables_complete_history() {
+fn zero_full_text_history_pages_disables_startup_text_history() {
     let config = NostrMirrorConfig {
         full_text_note_history_max_relay_pages: 0,
         ..NostrMirrorConfig::default()

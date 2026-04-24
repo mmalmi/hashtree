@@ -860,6 +860,10 @@ impl BackgroundNostrMirror {
         let Some(distance) = self.full_text_note_history_follow_distance() else {
             return Ok(());
         };
+        if self.full_text_note_history_max_relay_pages().is_none() {
+            info!("Nostr mirror startup text content history sync skipped: max_relay_pages=0");
+            return Ok(());
+        }
         info!(
             "Nostr mirror recent text content catch-up author collection starting: max_follow_distance={distance}"
         );
@@ -869,7 +873,10 @@ impl BackgroundNostrMirror {
     }
 
     async fn history_sync_recent_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
-        if authors.is_empty() || self.full_text_note_history_follow_distance().is_none() {
+        if authors.is_empty()
+            || self.full_text_note_history_follow_distance().is_none()
+            || self.full_text_note_history_max_relay_pages().is_none()
+        {
             return Ok(());
         }
 
