@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use std::cell::RefCell;
 
+use futures::{stream, StreamExt, TryStreamExt};
 use hashtree_collection::{
     load_collection_state, CollectionDefinition, CollectionOptions, CollectionPublishedSchema,
     CollectionSource, CollectionState, CollectionWriter,
@@ -39,6 +40,7 @@ const MANIFEST_BY_TIME: &str = "by-time";
 const MANIFEST_BY_TAG: &str = "by-tag";
 const MANIFEST_REPLACEABLE: &str = "replaceable";
 const MANIFEST_PARAMETERIZED_REPLACEABLE: &str = "parameterized-replaceable";
+const EVENT_BLOB_WRITE_CONCURRENCY: usize = 64;
 const NOSTR_EVENT_ITEM_FORMAT: &str = "nostr/event@1";
 const NOSTR_EVENT_PROJECTION_FORMAT: &str = "hashtree/nostr-event-index@1";
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
@@ -204,6 +206,13 @@ enum ReplaceableSlot {
 struct ExistingReplaceableEvent {
     event: StoredNostrEvent,
     cid: Cid,
+}
+
+struct PreparedEventBlob {
+    sequence: usize,
+    event: StoredNostrEvent,
+    bytes: Vec<u8>,
+    previous: Option<StoredNostrEvent>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -599,11 +608,47 @@ impl<S: Store> NostrEventStore<S> {
             buffered_writer.build_manifest_from_events(events).await?
         } else {
             let mut manifest = buffered_writer.get_manifest(root).await?;
-            for event in events {
+            let mut prepared_non_replaceable = Vec::new();
+            for (sequence, event) in events.into_iter().enumerate() {
                 let normalized = buffered_writer.validate_event(event).await?;
-                buffered_writer
-                    .insert_into_manifest(&mut manifest, normalized, &mut obsolete_event_cids)
-                    .await?;
+                if is_replaceable_kind(normalized.kind)
+                    || is_parameterized_replaceable_kind(normalized.kind)
+                {
+                    buffered_writer
+                        .insert_into_manifest(&mut manifest, normalized, &mut obsolete_event_cids)
+                        .await?;
+                } else {
+                    let previous = match buffered_writer
+                        .manifest_event_cid(&manifest, &normalized.id)
+                        .await?
+                    {
+                        Some(existing_cid) => {
+                            match buffered_writer.read_stored_event(&existing_cid).await {
+                                Ok(_) => continue,
+                                Err(err) if is_missing_stored_event_error(&err) => {
+                                    Some(normalized.clone())
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        None => None,
+                    };
+                    prepared_non_replaceable
+                        .push(buffered_writer.prepare_event_blob(sequence, normalized, previous)?);
+                }
+            }
+
+            let indexed_events = buffered_writer
+                .put_prepared_event_blobs_parallel(prepared_non_replaceable)
+                .await?;
+            if !indexed_events.is_empty() {
+                let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
+                for (_sequence, event, event_cid, previous) in indexed_events {
+                    collection
+                        .put(&event, &event_cid, previous.as_ref())
+                        .await?;
+                }
+                manifest = nostr_manifest_from_collection_state(collection.state());
             }
             buffered_writer.write_manifest(&manifest).await?
         };
@@ -913,6 +958,56 @@ impl<S: Store> NostrEventStore<S> {
         self.decode_event(&data)
     }
 
+    async fn manifest_event_cid(
+        &self,
+        manifest: &NostrEventManifest,
+        id: &str,
+    ) -> Result<Option<Cid>, NostrEventStoreError> {
+        self.collection_source_from_manifest(manifest)
+            .get(id)
+            .await
+            .map_err(Into::into)
+    }
+
+    fn prepare_event_blob(
+        &self,
+        sequence: usize,
+        event: StoredNostrEvent,
+        previous: Option<StoredNostrEvent>,
+    ) -> Result<PreparedEventBlob, NostrEventStoreError> {
+        let bytes = self.encode_validated_event(&event)?;
+        Ok(PreparedEventBlob {
+            sequence,
+            event,
+            bytes,
+            previous,
+        })
+    }
+
+    async fn put_prepared_event_blobs_parallel(
+        &self,
+        prepared_events: Vec<PreparedEventBlob>,
+    ) -> Result<Vec<(usize, StoredNostrEvent, Cid, Option<StoredNostrEvent>)>, NostrEventStoreError>
+    {
+        let tree = &self.tree;
+        let mut indexed_events =
+            stream::iter(prepared_events.into_iter().map(|prepared| async move {
+                let (event_cid, _size) = tree.put_file(&prepared.bytes).await?;
+                Ok::<_, NostrEventStoreError>((
+                    prepared.sequence,
+                    prepared.event,
+                    event_cid,
+                    prepared.previous,
+                ))
+            }))
+            .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        indexed_events.sort_by_key(|(sequence, _, _, _)| *sequence);
+        Ok(indexed_events)
+    }
+
     async fn insert_into_manifest(
         &self,
         manifest: &mut NostrEventManifest,
@@ -960,14 +1055,18 @@ impl<S: Store> NostrEventStore<S> {
         &self,
         events: Vec<StoredNostrEvent>,
     ) -> Result<Option<Cid>, NostrEventStoreError> {
-        let mut indexed_events = Vec::with_capacity(events.len());
+        let mut prepared_events = Vec::with_capacity(events.len());
 
-        for event in events {
+        for (sequence, event) in events.into_iter().enumerate() {
             let normalized = self.validate_event(event).await?;
-            let event_bytes = self.encode_validated_event(&normalized)?;
-            let (event_cid, _size) = self.tree.put_file(&event_bytes).await?;
-            indexed_events.push((normalized, event_cid));
+            prepared_events.push(self.prepare_event_blob(sequence, normalized, None)?);
         }
+        let indexed_events = self
+            .put_prepared_event_blobs_parallel(prepared_events)
+            .await?
+            .into_iter()
+            .map(|(_sequence, event, event_cid, _previous)| (event, event_cid))
+            .collect::<Vec<_>>();
 
         let mut collection = CollectionWriter::with_options(
             Arc::clone(&self.store),
