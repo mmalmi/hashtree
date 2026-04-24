@@ -1,15 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SignalingMessage } from '@hashtree/mesh';
 import {
+  finalizeEvent,
   generateSecretKey,
   getPublicKey,
+  nip44,
   type Event as NostrEvent,
+  verifyEvent,
 } from 'nostr-tools';
 import {
   SIGNALING_KIND,
   HELLO_TAG,
   createDecryptingGiftUnwrapper,
-  createNip44GiftWrap,
+  createSecretKeyNip44GiftWrap,
   createSecretKeyEventSigner,
   createSecretKeyGiftUnwrapper,
   createSignalingFilters,
@@ -195,12 +198,12 @@ describe('p2p signaling core', () => {
     expect(event.sig).toHaveLength(128);
   });
 
-  it('round-trips a NIP-44 gift wrap with a secret-key unwrap helper', async () => {
+  it('round-trips a signed NIP-59 seal inside the hashtree gift wrapper', async () => {
     const senderSecretKey = generateSecretKey();
     const recipientSecretKey = generateSecretKey();
     const recipientPubkey = getPublicKey(recipientSecretKey);
     const senderPubkey = getPublicKey(senderSecretKey);
-    const giftWrap = createNip44GiftWrap(senderPubkey, { nowMs: () => 1700000000000 });
+    const giftWrap = createSecretKeyNip44GiftWrap(senderSecretKey, { nowMs: () => 1700000000000 });
     const unwrapGift = createSecretKeyGiftUnwrapper(recipientSecretKey);
 
     const wrapped = await giftWrap({
@@ -213,6 +216,25 @@ describe('p2p signaling core', () => {
       } satisfies SignalingMessage),
       tags: [],
     }, recipientPubkey);
+
+    const outerConversationKey = nip44.v2.utils.getConversationKey(recipientSecretKey, wrapped.pubkey);
+    const outer = JSON.parse(nip44.v2.decrypt(wrapped.content, outerConversationKey)) as {
+      pubkey: string;
+      content: string;
+      seal: NostrEvent;
+    };
+
+    expect(outer.pubkey).toBe(senderPubkey);
+    expect(outer.content).toContain('"targetPeerId"');
+    expect(outer.seal.kind).toBe(13);
+    expect(outer.seal.pubkey).toBe(senderPubkey);
+    expect(verifyEvent(outer.seal)).toBe(true);
+
+    const sealConversationKey = nip44.v2.utils.getConversationKey(recipientSecretKey, senderPubkey);
+    const rumor = JSON.parse(nip44.v2.decrypt(outer.seal.content, sealConversationKey)) as Record<string, unknown>;
+    expect(rumor.pubkey).toBe(senderPubkey);
+    expect(rumor.sig).toBeUndefined();
+    expect(rumor.content).toContain('"targetPeerId"');
 
     const unwrapped = await unwrapGift(wrapped);
 
@@ -253,6 +275,42 @@ describe('p2p signaling core', () => {
       content: 'payload',
       tags: [['x', '1']],
     });
+  });
+
+  it('rejects a tampered signed seal instead of falling back to legacy wrapper content', async () => {
+    const senderSecretKey = generateSecretKey();
+    const signedSeal = finalizeEvent({
+      kind: 13,
+      created_at: 1700000000,
+      tags: [],
+      content: 'ciphertext',
+    }, senderSecretKey);
+    const decrypt = vi.fn(async () => JSON.stringify({
+      pubkey: 'claimed-sender',
+      kind: SIGNALING_KIND,
+      content: JSON.stringify({
+        type: 'offer',
+        peerId: 'claimed-sender',
+        targetPeerId: 'me',
+        sdp: 'legacy-fallback',
+      } satisfies SignalingMessage),
+      tags: [],
+      seal: {
+        ...signedSeal,
+        content: 'tampered',
+      },
+    }));
+    const unwrapGift = createDecryptingGiftUnwrapper(decrypt);
+
+    const unwrapped = await unwrapGift({
+      pubkey: 'ephemeral',
+      created_at: 1700000000,
+      tags: [['p', 'me']],
+      content: 'ciphertext',
+    });
+
+    expect(unwrapped).toBeNull();
+    expect(decrypt).toHaveBeenCalledTimes(1);
   });
 
   it('decodes hello events', async () => {
@@ -310,6 +368,31 @@ describe('p2p signaling core', () => {
     });
   });
 
+  it('rejects signed events with invalid outer signatures', async () => {
+    const secretKey = generateSecretKey();
+    const pubkey = getPublicKey(secretKey);
+    const event = finalizeEvent({
+      kind: SIGNALING_KIND,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['l', HELLO_TAG],
+        ['peerId', pubkey],
+      ],
+      content: '',
+    }, secretKey);
+
+    const decoded = await decodeSignalingEvent({
+      event: {
+        ...event,
+        content: 'tampered',
+      },
+      giftUnwrap: async () => null,
+      nowMs: () => Date.now(),
+    });
+
+    expect(decoded).toBeNull();
+  });
+
   it('decodes directed events from gift-unwrapped payload', async () => {
     const directedEvent: SignalingEventLike = {
       pubkey: 'ephemeral',
@@ -325,8 +408,8 @@ describe('p2p signaling core', () => {
       content: JSON.stringify({
         type: 'offer',
         peerId: 'sender-pubkey',
-        recipient: 'target',
-        offer: { sdp: 'v=0' },
+        targetPeerId: 'target',
+        sdp: 'v=0',
       }),
     };
 
@@ -345,6 +428,34 @@ describe('p2p signaling core', () => {
         sdp: 'v=0',
       },
     });
+  });
+
+  it('rejects legacy recipient-shaped directed payloads', async () => {
+    const directedEvent: SignalingEventLike = {
+      pubkey: 'ephemeral',
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['p', 'me']],
+      content: 'ciphertext',
+    };
+    const seal: GiftSeal = {
+      pubkey: 'sender-pubkey',
+      kind: SIGNALING_KIND,
+      tags: [],
+      content: JSON.stringify({
+        type: 'offer',
+        peerId: 'sender-pubkey',
+        recipient: 'me',
+        offer: { sdp: 'v=0' },
+      }),
+    };
+
+    const decoded = await decodeSignalingEvent({
+      event: directedEvent,
+      giftUnwrap: async () => seal,
+      nowMs: () => Date.now(),
+    });
+
+    expect(decoded).toBeNull();
   });
 
   it('ignores expired events', async () => {

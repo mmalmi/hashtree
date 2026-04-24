@@ -6,8 +6,13 @@
  * Uses nsec directly when available, delegates to main thread otherwise.
  */
 
-import { generateSecretKey, finalizeEvent, nip44 } from 'nostr-tools';
+import { finalizeEvent, nip44 } from 'nostr-tools';
 import type { EventTemplate } from 'nostr-tools';
+import {
+  createAuthenticatedNip44GiftWrap,
+  createDecryptingGiftUnwrapper,
+  type GiftSeal,
+} from '../p2p/signaling.js';
 import { getSecretKey, getPubkey, getEphemeralSecretKey } from './identity';
 import type { SignedEvent, UnsignedEvent } from './protocol';
 
@@ -166,15 +171,8 @@ export async function decrypt(senderPubkey: string, ciphertext: string): Promise
 }
 
 // ============================================================================
-// Gift Wrap (NIP-17 style private messaging)
+// Gift Wrap (authenticated NIP-59 seal inside hashtree signaling envelope)
 // ============================================================================
-
-interface Seal {
-  pubkey: string;
-  kind: number;
-  content: string;
-  tags: string[][];
-}
 
 /**
  * Gift wrap an event for private delivery.
@@ -186,54 +184,19 @@ export async function giftWrap(
   const myPubkey = getPubkey();
   if (!myPubkey) throw new Error('No pubkey available');
 
-  const seal: Seal = {
-    pubkey: myPubkey,
-    kind: innerEvent.kind,
-    content: innerEvent.content,
-    tags: innerEvent.tags,
-  };
-
-  // Generate ephemeral keypair for the wrapper
-  const ephemeralSk = generateSecretKey();
-
-  // Encrypt the seal for the recipient
-  const conversationKey = nip44.v2.utils.getConversationKey(ephemeralSk, recipientPubkey);
-  const encryptedContent = nip44.v2.encrypt(JSON.stringify(seal), conversationKey);
-
-  const createdAt = Math.floor(Date.now() / 1000);
-  const expiration = createdAt + 5 * 60;
-
-  const event = finalizeEvent({
-    kind: 25050,
-    created_at: createdAt,
-    tags: [
-      ['p', recipientPubkey],
-      ['expiration', expiration.toString()],
-    ],
-    content: encryptedContent,
-  }, ephemeralSk);
-
-  return {
-    id: event.id,
-    pubkey: event.pubkey,
-    kind: event.kind,
-    content: event.content,
-    tags: event.tags,
-    created_at: event.created_at,
-    sig: event.sig,
-  };
+  const wrap = createAuthenticatedNip44GiftWrap<SignedEvent>({
+    senderPubkey: myPubkey,
+    signEvent,
+    encrypt,
+  });
+  return wrap(innerEvent, recipientPubkey);
 }
 
 /**
  * Unwrap a gift wrapped event.
  */
-export async function giftUnwrap(event: SignedEvent): Promise<Seal | null> {
-  try {
-    const decrypted = await decrypt(event.pubkey, event.content);
-    return JSON.parse(decrypted) as Seal;
-  } catch {
-    return null;
-  }
+export async function giftUnwrap(event: SignedEvent): Promise<GiftSeal | null> {
+  return createDecryptingGiftUnwrapper(decrypt)(event);
 }
 
 // ============================================================================

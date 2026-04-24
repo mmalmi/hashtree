@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.39 - 2026-04-24
+
+Changes since the `0.2.38` release.
+
+### Added
+
+- Added native WebRTC peer-state persistence for known peer hints and peer transfer statistics, so restarted daemons can prioritize previously useful peers and reconnect directly when their observed addresses are still valid.
+
+### Changed
+
+- Changed directed WebRTC-over-Nostr signaling to carry a sender-signed NIP-59 seal inside the encrypted relay envelope, keeping direct connection details private from relays while deriving the peer identity from the verified seal signer.
+
+### Fixed
+
+- Fixed native peer restart behavior so peers with persisted direct addresses can reconnect and fetch over WebRTC after relay rendezvous is unavailable, with e2e coverage for relay shutdown after initial discovery.
+
 ## 0.2.38 - 2026-04-22
 
 Changes since the `0.2.37` release.

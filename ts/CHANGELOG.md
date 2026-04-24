@@ -6,6 +6,19 @@
 
 - Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
 
+## 0.2.9 - 2026-04-24
+
+Changes since the previous npm package publish.
+
+### Changed
+
+- Published `@hashtree/worker@0.2.14`.
+- Changed worker WebRTC signaling to include authenticated NIP-59 seals inside the encrypted hashtree relay envelope, so receivers derive directed signaling identity from the verified seal signer instead of an unsigned payload field.
+
+### Added
+
+- Added TypeScript/Rust signaling interop coverage for authenticated directed WebRTC offers in both directions.
+
 ## 0.2.8 - 2026-04-24
 
 Changes since the previous npm package publish.

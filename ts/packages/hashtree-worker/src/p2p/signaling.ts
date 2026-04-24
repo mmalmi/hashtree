@@ -2,7 +2,11 @@ import type { SignalingMessage } from '@hashtree/mesh';
 import {
   finalizeEvent,
   generateSecretKey,
+  getEventHash,
+  getPublicKey,
+  nip59,
   nip44,
+  verifyEvent,
   type Event as NostrEvent,
   type VerifiedEvent,
 } from 'nostr-tools';
@@ -17,12 +21,16 @@ export const SIGNALING_KIND = 25050;
 export const HELLO_TAG = 'hello';
 export const MAX_EVENT_AGE_SEC = 30;
 const HELLO_EXPIRATION_SEC = 5 * 60;
+const NIP59_SEAL_KIND = 13;
 
 export interface SignalingEventLike {
   pubkey: string;
+  kind?: number;
   created_at?: number;
   tags: string[][];
   content: string;
+  id?: string;
+  sig?: string;
 }
 
 export interface GiftSeal {
@@ -95,10 +103,24 @@ export interface CreateNip44GiftWrapOptions {
   nowMs?: () => number;
 }
 
+export interface CreateAuthenticatedNip44GiftWrapOptions<TEvent extends SignalingEventLike = SignalingEventLike>
+  extends CreateNip44GiftWrapOptions {
+  senderPubkey: string;
+  signEvent: (template: SignalingTemplate) => Promise<TEvent>;
+  encrypt: (recipientPubkey: string, plaintext: string) => Promise<string> | string;
+}
+
 export type GiftCiphertextDecryptor = (
   senderPubkey: string,
   ciphertext: string,
 ) => string | Promise<string>;
+
+type NostrEventLike = SignalingEventLike & {
+  kind: number;
+  created_at: number;
+  id: string;
+  sig: string;
+};
 
 function getSince(nowMs: number, maxEventAgeSec: number): number {
   return Math.floor((nowMs - maxEventAgeSec * 1000) / 1000);
@@ -132,6 +154,91 @@ function decodeHashGetTag(value: string | undefined): boolean {
   return !['0', 'false', 'FALSE', 'no', 'NO'].includes(value);
 }
 
+function isSignalingKind(kind: number | undefined): boolean {
+  return kind === undefined || kind === SIGNALING_KIND;
+}
+
+function hasCompleteEventFields(value: unknown): value is NostrEventLike {
+  if (!value || typeof value !== 'object') return false;
+  const event = value as Record<string, unknown>;
+  return (
+    typeof event.id === 'string' &&
+    typeof event.pubkey === 'string' &&
+    typeof event.kind === 'number' &&
+    typeof event.created_at === 'number' &&
+    Array.isArray(event.tags) &&
+    typeof event.content === 'string' &&
+    typeof event.sig === 'string'
+  );
+}
+
+function verifyNostrEvent(value: unknown): NostrEventLike | null {
+  if (!hasCompleteEventFields(value)) return null;
+  const eventForVerification: NostrEvent = {
+    id: value.id,
+    pubkey: value.pubkey,
+    kind: value.kind,
+    created_at: value.created_at,
+    tags: value.tags,
+    content: value.content,
+    sig: value.sig,
+  };
+  if (!verifyEvent(eventForVerification)) return null;
+  return value;
+}
+
+function signedEventToSeal(value: unknown): GiftSeal | null {
+  const event = verifyNostrEvent(value);
+  if (!event || !isSignalingKind(event.kind)) return null;
+  return {
+    pubkey: event.pubkey,
+    kind: event.kind,
+    content: event.content,
+    tags: event.tags,
+  };
+}
+
+function parseJson(value: string): unknown {
+  return JSON.parse(value) as unknown;
+}
+
+function createRumor(innerEvent: SignalingInnerEvent, senderPubkey: string, createdAt: number) {
+  const rumor = {
+    kind: innerEvent.kind,
+    content: innerEvent.content,
+    tags: innerEvent.tags,
+    created_at: createdAt,
+    pubkey: senderPubkey,
+  };
+  return {
+    ...rumor,
+    id: getEventHash(rumor),
+  };
+}
+
+function createOuterGiftWrap<TEvent extends NostrEvent = VerifiedEvent>(
+  encryptedContent: string,
+  recipientPubkey: string,
+  createdAt: number,
+  expirationSec: number,
+  ephemeralSecretKey: Uint8Array,
+): TEvent {
+  return finalizeEvent({
+    kind: SIGNALING_KIND,
+    created_at: createdAt,
+    tags: [
+      ['p', recipientPubkey],
+      ['expiration', String(createdAt + expirationSec)],
+    ],
+    content: encryptedContent,
+  }, ephemeralSecretKey) as TEvent;
+}
+
+function encryptOuterGiftWrapPayload(payload: unknown, recipientPubkey: string, ephemeralSecretKey: Uint8Array): string {
+  const conversationKey = nip44.v2.utils.getConversationKey(ephemeralSecretKey, recipientPubkey);
+  return nip44.v2.encrypt(JSON.stringify(payload), conversationKey);
+}
+
 function normalizeSignalingMessage(raw: unknown, senderPubkey: string): SignalingMessage | null {
   if (!raw || typeof raw !== 'object' || !('type' in raw)) return null;
   const msg = raw as Record<string, unknown>;
@@ -157,65 +264,7 @@ function normalizeSignalingMessage(raw: unknown, senderPubkey: string): Signalin
     };
   }
 
-  if (!('recipient' in msg) || typeof msg.recipient !== 'string' || typeof msg.peerId !== 'string') {
-    return null;
-  }
-
-  const senderPeerId = senderPubkey;
-  const targetPeerId = normalizePeerEndpoint(msg.recipient, senderPubkey);
-
-  switch (msg.type) {
-    case 'offer': {
-      const offer = msg.offer as { sdp?: string } | string | undefined;
-      const sdp = typeof offer === 'string' ? offer : offer?.sdp;
-      return sdp ? { type: 'offer', peerId: senderPeerId, targetPeerId, sdp } : null;
-    }
-    case 'answer': {
-      const answer = msg.answer as { sdp?: string } | string | undefined;
-      const sdp = typeof answer === 'string' ? answer : answer?.sdp;
-      return sdp ? { type: 'answer', peerId: senderPeerId, targetPeerId, sdp } : null;
-    }
-    case 'candidate': {
-      const candidateObj = msg.candidate as { candidate?: string; sdpMLineIndex?: number; sdpMid?: string } | string | undefined;
-      const candidate = typeof candidateObj === 'string' ? candidateObj : candidateObj?.candidate;
-      return candidate
-        ? {
-            type: 'candidate',
-            peerId: senderPeerId,
-            targetPeerId,
-            candidate,
-            sdpMLineIndex: typeof candidateObj === 'object' ? candidateObj?.sdpMLineIndex : undefined,
-            sdpMid: typeof candidateObj === 'object' ? candidateObj?.sdpMid : undefined,
-          }
-        : null;
-    }
-    case 'candidates': {
-      const candidates = Array.isArray(msg.candidates)
-        ? msg.candidates
-            .map((entry) => {
-              if (typeof entry === 'string') {
-                return { candidate: entry };
-              }
-              if (entry && typeof entry === 'object') {
-                const candidateEntry = entry as { candidate?: string; sdpMLineIndex?: number; sdpMid?: string };
-                if (typeof candidateEntry.candidate === 'string') {
-                  return {
-                    candidate: candidateEntry.candidate,
-                    sdpMLineIndex: candidateEntry.sdpMLineIndex,
-                    sdpMid: candidateEntry.sdpMid,
-                  };
-                }
-              }
-              return null;
-            })
-            .filter((entry): entry is { candidate: string; sdpMLineIndex?: number; sdpMid?: string } => !!entry)
-        : [];
-
-      return { type: 'candidates', peerId: senderPeerId, targetPeerId, candidates };
-    }
-    default:
-      return null;
-  }
+  return null;
 }
 
 export function createSignalingFilters(
@@ -320,6 +369,88 @@ export function createSecretKeyEventSigner(secretKey: Uint8Array) {
   return async (template: SignalingTemplate): Promise<VerifiedEvent> => finalizeEvent(template, secretKey);
 }
 
+export function createSecretKeyNip44GiftWrap<TEvent extends NostrEvent = VerifiedEvent>(
+  senderSecretKey: Uint8Array,
+  options: CreateNip44GiftWrapOptions = {},
+) {
+  const nowMs = options.nowMs ?? (() => Date.now());
+  const expirationSec = options.expirationSec ?? HELLO_EXPIRATION_SEC;
+
+  return async (innerEvent: SignalingInnerEvent, recipientPubkey: string): Promise<TEvent> => {
+    const senderPubkey = getPublicKey(senderSecretKey);
+    const rumor = nip59.createRumor({
+      kind: innerEvent.kind,
+      content: innerEvent.content,
+      tags: innerEvent.tags,
+    }, senderSecretKey);
+    const seal = nip59.createSeal(rumor, senderSecretKey, recipientPubkey);
+    const legacyReadableSeal = {
+      pubkey: senderPubkey,
+      kind: innerEvent.kind,
+      content: innerEvent.content,
+      tags: innerEvent.tags,
+      seal,
+    };
+
+    const ephemeralSecretKey = generateSecretKey();
+    const createdAt = Math.floor(nowMs() / 1000);
+    const encryptedContent = encryptOuterGiftWrapPayload(
+      legacyReadableSeal,
+      recipientPubkey,
+      ephemeralSecretKey,
+    );
+
+    return createOuterGiftWrap<TEvent>(
+      encryptedContent,
+      recipientPubkey,
+      createdAt,
+      expirationSec,
+      ephemeralSecretKey,
+    );
+  };
+}
+
+export function createAuthenticatedNip44GiftWrap<TEvent extends SignalingEventLike = SignalingEventLike>({
+  senderPubkey,
+  signEvent,
+  encrypt,
+  nowMs = () => Date.now(),
+  expirationSec = HELLO_EXPIRATION_SEC,
+}: CreateAuthenticatedNip44GiftWrapOptions<TEvent>) {
+  return async (innerEvent: SignalingInnerEvent, recipientPubkey: string): Promise<TEvent> => {
+    const createdAt = Math.floor(nowMs() / 1000);
+    const rumor = createRumor(innerEvent, senderPubkey, createdAt);
+    const seal = await signEvent({
+      kind: NIP59_SEAL_KIND,
+      created_at: createdAt,
+      tags: [],
+      content: await encrypt(recipientPubkey, JSON.stringify(rumor)),
+    });
+    const legacyReadableSeal = {
+      pubkey: senderPubkey,
+      kind: innerEvent.kind,
+      content: innerEvent.content,
+      tags: innerEvent.tags,
+      seal,
+    };
+
+    const ephemeralSecretKey = generateSecretKey();
+    const encryptedContent = encryptOuterGiftWrapPayload(
+      legacyReadableSeal,
+      recipientPubkey,
+      ephemeralSecretKey,
+    );
+
+    return createOuterGiftWrap<NostrEvent>(
+      encryptedContent,
+      recipientPubkey,
+      createdAt,
+      expirationSec,
+      ephemeralSecretKey,
+    ) as TEvent;
+  };
+}
+
 export function createNip44GiftWrap<TEvent extends NostrEvent = VerifiedEvent>(
   senderPubkey: string,
   options: CreateNip44GiftWrapOptions = {},
@@ -336,18 +467,16 @@ export function createNip44GiftWrap<TEvent extends NostrEvent = VerifiedEvent>(
     };
 
     const ephemeralSecretKey = generateSecretKey();
-    const conversationKey = nip44.v2.utils.getConversationKey(ephemeralSecretKey, recipientPubkey);
     const createdAt = Math.floor(nowMs() / 1000);
+    const encryptedContent = encryptOuterGiftWrapPayload(seal, recipientPubkey, ephemeralSecretKey);
 
-    return finalizeEvent({
-      kind: SIGNALING_KIND,
-      created_at: createdAt,
-      tags: [
-        ['p', recipientPubkey],
-        ['expiration', String(createdAt + expirationSec)],
-      ],
-      content: nip44.v2.encrypt(JSON.stringify(seal), conversationKey),
-    }, ephemeralSecretKey) as TEvent;
+    return createOuterGiftWrap<TEvent>(
+      encryptedContent,
+      recipientPubkey,
+      createdAt,
+      expirationSec,
+      ephemeralSecretKey,
+    );
   };
 }
 
@@ -357,7 +486,56 @@ export function createDecryptingGiftUnwrapper(
   return async (event: SignalingEventLike): Promise<GiftSeal | null> => {
     try {
       const content = await decrypt(event.pubkey, event.content);
-      return JSON.parse(content) as GiftSeal;
+      const unwrapped = parseJson(content);
+      const directSignedEvent = signedEventToSeal(unwrapped);
+      if (directSignedEvent) return directSignedEvent;
+      if (!unwrapped || typeof unwrapped !== 'object') return null;
+
+      const seal = unwrapped as Record<string, unknown>;
+      if ('event' in seal) {
+        return signedEventToSeal(seal.event);
+      }
+
+      if ('seal' in seal) {
+        const sealEvent = verifyNostrEvent(seal.seal);
+        if (!sealEvent || sealEvent.kind !== NIP59_SEAL_KIND) return null;
+
+        const rumorPlaintext = await decrypt(sealEvent.pubkey, sealEvent.content);
+        const rumor = parseJson(rumorPlaintext);
+        if (!rumor || typeof rumor !== 'object') return null;
+        const rumorEvent = rumor as Record<string, unknown>;
+        if (
+          rumorEvent.pubkey !== sealEvent.pubkey ||
+          typeof rumorEvent.kind !== 'number' ||
+          typeof rumorEvent.content !== 'string' ||
+          !Array.isArray(rumorEvent.tags)
+        ) {
+          return null;
+        }
+
+        return {
+          pubkey: sealEvent.pubkey,
+          kind: rumorEvent.kind,
+          content: rumorEvent.content,
+          tags: rumorEvent.tags as string[][],
+        };
+      }
+
+      if (
+        typeof seal.pubkey === 'string' &&
+        typeof seal.kind === 'number' &&
+        typeof seal.content === 'string' &&
+        Array.isArray(seal.tags)
+      ) {
+        return {
+          pubkey: seal.pubkey,
+          kind: seal.kind,
+          content: seal.content,
+          tags: seal.tags as string[][],
+        };
+      }
+
+      return null;
     } catch {
       return null;
     }
@@ -377,6 +555,14 @@ export async function decodeSignalingEvent<TEvent extends SignalingEventLike>({
   nowMs = () => Date.now(),
   maxEventAgeSec = MAX_EVENT_AGE_SEC,
 }: DecodeSignalingEventOptions<TEvent>): Promise<DecodedSignalingEvent | null> {
+  if (hasCompleteEventFields(event)) {
+    if (!verifyNostrEvent(event) || event.kind !== SIGNALING_KIND) {
+      return null;
+    }
+  } else if (!isSignalingKind(event.kind)) {
+    return null;
+  }
+
   const nowSec = nowMs() / 1000;
   if (isExpired(event, nowSec, maxEventAgeSec)) {
     return null;

@@ -51,8 +51,10 @@ export {
   SIGNALING_KIND,
   HELLO_TAG,
   MAX_EVENT_AGE_SEC,
+  createAuthenticatedNip44GiftWrap,
   createDecryptingGiftUnwrapper,
   createNip44GiftWrap,
+  createSecretKeyNip44GiftWrap,
   createSecretKeyEventSigner,
   createSecretKeyGiftUnwrapper,
   createSignalingFilters,
@@ -62,6 +64,7 @@ export {
 } from './signaling.js';
 
 export type {
+  CreateAuthenticatedNip44GiftWrapOptions,
   CreateNip44GiftWrapOptions,
   GiftCiphertextDecryptor,
   CreateSimplePoolSignalingSenderOptions,
