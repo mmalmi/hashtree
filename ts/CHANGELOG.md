@@ -6,6 +6,15 @@
 
 - Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
 
+## 0.2.8 - 2026-04-24
+
+Changes since the previous npm package publish.
+
+### Changed
+
+- Published `@hashtree/collection@0.2.4`.
+- Changed `CollectionWriter.reindex(...)` / `rebuild(...)` to accept async entry streams, so large consumers can rebuild derived roots directly from async storage without first materializing every canonical item in memory.
+
 ## 0.2.7 - 2026-04-23
 
 Changes since the previous npm package publish.

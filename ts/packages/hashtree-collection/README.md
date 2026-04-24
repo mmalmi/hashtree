@@ -174,7 +174,7 @@ const results = await source.search('songs', 'starlight');
 - `replace(item, cid, previous)` is the explicit helper for indexed updates.
 - `delete(item)` requires the indexed fields of the item being removed.
 - `count()` uses the manifest's published `itemCount` when available; use `exactCount()` if you explicitly need to walk the `byId` tree.
-- `reindex(entries)` is the explicit way to rebuild all derived roots after adding indexes or changing derivation rules. It needs canonical item snapshots plus their CIDs; roots alone are not enough.
+- `reindex(entries)` is the explicit way to rebuild all derived roots after adding indexes or changing derivation rules. It accepts sync or async entry streams, but each entry still needs the canonical item snapshot plus its CID; roots alone are not enough.
 - If query-time normalization differs from the default keyword parser, define `searchIndexes[].terms(text, { parseKeywords })`.
 - When the reader still has the collection definition, pass it to `new CollectionSource(store, manifest, definition)` so `source.search(...)` reuses the same term expansion.
 - When the reader only has the manifest, pair `searchIndexes[].terms(...)` with `CollectionSource.searchTerms(...)` and app-side query parsing so indexing and querying stay in sync.

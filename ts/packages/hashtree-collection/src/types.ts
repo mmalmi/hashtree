@@ -140,6 +140,14 @@ export interface CollectionDeleteMutation<T> {
 
 export type CollectionMutation<T> = CollectionPutMutation<T> | CollectionDeleteMutation<T>;
 
+export interface CollectionReindexEntry<T> {
+  item: T;
+  cid: CID;
+  context?: CollectionWriteContext;
+}
+
+export type CollectionReindexEntries<T> = Iterable<CollectionReindexEntry<T>> | AsyncIterable<CollectionReindexEntry<T>>;
+
 export interface CollectionIndexLinkResult {
   key: string;
   cid: CID;

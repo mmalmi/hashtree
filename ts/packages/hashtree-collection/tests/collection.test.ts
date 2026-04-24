@@ -282,6 +282,31 @@ describe('@hashtree/collection', () => {
     ]);
   });
 
+  it('reindexes from async entry streams', async () => {
+    const store = new MemoryStore();
+    const writer = new CollectionWriter(store, songDefinition);
+
+    async function* entries() {
+      yield {
+        item: { id: 'song-a', title: 'Midnight Orchard', artist: 'Ada', tags: ['night'] },
+        cid: cidFromSeed(97),
+      };
+      yield {
+        item: { id: 'song-b', title: 'Sun Clock', artist: 'Bea', tags: ['ambient'] },
+        cid: cidFromSeed(98),
+      };
+    }
+
+    await writer.reindex(entries());
+
+    const source = new CollectionSource(store, writer.manifest());
+    expect(await source.count()).toBe(2);
+    expect((await source.search('songs', 'midnight')).map((result) => result.id)).toEqual(['song-a']);
+    expect((await source.queryIndex('artist', { prefix: 'artist:bea' })).map((result) => result.key)).toEqual([
+      'artist:bea',
+    ]);
+  });
+
   it('removes stale index entries when an item is replaced in batch', async () => {
     const store = new MemoryStore();
     const writer = new CollectionWriter(store, songDefinition);

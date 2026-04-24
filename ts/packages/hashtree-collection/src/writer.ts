@@ -4,6 +4,7 @@ import type {
   CollectionDefinition,
   CollectionManifest,
   CollectionMutation,
+  CollectionReindexEntries,
   CollectionState,
   CollectionWriteContext,
   Store,
@@ -265,7 +266,7 @@ export class CollectionWriter<T> {
     return this.snapshot;
   }
 
-  async rebuild(entries: Iterable<{ item: T; cid: CID; context?: CollectionWriteContext }>): Promise<CollectionState> {
+  async rebuild(entries: CollectionReindexEntries<T>): Promise<CollectionState> {
     this.state = createEmptyCollectionState(this.definition);
     const byIdEntries = new Map<string, CID>();
     const uniqueIds = new Set<string>();
@@ -273,7 +274,7 @@ export class CollectionWriter<T> {
     const searchEntries = new Map<string, Map<string, CID>>();
     const searchBuilders = new Map<string, ReturnType<typeof createSearchIndex>>();
 
-    for (const entry of entries) {
+    for await (const entry of entries) {
       const nextItem = this.normalize(entry.item);
       const id = this.definition.getId(nextItem).trim();
       if (!id) {
@@ -354,7 +355,7 @@ export class CollectionWriter<T> {
     return this.snapshot;
   }
 
-  async reindex(entries: Iterable<{ item: T; cid: CID; context?: CollectionWriteContext }>): Promise<CollectionState> {
+  async reindex(entries: CollectionReindexEntries<T>): Promise<CollectionState> {
     return this.rebuild(entries);
   }
 

@@ -27,6 +27,8 @@ export type {
   CollectionMutation,
   CollectionPublishedSchema,
   CollectionPutMutation,
+  CollectionReindexEntries,
+  CollectionReindexEntry,
   CollectionRootMetadata,
   CollectionSchema,
   CollectionSearchEntry,
