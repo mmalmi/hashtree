@@ -25,6 +25,7 @@ pub use bluetooth::{
 };
 pub use bluetooth_peer::{BluetoothFrame, BluetoothLink, BluetoothPeer};
 pub use cashu::{cashu_mint_metadata_path, CashuMintMetadataStore, CashuRoutingConfig};
+pub use hashtree_network::{KnownPeerRecord, KnownPeerSnapshot};
 pub use local_bus::{LocalNostrBus, SharedLocalNostrBus};
 pub use multicast::{MulticastConfig, MulticastNostrBus};
 pub use peer::{ContentStore, Peer, PendingRequest};

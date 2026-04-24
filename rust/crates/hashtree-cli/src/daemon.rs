@@ -26,6 +26,7 @@ use crate::WebRTCState;
 struct PeerRouterRuntime {
     shutdown: Arc<tokio::sync::watch::Sender<bool>>,
     join: JoinHandle<()>,
+    peer_state_persist: JoinHandle<()>,
 }
 
 struct BackgroundSyncRuntime {
@@ -441,6 +442,7 @@ impl EmbeddedBackgroundServicesController {
 #[cfg(feature = "p2p")]
 pub struct EmbeddedPeerRouterController {
     keys: Keys,
+    data_dir: PathBuf,
     state: Arc<WebRTCState>,
     store: Arc<dyn ContentStore>,
     peer_classifier: PeerClassifier,
@@ -452,6 +454,7 @@ pub struct EmbeddedPeerRouterController {
 impl EmbeddedPeerRouterController {
     pub fn new(
         keys: Keys,
+        data_dir: PathBuf,
         state: Arc<WebRTCState>,
         store: Arc<dyn ContentStore>,
         peer_classifier: PeerClassifier,
@@ -459,6 +462,7 @@ impl EmbeddedPeerRouterController {
     ) -> Self {
         Self {
             keys,
+            data_dir,
             state,
             store,
             peer_classifier,
@@ -474,7 +478,13 @@ impl EmbeddedPeerRouterController {
     pub async fn apply_config(&self, config: &Config) -> Result<bool> {
         let mut runtime = self.runtime.lock().await;
         if let Some(runtime_handle) = runtime.take() {
+            if let Err(err) =
+                crate::p2p_common::persist_peer_state(&self.data_dir, &self.state).await
+            {
+                tracing::warn!("Failed to persist mesh peer state before router restart: {err:#}");
+            }
             let _ = runtime_handle.shutdown.send(true);
+            runtime_handle.peer_state_persist.abort();
             let mut join = runtime_handle.join;
             match tokio::time::timeout(std::time::Duration::from_secs(3), &mut join).await {
                 Ok(Ok(())) => {}
@@ -489,6 +499,9 @@ impl EmbeddedPeerRouterController {
         }
 
         self.state.reset_runtime_state().await;
+        if let Err(err) = crate::p2p_common::load_peer_state(&self.data_dir, &self.state).await {
+            tracing::warn!("Failed to load persisted mesh peer state: {err:#}");
+        }
 
         if !crate::p2p_common::peer_router_enabled(config) {
             return Ok(false);
@@ -517,7 +530,15 @@ impl EmbeddedPeerRouterController {
                 tracing::error!("Peer router error: {}", err);
             }
         });
-        *runtime = Some(PeerRouterRuntime { shutdown, join });
+        let peer_state_persist = crate::p2p_common::spawn_peer_state_persist_task(
+            self.data_dir.clone(),
+            self.state.clone(),
+        );
+        *runtime = Some(PeerRouterRuntime {
+            shutdown,
+            join,
+            peer_state_persist,
+        });
         Ok(true)
     }
 
@@ -527,7 +548,11 @@ impl EmbeddedPeerRouterController {
             return;
         };
 
+        if let Err(err) = crate::p2p_common::persist_peer_state(&self.data_dir, &self.state).await {
+            tracing::warn!("Failed to persist mesh peer state during router shutdown: {err:#}");
+        }
         let _ = runtime_handle.shutdown.send(true);
+        runtime_handle.peer_state_persist.abort();
         let mut join = runtime_handle.join;
         match tokio::time::timeout(std::time::Duration::from_secs(3), &mut join).await {
             Ok(Ok(())) => {}
@@ -616,6 +641,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let mut config = opts.config;
+    config.server.bind_address = opts.bind_address.clone();
     if let Some(relays) = opts.relays {
         config.nostr.relays = relays;
         config.nostr.enabled = !config.nostr.relays.is_empty();
@@ -770,6 +796,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         ));
         let controller = Arc::new(EmbeddedPeerRouterController::new(
             keys.clone(),
+            opts.data_dir.clone(),
             state.clone(),
             Arc::clone(&store) as Arc<dyn ContentStore>,
             peer_classifier,

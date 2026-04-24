@@ -177,7 +177,9 @@ impl WebRTCManager {
             tokio::time::interval(Duration::from_millis(self.config.hello_interval_ms));
         if self.config.signaling_enabled {
             if let Some(shared_router) = self.shared_router.as_ref() {
-                let _ = shared_router.send_hello(Vec::new()).await;
+                let _ = shared_router
+                    .send_hello_with_addresses(Vec::new(), self.config.advertise_addresses.clone())
+                    .await;
             }
         }
         loop {
@@ -216,7 +218,9 @@ impl WebRTCManager {
                 }
                 _ = hello_ticker.tick(), if self.config.signaling_enabled => {
                     if let Some(shared_router) = self.shared_router.as_ref() {
-                        let _ = shared_router.send_hello(Vec::new()).await;
+                        let _ = shared_router
+                            .send_hello_with_addresses(Vec::new(), self.config.advertise_addresses.clone())
+                            .await;
                     }
                 }
                 _ = cleanup_interval.tick() => {
@@ -714,6 +718,7 @@ mod tests {
                     peer_id: manager.my_peer_id.to_string(),
                     roots: Vec::new(),
                     hash_get: true,
+                    addresses: Vec::new(),
                 },
                 None,
             )

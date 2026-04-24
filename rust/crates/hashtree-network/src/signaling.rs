@@ -125,10 +125,20 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
 
     /// Send hello broadcast
     pub async fn send_hello(&self, roots: Vec<String>) -> Result<(), TransportError> {
+        self.send_hello_with_addresses(roots, Vec::new()).await
+    }
+
+    /// Send hello broadcast with direct peer address hints.
+    pub async fn send_hello_with_addresses(
+        &self,
+        roots: Vec<String>,
+        addresses: Vec<String>,
+    ) -> Result<(), TransportError> {
         let msg = SignalingMessage::Hello {
             peer_id: self.peer_id.clone(),
             roots,
             hash_get: self.hash_get_enabled,
+            addresses,
         };
         self.transport.publish(msg).await
     }
@@ -189,6 +199,7 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
                 peer_id,
                 roots,
                 hash_get,
+                ..
             } => {
                 self.set_peer_hash_get(peer_id, *hash_get).await;
                 self.handle_hello(peer_id, roots, *hash_get).await

@@ -150,12 +150,22 @@ where
         SignalingMessage::Hello { hash_get, .. } => Some(*hash_get),
         _ => None,
     };
+    let peer_addresses = match &msg {
+        SignalingMessage::Hello { addresses, .. } => addresses.clone(),
+        _ => Vec::new(),
+    };
     shared_router
         .handle_message(msg)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     if let Some(hash_get) = peer_hash_get {
         runtime.set_peer_hash_get(&peer_id, hash_get).await;
+    }
+    let peer_is_tracked = runtime.peers.read().await.contains_key(&peer_id);
+    if peer_is_tracked {
+        runtime
+            .record_known_peer_addresses(&peer_id, &peer_addresses, source)
+            .await;
     }
     remember_peer_signal_path(runtime.peers.as_ref(), &peer_id, source).await;
 

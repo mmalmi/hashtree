@@ -460,6 +460,7 @@ struct DaemonInstance {
     data_path: PathBuf,
     config_dir: PathBuf,
     pid_file: PathBuf,
+    log_file: PathBuf,
     pubkey_hex: String,
     addr: String,
     htree_bin: PathBuf,
@@ -516,23 +517,15 @@ impl DaemonInstance {
         let pid_file = home_path.join(format!("htree-{}.pid", port));
         let log_file = home_path.join(format!("htree-{}.log", port));
 
-        let output = Command::new(htree_bin)
-            .arg("--data-dir")
-            .arg(&data_path)
-            .arg("start")
-            .arg("--addr")
-            .arg(&addr)
-            .arg("--daemon")
-            .arg("--pid-file")
-            .arg(&pid_file)
-            .arg("--log-file")
-            .arg(&log_file)
-            .env("HOME", &home_path)
-            .env("HTREE_CONFIG_DIR", &config_dir)
-            .env("RUST_LOG", "warn")
-            .output()
-            .context("Failed to start htree daemon")?;
-
+        let output = start_daemon_process(
+            htree_bin,
+            &data_path,
+            &addr,
+            &pid_file,
+            &log_file,
+            &home_path,
+            &config_dir,
+        )?;
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -547,6 +540,7 @@ impl DaemonInstance {
             data_path,
             config_dir,
             pid_file,
+            log_file,
             pubkey_hex: keys.public_key().to_hex(),
             addr,
             htree_bin: htree_bin.clone(),
@@ -554,13 +548,7 @@ impl DaemonInstance {
         })
     }
 
-    fn base_url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-}
-
-impl Drop for DaemonInstance {
-    fn drop(&mut self) {
+    fn stop(&mut self) {
         let _ = Command::new(&self.htree_bin)
             .arg("stop")
             .arg("--pid-file")
@@ -569,12 +557,78 @@ impl Drop for DaemonInstance {
             .env("HTREE_CONFIG_DIR", &self.config_dir)
             .output();
 
-        if is_process_running(self.pid) {
+        if self.pid > 0 && is_process_running(self.pid) {
             unsafe {
                 let _ = libc::kill(self.pid, libc::SIGKILL);
             }
-            let _ = fs::remove_file(&self.pid_file);
         }
+        let _ = fs::remove_file(&self.pid_file);
+        self.pid = 0;
+    }
+
+    fn start(&mut self) -> Result<()> {
+        let output = start_daemon_process(
+            &self.htree_bin,
+            &self.data_path,
+            &self.addr,
+            &self.pid_file,
+            &self.log_file,
+            self._home_dir.path(),
+            &self.config_dir,
+        )?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("htree restart failed: {}\n{}", stdout, stderr);
+        }
+
+        self.pid = wait_for_pid_file(&self.pid_file, Duration::from_secs(5))?;
+        wait_for_health(&self.addr, Duration::from_secs(10))?;
+        Ok(())
+    }
+
+    fn restart(&mut self) -> Result<()> {
+        self.stop();
+        self.start()
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+}
+
+fn start_daemon_process(
+    htree_bin: &PathBuf,
+    data_path: &PathBuf,
+    addr: &str,
+    pid_file: &PathBuf,
+    log_file: &PathBuf,
+    home_path: &std::path::Path,
+    config_dir: &PathBuf,
+) -> Result<std::process::Output> {
+    let output = Command::new(htree_bin)
+        .arg("--data-dir")
+        .arg(data_path)
+        .arg("start")
+        .arg("--addr")
+        .arg(addr)
+        .arg("--daemon")
+        .arg("--pid-file")
+        .arg(pid_file)
+        .arg("--log-file")
+        .arg(log_file)
+        .env("HOME", home_path)
+        .env("HTREE_CONFIG_DIR", config_dir)
+        .env("RUST_LOG", "warn")
+        .output()
+        .context("Failed to start htree daemon")?;
+    Ok(output)
+}
+
+impl Drop for DaemonInstance {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1297,6 +1351,73 @@ fn test_three_peers_direct_mesh_survives_relay_shutdown() -> Result<()> {
             anyhow::bail!("Timed out waiting for B to fetch A's blob over relayless mesh");
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "p2p"),
+    ignore = "requires p2p feature for persisted native peer hints"
+)]
+fn test_known_peers_fetch_after_restart_with_relay_down() -> Result<()> {
+    let htree_bin = find_htree_binary();
+    let mut relay = test_relay::TestRelay::new(0);
+    let relay_url = relay.url();
+    let ports = find_unique_free_ports(2)?;
+
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let pubkey_a = keys_a.public_key().to_hex();
+    let pubkey_b = keys_b.public_key().to_hex();
+
+    let mut instance_a =
+        DaemonInstance::new(ports[0], &htree_bin, &keys_a, &[pubkey_b], &relay_url)?;
+    let mut instance_b = DaemonInstance::new(
+        ports[1],
+        &htree_bin,
+        &keys_b,
+        &[pubkey_a.clone()],
+        &relay_url,
+    )?;
+
+    wait_for_peer_data_channel(
+        &instance_a.addr,
+        &instance_b.pubkey_hex,
+        Duration::from_secs(45),
+    )?;
+    wait_for_peer_data_channel(&instance_b.addr, &pubkey_a, Duration::from_secs(45))?;
+
+    // Let the periodic peer-state writer flush the signed address hints learned from hello.
+    std::thread::sleep(Duration::from_secs(6));
+
+    let expected = b"relayless-restart-known-peer".to_vec();
+    let store = HashtreeStore::new_with_backend(
+        &instance_a.data_path,
+        StorageBackend::Lmdb,
+        TEST_STORAGE_MAX_SIZE_BYTES,
+    )?;
+    let cid = store.put_blob(&expected)?;
+
+    relay.stop();
+    instance_a.restart()?;
+    instance_b.restart()?;
+
+    let url = format!("{}/{}", instance_b.base_url(), cid);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Ok(bytes) = fetch_bytes(&url) {
+            if bytes == expected {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "Timed out waiting for restarted peer to fetch from known HTTP peer without relay"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     Ok(())

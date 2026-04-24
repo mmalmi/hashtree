@@ -34,6 +34,7 @@ fn test_signaling_message_hello() {
         peer_id: "my-pubkey".to_string(),
         roots: Vec::new(),
         hash_get: true,
+        addresses: Vec::new(),
     };
     assert_eq!(msg.msg_type(), "hello");
     assert_eq!(msg.peer_id(), "my-pubkey");

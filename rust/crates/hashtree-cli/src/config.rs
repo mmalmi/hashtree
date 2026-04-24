@@ -61,6 +61,9 @@ pub struct ServerConfig {
     /// Enable WebRTC P2P connections
     #[serde(default = "default_enable_webrtc")]
     pub enable_webrtc: bool,
+    /// Explicit HTTP(S) addresses this daemon may advertise as direct peer hints.
+    #[serde(default)]
+    pub peer_advertise_urls: Vec<String>,
     /// Enable LAN multicast discovery/signaling for native peers.
     #[serde(default = "default_enable_multicast")]
     pub enable_multicast: bool,
@@ -560,6 +563,7 @@ impl Default for ServerConfig {
             enable_auth: default_enable_auth(),
             stun_port: default_stun_port(),
             enable_webrtc: default_enable_webrtc(),
+            peer_advertise_urls: Vec::new(),
             enable_multicast: default_enable_multicast(),
             multicast_group: default_multicast_group(),
             multicast_port: default_multicast_port(),

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
 
@@ -9,6 +9,7 @@ use crate::local_bus::SharedLocalNostrBus;
 use crate::mesh_session::{resolve_root_from_local_buses_with_source, MeshSession};
 use crate::root_events::PeerRootEvent;
 use crate::runtime_peer::MeshPeerEntry;
+use crate::types::{KnownPeerRecord, KnownPeerSnapshot};
 
 /// Shared runtime state for transport-backed mesh peers.
 pub struct MeshRuntimeState<P> {
@@ -21,6 +22,7 @@ pub struct MeshRuntimeState<P> {
     pub mesh_forwarded: AtomicU64,
     pub mesh_dropped_duplicate: AtomicU64,
     local_buses: RwLock<Vec<SharedLocalNostrBus>>,
+    known_peers: RwLock<HashMap<String, KnownPeerRecord>>,
 }
 
 impl<P> Default for MeshRuntimeState<P>
@@ -47,6 +49,7 @@ where
             mesh_forwarded: AtomicU64::new(0),
             mesh_dropped_duplicate: AtomicU64::new(0),
             local_buses: RwLock::new(Vec::new()),
+            known_peers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -80,6 +83,66 @@ where
 
     pub async fn peer_hash_get_snapshot(&self) -> HashMap<String, bool> {
         self.peer_hash_get.read().await.clone()
+    }
+
+    pub async fn record_known_peer_addresses(
+        &self,
+        peer_id: &str,
+        addresses: &[String],
+        source: &str,
+    ) {
+        let clean_addresses = normalize_peer_addresses(addresses);
+        if clean_addresses.is_empty() {
+            return;
+        }
+
+        let mut known = self.known_peers.write().await;
+        let entry = known
+            .entry(peer_id.to_string())
+            .or_insert_with(|| KnownPeerRecord {
+                peer_id: peer_id.to_string(),
+                addresses: Vec::new(),
+                last_seen_unix_ms: 0,
+                last_source: None,
+            });
+        for address in clean_addresses {
+            if !entry.addresses.contains(&address) {
+                entry.addresses.push(address);
+            }
+        }
+        entry.addresses.sort();
+        entry.last_seen_unix_ms = now_unix_ms();
+        entry.last_source = Some(source.to_string());
+    }
+
+    pub async fn known_peer_snapshot(&self) -> KnownPeerSnapshot {
+        let mut peers: Vec<KnownPeerRecord> =
+            self.known_peers.read().await.values().cloned().collect();
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        KnownPeerSnapshot { version: 1, peers }
+    }
+
+    pub async fn import_known_peer_snapshot(&self, snapshot: &KnownPeerSnapshot) {
+        if snapshot.version != 1 {
+            return;
+        }
+        let mut known = self.known_peers.write().await;
+        known.clear();
+        for peer in &snapshot.peers {
+            let addresses = normalize_peer_addresses(&peer.addresses);
+            if peer.peer_id.trim().is_empty() || addresses.is_empty() {
+                continue;
+            }
+            known.insert(
+                peer.peer_id.clone(),
+                KnownPeerRecord {
+                    peer_id: peer.peer_id.clone(),
+                    addresses,
+                    last_seen_unix_ms: peer.last_seen_unix_ms,
+                    last_source: peer.last_source.clone(),
+                },
+            );
+        }
     }
 
     pub async fn local_buses(&self) -> Vec<SharedLocalNostrBus> {
@@ -167,6 +230,26 @@ where
             .await
             .map(|(_, root)| root)
     }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn normalize_peer_addresses(addresses: &[String]) -> Vec<String> {
+    let mut output = Vec::new();
+    for address in addresses {
+        let trimmed = address.trim().trim_end_matches('/').to_string();
+        if trimmed.is_empty() || output.contains(&trimmed) {
+            continue;
+        }
+        output.push(trimmed);
+    }
+    output.sort();
+    output
 }
 
 #[cfg(test)]

@@ -309,6 +309,7 @@ pub(crate) async fn run() -> Result<()> {
                 config.server.mode = mode.into();
                 println!("Using mode from CLI: {}", config.server.mode.as_str());
             }
+            config.server.bind_address = addr.clone();
 
             // Use CLI data_dir if provided, otherwise use config's data_dir
             let data_dir = cli
@@ -430,7 +431,7 @@ pub(crate) async fn run() -> Result<()> {
 
             // Start STUN server and WebRTC if P2P feature enabled
             #[cfg(feature = "p2p")]
-            let (stun_handle, webrtc_handle, webrtc_state) = {
+            let (stun_handle, webrtc_handle, webrtc_state, peer_state_persist_handle) = {
                 // Start STUN server if configured
                 let stun_handle = if hashtree_cli::p2p_common::should_start_stun_server(&config) {
                     let stun_addr: std::net::SocketAddr =
@@ -447,97 +448,121 @@ pub(crate) async fn run() -> Result<()> {
                 };
 
                 // Start WebRTC signaling manager if enabled
-                let (webrtc_handle, webrtc_state) = if peer_router_enabled {
-                    let webrtc_config = hashtree_cli::p2p_common::default_webrtc_config(&config);
-                    let peer_classifier = hashtree_cli::p2p_common::build_peer_classifier(
-                        data_dir.clone(),
-                        Arc::clone(&social_graph_store),
-                    );
-                    let cashu_payment_client = if config.cashu.default_mint.is_some()
-                        || !config.cashu.accepted_mints.is_empty()
-                    {
-                        match hashtree_cli::cashu_helper::CashuHelperClient::discover(
+                let (webrtc_handle, webrtc_state, peer_state_persist_handle) =
+                    if peer_router_enabled {
+                        let webrtc_config =
+                            hashtree_cli::p2p_common::default_webrtc_config(&config);
+                        let peer_classifier = hashtree_cli::p2p_common::build_peer_classifier(
                             data_dir.clone(),
-                        ) {
-                            Ok(client) => Some(Arc::new(client)
-                                as Arc<dyn hashtree_cli::cashu_helper::CashuPaymentClient>),
-                            Err(err) => {
-                                tracing::warn!(
+                            Arc::clone(&social_graph_store),
+                        );
+                        let cashu_payment_client = if config.cashu.default_mint.is_some()
+                            || !config.cashu.accepted_mints.is_empty()
+                        {
+                            match hashtree_cli::cashu_helper::CashuHelperClient::discover(
+                                data_dir.clone(),
+                            ) {
+                                Ok(client) => Some(Arc::new(client)
+                                    as Arc<dyn hashtree_cli::cashu_helper::CashuPaymentClient>),
+                                Err(err) => {
+                                    tracing::warn!(
                                     "Cashu settlement helper unavailable; paid retrieval stays disabled: {}",
                                     err
                                 );
-                                None
+                                    None
+                                }
                             }
-                        }
-                    } else {
-                        None
-                    };
-                    let cashu_mint_metadata = if config.cashu.default_mint.is_some()
-                        || !config.cashu.accepted_mints.is_empty()
-                    {
-                        let metadata_path =
-                            hashtree_cli::webrtc::cashu_mint_metadata_path(&data_dir);
-                        match hashtree_cli::webrtc::CashuMintMetadataStore::load(metadata_path) {
-                            Ok(store) => Some(store),
-                            Err(err) => {
-                                tracing::warn!(
+                        } else {
+                            None
+                        };
+                        let cashu_mint_metadata = if config.cashu.default_mint.is_some()
+                            || !config.cashu.accepted_mints.is_empty()
+                        {
+                            let metadata_path =
+                                hashtree_cli::webrtc::cashu_mint_metadata_path(&data_dir);
+                            match hashtree_cli::webrtc::CashuMintMetadataStore::load(metadata_path)
+                            {
+                                Ok(store) => Some(store),
+                                Err(err) => {
+                                    tracing::warn!(
                                     "Failed to load Cashu mint metadata; falling back to in-memory state: {}",
                                     err
                                 );
-                                Some(hashtree_cli::webrtc::CashuMintMetadataStore::in_memory())
+                                    Some(hashtree_cli::webrtc::CashuMintMetadataStore::in_memory())
+                                }
                             }
-                        }
-                    } else {
-                        None
-                    };
+                        } else {
+                            None
+                        };
 
-                    let mut manager = if config.server.mode.hash_get_enabled() {
-                        WebRTCManager::new_with_store_and_classifier_and_cashu(
-                            keys.clone(),
-                            webrtc_config,
-                            Arc::clone(&store) as Arc<dyn hashtree_cli::ContentStore>,
-                            peer_classifier,
-                            hashtree_cli::webrtc::CashuRoutingConfig::from(&config.cashu),
-                            cashu_payment_client,
-                            cashu_mint_metadata,
+                        let mut manager = if config.server.mode.hash_get_enabled() {
+                            WebRTCManager::new_with_store_and_classifier_and_cashu(
+                                keys.clone(),
+                                webrtc_config,
+                                Arc::clone(&store) as Arc<dyn hashtree_cli::ContentStore>,
+                                peer_classifier,
+                                hashtree_cli::webrtc::CashuRoutingConfig::from(&config.cashu),
+                                cashu_payment_client,
+                                cashu_mint_metadata,
+                            )
+                        } else {
+                            let manager = WebRTCManager::new_with_classifier(
+                                keys.clone(),
+                                webrtc_config,
+                                peer_classifier,
+                            );
+                            let _ = cashu_payment_client;
+                            let _ = cashu_mint_metadata;
+                            manager
+                        };
+                        manager.set_nostr_relay(
+                            nostr_relay.clone() as hashtree_network::SharedMeshRelayClient
+                        );
+
+                        // Get the WebRTC state before spawning (for HTTP handler to query peers)
+                        let webrtc_state = manager.state();
+                        if let Err(err) =
+                            hashtree_cli::p2p_common::load_peer_state(&data_dir, &webrtc_state)
+                                .await
+                        {
+                            tracing::warn!("Failed to load persisted mesh peer state: {err:#}");
+                        }
+                        let peer_state_persist_handle =
+                            hashtree_cli::p2p_common::spawn_peer_state_persist_task(
+                                data_dir.clone(),
+                                webrtc_state.clone(),
+                            );
+
+                        // Spawn the manager in a background task
+                        let handle = tokio::spawn(async move {
+                            if let Err(e) = manager.run().await {
+                                tracing::error!("Peer router error: {}", e);
+                            }
+                        });
+                        (
+                            Some(handle),
+                            Some(webrtc_state),
+                            Some(peer_state_persist_handle),
                         )
                     } else {
-                        let manager = WebRTCManager::new_with_classifier(
-                            keys.clone(),
-                            webrtc_config,
-                            peer_classifier,
-                        );
-                        let _ = cashu_payment_client;
-                        let _ = cashu_mint_metadata;
-                        manager
+                        (None, None, None)
                     };
-                    manager.set_nostr_relay(
-                        nostr_relay.clone() as hashtree_network::SharedMeshRelayClient
-                    );
-
-                    // Get the WebRTC state before spawning (for HTTP handler to query peers)
-                    let webrtc_state = manager.state();
-
-                    // Spawn the manager in a background task
-                    let handle = tokio::spawn(async move {
-                        if let Err(e) = manager.run().await {
-                            tracing::error!("Peer router error: {}", e);
-                        }
-                    });
-                    (Some(handle), Some(webrtc_state))
-                } else {
-                    (None, None)
-                };
-                (stun_handle, webrtc_handle, webrtc_state)
+                (
+                    stun_handle,
+                    webrtc_handle,
+                    webrtc_state,
+                    peer_state_persist_handle,
+                )
             };
 
             #[cfg(not(feature = "p2p"))]
             #[allow(clippy::type_complexity)]
-            let (stun_handle, webrtc_handle, webrtc_state): (
+            let (stun_handle, webrtc_handle, webrtc_state, peer_state_persist_handle): (
                 Option<tokio::task::JoinHandle<()>>,
                 Option<tokio::task::JoinHandle<()>>,
                 Option<Arc<hashtree_cli::webrtc::WebRTCState>>,
-            ) = (None, None, None);
+                Option<tokio::task::JoinHandle<()>>,
+            ) = (None, None, None, None);
 
             // Combine legacy servers with configured public read servers.
             let upstream_blossom = config.blossom.all_read_servers();
@@ -698,6 +723,20 @@ pub(crate) async fn run() -> Result<()> {
 
             background_services_controller.shutdown().await;
 
+            #[cfg(feature = "p2p")]
+            if let Some(ref state) = webrtc_state {
+                if let Err(err) =
+                    hashtree_cli::p2p_common::persist_peer_state(&data_dir, state).await
+                {
+                    tracing::warn!("Failed to persist mesh peer state during shutdown: {err:#}");
+                }
+            }
+
+            #[cfg(feature = "p2p")]
+            if let Some(handle) = peer_state_persist_handle {
+                handle.abort();
+            }
+
             // Shutdown WebRTC manager
             #[cfg(feature = "p2p")]
             if let Some(handle) = webrtc_handle {
@@ -712,7 +751,7 @@ pub(crate) async fn run() -> Result<()> {
 
             // Suppress unused variable warnings when p2p is disabled
             #[cfg(not(feature = "p2p"))]
-            let _ = (stun_handle, webrtc_handle);
+            let _ = (stun_handle, webrtc_handle, peer_state_persist_handle);
         }
         #[cfg(feature = "fuse")]
         Commands::Mount {

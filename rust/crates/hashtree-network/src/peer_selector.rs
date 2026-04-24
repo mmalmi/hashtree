@@ -39,6 +39,8 @@ pub struct PersistedPeerMetadata {
     pub principal: String,
     pub requests_sent: u64,
     pub successes: u64,
+    #[serde(default)]
+    pub misses: u64,
     pub timeouts: u64,
     pub failures: u64,
     pub srtt_ms: f64,
@@ -58,6 +60,7 @@ impl PersistedPeerMetadata {
             principal,
             requests_sent: stats.requests_sent,
             successes: stats.successes,
+            misses: stats.misses,
             timeouts: stats.timeouts,
             failures: stats.failures,
             srtt_ms: sanitize_latency(stats.srtt_ms),
@@ -75,6 +78,7 @@ impl PersistedPeerMetadata {
     fn apply_to_stats(&self, stats: &mut PeerStats) {
         stats.requests_sent = self.requests_sent;
         stats.successes = self.successes;
+        stats.misses = self.misses;
         stats.timeouts = self.timeouts;
         stats.failures = self.failures;
         stats.srtt_ms = sanitize_latency(self.srtt_ms);
@@ -163,6 +167,8 @@ pub struct PeerStats {
     pub requests_sent: u64,
     /// Total successful responses received
     pub successes: u64,
+    /// Total explicit misses (peer was reachable but did not have the content)
+    pub misses: u64,
     /// Total timeouts
     pub timeouts: u64,
     /// Total failures (bad data, disconnects, etc.)
@@ -205,6 +211,7 @@ impl PeerStats {
             connected_at: Instant::now(),
             requests_sent: 0,
             successes: 0,
+            misses: 0,
             timeouts: 0,
             failures: 0,
             srtt_ms: 0.0,
@@ -226,10 +233,11 @@ impl PeerStats {
 
     /// Get success rate (0.0 to 1.0)
     pub fn success_rate(&self) -> f64 {
-        if self.requests_sent == 0 {
+        let attempts_with_health_outcome = self.requests_sent.saturating_sub(self.misses);
+        if attempts_with_health_outcome == 0 {
             return 0.5; // Neutral for new peers
         }
-        self.successes as f64 / self.requests_sent as f64
+        self.successes as f64 / attempts_with_health_outcome as f64
     }
 
     /// Get selection rate (selections per second since connected)
@@ -297,6 +305,11 @@ impl PeerStats {
         // RTO = SRTT + max(G, K*RTTVAR) where G=20ms granularity, K=4
         let rto = self.srtt_ms + (20.0_f64).max(4.0 * self.rttvar_ms);
         self.rto_ms = (rto as u64).clamp(MIN_RTO_MS, MAX_RTO_MS);
+    }
+
+    /// Record an explicit not-found response from a reachable peer.
+    pub fn record_miss(&mut self) {
+        self.misses += 1;
     }
 
     /// Record a timeout
@@ -579,6 +592,13 @@ impl PeerSelector {
         }
     }
 
+    /// Record an explicit content miss.
+    pub fn record_miss(&mut self, peer_id: &str) {
+        if let Some(stats) = self.stats.get_mut(peer_id) {
+            stats.record_miss();
+        }
+    }
+
     /// Record a timeout
     pub fn record_timeout(&mut self, peer_id: &str) {
         if let Some(stats) = self.stats.get_mut(peer_id) {
@@ -823,8 +843,10 @@ impl PeerSelector {
 
         let total_requests: u64 = self.stats.values().map(|s| s.requests_sent).sum();
         let total_successes: u64 = self.stats.values().map(|s| s.successes).sum();
+        let total_misses: u64 = self.stats.values().map(|s| s.misses).sum();
         let total_timeouts: u64 = self.stats.values().map(|s| s.timeouts).sum();
         let backed_off = self.stats.values().filter(|s| s.is_backed_off()).count();
+        let total_health_attempts = total_requests.saturating_sub(total_misses);
 
         let avg_rtt = {
             let rtts: Vec<f64> = self
@@ -847,8 +869,8 @@ impl PeerSelector {
             total_timeouts,
             backed_off_count: backed_off,
             avg_rtt_ms: avg_rtt,
-            overall_success_rate: if total_requests > 0 {
-                total_successes as f64 / total_requests as f64
+            overall_success_rate: if total_health_attempts > 0 {
+                total_successes as f64 / total_health_attempts as f64
             } else {
                 0.0
             },
@@ -924,6 +946,19 @@ mod tests {
         stats.record_request(40);
         stats.record_timeout();
         assert_eq!(stats.success_rate(), 0.5);
+    }
+
+    #[test]
+    fn test_peer_stats_miss_does_not_lower_health_success_rate() {
+        let mut stats = PeerStats::new("peer1");
+
+        stats.record_request(40);
+        stats.record_miss();
+        assert_eq!(stats.success_rate(), 0.5);
+
+        stats.record_request(40);
+        stats.record_success(50, 1024);
+        assert_eq!(stats.success_rate(), 1.0);
     }
 
     #[test]

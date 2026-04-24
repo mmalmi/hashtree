@@ -139,11 +139,12 @@ pub use transport::{PeerLink, PeerLinkFactory, SignalingTransport, TransportErro
 pub use types::{
     classifier_channel, decrement_htl_with_policy, is_polite_peer, should_forward,
     should_forward_htl, validate_mesh_frame, ClassifierRx, ClassifierTx, ClassifyRequest, HtlMode,
-    HtlPolicy, IceCandidate, MeshNostrFrame, MeshNostrPayload, MeshStats, MeshStoreConfig,
-    PeerHTLConfig, PeerId, PeerPool, PeerState, PoolConfig, PoolSettings, SignalingMessage,
-    TimedSeenSet, WebRTCStats, BLOB_REQUEST_POLICY, DATA_CHANNEL_LABEL, DECREMENT_AT_MAX_PROB,
-    DECREMENT_AT_MIN_PROB, MAX_HTL, MESH_DEFAULT_HTL, MESH_EVENT_POLICY, MESH_MAX_HTL,
-    MESH_PROTOCOL, MESH_PROTOCOL_VERSION, MESH_SIGNALING_EVENT_KIND, NOSTR_KIND_HASHTREE,
+    HtlPolicy, IceCandidate, KnownPeerRecord, KnownPeerSnapshot, MeshNostrFrame, MeshNostrPayload,
+    MeshStats, MeshStoreConfig, PeerHTLConfig, PeerId, PeerPool, PeerState, PoolConfig,
+    PoolSettings, SignalingMessage, TimedSeenSet, WebRTCStats, BLOB_REQUEST_POLICY,
+    DATA_CHANNEL_LABEL, DECREMENT_AT_MAX_PROB, DECREMENT_AT_MIN_PROB, MAX_HTL, MESH_DEFAULT_HTL,
+    MESH_EVENT_POLICY, MESH_MAX_HTL, MESH_PROTOCOL, MESH_PROTOCOL_VERSION,
+    MESH_SIGNALING_EVENT_KIND, NOSTR_KIND_HASHTREE,
 };
 pub use wifi_aware::{
     install_mobile_wifi_aware_bridge, mobile_wifi_aware_bridge, MobileWifiAwareBridge,

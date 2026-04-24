@@ -36,7 +36,7 @@ use crate::mesh_store_core::{
 use crate::multicast::{MulticastConfig, MulticastNostrBus};
 use crate::nostr::NostrRelayTransport;
 use crate::peer::{ContentStore, Peer, PendingRequest};
-use crate::peer_selector::PeerSelector;
+use crate::peer_selector::{PeerMetadataSnapshot, PeerSelector, SelectorSummary};
 use crate::protocol::{DataQuoteRequest, DataRequest};
 use crate::relay_bridge::SharedMeshRelayClient;
 use crate::root_events::PeerRootEvent;
@@ -52,7 +52,8 @@ use crate::transport::{
     SignalingTransport as SharedSignalingTransport, TransportError as SharedTransportError,
 };
 use crate::types::{
-    validate_mesh_frame, MeshNostrFrame, MeshNostrPayload, SignalingMessage, TimedSeenSet,
+    validate_mesh_frame, KnownPeerRecord, KnownPeerSnapshot, MeshNostrFrame, MeshNostrPayload,
+    SignalingMessage, TimedSeenSet,
 };
 use crate::wifi_aware::{
     mobile_wifi_aware_bridge, WifiAwareConfig, WifiAwareNostrBus, WIFI_AWARE_SOURCE,
@@ -71,6 +72,7 @@ pub struct WebRTCConfig {
     pub relays: Vec<String>,
     pub signaling_enabled: bool,
     pub hash_get_enabled: bool,
+    pub advertise_addresses: Vec<String>,
     pub max_outbound: usize,
     pub max_inbound: usize,
     pub hello_interval_ms: u64,
@@ -97,6 +99,7 @@ impl Default for WebRTCConfig {
             ],
             signaling_enabled: true,
             hash_get_enabled: true,
+            advertise_addresses: Vec::new(),
             max_outbound: 6,
             max_inbound: 6,
             hello_interval_ms: 3000,
@@ -487,6 +490,90 @@ impl WebRTCState {
     /// keeping cumulative bandwidth counters intact.
     pub async fn reset_runtime_state(&self) {
         self.runtime.reset().await;
+    }
+
+    pub async fn peer_metadata_snapshot(&self) -> PeerMetadataSnapshot {
+        self.peer_selector
+            .read()
+            .await
+            .export_peer_metadata_snapshot()
+    }
+
+    pub async fn import_peer_metadata_snapshot(&self, snapshot: &PeerMetadataSnapshot) {
+        self.peer_selector
+            .write()
+            .await
+            .import_peer_metadata_snapshot(snapshot);
+    }
+
+    pub async fn selector_summary(&self) -> SelectorSummary {
+        self.peer_selector.read().await.summary()
+    }
+
+    pub async fn known_peer_snapshot(&self) -> KnownPeerSnapshot {
+        self.runtime.known_peer_snapshot().await
+    }
+
+    pub async fn import_known_peer_snapshot(&self, snapshot: &KnownPeerSnapshot) {
+        self.runtime.import_known_peer_snapshot(snapshot).await;
+    }
+
+    pub async fn record_direct_peer_request(&self, peer_id: &str, bytes: u64) {
+        let mut selector = self.peer_selector.write().await;
+        selector.add_peer(peer_id);
+        selector.record_request(peer_id, bytes);
+    }
+
+    pub async fn record_direct_peer_success(&self, peer_id: &str, rtt_ms: u64, bytes: u64) {
+        let mut selector = self.peer_selector.write().await;
+        selector.add_peer(peer_id);
+        selector.record_success(peer_id, rtt_ms, bytes);
+    }
+
+    pub async fn record_direct_peer_miss(&self, peer_id: &str) {
+        let mut selector = self.peer_selector.write().await;
+        selector.add_peer(peer_id);
+        selector.record_miss(peer_id);
+    }
+
+    pub async fn record_direct_peer_timeout(&self, peer_id: &str) {
+        let mut selector = self.peer_selector.write().await;
+        selector.add_peer(peer_id);
+        selector.record_timeout(peer_id);
+    }
+
+    pub async fn record_direct_peer_failure(&self, peer_id: &str) {
+        let mut selector = self.peer_selector.write().await;
+        selector.add_peer(peer_id);
+        selector.record_failure(peer_id);
+    }
+
+    pub async fn ordered_known_peers(&self) -> Vec<KnownPeerRecord> {
+        let snapshot = self.runtime.known_peer_snapshot().await;
+        let mut by_peer = snapshot
+            .peers
+            .into_iter()
+            .map(|peer| (peer.peer_id.clone(), peer))
+            .collect::<HashMap<_, _>>();
+
+        let ordered_ids = {
+            let mut selector = self.peer_selector.write().await;
+            for peer_id in by_peer.keys() {
+                selector.add_peer(peer_id);
+            }
+            selector.select_peers()
+        };
+
+        let mut ordered = Vec::new();
+        for peer_id in ordered_ids {
+            if let Some(peer) = by_peer.remove(&peer_id) {
+                ordered.push(peer);
+            }
+        }
+        let mut remaining = by_peer.into_values().collect::<Vec<_>>();
+        remaining.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        ordered.extend(remaining);
+        ordered
     }
 
     /// Get current bandwidth stats (bytes sent/received)

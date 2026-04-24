@@ -53,6 +53,35 @@ impl PeerId {
     }
 }
 
+/// Persistable reachability hints for a stable peer identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownPeerRecord {
+    pub peer_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub last_seen_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_source: Option<String>,
+}
+
+/// Snapshot of direct peer hints learned from signed signaling messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownPeerSnapshot {
+    pub version: u32,
+    #[serde(default)]
+    pub peers: Vec<KnownPeerRecord>,
+}
+
+impl Default for KnownPeerSnapshot {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            peers: Vec::new(),
+        }
+    }
+}
+
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.pubkey)
@@ -71,6 +100,8 @@ pub enum SignalingMessage {
         roots: Vec<String>,
         #[serde(rename = "hashGet", default = "default_hash_get_enabled")]
         hash_get: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        addresses: Vec<String>,
     },
 
     /// Negotiation offer payload (currently SDP for WebRTC links).

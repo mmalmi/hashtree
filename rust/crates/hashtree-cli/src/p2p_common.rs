@@ -4,11 +4,113 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::socialgraph;
 use crate::webrtc::{
-    BluetoothConfig, MulticastConfig, PeerClassifier, PeerPool, WebRTCConfig, WifiAwareConfig,
+    BluetoothConfig, KnownPeerSnapshot, MulticastConfig, PeerClassifier, PeerPool, WebRTCConfig,
+    WebRTCState, WifiAwareConfig,
 };
+use anyhow::{Context, Result};
+use hashtree_network::PeerMetadataSnapshot;
+
+const PEER_STATE_FILE: &str = "mesh-peer-state.json";
+const PEER_STATE_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedPeerState {
+    version: u32,
+    #[serde(default)]
+    peer_metadata: PeerMetadataSnapshot,
+    #[serde(default)]
+    known_peers: KnownPeerSnapshot,
+}
+
+impl Default for PersistedPeerState {
+    fn default() -> Self {
+        Self {
+            version: PEER_STATE_VERSION,
+            peer_metadata: PeerMetadataSnapshot::default(),
+            known_peers: KnownPeerSnapshot::default(),
+        }
+    }
+}
 
 fn relay_is_loopback(relay: &str) -> bool {
     relay.contains("://127.0.0.1") || relay.contains("://localhost") || relay.contains("://[::1]")
+}
+
+fn bind_address_is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+pub fn infer_loopback_peer_advertise_url(bind_address: &str) -> Option<String> {
+    let trimmed = bind_address.trim();
+    let (host, port) = trimmed.rsplit_once(':')?;
+    if port.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if !bind_address_is_loopback(host) {
+        return None;
+    }
+    Some(format!("http://127.0.0.1:{port}"))
+}
+
+fn peer_state_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join(PEER_STATE_FILE)
+}
+
+pub async fn load_peer_state(data_dir: &std::path::Path, state: &Arc<WebRTCState>) -> Result<bool> {
+    let path = peer_state_path(data_dir);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let persisted: PersistedPeerState = serde_json::from_str(&content)
+        .with_context(|| format!("parse persisted peer state {}", path.display()))?;
+    if persisted.version != PEER_STATE_VERSION {
+        return Ok(false);
+    }
+    state
+        .import_peer_metadata_snapshot(&persisted.peer_metadata)
+        .await;
+    state
+        .import_known_peer_snapshot(&persisted.known_peers)
+        .await;
+    Ok(true)
+}
+
+pub async fn persist_peer_state(
+    data_dir: &std::path::Path,
+    state: &Arc<WebRTCState>,
+) -> Result<()> {
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    let path = peer_state_path(data_dir);
+    let tmp_path = path.with_extension("json.tmp");
+    let persisted = PersistedPeerState {
+        version: PEER_STATE_VERSION,
+        peer_metadata: state.peer_metadata_snapshot().await,
+        known_peers: state.known_peer_snapshot().await,
+    };
+    let content = serde_json::to_vec_pretty(&persisted).context("encode persisted peer state")?;
+    std::fs::write(&tmp_path, content).with_context(|| format!("write {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &path)
+        .with_context(|| format!("replace persisted peer state {}", path.display()))?;
+    Ok(())
+}
+
+pub fn spawn_peer_state_persist_task(
+    data_dir: PathBuf,
+    state: Arc<WebRTCState>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if let Err(err) = persist_peer_state(&data_dir, &state).await {
+                tracing::debug!("Failed to persist mesh peer state: {err:#}");
+            }
+        }
+    })
 }
 
 pub fn peer_router_enabled(config: &Config) -> bool {
@@ -38,11 +140,25 @@ pub fn default_webrtc_config(config: &Config) -> WebRTCConfig {
         } else {
             WebRTCConfig::default().stun_servers
         };
+    let advertise_addresses = if config.server.peer_advertise_urls.is_empty() {
+        infer_loopback_peer_advertise_url(&config.server.bind_address)
+            .into_iter()
+            .collect()
+    } else {
+        config
+            .server
+            .peer_advertise_urls
+            .iter()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .collect()
+    };
 
     WebRTCConfig {
         relays,
         signaling_enabled: config.server.enable_webrtc,
         hash_get_enabled: config.server.mode.hash_get_enabled(),
+        advertise_addresses,
         stun_servers,
         multicast: MulticastConfig {
             enabled: config.server.enable_multicast,
@@ -142,6 +258,31 @@ mod tests {
         assert!(webrtc.signaling_enabled);
         assert!(webrtc.wifi_aware.enabled);
         assert_eq!(webrtc.wifi_aware.max_peers, 4);
+    }
+
+    #[test]
+    fn default_webrtc_config_advertises_loopback_bind_address() {
+        let mut config = Config::default();
+        config.server.bind_address = "127.0.0.1:18080".to_string();
+
+        let webrtc = default_webrtc_config(&config);
+        assert_eq!(
+            webrtc.advertise_addresses,
+            vec!["http://127.0.0.1:18080".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_webrtc_config_prefers_explicit_peer_advertise_urls() {
+        let mut config = Config::default();
+        config.server.bind_address = "127.0.0.1:18080".to_string();
+        config.server.peer_advertise_urls = vec!["https://peer.example/".to_string()];
+
+        let webrtc = default_webrtc_config(&config);
+        assert_eq!(
+            webrtc.advertise_addresses,
+            vec!["https://peer.example".to_string()]
+        );
     }
 
     #[test]

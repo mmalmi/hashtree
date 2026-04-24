@@ -18,6 +18,7 @@ use crate::types::{SignalingMessage, NOSTR_KIND_HASHTREE};
 /// Hello tag for broadcast peer discovery
 const HELLO_TAG: &str = "hello";
 const HASH_GET_TAG: &str = "hashGet";
+const ADDRESS_TAG: &str = "addr";
 
 fn decode_hash_get_tag(tag_value: Option<String>) -> bool {
     match tag_value.as_deref() {
@@ -50,6 +51,20 @@ pub fn decode_signaling_event(
             }
         })
     };
+    let get_tags = |name: &str| -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let v: Vec<String> = tag.clone().to_vec();
+                if v.len() >= 2 && v[0] == name {
+                    Some(v[1].clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
 
     if get_tag("l").as_deref() == Some(HELLO_TAG) {
         let sender_pubkey = event.pubkey.to_hex();
@@ -67,6 +82,7 @@ pub fn decode_signaling_event(
             peer_id: sender_pubkey,
             roots: vec![],
             hash_get: decode_hash_get_tag(get_tag(HASH_GET_TAG)),
+            addresses: get_tags(ADDRESS_TAG),
         });
     }
 
@@ -138,12 +154,16 @@ pub fn encode_signaling_event(
             .map_err(|e| TransportError::SendFailed(e.to_string()));
     }
 
-    let hash_get = match msg {
-        SignalingMessage::Hello { hash_get, .. } => *hash_get,
-        _ => true,
+    let (hash_get, addresses) = match msg {
+        SignalingMessage::Hello {
+            hash_get,
+            addresses,
+            ..
+        } => (*hash_get, addresses.as_slice()),
+        _ => (true, &[][..]),
     };
     let expiration = Timestamp::now() + Duration::from_secs(5 * 60);
-    let tags = vec![
+    let mut tags = vec![
         Tag::custom(
             nostr_sdk::TagKind::SingleLetter(nostr_sdk::SingleLetterTag::lowercase(
                 nostr_sdk::Alphabet::L,
@@ -160,6 +180,16 @@ pub fn encode_signaling_event(
         ),
         Tag::expiration(expiration),
     ];
+    for address in addresses {
+        let address = address.trim();
+        if address.is_empty() {
+            continue;
+        }
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom(std::borrow::Cow::Borrowed(ADDRESS_TAG)),
+            vec![address.to_string()],
+        ));
+    }
 
     EventBuilder::new(kind, "", tags)
         .to_event(keys)
@@ -461,11 +491,15 @@ fn normalize_signaling_message(
 
     Some(match msg {
         SignalingMessage::Hello {
-            roots, hash_get, ..
+            roots,
+            hash_get,
+            addresses,
+            ..
         } => SignalingMessage::Hello {
             peer_id: sender_peer_id,
             roots,
             hash_get,
+            addresses,
         },
         SignalingMessage::Offer {
             target_peer_id,
@@ -575,6 +609,7 @@ mod tests {
             peer_id: sender_peer_id.clone(),
             roots: vec![],
             hash_get: false,
+            addresses: vec!["http://127.0.0.1:8123".to_string()],
         };
 
         let event = encode_signaling_event(
@@ -596,6 +631,17 @@ mod tests {
             })
             .expect("hashGet tag");
         assert_eq!(hash_get_tag, "0");
+        let address_tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let values = tag.as_slice();
+                (values.first().map(|value| value.as_str()) == Some("addr"))
+                    .then(|| values.get(1).cloned())
+                    .flatten()
+            })
+            .collect();
+        assert_eq!(address_tags, vec!["http://127.0.0.1:8123".to_string()]);
 
         let decoded =
             decode_signaling_event(&event, "receiver", "receiver-pubkey", &Keys::generate())
@@ -603,10 +649,14 @@ mod tests {
 
         match decoded {
             SignalingMessage::Hello {
-                peer_id, hash_get, ..
+                peer_id,
+                hash_get,
+                addresses,
+                ..
             } => {
                 assert_eq!(peer_id, sender_peer_id);
                 assert!(!hash_get);
+                assert_eq!(addresses, vec!["http://127.0.0.1:8123".to_string()]);
             }
             other => panic!("expected hello, got {:?}", other),
         }
