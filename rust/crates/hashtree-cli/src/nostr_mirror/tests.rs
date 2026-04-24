@@ -1167,27 +1167,31 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
     let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     mirror
-        .history_sync_authors_chunked(vec!["author-a".to_string(), "author-b".to_string()], {
-            let call_index = Arc::clone(&call_index);
-            let root = root.clone();
-            move |_current_root, author_chunk| {
+        .history_sync_authors_chunked(
+            vec!["author-a".to_string(), "author-b".to_string()],
+            {
                 let call_index = Arc::clone(&call_index);
                 let root = root.clone();
-                std::future::ready(
-                    match call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-                        0 => Ok(CrawlReport {
-                            root: root.clone(),
-                            authors_considered: 2,
-                            authors_processed: author_chunk.len(),
-                            events_seen: 1,
-                            events_selected: 1,
-                            live_bytes_selected: 0,
-                        }),
-                        _ => Err(anyhow::anyhow!("boom")),
-                    },
-                )
-            }
-        })
+                move |_current_root, author_chunk| {
+                    let call_index = Arc::clone(&call_index);
+                    let root = root.clone();
+                    std::future::ready(
+                        match call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                            0 => Ok(CrawlReport {
+                                root: root.clone(),
+                                authors_considered: 2,
+                                authors_processed: author_chunk.len(),
+                                events_seen: 1,
+                                events_selected: 1,
+                                live_bytes_selected: 0,
+                            }),
+                            _ => Err(anyhow::anyhow!("boom")),
+                        },
+                    )
+                }
+            },
+            true,
+        )
         .await?;
 
     let alice_hex = alice_keys.public_key().to_hex();
@@ -1196,6 +1200,80 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
         graph_store.public_events_root()?,
         root,
         "expected first successful chunk to checkpoint trusted root"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Ignored"}"#, [])
+        .custom_created_at(Timestamp::from(12))
+        .to_event(&alice_keys)
+        .expect("alice profile");
+    let alice_stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_profile.id.to_hex(),
+        pubkey: alice_profile.pubkey.to_hex(),
+        created_at: alice_profile.created_at.as_u64(),
+        kind: alice_profile.kind.as_u16() as u32,
+        tags: alice_profile
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_profile.content.clone(),
+        sig: alice_profile.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store.build(None, vec![alice_stored]).await?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig::default(),
+        store,
+        graph_store.clone(),
+        None,
+    )
+    .await?;
+
+    mirror
+        .history_sync_authors_chunked(
+            vec!["author-a".to_string()],
+            {
+                let root = root.clone();
+                move |_current_root, author_chunk| {
+                    let root = root.clone();
+                    std::future::ready(Ok(CrawlReport {
+                        root: root.clone(),
+                        authors_considered: 1,
+                        authors_processed: author_chunk.len(),
+                        events_seen: 1,
+                        events_selected: 1,
+                        live_bytes_selected: 0,
+                    }))
+                }
+            },
+            false,
+        )
+        .await?;
+
+    let alice_hex = alice_keys.public_key().to_hex();
+    assert!(graph_store.latest_profile_event(&alice_hex)?.is_none());
+    assert_eq!(
+        graph_store.public_events_root()?,
+        root,
+        "event-only history sync should still checkpoint trusted root"
     );
     Ok(())
 }
@@ -1705,6 +1783,30 @@ fn metadata_only_history_sync_uses_small_author_batches() {
     assert_eq!(plan.relay_fetch_mode, RelayFetchMode::AuthorBatches);
     assert_eq!(plan.per_author_event_limit, 1);
     assert_eq!(plan.author_batch_size, 64);
+}
+
+#[test]
+fn text_note_history_sync_is_event_root_only() {
+    assert!(
+        !BackgroundNostrMirror::history_sync_kinds_affect_profile_or_graph(&[
+            Kind::TextNote.as_u16()
+        ])
+    );
+    assert!(
+        BackgroundNostrMirror::history_sync_kinds_affect_profile_or_graph(&[
+            Kind::Metadata.as_u16()
+        ])
+    );
+    assert!(
+        BackgroundNostrMirror::history_sync_kinds_affect_profile_or_graph(&[
+            Kind::ContactList.as_u16()
+        ])
+    );
+    assert!(
+        BackgroundNostrMirror::history_sync_kinds_affect_profile_or_graph(&[
+            Kind::MuteList.as_u16()
+        ])
+    );
 }
 
 #[test]

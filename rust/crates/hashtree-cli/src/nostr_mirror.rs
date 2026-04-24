@@ -619,6 +619,15 @@ impl BackgroundNostrMirror {
         !kinds.is_empty() && kinds.iter().all(|kind| *kind == Kind::Metadata.as_u16())
     }
 
+    fn history_sync_kinds_affect_profile_or_graph(kinds: &[u16]) -> bool {
+        kinds.is_empty()
+            || kinds.iter().any(|kind| {
+                *kind == Kind::Metadata.as_u16()
+                    || *kind == Kind::ContactList.as_u16()
+                    || *kind == Kind::MuteList.as_u16()
+            })
+    }
+
     fn history_sync_plan_for(
         config: &NostrMirrorConfig,
         authors: usize,
@@ -735,16 +744,21 @@ impl BackgroundNostrMirror {
         full_author_history: bool,
         max_relay_pages: Option<usize>,
     ) -> Result<()> {
-        self.history_sync_authors_chunked(authors, |current_root, author_chunk| async move {
-            self.history_sync_author_chunk(
-                current_root,
-                author_chunk,
-                kinds,
-                full_author_history,
-                max_relay_pages,
-            )
-            .await
-        })
+        let update_profile_and_graph = Self::history_sync_kinds_affect_profile_or_graph(kinds);
+        self.history_sync_authors_chunked(
+            authors,
+            |current_root, author_chunk| async move {
+                self.history_sync_author_chunk(
+                    current_root,
+                    author_chunk,
+                    kinds,
+                    full_author_history,
+                    max_relay_pages,
+                )
+                .await
+            },
+            update_profile_and_graph,
+        )
         .await
     }
 
@@ -752,6 +766,7 @@ impl BackgroundNostrMirror {
         &self,
         authors: Vec<String>,
         mut run_chunk: F,
+        update_profile_and_graph: bool,
     ) -> Result<()>
     where
         F: FnMut(Option<hashtree_core::Cid>, Vec<String>) -> Fut,
@@ -801,7 +816,11 @@ impl BackgroundNostrMirror {
             };
 
             if report.root != current_root {
-                self.apply_history_root(report.root.as_ref()).await?;
+                self.apply_history_root_with_options(
+                    report.root.as_ref(),
+                    update_profile_and_graph,
+                )
+                .await?;
                 current_root = report.root.clone();
                 info!(
                     "Nostr mirror history sync updated trusted root: chunk={}/{} authors_processed={} events_selected={} events_seen={}",
@@ -909,31 +928,43 @@ impl BackgroundNostrMirror {
             .context("run mirror history sync")
     }
 
+    #[cfg(test)]
     async fn apply_history_root(&self, root: Option<&hashtree_core::Cid>) -> Result<()> {
+        self.apply_history_root_with_options(root, true).await
+    }
+
+    async fn apply_history_root_with_options(
+        &self,
+        root: Option<&hashtree_core::Cid>,
+        update_profile_and_graph: bool,
+    ) -> Result<()> {
         self.graph_store.write_public_events_root(root)?;
         let Some(root) = root else {
             return Ok(());
         };
 
-        let event_store = NostrEventStore::new(self.store.store_arc());
-        let events = event_store
-            .list_recent_lossy(Some(root), ListEventsOptions::default())
-            .await
-            .context("list trusted mirrored events")?
-            .into_iter()
-            .map(socialgraph::stored_event_to_nostr_event)
-            .collect::<Result<Vec<_>>>()?;
-
-        self.graph_store
-            .rebuild_profile_index_for_events(&events)
-            .context("rebuild mirrored profile search index")?;
-        socialgraph::ingest_graph_parsed_events(self.graph_store.as_ref(), &events)
-            .context("sync mirrored social graph state")?;
         self.note_public_events_root_change()?;
-        self.note_profile_search_root_change()?;
-        self.note_profiles_by_pubkey_root_change()?;
-        let (event_result, profile_search_result, profiles_by_pubkey_result) =
-            self.publish_priority_roots(true, true, true).await;
+        if update_profile_and_graph {
+            let event_store = NostrEventStore::new(self.store.store_arc());
+            let events = event_store
+                .list_recent_lossy(Some(root), ListEventsOptions::default())
+                .await
+                .context("list trusted mirrored events")?
+                .into_iter()
+                .map(socialgraph::stored_event_to_nostr_event)
+                .collect::<Result<Vec<_>>>()?;
+
+            self.graph_store
+                .rebuild_profile_index_for_events(&events)
+                .context("rebuild mirrored profile search index")?;
+            socialgraph::ingest_graph_parsed_events(self.graph_store.as_ref(), &events)
+                .context("sync mirrored social graph state")?;
+            self.note_profile_search_root_change()?;
+            self.note_profiles_by_pubkey_root_change()?;
+        }
+        let (event_result, profile_search_result, profiles_by_pubkey_result) = self
+            .publish_priority_roots(true, update_profile_and_graph, update_profile_and_graph)
+            .await;
         if let Err(err) = event_result {
             warn!(
                 "Nostr mirror event-root publish failed after root update: {:#}",
