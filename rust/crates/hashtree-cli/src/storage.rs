@@ -369,8 +369,8 @@ impl StorageRouter {
 
             tracing::info!("S3 background sync task started");
 
-            // Limit concurrent uploads to prevent overwhelming the runtime
-            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
+            // Keep S3 writes parallel, but avoid dispatch failures during mirror backfill bursts.
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
             let client = std::sync::Arc::new(sync_client);
             let bucket = std::sync::Arc::new(sync_bucket);
             let prefix = std::sync::Arc::new(sync_prefix);
@@ -391,30 +391,82 @@ impl StorageRouter {
                             let key = format!("{}{}.bin", prefix, to_hex(&hash));
                             tracing::debug!("S3 uploading {} ({} bytes)", &key, data.len());
 
-                            match client
-                                .put_object()
-                                .bucket(bucket.as_str())
-                                .key(&key)
-                                .body(ByteStream::from(data))
-                                .send()
-                                .await
-                            {
-                                Ok(_) => tracing::debug!("S3 upload succeeded: {}", &key),
-                                Err(e) => tracing::error!("S3 upload failed {}: {}", &key, e),
+                            let mut attempt = 1u8;
+                            loop {
+                                match client
+                                    .put_object()
+                                    .bucket(bucket.as_str())
+                                    .key(&key)
+                                    .body(ByteStream::from(data.clone()))
+                                    .send()
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        tracing::debug!("S3 upload succeeded: {}", &key);
+                                        break;
+                                    }
+                                    Err(e) if attempt < 3 => {
+                                        tracing::warn!(
+                                            "S3 upload retrying {}: attempt={} error={}",
+                                            &key,
+                                            attempt,
+                                            e
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            250 * u64::from(attempt),
+                                        ))
+                                        .await;
+                                        attempt += 1;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "S3 upload failed {} after {} attempts: {}",
+                                            &key,
+                                            attempt,
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         }
                         S3SyncMessage::Delete { hash } => {
                             let key = format!("{}{}.bin", prefix, to_hex(&hash));
                             tracing::debug!("S3 deleting {}", &key);
 
-                            if let Err(e) = client
-                                .delete_object()
-                                .bucket(bucket.as_str())
-                                .key(&key)
-                                .send()
-                                .await
-                            {
-                                tracing::error!("S3 delete failed {}: {}", &key, e);
+                            let mut attempt = 1u8;
+                            loop {
+                                match client
+                                    .delete_object()
+                                    .bucket(bucket.as_str())
+                                    .key(&key)
+                                    .send()
+                                    .await
+                                {
+                                    Ok(_) => break,
+                                    Err(e) if attempt < 3 => {
+                                        tracing::warn!(
+                                            "S3 delete retrying {}: attempt={} error={}",
+                                            &key,
+                                            attempt,
+                                            e
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            250 * u64::from(attempt),
+                                        ))
+                                        .await;
+                                        attempt += 1;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "S3 delete failed {} after {} attempts: {}",
+                                            &key,
+                                            attempt,
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
