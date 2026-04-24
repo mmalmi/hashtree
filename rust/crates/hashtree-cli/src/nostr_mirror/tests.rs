@@ -1163,6 +1163,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
                                 events_seen: 1,
                                 events_selected: 1,
                                 live_bytes_selected: 0,
+                                applied_events: Vec::new(),
                             }),
                             _ => Err(anyhow::anyhow!("boom")),
                         },
@@ -1181,6 +1182,149 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
         root,
         "expected first successful chunk to checkpoint trusted root"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+
+    let initial_keys = nostr::Keys::generate();
+    let initial_event = EventBuilder::new(Kind::TextNote, "initial", [])
+        .custom_created_at(Timestamp::from(10))
+        .to_event(&initial_keys)
+        .expect("initial event");
+    let initial_stored = hashtree_nostr::StoredNostrEvent {
+        id: initial_event.id.to_hex(),
+        pubkey: initial_event.pubkey.to_hex(),
+        created_at: initial_event.created_at.as_u64(),
+        kind: initial_event.kind.as_u16() as u32,
+        tags: initial_event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: initial_event.content.clone(),
+        sig: initial_event.sig.to_string(),
+    };
+
+    let live_keys = nostr::Keys::generate();
+    let live_event = EventBuilder::new(Kind::TextNote, "live", [])
+        .custom_created_at(Timestamp::from(11))
+        .to_event(&live_keys)
+        .expect("live event");
+    let live_stored = hashtree_nostr::StoredNostrEvent {
+        id: live_event.id.to_hex(),
+        pubkey: live_event.pubkey.to_hex(),
+        created_at: live_event.created_at.as_u64(),
+        kind: live_event.kind.as_u16() as u32,
+        tags: live_event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: live_event.content.clone(),
+        sig: live_event.sig.to_string(),
+    };
+
+    let history_keys = nostr::Keys::generate();
+    let history_event = EventBuilder::new(Kind::TextNote, "history", [])
+        .custom_created_at(Timestamp::from(12))
+        .to_event(&history_keys)
+        .expect("history event");
+    let history_stored = hashtree_nostr::StoredNostrEvent {
+        id: history_event.id.to_hex(),
+        pubkey: history_event.pubkey.to_hex(),
+        created_at: history_event.created_at.as_u64(),
+        kind: history_event.kind.as_u16() as u32,
+        tags: history_event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: history_event.content.clone(),
+        sig: history_event.sig.to_string(),
+    };
+
+    let event_store = NostrEventStore::new(store.store_arc());
+    let initial_root = event_store.build(None, vec![initial_stored]).await?;
+    graph_store.write_public_events_root(initial_root.as_ref())?;
+    let live_root = event_store
+        .build(initial_root.as_ref(), vec![live_stored.clone()])
+        .await?;
+    let history_root = event_store
+        .build(initial_root.as_ref(), vec![history_stored.clone()])
+        .await?;
+
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig::default(),
+        store,
+        graph_store.clone(),
+        None,
+    )
+    .await?;
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    mirror
+        .history_sync_authors_chunked(
+            vec!["author-a".to_string()],
+            {
+                let call_index = Arc::clone(&call_index);
+                let graph_store = graph_store.clone();
+                let live_root = live_root.clone();
+                let history_root = history_root.clone();
+                let history_stored = history_stored.clone();
+                move |_current_root, author_chunk| {
+                    let call_index = Arc::clone(&call_index);
+                    let graph_store = graph_store.clone();
+                    let live_root = live_root.clone();
+                    let history_root = history_root.clone();
+                    let history_stored = history_stored.clone();
+                    async move {
+                        assert_eq!(
+                            call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                            0,
+                            "history chunk should not be refetched after live root churn"
+                        );
+                        graph_store.write_public_events_root(live_root.as_ref())?;
+                        Ok(CrawlReport {
+                            root: history_root.clone(),
+                            authors_considered: 1,
+                            authors_processed: author_chunk.len(),
+                            events_seen: 1,
+                            events_selected: 1,
+                            live_bytes_selected: 0,
+                            applied_events: vec![history_stored.clone()],
+                        })
+                    }
+                }
+            },
+            false,
+            Some(1),
+        )
+        .await?;
+
+    assert_eq!(call_index.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let final_root = graph_store.public_events_root()?.expect("final root");
+    let events = event_store
+        .list_recent(Some(&final_root), ListEventsOptions::default())
+        .await?;
+    let event_ids = events
+        .into_iter()
+        .map(|event| event.id)
+        .collect::<HashSet<_>>();
+    assert!(event_ids.contains(&live_event.id.to_hex()));
+    assert!(event_ids.contains(&history_event.id.to_hex()));
     Ok(())
 }
 
@@ -1241,6 +1385,7 @@ async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
                         events_seen: 1,
                         events_selected: 1,
                         live_bytes_selected: 0,
+                        applied_events: Vec::new(),
                     }))
                 }
             },

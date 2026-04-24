@@ -966,38 +966,42 @@ impl BackgroundNostrMirror {
                 total_chunks,
                 author_count
             );
-            let report = loop {
-                let report = match run_chunk(current_root.clone(), author_chunk.clone()).await {
-                    Ok(report) => report,
-                    Err(err) => {
-                        failed_chunks = failed_chunks.saturating_add(1);
-                        warn!(
-                            "Nostr mirror history sync chunk failed: chunk={}/{} authors={} error={:#}",
-                            chunk_index + 1,
-                            total_chunks,
-                            author_count,
-                            err
-                        );
-                        last_error = Some(err);
-                        break None;
-                    }
-                };
-
-                let latest_root = self.graph_store.public_events_root_for_write()?;
-                if latest_root == current_root {
-                    break Some(report);
+            let mut report = match run_chunk(current_root.clone(), author_chunk.clone()).await {
+                Ok(report) => report,
+                Err(err) => {
+                    failed_chunks = failed_chunks.saturating_add(1);
+                    warn!(
+                        "Nostr mirror history sync chunk failed: chunk={}/{} authors={} error={:#}",
+                        chunk_index + 1,
+                        total_chunks,
+                        author_count,
+                        err
+                    );
+                    last_error = Some(err);
+                    continue;
                 }
+            };
+
+            let latest_root = self.graph_store.public_events_root_for_write()?;
+            if latest_root != current_root {
                 info!(
-                    "Nostr mirror history sync root advanced while chunk was fetching; retrying chunk={}/{} authors={}",
+                    "Nostr mirror history sync root advanced while chunk was fetching; merging chunk into latest root: chunk={}/{} authors={} events_applied={}",
                     chunk_index + 1,
                     total_chunks,
-                    author_count
+                    author_count,
+                    report.applied_events.len()
                 );
+                if report.applied_events.is_empty() {
+                    report.root = latest_root.clone();
+                } else {
+                    let event_store = NostrEventStore::new(self.store.store_arc());
+                    report.root = event_store
+                        .build(latest_root.as_ref(), report.applied_events.clone())
+                        .await
+                        .context("merge history chunk into latest mirrored event root")?;
+                }
                 current_root = latest_root;
-            };
-            let Some(report) = report else {
-                continue;
-            };
+            }
 
             if report.root != current_root {
                 self.apply_history_root_with_options(

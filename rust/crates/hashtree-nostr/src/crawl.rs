@@ -72,6 +72,7 @@ pub struct CrawlReport {
     pub events_seen: usize,
     pub events_selected: usize,
     pub live_bytes_selected: u64,
+    pub applied_events: Vec<StoredNostrEvent>,
 }
 
 pub trait EventSelectionPolicy: Send + Sync {
@@ -270,6 +271,7 @@ impl<S: Store> NostrBridge<S> {
         let mut events_selected = 0usize;
         let mut live_bytes_selected = 0u64;
         let mut authors_processed = 0usize;
+        let mut applied_events = Vec::new();
 
         for author_batch in authors.chunks(self.config.author_batch_size) {
             let batch = self
@@ -287,6 +289,7 @@ impl<S: Store> NostrBridge<S> {
             live_bytes_selected = batch.live_bytes_selected;
             authors_processed = authors_processed.saturating_add(author_batch.len());
             if !batch.events.is_empty() {
+                applied_events.extend(batch.events.clone());
                 current_root = self
                     .event_store
                     .build(current_root.as_ref(), batch.events)
@@ -299,6 +302,7 @@ impl<S: Store> NostrBridge<S> {
                 events_seen,
                 events_selected,
                 live_bytes_selected,
+                applied_events: Vec::new(),
             });
             if self.reached_events_seen_limit(events_seen) {
                 break;
@@ -312,6 +316,7 @@ impl<S: Store> NostrBridge<S> {
             events_seen,
             events_selected,
             live_bytes_selected,
+            applied_events,
         })
     }
 
@@ -801,6 +806,7 @@ impl<S: Store> NostrBridge<S> {
         let mut failed_relays = BTreeSet::<String>::new();
         let mut relay_negentropy_support = BTreeMap::<String, bool>::new();
         let mut events_seen = 0usize;
+        let mut applied_events = Vec::new();
 
         self.hydrate_global_recent_profiles(
             client,
@@ -808,6 +814,7 @@ impl<S: Store> NostrBridge<S> {
             &mut state,
             &mut known_ids,
             &mut authors_processed,
+            &mut applied_events,
             &mut relay_negentropy_support,
             &mut failed_relays,
             &mut events_seen,
@@ -822,6 +829,7 @@ impl<S: Store> NostrBridge<S> {
                 events_seen,
                 events_selected: state.events_selected,
                 live_bytes_selected: state.live_bytes_selected,
+                applied_events,
             });
         }
 
@@ -876,6 +884,7 @@ impl<S: Store> NostrBridge<S> {
                     &mut authors_processed,
                 )?;
                 if !pending_apply.is_empty() {
+                    applied_events.extend(pending_apply.clone());
                     state.current_root = self
                         .event_store
                         .build(state.current_root.as_ref(), pending_apply)
@@ -889,6 +898,7 @@ impl<S: Store> NostrBridge<S> {
                     events_seen,
                     events_selected: state.events_selected,
                     live_bytes_selected: state.live_bytes_selected,
+                    applied_events: Vec::new(),
                 });
 
                 if min_created_at == u64::MAX || min_created_at == 0 {
@@ -915,6 +925,7 @@ impl<S: Store> NostrBridge<S> {
             events_seen,
             events_selected: state.events_selected,
             live_bytes_selected: state.live_bytes_selected,
+            applied_events,
         })
     }
 
@@ -1095,6 +1106,7 @@ impl<S: Store> NostrBridge<S> {
         state: &mut GlobalRecentState,
         known_ids: &mut BTreeSet<String>,
         authors_processed: &mut usize,
+        applied_events: &mut Vec<StoredNostrEvent>,
         relay_negentropy_support: &mut BTreeMap<String, bool>,
         failed_relays: &mut BTreeSet<String>,
         events_seen: &mut usize,
@@ -1140,6 +1152,7 @@ impl<S: Store> NostrBridge<S> {
                 authors_processed,
             )?;
             if !pending_apply.is_empty() {
+                applied_events.extend(pending_apply.clone());
                 state.current_root = self
                     .event_store
                     .build(state.current_root.as_ref(), pending_apply)
@@ -1153,6 +1166,7 @@ impl<S: Store> NostrBridge<S> {
                 events_seen: *events_seen,
                 events_selected: state.events_selected,
                 live_bytes_selected: state.live_bytes_selected,
+                applied_events: Vec::new(),
             });
 
             if self.reached_events_seen_limit(*events_seen) {
