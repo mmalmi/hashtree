@@ -1,15 +1,24 @@
+# syntax=docker/dockerfile:1.7
+
 FROM rust:bookworm AS builder
 
 WORKDIR /app
 
 # Copy workspace files
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY vendor ./vendor
 
-# Build release binary with S3 support
-RUN cargo build --release --package hashtree-cli --features s3
-RUN cargo build --release --package hashtree-cashu-cli
+# Build release binaries with persistent BuildKit caches. The target directory
+# is cache-mounted, so copy final artifacts to /out before the layer commits.
+RUN --mount=type=cache,id=hashtree-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=hashtree-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=hashtree-target,target=/app/target \
+    cargo build --locked --release --package hashtree-cli --features s3 && \
+    cargo build --locked --release --package hashtree-cashu-cli && \
+    mkdir -p /out && \
+    cp /app/target/release/htree /out/htree && \
+    cp /app/target/release/htree-cashu /out/htree-cashu
 
 FROM debian:bookworm-slim
 
@@ -18,8 +27,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/htree /usr/local/bin/htree
-COPY --from=builder /app/target/release/htree-cashu /usr/local/bin/htree-cashu
+COPY --from=builder /out/htree /usr/local/bin/htree
+COPY --from=builder /out/htree-cashu /usr/local/bin/htree-cashu
 
 WORKDIR /data
 
