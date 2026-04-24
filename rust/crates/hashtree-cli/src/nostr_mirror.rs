@@ -1203,13 +1203,16 @@ impl BackgroundNostrMirror {
                 .kinds(self.config.kinds.iter().copied().map(Kind::from))
                 .since(since);
 
-            self.client
-                .subscribe(vec![filter], None)
-                .await
-                .context("subscribe mirror author batch")?;
+            if let Err(err) = self.client.subscribe(vec![filter], None).await {
+                warn!(
+                    "Nostr mirror author subscription failed: authors={} error={:#}",
+                    chunk.len(),
+                    err
+                );
+                continue;
+            }
+            subscribed_authors.extend(chunk.iter().cloned());
         }
-
-        subscribed_authors.extend(new_authors);
         Ok(())
     }
 
