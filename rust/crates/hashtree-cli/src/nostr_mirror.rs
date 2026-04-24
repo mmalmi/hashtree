@@ -849,6 +849,10 @@ impl BackgroundNostrMirror {
         let Some(distance) = self.full_text_note_history_follow_distance() else {
             return Ok(());
         };
+        if self.full_text_note_history_max_relay_pages().is_none() {
+            info!("Nostr mirror full text content history sync skipped: max_relay_pages=0");
+            return Ok(());
+        }
         info!(
             "Nostr mirror full text content history author collection starting: max_follow_distance={distance}"
         );
