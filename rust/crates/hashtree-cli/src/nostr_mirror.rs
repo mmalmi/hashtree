@@ -1487,6 +1487,7 @@ impl BackgroundNostrMirror {
             let state = publish_state.lock().expect("root publish state");
             !upload_required || state.last_uploaded_root.as_ref() == Some(&pending_root)
         };
+        let publish_before_upload_ready = force && upload_required && !upload_ready;
 
         let mut successful_relays = Vec::new();
         let mut failed_relays = Vec::new();
@@ -1500,7 +1501,7 @@ impl BackgroundNostrMirror {
             if !self.has_connected_publish_relay().await {
                 return Ok(());
             }
-            if !upload_ready {
+            if !upload_ready && !publish_before_upload_ready {
                 if upload_started {
                     info!(
                         "Nostr mirror uploading {} DAG before publish: tree={} hash={}",
@@ -1510,6 +1511,14 @@ impl BackgroundNostrMirror {
                     );
                 }
                 return Ok(());
+            }
+            if publish_before_upload_ready {
+                info!(
+                    "Nostr mirror publishing {} before Blossom upload completes: tree={} hash={}",
+                    log_label,
+                    tree_name,
+                    hex::encode(pending_root.hash),
+                );
             }
 
             let already_published = {

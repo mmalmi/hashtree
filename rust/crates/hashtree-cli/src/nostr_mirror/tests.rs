@@ -697,7 +697,7 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 }
 
 #[tokio::test]
-async fn apply_history_root_defers_event_root_publish_until_event_upload_finishes() -> Result<()> {
+async fn apply_history_root_publishes_event_root_while_event_upload_continues() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
@@ -800,7 +800,7 @@ async fn apply_history_root_defers_event_root_publish_until_event_upload_finishe
     );
     assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
     assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
-    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
     Ok(())
 }
 
