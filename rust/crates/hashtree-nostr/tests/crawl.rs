@@ -847,6 +847,61 @@ async fn full_author_history_pages_past_per_author_limit() -> io::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_author_history_can_skip_paging_fallback() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = EventBuilder::new(
+        Kind::ContactList,
+        "",
+        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .to_event(&root_keys)
+    .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let publisher = Client::new(Keys::generate());
+    publisher.add_relay(&relay_url).await.expect("add relay");
+    publisher.connect().await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let note = EventBuilder::new(Kind::TextNote, "alice note", [])
+        .custom_created_at(Timestamp::from_secs(20))
+        .to_event(&alice_keys)
+        .expect("note");
+    publisher
+        .send_event(note)
+        .await
+        .expect("publish test event");
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 1,
+            full_author_history: true,
+            relay_page_size: 2,
+            max_relay_pages: 0,
+            kinds: Some(vec![1]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    assert_eq!(report.events_selected, 0);
+    assert_eq!(report.events_seen, 0);
+    assert_eq!(relay.negentropy_open_attempts(), 1);
+    assert!(relay.requested_id_batches().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()> {
     let relay = TestRelay::with_negentropy(true);
     let relay_url = relay.url();

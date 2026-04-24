@@ -415,7 +415,7 @@ impl<S: Store> NostrBridge<S> {
         if self.config.relay_page_size == 0 {
             return Err(CrawlError::InvalidRelayPageSize);
         }
-        if self.config.max_relay_pages == 0 {
+        if self.config.max_relay_pages == 0 && !self.config.full_author_history {
             return Err(CrawlError::InvalidMaxRelayPages);
         }
         if self.config.max_events_seen == Some(0) {
@@ -1372,10 +1372,14 @@ impl<S: Store> NostrBridge<S> {
                             events,
                             supports_negentropy: true,
                         }),
-                        Err(err) if !self.config.require_negentropy => self
-                            .fetch_full_history_by_paging_from_relay(client, relay, pubkeys)
-                            .await
-                            .map_err(|_| err),
+                        Err(err)
+                            if !self.config.require_negentropy
+                                && self.config.max_relay_pages > 0 =>
+                        {
+                            self.fetch_full_history_by_paging_from_relay(client, relay, pubkeys)
+                                .await
+                                .map_err(|_| err)
+                        }
                         Err(err) => Err(err),
                     };
                 }
@@ -1390,7 +1394,7 @@ impl<S: Store> NostrBridge<S> {
             }
         }
 
-        if self.config.require_negentropy {
+        if self.config.require_negentropy || self.config.max_relay_pages == 0 {
             return Ok(RelayFetchResult {
                 events_seen: 0,
                 events: Vec::new(),

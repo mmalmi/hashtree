@@ -51,7 +51,7 @@ const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
 const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
 const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
-const DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES: usize = 1_000;
+const DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES: usize = 0;
 const LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER: usize = 8;
 const LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 16;
 const LARGE_HISTORY_SYNC_MAX_RELAY_PAGES: usize = 20;
@@ -726,13 +726,13 @@ impl BackgroundNostrMirror {
             "Nostr mirror full text-note history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
             close_authors.len(),
             distance,
-            self.config.full_text_note_history_max_relay_pages.max(1)
+            self.config.full_text_note_history_max_relay_pages
         );
         self.history_sync_authors_with_kinds_and_mode(
             close_authors,
             &[Kind::TextNote.as_u16()],
             true,
-            Some(self.config.full_text_note_history_max_relay_pages.max(1)),
+            Some(self.config.full_text_note_history_max_relay_pages),
         )
         .await
     }
@@ -862,7 +862,7 @@ impl BackgroundNostrMirror {
         let mut plan = self.history_sync_plan(authors.len(), kinds);
         if full_author_history {
             plan.relay_fetch_mode = RelayFetchMode::AuthorBatches;
-            plan.max_relay_pages = max_relay_pages.unwrap_or(plan.max_relay_pages).max(1);
+            plan.max_relay_pages = max_relay_pages.unwrap_or(plan.max_relay_pages);
         }
         for attempt in 0..3 {
             let mut last_logged_authors = 0usize;

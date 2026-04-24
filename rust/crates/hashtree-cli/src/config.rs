@@ -477,7 +477,7 @@ fn default_nostr_full_text_note_history_follow_distance() -> Option<u32> {
 }
 
 fn default_nostr_full_text_note_history_max_relay_pages() -> usize {
-    1_000
+    0
 }
 
 fn default_relays() -> Vec<String> {
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
         assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(2));
-        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 1_000);
+        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 0);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
             config.nostr.bootstrap_follows,
@@ -966,7 +966,7 @@ relays = ["wss://relay.damus.io"]
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
         assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(2));
-        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 1_000);
+        assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 0);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
             config.nostr.bootstrap_follows,
