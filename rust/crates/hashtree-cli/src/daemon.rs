@@ -178,10 +178,9 @@ impl EmbeddedBackgroundServicesController {
             return active_relays;
         }
 
-        let filtered_set = filtered.iter().cloned().collect::<HashSet<_>>();
         let mut selected = Self::MIRROR_PUBLISH_RELAY_PRIORITY
             .iter()
-            .filter(|relay| filtered_set.contains(**relay))
+            .filter(|relay| !Self::MIRROR_PUBLISH_RELAY_BLOCKLIST.contains(relay))
             .map(|relay| (*relay).to_string())
             .collect::<Vec<_>>();
         let mut selected_set = selected.iter().cloned().collect::<HashSet<_>>();
@@ -934,6 +933,33 @@ mod tests {
             relays,
             vec![
                 "wss://relay.primal.net".to_string(),
+                "wss://nos.lol".to_string(),
+                "wss://relay.nostr.band".to_string(),
+                "wss://relay.snort.social".to_string(),
+                "wss://temp.iris.to".to_string(),
+                "wss://vault.iris.to".to_string(),
+                "wss://relay.damus.io".to_string(),
+                "wss://relay.example".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mirror_publish_relays_includes_durable_publish_target_even_when_not_active() {
+        let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
+            &[
+                "wss://graph-relay.iris.to".to_string(),
+                "wss://relay.example".to_string(),
+            ],
+            "0.0.0.0:8080",
+        );
+        assert_eq!(
+            relays,
+            vec![
+                "wss://relay.primal.net".to_string(),
+                "wss://nos.lol".to_string(),
+                "wss://relay.nostr.band".to_string(),
+                "wss://relay.snort.social".to_string(),
                 "wss://temp.iris.to".to_string(),
                 "wss://vault.iris.to".to_string(),
                 "wss://relay.damus.io".to_string(),
@@ -956,8 +982,13 @@ mod tests {
         assert_eq!(
             relays,
             vec![
+                "wss://relay.primal.net".to_string(),
+                "wss://nos.lol".to_string(),
                 "wss://relay.nostr.band".to_string(),
                 "wss://relay.snort.social".to_string(),
+                "wss://temp.iris.to".to_string(),
+                "wss://vault.iris.to".to_string(),
+                "wss://relay.damus.io".to_string(),
             ]
         );
     }

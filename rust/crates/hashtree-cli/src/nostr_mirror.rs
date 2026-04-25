@@ -1464,7 +1464,7 @@ impl BackgroundNostrMirror {
                 &self.event_publish_state,
                 "event root",
                 force,
-                false,
+                true,
             )
             .await;
         let Err(error) = result else {
@@ -1517,7 +1517,7 @@ impl BackgroundNostrMirror {
             &self.event_publish_state,
             "event root",
             force,
-            false,
+            true,
         )
         .await
     }
