@@ -148,10 +148,7 @@ pub struct EmbeddedBackgroundServicesController {
 
 impl EmbeddedBackgroundServicesController {
     const MIRROR_PUBLISH_RELAY_PRIORITY: &[&str] = &[
-        "wss://relay.primal.net",
         "wss://nos.lol",
-        "wss://relay.nostr.band",
-        "wss://relay.snort.social",
         "wss://temp.iris.to",
         "wss://vault.iris.to",
         "wss://relay.damus.io",
@@ -178,12 +175,14 @@ impl EmbeddedBackgroundServicesController {
             return active_relays;
         }
 
-        let mut selected = Self::MIRROR_PUBLISH_RELAY_PRIORITY
-            .iter()
-            .filter(|relay| !Self::MIRROR_PUBLISH_RELAY_BLOCKLIST.contains(relay))
-            .map(|relay| (*relay).to_string())
-            .collect::<Vec<_>>();
-        let mut selected_set = selected.iter().cloned().collect::<HashSet<_>>();
+        let mut selected = Vec::new();
+        let mut selected_set = HashSet::new();
+        for relay in Self::MIRROR_PUBLISH_RELAY_PRIORITY {
+            if filtered.iter().any(|active| active == relay) {
+                selected.push((*relay).to_string());
+                selected_set.insert((*relay).to_string());
+            }
+        }
         for relay in filtered {
             if selected_set.insert(relay.clone()) {
                 selected.push(relay);
@@ -822,7 +821,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         crawler_spambox_backend,
         webrtc_state.clone(),
     ));
-    background_services_controller.apply_config(&config).await?;
 
     let upstream_blossom = config.blossom.all_read_servers();
     let active_nostr_relays = config.nostr.active_relays();
@@ -879,6 +877,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         }
     });
     let server_controller = Arc::new(EmbeddedServerController::new(server_shutdown, server_join));
+    background_services_controller.apply_config(&config).await?;
     #[cfg(feature = "p2p")]
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
@@ -932,20 +931,17 @@ mod tests {
         assert_eq!(
             relays,
             vec![
-                "wss://relay.primal.net".to_string(),
-                "wss://nos.lol".to_string(),
-                "wss://relay.nostr.band".to_string(),
-                "wss://relay.snort.social".to_string(),
                 "wss://temp.iris.to".to_string(),
                 "wss://vault.iris.to".to_string(),
                 "wss://relay.damus.io".to_string(),
                 "wss://relay.example".to_string(),
+                "wss://relay.primal.net".to_string(),
             ]
         );
     }
 
     #[test]
-    fn mirror_publish_relays_includes_durable_publish_target_even_when_not_active() {
+    fn mirror_publish_relays_do_not_add_non_active_publish_targets() {
         let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
             &[
                 "wss://graph-relay.iris.to".to_string(),
@@ -953,28 +949,14 @@ mod tests {
             ],
             "0.0.0.0:8080",
         );
-        assert_eq!(
-            relays,
-            vec![
-                "wss://relay.primal.net".to_string(),
-                "wss://nos.lol".to_string(),
-                "wss://relay.nostr.band".to_string(),
-                "wss://relay.snort.social".to_string(),
-                "wss://temp.iris.to".to_string(),
-                "wss://vault.iris.to".to_string(),
-                "wss://relay.damus.io".to_string(),
-                "wss://relay.example".to_string(),
-            ]
-        );
+        assert_eq!(relays, vec!["wss://relay.example".to_string()]);
     }
 
     #[test]
-    fn mirror_publish_relays_filters_known_bad_publish_targets_when_no_preferred_remain() {
+    fn mirror_publish_relays_falls_back_to_active_relays_when_all_are_blocklisted() {
         let relays = EmbeddedBackgroundServicesController::mirror_publish_relays(
             &[
                 "wss://graph-relay.iris.to".to_string(),
-                "wss://relay.snort.social".to_string(),
-                "wss://relay.nostr.band".to_string(),
                 "wss://upload.iris.to/nostr".to_string(),
             ],
             "0.0.0.0:8080",
@@ -982,13 +964,8 @@ mod tests {
         assert_eq!(
             relays,
             vec![
-                "wss://relay.primal.net".to_string(),
-                "wss://nos.lol".to_string(),
-                "wss://relay.nostr.band".to_string(),
-                "wss://relay.snort.social".to_string(),
-                "wss://temp.iris.to".to_string(),
-                "wss://vault.iris.to".to_string(),
-                "wss://relay.damus.io".to_string(),
+                "wss://graph-relay.iris.to".to_string(),
+                "wss://upload.iris.to/nostr".to_string(),
             ]
         );
     }

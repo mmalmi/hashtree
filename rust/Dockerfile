@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 FROM rust:bookworm AS deps
+ARG BUILD_CASHU=0
 
 WORKDIR /app
 
@@ -39,10 +40,13 @@ RUN --mount=type=bind,source=crates,target=/source-crates,readonly \
             cp "/source-crates/$crate/build.rs" "crates/$crate/build.rs"; \
         fi; \
     done; \
-    cargo build --locked --release --package hashtree-cli --features s3 && \
-    cargo build --locked --release --package hashtree-cashu-cli
+    cargo build --locked --release --package hashtree-cli --features s3; \
+    if [ "$BUILD_CASHU" = "1" ]; then \
+        cargo build --locked --release --package hashtree-cashu-cli; \
+    fi
 
 FROM deps AS builder
+ARG BUILD_CASHU=0
 
 COPY crates ./crates
 
@@ -56,10 +60,14 @@ RUN --mount=type=cache,id=hashtree-cargo-registry,target=/usr/local/cargo/regist
     --mount=type=cache,id=hashtree-target,target=/app/target,sharing=locked \
     find crates -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'build.rs' \) -exec touch {} + && \
     cargo build --locked --release --package hashtree-cli --features s3 && \
-    cargo build --locked --release --package hashtree-cashu-cli && \
+    if [ "$BUILD_CASHU" = "1" ]; then \
+        cargo build --locked --release --package hashtree-cashu-cli; \
+    fi && \
     mkdir -p /out && \
     cp /app/target/release/htree /out/htree && \
-    cp /app/target/release/htree-cashu /out/htree-cashu
+    if [ "$BUILD_CASHU" = "1" ]; then \
+        cp /app/target/release/htree-cashu /out/htree-cashu; \
+    fi
 
 FROM debian:bookworm-slim
 
@@ -69,7 +77,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/htree /usr/local/bin/htree
-COPY --from=builder /out/htree-cashu /usr/local/bin/htree-cashu
 
 WORKDIR /data
 

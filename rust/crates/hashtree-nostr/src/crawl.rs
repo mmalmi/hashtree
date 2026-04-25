@@ -12,6 +12,8 @@ use nostr_sdk::{
 use nostr_social_graph::SocialGraphBackend;
 
 const NEGENTROPY_FETCH_CHUNK_SIZE: usize = 256;
+const NEGENTROPY_FETCH_CHUNK_CONCURRENCY: usize = 16;
+const FULL_HISTORY_PAGING_CONCURRENCY_PER_RELAY: usize = 64;
 const METADATA_KIND: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayFetchMode {
@@ -1330,12 +1332,20 @@ impl<S: Store> NostrBridge<S> {
 
         let mut out = BTreeMap::<String, StoredNostrEvent>::new();
         let mut events_seen = 0usize;
-        for chunk in missing_ids.chunks(NEGENTROPY_FETCH_CHUNK_SIZE) {
-            let filter = Filter::new().ids(chunk.iter().cloned());
-            let events = client
+        let filters = missing_ids
+            .chunks(NEGENTROPY_FETCH_CHUNK_SIZE)
+            .map(|chunk| Filter::new().ids(chunk.iter().cloned()))
+            .collect::<Vec<_>>();
+        let fetches = filters.into_iter().map(|filter| async move {
+            client
                 .get_events_from([relay], vec![filter], Some(self.config.fetch_timeout))
                 .await
-                .map_err(|err| CrawlError::Nostr(err.to_string()))?;
+                .map_err(|err| CrawlError::Nostr(err.to_string()))
+        });
+        let mut fetches =
+            stream::iter(fetches).buffer_unordered(NEGENTROPY_FETCH_CHUNK_CONCURRENCY);
+        while let Some(result) = fetches.next().await {
+            let events = result?;
             events_seen = events_seen.saturating_add(events.len());
             for event in events {
                 if event.kind.is_ephemeral() {
@@ -1384,16 +1394,14 @@ impl<S: Store> NostrBridge<S> {
     ) -> Result<RelayFetchResult> {
         if supports_negentropy != Some(false) {
             let filter = self.full_history_negentropy_filter(pubkeys.to_vec());
-            match client
-                .reconcile_advanced(
-                    [relay],
-                    filter,
-                    local_items,
-                    NegentropyOptions::default().dry_run(),
-                )
-                .await
-            {
-                Ok(output) if !output.success.is_empty() => {
+            let reconcile = client.reconcile_advanced(
+                [relay],
+                filter,
+                local_items,
+                NegentropyOptions::default().dry_run(),
+            );
+            match tokio::time::timeout(self.config.fetch_timeout, reconcile).await {
+                Ok(Ok(output)) if !output.success.is_empty() => {
                     let missing = output.remote.iter().cloned().collect::<Vec<_>>();
                     return match self.fetch_missing_ids(client, relay, missing).await {
                         Ok(RelayFetchResult {
@@ -1416,14 +1424,22 @@ impl<S: Store> NostrBridge<S> {
                         Err(err) => Err(err),
                     };
                 }
-                Ok(_) | Err(_) if self.config.require_negentropy => {
+                Err(_) if self.config.require_negentropy => {
                     return Ok(RelayFetchResult {
                         events_seen: 0,
                         events: Vec::new(),
                         supports_negentropy: false,
                     });
                 }
-                Ok(_) | Err(_) => {}
+                Err(_) => {}
+                Ok(Ok(_)) | Ok(Err(_)) if self.config.require_negentropy => {
+                    return Ok(RelayFetchResult {
+                        events_seen: 0,
+                        events: Vec::new(),
+                        supports_negentropy: false,
+                    });
+                }
+                Ok(Ok(_)) | Ok(Err(_)) => {}
             }
         }
 
@@ -1446,11 +1462,17 @@ impl<S: Store> NostrBridge<S> {
     ) -> Result<RelayFetchResult> {
         let mut out = BTreeMap::<String, StoredNostrEvent>::new();
         let mut events_seen = 0usize;
+        let concurrency = FULL_HISTORY_PAGING_CONCURRENCY_PER_RELAY
+            .min(pubkeys.len().max(1))
+            .max(1);
+        let fetches = pubkeys.iter().copied().map(|pubkey| async move {
+            self.fetch_full_author_history_by_paging_from_relay(client, relay, pubkey)
+                .await
+        });
+        let mut fetches = stream::iter(fetches).buffer_unordered(concurrency);
 
-        for pubkey in pubkeys {
-            let fetched = self
-                .fetch_full_author_history_by_paging_from_relay(client, relay, *pubkey)
-                .await?;
+        while let Some(result) = fetches.next().await {
+            let fetched = result?;
             events_seen = events_seen.saturating_add(fetched.events_seen);
             for event in fetched.events {
                 out.insert(event.id.clone(), event);

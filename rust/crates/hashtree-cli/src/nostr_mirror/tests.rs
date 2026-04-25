@@ -697,7 +697,7 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 }
 
 #[tokio::test]
-async fn apply_history_root_publishes_event_root_while_event_upload_continues() -> Result<()> {
+async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
@@ -789,7 +789,7 @@ async fn apply_history_root_publishes_event_root_while_event_upload_continues() 
         mirror.maybe_publish_event_root(false).await?;
         if published_root_event_count(&relay, "profile-search") == 1
             && published_root_event_count(&relay, "profiles-by-pubkey") == 1
-            && published_root_event_count(&relay, "nostr-event-index") == 1
+            && published_root_event_count(&relay, "nostr-event-index") == 0
         {
             break;
         }
@@ -801,7 +801,7 @@ async fn apply_history_root_publishes_event_root_while_event_upload_continues() 
     );
     assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
     assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
-    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
 
     wait_until("event DAG upload", Duration::from_secs(5), || {
         delayed_hashes.iter().all(|hash| blossom.has_hash(hash))
@@ -813,8 +813,258 @@ async fn apply_history_root_publishes_event_root_while_event_upload_continues() 
 }
 
 #[tokio::test]
-async fn apply_history_root_bumps_replaceable_timestamp_past_existing_profile_search_event(
-) -> Result<()> {
+async fn uploaded_event_root_state_is_reused_after_restart() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+
+    let alice_keys = nostr::Keys::generate();
+    let alice_note = EventBuilder::new(Kind::TextNote, "persisted upload", [])
+        .custom_created_at(Timestamp::from(22))
+        .to_event(&alice_keys)
+        .expect("alice note");
+    let stored = hashtree_nostr::StoredNostrEvent {
+        id: alice_note.id.to_hex(),
+        pubkey: alice_note.pubkey.to_hex(),
+        created_at: alice_note.created_at.as_u64(),
+        kind: alice_note.kind.as_u16() as u32,
+        tags: alice_note
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: alice_note.content.clone(),
+        sig: alice_note.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let root = event_store
+        .build(None, vec![stored])
+        .await?
+        .expect("event root");
+
+    let blossom = TestBlossom::new().await;
+    let config = NostrMirrorConfig {
+        blossom_write_servers: vec![blossom.base_url()],
+        history_sync_on_start: false,
+        published_event_tree_name: Some("nostr-event-index".to_string()),
+        published_profile_search_tree_name: None,
+        published_profiles_by_pubkey_tree_name: None,
+        ..NostrMirrorConfig::default()
+    };
+    let mirror = BackgroundNostrMirror::new(
+        config.clone(),
+        Arc::clone(&store),
+        graph_store.clone(),
+        None,
+    )
+    .await?;
+
+    mirror.apply_history_root(Some(&root)).await?;
+    let state_path =
+        BackgroundNostrMirror::uploaded_root_state_path(store.base_path(), "nostr-event-index");
+    wait_until("uploaded root state", Duration::from_secs(5), || {
+        state_path.exists() && blossom.has_hash(&hex::encode(root.hash))
+    })
+    .await;
+
+    let restarted = BackgroundNostrMirror::new(config, store, graph_store, None).await?;
+    assert_eq!(
+        restarted
+            .event_publish_state
+            .lock()
+            .expect("event publish state")
+            .last_uploaded_root
+            .as_ref(),
+        Some(&root)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_publish_uses_last_uploaded_root_while_newer_root_uploads() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+    let alice_keys = nostr::Keys::generate();
+    let note_one = EventBuilder::new(Kind::TextNote, "uploaded", [])
+        .custom_created_at(Timestamp::from(1))
+        .to_event(&alice_keys)
+        .expect("note one");
+    let note_two = EventBuilder::new(Kind::TextNote, "pending", [])
+        .custom_created_at(Timestamp::from(2))
+        .to_event(&alice_keys)
+        .expect("note two");
+    let stored_one = hashtree_nostr::StoredNostrEvent {
+        id: note_one.id.to_hex(),
+        pubkey: note_one.pubkey.to_hex(),
+        created_at: note_one.created_at.as_u64(),
+        kind: note_one.kind.as_u16() as u32,
+        tags: note_one
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: note_one.content.clone(),
+        sig: note_one.sig.to_string(),
+    };
+    let stored_two = hashtree_nostr::StoredNostrEvent {
+        id: note_two.id.to_hex(),
+        pubkey: note_two.pubkey.to_hex(),
+        created_at: note_two.created_at.as_u64(),
+        kind: note_two.kind.as_u16() as u32,
+        tags: note_two
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: note_two.content.clone(),
+        sig: note_two.sig.to_string(),
+    };
+    let event_store = NostrEventStore::new(store.store_arc());
+    let uploaded_root = event_store
+        .build(None, vec![stored_one])
+        .await?
+        .expect("uploaded root");
+    let pending_root = event_store
+        .build(Some(&uploaded_root), vec![stored_two])
+        .await?
+        .expect("pending root");
+
+    let relay = TestRelay::new(Vec::new());
+    let blossom = TestBlossom::new().await;
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            blossom_write_servers: vec![blossom.base_url()],
+            history_sync_on_start: false,
+            published_event_tree_name: Some("nostr-event-index".to_string()),
+            published_profile_search_tree_name: None,
+            published_profiles_by_pubkey_tree_name: None,
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store,
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+    {
+        let mut state = mirror
+            .event_publish_state
+            .lock()
+            .expect("event publish state");
+        state.pending_root = Some(pending_root.clone());
+        state.last_uploaded_root = Some(uploaded_root.clone());
+        state.last_changed_at = Some(Instant::now() - MIRROR_ROOT_PUBLISH_DEBOUNCE);
+        state.dirty_since = Some(Instant::now() - MIRROR_ROOT_PUBLISH_MAX_STALENESS);
+    }
+
+    mirror.maybe_publish_event_root(false).await?;
+    let resolver = crate::NostrRootResolver::new(crate::NostrResolverConfig {
+        relays: vec![relay.url()],
+        resolve_timeout: Duration::from_secs(2),
+        secret_key: None,
+    })
+    .await?;
+    let npub = root_keys.public_key().to_bech32()?;
+    let resolved = resolver
+        .resolve(&format!("{npub}/nostr-event-index"))
+        .await?
+        .expect("published event root");
+    assert_eq!(resolved, uploaded_root);
+    resolver.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_publish_retries_with_fresh_client_when_primary_publish_client_misses() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let root_pubkey = root_keys.public_key().to_bytes();
+    set_social_graph_root(&graph_store, &root_pubkey);
+
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: Vec::new(),
+            publish_relays: Vec::new(),
+            fetch_timeout: Duration::from_secs(2),
+            history_sync_on_start: false,
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store,
+        None,
+    )
+    .await?;
+
+    let relay = TestRelay::new(Vec::new());
+    let primary_client = Client::new(Keys::generate());
+    let root = hashtree_core::Cid {
+        hash: [7u8; 32],
+        key: None,
+    };
+    let event = BackgroundNostrMirror::build_public_root_event(
+        "nostr-event-index",
+        &root,
+        Timestamp::from(42),
+    )
+    .to_event(&root_keys)?;
+
+    let (successful_relays, failed_relays) = mirror
+        .publish_root_event_to_relays(&primary_client, &[relay.url()], &event)
+        .await?;
+
+    assert_eq!(successful_relays, vec![relay.url()]);
+    assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
+    assert!(
+        failed_relays
+            .iter()
+            .any(|failure| failure.contains("publish relays")),
+        "primary publish miss should be retained for diagnostics: {failed_relays:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_history_root_publishes_profile_search_over_existing_stale_event() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
@@ -853,7 +1103,7 @@ async fn apply_history_root_bumps_replaceable_timestamp_past_existing_profile_se
     let event_store = NostrEventStore::new(store.store_arc());
     let root = event_store.build(None, vec![stored]).await?;
 
-    let stale_created_at = Timestamp::from_secs(Timestamp::now().as_u64().saturating_add(30));
+    let stale_created_at = Timestamp::from_secs(1);
     let stale_event = EventBuilder::new(
         Kind::Custom(30078),
         "",
@@ -918,7 +1168,7 @@ async fn apply_history_root_bumps_replaceable_timestamp_past_existing_profile_se
         .expect("latest published profile-search event");
     assert!(
         latest.created_at > stale_created_at,
-        "new publish should advance replaceable timestamp past existing relay state"
+        "new publish should beat stale relay state"
     );
     assert_eq!(
         resolved,
@@ -1535,6 +1785,80 @@ async fn mirror_collect_authors_skips_overmuted_users() -> Result<()> {
 }
 
 #[tokio::test]
+async fn full_text_history_prioritizes_low_indexed_direct_follows() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock();
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    let prolific_keys = nostr::Keys::generate();
+    let sparse_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+
+    let follow = EventBuilder::new(
+        Kind::ContactList,
+        "",
+        vec![
+            Tag::public_key(prolific_keys.public_key()),
+            Tag::public_key(sparse_keys.public_key()),
+        ],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .to_event(&root_keys)
+    .expect("follow");
+    crate::socialgraph::ingest_parsed_event(&graph_store, &follow)?;
+
+    let mut stored_notes = Vec::new();
+    for created_at in 1..=40 {
+        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .to_event(&prolific_keys)
+            .expect("prolific note");
+        stored_notes.push(hashtree_nostr::StoredNostrEvent {
+            id: note.id.to_hex(),
+            pubkey: note.pubkey.to_hex(),
+            created_at: note.created_at.as_u64(),
+            kind: note.kind.as_u16() as u32,
+            tags: note
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+            content: note.content.clone(),
+            sig: note.sig.to_string(),
+        });
+    }
+    let event_store = NostrEventStore::new(store.store_arc());
+    let event_root = event_store.build(None, stored_notes).await?;
+    graph_store.write_public_events_root(event_root.as_ref())?;
+
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            max_follow_distance: 1,
+            history_sync_on_start: false,
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store,
+        None,
+    )
+    .await?;
+
+    let prolific = prolific_keys.public_key().to_hex();
+    let sparse = sparse_keys.public_key().to_hex();
+    let prioritized = mirror
+        .prioritize_full_text_note_history_authors(vec![prolific.clone(), sparse.clone()])
+        .await?;
+    assert_eq!(prioritized, vec![sparse, prolific]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Result<()> {
     let _guard = crate::socialgraph::test_lock();
     let tmp = TempDir::new().expect("tempdir");
@@ -2059,7 +2383,7 @@ fn zero_full_text_history_pages_disables_startup_text_history() {
 }
 
 #[test]
-fn zero_full_text_history_pages_removes_text_kinds_from_general_history_sync() {
+fn general_history_sync_excludes_text_content_kinds() {
     let config = NostrMirrorConfig {
         full_text_note_history_max_relay_pages: 0,
         ..NostrMirrorConfig::default()
@@ -2075,8 +2399,10 @@ fn zero_full_text_history_pages_removes_text_kinds_from_general_history_sync() {
         ..NostrMirrorConfig::default()
     };
     let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
-    assert!(kinds.contains(&Kind::TextNote.as_u16()));
-    assert!(kinds.contains(&30_023));
+    assert!(!kinds.contains(&Kind::TextNote.as_u16()));
+    assert!(!kinds.contains(&30_023));
+    assert!(kinds.contains(&Kind::Metadata.as_u16()));
+    assert!(kinds.contains(&Kind::ContactList.as_u16()));
 }
 
 #[test]
@@ -2109,7 +2435,7 @@ fn large_global_recent_history_sync_uses_one_chunk() {
 }
 
 #[test]
-fn full_author_history_keeps_configured_chunks() {
+fn full_author_history_flushes_each_author() {
     let config = NostrMirrorConfig {
         history_sync_author_chunk_size: 128,
         ..NostrMirrorConfig::default()
@@ -2120,5 +2446,5 @@ fn full_author_history_keeps_configured_chunks() {
         &config, authors, &kinds, true, None,
     );
 
-    assert_eq!(chunk_size, 128);
+    assert_eq!(chunk_size, 1);
 }

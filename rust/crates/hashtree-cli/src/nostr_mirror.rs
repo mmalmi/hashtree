@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,13 +14,12 @@ use nostr::{
     Timestamp,
 };
 use nostr_sdk::{
-    pool::RelayLimits, prelude::RelayPoolNotification, Client, EventSource, Keys, Options,
-    RelayStatus,
+    pool::RelayLimits, prelude::RelayPoolNotification, Client, Keys, Options, RelayStatus,
 };
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
-use crate::blossom_push::background_blossom_push_with_store;
+use crate::blossom_push::background_blossom_push_incremental_with_store;
 use crate::socialgraph::crawler::SOCIALGRAPH_RELAY_EVENT_MAX_SIZE;
 use crate::socialgraph::{self, SocialGraphBackend, SocialGraphStore};
 use crate::HashtreeStore;
@@ -49,10 +49,14 @@ const DEFAULT_HISTORY_KINDS: [u16; 7] = [0, 1, 3, 6, 7, 9735, KIND_LONG_FORM_CON
 const DEFAULT_EVENT_TREE_NAME: &str = "nostr-event-index";
 const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
+const MIRROR_UPLOAD_STATE_DIR: &str = "nostr-mirror";
+const MIRROR_UPLOADED_ROOT_SUFFIX: &str = ".uploaded-root";
 const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
 const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES: usize = 0;
+const FULL_TEXT_HISTORY_PRIORITY_MAX_DISTANCE: u32 = 1;
+const FULL_TEXT_HISTORY_PRIORITY_SAMPLE_LIMIT: usize = 32;
 const LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER: usize = 8;
 const LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 16;
 const LARGE_HISTORY_SYNC_MAX_RELAY_PAGES: usize = 20;
@@ -77,7 +81,22 @@ const MIRROR_ROOT_UPLOAD_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const MIRROR_ROOT_UPLOAD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
+#[cfg(not(test))]
+const MIRROR_ROOT_PUBLISH_PRIMARY_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const MIRROR_ROOT_PUBLISH_PRIMARY_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[cfg(not(test))]
+const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+
 const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob";
+
+fn decode_hex_pubkey(value: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(value).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
 
 #[derive(Debug, Clone)]
 pub struct NostrMirrorConfig {
@@ -165,7 +184,6 @@ pub struct BackgroundNostrMirror {
     graph_store: Arc<SocialGraphStore>,
     client: Client,
     publish_client: Option<Client>,
-    publish_pubkey: Option<PublicKey>,
     event_publish_state: Arc<Mutex<RootPublishState>>,
     profile_search_publish_state: Arc<Mutex<RootPublishState>>,
     profiles_by_pubkey_publish_state: Arc<Mutex<RootPublishState>>,
@@ -198,7 +216,6 @@ impl BackgroundNostrMirror {
         }
         client.connect().await;
 
-        let publish_pubkey = publish_keys.as_ref().map(Keys::public_key);
         let publish_client = if let Some(keys) = publish_keys {
             if config.publish_relays.is_empty() {
                 None
@@ -218,22 +235,121 @@ impl BackgroundNostrMirror {
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let event_publish_state = Self::root_publish_state_from_disk(
+            store.base_path(),
+            config.published_event_tree_name.as_deref(),
+            "event root",
+        );
+        let profile_search_publish_state = Self::root_publish_state_from_disk(
+            store.base_path(),
+            config.published_profile_search_tree_name.as_deref(),
+            "profile-search root",
+        );
+        let profiles_by_pubkey_publish_state = Self::root_publish_state_from_disk(
+            store.base_path(),
+            config.published_profiles_by_pubkey_tree_name.as_deref(),
+            "profiles-by-pubkey root",
+        );
         Ok(Self {
             config,
             store,
             graph_store,
             client,
             publish_client,
-            publish_pubkey,
-            event_publish_state: Arc::new(Mutex::new(RootPublishState::default())),
-            profile_search_publish_state: Arc::new(Mutex::new(RootPublishState::default())),
-            profiles_by_pubkey_publish_state: Arc::new(Mutex::new(RootPublishState::default())),
+            event_publish_state: Arc::new(Mutex::new(event_publish_state)),
+            profile_search_publish_state: Arc::new(Mutex::new(profile_search_publish_state)),
+            profiles_by_pubkey_publish_state: Arc::new(Mutex::new(
+                profiles_by_pubkey_publish_state,
+            )),
             pending_live_events: Mutex::new(BTreeMap::new()),
             missing_profile_cursor: Mutex::new(0),
             history_sync_lock: AsyncMutex::new(()),
             shutdown_tx,
             shutdown_rx,
         })
+    }
+
+    fn root_publish_state_from_disk(
+        base_path: &std::path::Path,
+        tree_name: Option<&str>,
+        log_label: &str,
+    ) -> RootPublishState {
+        let Some(tree_name) = tree_name else {
+            return RootPublishState::default();
+        };
+        let path = Self::uploaded_root_state_path(base_path, tree_name);
+        let Some(root) = Self::read_uploaded_root_state(&path, log_label) else {
+            return RootPublishState::default();
+        };
+
+        RootPublishState {
+            last_uploaded_root: Some(root),
+            ..RootPublishState::default()
+        }
+    }
+
+    fn uploaded_root_state_path(base_path: &std::path::Path, tree_name: &str) -> PathBuf {
+        let safe_tree_name = tree_name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        base_path
+            .join(MIRROR_UPLOAD_STATE_DIR)
+            .join(format!("{safe_tree_name}{MIRROR_UPLOADED_ROOT_SUFFIX}"))
+    }
+
+    fn read_uploaded_root_state(
+        path: &std::path::Path,
+        log_label: &str,
+    ) -> Option<hashtree_core::Cid> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                warn!(
+                    "Nostr mirror failed to read uploaded {} state {}: {}",
+                    log_label,
+                    path.display(),
+                    err
+                );
+                return None;
+            }
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match hashtree_core::Cid::parse(trimmed) {
+            Ok(root) => Some(root),
+            Err(err) => {
+                warn!(
+                    "Nostr mirror ignored invalid uploaded {} state {}: {}",
+                    log_label,
+                    path.display(),
+                    err
+                );
+                None
+            }
+        }
+    }
+
+    fn write_uploaded_root_state(
+        path: &std::path::Path,
+        root: &hashtree_core::Cid,
+        log_label: &str,
+    ) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        std::fs::write(path, format!("{root}\n"))
+            .with_context(|| format!("write uploaded {log_label} state {}", path.display()))
     }
 
     pub fn shutdown(&self) {
@@ -520,6 +636,9 @@ impl BackgroundNostrMirror {
     }
 
     async fn run_startup_history_sync(&self, initial_authors: Vec<String>) -> Result<()> {
+        self.history_sync_full_text_notes_for_reachable_authors()
+            .await?;
+        self.history_sync_authors(initial_authors).await?;
         if self.should_backfill_missing_profiles(None) {
             let missing_profile_authors = self
                 .collect_missing_profile_authors(self.config.missing_profile_backfill_batch_size)?;
@@ -535,11 +654,7 @@ impl BackgroundNostrMirror {
                 .await?;
             }
         }
-        self.history_sync_recent_text_notes_for_reachable_authors()
-            .await?;
-        self.history_sync_full_text_notes_for_reachable_authors()
-            .await?;
-        self.history_sync_authors(initial_authors).await
+        Ok(())
     }
 
     fn spawn_author_history_sync(
@@ -587,8 +702,6 @@ impl BackgroundNostrMirror {
         include_full_text_notes: bool,
     ) -> Result<()> {
         if include_full_text_notes {
-            self.history_sync_recent_text_notes_for_authors(authors.clone())
-                .await?;
             self.history_sync_full_text_notes_for_authors(authors.clone())
                 .await?;
         }
@@ -672,6 +785,66 @@ impl BackgroundNostrMirror {
         Ok(authors)
     }
 
+    async fn prioritize_full_text_note_history_authors(
+        &self,
+        authors: Vec<String>,
+    ) -> Result<Vec<String>> {
+        let Some(root) = self.graph_store.public_events_root()? else {
+            return Ok(authors);
+        };
+
+        let event_store = NostrEventStore::new(self.store.store_arc());
+        let mut prioritized = Vec::with_capacity(authors.len());
+        let mut sampled = 0usize;
+        for (index, author) in authors.into_iter().enumerate() {
+            let distance = match decode_hex_pubkey(&author) {
+                Some(pubkey) => self
+                    .graph_store
+                    .follow_distance(&pubkey)?
+                    .unwrap_or(u32::MAX),
+                None => u32::MAX,
+            };
+            let indexed_text_sample = if distance <= FULL_TEXT_HISTORY_PRIORITY_MAX_DISTANCE {
+                sampled = sampled.saturating_add(1);
+                event_store
+                    .list_by_author_and_kind(
+                        Some(&root),
+                        &author,
+                        Kind::TextNote.as_u16() as u32,
+                        ListEventsOptions {
+                            limit: Some(FULL_TEXT_HISTORY_PRIORITY_SAMPLE_LIMIT),
+                            ..ListEventsOptions::default()
+                        },
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("sample indexed text-note history for author {author}")
+                    })?
+                    .len()
+            } else {
+                FULL_TEXT_HISTORY_PRIORITY_SAMPLE_LIMIT
+            };
+            prioritized.push((distance, indexed_text_sample, index, author));
+        }
+
+        prioritized.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        info!(
+            "Nostr mirror full text content history prioritized authors: authors={} sampled_distance_le_{}={}",
+            prioritized.len(),
+            FULL_TEXT_HISTORY_PRIORITY_MAX_DISTANCE,
+            sampled
+        );
+        Ok(prioritized
+            .into_iter()
+            .map(|(_, _, _, author)| author)
+            .collect())
+    }
+
     fn full_text_note_history_follow_distance(&self) -> Option<u32> {
         let distance = self.config.full_text_note_history_follow_distance?;
         if self
@@ -707,9 +880,7 @@ impl BackgroundNostrMirror {
 
     fn history_sync_kinds_for_config(config: &NostrMirrorConfig) -> Vec<u16> {
         let mut kinds = config.kinds.clone();
-        if Self::full_text_note_history_max_relay_pages_for_config(config).is_none() {
-            kinds.retain(|kind| !Self::is_text_content_history_kind(*kind));
-        }
+        kinds.retain(|kind| !Self::is_text_content_history_kind(*kind));
         kinds
     }
 
@@ -853,6 +1024,9 @@ impl BackgroundNostrMirror {
         let configured_chunk_size = chunk_size_override
             .unwrap_or(config.history_sync_author_chunk_size)
             .max(1);
+        if full_author_history {
+            return 1;
+        }
         if !full_author_history
             && Self::history_sync_plan_for(config, authors, kinds).relay_fetch_mode
                 == RelayFetchMode::GlobalRecent
@@ -891,54 +1065,17 @@ impl BackgroundNostrMirror {
         info!(
             "Nostr mirror full text content history author collection starting: max_follow_distance={distance}"
         );
-        let authors = self.collect_authors_with_max_distance(distance)?;
-        self.history_sync_full_text_notes_for_authors(authors).await
-    }
-
-    async fn history_sync_recent_text_notes_for_reachable_authors(&self) -> Result<()> {
-        let Some(distance) = self.full_text_note_history_follow_distance() else {
+        let authors = self
+            .prioritize_full_text_note_history_authors(
+                self.collect_authors_with_max_distance(distance)?,
+            )
+            .await?;
+        let Some(max_relay_pages) = self.full_text_note_history_max_relay_pages() else {
+            info!("Nostr mirror full text content history sync skipped: max_relay_pages=0");
             return Ok(());
         };
-        if self.full_text_note_history_max_relay_pages().is_none() {
-            info!("Nostr mirror startup text content history sync skipped: max_relay_pages=0");
-            return Ok(());
-        }
-        info!(
-            "Nostr mirror recent text content catch-up author collection starting: max_follow_distance={distance}"
-        );
-        let authors = self.collect_authors_with_max_distance(distance)?;
-        self.history_sync_recent_text_notes_for_authors(authors)
+        self.history_sync_distance_filtered_full_text_notes(authors, distance, max_relay_pages)
             .await
-    }
-
-    async fn history_sync_recent_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
-        if authors.is_empty()
-            || self.full_text_note_history_follow_distance().is_none()
-            || self.full_text_note_history_max_relay_pages().is_none()
-        {
-            return Ok(());
-        }
-
-        info!(
-            "Nostr mirror recent text content catch-up starting: authors={}",
-            authors.len()
-        );
-        let kinds = [Kind::TextNote.as_u16(), KIND_LONG_FORM_CONTENT];
-        let chunk_size = self
-            .config
-            .author_batch_size
-            .max(1)
-            .saturating_mul(LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER + 1);
-        self.history_sync_authors_chunked(
-            authors,
-            |current_root, author_chunk| async move {
-                self.history_sync_author_chunk(current_root, author_chunk, &kinds, false, None)
-                    .await
-            },
-            false,
-            Some(chunk_size),
-        )
-        .await
     }
 
     async fn history_sync_full_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
@@ -951,10 +1088,7 @@ impl BackgroundNostrMirror {
         };
         let mut close_authors = Vec::new();
         for author in authors {
-            let Ok(pubkey) = hex::decode(&author) else {
-                continue;
-            };
-            let Ok(pubkey) = <[u8; 32]>::try_from(pubkey.as_slice()) else {
+            let Some(pubkey) = decode_hex_pubkey(&author) else {
                 continue;
             };
             if self
@@ -965,6 +1099,27 @@ impl BackgroundNostrMirror {
                 close_authors.push(author);
             }
         }
+        if close_authors.is_empty() {
+            return Ok(());
+        }
+        let close_authors = self
+            .prioritize_full_text_note_history_authors(close_authors)
+            .await?;
+
+        self.history_sync_distance_filtered_full_text_notes(
+            close_authors,
+            distance,
+            max_relay_pages,
+        )
+        .await
+    }
+
+    async fn history_sync_distance_filtered_full_text_notes(
+        &self,
+        close_authors: Vec<String>,
+        distance: u32,
+        max_relay_pages: usize,
+    ) -> Result<()> {
         if close_authors.is_empty() {
             return Ok(());
         }
@@ -1170,8 +1325,10 @@ impl BackgroundNostrMirror {
                 },
             );
 
-            match bridge
-                .crawl_with_progress(self.graph_store.as_ref(), current_root.as_ref(), |progress| {
+            let crawl = bridge.crawl_with_progress(
+                self.graph_store.as_ref(),
+                current_root.as_ref(),
+                |progress| {
                     let log_interval = self.config.author_batch_size.saturating_mul(8).max(2_048);
                     let should_log = progress.authors_processed == progress.authors_considered
                         || progress.authors_processed == 0
@@ -1189,15 +1346,32 @@ impl BackgroundNostrMirror {
                             progress.events_seen
                         );
                     }
-                })
-                .await
-            {
+                },
+            );
+            let crawl_result: Result<CrawlReport> = if full_author_history {
+                let timeout = self.config.fetch_timeout.saturating_mul(4);
+                match tokio::time::timeout(timeout, crawl).await {
+                    Ok(result) => result.map_err(Into::into),
+                    Err(_) => Err(anyhow::anyhow!(
+                        "full author history crawl timed out after {:?} for {} author(s)",
+                        timeout,
+                        authors.len()
+                    )),
+                }
+            } else {
+                crawl.await.map_err(Into::into)
+            };
+
+            match crawl_result {
                 Ok(next_report) => {
                     report = Some(next_report);
                     break;
                 }
                 Err(err) => {
                     last_error = Some(err);
+                    if full_author_history {
+                        break;
+                    }
                     if attempt < 2 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
@@ -1454,7 +1628,6 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_event_root(&self, force: bool) -> Result<()> {
-        self.ensure_public_events_root_is_publishable().await?;
         if self.take_missing_blob_event_upload_error() {
             return self.rebuild_event_indexes_after_missing_blobs(force).await;
         }
@@ -1464,7 +1637,7 @@ impl BackgroundNostrMirror {
                 &self.event_publish_state,
                 "event root",
                 force,
-                true,
+                false,
             )
             .await;
         let Err(error) = result else {
@@ -1517,26 +1690,9 @@ impl BackgroundNostrMirror {
             &self.event_publish_state,
             "event root",
             force,
-            true,
+            false,
         )
         .await
-    }
-
-    async fn ensure_public_events_root_is_publishable(&self) -> Result<()> {
-        let Some(root) = self.graph_store.public_events_root()? else {
-            return Ok(());
-        };
-        let event_store = NostrEventStore::new(self.store.store_arc());
-        if let Err(err) = event_store.validate_index_root(Some(&root)).await {
-            warn!(
-                "Nostr mirror refusing to publish invalid event index root {}; clearing trusted root: {}",
-                hex::encode(root.hash),
-                err
-            );
-            self.graph_store.write_public_events_root(None)?;
-            self.note_public_events_root_change()?;
-        }
-        Ok(())
     }
 
     async fn maybe_publish_profile_search_root(&self, force: bool) -> Result<()> {
@@ -1595,15 +1751,43 @@ impl BackgroundNostrMirror {
             pending_root
         };
 
-        let upload_started =
-            self.maybe_start_background_root_upload(&pending_root, publish_state, log_label);
+        let upload_started = self.maybe_start_background_root_upload(
+            tree_name,
+            &pending_root,
+            publish_state,
+            log_label,
+        );
         let upload_required = !self.config.blossom_write_servers.is_empty();
-        let upload_ready = {
+        let (upload_ready, publish_root) = {
             let state = publish_state.lock().expect("root publish state");
-            !upload_required || state.last_uploaded_root.as_ref() == Some(&pending_root)
+            let upload_ready =
+                !upload_required || state.last_uploaded_root.as_ref() == Some(&pending_root);
+            let publish_root = if upload_ready {
+                Some(pending_root.clone())
+            } else {
+                state.last_uploaded_root.clone().filter(|uploaded_root| {
+                    state.last_published_root.as_ref() != Some(uploaded_root)
+                })
+            };
+            (upload_ready, publish_root)
         };
         let publish_before_upload_ready =
             force && upload_required && !upload_ready && publish_before_upload_ready_on_force;
+        let publish_root = if let Some(publish_root) = publish_root {
+            publish_root
+        } else if publish_before_upload_ready {
+            pending_root.clone()
+        } else {
+            if upload_started {
+                info!(
+                    "Nostr mirror uploading {} DAG before publish: tree={} hash={}",
+                    log_label,
+                    tree_name,
+                    hex::encode(pending_root.hash),
+                );
+            }
+            return Ok(());
+        };
 
         let mut successful_relays = Vec::new();
         let mut failed_relays = Vec::new();
@@ -1617,17 +1801,6 @@ impl BackgroundNostrMirror {
             if !self.has_connected_publish_relay().await {
                 return Ok(());
             }
-            if !upload_ready && !publish_before_upload_ready {
-                if upload_started {
-                    info!(
-                        "Nostr mirror uploading {} DAG before publish: tree={} hash={}",
-                        log_label,
-                        tree_name,
-                        hex::encode(pending_root.hash),
-                    );
-                }
-                return Ok(());
-            }
             if publish_before_upload_ready {
                 info!(
                     "Nostr mirror publishing {} before Blossom upload completes: tree={} hash={}",
@@ -1635,11 +1808,19 @@ impl BackgroundNostrMirror {
                     tree_name,
                     hex::encode(pending_root.hash),
                 );
+            } else if !upload_ready {
+                info!(
+                    "Nostr mirror publishing uploaded {} while newer root is still uploading: tree={} published_hash={} pending_hash={}",
+                    log_label,
+                    tree_name,
+                    hex::encode(publish_root.hash),
+                    hex::encode(pending_root.hash),
+                );
             }
 
             let already_published = {
                 let state = publish_state.lock().expect("root publish state");
-                state.last_published_root.as_ref() == Some(&pending_root)
+                state.last_published_root.as_ref() == Some(&publish_root)
             };
             if !already_published {
                 let publish_relays = self.config.publish_relays.clone();
@@ -1647,17 +1828,12 @@ impl BackgroundNostrMirror {
                     let state = publish_state.lock().expect("root publish state");
                     state.last_published_created_at
                 };
-                let publish_created_at = next_replaceable_created_at(
-                    Timestamp::now(),
-                    later_timestamp(
-                        latest_known_created_at,
-                        self.latest_root_event_created_at(tree_name).await,
-                    ),
-                );
+                let publish_created_at =
+                    next_replaceable_created_at(Timestamp::now(), latest_known_created_at);
                 let event = publish_client
                     .sign_event_builder(Self::build_public_root_event(
                         tree_name,
-                        &pending_root,
+                        &publish_root,
                         publish_created_at,
                     ))
                     .await
@@ -1678,8 +1854,11 @@ impl BackgroundNostrMirror {
                 }
 
                 let mut state = publish_state.lock().expect("root publish state");
-                if state.pending_root.as_ref() == Some(&pending_root) {
-                    state.last_published_root = Some(pending_root.clone());
+                if state.pending_root.as_ref() == Some(&pending_root)
+                    || state.last_uploaded_root.as_ref() == Some(&publish_root)
+                    || publish_before_upload_ready
+                {
+                    state.last_published_root = Some(publish_root.clone());
                     state.last_published_at = Some(Instant::now());
                     state.last_published_created_at = Some(event.created_at);
                 }
@@ -1705,7 +1884,7 @@ impl BackgroundNostrMirror {
                 "Nostr mirror published {}: tree={} hash={} relays={:?}",
                 log_label,
                 tree_name,
-                hex::encode(pending_root.hash),
+                hex::encode(publish_root.hash),
                 successful_relays,
             );
         }
@@ -1720,6 +1899,7 @@ impl BackgroundNostrMirror {
 
     fn maybe_start_background_root_upload(
         &self,
+        tree_name: &str,
         pending_root: &hashtree_core::Cid,
         publish_state: &Arc<Mutex<RootPublishState>>,
         log_label: &str,
@@ -1728,7 +1908,7 @@ impl BackgroundNostrMirror {
             return false;
         }
 
-        {
+        let previous_uploaded_root = {
             let mut state = publish_state.lock().expect("root publish state");
             if state.last_uploaded_root.as_ref() == Some(pending_root)
                 || state.upload_in_progress_root.is_some()
@@ -1742,12 +1922,13 @@ impl BackgroundNostrMirror {
                 return false;
             }
             state.upload_in_progress_root = Some(pending_root.clone());
-        }
+            state.last_uploaded_root.clone()
+        };
 
         let store = Arc::clone(&self.store);
+        let upload_state_path = Self::uploaded_root_state_path(store.base_path(), tree_name);
         let servers = self.config.blossom_write_servers.clone();
         let root = pending_root.clone();
-        let root_string = pending_root.to_string();
         let publish_state = Arc::clone(publish_state);
         let log_label = log_label.to_string();
         tokio::task::spawn_blocking(move || {
@@ -1756,17 +1937,27 @@ impl BackgroundNostrMirror {
                 .build()
                 .expect("build nostr mirror root upload runtime");
             runtime.block_on(async move {
-                let result =
-                    background_blossom_push_with_store(store, &root_string, &servers).await;
+                let result = background_blossom_push_incremental_with_store(
+                    store,
+                    root.clone(),
+                    previous_uploaded_root,
+                    &servers,
+                )
+                .await;
                 let mut state = publish_state.lock().expect("root publish state");
                 if state.upload_in_progress_root.as_ref() == Some(&root) {
                     state.upload_in_progress_root = None;
                 }
                 match result {
                     Ok(()) => {
+                        if let Err(err) =
+                            Self::write_uploaded_root_state(&upload_state_path, &root, &log_label)
+                        {
+                            warn!("Nostr mirror failed to persist uploaded root state: {err:#}");
+                        }
+                        state.last_uploaded_root = Some(root.clone());
+                        state.last_uploaded_at = Some(Instant::now());
                         if state.pending_root.as_ref() == Some(&root) {
-                            state.last_uploaded_root = Some(root.clone());
-                            state.last_uploaded_at = Some(Instant::now());
                             state.last_upload_failed_at = None;
                             state.last_upload_error = None;
                             state.missing_blob_rebuild_required = false;
@@ -1805,6 +1996,35 @@ impl BackgroundNostrMirror {
         relays: &[String],
         event: &Event,
     ) -> Result<(Vec<String>, Vec<String>)> {
+        let primary_send = Self::send_root_event_to_relays(publish_client, relays, event);
+        let (mut successful_relays, mut failed_relays) =
+            match tokio::time::timeout(MIRROR_ROOT_PUBLISH_PRIMARY_TIMEOUT, primary_send).await {
+                Ok(result) => result,
+                Err(_) => (
+                    Vec::new(),
+                    vec![format!(
+                        "publish relays: primary publish timed out after {:?}",
+                        MIRROR_ROOT_PUBLISH_PRIMARY_TIMEOUT
+                    )],
+                ),
+            };
+
+        if successful_relays.is_empty() {
+            let (retry_successes, retry_failures) = self
+                .publish_root_event_with_fresh_client(relays, event)
+                .await;
+            successful_relays.extend(retry_successes);
+            failed_relays.extend(retry_failures);
+        }
+
+        Ok((successful_relays, failed_relays))
+    }
+
+    async fn send_root_event_to_relays(
+        publish_client: &Client,
+        relays: &[String],
+        event: &Event,
+    ) -> (Vec<String>, Vec<String>) {
         let mut successful_relays = Vec::new();
         let mut failed_relays = Vec::new();
 
@@ -1833,53 +2053,44 @@ impl BackgroundNostrMirror {
             }
         }
 
-        Ok((successful_relays, failed_relays))
+        (successful_relays, failed_relays)
     }
 
-    async fn latest_root_event_created_at(&self, tree_name: &str) -> Option<Timestamp> {
-        let publish_client = self.publish_client.as_ref()?;
-        let author = self.publish_pubkey?;
-        let events = publish_client
-            .get_events_of(
-                vec![Self::build_public_root_filter(author, tree_name)],
-                EventSource::relays(Some(self.config.fetch_timeout)),
-            )
-            .await
-            .ok()?;
-        events
-            .iter()
-            .filter(|event| Self::matches_public_root_event(event, tree_name))
-            .max_by_key(|event| (event.created_at, event.id))
-            .map(|event| event.created_at)
-    }
+    async fn publish_root_event_with_fresh_client(
+        &self,
+        relays: &[String],
+        event: &Event,
+    ) -> (Vec<String>, Vec<String>) {
+        let client = Client::with_opts(Keys::generate(), Options::new().wait_for_send(false));
+        let mut setup_failures = Vec::new();
+        for relay in relays {
+            if let Err(err) = client.add_relay(relay).await {
+                setup_failures.push(format!("{relay}: add relay failed: {err}"));
+            }
+        }
 
-    fn build_public_root_filter(author: PublicKey, tree_name: &str) -> Filter {
-        Filter::new()
-            .kind(Kind::Custom(30078))
-            .author(author)
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.to_string()],
-            )
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                vec!["hashtree".to_string()],
-            )
-            .limit(50)
-    }
+        client.connect().await;
+        let publish = Self::send_root_event_to_relays(&client, relays, event);
+        let retry_timeout = self
+            .config
+            .fetch_timeout
+            .min(MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT);
+        let result = tokio::time::timeout(retry_timeout, publish).await;
+        let _ = client.disconnect().await;
 
-    fn matches_public_root_event(event: &Event, tree_name: &str) -> bool {
-        event.kind == Kind::Custom(30078)
-            && event.tags.iter().any(|tag| {
-                let values = tag.as_slice();
-                values.first().is_some_and(|value| value == "d")
-                    && values.get(1).is_some_and(|value| value == tree_name)
-            })
-            && event.tags.iter().any(|tag| {
-                let values = tag.as_slice();
-                values.first().is_some_and(|value| value == "l")
-                    && values.get(1).is_some_and(|value| value == "hashtree")
-            })
+        match result {
+            Ok((successful_relays, mut failed_relays)) => {
+                failed_relays.extend(setup_failures);
+                (successful_relays, failed_relays)
+            }
+            Err(_) => {
+                setup_failures.push(format!(
+                    "fresh publish client timed out after {:?}",
+                    retry_timeout
+                ));
+                (Vec::new(), setup_failures)
+            }
+        }
     }
 
     fn build_public_root_event(
@@ -1914,15 +2125,6 @@ fn is_missing_local_blob_push_error(error: &anyhow::Error) -> bool {
 
 fn is_missing_local_blob_message(message: &str) -> bool {
     message.contains(MISSING_LOCAL_BLOB_PUSH_ERROR)
-}
-
-fn later_timestamp(left: Option<Timestamp>, right: Option<Timestamp>) -> Option<Timestamp> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(std::cmp::max(left, right)),
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    }
 }
 
 fn next_replaceable_created_at(now: Timestamp, latest_existing: Option<Timestamp>) -> Timestamp {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::ensure_keys_string;
 use crate::fetch::{FetchConfig, Fetcher};
 use crate::HashtreeStore;
-use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link};
+use hashtree_core::{to_hex, tree_diff, Cid, HashTree, HashTreeConfig, Link};
 
 const BLOSSOM_PUSH_CONCURRENCY: usize = 16;
 const BLOSSOM_PUSH_PROGRESS_EVERY: usize = 512;
@@ -215,17 +215,51 @@ pub async fn background_blossom_push_with_store(
     cid_str: &str,
     servers: &[String],
 ) -> Result<()> {
+    let root_cid = parse_root_cid(cid_str)?;
+    background_blossom_push_incremental_with_store(store, root_cid, None, servers).await
+}
+
+pub async fn background_blossom_push_incremental_with_store(
+    store: Arc<HashtreeStore>,
+    root_cid: Cid,
+    previous_root_cid: Option<Cid>,
+    servers: &[String],
+) -> Result<()> {
     use hashtree_blossom::BlossomClient;
     use nostr::Keys;
 
     let (nsec_str, _) = ensure_keys_string()?;
     let keys = Keys::parse(&nsec_str).context("Failed to parse nsec")?;
 
-    let root_cid = parse_root_cid(cid_str)?;
     let fetcher = Arc::new(Fetcher::new(FetchConfig::default()));
-    println!("Collecting DAG for file-server push...");
-    let cids_to_push =
-        collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?;
+    let cids_to_push = if let Some(previous_root_cid) = previous_root_cid.as_ref() {
+        println!("Collecting DAG diff for file-server push...");
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        match tree_diff(
+            &tree,
+            Some(previous_root_cid),
+            &root_cid,
+            BLOSSOM_PUSH_CONCURRENCY,
+        )
+        .await
+        {
+            Ok(diff) => diff
+                .added
+                .into_iter()
+                .map(|hash| Cid { hash, key: None })
+                .collect(),
+            Err(err) => {
+                tracing::warn!(
+                    "Blossom DAG diff failed; falling back to full push: {}",
+                    err
+                );
+                collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?
+            }
+        }
+    } else {
+        println!("Collecting DAG for file-server push...");
+        collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?
+    };
 
     if cids_to_push.is_empty() {
         return Ok(());
