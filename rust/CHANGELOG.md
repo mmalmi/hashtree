@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Fixed owned Blossom uploads so they respect the configured durable storage limit: when protected
+  owned blobs fill the local store, new owned uploads now fail with a storage-limit error instead
+  of growing the LMDB blob store past the quota.
+
 ## 0.2.39 - 2026-04-24
 
 Changes since the `0.2.38` release.

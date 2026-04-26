@@ -919,6 +919,23 @@ impl HashtreeStore {
         Ok(to_hex(&hash))
     }
 
+    /// Store an owned Blossom blob under the configured durable storage limit.
+    pub fn put_owned_blob(&self, data: &[u8], pubkey: &[u8; 32]) -> Result<String> {
+        let hash = sha256(data);
+        if !self
+            .router
+            .exists(&hash)
+            .map_err(|e| anyhow::anyhow!("Failed to check blob: {}", e))?
+        {
+            self.make_room_for_durable_blob(data.len() as u64)?;
+            self.router
+                .put_sync(hash, data)
+                .map_err(|e| anyhow::anyhow!("Failed to store blob: {}", e))?;
+        }
+        self.set_blob_owner(&hash, pubkey)?;
+        Ok(to_hex(&hash))
+    }
+
     /// Store an opportunistically cached blob.
     ///
     /// Unlike durable `put_blob` writes, this path may evict disposable orphaned

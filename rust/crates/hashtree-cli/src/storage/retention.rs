@@ -245,6 +245,47 @@ impl HashtreeStore {
         self.evict_disposable_orphans_to_target(target)
     }
 
+    pub fn make_room_for_durable_blob(&self, incoming_bytes: u64) -> Result<u64> {
+        if self.max_size_bytes == 0 || incoming_bytes == 0 {
+            return Ok(0);
+        }
+
+        if incoming_bytes > self.max_size_bytes {
+            anyhow::bail!(
+                "storage limit exceeded: incoming blob is {} bytes but limit is {} bytes",
+                incoming_bytes,
+                self.max_size_bytes
+            );
+        }
+
+        let stats = self
+            .router
+            .stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+        if stats.total_bytes.saturating_add(incoming_bytes) <= self.max_size_bytes {
+            return Ok(0);
+        }
+
+        let target = (self.max_size_bytes.saturating_mul(9) / 10)
+            .min(self.max_size_bytes.saturating_sub(incoming_bytes));
+        let freed = self.evict_with_policy_to_target(stats.total_bytes, target)?;
+
+        let next_stats = self
+            .router
+            .stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get stats after eviction: {}", e))?;
+        if next_stats.total_bytes.saturating_add(incoming_bytes) > self.max_size_bytes {
+            anyhow::bail!(
+                "storage limit exceeded: {} bytes used, {} byte incoming blob, {} byte limit",
+                next_stats.total_bytes,
+                incoming_bytes,
+                self.max_size_bytes
+            );
+        }
+
+        Ok(freed)
+    }
+
     pub fn relieve_cached_blob_write_pressure(&self, incoming_bytes: u64) -> Result<u64> {
         let stats = self
             .router
@@ -612,12 +653,16 @@ impl HashtreeStore {
 
         // Target 90% of max to avoid constant eviction
         let target = self.max_size_bytes * 90 / 100;
+        self.evict_with_policy_to_target(current, target)
+    }
+
+    fn evict_with_policy_to_target(&self, current: u64, target: u64) -> Result<u64> {
         let mut freed = 0u64;
         let mut current_size = current;
 
         // Phase 1: Evict orphaned blobs (not in any tree and not pinned)
         if self.evict_orphans {
-            let orphan_freed = self.evict_orphaned_blobs()?;
+            let orphan_freed = self.evict_disposable_orphans_to_target(target)?;
             freed += orphan_freed;
             current_size = current_size.saturating_sub(orphan_freed);
 
@@ -667,68 +712,6 @@ impl HashtreeStore {
 
         if freed > 0 {
             tracing::info!("Eviction complete: {} bytes freed", freed);
-        }
-
-        Ok(freed)
-    }
-
-    /// Evict blobs that are not part of any indexed tree and not pinned
-    fn evict_orphaned_blobs(&self) -> Result<u64> {
-        let mut freed = 0u64;
-
-        // Get all blob hashes from store
-        let all_hashes = self
-            .router
-            .list()
-            .map_err(|e| anyhow::anyhow!("Failed to list hashes: {}", e))?;
-
-        // Get pinned hashes as raw bytes
-        let rtxn = self.env.read_txn()?;
-        let pinned: HashSet<Hash> = self
-            .pins
-            .iter(&rtxn)?
-            .filter_map(|item| item.ok())
-            .filter_map(|(hash_bytes, _)| {
-                if hash_bytes.len() == 32 {
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(hash_bytes);
-                    Some(hash)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        drop(rtxn);
-
-        let protected_hashes = self.protected_hashes()?;
-
-        // Find and delete orphaned blobs
-        for hash in all_hashes {
-            // Skip if pinned
-            if pinned.contains(&hash) {
-                continue;
-            }
-
-            // Skip if part of any tree
-            if protected_hashes.contains(&hash) {
-                continue;
-            }
-
-            // Skip owned Blossom uploads
-            if self.blob_has_owners(&hash)? {
-                continue;
-            }
-
-            // This blob is orphaned - delete locally (keep S3 as archive)
-            if let Ok(Some(data)) = self.router.get_sync(&hash) {
-                freed += data.len() as u64;
-                let _ = self.router.delete_local_only(&hash);
-                tracing::debug!(
-                    "Deleted orphaned blob {} ({} bytes)",
-                    &to_hex(&hash)[..8],
-                    data.len()
-                );
-            }
         }
 
         Ok(freed)
@@ -836,7 +819,9 @@ mod tests {
                 Some("owner/tree"),
             )
             .expect("index tree");
-        let freed = store.evict_orphaned_blobs().expect("orphan cleanup");
+        let freed = store
+            .evict_disposable_orphans_to_target(0)
+            .expect("orphan cleanup");
 
         assert!(freed < 1024);
         assert!(store.blob_exists(&cid.hash).expect("root exists"));
@@ -899,7 +884,9 @@ mod tests {
             &cid,
         );
 
-        let freed = store.evict_orphaned_blobs().expect("orphan cleanup");
+        let freed = store
+            .evict_disposable_orphans_to_target(0)
+            .expect("orphan cleanup");
 
         assert!(freed < 1024);
         assert!(store.blob_exists(&cid.hash).expect("root exists"));

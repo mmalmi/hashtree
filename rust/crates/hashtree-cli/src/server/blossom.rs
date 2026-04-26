@@ -760,22 +760,16 @@ fn is_valid_sha256(s: &str) -> bool {
 fn store_blossom_blob(
     state: &AppState,
     data: &[u8],
-    sha256: &[u8; 32],
+    _sha256: &[u8; 32],
     pubkey: &[u8; 32],
     track_ownership: bool,
 ) -> anyhow::Result<()> {
     // Store as raw blob only - no tree creation needed for blossom
     // This avoids sync_block_on which can deadlock under load
     if track_ownership {
-        state.store.put_blob(data)?;
+        state.store.put_owned_blob(data, pubkey)?;
     } else {
         state.store.put_cached_blob(data)?;
-    }
-
-    // Only track ownership for social graph members
-    // Non-members can upload (if public_writes=true) but can't delete
-    if track_ownership {
-        state.store.set_blob_owner(sha256, pubkey)?;
     }
 
     Ok(())
@@ -926,5 +920,44 @@ mod tests {
             .store
             .blob_has_owners(&public_hash)
             .expect("public upload unowned"));
+    }
+
+    #[test]
+    fn owned_blossom_uploads_are_rejected_when_storage_limit_is_full() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store =
+            Arc::new(HashtreeStore::with_options(temp_dir.path(), None, 500).expect("store"));
+        let state = test_app_state(Arc::clone(&store));
+
+        let first = vec![1u8; 300];
+        let first_hash = sha256(&first);
+        let owner = [2u8; 32];
+        store_blossom_blob(&state, &first, &first_hash, &owner, true).expect("first upload");
+
+        let second = vec![3u8; 300];
+        let second_hash = sha256(&second);
+        let error = store_blossom_blob(&state, &second, &second_hash, &owner, true)
+            .expect_err("second owned upload should exceed the storage limit");
+
+        assert!(
+            error.to_string().contains("storage limit"),
+            "unexpected error: {error}"
+        );
+        assert!(state
+            .store
+            .blob_exists(&first_hash)
+            .expect("first blob remains"));
+        assert!(!state
+            .store
+            .blob_exists(&second_hash)
+            .expect("second blob rejected"));
+        assert!(state
+            .store
+            .is_blob_owner(&first_hash, &owner)
+            .expect("first owner tracked"));
+        assert!(!state
+            .store
+            .is_blob_owner(&second_hash, &owner)
+            .expect("second owner not tracked"));
     }
 }

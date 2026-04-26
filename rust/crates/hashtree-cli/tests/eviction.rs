@@ -174,6 +174,34 @@ fn test_eviction_under_limit() {
 }
 
 #[test]
+fn durable_blob_write_rejects_when_owned_blobs_fill_limit() {
+    let (store, _tmp) = test_store(500);
+
+    let first = vec![1u8; 300];
+    let owner = [7u8; 32];
+    let first_hash = from_hex(
+        &store
+            .put_owned_blob(&first, &owner)
+            .expect("first owned blob"),
+    )
+    .expect("first hash");
+
+    let second = vec![2u8; 300];
+    let second_hash = hashtree_core::sha256(&second);
+    let error = store
+        .put_owned_blob(&second, &owner)
+        .expect_err("owned durable data should not be displaced by a new durable blob");
+
+    assert!(
+        error.to_string().contains("storage limit"),
+        "unexpected error: {error}"
+    );
+    assert!(store.blob_exists(&first_hash).expect("first remains"));
+    assert!(!store.blob_exists(&second_hash).expect("second rejected"));
+    assert!(used_bytes(&store) <= 500);
+}
+
+#[test]
 fn test_eviction_over_limit() {
     let (store, _tmp) = test_store(500); // 500 byte limit
 
