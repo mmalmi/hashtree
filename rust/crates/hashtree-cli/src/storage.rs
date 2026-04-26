@@ -33,8 +33,10 @@ pub const PRIORITY_OTHER: u8 = 64;
 pub const PRIORITY_FOLLOWED: u8 = 128;
 pub const PRIORITY_OWN: u8 = 255;
 const LMDB_MAX_READERS: u32 = 1024;
+const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 1024 * 1024;
+const LMDB_PAGE_SIZE_BYTES: u64 = 4096;
 #[cfg(feature = "lmdb")]
-const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Cached root info from Nostr events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +71,23 @@ fn is_fs_blob_shard_dir(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .map(|name| name.len() == 2 && name.as_bytes().iter().all(u8::is_ascii_hexdigit))
         .unwrap_or(false)
+}
+
+fn lmdb_map_size_for_existing_env(path: &Path, minimum_bytes: u64) -> Result<usize> {
+    let existing_bytes = std::fs::metadata(path.join("data.mdb"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let requested = align_lmdb_map_size(minimum_bytes.max(existing_bytes));
+    usize::try_from(requested).context("LMDB map size exceeds usize")
+}
+
+fn align_lmdb_map_size(bytes: u64) -> u64 {
+    let remainder = bytes % LMDB_PAGE_SIZE_BYTES;
+    if remainder == 0 {
+        bytes
+    } else {
+        bytes.saturating_add(LMDB_PAGE_SIZE_BYTES - remainder)
+    }
 }
 
 #[cfg(feature = "lmdb")]
@@ -777,7 +796,7 @@ impl HashtreeStore {
         )
     }
 
-    fn with_options_and_backend<P: AsRef<Path>>(
+    pub fn with_options_and_backend<P: AsRef<Path>>(
         path: P,
         s3_config: Option<&S3Config>,
         max_size_bytes: u64,
@@ -786,10 +805,12 @@ impl HashtreeStore {
     ) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
+        let metadata_map_size =
+            lmdb_map_size_for_existing_env(path, LMDB_METADATA_MIN_MAP_SIZE_BYTES)?;
 
         let env = unsafe {
             EnvOpenOptions::new()
-                .map_size(10 * 1024 * 1024 * 1024) // 10GB virtual address space
+                .map_size(metadata_map_size)
                 .max_dbs(10) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, tree_meta, blob_trees, tree_refs, cached_roots, blobs
                 .max_readers(LMDB_MAX_READERS)
                 .open(path)?

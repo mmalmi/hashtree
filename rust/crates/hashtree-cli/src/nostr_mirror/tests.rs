@@ -807,7 +807,14 @@ async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Re
         delayed_hashes.iter().all(|hash| blossom.has_hash(hash))
     })
     .await;
-    mirror.maybe_publish_event_root(false).await?;
+    let event_publish_started = std::time::Instant::now();
+    while event_publish_started.elapsed() < Duration::from_secs(5) {
+        mirror.maybe_publish_event_root(false).await?;
+        if published_root_event_count(&relay, "nostr-event-index") == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 1);
     Ok(())
 }

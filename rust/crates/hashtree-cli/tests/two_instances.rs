@@ -349,6 +349,7 @@ struct TestInstance {
     process: Option<Child>,
     data_path: PathBuf,
     home_dir: PathBuf,
+    config_dir: PathBuf,
     addr: String,
     pubkey_hex: String,
 }
@@ -411,6 +412,7 @@ impl TestInstance {
             process: Some(process),
             data_path,
             home_dir,
+            config_dir,
             addr,
             pubkey_hex,
         })
@@ -420,12 +422,16 @@ impl TestInstance {
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let data_path = data_dir.path().to_path_buf();
         let home_dir = data_dir.path().to_path_buf();
+        let config_dir = home_dir.join(".hashtree");
+        std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
+        write_test_config_with_relays(&config_dir, &[]).expect("Failed to write test config");
 
         TestInstance {
             _data_dir: data_dir,
             process: None,
             data_path,
             home_dir,
+            config_dir,
             addr: String::new(),
             pubkey_hex: String::new(),
         }
@@ -437,6 +443,7 @@ impl TestInstance {
             .arg(&self.data_path)
             .args(args)
             .env("HOME", &self.home_dir)
+            .env("HTREE_CONFIG_DIR", &self.config_dir)
             .output()
             .expect("Failed to run htree command")
     }
@@ -1460,6 +1467,14 @@ fn test_local_add_and_get() {
     );
 
     let add_stdout = String::from_utf8_lossy(&add_output.stdout);
+    let add_stderr = String::from_utf8_lossy(&add_output.stderr);
+    assert!(
+        add_output.status.success(),
+        "htree add failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        add_output.status,
+        add_stdout,
+        add_stderr
+    );
     println!("Add output: {}", add_stdout);
 
     // Extract CID

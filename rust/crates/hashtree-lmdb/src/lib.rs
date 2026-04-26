@@ -16,7 +16,7 @@ const DEFAULT_MAP_SIZE: usize = 10 * 1024 * 1024 * 1024;
 #[cfg(target_pointer_width = "32")]
 const DEFAULT_MAP_SIZE: usize = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READERS: u32 = 1024;
-const DATABASE_COUNT: u32 = 4;
+const DATABASE_COUNT: u32 = 5;
 const REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 const LMDB_PAGE_SIZE_BYTES: u64 = 4096;
 const EVICTION_BATCH_TARGET_BYTES: u64 = 256 * 1024 * 1024;
@@ -24,11 +24,21 @@ const EVICTION_BATCH_MAX_ITEMS: usize = 4096;
 const BLOB_META_BYTES: usize = 16;
 const ORDER_KEY_BYTES: usize = 40;
 const PIN_COUNT_BYTES: usize = 4;
+const STORE_TOTALS_BYTES: usize = 32;
+const STORE_TOTALS_KEY: &[u8] = b"totals";
 
 #[derive(Debug, Clone, Copy)]
 struct BlobMeta {
     order: u64,
     size: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct StoreTotals {
+    count: u64,
+    total_bytes: u64,
+    pinned_count: u64,
+    pinned_bytes: u64,
 }
 
 /// LMDB-backed blob store implementing hashtree's Store trait.
@@ -42,6 +52,8 @@ pub struct LmdbBlobStore {
     eviction_order: Database<Bytes, Unit>,
     /// Maps SHA256 hash (32 bytes) → pin count (u32)
     pins: Database<Bytes, Bytes>,
+    /// Small aggregate counters used by quota checks and stats.
+    stats: Database<Bytes, Bytes>,
     max_bytes: AtomicU64,
     current_bytes: AtomicU64,
     next_order: AtomicU64,
@@ -141,9 +153,12 @@ impl LmdbBlobStore {
         let pins = env
             .create_database(&mut wtxn, Some("pins"))
             .map_err(map_heed_error)?;
+        let stats = env
+            .create_database(&mut wtxn, Some("stats"))
+            .map_err(map_heed_error)?;
         wtxn.commit().map_err(map_heed_error)?;
 
-        let (next_order, current_bytes) = {
+        let next_order = {
             let rtxn = env.read_txn().map_err(map_heed_error)?;
             let next = eviction_order
                 .iter(&rtxn)
@@ -156,19 +171,9 @@ impl LmdbBlobStore {
                 })
                 .transpose()?
                 .unwrap_or(0);
-            let current = metadata
-                .iter(&rtxn)
-                .map_err(map_heed_error)?
-                .map(|item| {
-                    item.map_err(map_heed_error)
-                        .and_then(|(_, bytes)| Self::decode_blob_meta(bytes))
-                        .map(|meta| meta.size)
-                })
-                .try_fold(0u64, |total, size| {
-                    size.map(|size| total.saturating_add(size))
-                })?;
-            (next, current)
+            next
         };
+        let totals = Self::load_or_rebuild_totals(&env, metadata, pins, stats)?;
 
         Ok(Self {
             env,
@@ -176,10 +181,116 @@ impl LmdbBlobStore {
             metadata,
             eviction_order,
             pins,
+            stats,
             max_bytes: AtomicU64::new(0),
-            current_bytes: AtomicU64::new(current_bytes),
+            current_bytes: AtomicU64::new(totals.total_bytes),
             next_order: AtomicU64::new(next_order),
         })
+    }
+
+    fn load_or_rebuild_totals(
+        env: &heed::Env,
+        metadata: Database<Bytes, Bytes>,
+        pins: Database<Bytes, Bytes>,
+        stats: Database<Bytes, Bytes>,
+    ) -> Result<StoreTotals, StoreError> {
+        {
+            let rtxn = env.read_txn().map_err(map_heed_error)?;
+            if let Some(totals) = Self::read_store_totals(stats, &rtxn)? {
+                return Ok(totals);
+            }
+        }
+
+        let mut totals = StoreTotals::default();
+        {
+            let rtxn = env.read_txn().map_err(map_heed_error)?;
+            for item in metadata.iter(&rtxn).map_err(map_heed_error)? {
+                let (_, bytes) = item.map_err(map_heed_error)?;
+                let meta = Self::decode_blob_meta(bytes)?;
+                totals.count = totals.count.saturating_add(1);
+                totals.total_bytes = totals.total_bytes.saturating_add(meta.size);
+            }
+            for item in pins.iter(&rtxn).map_err(map_heed_error)? {
+                let (hash, pin_bytes) = item.map_err(map_heed_error)?;
+                let count = Self::decode_pin_count(pin_bytes)?;
+                if count == 0 {
+                    continue;
+                }
+                let Some(meta_bytes) = metadata.get(&rtxn, hash).map_err(map_heed_error)? else {
+                    continue;
+                };
+                let meta = Self::decode_blob_meta(meta_bytes)?;
+                totals.pinned_count = totals.pinned_count.saturating_add(1);
+                totals.pinned_bytes = totals.pinned_bytes.saturating_add(meta.size);
+            }
+        }
+
+        let mut wtxn = env.write_txn().map_err(map_heed_error)?;
+        Self::write_store_totals(stats, &mut wtxn, totals).map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        Ok(totals)
+    }
+
+    fn read_store_totals(
+        stats: Database<Bytes, Bytes>,
+        txn: &heed::RoTxn,
+    ) -> Result<Option<StoreTotals>, StoreError> {
+        stats
+            .get(txn, STORE_TOTALS_KEY)
+            .map_err(map_heed_error)?
+            .map(Self::decode_store_totals)
+            .transpose()
+    }
+
+    fn read_store_totals_lossy(
+        stats: Database<Bytes, Bytes>,
+        txn: &heed::RoTxn,
+    ) -> std::result::Result<StoreTotals, HeedError> {
+        Ok(stats
+            .get(txn, STORE_TOTALS_KEY)?
+            .and_then(Self::decode_store_totals_lossy)
+            .unwrap_or_default())
+    }
+
+    fn write_store_totals(
+        stats: Database<Bytes, Bytes>,
+        txn: &mut heed::RwTxn,
+        totals: StoreTotals,
+    ) -> std::result::Result<(), HeedError> {
+        let encoded = Self::encode_store_totals(totals);
+        stats.put(txn, STORE_TOTALS_KEY, &encoded)
+    }
+
+    fn increment_totals_in_txn(
+        &self,
+        txn: &mut heed::RwTxn,
+        count: u64,
+        total_bytes: u64,
+        pinned_count: u64,
+        pinned_bytes: u64,
+    ) -> std::result::Result<(), HeedError> {
+        let mut totals = Self::read_store_totals_lossy(self.stats, txn)?;
+        totals.count = totals.count.saturating_add(count);
+        totals.total_bytes = totals.total_bytes.saturating_add(total_bytes);
+        totals.pinned_count = totals.pinned_count.saturating_add(pinned_count);
+        totals.pinned_bytes = totals.pinned_bytes.saturating_add(pinned_bytes);
+        Self::write_store_totals(self.stats, txn, totals)
+    }
+
+    fn decrement_totals_in_txn(
+        &self,
+        txn: &mut heed::RwTxn,
+        count: u64,
+        total_bytes: u64,
+        pinned_count: u64,
+        pinned_bytes: u64,
+    ) -> std::result::Result<(), HeedError> {
+        let mut totals = Self::read_store_totals_lossy(self.stats, txn)?;
+        totals.count = totals.count.saturating_sub(count);
+        totals.total_bytes = totals.total_bytes.saturating_sub(total_bytes);
+        totals.pinned_count = totals.pinned_count.saturating_sub(pinned_count);
+        totals.pinned_bytes = totals.pinned_bytes.saturating_sub(pinned_bytes);
+        Self::write_store_totals(self.stats, txn, totals)
     }
 
     /// Check if a hash exists (sync version for internal use).
@@ -255,6 +366,14 @@ impl LmdbBlobStore {
             let order_key = Self::encode_order_key(order, &hash);
             self.metadata.put(&mut wtxn, &hash, &meta)?;
             self.eviction_order.put(&mut wtxn, &order_key, &())?;
+            let pin_count = self.read_pin_count_lossy(&wtxn, &hash)?;
+            self.increment_totals_in_txn(
+                &mut wtxn,
+                1,
+                data.len() as u64,
+                u64::from(pin_count > 0),
+                if pin_count > 0 { data.len() as u64 } else { 0 },
+            )?;
         }
 
         wtxn.commit()?;
@@ -268,6 +387,8 @@ impl LmdbBlobStore {
         let mut wtxn = self.env.write_txn()?;
         let mut inserted = 0usize;
         let mut inserted_bytes = 0u64;
+        let mut inserted_pinned = 0u64;
+        let mut inserted_pinned_bytes = 0u64;
 
         for (hash, data) in items {
             let inserted_blob = match self.blobs.put_with_flags(
@@ -295,6 +416,20 @@ impl LmdbBlobStore {
             self.eviction_order.put(&mut wtxn, &order_key, &())?;
             inserted += 1;
             inserted_bytes = inserted_bytes.saturating_add(data.len() as u64);
+            if self.read_pin_count_lossy(&wtxn, hash)? > 0 {
+                inserted_pinned = inserted_pinned.saturating_add(1);
+                inserted_pinned_bytes = inserted_pinned_bytes.saturating_add(data.len() as u64);
+            }
+        }
+
+        if inserted > 0 {
+            self.increment_totals_in_txn(
+                &mut wtxn,
+                inserted as u64,
+                inserted_bytes,
+                inserted_pinned,
+                inserted_pinned_bytes,
+            )?;
         }
 
         wtxn.commit()?;
@@ -307,34 +442,13 @@ impl LmdbBlobStore {
             .env
             .read_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
-
-        let count = self
-            .blobs
-            .len(&rtxn)
-            .map_err(|e| StoreError::Other(e.to_string()))? as usize;
-
-        let mut total_bytes = 0u64;
-        let mut pinned_count = 0usize;
-        let mut pinned_bytes = 0u64;
-        for item in self
-            .blobs
-            .iter(&rtxn)
-            .map_err(|e| StoreError::Other(e.to_string()))?
-        {
-            let (hash, data) = item.map_err(|e| StoreError::Other(e.to_string()))?;
-            let size = data.len() as u64;
-            total_bytes += size;
-            if self.read_pin_count(&rtxn, hash)? > 0 {
-                pinned_count += 1;
-                pinned_bytes += size;
-            }
-        }
+        let totals = Self::read_store_totals(self.stats, &rtxn)?.unwrap_or_default();
 
         Ok(LmdbStats {
-            count,
-            total_bytes,
-            pinned_count,
-            pinned_bytes,
+            count: totals.count as usize,
+            total_bytes: totals.total_bytes,
+            pinned_count: totals.pinned_count as usize,
+            pinned_bytes: totals.pinned_bytes,
         })
     }
 
@@ -458,11 +572,18 @@ impl LmdbBlobStore {
             .env
             .write_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
-        let count = self.read_pin_count(&wtxn, hash)?.saturating_add(1);
+        let previous = self.read_pin_count(&wtxn, hash)?;
+        let count = previous.saturating_add(1);
         let encoded = count.to_be_bytes();
         self.pins
             .put(&mut wtxn, hash, &encoded)
             .map_err(|e| StoreError::Other(e.to_string()))?;
+        if previous == 0 {
+            if let Some(size) = self.blob_size_in_txn(&wtxn, hash)? {
+                self.increment_totals_in_txn(&mut wtxn, 0, 0, 1, size)
+                    .map_err(|e| StoreError::Other(e.to_string()))?;
+            }
+        }
         wtxn.commit()
             .map_err(|e| StoreError::Other(e.to_string()))?;
         Ok(())
@@ -474,6 +595,12 @@ impl LmdbBlobStore {
             .write_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
         let count = self.read_pin_count(&wtxn, hash)?;
+        if count == 1 {
+            if let Some(size) = self.blob_size_in_txn(&wtxn, hash)? {
+                self.decrement_totals_in_txn(&mut wtxn, 0, 0, 1, size)
+                    .map_err(|e| StoreError::Other(e.to_string()))?;
+            }
+        }
         if count <= 1 {
             let _ = self
                 .pins
@@ -566,6 +693,7 @@ impl LmdbBlobStore {
         wtxn: &mut heed::RwTxn,
         hash: &Hash,
     ) -> Result<(bool, u64), StoreError> {
+        let pin_count = self.read_pin_count(wtxn, hash)?;
         let data_len = self
             .blobs
             .get(wtxn, hash)
@@ -597,11 +725,36 @@ impl LmdbBlobStore {
                 .delete(wtxn, &order_key)
                 .map_err(|e| StoreError::Other(e.to_string()))?;
         }
+        let bytes_freed = data_len.or(meta.map(|m| m.size)).unwrap_or(0);
+        if existed || meta.is_some() {
+            self.decrement_totals_in_txn(
+                wtxn,
+                1,
+                bytes_freed,
+                u64::from(pin_count > 0),
+                if pin_count > 0 { bytes_freed } else { 0 },
+            )
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        }
 
-        Ok((
-            existed || meta.is_some(),
-            data_len.or(meta.map(|m| m.size)).unwrap_or(0),
-        ))
+        Ok((existed || meta.is_some(), bytes_freed))
+    }
+
+    fn blob_size_in_txn(&self, txn: &heed::RoTxn, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        if let Some(meta) = self
+            .metadata
+            .get(txn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+            .map(Self::decode_blob_meta)
+            .transpose()?
+        {
+            return Ok(Some(meta.size));
+        }
+
+        self.blobs
+            .get(txn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))
+            .map(|data| data.map(|bytes| bytes.len() as u64))
     }
 
     fn read_pin_count(&self, txn: &heed::RoTxn, hash: &[u8]) -> Result<u32, StoreError> {
@@ -611,6 +764,18 @@ impl LmdbBlobStore {
             .map(Self::decode_pin_count)
             .transpose()?
             .map_or(Ok(0), Ok)
+    }
+
+    fn read_pin_count_lossy(
+        &self,
+        txn: &heed::RoTxn,
+        hash: &[u8],
+    ) -> std::result::Result<u32, HeedError> {
+        Ok(self
+            .pins
+            .get(txn, hash)?
+            .and_then(Self::decode_pin_count_lossy)
+            .unwrap_or(0))
     }
 
     fn encode_blob_meta(meta: BlobMeta) -> [u8; BLOB_META_BYTES] {
@@ -634,6 +799,33 @@ impl LmdbBlobStore {
                     .try_into()
                     .map_err(|_| StoreError::Other("invalid blob size bytes".into()))?,
             ),
+        })
+    }
+
+    fn encode_store_totals(totals: StoreTotals) -> [u8; STORE_TOTALS_BYTES] {
+        let mut encoded = [0u8; STORE_TOTALS_BYTES];
+        encoded[0..8].copy_from_slice(&totals.count.to_be_bytes());
+        encoded[8..16].copy_from_slice(&totals.total_bytes.to_be_bytes());
+        encoded[16..24].copy_from_slice(&totals.pinned_count.to_be_bytes());
+        encoded[24..32].copy_from_slice(&totals.pinned_bytes.to_be_bytes());
+        encoded
+    }
+
+    fn decode_store_totals(bytes: &[u8]) -> Result<StoreTotals, StoreError> {
+        Self::decode_store_totals_lossy(bytes).ok_or_else(|| {
+            StoreError::Other(format!("invalid store totals length: {}", bytes.len()))
+        })
+    }
+
+    fn decode_store_totals_lossy(bytes: &[u8]) -> Option<StoreTotals> {
+        if bytes.len() != STORE_TOTALS_BYTES {
+            return None;
+        }
+        Some(StoreTotals {
+            count: u64::from_be_bytes(bytes[0..8].try_into().ok()?),
+            total_bytes: u64::from_be_bytes(bytes[8..16].try_into().ok()?),
+            pinned_count: u64::from_be_bytes(bytes[16..24].try_into().ok()?),
+            pinned_bytes: u64::from_be_bytes(bytes[24..32].try_into().ok()?),
         })
     }
 
@@ -679,15 +871,15 @@ impl LmdbBlobStore {
     }
 
     fn decode_pin_count(bytes: &[u8]) -> Result<u32, StoreError> {
+        Self::decode_pin_count_lossy(bytes)
+            .ok_or_else(|| StoreError::Other(format!("invalid pin count length: {}", bytes.len())))
+    }
+
+    fn decode_pin_count_lossy(bytes: &[u8]) -> Option<u32> {
         if bytes.len() != PIN_COUNT_BYTES {
-            return Err(StoreError::Other(format!(
-                "invalid pin count length: {}",
-                bytes.len()
-            )));
+            return None;
         }
-        Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
-            StoreError::Other("invalid pin count bytes".into())
-        })?))
+        Some(u32::from_be_bytes(bytes.try_into().ok()?))
     }
 }
 
@@ -909,6 +1101,55 @@ mod tests {
         let stats = store.stats()?;
         assert_eq!(stats.count, 2);
         assert_eq!(stats.total_bytes, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stats_persist_across_reopen_and_mutations() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blobs");
+        let h1 = sha256(b"hello");
+        let h2 = sha256(b"world!");
+        let h3 = sha256(b"prepin");
+
+        {
+            let store = LmdbBlobStore::new(&path)?;
+            store.put(h1, b"hello".to_vec()).await?;
+            store.put(h2, b"world!".to_vec()).await?;
+            store.pin(&h1).await?;
+            store.pin(&h3).await?;
+            store.put(h3, b"prepin".to_vec()).await?;
+
+            let stats = store.stats()?;
+            assert_eq!(stats.count, 3);
+            assert_eq!(stats.total_bytes, 17);
+            assert_eq!(stats.pinned_count, 2);
+            assert_eq!(stats.pinned_bytes, 11);
+        }
+
+        {
+            let reopened = LmdbBlobStore::new(&path)?;
+            let stats = reopened.stats()?;
+            assert_eq!(stats.count, 3);
+            assert_eq!(stats.total_bytes, 17);
+            assert_eq!(stats.pinned_count, 2);
+            assert_eq!(stats.pinned_bytes, 11);
+
+            assert!(reopened.delete(&h1).await?);
+            let stats = reopened.stats()?;
+            assert_eq!(stats.count, 2);
+            assert_eq!(stats.total_bytes, 12);
+            assert_eq!(stats.pinned_count, 1);
+            assert_eq!(stats.pinned_bytes, 6);
+        }
+
+        let reopened = LmdbBlobStore::new(&path)?;
+        let stats = reopened.stats()?;
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.total_bytes, 12);
+        assert_eq!(stats.pinned_count, 1);
+        assert_eq!(stats.pinned_bytes, 6);
 
         Ok(())
     }

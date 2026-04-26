@@ -9,6 +9,7 @@
 //! Run with: cargo test --package hashtree-cli --test eviction -- --nocapture
 
 use hashtree_cli::storage::{HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OTHER, PRIORITY_OWN};
+use hashtree_config::StorageBackend;
 use hashtree_core::from_hex;
 use std::thread;
 use std::time::Duration;
@@ -17,8 +18,14 @@ use tempfile::TempDir;
 /// Create a store with a small max size for testing
 fn test_store(max_size_bytes: u64) -> (HashtreeStore, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let store = HashtreeStore::with_options(temp_dir.path(), None, max_size_bytes)
-        .expect("Failed to create store");
+    let store = HashtreeStore::with_options_and_backend(
+        temp_dir.path(),
+        None,
+        max_size_bytes,
+        true,
+        &StorageBackend::Fs,
+    )
+    .expect("Failed to create store");
     (store, temp_dir)
 }
 

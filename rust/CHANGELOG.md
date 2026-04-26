@@ -7,6 +7,10 @@
 - Fixed owned Blossom uploads so they respect the configured durable storage limit: when protected
   owned blobs fill the local store, new owned uploads now fail with a storage-limit error instead
   of growing the LMDB blob store past the quota.
+- Fixed LMDB blob-store stats so quota checks use transactionally maintained counters instead of
+  scanning blob data on every check, avoiding slow starts and uploads on large stores.
+- Fixed hashtree metadata LMDB environments to start with a small map instead of reserving a
+  10GB map for tiny test and CLI stores, while still reopening larger existing environments.
 
 ## 0.2.39 - 2026-04-24
 
