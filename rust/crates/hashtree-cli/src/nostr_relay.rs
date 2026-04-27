@@ -7,7 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 #[cfg(feature = "p2p")]
 use hashtree_network::{MeshEventStore, MeshRelayClient};
@@ -17,6 +17,7 @@ use nostr::{Event, EventId, Filter as NostrFilter, SubscriptionId};
 use crate::socialgraph;
 
 const BLUETOOTH_EVENT_LOG_CAPACITY: usize = 100;
+const MAX_CONCURRENT_NOSTR_STORE_BLOCKING_TASKS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BluetoothReceivedEventRecord {
@@ -99,15 +100,27 @@ mod imp {
 
     struct NostrStore {
         store: Arc<dyn SocialGraphBackend>,
+        blocking_permits: Arc<Semaphore>,
     }
 
     impl NostrStore {
         fn new(store: Arc<dyn SocialGraphBackend>) -> Self {
-            Self { store }
+            Self {
+                store,
+                blocking_permits: Arc::new(Semaphore::new(
+                    MAX_CONCURRENT_NOSTR_STORE_BLOCKING_TASKS,
+                )),
+            }
         }
 
         async fn ingest(&self, event: Event) -> Result<()> {
             let store = Arc::clone(&self.store);
+            let _permit = self
+                .blocking_permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|err| anyhow::anyhow!("trusted nostr store closed: {err}"))?;
             tokio::task::spawn_blocking(move || {
                 crate::socialgraph::ingest_parsed_event(store.as_ref(), &event)
             })
@@ -121,6 +134,12 @@ mod imp {
             storage_class: EventStorageClass,
         ) -> Result<()> {
             let store = Arc::clone(&self.store);
+            let _permit = self
+                .blocking_permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|err| anyhow::anyhow!("trusted nostr store closed: {err}"))?;
             tokio::task::spawn_blocking(move || {
                 crate::socialgraph::ingest_parsed_event_with_storage_class(
                     store.as_ref(),
@@ -137,6 +156,10 @@ mod imp {
             let filter_summary = nostr_filter_summary(&filter);
             let memory_before = process_memory_snapshot();
             let started = Instant::now();
+            let Ok(_permit) = self.blocking_permits.clone().acquire_owned().await else {
+                warn!("trusted nostr store query skipped: blocking semaphore closed");
+                return Vec::new();
+            };
             let result = tokio::task::spawn_blocking(move || {
                 crate::socialgraph::query_events(store.as_ref(), &filter, limit)
             })
