@@ -1979,6 +1979,7 @@ async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
 
     mirror.ingest_live_event(&alice_note)?;
     mirror.flush_live_events().await?;
+    mirror.maybe_publish_event_root(true).await?;
 
     let public_root = graph_store
         .public_events_root()?
@@ -2008,6 +2009,7 @@ async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
 
     mirror.ingest_live_event(&alice_note)?;
     mirror.flush_live_events().await?;
+    mirror.maybe_publish_event_root(true).await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert_eq!(
@@ -2079,6 +2081,7 @@ async fn live_event_flush_recovers_invalid_public_event_root_before_publish() ->
 
     mirror.ingest_live_event(&alice_note)?;
     mirror.flush_live_events().await?;
+    mirror.maybe_publish_event_root(true).await?;
 
     let public_root = graph_store
         .public_events_root()?

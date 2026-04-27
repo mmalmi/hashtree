@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::ensure_keys_string;
 use crate::fetch::{FetchConfig, Fetcher};
 use crate::HashtreeStore;
-use hashtree_core::{to_hex, tree_diff, Cid, HashTree, HashTreeConfig, Link};
+use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link};
 
 const BLOSSOM_PUSH_CONCURRENCY: usize = 16;
 const BLOSSOM_PUSH_PROGRESS_EVERY: usize = 512;
@@ -90,6 +90,87 @@ pub(crate) async fn collect_cids_for_push(
                     queue.push(child_cid(&cid, link));
                 }
             }
+        }
+    }
+
+    Ok(cids_to_push)
+}
+
+fn matching_old_child<'a>(
+    old_links: &'a [Link],
+    new_index: usize,
+    new_link: &Link,
+) -> Option<&'a Link> {
+    if let Some(name) = new_link.name.as_deref() {
+        old_links
+            .iter()
+            .find(|old_link| old_link.name.as_deref() == Some(name))
+    } else {
+        old_links
+            .get(new_index)
+            .filter(|old_link| old_link.name.is_none())
+    }
+}
+
+pub(crate) async fn collect_incremental_cids_for_push(
+    store: &HashtreeStore,
+    root_cid: Cid,
+    previous_root_cid: Cid,
+    fetcher: Option<&Fetcher>,
+) -> Result<Vec<Cid>> {
+    let mut cids_to_push = Vec::new();
+    let mut visited_new: HashSet<[u8; 32]> = HashSet::new();
+    let mut queue = vec![(root_cid, Some(previous_root_cid))];
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    while let Some((cid, old_cid)) = queue.pop() {
+        if old_cid.as_ref().is_some_and(|old| old.hash == cid.hash) {
+            continue;
+        }
+        if !visited_new.insert(cid.hash) {
+            continue;
+        }
+
+        ensure_local_blob_for_push(store, fetcher, &cid).await?;
+        cids_to_push.push(cid.clone());
+
+        let node = tree
+            .get_node(&cid)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to inspect {}: {}", cid, e))?;
+        let Some(node) = node else {
+            continue;
+        };
+
+        let old_node = match old_cid.as_ref() {
+            Some(old_cid) => match tree.get_node(old_cid).await {
+                Ok(old_node) => old_node,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to inspect previous Blossom DAG node {}; uploading changed subtree: {}",
+                        old_cid,
+                        err
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        for (index, link) in node.links.iter().enumerate() {
+            let child = child_cid(&cid, link);
+            let old_child = old_node
+                .as_ref()
+                .and_then(|old_node| matching_old_child(&old_node.links, index, link))
+                .map(|old_link| child_cid(old_cid.as_ref().expect("old node has cid"), old_link));
+
+            if old_child
+                .as_ref()
+                .is_some_and(|old_child| old_child.hash == child.hash)
+            {
+                continue;
+            }
+            queue.push((child, old_child));
         }
     }
 
@@ -233,21 +314,16 @@ pub async fn background_blossom_push_incremental_with_store(
 
     let fetcher = Arc::new(Fetcher::new(FetchConfig::default()));
     let cids_to_push = if let Some(previous_root_cid) = previous_root_cid.as_ref() {
-        println!("Collecting DAG diff for file-server push...");
-        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
-        match tree_diff(
-            &tree,
-            Some(previous_root_cid),
-            &root_cid,
-            BLOSSOM_PUSH_CONCURRENCY,
+        println!("Collecting bounded DAG diff for file-server push...");
+        match collect_incremental_cids_for_push(
+            store.as_ref(),
+            root_cid.clone(),
+            previous_root_cid.clone(),
+            Some(fetcher.as_ref()),
         )
         .await
         {
-            Ok(diff) => diff
-                .added
-                .into_iter()
-                .map(|hash| Cid { hash, key: None })
-                .collect(),
+            Ok(cids) => cids,
             Err(err) => {
                 tracing::warn!(
                     "Blossom DAG diff failed; falling back to full push: {}",
@@ -290,10 +366,10 @@ pub async fn background_blossom_push_incremental_with_store(
 
 #[cfg(test)]
 mod tests {
-    use super::collect_cids_for_push;
+    use super::{collect_cids_for_push, collect_incremental_cids_for_push};
     use crate::HashtreeStore;
     use futures::executor::block_on as sync_block_on;
-    use hashtree_core::{HashTree, HashTreeConfig};
+    use hashtree_core::{DirEntry, HashTree, HashTreeConfig, LinkType};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -329,5 +405,56 @@ mod tests {
         assert!(err
             .to_string()
             .contains("missing local blob while pushing DAG"));
+    }
+
+    #[tokio::test]
+    async fn incremental_push_collects_only_changed_named_subtrees() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+        let stable_file = tree.put_blob(b"stable").await.expect("stable file");
+        let old_changed_file = tree.put_blob(b"old").await.expect("old file");
+        let old_subdir = tree
+            .put_directory(vec![
+                DirEntry::new("changed.txt", old_changed_file).with_size(3),
+                DirEntry::new("stable.txt", stable_file).with_size(6),
+            ])
+            .await
+            .expect("old subdir");
+        let old_root = tree
+            .put_directory(vec![
+                DirEntry::new("subdir", old_subdir.hash).with_link_type(LinkType::Dir),
+                DirEntry::new("stable-root.txt", stable_file).with_size(6),
+            ])
+            .await
+            .expect("old root");
+
+        let new_changed_file = tree.put_blob(b"new").await.expect("new file");
+        let new_subdir = tree
+            .put_directory(vec![
+                DirEntry::new("stable.txt", stable_file).with_size(6),
+                DirEntry::new("changed.txt", new_changed_file).with_size(3),
+            ])
+            .await
+            .expect("new subdir");
+        let new_root = tree
+            .put_directory(vec![
+                DirEntry::new("stable-root.txt", stable_file).with_size(6),
+                DirEntry::new("subdir", new_subdir.hash).with_link_type(LinkType::Dir),
+            ])
+            .await
+            .expect("new root");
+
+        let cids = collect_incremental_cids_for_push(&store, new_root.clone(), old_root, None)
+            .await
+            .expect("incremental cids");
+        let hashes = cids.iter().map(|cid| cid.hash).collect::<Vec<_>>();
+
+        assert_eq!(hashes.len(), 3);
+        assert!(hashes.contains(&new_root.hash));
+        assert!(hashes.contains(&new_subdir.hash));
+        assert!(hashes.contains(&new_changed_file));
+        assert!(!hashes.contains(&stable_file));
     }
 }

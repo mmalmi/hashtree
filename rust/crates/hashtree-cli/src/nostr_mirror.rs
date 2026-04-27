@@ -93,6 +93,16 @@ const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
 const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob";
 
+fn trim_transient_upload_allocations() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // SAFETY: malloc_trim asks glibc to return free heap pages to the OS.
+        // It does not touch live allocations and is safe to call after the
+        // large, synchronous mirror upload job has dropped its temporary data.
+        libc::malloc_trim(0);
+    }
+}
+
 fn decode_hex_pubkey(value: &str) -> Option<[u8; 32]> {
     let bytes = hex::decode(value).ok()?;
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
@@ -1554,13 +1564,13 @@ impl BackgroundNostrMirror {
             self.note_profiles_by_pubkey_root_change()?;
         }
         if profile_search_root_changed {
-            self.maybe_publish_profile_search_root(true).await?;
+            self.maybe_publish_profile_search_root(false).await?;
         }
         if profiles_by_pubkey_root_changed {
-            self.maybe_publish_profiles_by_pubkey_root(true).await?;
+            self.maybe_publish_profiles_by_pubkey_root(false).await?;
         }
         if event_root_changed {
-            self.maybe_publish_event_root(true).await?;
+            self.maybe_publish_event_root(false).await?;
         }
         info!(
             "Nostr mirror flushed live events: events={} event_root_changed={} profile_search_root_changed={} profiles_by_pubkey_root_changed={}",
@@ -1985,6 +1995,7 @@ impl BackgroundNostrMirror {
                     }
                 }
             });
+            trim_transient_upload_allocations();
         });
 
         true
