@@ -1500,9 +1500,13 @@ impl<S: Store> NostrBridge<S> {
         let mut until = None;
 
         for _ in 0..self.config.max_relay_pages {
+            let remaining = self.config.per_author_event_limit.saturating_sub(out.len());
+            if remaining == 0 {
+                break;
+            }
             let mut filter = Filter::new()
                 .author(pubkey)
-                .limit(self.config.relay_page_size);
+                .limit(self.config.relay_page_size.min(remaining));
             if let Some(kinds) = &self.config.kinds {
                 filter = filter.kinds(kinds.iter().copied().map(Kind::from));
             }
