@@ -56,10 +56,13 @@ mod imp {
     use super::*;
     use anyhow::Result;
 
+    use crate::diagnostics::{
+        nostr_filter_summary, nostr_filters_summary, process_memory_snapshot,
+    };
     use crate::socialgraph::{EventStorageClass, SocialGraphAccessControl, SocialGraphBackend};
     use hashtree_core::{nhash_decode, Cid};
     use hashtree_nostr::{is_parameterized_replaceable_kind, is_replaceable_kind};
-    use tracing::warn;
+    use tracing::{info, warn};
 
     fn prefers_trusted_only(filter: &NostrFilter) -> bool {
         let Some(kinds) = filter.kinds.as_ref() else {
@@ -130,19 +133,29 @@ mod imp {
 
         async fn query(&self, filter: NostrFilter, limit: usize) -> Vec<Event> {
             let store = Arc::clone(&self.store);
-            match std::thread::Builder::new()
-                .name("nostr-relay-query".to_string())
-                .spawn(move || crate::socialgraph::query_events(store.as_ref(), &filter, limit))
-            {
-                Ok(join) => match join.join() {
-                    Ok(events) => events,
-                    Err(_) => {
-                        warn!("trusted nostr store query thread panicked");
-                        Vec::new()
-                    }
-                },
+            let filter_summary = nostr_filter_summary(&filter);
+            let memory_before = process_memory_snapshot();
+            let started = Instant::now();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::socialgraph::query_events(store.as_ref(), &filter, limit)
+            })
+            .await;
+            match result {
+                Ok(events) => {
+                    info!(
+                        target: "hashtree_cli::nostr_relay::query",
+                        limit,
+                        events = events.len(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        filter = %filter_summary,
+                        memory_before = ?memory_before,
+                        memory_after = ?process_memory_snapshot(),
+                        "trusted nostr store query completed",
+                    );
+                    events
+                }
                 Err(err) => {
-                    warn!("failed to spawn trusted nostr store query thread: {}", err);
+                    warn!("trusted nostr store query task failed: {}", err);
                     Vec::new()
                 }
             }
@@ -708,11 +721,14 @@ mod imp {
                 {
                     return Err("too many subscriptions");
                 }
-                entry.insert(subscription_id, filters.clone());
+                entry.insert(subscription_id.clone(), filters.clone());
             }
 
             let mut seen: HashSet<EventId> = HashSet::new();
             let mut events = Vec::new();
+            let memory_before = process_memory_snapshot();
+            let started = Instant::now();
+            let filter_summary = nostr_filters_summary(&filters);
             for filter in &filters {
                 let limit = filter
                     .limit
@@ -722,6 +738,18 @@ mod imp {
                     .await;
             }
 
+            info!(
+                target: "hashtree_cli::nostr_relay::query",
+                client_id,
+                subscription_id = %subscription_id,
+                filters = filters.len(),
+                events = events.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                filter = %filter_summary,
+                memory_before = ?memory_before,
+                memory_after = ?process_memory_snapshot(),
+                "nostr relay local subscription query completed",
+            );
             Ok(events)
         }
 

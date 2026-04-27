@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
 use super::auth::{AppState, PendingRequest, UpstreamNostrSubscription, WsProtocol};
+use crate::diagnostics::{nostr_filters_summary, process_memory_snapshot};
 use crate::webrtc::types::{
     encode_request, encode_response, parse_message, DataMessage, DataRequest, DataResponse, MAX_HTL,
 };
@@ -387,6 +388,7 @@ async fn start_upstream_nostr_subscription(
     subscription_id: SubscriptionId,
     filters: Vec<NostrFilter>,
 ) -> usize {
+    let memory_before = process_memory_snapshot();
     close_upstream_nostr_subscription(state, client_id, &subscription_id).await;
     if state.nostr_relay_urls.is_empty() || filters.is_empty() {
         tracing::info!(
@@ -424,6 +426,7 @@ async fn start_upstream_nostr_subscription(
         relay_urls.len(),
     );
 
+    let filter_summary = nostr_filters_summary(&filters);
     let key = (client_id, subscription_id.to_string());
     state
         .ws_relay
@@ -450,6 +453,19 @@ async fn start_upstream_nostr_subscription(
             close_rx.clone(),
         )));
     }
+
+    tracing::info!(
+        target: "hashtree_cli::server::ws_relay::upstream",
+        client_id,
+        subscription_id = %subscription_id,
+        relays = relay_urls.len(),
+        tasks = tasks.len(),
+        filters = filters.len(),
+        filter = %filter_summary,
+        memory_before = ?memory_before,
+        memory_after = ?process_memory_snapshot(),
+        "upstream nostr relay tasks spawned",
+    );
 
     state
         .ws_relay

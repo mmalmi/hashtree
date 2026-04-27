@@ -43,7 +43,12 @@ RUN --mount=type=bind,source=crates,target=/source-crates,readonly \
     cargo build --locked --release --package hashtree-cli --features s3; \
     if [ "$BUILD_CASHU" = "1" ]; then \
         cargo build --locked --release --package hashtree-cashu-cli; \
-    fi
+    fi; \
+    for manifest in /source-crates/*/Cargo.toml; do \
+        package="$(awk 'BEGIN { in_package = 0 } /^\[package\]/ { in_package = 1; next } /^\[/ { in_package = 0 } in_package && $1 == "name" { gsub(/"/, "", $3); print $3; exit }' "$manifest")"; \
+        [ -n "$package" ] || continue; \
+        cargo clean --release --package "$package"; \
+    done
 
 FROM deps AS builder
 ARG BUILD_CASHU=0
@@ -52,13 +57,12 @@ COPY crates ./crates
 
 # Build release binaries with persistent BuildKit caches. The target directory
 # is cache-mounted, so copy final artifacts to /out before the layer commits.
-# The deps stage builds placeholder local crates into the shared target cache.
-# Touch copied workspace sources so Cargo cannot reuse a placeholder htree binary
-# when Docker preserves older source mtimes.
+# The deps stage builds placeholder local crates, then removes those local
+# package artifacts. Third-party deps stay warm without forcing every source
+# file to look changed on each rebuild.
 RUN --mount=type=cache,id=hashtree-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=hashtree-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=hashtree-target,target=/app/target,sharing=locked \
-    find crates -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'build.rs' \) -exec touch {} + && \
     cargo build --locked --release --package hashtree-cli --features s3 && \
     if [ "$BUILD_CASHU" = "1" ]; then \
         cargo build --locked --release --package hashtree-cashu-cli; \

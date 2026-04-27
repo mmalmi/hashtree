@@ -7,6 +7,7 @@ pub mod cashu_cli;
 pub mod cashu_helper;
 pub mod config;
 pub mod daemon;
+pub mod diagnostics;
 pub mod eviction;
 pub mod fetch;
 pub mod ignore_rules;
