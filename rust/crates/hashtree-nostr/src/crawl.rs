@@ -221,25 +221,26 @@ impl<S: Store> NostrBridge<S> {
             return Ok(CrawlReport::default());
         }
 
+        let existing_root = self.usable_existing_root(existing_root).await?;
         let client = self.connect_client().await?;
 
-        let existing_root = self.usable_existing_root(existing_root).await?;
+        let result = if self.config.relay_fetch_mode == RelayFetchMode::AuthorBatches {
+            self.crawl_author_batches(&client, &authors, existing_root.as_ref(), &mut on_progress)
+                .await
+        } else {
+            let state = self
+                .load_existing_global_state(existing_root.as_ref(), &authors)
+                .await?;
 
-        if self.config.relay_fetch_mode == RelayFetchMode::AuthorBatches {
-            return self
-                .crawl_author_batches(&client, &authors, existing_root.as_ref(), &mut on_progress)
-                .await;
-        }
+            let report = self
+                .crawl_global_recent_incremental(&client, &authors, state, &mut on_progress)
+                .await?;
+            on_progress(&report);
+            Ok(report)
+        };
 
-        let state = self
-            .load_existing_global_state(existing_root.as_ref(), &authors)
-            .await?;
-
-        let report = self
-            .crawl_global_recent_incremental(&client, &authors, state, &mut on_progress)
-            .await?;
-        on_progress(&report);
-        Ok(report)
+        let _ = client.disconnect().await;
+        result
     }
 
     async fn usable_existing_root(&self, root: Option<&Cid>) -> Result<Option<Cid>> {
