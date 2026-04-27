@@ -2,8 +2,19 @@
 
 ## Unreleased
 
+## 0.2.43 - 2026-04-27
+
 ### Fixed
 
+- Fixed Nostr mirror and relay startup memory spikes by bounding Blossom diff uploads, full-history
+  crawl retention, relay index scans, and per-subscription local query batches, then trimming
+  transient allocator pages after large mirror and relay batches.
+- Fixed multi-author, multi-kind Nostr relay queries to use the author-kind index instead of broad
+  kind scans that decoded large unrelated event sets.
+- Improved Nostr relay diagnostics with process memory snapshots and compact filter summaries around
+  trusted local queries and upstream subscription fanout.
+- Improved Docker rebuild behavior so source edits reuse Cargo's persistent target cache instead of
+  forcing dependency rebuilds through placeholder crate artifacts.
 - Fixed owned Blossom uploads so they respect the configured durable storage limit: when protected
   owned blobs fill the local store, new owned uploads now fail with a storage-limit error instead
   of growing the LMDB blob store past the quota.
