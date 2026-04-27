@@ -763,7 +763,7 @@ impl<S: Store> NostrBridge<S> {
             let author_selected = self
                 .select_author_events_with_limits(
                     merged.into_values().collect(),
-                    usize::MAX,
+                    self.config.per_author_event_limit,
                     self.config.per_author_live_bytes,
                 )?
                 .into_iter()
@@ -1528,8 +1528,14 @@ impl<S: Store> NostrBridge<S> {
                 }
                 let stored = stored_event_from_nostr(&event);
                 out.insert(stored.id.clone(), stored);
+                if out.len() >= self.config.per_author_event_limit {
+                    break;
+                }
             }
 
+            if out.len() >= self.config.per_author_event_limit {
+                break;
+            }
             if min_created_at == u64::MAX || min_created_at == 0 {
                 break;
             }

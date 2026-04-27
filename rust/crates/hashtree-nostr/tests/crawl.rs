@@ -765,7 +765,7 @@ async fn limits_relay_fetches_per_author_batch() -> io::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn full_author_history_pages_past_per_author_limit() -> io::Result<()> {
+async fn full_author_history_retains_per_author_limit() -> io::Result<()> {
     let relay = TestRelay::new();
     let relay_url = relay.url();
 
@@ -821,8 +821,8 @@ async fn full_author_history_pages_past_per_author_limit() -> io::Result<()> {
     );
 
     let report = bridge.crawl(&graph, None).await.expect("crawl report");
-    assert_eq!(report.events_selected, 5);
-    assert_eq!(report.events_seen, 5);
+    assert_eq!(report.events_selected, 2);
+    assert_eq!(report.events_seen, 2);
 
     let root = report.root.expect("index root");
     let event_store = NostrEventStore::new(store);
@@ -840,7 +840,7 @@ async fn full_author_history_pages_past_per_author_limit() -> io::Result<()> {
         .map(|event| event.id)
         .collect::<Vec<_>>();
 
-    expected_ids.reverse();
+    expected_ids = expected_ids.into_iter().rev().take(2).collect();
     assert_eq!(indexed_ids, expected_ids);
 
     Ok(())
@@ -962,7 +962,7 @@ async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()
         .crawl(&graph, Some(&existing_root))
         .await
         .expect("crawl report");
-    assert_eq!(report.events_selected, 5);
+    assert_eq!(report.events_selected, 2);
     assert_eq!(report.events_seen, 2);
     assert!(relay.negentropy_sessions_started() >= 1);
 
