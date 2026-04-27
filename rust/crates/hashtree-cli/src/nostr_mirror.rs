@@ -93,7 +93,7 @@ const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
 const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob";
 
-fn trim_transient_upload_allocations() {
+fn trim_transient_allocations() {
     #[cfg(target_os = "linux")]
     unsafe {
         // SAFETY: malloc_trim asks glibc to return free heap pages to the OS.
@@ -1235,6 +1235,7 @@ impl BackgroundNostrMirror {
                         err
                     );
                     last_error = Some(err);
+                    trim_transient_allocations();
                     continue;
                 }
             };
@@ -1279,6 +1280,7 @@ impl BackgroundNostrMirror {
                 );
             }
             applied_chunks = applied_chunks.saturating_add(1);
+            trim_transient_allocations();
         }
 
         if applied_chunks == 0 {
@@ -1995,7 +1997,7 @@ impl BackgroundNostrMirror {
                     }
                 }
             });
-            trim_transient_upload_allocations();
+            trim_transient_allocations();
         });
 
         true
