@@ -204,6 +204,20 @@ impl<S: Store> BTree<S> {
             .await
     }
 
+    pub async fn prefix_links_limited(
+        &self,
+        root: &Cid,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Cid)>, BTreeError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let end = increment_prefix(prefix);
+        self.range_link_traverse_limited(root.clone(), Some(prefix.to_string()), end, limit)
+            .await
+    }
+
     pub async fn delete(&self, root: &Cid, key: &str) -> Result<Option<Cid>, BTreeError> {
         self.delete_recursive(root.clone(), key.to_string()).await
     }
@@ -808,6 +822,75 @@ impl<S: Store> BTree<S> {
                     self.range_link_traverse(entry_cid(child), start.clone(), end.clone())
                         .await?,
                 );
+            }
+
+            Ok(out)
+        })
+    }
+
+    fn range_link_traverse_limited<'a>(
+        &'a self,
+        node: Cid,
+        start: Option<String>,
+        end: Option<String>,
+        limit: usize,
+    ) -> BTreeFuture<'a, Vec<(String, Cid)>> {
+        Box::pin(async move {
+            let entries = self.tree.list_directory(&node).await?;
+            let sorted = sort_entries(entries);
+            let mut out = Vec::new();
+
+            if is_leaf_node(&sorted) {
+                for entry in sorted {
+                    if entry.link_type != LinkType::File {
+                        continue;
+                    }
+                    let key = unescape_key(&entry.name);
+                    if start.as_ref().is_some_and(|start| key < *start) {
+                        continue;
+                    }
+                    if end.as_ref().is_some_and(|end| key >= *end) {
+                        return Ok(out);
+                    }
+                    out.push((key, entry_cid(&entry)));
+                    if out.len() >= limit {
+                        return Ok(out);
+                    }
+                }
+                return Ok(out);
+            }
+
+            for (index, child) in sorted.iter().enumerate() {
+                let child_min = unescape_key(&child.name);
+                let child_max = sorted.get(index + 1).map(|entry| unescape_key(&entry.name));
+
+                if start.as_ref().is_some_and(|start| {
+                    child_max
+                        .as_ref()
+                        .is_some_and(|child_max| child_max <= start)
+                }) {
+                    continue;
+                }
+                if end.as_ref().is_some_and(|end| child_min >= *end) {
+                    return Ok(out);
+                }
+
+                let remaining = limit.saturating_sub(out.len());
+                if remaining == 0 {
+                    return Ok(out);
+                }
+                out.extend(
+                    self.range_link_traverse_limited(
+                        entry_cid(child),
+                        start.clone(),
+                        end.clone(),
+                        remaining,
+                    )
+                    .await?,
+                );
+                if out.len() >= limit {
+                    return Ok(out);
+                }
             }
 
             Ok(out)

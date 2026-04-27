@@ -953,6 +953,11 @@ impl<S: Store> NostrEventStore<S> {
         let mut events = Vec::new();
         let entries = if prefix.is_empty() {
             self.index.links_entries(Some(root)).await?
+        } else if options.since.is_none() && options.until.is_none() {
+            match options.limit {
+                Some(limit) => self.index.prefix_links_limited(root, prefix, limit).await?,
+                None => self.index.prefix_links(root, prefix).await?,
+            }
         } else {
             self.index.prefix_links(root, prefix).await?
         };
@@ -981,6 +986,11 @@ impl<S: Store> NostrEventStore<S> {
         let mut events = Vec::new();
         let entries = if prefix.is_empty() {
             self.index.links_entries(Some(root)).await?
+        } else if options.since.is_none() && options.until.is_none() {
+            match options.limit {
+                Some(limit) => self.index.prefix_links_limited(root, prefix, limit).await?,
+                None => self.index.prefix_links(root, prefix).await?,
+            }
         } else {
             self.index.prefix_links(root, prefix).await?
         };

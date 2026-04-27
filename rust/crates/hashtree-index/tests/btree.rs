@@ -170,6 +170,19 @@ fn bulk_link_build_matches_incremental_entries() {
                 .await
                 .unwrap()
         );
+        assert_eq!(
+            btree
+                .prefix_links_limited(&bulk_root, "author1:", 2)
+                .await
+                .unwrap(),
+            btree
+                .prefix_links(&bulk_root, "author1:")
+                .await
+                .unwrap()
+                .into_iter()
+                .take(2)
+                .collect::<Vec<_>>()
+        );
     });
 }
 
