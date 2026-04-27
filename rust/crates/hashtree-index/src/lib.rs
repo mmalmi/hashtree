@@ -171,6 +171,21 @@ impl<S: Store> BTree<S> {
         self.traverse_links_in_order(root.clone()).await
     }
 
+    pub async fn links_entries_limited(
+        &self,
+        root: Option<&Cid>,
+        limit: usize,
+    ) -> Result<Vec<(String, Cid)>, BTreeError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(root) = root else {
+            return Ok(Vec::new());
+        };
+        self.range_link_traverse_limited(root.clone(), None, None, limit)
+            .await
+    }
+
     pub async fn range(
         &self,
         root: &Cid,

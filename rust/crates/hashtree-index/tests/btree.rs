@@ -183,6 +183,19 @@ fn bulk_link_build_matches_incremental_entries() {
                 .take(2)
                 .collect::<Vec<_>>()
         );
+        assert_eq!(
+            btree
+                .links_entries_limited(Some(&bulk_root), 3)
+                .await
+                .unwrap(),
+            btree
+                .links_entries(Some(&bulk_root))
+                .await
+                .unwrap()
+                .into_iter()
+                .take(3)
+                .collect::<Vec<_>>()
+        );
     });
 }
 

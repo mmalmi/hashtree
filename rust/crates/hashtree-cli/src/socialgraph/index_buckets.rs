@@ -677,9 +677,9 @@ fn build_profile_search_entry(
     })
 }
 
-fn filter_list_options(filter: &Filter, limit: usize, exact: bool) -> ListEventsOptions {
+fn filter_list_options(filter: &Filter, limit: usize, _exact: bool) -> ListEventsOptions {
     ListEventsOptions {
-        limit: exact.then_some(limit.max(1)),
+        limit: Some(limit.max(1)),
         since: filter.since.map(|timestamp| timestamp.as_u64()),
         until: filter.until.map(|timestamp| timestamp.as_u64()),
     }

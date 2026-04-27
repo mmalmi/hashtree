@@ -952,14 +952,15 @@ impl<S: Store> NostrEventStore<S> {
     ) -> Result<Vec<StoredNostrEvent>, NostrEventStoreError> {
         let mut events = Vec::new();
         let entries = if prefix.is_empty() {
-            self.index.links_entries(Some(root)).await?
-        } else if options.since.is_none() && options.until.is_none() {
+            match options.limit {
+                Some(limit) => self.index.links_entries_limited(Some(root), limit).await?,
+                None => self.index.links_entries(Some(root)).await?,
+            }
+        } else {
             match options.limit {
                 Some(limit) => self.index.prefix_links_limited(root, prefix, limit).await?,
                 None => self.index.prefix_links(root, prefix).await?,
             }
-        } else {
-            self.index.prefix_links(root, prefix).await?
         };
         for (key, cid) in entries {
             let created_at = created_at_from_index_key(&key)?;
@@ -985,14 +986,15 @@ impl<S: Store> NostrEventStore<S> {
     ) -> Result<Vec<StoredNostrEvent>, NostrEventStoreError> {
         let mut events = Vec::new();
         let entries = if prefix.is_empty() {
-            self.index.links_entries(Some(root)).await?
-        } else if options.since.is_none() && options.until.is_none() {
+            match options.limit {
+                Some(limit) => self.index.links_entries_limited(Some(root), limit).await?,
+                None => self.index.links_entries(Some(root)).await?,
+            }
+        } else {
             match options.limit {
                 Some(limit) => self.index.prefix_links_limited(root, prefix, limit).await?,
                 None => self.index.prefix_links(root, prefix).await?,
             }
-        } else {
-            self.index.prefix_links(root, prefix).await?
         };
         for (key, cid) in entries {
             let created_at = created_at_from_index_key(&key)?;
