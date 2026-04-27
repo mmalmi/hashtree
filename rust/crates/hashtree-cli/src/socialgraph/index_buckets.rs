@@ -161,23 +161,30 @@ impl EventIndexBucket {
         exact: bool,
     ) -> Result<Vec<Event>> {
         let mut events = Vec::new();
+        let mut seen = HashSet::new();
         let options = filter_list_options(filter, limit, exact);
         for value in values {
+            let remaining = limit.saturating_sub(events.len());
+            if remaining == 0 {
+                break;
+            }
             let stored = block_on(self.event_store.list_by_tag(
                 Some(root),
                 tag_name,
                 value,
-                options.clone(),
+                ListEventsOptions {
+                    limit: Some(remaining.max(1)),
+                    ..options.clone()
+                },
             ))
             .map_err(map_event_store_error)?;
-            events.extend(
-                stored
-                    .into_iter()
-                    .map(nostr_event_from_stored)
-                    .collect::<Result<Vec<_>>>()?,
-            );
+            let next_events = stored
+                .into_iter()
+                .map(nostr_event_from_stored)
+                .collect::<Result<Vec<_>>>()?;
+            extend_unique_events(&mut events, &mut seen, next_events, limit);
         }
-        Ok(dedupe_events(events))
+        Ok(events)
     }
 
     fn choose_tag_source(&self, filter: &Filter) -> Option<(String, Vec<String>)> {
@@ -215,35 +222,58 @@ impl EventIndexBucket {
 
         if let (Some(authors), Some(kinds)) = (filter.authors.as_ref(), filter.kinds.as_ref()) {
             let mut events = Vec::new();
+            let mut seen = HashSet::new();
             let exact = filter.generic_tags.is_empty() && filter.search.is_none();
             for author in authors {
                 for kind in kinds {
-                    events.extend(self.load_events_for_author_and_kind(
-                        root, author, *kind, filter, limit, exact,
-                    )?);
+                    let remaining = limit.saturating_sub(events.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    let next_events = self.load_events_for_author_and_kind(
+                        root, author, *kind, filter, remaining, exact,
+                    )?;
+                    extend_unique_events(&mut events, &mut seen, next_events, limit);
+                }
+                if events.len() >= limit {
+                    break;
                 }
             }
-            return Ok(Some(dedupe_events(events)));
+            return Ok(Some(events));
         }
 
         if let Some(authors) = filter.authors.as_ref() {
             let mut events = Vec::new();
+            let mut seen = HashSet::new();
             let exact = filter.generic_tags.is_empty() && filter.search.is_none();
             for author in authors {
-                events.extend(self.load_events_for_author(root, author, filter, limit, exact)?);
+                let remaining = limit.saturating_sub(events.len());
+                if remaining == 0 {
+                    break;
+                }
+                let next_events =
+                    self.load_events_for_author(root, author, filter, remaining, exact)?;
+                extend_unique_events(&mut events, &mut seen, next_events, limit);
             }
-            return Ok(Some(dedupe_events(events)));
+            return Ok(Some(events));
         }
 
         if let Some(kinds) = filter.kinds.as_ref() {
             let mut events = Vec::new();
+            let mut seen = HashSet::new();
             let exact = filter.authors.is_none()
                 && filter.generic_tags.is_empty()
                 && filter.search.is_none();
             for kind in kinds {
-                events.extend(self.load_events_for_kind(root, *kind, filter, limit, exact)?);
+                let remaining = limit.saturating_sub(events.len());
+                if remaining == 0 {
+                    break;
+                }
+                let next_events =
+                    self.load_events_for_kind(root, *kind, filter, remaining, exact)?;
+                extend_unique_events(&mut events, &mut seen, next_events, limit);
             }
-            return Ok(Some(dedupe_events(events)));
+            return Ok(Some(events));
         }
 
         Ok(None)
@@ -711,4 +741,20 @@ pub(super) fn dedupe_events(events: Vec<Event>) -> Vec<Event> {
             .then_with(|| a.id.cmp(&b.id))
     });
     deduped
+}
+
+fn extend_unique_events(
+    events: &mut Vec<Event>,
+    seen: &mut HashSet<[u8; 32]>,
+    next_events: Vec<Event>,
+    limit: usize,
+) {
+    for event in next_events {
+        if seen.insert(event.id.to_bytes()) {
+            events.push(event);
+            if events.len() >= limit {
+                break;
+            }
+        }
+    }
 }
