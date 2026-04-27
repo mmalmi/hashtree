@@ -17,7 +17,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
 use super::auth::{AppState, PendingRequest, UpstreamNostrSubscription, WsProtocol};
-use crate::diagnostics::{nostr_filters_summary, process_memory_snapshot};
+use crate::diagnostics::{
+    nostr_filters_summary, process_memory_snapshot, trim_process_allocations,
+};
 use crate::webrtc::types::{
     encode_request, encode_response, parse_message, DataMessage, DataRequest, DataResponse, MAX_HTL,
 };
@@ -552,6 +554,7 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                                         )
                                         .await;
                                     }
+                                    trim_process_allocations();
                                     if upstream_relays == 0 {
                                         send_nostr(
                                             state,

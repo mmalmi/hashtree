@@ -85,6 +85,17 @@ pub fn nostr_filters_summary(filters: &[Filter]) -> String {
 }
 
 #[cfg(target_os = "linux")]
+pub fn trim_process_allocations() {
+    // SAFETY: malloc_trim asks glibc to return free heap pages to the OS.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn trim_process_allocations() {}
+
+#[cfg(target_os = "linux")]
 fn parse_status_kb(value: &str) -> Option<u64> {
     value.split_whitespace().next()?.parse::<u64>().ok()
 }

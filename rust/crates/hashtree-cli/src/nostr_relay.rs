@@ -58,6 +58,7 @@ mod imp {
 
     use crate::diagnostics::{
         nostr_filter_summary, nostr_filters_summary, process_memory_snapshot,
+        trim_process_allocations,
     };
     use crate::socialgraph::{EventStorageClass, SocialGraphAccessControl, SocialGraphBackend};
     use hashtree_core::{nhash_decode, Cid};
@@ -730,10 +731,15 @@ mod imp {
             let started = Instant::now();
             let filter_summary = nostr_filters_summary(&filters);
             for filter in &filters {
+                let remaining = self.config.max_query_limit.saturating_sub(events.len());
+                if remaining == 0 {
+                    break;
+                }
                 let limit = filter
                     .limit
                     .unwrap_or(self.config.max_query_limit)
-                    .min(self.config.max_query_limit);
+                    .min(self.config.max_query_limit)
+                    .min(remaining);
                 self.collect_filter_events(filter, limit, &mut seen, &mut events)
                     .await;
             }
@@ -846,6 +852,7 @@ mod imp {
                         )
                         .await;
                     }
+                    trim_process_allocations();
 
                     self.send_to_client(client_id, NostrRelayMessage::eose(subscription_id))
                         .await;
