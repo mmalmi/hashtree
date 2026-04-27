@@ -920,6 +920,48 @@ fn test_query_events_by_author() {
 }
 
 #[test]
+fn test_query_events_by_multiple_authors_and_kinds() {
+    let _guard = test_lock();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let first_keys = Keys::generate();
+    let second_keys = Keys::generate();
+    let other_keys = Keys::generate();
+
+    let first_note = EventBuilder::new(Kind::TextNote, "first note", [])
+        .custom_created_at(Timestamp::from_secs(5))
+        .to_event(&first_keys)
+        .unwrap();
+    let first_profile = EventBuilder::new(Kind::Metadata, "first profile", [])
+        .custom_created_at(Timestamp::from_secs(6))
+        .to_event(&first_keys)
+        .unwrap();
+    let second_note = EventBuilder::new(Kind::TextNote, "second note", [])
+        .custom_created_at(Timestamp::from_secs(7))
+        .to_event(&second_keys)
+        .unwrap();
+    let other_note = EventBuilder::new(Kind::TextNote, "other note", [])
+        .custom_created_at(Timestamp::from_secs(8))
+        .to_event(&other_keys)
+        .unwrap();
+
+    ingest_parsed_event(&graph_store, &first_note).unwrap();
+    ingest_parsed_event(&graph_store, &first_profile).unwrap();
+    ingest_parsed_event(&graph_store, &second_note).unwrap();
+    ingest_parsed_event(&graph_store, &other_note).unwrap();
+
+    let filter = Filter::new()
+        .authors(vec![first_keys.public_key(), second_keys.public_key()])
+        .kinds(vec![Kind::TextNote, Kind::Metadata])
+        .limit(10);
+    let events = query_events(&graph_store, &filter, 10);
+    assert_eq!(
+        events.iter().map(|event| event.id).collect::<Vec<_>>(),
+        vec![second_note.id, first_profile.id, first_note.id]
+    );
+}
+
+#[test]
 fn test_query_events_by_kind() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();

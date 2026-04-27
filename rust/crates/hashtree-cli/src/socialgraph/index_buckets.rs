@@ -111,6 +111,28 @@ impl EventIndexBucket {
             .collect::<Result<Vec<_>>>()
     }
 
+    fn load_events_for_author_and_kind(
+        &self,
+        root: &Cid,
+        author: &nostr::PublicKey,
+        kind: Kind,
+        filter: &Filter,
+        limit: usize,
+        exact: bool,
+    ) -> Result<Vec<Event>> {
+        let stored = block_on(self.event_store.list_by_author_and_kind(
+            Some(root),
+            &author.to_hex(),
+            kind.as_u16() as u32,
+            filter_list_options(filter, limit, exact),
+        ))
+        .map_err(map_event_store_error)?;
+        stored
+            .into_iter()
+            .map(nostr_event_from_stored)
+            .collect::<Result<Vec<_>>>()
+    }
+
     fn load_recent_events(
         &self,
         root: &Cid,
@@ -192,25 +214,14 @@ impl EventIndexBucket {
         }
 
         if let (Some(authors), Some(kinds)) = (filter.authors.as_ref(), filter.kinds.as_ref()) {
-            if authors.len() == 1 && kinds.len() == 1 {
-                let author = authors.iter().next().expect("checked single author");
-                let exact = filter.generic_tags.is_empty() && filter.search.is_none();
-                return Ok(Some(
-                    self.load_events_for_author(root, author, filter, limit, exact)?,
-                ));
-            }
-
-            if kinds.len() < authors.len() {
-                let mut events = Vec::new();
-                for kind in kinds {
-                    events.extend(self.load_events_for_kind(root, *kind, filter, limit, false)?);
-                }
-                return Ok(Some(dedupe_events(events)));
-            }
-
             let mut events = Vec::new();
+            let exact = filter.generic_tags.is_empty() && filter.search.is_none();
             for author in authors {
-                events.extend(self.load_events_for_author(root, author, filter, limit, false)?);
+                for kind in kinds {
+                    events.extend(self.load_events_for_author_and_kind(
+                        root, author, *kind, filter, limit, exact,
+                    )?);
+                }
             }
             return Ok(Some(dedupe_events(events)));
         }
