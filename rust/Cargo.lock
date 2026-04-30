@@ -3230,6 +3230,7 @@ dependencies = [
  "async-trait",
  "hashtree-core",
  "heed",
+ "page_size",
  "tempfile",
  "tokio",
 ]

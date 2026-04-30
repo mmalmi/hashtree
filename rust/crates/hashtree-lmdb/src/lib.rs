@@ -18,7 +18,6 @@ const DEFAULT_MAP_SIZE: usize = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READERS: u32 = 1024;
 const DATABASE_COUNT: u32 = 5;
 const REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
-const LMDB_PAGE_SIZE_BYTES: u64 = 4096;
 const EVICTION_BATCH_TARGET_BYTES: u64 = 256 * 1024 * 1024;
 const EVICTION_BATCH_MAX_ITEMS: usize = 4096;
 const BLOB_META_BYTES: usize = 16;
@@ -99,11 +98,12 @@ impl LmdbBlobStore {
         if bytes == 0 {
             return 0;
         }
-        let remainder = bytes % LMDB_PAGE_SIZE_BYTES;
+        let page_size = (page_size::get() as u64).max(4096);
+        let remainder = bytes % page_size;
         if remainder == 0 {
             bytes
         } else {
-            bytes.saturating_add(LMDB_PAGE_SIZE_BYTES - remainder)
+            bytes.saturating_add(page_size - remainder)
         }
     }
 

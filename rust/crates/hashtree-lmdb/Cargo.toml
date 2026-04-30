@@ -12,6 +12,7 @@ description = "LMDB-backed content-addressed blob storage for hashtree"
 hashtree-core.workspace = true
 heed.workspace = true
 async-trait.workspace = true
+page_size = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true

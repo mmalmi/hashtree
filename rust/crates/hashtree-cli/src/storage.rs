@@ -34,7 +34,6 @@ pub const PRIORITY_FOLLOWED: u8 = 128;
 pub const PRIORITY_OWN: u8 = 255;
 const LMDB_MAX_READERS: u32 = 1024;
 const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 1024 * 1024;
-const LMDB_PAGE_SIZE_BYTES: u64 = 4096;
 #[cfg(feature = "lmdb")]
 const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -82,11 +81,12 @@ fn lmdb_map_size_for_existing_env(path: &Path, minimum_bytes: u64) -> Result<usi
 }
 
 fn align_lmdb_map_size(bytes: u64) -> u64 {
-    let remainder = bytes % LMDB_PAGE_SIZE_BYTES;
+    let page_size = (page_size::get() as u64).max(4096);
+    let remainder = bytes % page_size;
     if remainder == 0 {
         bytes
     } else {
-        bytes.saturating_add(LMDB_PAGE_SIZE_BYTES - remainder)
+        bytes.saturating_add(page_size - remainder)
     }
 }
 
