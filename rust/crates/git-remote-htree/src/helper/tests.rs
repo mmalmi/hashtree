@@ -311,6 +311,24 @@ fn create_test_helper_with_config(config: Config) -> Option<RemoteHelper> {
     RemoteHelper::new(TEST_PUBKEY, "test-repo", None, None, false, config).ok()
 }
 
+#[test]
+fn test_cached_fetch_tree_reuses_open_git_storage_store() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+
+    let storage_store = helper.storage.store().clone();
+    let before = Arc::strong_count(&storage_store);
+    let (_tree, _eviction_store) = helper.build_cached_fetch_tree().expect("cached fetch tree");
+
+    assert_eq!(
+        Arc::strong_count(&storage_store),
+        before + 2,
+        "cached fetch tree should reuse the already-open GitStorage blob store instead of reopening the shared LMDB environment",
+    );
+}
+
 fn write_test_config(home: &std::path::Path, blossom_url: &str, force_upload: bool) {
     let config_dir = home.join(".hashtree");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
