@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.44 - 2026-05-02
+
+### Fixed
+
+- Fixed `git-remote-htree` cached-root retries so repeated pushes reuse the already-open git blob
+  store instead of reopening the shared LMDB cache.
+- Fixed LMDB map sizing to align to the host page size instead of assuming 4 KiB pages.
+- Fixed Nostr relay query paths in `hashtree-cli` to bound blocking query batches and social-graph
+  candidate fanout.
+- Fixed a flaky static HTTP clone test by running `git clone` from a stable working directory.
+
 ## 0.2.43 - 2026-04-27
 
 ### Fixed
