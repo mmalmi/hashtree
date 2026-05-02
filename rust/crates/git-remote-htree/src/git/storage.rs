@@ -2510,6 +2510,7 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().join("clone");
         let output = Command::new("git")
+            .current_dir(clone_dir.path())
             .args([
                 "clone",
                 &format!("http://127.0.0.1:{port}/repo/.git", port = port),

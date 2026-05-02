@@ -23,7 +23,7 @@ mod storage_support;
 use progress::UploadProgress;
 #[cfg(test)]
 use storage_support::{build_repo_viewer_url, queue_hash_if_new};
-use storage_support::{create_local_store, get_hashtree_data_dir};
+use storage_support::{create_cached_local_store, get_hashtree_data_dir};
 
 /// Threshold for showing detailed progress (3 seconds)
 const VERBOSE_THRESHOLD: Duration = Duration::from_secs(3);
@@ -396,8 +396,7 @@ impl RemoteHelper {
 
         let data_dir = get_hashtree_data_dir();
         let blobs_path = data_dir.join("blobs");
-        let local_store =
-            create_local_store(&blobs_path).context("Failed to create local blob store")?;
+        let (local_store, _is_shared_cache) = create_cached_local_store(&blobs_path);
         let local_store_for_eviction = local_store.clone();
 
         let blossom_store = BlossomStore::with_servers(nostr::Keys::generate(), servers);
