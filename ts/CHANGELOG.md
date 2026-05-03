@@ -5,6 +5,12 @@
 ### Added
 
 - Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
+- Added optional `watch(hash, callback)` to the `Store` interface so the tree layer can react to block arrivals without polling. `MemoryStore` implements it; existing stores remain compatible because the method is optional.
+- Added `loadBlock(store, hash, signal?)` (re-exported from `@hashtree/core`). Resolves once data for `hash` is available, using `watch` when present and falling back to polling otherwise.
+
+### Changed
+
+- Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` / `HashTree.resolvePath` to wait for the directory block to load instead of returning `[]` / `null` when the data isn't local yet — a not-yet-synced block is a transient state, not a final answer. They now accept an optional `signal: AbortSignal` for callers that want a bounded wait. `[]` from `listDirectory` and `null` from `resolvePath` again mean "the directory loaded and the entry isn't there", which lets callers drop ad-hoc grace timers around `'not found'` UI.
 
 ## 0.2.9 - 2026-04-24
 

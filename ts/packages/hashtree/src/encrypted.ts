@@ -14,6 +14,7 @@ import { sha256 } from './hash.js';
 import { encodeAndHash, decodeTreeNode, tryDecodeTreeNode } from './codec.js';
 import { encryptChk, decryptChk, type EncryptionKey } from './crypto.js';
 import { compareNames } from './compare.js';
+import { loadBlock } from './tree/loadBlock.js';
 
 export interface EncryptedTreeConfig {
   store: Store;
@@ -37,7 +38,28 @@ async function getRootNodeOrBlob(
 ): Promise<Uint8Array | null> {
   const encryptedData = await store.get(hash);
   if (!encryptedData) return null;
+  return decryptRootNodeOrBlob(encryptedData, key);
+}
 
+/**
+ * Like getRootNodeOrBlob but waits for the block to arrive instead of
+ * returning null. Used for directory reads, where a not-yet-synced block
+ * is a transient state we don't want to surface as "missing".
+ */
+async function loadRootNodeOrBlob(
+  store: Store,
+  hash: Hash,
+  key: EncryptionKey,
+  signal?: AbortSignal
+): Promise<Uint8Array> {
+  const encryptedData = await loadBlock(store, hash, signal);
+  return decryptRootNodeOrBlob(encryptedData, key);
+}
+
+async function decryptRootNodeOrBlob(
+  encryptedData: Uint8Array,
+  key: EncryptionKey
+): Promise<Uint8Array> {
   const rawNode = tryDecodeTreeNode(encryptedData);
   try {
     const decrypted = await decryptChk(encryptedData, key);
@@ -199,10 +221,10 @@ export async function readFileEncrypted(
 async function getEncryptedDirectoryNode(
   store: Store,
   hash: Hash,
-  key: EncryptionKey
+  key: EncryptionKey,
+  signal?: AbortSignal
 ): Promise<TreeNode | null> {
-  const decrypted = await getRootNodeOrBlob(store, hash, key);
-  if (!decrypted) return null;
+  const decrypted = await loadRootNodeOrBlob(store, hash, key, signal);
 
   // Check if it's directly a directory (small directory)
   const node = tryDecodeTreeNode(decrypted);
@@ -594,9 +616,10 @@ export async function putDirectoryEncrypted(
 export async function listDirectoryEncrypted(
   store: Store,
   hash: Hash,
-  key: EncryptionKey
+  key: EncryptionKey,
+  signal?: AbortSignal
 ): Promise<EncryptedDirEntry[]> {
-  const node = await getEncryptedDirectoryNode(store, hash, key);
+  const node = await getEncryptedDirectoryNode(store, hash, key, signal);
   if (!node) return [];
 
   // Extract directory entries from the node

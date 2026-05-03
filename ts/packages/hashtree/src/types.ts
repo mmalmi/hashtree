@@ -141,6 +141,17 @@ export interface Store {
    * @returns true if deleted, false if didn't exist
    */
   delete(hash: Hash): Promise<boolean>;
+
+  /**
+   * Subscribe to a single hash. The callback fires once when data for that hash
+   * becomes available, after which the subscription self-clears. Implementations
+   * may also fire the callback synchronously before returning if the data is
+   * already present.
+   *
+   * Optional: stores that omit `watch` fall back to polling `get`.
+   * Returns an unsubscribe function.
+   */
+  watch?(hash: Hash, callback: (data: Uint8Array) => void): () => void;
 }
 
 /**

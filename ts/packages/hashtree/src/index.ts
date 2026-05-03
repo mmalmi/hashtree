@@ -94,6 +94,10 @@ export {
 // Stream options for readFileStream
 export type { StreamOptions } from './tree/read.js';
 
+// Block loader: waits for a block to become available rather than returning
+// null when the data isn't local yet. Used internally by directory reads.
+export { loadBlock } from './tree/loadBlock.js';
+
 // Chunker utilities
 export {
   type Chunker,

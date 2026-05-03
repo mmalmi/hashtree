@@ -4,6 +4,7 @@
 
 import { Store, Hash, TreeNode, LinkType, toHex, CID, cid } from '../types.js';
 import { decodeTreeNode, tryDecodeTreeNode, getNodeType } from '../codec.js';
+import { loadBlock } from './loadBlock.js';
 
 export interface TreeEntry {
   name: string;
@@ -372,14 +373,21 @@ async function readRangeFromNode(
 }
 
 /**
- * Get directory node, handling chunked directories
+ * Get directory node, handling chunked directories.
  *
  * For chunked directories (encoded blob > chunkSize), the chunks are assembled
  * first, then decoded as a TreeNode.
+ *
+ * Waits for the directory block to become available — never returns null
+ * because data isn't local yet. Returns null only when the block has loaded
+ * and turned out not to be a directory.
  */
-async function getDirectoryNode(store: Store, hash: Hash): Promise<TreeNode | null> {
-  const data = await store.get(hash);
-  if (!data) return null;
+async function getDirectoryNode(
+  store: Store,
+  hash: Hash,
+  signal?: AbortSignal
+): Promise<TreeNode | null> {
+  const data = await loadBlock(store, hash, signal);
 
   const node = tryDecodeTreeNode(data);
   if (!node) {
@@ -404,13 +412,21 @@ async function getDirectoryNode(store: Store, hash: Hash): Promise<TreeNode | nu
 }
 
 /**
- * List directory entries
+ * List directory entries.
  *
  * Handles both small directories (single node) and large directories
  * (chunked by bytes like files - reassembled then decoded).
+ *
+ * Waits for the directory block to load. Returns `[]` only for a genuinely
+ * empty directory (or when the loaded block isn't a directory). Pass a
+ * signal to bound the wait.
  */
-export async function listDirectory(store: Store, hash: Hash): Promise<TreeEntry[]> {
-  const node = await getDirectoryNode(store, hash);
+export async function listDirectory(
+  store: Store,
+  hash: Hash,
+  signal?: AbortSignal
+): Promise<TreeEntry[]> {
+  const node = await getDirectoryNode(store, hash, signal);
   if (!node) return [];
 
   const entries: TreeEntry[] = [];
@@ -431,17 +447,26 @@ export async function listDirectory(store: Store, hash: Hash): Promise<TreeEntry
 }
 
 /**
- * Resolve a path within a tree
+ * Resolve a path within a tree.
  *
  * Handles chunked directories (reassembles bytes to get the full TreeNode).
+ *
+ * Waits for each directory block in the path to load. Returns null only
+ * when an entry is missing from a successfully-loaded directory listing —
+ * never because of a transient sync delay.
  */
-export async function resolvePath(store: Store, rootHash: Hash, path: string): Promise<Hash | null> {
+export async function resolvePath(
+  store: Store,
+  rootHash: Hash,
+  path: string,
+  signal?: AbortSignal
+): Promise<Hash | null> {
   const parts = path.split('/').filter(p => p.length > 0);
 
   let currentHash = rootHash;
 
   for (const part of parts) {
-    const node = await getDirectoryNode(store, currentHash);
+    const node = await getDirectoryNode(store, currentHash, signal);
     if (!node) return null;
 
     const link = node.links.find(l => l.name === part);

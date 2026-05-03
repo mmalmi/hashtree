@@ -217,11 +217,14 @@ export class HashTree {
   }
 
   /**
-   * List directory entries
+   * List directory entries.
+   *
+   * Waits for the directory block to load. Pass `signal` to bound the wait —
+   * otherwise the call stays open until the data is available.
    */
-  async listDirectory(id: CID): Promise<TreeEntry[]> {
+  async listDirectory(id: CID, signal?: AbortSignal): Promise<TreeEntry[]> {
     if (id.key) {
-      const entries = await listDirectoryEncrypted(this.store, id.hash, id.key);
+      const entries = await listDirectoryEncrypted(this.store, id.hash, id.key, signal);
       return entries.map(e => ({
         name: e.name,
         cid: cid(e.hash, e.key),
@@ -230,7 +233,7 @@ export class HashTree {
         meta: e.meta,
       }));
     }
-    const entries = await read.listDirectory(this.store, id.hash);
+    const entries = await read.listDirectory(this.store, id.hash, signal);
     return entries.map(e => ({
       name: e.name,
       cid: e.cid,
@@ -241,15 +244,21 @@ export class HashTree {
   }
 
   /**
-   * Resolve a path to get the entry's CID
+   * Resolve a path to get the entry's CID.
+   *
+   * Waits for each directory block in the path to load. Returns null only
+   * when an entry is missing from a successfully-loaded directory listing —
+   * never because of a transient sync delay. Pass `signal` to bound the wait.
    *
    * @param root - Root CID of the tree
    * @param path - Path to resolve (string like 'a/b/file.txt' or array like ['a', 'b', 'file.txt'])
-   * @returns { cid, type } or null if not found
+   * @param signal - Optional AbortSignal to bound the wait
+   * @returns { cid, type } or null if not found in the resolved directory
    */
   async resolvePath(
     root: CID,
-    path: string | string[]
+    path: string | string[],
+    signal?: AbortSignal
   ): Promise<{ cid: CID; type: LinkType } | null> {
     const parts = Array.isArray(path)
       ? path
@@ -259,7 +268,7 @@ export class HashTree {
     let entryType: LinkType = LinkType.Dir;
 
     for (const segment of parts) {
-      const entries = await this.listDirectory(current);
+      const entries = await this.listDirectory(current, signal);
       const entry = entries.find(e => e.name === segment);
       if (!entry) {
         return null;
