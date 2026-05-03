@@ -7,7 +7,7 @@ use crate::progress::{DownloadCallback, DownloadEvent};
 use crate::reference::UpdateRef;
 use crate::target::UpdateTarget;
 
-const DEFAULT_MANIFEST_PATH: &str = "manifest.json";
+const DEFAULT_MANIFEST_PATH: &str = "release.json";
 const DEFAULT_MAX_MANIFEST_SIZE: u64 = 1024 * 1024;
 const DEFAULT_PROGRESS_CHUNK: u64 = 256 * 1024;
 

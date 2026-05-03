@@ -111,7 +111,7 @@ pub(crate) async fn run_check(
     let check = updater.check(options).await?;
 
     println!("App:        {}", check.manifest.app);
-    println!("Version:    {}", check.manifest.version);
+    println!("Version:    {}", check.manifest.effective_version());
     println!("Current:    {}", current_version);
     println!("Newer:      {}", check.update_available);
     if let Some(channel) = check.manifest.channel.as_deref() {
@@ -189,7 +189,7 @@ pub(crate) async fn run_install(
     if only_if_newer && !check.update_available {
         println!(
             "Already up to date (manifest version {} not newer)",
-            check.manifest.version
+            check.manifest.effective_version()
         );
         return Ok(());
     }
@@ -213,7 +213,7 @@ pub(crate) async fn run_install(
     install(&asset, &downloaded.bytes, &target)?;
     println!(
         "Installed {} ({}) → {}",
-        check.manifest.version,
+        check.manifest.effective_version(),
         asset.asset_kind().as_str(),
         to.display()
     );

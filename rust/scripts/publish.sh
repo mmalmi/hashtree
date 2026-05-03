@@ -61,6 +61,7 @@ TIER_3_CRATES=(
 
 TIER_4_CRATES=(
     "git-remote-htree"
+    "tauri-plugin-hashtree-updater"
     "hashtree-cli"
     "hashtree-cashu-cli"
 )

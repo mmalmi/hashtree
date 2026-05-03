@@ -98,11 +98,11 @@ impl UpdaterContext {
         };
         Ok(Some(CheckedUpdate {
             current_version: self.current_version.clone(),
-            version: check.manifest.version,
+            version: check.manifest.effective_version(),
             asset_name: asset.name.clone(),
             asset_kind: asset.asset_kind().as_str().to_string(),
+            published_at: check.manifest.published_at_string(),
             notes: check.manifest.notes,
-            published_at: check.manifest.published_at,
             update_available: check.update_available,
         }))
     }
@@ -150,11 +150,11 @@ impl UpdaterContext {
 
         Ok(CheckedUpdate {
             current_version: self.current_version.clone(),
-            version: check.manifest.version,
+            version: check.manifest.effective_version(),
             asset_name: asset.name.clone(),
             asset_kind: asset.asset_kind().as_str().to_string(),
+            published_at: check.manifest.published_at_string(),
             notes: check.manifest.notes,
-            published_at: check.manifest.published_at,
             update_available: check.update_available,
         })
     }

@@ -28,7 +28,7 @@ async fn make_release_tree(
         .put_file(manifest.as_bytes())
         .await
         .expect("put manifest");
-    let manifest_entry = DirEntry::from_cid("manifest.json", &manifest_cid)
+    let manifest_entry = DirEntry::from_cid("release.json", &manifest_cid)
         .with_size(manifest_size)
         .with_link_type(LinkType::File);
 
@@ -257,6 +257,111 @@ async fn e2e_resolves_latest_update_through_nostr_root_event() {
     );
 
     relay.stop().await;
+}
+
+#[tokio::test]
+async fn check_parses_existing_release_json_schema_with_filename_inference() {
+    let store = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(HashTreeConfig::new(store).public());
+    // Match the schema squirreldisk's release.mjs already writes today —
+    // tag/commit/notes_file/assets without per-asset target or kind.
+    let release_json = r#"{
+      "id": "v0.3.12",
+      "title": "v0.3.12",
+      "tag": "v0.3.12",
+      "commit": "deadbeef",
+      "created_at": 1777820414,
+      "published_at": 1777820414,
+      "draft": false,
+      "prerelease": false,
+      "notes_file": "notes.md",
+      "assets": [
+        {
+          "name": "squirreldisk-v0.3.12-linux-arm64.AppImage",
+          "path": "assets/squirreldisk-v0.3.12-linux-arm64.AppImage",
+          "size": 112144768
+        },
+        {
+          "name": "squirreldisk-v0.3.12-linux-arm64.deb",
+          "path": "assets/squirreldisk-v0.3.12-linux-arm64.deb",
+          "size": 12003144
+        },
+        {
+          "name": "squirreldisk-v0.3.12-macos-arm64.dmg",
+          "path": "assets/squirreldisk-v0.3.12-macos-arm64.dmg",
+          "size": 13738512
+        },
+        {
+          "name": "squirreldisk-v0.3.12-windows-x64.exe",
+          "path": "assets/squirreldisk-v0.3.12-windows-x64.exe",
+          "size": 8801067
+        }
+      ]
+    }"#;
+    let release_cid = make_release_tree(
+        &tree,
+        release_json,
+        "assets/squirreldisk-v0.3.12-linux-arm64.AppImage",
+        b"appimage bytes",
+    )
+    .await;
+    let releases_root = make_releases_root(&tree, &release_cid, "v0.3.12").await;
+    let resolver =
+        SingleRootResolver::new("npub1publisher/releases/squirreldisk", releases_root);
+    let updater = HashtreeUpdater::new(resolver, tree);
+
+    let check = updater
+        .check(UpdateCheckOptions {
+            reference: UpdateRef::parse(
+                "htree://npub1publisher/releases%2Fsquirreldisk/latest",
+            )
+            .expect("ref"),
+            current_version: "0.3.11".to_string(),
+            target: UpdateTarget::new("linux-aarch64"),
+            ..UpdateCheckOptions::default()
+        })
+        .await
+        .expect("check");
+
+    assert!(check.update_available);
+    assert_eq!(check.manifest.effective_version(), "0.3.12");
+    let asset = check.asset.as_ref().expect("asset");
+    assert!(
+        asset.name.contains("linux-arm64"),
+        "expected linux asset, got {}",
+        asset.name,
+    );
+    assert!(
+        asset.name.ends_with(".AppImage"),
+        "expected appimage to win over deb, got {}",
+        asset.name,
+    );
+    assert_eq!(asset.asset_kind(), AssetKind::AppImage);
+}
+
+#[test]
+fn filename_inference_covers_common_release_artifacts() {
+    use hashtree_updater::{infer_kind_from_name, infer_target_from_name};
+
+    let cases = [
+        ("squirreldisk-v0.3.12-linux-arm64.AppImage", "linux-aarch64", AssetKind::AppImage),
+        ("squirreldisk-v0.3.12-linux-x64.deb", "linux-x86_64", AssetKind::Deb),
+        ("nostr-vpn-v1.0-macos-arm64.app.tar.gz", "darwin-aarch64", AssetKind::AppBundle),
+        ("nostr-vpn-v1.0-windows-x64.msi", "windows-x86_64", AssetKind::Msi),
+        ("nostr-vpn-v1.0-windows-x64.exe", "windows-x86_64", AssetKind::Nsis),
+    ];
+    for (name, expected_target, expected_kind) in cases {
+        assert_eq!(
+            infer_target_from_name(name).as_deref(),
+            Some(expected_target),
+            "target inference for {name}",
+        );
+        assert_eq!(
+            infer_kind_from_name(name),
+            Some(expected_kind),
+            "kind inference for {name}",
+        );
+    }
 }
 
 #[tokio::test]

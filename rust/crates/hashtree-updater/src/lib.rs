@@ -19,7 +19,10 @@ mod updater;
 
 pub use error::UpdateError;
 pub use install::{install, install_appimage, install_app_bundle, install_binary, install_file, InstallTarget};
-pub use manifest::{AssetKind, UpdateAsset, UpdateManifest};
+pub use manifest::{
+    infer_kind_from_name, infer_target_from_name, AssetKind, PublishedAt, UpdateAsset,
+    UpdateManifest,
+};
 pub use progress::{DownloadCallback, DownloadEvent};
 pub use reference::UpdateRef;
 pub use target::UpdateTarget;
