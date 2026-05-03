@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/tauri-plugin-updater",
-  "version": "0.2.44",
+  "version": "0.2.45",
   "description": "Tauri v2 plugin for hashtree-based in-app updates",
   "license": "MIT",
   "type": "module",

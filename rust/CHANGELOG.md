@@ -1,13 +1,54 @@
 # Changelog
 
-## Unreleased
+## 0.2.45 - 2026-05-04
 
 ### Added
 
 - Added `hashtree-updater`, a reusable Rust updater crate that resolves signed
-  `npub/tree/path` release roots, reads `manifest.json`, selects platform assets,
-  downloads artifacts from hashtree, and provides an atomic file-install helper
-  for non-Tauri native apps.
+  `npub/tree/path` release roots, reads the existing `release.json` (the same
+  file `htree release publish` consumers already write), selects the asset for
+  the current platform, downloads chunks via hashtree (which authenticates
+  every chunk against its CID), and emits Started/Progress/Finished events for
+  UIs that want to render a progress bar.
+- Added an `AssetKind` taxonomy (`binary`, `app-bundle`, `appimage`, `deb`,
+  `rpm`, `nsis`, `msi`, `archive`) with platform install dispatchers: atomic
+  file swap with executable bit for `binary`, `tar.gz` → `*.app` swap with
+  AppleScript admin-elevation fallback for macOS `app-bundle`, gunzip + chmod
+  in place for Linux `appimage`. Other kinds return `UnsupportedKind` so apps
+  can fall back to opening the release page.
+- Added filename inference for `target` and `kind` so the existing
+  git.iris.to-style `release.json` schema (just `tag` + `assets[].name`)
+  works without per-asset annotations: `…-linux-arm64.AppImage` →
+  `linux-aarch64` + `appimage`, `…-macos-arm64.app.tar.gz` →
+  `darwin-aarch64` + `app-bundle`, etc.
+- Added `htree update {check, download, install}` to the CLI for plain Rust
+  apps that prefer to shell out instead of linking the library. A
+  `FetchingStore` adapter bridges the resolver/Fetcher pair into the
+  updater's Store-generic API so chunks are pulled from WebRTC/Blossom on
+  demand.
+- Added `tauri-plugin-hashtree-updater`, a Tauri v2 plugin wrapping the core
+  for desktop apps. Exposes `check()` and `Update.downloadAndInstall()` over
+  IPC, with a Channel-based progress event stream and a TS guest API
+  (`@hashtree/tauri-plugin-updater`). Auto-detects install destination from
+  `current_exe()` so apps using the standard tauri-bundler layout don't need
+  any path config — just the `htree://` reference.
+- Documented the integration pattern (config schema, capability, JS API,
+  copy-pasteable ~70 line prefs/banner helper, recommended UX) in the new
+  `tauri-plugin-hashtree-updater/README.md`.
+
+### Fixed
+
+- Plugin now falls back to `NostrResolverConfig::default()`'s built-in 3-relay
+  set when the app's `tauri.conf.json` doesn't list any, instead of silently
+  passing an empty relay list and surfacing every check as "release root not
+  found".
+- Plugin maps `ReleaseNotFound` and `ManifestNotFound` from `check()` to
+  `Ok(None)` so frontends can render a quiet "no releases yet" / "you're up
+  to date" instead of leaking the technical error.
+- Removed the redundant per-asset `sha256` and `size` fields from the
+  manifest schema — the resolved root CID already authenticates every byte
+  through the hash chain, so re-checking was a no-op and a footgun for
+  stale manifests.
 
 ## 0.2.44 - 2026-05-02
 
