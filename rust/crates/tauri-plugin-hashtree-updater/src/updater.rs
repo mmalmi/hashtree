@@ -143,6 +143,7 @@ impl UpdaterContext {
         let destination = overrides
             .destination
             .or_else(|| self.config.destination.clone())
+            .or_else(|| default_destination_for(asset.asset_kind()))
             .ok_or_else(|| Error::MissingDestination(asset.asset_kind().as_str().to_string()))?;
         let target = InstallTarget::new(destination).executable(overrides.executable);
         install(&asset, &downloaded.bytes, &target)?;
@@ -166,4 +167,32 @@ pub fn context_from_app<R: Runtime>(app: &AppHandle<R>) -> UpdaterContext {
     let state = app.state::<crate::PluginState>();
     let pkg = app.package_info();
     UpdaterContext::new(state.config.clone(), pkg.version.to_string())
+}
+
+/// Best-effort default install destination based on the running binary.
+/// Returns `None` for kinds the plugin can't install in place (deb, rpm,
+/// nsis, msi, archive).
+fn default_destination_for(kind: AssetKind) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    match kind {
+        AssetKind::Binary => Some(exe),
+        AssetKind::AppBundle => walk_up_to_app(&exe),
+        AssetKind::AppImage => Some(exe),
+        AssetKind::Deb | AssetKind::Rpm | AssetKind::Nsis | AssetKind::Msi | AssetKind::Archive => {
+            None
+        }
+    }
+}
+
+/// On macOS, the binary lives at `MyApp.app/Contents/MacOS/MyApp`. Walk up
+/// the parent chain until we find the directory ending in `.app`.
+fn walk_up_to_app(start: &std::path::Path) -> Option<PathBuf> {
+    let mut current = start.parent();
+    while let Some(dir) = current {
+        if dir.extension().and_then(|s| s.to_str()) == Some("app") {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
