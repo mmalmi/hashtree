@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::add::run_add;
 use super::args::{
     Cli, Commands, MirrorCommands, PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands,
-    StorageCommands,
+    StorageCommands, UpdateCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -1230,6 +1230,65 @@ pub(crate) async fn run() -> Result<()> {
                     "Latest release:    htree://{}/{}/{}",
                     published.npub, published.tree_name, published.latest_path
                 );
+            }
+        },
+        Commands::Update { command } => match command {
+            UpdateCommands::Check {
+                reference,
+                current_version,
+                target,
+                manifest_path,
+            } => {
+                super::update::run_check(
+                    &data_dir,
+                    reference,
+                    current_version,
+                    target,
+                    manifest_path,
+                )
+                .await?;
+            }
+            UpdateCommands::Download {
+                reference,
+                out,
+                current_version,
+                target,
+                manifest_path,
+                max_size,
+            } => {
+                super::update::run_download(
+                    &data_dir,
+                    reference,
+                    out,
+                    current_version,
+                    target,
+                    manifest_path,
+                    max_size,
+                )
+                .await?;
+            }
+            UpdateCommands::Install {
+                reference,
+                to,
+                current_version,
+                target,
+                manifest_path,
+                kind,
+                executable,
+                only_if_newer,
+            } => {
+                super::update::run_install(
+                    &data_dir,
+                    reference,
+                    to,
+                    current_version,
+                    target,
+                    manifest_path,
+                    kind,
+                    executable,
+                    only_if_newer,
+                )
+                .await?;
             }
         },
         Commands::Follow { npub } => {

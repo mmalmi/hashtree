@@ -1,0 +1,8 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Allow checking for and installing updates from the configured hashtree release."
+permissions = [
+  "allow-check",
+  "allow-download-and-install",
+]

@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, MemoryStore};
@@ -7,7 +7,8 @@ use hashtree_resolver::nostr::{NostrResolverConfig, NostrRootResolver};
 use hashtree_resolver::{Keys, RootResolver, ToBech32};
 use hashtree_sim::WsRelay;
 use hashtree_updater::{
-    install_file, HashtreeUpdater, UpdateCheckOptions, UpdateManifest, UpdateRef, UpdateTarget,
+    install, install_file, AssetKind, DownloadEvent, DownloadOptions, HashtreeUpdater,
+    InstallTarget, UpdateAsset, UpdateCheckOptions, UpdateManifest, UpdateRef, UpdateTarget,
 };
 
 async fn file_entry(tree: &HashTree<MemoryStore>, name: &str, bytes: &[u8]) -> DirEntry {
@@ -256,6 +257,213 @@ async fn e2e_resolves_latest_update_through_nostr_root_event() {
     );
 
     relay.stop().await;
+}
+
+#[tokio::test]
+async fn download_emits_started_progress_finished_with_total_size() {
+    let store = Arc::new(MemoryStore::new());
+    // Small chunk size forces the asset into a multi-chunk tree so the
+    // progress callback fires several times.
+    let tree = HashTree::new(HashTreeConfig::new(store).public().with_chunk_size(64));
+    let asset_bytes = vec![7u8; 4096];
+    let manifest = format!(
+        r#"{{
+          "schema": "hashtree.update.v1",
+          "app": "iris-chat",
+          "version": "0.5.0",
+          "assets": [
+            {{
+              "name": "iris-chat",
+              "path": "assets/iris-chat",
+              "target": "{}",
+              "kind": "binary"
+            }}
+          ]
+        }}"#,
+        UpdateTarget::current().as_str(),
+    );
+    let release_cid = make_release_tree(&tree, &manifest, "assets/iris-chat", &asset_bytes).await;
+    let releases_root = make_releases_root(&tree, &release_cid, "v0.5.0").await;
+    let resolver = SingleRootResolver::new("npub1publisher/releases/iris-chat", releases_root);
+    let updater = HashtreeUpdater::new(resolver, tree);
+
+    let check = updater
+        .check(UpdateCheckOptions {
+            reference: UpdateRef::parse("htree://npub1publisher/releases%2Firis-chat/latest")
+                .expect("ref"),
+            current_version: "0.4.0".to_string(),
+            target: UpdateTarget::current(),
+            ..UpdateCheckOptions::default()
+        })
+        .await
+        .expect("check");
+
+    let events: Arc<Mutex<Vec<DownloadEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let cb: hashtree_updater::DownloadCallback = Arc::new(move |event| {
+        sink.lock().unwrap().push(event);
+    });
+
+    let downloaded = updater
+        .download(
+            &check,
+            DownloadOptions {
+                progress_chunk: Some(512),
+                ..Default::default()
+            },
+            Some(cb),
+        )
+        .await
+        .expect("download");
+    assert_eq!(downloaded.bytes, asset_bytes);
+
+    let events = events.lock().unwrap();
+    assert!(matches!(
+        events.first(),
+        Some(DownloadEvent::Started { content_length: Some(4096) })
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(DownloadEvent::Finished { total: 4096 })
+    ));
+    let progress_total: u64 = events
+        .iter()
+        .filter_map(|event| match event {
+            DownloadEvent::Progress { chunk_len, .. } => Some(*chunk_len),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(progress_total, 4096);
+    let progress_count = events
+        .iter()
+        .filter(|event| matches!(event, DownloadEvent::Progress { .. }))
+        .count();
+    assert!(
+        progress_count >= 4,
+        "expected several progress events, got {progress_count}",
+    );
+}
+
+#[test]
+fn install_dispatcher_handles_binary_kind_with_atomic_swap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("iris-chat");
+    std::fs::write(&dest, b"old").unwrap();
+
+    let asset = UpdateAsset {
+        name: "iris-chat".into(),
+        path: "assets/iris-chat".into(),
+        kind: Some("binary".into()),
+        ..Default::default()
+    };
+    let target = InstallTarget::new(&dest).executable(true);
+
+    install(&asset, b"new-binary", &target).expect("install");
+
+    assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
+    assert_eq!(asset.asset_kind(), AssetKind::Binary);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0);
+    }
+}
+
+#[test]
+fn install_dispatcher_rejects_unsupported_kinds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("payload");
+
+    for kind in ["deb", "rpm", "nsis", "msi", "archive"] {
+        let asset = UpdateAsset {
+            name: "x".into(),
+            path: "assets/x".into(),
+            kind: Some(kind.into()),
+            ..Default::default()
+        };
+        let result = install(&asset, b"data", &InstallTarget::new(&dest));
+        match result {
+            Err(hashtree_updater::UpdateError::UnsupportedKind { kind: reported }) => {
+                assert_eq!(reported, kind, "unsupported kind round-trip");
+            }
+            other => panic!("expected UnsupportedKind for {kind}, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_app_bundle_unpacks_tar_gz_and_swaps_dot_app() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Build a tar.gz containing MyApp.app/Contents/MacOS/MyApp
+    let mut buffer = Vec::new();
+    {
+        let gz = GzEncoder::new(&mut buffer, Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        let payload = b"#!/bin/sh\necho hi\n";
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "MyApp.app/Contents/MacOS/MyApp", &payload[..])
+            .unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    let dest = dir.path().join("MyApp.app");
+    let asset = UpdateAsset {
+        name: "MyApp.tar.gz".into(),
+        path: "assets/MyApp.tar.gz".into(),
+        kind: Some("app-bundle".into()),
+        ..Default::default()
+    };
+    let target = InstallTarget::new(&dest);
+    install(&asset, &buffer, &target).expect("install app bundle");
+
+    let installed = dest.join("Contents/MacOS/MyApp");
+    assert!(installed.exists(), "binary missing inside installed .app");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"#!/bin/sh\necho hi\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn install_appimage_decompresses_gzip_and_preserves_executable_bit() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("MyApp.AppImage");
+    std::fs::write(&dest, b"old").unwrap();
+    let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&dest, perms).unwrap();
+
+    let payload = b"new appimage bytes";
+    let mut gzipped = Vec::new();
+    {
+        let mut enc = GzEncoder::new(&mut gzipped, Compression::fast());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap();
+    }
+
+    let asset = UpdateAsset {
+        name: "MyApp.AppImage.gz".into(),
+        path: "assets/MyApp.AppImage.gz".into(),
+        kind: Some("appimage".into()),
+        ..Default::default()
+    };
+    install(&asset, &gzipped, &InstallTarget::new(&dest)).expect("install");
+
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+    assert_ne!(mode & 0o111, 0, "appimage should be executable after install");
 }
 
 struct SingleRootResolver {

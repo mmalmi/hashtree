@@ -349,6 +349,12 @@ pub(crate) enum Commands {
         command: ReleaseCommands,
     },
 
+    /// Check for, download, and install app updates from a hashtree release
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommands,
+    },
+
     /// List published git repositories for yourself or another user
     Repos {
         /// Owner identity (defaults to self). Accepts alias, npub, or hex pubkey.
@@ -740,5 +746,65 @@ pub(crate) enum ReleaseCommands {
         /// Don't push the updated release root to file servers
         #[arg(long)]
         local: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum UpdateCommands {
+    /// Resolve the manifest and report the latest version + matching asset
+    Check {
+        /// htree:// reference to the release latest pointer
+        reference: String,
+        /// Current installed version (used to compute update_available)
+        #[arg(long, default_value = "0.0.0")]
+        current_version: String,
+        /// Override the target triple (defaults to the current host)
+        #[arg(long)]
+        target: Option<String>,
+        /// Path within the release dir to read the manifest from
+        #[arg(long, default_value = "manifest.json")]
+        manifest_path: String,
+    },
+
+    /// Download the asset matching the current platform to a local path
+    Download {
+        /// htree:// reference to the release latest pointer
+        reference: String,
+        /// Output file path (defaults to the asset name in the current dir)
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        #[arg(long, default_value = "0.0.0")]
+        current_version: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, default_value = "manifest.json")]
+        manifest_path: String,
+        /// Refuse to download if the asset is larger than this many bytes
+        #[arg(long)]
+        max_size: Option<u64>,
+    },
+
+    /// Download the matching asset and install it at the destination
+    Install {
+        /// htree:// reference to the release latest pointer
+        reference: String,
+        /// Where to install the new artifact (binary path, .app dir, or AppImage path)
+        #[arg(long)]
+        to: PathBuf,
+        #[arg(long, default_value = "0.0.0")]
+        current_version: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, default_value = "manifest.json")]
+        manifest_path: String,
+        /// Override the asset kind (binary, app-bundle, appimage). Default: from manifest.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Set the executable bit after install (binary kind only)
+        #[arg(long)]
+        executable: bool,
+        /// Skip install if the manifest version is not newer than current_version
+        #[arg(long)]
+        only_if_newer: bool,
     },
 }

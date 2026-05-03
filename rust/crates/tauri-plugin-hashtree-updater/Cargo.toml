@@ -1,0 +1,33 @@
+[package]
+name = "tauri-plugin-hashtree-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Tauri v2 plugin: in-app updates discovered and downloaded via hashtree"
+links = "tauri-plugin-hashtree-updater"
+
+[package.metadata.platforms.support]
+windows = { level = "partial", notes = "binary install only; nsis/msi launch not implemented" }
+linux = { level = "full", notes = "binary, AppImage" }
+macos = { level = "full", notes = "binary, .app bundle" }
+android = { level = "none", notes = "" }
+ios = { level = "none", notes = "" }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+hashtree-updater.workspace = true
+hashtree-resolver = { workspace = true, features = ["nostr"] }
+hashtree-blossom = { workspace = true, features = ["store"] }
+hashtree-core.workspace = true
+nostr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tauri = { version = "2" }
+tokio = { workspace = true, features = ["sync"] }
+log = "0.4"

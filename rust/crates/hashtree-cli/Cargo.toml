@@ -31,6 +31,7 @@ hashtree-blossom.workspace = true
 hashtree-config.workspace = true
 hashtree-nostr.workspace = true
 hashtree-resolver = { workspace = true, features = ["nostr"] }
+hashtree-updater.workspace = true
 hashtree-index.workspace = true
 hashtree-network = { workspace = true, optional = true }
 cashu-service = { workspace = true, default-features = false }
