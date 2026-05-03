@@ -25,16 +25,17 @@ Release directories contain a `manifest.json`:
     {
       "name": "nostr-vpn-aarch64-apple-darwin.tar.gz",
       "path": "assets/nostr-vpn-aarch64-apple-darwin.tar.gz",
-      "targets": ["aarch64-apple-darwin"],
-      "size": 12345678
+      "targets": ["aarch64-apple-darwin"]
     }
   ]
 }
 ```
 
-The mutable root event is the update authority. Extra binary signatures can still
-be shipped as assets when an app wants them, but this crate does not require a
-second manifest-signing scheme.
+The mutable root event is the update authority. Asset bytes are authenticated by
+hashtree itself: the resolved root CID transitively pins every directory entry
+and chunk, so reading an asset by CID already guarantees integrity. The manifest
+therefore does not carry per-asset hashes or sizes. Extra binary signatures can
+still be shipped as assets when an app wants them.
 
 ## Example
 

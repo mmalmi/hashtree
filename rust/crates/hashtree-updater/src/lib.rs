@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use hashtree_core::{from_hex, sha256, to_hex, Cid, HashTree, HashTreeError, Store};
+use hashtree_core::{Cid, HashTree, HashTreeError, Store};
 use hashtree_resolver::{ResolverError, RootResolver};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -40,18 +40,6 @@ pub enum UpdateError {
     NoSelectedAsset,
     #[error("asset was not found at {0}")]
     AssetPathNotFound(String),
-    #[error("asset size mismatch for {path}: expected {expected} bytes, got {actual} bytes")]
-    AssetSizeMismatch {
-        path: String,
-        expected: u64,
-        actual: u64,
-    },
-    #[error("asset sha256 mismatch for {path}: expected {expected}, got {actual}")]
-    AssetHashMismatch {
-        path: String,
-        expected: String,
-        actual: String,
-    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -320,9 +308,6 @@ pub struct UpdateAsset {
     pub targets: Vec<String>,
     pub kind: Option<String>,
     pub executable: Option<String>,
-    pub size: Option<u64>,
-    #[serde(alias = "hash")]
-    pub sha256: Option<String>,
 }
 
 impl UpdateAsset {
@@ -337,14 +322,6 @@ impl UpdateAsset {
                 "asset path is not a safe relative path: {}",
                 self.path
             )));
-        }
-        if let Some(hash) = self.sha256.as_deref() {
-            from_hex(hash).map_err(|_| {
-                UpdateError::InvalidManifest(format!(
-                    "asset sha256 must be 64 hex chars: {}",
-                    self.name
-                ))
-            })?;
         }
         Ok(())
     }
@@ -498,28 +475,6 @@ where
             .get(&cid, max_size)
             .await?
             .ok_or_else(|| UpdateError::AssetPathNotFound(asset.path.clone()))?;
-
-        if let Some(expected) = asset.size {
-            let actual = bytes.len() as u64;
-            if actual != expected {
-                return Err(UpdateError::AssetSizeMismatch {
-                    path: asset.path,
-                    expected,
-                    actual,
-                });
-            }
-        }
-
-        if let Some(expected) = asset.sha256.as_deref() {
-            let actual = to_hex(&sha256(&bytes));
-            if actual != expected {
-                return Err(UpdateError::AssetHashMismatch {
-                    path: asset.path,
-                    expected: expected.to_string(),
-                    actual,
-                });
-            }
-        }
 
         Ok(DownloadedAsset { asset, cid, bytes })
     }

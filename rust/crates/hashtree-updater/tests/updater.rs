@@ -114,8 +114,7 @@ async fn check_resolves_release_manifest_and_downloads_selected_asset() {
         {
           "name": "squirreldisk-linux-x64",
           "path": "assets/squirreldisk-linux-x64",
-          "target": "x86_64-unknown-linux-gnu",
-          "size": 11
+          "target": "x86_64-unknown-linux-gnu"
         }
       ]
     }"#;
