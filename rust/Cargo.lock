@@ -3764,7 +3764,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-collection"
-version = "0.2.43"
+version = "0.2.45"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.43"
+version = "0.2.45"
 dependencies = [
  "futures",
  "hashtree-core",
