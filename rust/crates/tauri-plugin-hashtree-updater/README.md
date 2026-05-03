@@ -77,20 +77,18 @@ Optional fields: `manifestPath` (default `release.json`), `destination`
 { "permissions": ["hashtree-updater:default"] }
 ```
 
-### `package.json`
+### TypeScript glue
 
-```json
-{
-  "dependencies": {
-    "@hashtree/tauri-plugin-updater": "^0.2"
-  }
-}
-```
+There is no published npm package — copy `guest-js/index.ts` from this crate
+into your app (eg `src/lib/updater-api.ts`) so the JS side has thin wrappers
+around `invoke('plugin:hashtree-updater|check')` and the
+`download_and_install` channel. It's ~70 lines and only depends on
+`@tauri-apps/api/core`.
 
 ## JS API
 
 ```ts
-import { check, Update, type DownloadEvent } from '@hashtree/tauri-plugin-updater'
+import { check, Update, type DownloadEvent } from './updater-api'
 
 const update: Update | null = await check()
 // update?.updateAvailable, update?.version, update?.currentVersion,
@@ -116,7 +114,7 @@ prefs/auto-check/dismissal logic so your banner just renders state. Change
 the storage key to your app's name.
 
 ```ts
-import { check as pluginCheck, Update, type DownloadEvent } from '@hashtree/tauri-plugin-updater'
+import { check as pluginCheck, Update, type DownloadEvent } from './updater-api'
 
 const PREFS_KEY = 'myapp.updater.prefs.v1'
 const DEFAULT_AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6h
