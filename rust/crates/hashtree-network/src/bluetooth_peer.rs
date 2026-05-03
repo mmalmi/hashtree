@@ -22,6 +22,9 @@ use nostr_sdk::nostr::{
 const BLUETOOTH_SEEN_EVENT_CAP: usize = 2048;
 const BLUETOOTH_SEEN_EVENT_TTL: Duration = Duration::from_secs(600);
 
+type PendingBlobRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<u8>>>>>>;
+type PendingNostrQueries = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<NostrRelayMessage>>>>;
+
 #[derive(Debug, Clone)]
 pub enum BluetoothFrame {
     Text(String),
@@ -43,8 +46,8 @@ pub struct BluetoothPeer {
     pub connected_at: Option<std::time::Instant>,
     link: Arc<dyn BluetoothLink>,
     store: Option<Arc<dyn ContentStore>>,
-    pending_requests: Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<u8>>>>>>,
-    pending_nostr_queries: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<NostrRelayMessage>>>>,
+    pending_requests: PendingBlobRequests,
+    pending_nostr_queries: PendingNostrQueries,
     nostr_relay: Option<SharedMeshRelayClient>,
     mesh_frame_tx: Option<mpsc::Sender<(PeerId, MeshNostrFrame)>>,
     traffic_state: Option<Arc<WebRTCState>>,

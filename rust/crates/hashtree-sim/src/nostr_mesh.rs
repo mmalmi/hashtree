@@ -85,7 +85,15 @@ impl NostrMesh {
             stats: MeshStats::default(),
         }
     }
+}
 
+impl Default for NostrMesh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NostrMesh {
     pub fn add_node(&mut self, node_id: &str) -> PublicKey {
         let keys = Keys::generate();
         let node = Node {

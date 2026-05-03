@@ -3339,6 +3339,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashtree-updater"
+version = "0.2.44"
+dependencies = [
+ "async-trait",
+ "hashtree-core",
+ "hashtree-resolver",
+ "hashtree-sim",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

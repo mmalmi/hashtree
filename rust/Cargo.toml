@@ -20,6 +20,7 @@ serde_json = "1.0"
 hex = "0.4"
 async-trait = "0.1"
 thiserror = "1.0"
+semver = "1"
 
 # WebRTC transport
 webrtc = "0.11"
@@ -41,6 +42,7 @@ hashtree-config = { version = "0.2.43", path = "crates/hashtree-config" }
 hashtree-fs = { version = "0.2.43", path = "crates/hashtree-fs" }
 hashtree-nostr = { version = "0.2.43", path = "crates/hashtree-nostr" }
 hashtree-network = { version = "0.2.43", path = "crates/hashtree-network" }
+hashtree-updater = { version = "0.2.44", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.2.43", path = "crates/cashu-service", default-features = false }
 
 # AWS S3

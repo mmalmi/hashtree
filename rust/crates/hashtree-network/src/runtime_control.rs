@@ -83,6 +83,7 @@ pub async fn create_signaling_event(
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_signaling_event<P, R, F>(
     signaling_enabled: bool,
     my_peer_id: &PeerId,
@@ -163,6 +164,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_signaling_message<P, S>(
     signaling_enabled: bool,
     keys: &Keys,

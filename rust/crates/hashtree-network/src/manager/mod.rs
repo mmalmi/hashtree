@@ -228,6 +228,7 @@ struct SharedRouterPeerFactory {
 }
 
 impl SharedRouterPeerFactory {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         my_peer_id: PeerId,
         signaling_tx: mpsc::Sender<SignalingMessage>,

@@ -1860,7 +1860,8 @@ where
             let to = (next_source_idx + wave_size).min(ordered_sources.len());
             next_source_idx = to;
 
-            for source in ordered_sources[from..to].iter().cloned() {
+            for source in &ordered_sources[from..to] {
+                let source = Arc::clone(source);
                 let source_id = source.id().to_string();
                 self.record_read_source_request(&source_id).await;
                 pending_source_ids.insert(source_id.clone());
@@ -2219,7 +2220,7 @@ where
             let _ = pending.response_tx.send(Some(payload));
             if let Some(response_bytes) = response_bytes {
                 for requester_id in forward_requesters {
-                    Arc::clone(&self)
+                    Arc::clone(self)
                         .enqueue_response_send(requester_id, response_bytes.clone(), Instant::now())
                         .await;
                 }

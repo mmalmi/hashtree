@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Added `hashtree-updater`, a reusable Rust updater crate that resolves signed
+  `npub/tree/path` release roots, reads `manifest.json`, selects platform assets,
+  downloads artifacts from hashtree, and provides an atomic file-install helper
+  for non-Tauri native apps.
+
 ## 0.2.44 - 2026-05-02
 
 ### Fixed

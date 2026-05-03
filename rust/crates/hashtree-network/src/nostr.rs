@@ -194,8 +194,7 @@ pub fn encode_signaling_event(
         let expiration = Timestamp::now() + Duration::from_secs(5 * 60);
         let message_json =
             serde_json::to_string(msg).map_err(|e| TransportError::SendFailed(e.to_string()))?;
-        let rumor =
-            EventBuilder::new(kind.clone(), message_json, []).to_unsigned_event(keys.public_key());
+        let rumor = EventBuilder::new(kind, message_json, []).to_unsigned_event(keys.public_key());
         let seal_event = EventBuilder::seal(keys, &recipient_pk, rumor.clone())
             .map_err(|e| TransportError::SendFailed(format!("Failed to build seal: {e}")))?
             .to_event(keys)

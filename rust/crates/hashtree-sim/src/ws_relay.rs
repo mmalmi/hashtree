@@ -43,6 +43,10 @@ pub struct NostrFilter {
     pub kinds: Option<Vec<u32>>,
     #[serde(rename = "#p", skip_serializing_if = "Option::is_none")]
     pub p_tags: Option<Vec<String>>,
+    #[serde(rename = "#d", skip_serializing_if = "Option::is_none")]
+    pub d_tags: Option<Vec<String>>,
+    #[serde(rename = "#l", skip_serializing_if = "Option::is_none")]
+    pub l_tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +77,24 @@ impl NostrFilter {
                 .tags
                 .iter()
                 .any(|t| t.len() >= 2 && t[0] == "p" && p_tags.contains(&t[1]));
+            if !has_match {
+                return false;
+            }
+        }
+        if let Some(ref d_tags) = self.d_tags {
+            let has_match = event
+                .tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "d" && d_tags.contains(&t[1]));
+            if !has_match {
+                return false;
+            }
+        }
+        if let Some(ref l_tags) = self.l_tags {
+            let has_match = event
+                .tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "l" && l_tags.contains(&t[1]));
             if !has_match {
                 return false;
             }
@@ -273,9 +295,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                             let sub_id = parsed[1].as_str().unwrap_or("").to_string();
                             let mut filters = Vec::new();
 
-                            for i in 2..parsed.len() {
+                            for value in parsed.iter().skip(2) {
                                 if let Ok(filter) =
-                                    serde_json::from_value::<NostrFilter>(parsed[i].clone())
+                                    serde_json::from_value::<NostrFilter>(value.clone())
                                 {
                                     filters.push(filter);
                                 }

@@ -416,7 +416,7 @@ impl Simulation {
             vec![NodeStrategyProfile {
                 name: "default".to_string(),
                 weight: 1,
-                pool: config.pool.clone(),
+                pool: config.pool,
                 selection_strategy: SelectionStrategy::Weighted,
                 fairness_enabled: true,
                 dispatch: RequestDispatchConfig::default(),
@@ -433,7 +433,7 @@ impl Simulation {
                 vec![NodeStrategyProfile {
                     name: "default".to_string(),
                     weight: 1,
-                    pool: config.pool.clone(),
+                    pool: config.pool,
                     selection_strategy: SelectionStrategy::Weighted,
                     fairness_enabled: true,
                     dispatch: RequestDispatchConfig::default(),
@@ -617,7 +617,7 @@ impl Simulation {
                 max_connections: 0,
                 satisfied_connections: 0,
             },
-            other: selected_strategy.pool.clone(),
+            other: selected_strategy.pool,
         };
 
         // Create mesh router
@@ -1074,7 +1074,7 @@ impl Simulation {
             RetrievalTimingMode::VirtualSteps => {
                 let poll_interval_ms = self.config.retrieval_poll_interval_ms.max(1);
                 let timeout_ms = timeout.as_millis() as u64;
-                let max_polls = ((timeout_ms + poll_interval_ms - 1) / poll_interval_ms).max(1);
+                let max_polls = timeout_ms.div_ceil(poll_interval_ms).max(1);
                 let step_sleep_ms = self.virtual_scaled_latency_ms();
 
                 for poll in 0..max_polls {
@@ -1275,7 +1275,7 @@ impl Simulation {
         let mut total_clustering = 0.0;
         let mut nodes_with_neighbors = 0;
 
-        for (_, peers) in &active_adjacency {
+        for peers in active_adjacency.values() {
             let k = peers.len();
             if k < 2 {
                 continue;

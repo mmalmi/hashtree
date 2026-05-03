@@ -1,0 +1,24 @@
+[package]
+name = "hashtree-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Hashtree-based app update discovery, artifact selection, and install helpers"
+
+[dependencies]
+hashtree-core.workspace = true
+hashtree-resolver.workspace = true
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+hashtree-resolver = { workspace = true, features = ["nostr"] }
+hashtree-sim = { path = "../hashtree-sim", features = ["nostr"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

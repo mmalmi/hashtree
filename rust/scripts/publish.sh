@@ -56,6 +56,7 @@ TIER_3_CRATES=(
     "hashtree-collection"
     "hashtree-nostr"
     "hashtree-network"
+    "hashtree-updater"
 )
 
 TIER_4_CRATES=(
