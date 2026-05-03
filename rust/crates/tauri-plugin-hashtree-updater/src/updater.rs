@@ -70,11 +70,17 @@ impl UpdaterContext {
         let store = Arc::new(BlossomStore::new(blossom));
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        let resolver_config = NostrResolverConfig {
-            relays: self.config.relays.clone(),
+        // Fall back to NostrResolverConfig::default()'s built-in relay set
+        // when the app's tauri.conf.json doesn't list any. End users can
+        // still override by setting `relays` in the plugin config.
+        let mut resolver_config = NostrResolverConfig {
             resolve_timeout: Duration::from_secs(10),
             secret_key: Some(keys),
+            ..NostrResolverConfig::default()
         };
+        if !self.config.relays.is_empty() {
+            resolver_config.relays = self.config.relays.clone();
+        }
         let resolver = NostrRootResolver::new(resolver_config).await?;
         Ok(HashtreeUpdater::new(resolver, tree))
     }
@@ -89,10 +95,17 @@ impl UpdaterContext {
                 .config
                 .manifest_path
                 .clone()
-                .unwrap_or_else(|| "manifest.json".to_string()),
+                .unwrap_or_else(|| "release.json".to_string()),
             ..UpdateCheckOptions::default()
         };
-        let check = updater.check(options).await?;
+        let check = match updater.check(options).await {
+            Ok(check) => check,
+            // Treat "nothing published yet" as a quiet "no update" so the UI
+            // can show "no releases found" instead of a scary error.
+            Err(hashtree_updater::UpdateError::ReleaseNotFound(_))
+            | Err(hashtree_updater::UpdateError::ManifestNotFound(_)) => return Ok(None),
+            Err(err) => return Err(Error::Updater(err)),
+        };
         let Some(asset) = check.asset.as_ref() else {
             return Ok(None);
         };

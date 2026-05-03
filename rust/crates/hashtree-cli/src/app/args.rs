@@ -762,7 +762,7 @@ pub(crate) enum UpdateCommands {
         #[arg(long)]
         target: Option<String>,
         /// Path within the release dir to read the manifest from
-        #[arg(long, default_value = "manifest.json")]
+        #[arg(long, default_value = "release.json")]
         manifest_path: String,
     },
 
@@ -777,7 +777,7 @@ pub(crate) enum UpdateCommands {
         current_version: String,
         #[arg(long)]
         target: Option<String>,
-        #[arg(long, default_value = "manifest.json")]
+        #[arg(long, default_value = "release.json")]
         manifest_path: String,
         /// Refuse to download if the asset is larger than this many bytes
         #[arg(long)]
@@ -795,7 +795,7 @@ pub(crate) enum UpdateCommands {
         current_version: String,
         #[arg(long)]
         target: Option<String>,
-        #[arg(long, default_value = "manifest.json")]
+        #[arg(long, default_value = "release.json")]
         manifest_path: String,
         /// Override the asset kind (binary, app-bundle, appimage). Default: from manifest.
         #[arg(long)]
