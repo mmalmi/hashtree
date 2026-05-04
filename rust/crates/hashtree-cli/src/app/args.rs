@@ -398,12 +398,18 @@ pub(crate) enum Commands {
         only_if_newer: bool,
     },
 
-    /// Self-update the htree binary itself (only meaningful when htree was
-    /// installed via `htree install`, not via `cargo install`).
+    /// Self-update the htree binary itself.
+    ///
+    /// Refuses by default when the binary lives under a package-manager
+    /// path (cargo, brew) so the package manager's metadata stays in sync.
+    /// Pass `--force` to bypass and replace the binary directly.
     Update {
         /// Don't install, just print what would happen
         #[arg(long)]
         check: bool,
+        /// Replace the binary in place even if it lives under cargo/brew
+        #[arg(long)]
+        force: bool,
     },
 
     /// Internal: detached background self-update check. Spawned by the

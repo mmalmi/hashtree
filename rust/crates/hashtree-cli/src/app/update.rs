@@ -237,12 +237,15 @@ fn sentinel_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Read the cached result and print an inline notification if there's a
-/// newer version than the running binary. Runs synchronously at startup;
-/// fast (a small JSON read), no network.
+/// newer version than the running binary. Strictly bounded: the file
+/// read happens on a worker thread with a 50 ms timeout so a hung
+/// filesystem (NFS, FUSE, busy spinning disk) can't stall command
+/// startup. Worst case the notification skips this round.
 pub(crate) fn print_cached_update_notification(data_dir: &Path) {
     let path = cached_result_path(data_dir);
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return;
+    let contents = match read_to_string_with_timeout(path, std::time::Duration::from_millis(50)) {
+        Some(s) => s,
+        None => return,
     };
     let Ok(cached): std::result::Result<CachedUpdateResult, _> = serde_json::from_str(&contents)
     else {
@@ -264,9 +267,25 @@ pub(crate) fn print_cached_update_notification(data_dir: &Path) {
         );
     } else {
         eprintln!(
-            "htree update available: {version} (you're on {current}) — run `htree update` to install",
+            "htree update available: {version} (you're on {current}) — run `{}` to install",
+            upgrade_command_hint(),
         );
     }
+}
+
+/// Read a file's contents on a worker thread, returning `None` if the
+/// read doesn't complete within `timeout`. The worker is orphaned on
+/// timeout — fine, the OS reaps it on process exit and the FS layer
+/// will eventually unblock or the kernel will tear down the syscall.
+fn read_to_string_with_timeout(
+    path: PathBuf,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::fs::read_to_string(&path).ok());
+    });
+    rx.recv_timeout(timeout).ok().flatten()
 }
 
 /// Spawn a detached child process to run the actual check. Survives the
@@ -420,17 +439,39 @@ fn detect_install_source() -> InstallSource {
     }
 }
 
+/// The right one-liner to suggest in the update notification, picked
+/// from the running binary's install source so the user can copy-paste it.
+fn upgrade_command_hint() -> &'static str {
+    match detect_install_source() {
+        InstallSource::Cargo => "cargo install hashtree-cli --force",
+        InstallSource::Brew => "brew upgrade htree",
+        InstallSource::Other => "htree update",
+    }
+}
+
 /// Self-update: install a fresh htree binary over the running one.
-pub(crate) async fn run_self_update(data_dir: &Path, check_only: bool) -> Result<()> {
+///
+/// Refuses when the binary lives under a known package-manager path
+/// (cargo, brew) so the package manager's metadata stays in sync. Pass
+/// `force = true` to bypass and replace the binary directly anyway.
+pub(crate) async fn run_self_update(
+    data_dir: &Path,
+    check_only: bool,
+    force: bool,
+) -> Result<()> {
     let current_exe = std::env::current_exe()?;
-    if !check_only {
+    if !check_only && !force {
         match detect_install_source() {
-            InstallSource::Cargo => eprintln!(
-                "note: htree was installed via cargo at {} — `cargo install hashtree-cli --force` would also work and keeps cargo metadata in sync.",
+            InstallSource::Cargo => bail!(
+                "htree was installed via cargo at {}.\n\
+                 Run `cargo install hashtree-cli --force` to upgrade and keep cargo metadata in sync,\n\
+                 or `htree update --force` to replace the binary directly anyway.",
                 current_exe.display(),
             ),
-            InstallSource::Brew => eprintln!(
-                "note: htree was installed via brew at {} — `brew upgrade htree` would also work and keeps brew metadata in sync.",
+            InstallSource::Brew => bail!(
+                "htree was installed via brew at {}.\n\
+                 Run `brew upgrade htree` to upgrade and keep brew metadata in sync,\n\
+                 or `htree update --force` to replace the binary directly anyway.",
                 current_exe.display(),
             ),
             InstallSource::Other => {}

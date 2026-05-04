@@ -1272,8 +1272,8 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?;
         }
-        Commands::Update { check } => {
-            super::update::run_self_update(&data_dir, check).await?;
+        Commands::Update { check, force } => {
+            super::update::run_self_update(&data_dir, check, force).await?;
         }
         Commands::BgCheck => {
             super::update::run_bg_check(&data_dir).await?;
