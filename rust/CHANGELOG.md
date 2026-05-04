@@ -4,6 +4,18 @@
 
 ### Added
 
+- `htree update` refuses by default when the running binary lives under
+  a known package-manager path (`~/.cargo/bin/`, `*/Cellar/*`,
+  `*/homebrew/*`) and suggests the native upgrade command (`cargo
+  install hashtree-cli --force` or `brew upgrade htree`) so the
+  package manager's metadata stays in sync. Pass `--force` to bypass
+  and replace the binary in place anyway.
+- The auto-check notification picks the install-source-appropriate
+  hint (`cargo install …`, `brew upgrade htree`, or `htree update`)
+  based on the same path detection.
+- The startup-hook read of the cached update result is bounded to
+  50ms via a worker thread + `recv_timeout`, so a hung NFS/FUSE mount
+  on `~/.hashtree` can't stall command startup.
 - htree now opportunistically self-checks for updates in the background.
   Before each command (except `htree update`), it spawns a fire-and-
   forget task that — at most once per `updater.check_interval_hours` —
