@@ -211,6 +211,97 @@ pub(crate) async fn run_install(
     Ok(())
 }
 
+/// Spawn a background tokio task that, throttled to once per
+/// `config.updater.check_interval_hours`, checks for a newer published
+/// htree and either prints a one-liner to stderr (default) or installs
+/// silently (when `auto_install` is set).
+///
+/// Lives on a best-effort basis: if the check is still running when the
+/// command exits, the process tears down with the task — no waiting.
+pub(crate) fn spawn_background_self_check(data_dir: PathBuf) {
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if !config.updater.auto_check {
+        return;
+    }
+
+    let interval = std::time::Duration::from_secs(config.updater.check_interval_hours as u64 * 3600);
+    let sentinel = data_dir.join("last-update-check");
+    if let Ok(meta) = std::fs::metadata(&sentinel) {
+        if let Ok(modified) = meta.modified() {
+            if modified.elapsed().map(|e| e < interval).unwrap_or(false) {
+                return;
+            }
+        }
+    }
+    // Touch the sentinel up-front so concurrent invocations don't all
+    // race the same network request.
+    if let Some(parent) = sentinel.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&sentinel)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+
+    let auto_install = config.updater.auto_install;
+    tokio::spawn(async move {
+        if let Err(err) = background_self_check_inner(&data_dir, auto_install).await {
+            // Silent by default — we don't want noise in normal command flow.
+            // Only emit if the user explicitly enabled debug.
+            tracing::debug!("background update check failed: {err}");
+        }
+    });
+}
+
+async fn background_self_check_inner(data_dir: &Path, auto_install: bool) -> Result<()> {
+    let updater = build_updater(data_dir).await?;
+    let options = build_check_options(
+        super::args::HTREE_SELF_REFERENCE,
+        env!("CARGO_PKG_VERSION").to_string(),
+        None,
+        "release.json".to_string(),
+    )?;
+    let check = match updater.check(options).await {
+        Ok(c) => c,
+        // Quiet for "no release published yet" cases.
+        Err(hashtree_updater::UpdateError::ReleaseNotFound(_))
+        | Err(hashtree_updater::UpdateError::ManifestNotFound(_)) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if !check.update_available {
+        return Ok(());
+    }
+    let version = check.manifest.effective_version();
+
+    if auto_install {
+        // Install over the running binary. Safe because Unix lets us replace
+        // an open file (the running process keeps its in-memory mapping).
+        let exe = std::env::current_exe()?;
+        let mut asset = check
+            .asset
+            .clone()
+            .context("no asset matched the platform")?;
+        // Force binary-archive interpretation for htree's own tarballs.
+        if asset.executable.is_none() {
+            asset.executable = Some("htree".to_string());
+        }
+        let downloaded = updater
+            .download(&check, DownloadOptions::default(), None)
+            .await?;
+        let target = InstallTarget::new(&exe).executable(true);
+        install(&asset, &downloaded.bytes, &target)?;
+        eprintln!("htree self-updated to {version} (will be active on next launch)");
+    } else {
+        eprintln!("htree update available: {version} — run `htree update` to install");
+    }
+    Ok(())
+}
+
 /// Self-update: install a fresh htree binary over the running one.
 pub(crate) async fn run_self_update(data_dir: &Path, check_only: bool) -> Result<()> {
     let current_exe = std::env::current_exe()?;

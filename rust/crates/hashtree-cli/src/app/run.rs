@@ -273,6 +273,13 @@ pub(crate) async fn run() -> Result<()> {
     // Get data_dir early to avoid borrow issues in match arms
     let data_dir = cli.data_dir();
 
+    // Fire-and-forget background self-update check, throttled by mtime on
+    // a sentinel file so we don't hit the network on every command. Skipped
+    // when running `htree update` itself (the user already has it covered).
+    if !matches!(cli.command, Commands::Update { .. }) {
+        super::update::spawn_background_self_check(data_dir.clone());
+    }
+
     match cli.command {
         Commands::Start {
             addr,

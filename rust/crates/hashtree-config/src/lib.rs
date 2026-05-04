@@ -46,6 +46,8 @@ pub struct Config {
     pub blossom: BlossomConfig,
     #[serde(default)]
     pub sync: SyncConfig,
+    #[serde(default)]
+    pub updater: UpdaterConfig,
 }
 
 /// Server configuration
@@ -366,6 +368,36 @@ impl Default for SyncConfig {
             blossom_timeout_ms: default_blossom_timeout_ms(),
         }
     }
+}
+
+/// htree self-update preferences. Reads `[updater]` from
+/// `~/.hashtree/config.toml`. Auto-check is on by default — `htree` will
+/// quietly check for a newer published binary at most once per
+/// `check_interval_hours` and print a one-liner to stderr when one exists.
+/// Auto-install is off by default; flip it on to install the new binary
+/// in the background and print the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdaterConfig {
+    #[serde(default = "default_true")]
+    pub auto_check: bool,
+    #[serde(default)]
+    pub auto_install: bool,
+    #[serde(default = "default_check_interval_hours")]
+    pub check_interval_hours: u32,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            auto_install: false,
+            check_interval_hours: default_check_interval_hours(),
+        }
+    }
+}
+
+fn default_check_interval_hours() -> u32 {
+    24
 }
 
 fn default_max_concurrent() -> usize {

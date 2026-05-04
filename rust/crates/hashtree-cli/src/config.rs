@@ -19,6 +19,41 @@ pub struct Config {
     pub sync: SyncConfig,
     #[serde(default)]
     pub cashu: CashuConfig,
+    #[serde(default)]
+    pub updater: UpdaterConfig,
+}
+
+/// htree self-update preferences. Auto-check is on by default — htree
+/// quietly checks for a newer published binary at most once per
+/// `check_interval_hours` and prints a one-liner to stderr when one
+/// exists. `auto_install` is off by default; flip it on to install in
+/// the background and print the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdaterConfig {
+    #[serde(default = "default_auto_check")]
+    pub auto_check: bool,
+    #[serde(default)]
+    pub auto_install: bool,
+    #[serde(default = "default_check_interval_hours")]
+    pub check_interval_hours: u32,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: default_auto_check(),
+            auto_install: false,
+            check_interval_hours: default_check_interval_hours(),
+        }
+    }
+}
+
+fn default_auto_check() -> bool {
+    true
+}
+
+fn default_check_interval_hours() -> u32 {
+    24
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

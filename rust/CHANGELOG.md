@@ -2,6 +2,24 @@
 
 ## 0.2.47 - 2026-05-04
 
+### Added
+
+- htree now opportunistically self-checks for updates in the background.
+  Before each command (except `htree update`), it spawns a fire-and-
+  forget task that — at most once per `updater.check_interval_hours` —
+  resolves `releases/hashtree/latest` and either prints a one-liner to
+  stderr ("htree update available: vX.Y.Z — run `htree update` to
+  install") or, when `updater.auto_install = true`, replaces the running
+  binary in place. Throttling is mtime-based on
+  `~/.hashtree/data/last-update-check`. New `[updater]` section in
+  `~/.hashtree/config.toml`:
+  ```toml
+  [updater]
+  auto_check = true            # default on
+  auto_install = false         # default off — opt in for hands-off
+  check_interval_hours = 24
+  ```
+
 ### Changed (breaking CLI)
 
 - Renamed `htree update {check,download,install}` to a flat `htree install`
