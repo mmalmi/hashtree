@@ -273,11 +273,15 @@ pub(crate) async fn run() -> Result<()> {
     // Get data_dir early to avoid borrow issues in match arms
     let data_dir = cli.data_dir();
 
-    // Fire-and-forget background self-update check, throttled by mtime on
-    // a sentinel file so we don't hit the network on every command. Skipped
-    // when running `htree update` itself (the user already has it covered).
-    if !matches!(cli.command, Commands::Update { .. }) {
-        super::update::spawn_background_self_check(data_dir.clone());
+    // Background self-update flow:
+    //   1) Print any pending notification from the previous bg check.
+    //   2) If interval elapsed, fork a detached child that writes a fresh
+    //      result. Detached so it survives short commands like `htree user`.
+    // Skipped for `htree update` (user already has it covered) and the
+    // internal `__bg_check` subcommand itself (don't recursively fork).
+    if !matches!(cli.command, Commands::Update { .. } | Commands::BgCheck) {
+        super::update::print_cached_update_notification(&data_dir);
+        super::update::spawn_detached_bg_check(&data_dir);
     }
 
     match cli.command {
@@ -1270,6 +1274,9 @@ pub(crate) async fn run() -> Result<()> {
         }
         Commands::Update { check } => {
             super::update::run_self_update(&data_dir, check).await?;
+        }
+        Commands::BgCheck => {
+            super::update::run_bg_check(&data_dir).await?;
         }
         Commands::Follow { npub } => {
             follow_user(&data_dir, &npub, true).await?;

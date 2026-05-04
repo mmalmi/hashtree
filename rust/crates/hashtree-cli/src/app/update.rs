@@ -211,14 +211,69 @@ pub(crate) async fn run_install(
     Ok(())
 }
 
-/// Spawn a background tokio task that, throttled to once per
-/// `config.updater.check_interval_hours`, checks for a newer published
-/// htree and either prints a one-liner to stderr (default) or installs
-/// silently (when `auto_install` is set).
-///
-/// Lives on a best-effort basis: if the check is still running when the
-/// command exits, the process tears down with the task — no waiting.
-pub(crate) fn spawn_background_self_check(data_dir: PathBuf) {
+use serde::{Deserialize, Serialize};
+
+/// Cached result of the most recent background check. Written by the
+/// detached `__bg_check` child, read on every startup to print the
+/// pending notification before the new command runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CachedUpdateResult {
+    /// Unix seconds when the check completed.
+    checked_at: u64,
+    /// htree version the check was run as.
+    checked_as_version: String,
+    /// Latest published htree version, if newer than `checked_as_version`.
+    available_version: Option<String>,
+    /// Whether the bg flow already installed the update (auto_install).
+    installed: bool,
+}
+
+fn cached_result_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("last-update-result.json")
+}
+
+fn sentinel_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("last-update-check")
+}
+
+/// Read the cached result and print an inline notification if there's a
+/// newer version than the running binary. Runs synchronously at startup;
+/// fast (a small JSON read), no network.
+pub(crate) fn print_cached_update_notification(data_dir: &Path) {
+    let path = cached_result_path(data_dir);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(cached): std::result::Result<CachedUpdateResult, _> = serde_json::from_str(&contents)
+    else {
+        return;
+    };
+    let Some(version) = cached.available_version.as_deref() else {
+        return;
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    // Don't notify if the user already upgraded since the cache was written
+    // (eg they ran `htree update` manually) or if the cached check was for
+    // an older version of htree.
+    if version == current {
+        return;
+    }
+    if cached.installed {
+        eprintln!(
+            "htree was self-updated to {version} in the background — restart htree to use it",
+        );
+    } else {
+        eprintln!(
+            "htree update available: {version} (you're on {current}) — run `htree update` to install",
+        );
+    }
+}
+
+/// Spawn a detached child process to run the actual check. Survives the
+/// parent's exit (important for short commands like `htree user` whose
+/// tokio runtime tears down before a network call would complete).
+/// Throttled by mtime on the sentinel file.
+pub(crate) fn spawn_detached_bg_check(data_dir: &Path) {
     let config = match Config::load() {
         Ok(c) => c,
         Err(_) => return,
@@ -227,8 +282,10 @@ pub(crate) fn spawn_background_self_check(data_dir: PathBuf) {
         return;
     }
 
-    let interval = std::time::Duration::from_secs(config.updater.check_interval_hours as u64 * 3600);
-    let sentinel = data_dir.join("last-update-check");
+    let interval = std::time::Duration::from_secs(
+        u64::from(config.updater.check_interval_hours).saturating_mul(3600),
+    );
+    let sentinel = sentinel_path(data_dir);
     if let Ok(meta) = std::fs::metadata(&sentinel) {
         if let Ok(modified) = meta.modified() {
             if modified.elapsed().map(|e| e < interval).unwrap_or(false) {
@@ -236,8 +293,9 @@ pub(crate) fn spawn_background_self_check(data_dir: PathBuf) {
             }
         }
     }
-    // Touch the sentinel up-front so concurrent invocations don't all
-    // race the same network request.
+    // Touch the sentinel up-front so concurrent invocations don't all race
+    // the same network request. Race window is small but the worst case is
+    // two simultaneous checks once per interval — no correctness issue.
     if let Some(parent) = sentinel.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -248,17 +306,27 @@ pub(crate) fn spawn_background_self_check(data_dir: PathBuf) {
         .open(&sentinel)
         .and_then(|f| f.set_modified(std::time::SystemTime::now()));
 
-    let auto_install = config.updater.auto_install;
-    tokio::spawn(async move {
-        if let Err(err) = background_self_check_inner(&data_dir, auto_install).await {
-            // Silent by default — we don't want noise in normal command flow.
-            // Only emit if the user explicitly enabled debug.
-            tracing::debug!("background update check failed: {err}");
-        }
-    });
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    // Detached: stdio piped to /dev/null, parent doesn't await. The OS
+    // reaps the orphaned child via init/launchd. Failure to spawn is fine
+    // — we just won't get a notification this round.
+    use std::process::Stdio;
+    let _ = std::process::Command::new(exe)
+        .arg("__bg_check")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
-async fn background_self_check_inner(data_dir: &Path, auto_install: bool) -> Result<()> {
+/// Body of the detached `htree __bg_check` invocation. Runs the check
+/// (and optional install when auto_install is set), writes the result to
+/// the cache file, exits.
+pub(crate) async fn run_bg_check(data_dir: &Path) -> Result<()> {
+    let config = Config::load().unwrap_or_default();
     let updater = build_updater(data_dir).await?;
     let options = build_check_options(
         super::args::HTREE_SELF_REFERENCE,
@@ -266,27 +334,36 @@ async fn background_self_check_inner(data_dir: &Path, auto_install: bool) -> Res
         None,
         "release.json".to_string(),
     )?;
+    let mut cached = CachedUpdateResult {
+        checked_at: now_unix(),
+        checked_as_version: env!("CARGO_PKG_VERSION").to_string(),
+        ..Default::default()
+    };
+
     let check = match updater.check(options).await {
         Ok(c) => c,
-        // Quiet for "no release published yet" cases.
+        // Quiet for "no release yet" cases — write empty result so the
+        // notifier stays silent.
         Err(hashtree_updater::UpdateError::ReleaseNotFound(_))
-        | Err(hashtree_updater::UpdateError::ManifestNotFound(_)) => return Ok(()),
+        | Err(hashtree_updater::UpdateError::ManifestNotFound(_)) => {
+            write_cached_result(data_dir, &cached);
+            return Ok(());
+        }
         Err(e) => return Err(e.into()),
     };
     if !check.update_available {
+        write_cached_result(data_dir, &cached);
         return Ok(());
     }
     let version = check.manifest.effective_version();
+    cached.available_version = Some(version.clone());
 
-    if auto_install {
-        // Install over the running binary. Safe because Unix lets us replace
-        // an open file (the running process keeps its in-memory mapping).
+    if config.updater.auto_install {
         let exe = std::env::current_exe()?;
         let mut asset = check
             .asset
             .clone()
             .context("no asset matched the platform")?;
-        // Force binary-archive interpretation for htree's own tarballs.
         if asset.executable.is_none() {
             asset.executable = Some("htree".to_string());
         }
@@ -294,17 +371,71 @@ async fn background_self_check_inner(data_dir: &Path, auto_install: bool) -> Res
             .download(&check, DownloadOptions::default(), None)
             .await?;
         let target = InstallTarget::new(&exe).executable(true);
-        install(&asset, &downloaded.bytes, &target)?;
-        eprintln!("htree self-updated to {version} (will be active on next launch)");
-    } else {
-        eprintln!("htree update available: {version} — run `htree update` to install");
+        if install(&asset, &downloaded.bytes, &target).is_ok() {
+            cached.installed = true;
+        }
     }
+
+    write_cached_result(data_dir, &cached);
     Ok(())
+}
+
+fn write_cached_result(data_dir: &Path, cached: &CachedUpdateResult) {
+    let path = cached_result_path(data_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(cached) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// How the running htree binary was installed — used to print the right
+/// upgrade hint when self-updating clashes with a package manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallSource {
+    Cargo,
+    Brew,
+    Other,
+}
+
+fn detect_install_source() -> InstallSource {
+    let Ok(exe) = std::env::current_exe() else {
+        return InstallSource::Other;
+    };
+    let s = exe.to_string_lossy();
+    if s.contains("/.cargo/bin/") {
+        InstallSource::Cargo
+    } else if s.contains("/Cellar/") || s.contains("/homebrew/") {
+        InstallSource::Brew
+    } else {
+        InstallSource::Other
+    }
 }
 
 /// Self-update: install a fresh htree binary over the running one.
 pub(crate) async fn run_self_update(data_dir: &Path, check_only: bool) -> Result<()> {
     let current_exe = std::env::current_exe()?;
+    if !check_only {
+        match detect_install_source() {
+            InstallSource::Cargo => eprintln!(
+                "note: htree was installed via cargo at {} — `cargo install hashtree-cli --force` would also work and keeps cargo metadata in sync.",
+                current_exe.display(),
+            ),
+            InstallSource::Brew => eprintln!(
+                "note: htree was installed via brew at {} — `brew upgrade htree` would also work and keeps brew metadata in sync.",
+                current_exe.display(),
+            ),
+            InstallSource::Other => {}
+        }
+    }
     run_install(
         data_dir,
         super::args::HTREE_SELF_REFERENCE.to_string(),

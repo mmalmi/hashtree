@@ -43,6 +43,10 @@ Publishing & Git Commands:
   repos        List published git repositories for yourself or another user
   pr           Pull request management
 
+Update Commands:
+  install      Install or upgrade an app from a hashtree release
+  update       Self-update the htree binary itself
+
 Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
@@ -93,6 +97,10 @@ Publishing & Git Commands:
   release      Manage published release trees
   repos        List published git repositories for yourself or another user
   pr           Pull request management
+
+Update Commands:
+  install      Install or upgrade an app from a hashtree release
+  update       Self-update the htree binary itself
 
 Identity & Social Commands:
   user         Show or set your nostr identity
@@ -397,6 +405,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         check: bool,
     },
+
+    /// Internal: detached background self-update check. Spawned by the
+    /// startup hook; not meant to be run by users.
+    #[command(hide = true, name = "__bg_check")]
+    BgCheck,
 
     /// List published git repositories for yourself or another user
     Repos {
