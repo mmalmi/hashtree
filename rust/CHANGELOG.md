@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.46 - 2026-05-04
+
+### Added
+
+- Added `AssetKind::BinaryArchive` to `hashtree-updater`: a `.tar.gz` (or
+  raw tar) containing one binary plus auxiliary files. The manifest's
+  `executable` field names the entry to extract (eg `iris/iris`). The
+  install dispatcher decompresses, finds the entry, and atomically writes
+  it to the destination with the executable bit set. Cross-platform
+  (no per-OS install support needed since it's just file extraction).
+- Asset-kind inference now upgrades a plain archive to `BinaryArchive`
+  when the manifest sets a non-empty `executable` field, so apps with the
+  conventional `<name>-<target>.tar.gz` layout (eg iris-chat-rs) work
+  without setting `kind` explicitly — only the `executable` hint.
+- `htree update install` learned a `--archive-entry <path>` flag that
+  overrides the manifest's `executable` field, useful for testing the
+  install path before a publisher updates their `release.json`.
+
+### Changed
+
+- `flate2` and `tar` are now unconditional dependencies of
+  `hashtree-updater` (were target-gated to macOS/Linux). Both crates are
+  small and the binary-archive dispatcher needs them on every platform.
+
 ## 0.2.45 - 2026-05-04
 
 ### Added

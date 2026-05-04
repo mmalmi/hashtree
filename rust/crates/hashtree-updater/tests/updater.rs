@@ -497,6 +497,89 @@ fn install_dispatcher_rejects_unsupported_kinds() {
     }
 }
 
+#[test]
+fn install_binary_archive_extracts_named_entry_to_destination() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("iris");
+    std::fs::write(&dest, b"old").unwrap();
+
+    // tar.gz layout: iris/iris (binary), iris/install.sh (ignored)
+    let payload = b"#!/bin/sh\necho hello from iris\n";
+    let install_sh = b"#!/bin/sh\necho stale installer\n";
+    let mut buffer = Vec::new();
+    {
+        let gz = GzEncoder::new(&mut buffer, Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        let mut h1 = tar::Header::new_gnu();
+        h1.set_size(payload.len() as u64);
+        h1.set_mode(0o755);
+        h1.set_cksum();
+        tar.append_data(&mut h1, "iris/iris", &payload[..]).unwrap();
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_size(install_sh.len() as u64);
+        h2.set_mode(0o755);
+        h2.set_cksum();
+        tar.append_data(&mut h2, "iris/install.sh", &install_sh[..])
+            .unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    let asset = UpdateAsset {
+        name: "iris-aarch64-apple-darwin.tar.gz".into(),
+        path: "assets/iris-aarch64-apple-darwin.tar.gz".into(),
+        // No explicit kind — relies on inference from .tar.gz + executable hint.
+        executable: Some("iris/iris".into()),
+        ..Default::default()
+    };
+    assert_eq!(asset.asset_kind(), AssetKind::BinaryArchive);
+
+    install(&asset, &buffer, &InstallTarget::new(&dest)).expect("install");
+
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "extracted binary should be executable");
+    }
+}
+
+#[test]
+fn install_binary_archive_errors_when_entry_not_in_tar() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("iris");
+    let mut buffer = Vec::new();
+    {
+        let gz = GzEncoder::new(&mut buffer, Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        let mut h = tar::Header::new_gnu();
+        let payload = b"unrelated";
+        h.set_size(payload.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, "other/file", &payload[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    let asset = UpdateAsset {
+        name: "iris.tar.gz".into(),
+        path: "assets/iris.tar.gz".into(),
+        executable: Some("iris/iris".into()),
+        ..Default::default()
+    };
+    let err = install(&asset, &buffer, &InstallTarget::new(&dest)).unwrap_err();
+    assert!(
+        matches!(err, hashtree_updater::UpdateError::Install(ref m) if m.contains("not found")),
+        "expected Install error, got {err:?}",
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn install_app_bundle_unpacks_tar_gz_and_swaps_dot_app() {

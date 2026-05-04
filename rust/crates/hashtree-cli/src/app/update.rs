@@ -181,6 +181,7 @@ pub(crate) async fn run_install(
     manifest_path: String,
     kind: Option<String>,
     executable: bool,
+    archive_entry: Option<String>,
     only_if_newer: bool,
 ) -> Result<()> {
     let updater = build_updater(data_dir).await?;
@@ -203,6 +204,9 @@ pub(crate) async fn run_install(
             bail!("unknown asset kind: {kind_override}");
         }
         asset.kind = Some(kind_override);
+    }
+    if let Some(entry) = archive_entry {
+        asset.executable = Some(entry);
     }
 
     let downloaded = updater

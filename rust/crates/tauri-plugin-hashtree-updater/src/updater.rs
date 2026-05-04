@@ -188,7 +188,7 @@ pub fn context_from_app<R: Runtime>(app: &AppHandle<R>) -> UpdaterContext {
 fn default_destination_for(kind: AssetKind) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     match kind {
-        AssetKind::Binary => Some(exe),
+        AssetKind::Binary | AssetKind::BinaryArchive => Some(exe),
         AssetKind::AppBundle => walk_up_to_app(&exe),
         AssetKind::AppImage => Some(exe),
         AssetKind::Deb | AssetKind::Rpm | AssetKind::Nsis | AssetKind::Msi | AssetKind::Archive => {

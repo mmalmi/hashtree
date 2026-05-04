@@ -107,14 +107,18 @@ impl UpdateManifest {
 /// `Binary` is a plain file written into place, optionally executable.
 /// `AppBundle` is a `tar.gz` containing a `*.app` (macOS only install).
 /// `AppImage` is a Linux AppImage (optionally gzipped).
+/// `BinaryArchive` is a `.tar.gz` containing one binary plus auxiliary
+/// files; the manifest's `executable` field names the entry to extract
+/// (eg `iris/iris`). Works cross-platform.
 /// `Deb` / `Rpm` invoke the system package manager (requires elevation).
 /// `Nsis` / `Msi` launch the installer and exit (Windows only).
-/// `Archive` is a tarball or zip the caller is expected to handle.
+/// `Archive` is an opaque tarball or zip the caller is expected to handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
     Binary,
     AppBundle,
     AppImage,
+    BinaryArchive,
     Deb,
     Rpm,
     Nsis,
@@ -128,6 +132,7 @@ impl AssetKind {
             AssetKind::Binary => "binary",
             AssetKind::AppBundle => "app-bundle",
             AssetKind::AppImage => "appimage",
+            AssetKind::BinaryArchive => "binary-archive",
             AssetKind::Deb => "deb",
             AssetKind::Rpm => "rpm",
             AssetKind::Nsis => "nsis",
@@ -141,6 +146,7 @@ impl AssetKind {
             "binary" | "raw" | "raw-binary" | "exe" => AssetKind::Binary,
             "app" | "app-bundle" | "macos-app" => AssetKind::AppBundle,
             "appimage" | "app-image" => AssetKind::AppImage,
+            "binary-archive" | "tarball-binary" => AssetKind::BinaryArchive,
             "deb" => AssetKind::Deb,
             "rpm" => AssetKind::Rpm,
             "nsis" => AssetKind::Nsis,
@@ -225,7 +231,18 @@ impl UpdateAsset {
         if let Some(kind) = self.kind.as_deref().and_then(AssetKind::parse) {
             return kind;
         }
-        infer_kind_from_name(&self.name).unwrap_or(AssetKind::Binary)
+        let inferred = infer_kind_from_name(&self.name).unwrap_or(AssetKind::Binary);
+        // A bare archive with an `executable` hint upgrades to BinaryArchive
+        // so the install dispatcher knows which entry to extract.
+        let has_executable_hint = self
+            .executable
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if matches!(inferred, AssetKind::Archive) && has_executable_hint {
+            return AssetKind::BinaryArchive;
+        }
+        inferred
     }
 }
 

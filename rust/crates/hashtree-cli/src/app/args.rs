@@ -797,12 +797,18 @@ pub(crate) enum UpdateCommands {
         target: Option<String>,
         #[arg(long, default_value = "release.json")]
         manifest_path: String,
-        /// Override the asset kind (binary, app-bundle, appimage). Default: from manifest.
+        /// Override the asset kind (binary, app-bundle, appimage, binary-archive).
+        /// Default: from manifest.
         #[arg(long)]
         kind: Option<String>,
         /// Set the executable bit after install (binary kind only)
         #[arg(long)]
         executable: bool,
+        /// For binary-archive kind: name of the entry inside the archive to
+        /// extract (eg `iris/iris`). Overrides the manifest's `executable`
+        /// field if both are set.
+        #[arg(long = "archive-entry")]
+        archive_entry: Option<String>,
         /// Skip install if the manifest version is not newer than current_version
         #[arg(long)]
         only_if_newer: bool,

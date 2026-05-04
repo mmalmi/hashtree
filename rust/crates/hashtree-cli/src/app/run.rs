@@ -1275,6 +1275,7 @@ pub(crate) async fn run() -> Result<()> {
                 manifest_path,
                 kind,
                 executable,
+                archive_entry,
                 only_if_newer,
             } => {
                 super::update::run_install(
@@ -1286,6 +1287,7 @@ pub(crate) async fn run() -> Result<()> {
                     manifest_path,
                     kind,
                     executable,
+                    archive_entry,
                     only_if_newer,
                 )
                 .await?;

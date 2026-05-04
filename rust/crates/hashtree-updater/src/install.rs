@@ -45,6 +45,15 @@ pub fn install(
         AssetKind::Binary => install_binary(&target.destination, bytes, target.executable),
         AssetKind::AppBundle => install_app_bundle(&target.destination, bytes),
         AssetKind::AppImage => install_appimage(&target.destination, bytes),
+        AssetKind::BinaryArchive => {
+            let entry = asset.executable.as_deref().ok_or_else(|| {
+                UpdateError::Install(
+                    "binary-archive kind requires asset.executable to name the entry to extract"
+                        .to_string(),
+                )
+            })?;
+            install_binary_archive(&target.destination, bytes, entry)
+        }
         kind @ (AssetKind::Deb
         | AssetKind::Rpm
         | AssetKind::Nsis
@@ -53,6 +62,45 @@ pub fn install(
             kind: kind.as_str().to_string(),
         }),
     }
+}
+
+/// Decompress a `.tar.gz` (or raw tar — auto-detected by gzip magic),
+/// find the entry whose path matches `entry_name`, and atomically write
+/// its bytes to `destination` with the executable bit set. Cross-platform.
+pub fn install_binary_archive(
+    destination: &Path,
+    bytes: &[u8],
+    entry_name: &str,
+) -> Result<(), UpdateError> {
+    use std::io::{Cursor, Read};
+
+    let payload: Box<dyn Read> = if bytes.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes)))
+    } else {
+        Box::new(Cursor::new(bytes))
+    };
+    let mut archive = tar::Archive::new(payload);
+
+    for entry in archive
+        .entries()
+        .map_err(|err| UpdateError::Install(format!("failed to read tar archive: {err}")))?
+    {
+        let mut entry = entry
+            .map_err(|err| UpdateError::Install(format!("failed to read tar entry: {err}")))?;
+        let path = entry
+            .path()
+            .map_err(|err| UpdateError::Install(format!("entry has invalid path: {err}")))?;
+        if path.to_string_lossy() == entry_name {
+            let mut buf = Vec::with_capacity(entry.header().size().unwrap_or(0) as usize);
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|err| UpdateError::Install(format!("failed to read entry bytes: {err}")))?;
+            return install_binary(destination, &buf, true);
+        }
+    }
+    Err(UpdateError::Install(format!(
+        "entry {entry_name} not found in archive"
+    )))
 }
 
 /// Write `bytes` to `path` via a temp file + atomic rename.

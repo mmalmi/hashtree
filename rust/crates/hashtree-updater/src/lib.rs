@@ -18,7 +18,10 @@ mod target;
 mod updater;
 
 pub use error::UpdateError;
-pub use install::{install, install_appimage, install_app_bundle, install_binary, install_file, InstallTarget};
+pub use install::{
+    install, install_app_bundle, install_appimage, install_binary, install_binary_archive,
+    install_file, InstallTarget,
+};
 pub use manifest::{
     infer_kind_from_name, infer_target_from_name, AssetKind, PublishedAt, UpdateAsset,
     UpdateManifest,

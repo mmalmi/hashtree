@@ -15,13 +15,10 @@ semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
+# Used everywhere by the binary-archive install dispatcher; macOS app-bundle
+# also needs both, Linux appimage just needs flate2.
 flate2 = "1.0"
 tar = "0.4"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-flate2 = "1.0"
 
 [dev-dependencies]
 async-trait.workspace = true
