@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.47 - 2026-05-04
+
+### Changed (breaking CLI)
+
+- Renamed `htree update {check,download,install}` to a flat `htree install`
+  with `--check` and `--download-only` mode flags. Reads better as a noun
+  ("install <ref>") and frees `htree update` for self-updating htree
+  itself.
+- New `htree update [--check]` upgrades the running htree binary in place
+  by resolving its own published reference (`releases/hashtree/latest`).
+  Useful when htree was installed via `htree install` rather than
+  `cargo install` (which has its own upgrade story).
+- `htree install` now defaults `--to ~/.local/bin/<binary-name>` for the
+  `binary` and `binary-archive` kinds when no destination is given.
+  `app-bundle` and `appimage` still infer the destination from
+  `current_exe()` since they typically self-replace.
+
 ## 0.2.46 - 2026-05-04
 
 ### Added

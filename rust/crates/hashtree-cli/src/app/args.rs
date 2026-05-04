@@ -349,10 +349,53 @@ pub(crate) enum Commands {
         command: ReleaseCommands,
     },
 
-    /// Check for, download, and install app updates from a hashtree release
+    /// Install or upgrade an app from a hashtree release reference
+    Install {
+        /// htree:// reference to the release latest pointer
+        reference: String,
+        /// Where to install (default: ~/.local/bin/<asset name> for plain
+        /// binaries / binary-archives, current_exe()'s parent for app-bundle
+        /// and appimage when in place)
+        #[arg(long)]
+        to: Option<PathBuf>,
+        /// Don't download or install — just print the matched asset
+        #[arg(long, conflicts_with = "download_only")]
+        check: bool,
+        /// Download only, don't install. Implies --to is the file path
+        #[arg(long, conflicts_with = "check")]
+        download_only: bool,
+        /// Current installed version (used to compute "newer than" / skip
+        /// re-install when --only-if-newer is set)
+        #[arg(long, default_value = "0.0.0")]
+        current_version: String,
+        /// Override the target triple (defaults to the current host)
+        #[arg(long)]
+        target: Option<String>,
+        /// Path within the release dir to read the manifest from
+        #[arg(long, default_value = "release.json")]
+        manifest_path: String,
+        /// Override the asset kind (binary, app-bundle, appimage,
+        /// binary-archive). Default: from manifest.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Set the executable bit after install (binary kind only)
+        #[arg(long)]
+        executable: bool,
+        /// For binary-archive kind: name of the entry inside the archive
+        /// to extract (eg `iris/iris`). Overrides manifest's `executable`.
+        #[arg(long = "archive-entry")]
+        archive_entry: Option<String>,
+        /// Skip install if the manifest version is not newer than current
+        #[arg(long)]
+        only_if_newer: bool,
+    },
+
+    /// Self-update the htree binary itself (only meaningful when htree was
+    /// installed via `htree install`, not via `cargo install`).
     Update {
-        #[command(subcommand)]
-        command: UpdateCommands,
+        /// Don't install, just print what would happen
+        #[arg(long)]
+        check: bool,
     },
 
     /// List published git repositories for yourself or another user
@@ -749,68 +792,6 @@ pub(crate) enum ReleaseCommands {
     },
 }
 
-#[derive(Subcommand)]
-pub(crate) enum UpdateCommands {
-    /// Resolve the manifest and report the latest version + matching asset
-    Check {
-        /// htree:// reference to the release latest pointer
-        reference: String,
-        /// Current installed version (used to compute update_available)
-        #[arg(long, default_value = "0.0.0")]
-        current_version: String,
-        /// Override the target triple (defaults to the current host)
-        #[arg(long)]
-        target: Option<String>,
-        /// Path within the release dir to read the manifest from
-        #[arg(long, default_value = "release.json")]
-        manifest_path: String,
-    },
-
-    /// Download the asset matching the current platform to a local path
-    Download {
-        /// htree:// reference to the release latest pointer
-        reference: String,
-        /// Output file path (defaults to the asset name in the current dir)
-        #[arg(long, short = 'o')]
-        out: Option<PathBuf>,
-        #[arg(long, default_value = "0.0.0")]
-        current_version: String,
-        #[arg(long)]
-        target: Option<String>,
-        #[arg(long, default_value = "release.json")]
-        manifest_path: String,
-        /// Refuse to download if the asset is larger than this many bytes
-        #[arg(long)]
-        max_size: Option<u64>,
-    },
-
-    /// Download the matching asset and install it at the destination
-    Install {
-        /// htree:// reference to the release latest pointer
-        reference: String,
-        /// Where to install the new artifact (binary path, .app dir, or AppImage path)
-        #[arg(long)]
-        to: PathBuf,
-        #[arg(long, default_value = "0.0.0")]
-        current_version: String,
-        #[arg(long)]
-        target: Option<String>,
-        #[arg(long, default_value = "release.json")]
-        manifest_path: String,
-        /// Override the asset kind (binary, app-bundle, appimage, binary-archive).
-        /// Default: from manifest.
-        #[arg(long)]
-        kind: Option<String>,
-        /// Set the executable bit after install (binary kind only)
-        #[arg(long)]
-        executable: bool,
-        /// For binary-archive kind: name of the entry inside the archive to
-        /// extract (eg `iris/iris`). Overrides the manifest's `executable`
-        /// field if both are set.
-        #[arg(long = "archive-entry")]
-        archive_entry: Option<String>,
-        /// Skip install if the manifest version is not newer than current_version
-        #[arg(long)]
-        only_if_newer: bool,
-    },
-}
+/// htree's own published release reference for self-update.
+pub(crate) const HTREE_SELF_REFERENCE: &str =
+    "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhashtree/latest";

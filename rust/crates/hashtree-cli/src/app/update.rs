@@ -98,84 +98,34 @@ fn build_check_options(
     })
 }
 
-pub(crate) async fn run_check(
-    data_dir: &Path,
-    reference: String,
-    current_version: String,
-    target: Option<String>,
-    manifest_path: String,
-) -> Result<()> {
-    let updater = build_updater(data_dir).await?;
-    let options =
-        build_check_options(&reference, current_version.clone(), target, manifest_path)?;
-    let check = updater.check(options).await?;
-
-    println!("App:        {}", check.manifest.app);
-    println!("Version:    {}", check.manifest.effective_version());
-    println!("Current:    {}", current_version);
-    println!("Newer:      {}", check.update_available);
-    if let Some(channel) = check.manifest.channel.as_deref() {
-        println!("Channel:    {}", channel);
-    }
-    if let Some(notes) = check.manifest.notes.as_deref() {
-        println!("Notes:      {}", notes);
-    }
-    if let Some(asset) = check.asset.as_ref() {
-        println!("Asset:      {} ({})", asset.name, asset.path);
-        println!("Kind:       {}", asset.asset_kind().as_str());
-        if !asset.target_values().is_empty() {
-            println!("Targets:    {}", asset.target_values().join(", "));
-        }
-    } else {
-        println!("Asset:      <none matched>");
-    }
-    Ok(())
+/// Default destination for plain binaries / binary-archives when the user
+/// doesn't pass --to. Picks `~/.local/bin/<asset binary name>`.
+fn default_install_path(asset: &UpdateAsset) -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME is not set; pass --to explicitly")?;
+    let bin_dir = PathBuf::from(home).join(".local/bin");
+    let entry_name = asset
+        .executable
+        .as_deref()
+        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .unwrap_or_else(|| {
+            // Strip common archive extensions to derive a sensible binary
+            // name from the asset name itself.
+            let n = asset.name.as_str();
+            let n = n.strip_suffix(".tar.gz").unwrap_or(n);
+            let n = n.strip_suffix(".tgz").unwrap_or(n);
+            let n = n.strip_suffix(".zip").unwrap_or(n);
+            n
+        });
+    Ok(bin_dir.join(entry_name))
 }
 
-pub(crate) async fn run_download(
-    data_dir: &Path,
-    reference: String,
-    out: Option<PathBuf>,
-    current_version: String,
-    target: Option<String>,
-    manifest_path: String,
-    max_size: Option<u64>,
-) -> Result<()> {
-    let updater = build_updater(data_dir).await?;
-    let options = build_check_options(&reference, current_version, target, manifest_path)?;
-    let check = updater.check(options).await?;
-    let asset = check.asset.clone().context("no asset matched the platform")?;
-    let out_path = out.unwrap_or_else(|| PathBuf::from(&asset.name));
-
-    let downloaded = updater
-        .download(
-            &check,
-            DownloadOptions {
-                max_size,
-                ..Default::default()
-            },
-            Some(progress_logger()),
-        )
-        .await?;
-
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    std::fs::write(&out_path, &downloaded.bytes)?;
-    println!(
-        "Wrote {} bytes to {}",
-        downloaded.bytes.len(),
-        out_path.display()
-    );
-    Ok(())
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_install(
     data_dir: &Path,
     reference: String,
-    to: PathBuf,
+    to: Option<PathBuf>,
+    check_only: bool,
+    download_only: bool,
     current_version: String,
     target: Option<String>,
     manifest_path: String,
@@ -185,15 +135,9 @@ pub(crate) async fn run_install(
     only_if_newer: bool,
 ) -> Result<()> {
     let updater = build_updater(data_dir).await?;
-    let options = build_check_options(&reference, current_version, target, manifest_path)?;
+    let options =
+        build_check_options(&reference, current_version.clone(), target, manifest_path)?;
     let check = updater.check(options).await?;
-    if only_if_newer && !check.update_available {
-        println!(
-            "Already up to date (manifest version {} not newer)",
-            check.manifest.effective_version()
-        );
-        return Ok(());
-    }
 
     let mut asset: UpdateAsset = check
         .asset
@@ -209,19 +153,82 @@ pub(crate) async fn run_install(
         asset.executable = Some(entry);
     }
 
+    if check_only {
+        println!("Version:    {}", check.manifest.effective_version());
+        println!("Current:    {}", current_version);
+        println!("Newer:      {}", check.update_available);
+        if let Some(notes) = check.manifest.notes.as_deref() {
+            println!("Notes:      {}", notes);
+        }
+        println!("Asset:      {} ({})", asset.name, asset.path);
+        println!("Kind:       {}", asset.asset_kind().as_str());
+        if let Some(exe) = asset.executable.as_deref() {
+            println!("Entry:      {}", exe);
+        }
+        return Ok(());
+    }
+
+    if only_if_newer && !check.update_available {
+        println!(
+            "Already up to date (manifest version {} not newer)",
+            check.manifest.effective_version()
+        );
+        return Ok(());
+    }
+
     let downloaded = updater
         .download(&check, DownloadOptions::default(), Some(progress_logger()))
         .await?;
 
-    let target = InstallTarget::new(&to).executable(executable);
+    if download_only {
+        let out_path = to.unwrap_or_else(|| PathBuf::from(&asset.name));
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(&out_path, &downloaded.bytes)?;
+        println!(
+            "Wrote {} bytes to {}",
+            downloaded.bytes.len(),
+            out_path.display()
+        );
+        return Ok(());
+    }
+
+    let dest = match to {
+        Some(p) => p,
+        None => default_install_path(&asset)?,
+    };
+    let target = InstallTarget::new(&dest).executable(executable);
     install(&asset, &downloaded.bytes, &target)?;
     println!(
         "Installed {} ({}) → {}",
         check.manifest.effective_version(),
         asset.asset_kind().as_str(),
-        to.display()
+        dest.display()
     );
     Ok(())
+}
+
+/// Self-update: install a fresh htree binary over the running one.
+pub(crate) async fn run_self_update(data_dir: &Path, check_only: bool) -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    run_install(
+        data_dir,
+        super::args::HTREE_SELF_REFERENCE.to_string(),
+        Some(current_exe),
+        check_only,
+        false,
+        env!("CARGO_PKG_VERSION").to_string(),
+        None,
+        "release.json".to_string(),
+        None,
+        true,
+        Some("htree".to_string()),
+        true,
+    )
+    .await
 }
 
 fn progress_logger() -> hashtree_updater::DownloadCallback {

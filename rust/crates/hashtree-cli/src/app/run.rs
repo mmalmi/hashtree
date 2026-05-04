@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::add::run_add;
 use super::args::{
     Cli, Commands, MirrorCommands, PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands,
-    StorageCommands, UpdateCommands,
+    StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -1232,44 +1232,25 @@ pub(crate) async fn run() -> Result<()> {
                 );
             }
         },
-        Commands::Update { command } => match command {
-            UpdateCommands::Check {
-                reference,
-                current_version,
-                target,
-                manifest_path,
-            } => {
-                super::update::run_check(
-                    &data_dir,
-                    reference,
-                    current_version,
-                    target,
-                    manifest_path,
-                )
-                .await?;
-            }
-            UpdateCommands::Download {
-                reference,
-                out,
-                current_version,
-                target,
-                manifest_path,
-                max_size,
-            } => {
-                super::update::run_download(
-                    &data_dir,
-                    reference,
-                    out,
-                    current_version,
-                    target,
-                    manifest_path,
-                    max_size,
-                )
-                .await?;
-            }
-            UpdateCommands::Install {
+        Commands::Install {
+            reference,
+            to,
+            check,
+            download_only,
+            current_version,
+            target,
+            manifest_path,
+            kind,
+            executable,
+            archive_entry,
+            only_if_newer,
+        } => {
+            super::update::run_install(
+                &data_dir,
                 reference,
                 to,
+                check,
+                download_only,
                 current_version,
                 target,
                 manifest_path,
@@ -1277,22 +1258,12 @@ pub(crate) async fn run() -> Result<()> {
                 executable,
                 archive_entry,
                 only_if_newer,
-            } => {
-                super::update::run_install(
-                    &data_dir,
-                    reference,
-                    to,
-                    current_version,
-                    target,
-                    manifest_path,
-                    kind,
-                    executable,
-                    archive_entry,
-                    only_if_newer,
-                )
-                .await?;
-            }
-        },
+            )
+            .await?;
+        }
+        Commands::Update { check } => {
+            super::update::run_self_update(&data_dir, check).await?;
+        }
         Commands::Follow { npub } => {
             follow_user(&data_dir, &npub, true).await?;
         }
