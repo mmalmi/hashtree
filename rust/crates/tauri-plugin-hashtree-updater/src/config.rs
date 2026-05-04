@@ -10,7 +10,8 @@ pub struct Config {
     /// `htree://npub.../<tree>/<channel>/latest` reference to the release
     /// directory. Required.
     pub reference: Option<String>,
-    /// Manifest filename within the release directory. Default: `manifest.json`.
+    /// Manifest filename within the release directory. Default: `release.json`
+    /// (matches what `htree release publish` writes).
     pub manifest_path: Option<String>,
     /// Default install destination. Apps that override `kind` per-platform
     /// should leave this empty and pass a destination at install time.

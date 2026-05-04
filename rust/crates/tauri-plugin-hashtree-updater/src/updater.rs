@@ -134,7 +134,7 @@ impl UpdaterContext {
                 .config
                 .manifest_path
                 .clone()
-                .unwrap_or_else(|| "manifest.json".to_string()),
+                .unwrap_or_else(|| "release.json".to_string()),
             ..UpdateCheckOptions::default()
         };
         let check = updater.check(options).await?;

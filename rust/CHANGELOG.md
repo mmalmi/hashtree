@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.48 - 2026-05-04
+
+### Fixed
+
+- `tauri-plugin-hashtree-updater`: `download_and_install` defaulted
+  `manifest_path` to `manifest.json` while `check` defaulted to
+  `release.json`, so apps relying on the default would pass Check
+  ("update available") and then fail Install with `manifest was not
+  found at manifest.json`. Both code paths now default to
+  `release.json` (the name `htree release publish` writes), and the
+  config doc string was updated to match.
+
 ## 0.2.47 - 2026-05-04
 
 ### Added
