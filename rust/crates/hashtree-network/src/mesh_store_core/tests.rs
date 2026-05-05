@@ -505,6 +505,220 @@ fn test_response_scheduler_ignores_useless_ingress_spam() {
     );
 }
 
+#[tokio::test]
+async fn test_pubsub_production_path_delivers_subscribed_stream() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
+    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let nodes = [&publisher, &subscriber];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    subscriber.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+    assert_eq!(
+        publisher.store.pubsub_interest_peers("author:alice").await,
+        vec!["subscriber".to_string()]
+    );
+
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 1, b"live-bytes".to_vec())
+        .await;
+    assert_eq!(stats.selected_peers, 1);
+    assert_eq!(stats.sent_peers, 1);
+    pump_test_network(&nodes, 12).await;
+
+    let events = subscriber.store.drain_pubsub_events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].stream_id, "author:alice");
+    assert_eq!(events[0].seq, 1);
+    assert_eq!(events[0].origin_peer_id, "publisher");
+    assert_eq!(events[0].payload, b"live-bytes".to_vec());
+    assert!(
+        subscriber
+            .store
+            .peer_traffic_snapshot("publisher")
+            .await
+            .useful_bytes_received
+            > 0
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_pubsub_spam_ingress_does_not_buy_reciprocity_credit() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let spammer = make_shared_test_node(relay.clone(), "spammer", MeshRoutingConfig::default());
+    let target = make_shared_test_node(relay, "target", MeshRoutingConfig::default());
+    let nodes = [&spammer, &target];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    let channel = spammer
+        .store
+        .signaling()
+        .get_channel("target")
+        .await
+        .expect("target channel");
+    let spam = create_pubsub_frame("spam", 1, "spammer", vec![9; 256], MAX_HTL);
+    channel
+        .send(encode_pubsub_frame(&spam))
+        .await
+        .expect("send spam frame");
+    pump_test_network(&nodes, 8).await;
+
+    let after_spam = target.store.peer_traffic_snapshot("spammer").await;
+    assert!(after_spam.bytes_received > 0);
+    assert_eq!(
+        after_spam.useful_bytes_received, 0,
+        "unsubscribed publish spam must not count as useful ingress"
+    );
+
+    target.store.subscribe_pubsub("good").await;
+    pump_test_network(&nodes, 24).await;
+    spammer
+        .store
+        .publish_pubsub("good", 1, b"useful".to_vec())
+        .await;
+    pump_test_network(&nodes, 12).await;
+
+    let events = target.store.drain_pubsub_events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload, b"useful".to_vec());
+    assert!(
+        target
+            .store
+            .peer_traffic_snapshot("spammer")
+            .await
+            .useful_bytes_received
+            > 0
+    );
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_pubsub_scheduler_uses_production_reciprocity_credit() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(
+        relay.clone(),
+        "publisher",
+        MeshRoutingConfig {
+            pubsub_scheduler: PubsubSchedulerConfig {
+                policy: crate::pubsub_strategy::PubsubSchedulingPolicy::Reciprocal,
+                fanout: 1,
+                anonymous_free_credit_bytes: 0,
+                reciprocal_credit_multiplier: 1.0,
+                aging_credit_bytes: 0,
+            },
+            ..Default::default()
+        },
+    );
+    let leecher = make_shared_test_node(relay.clone(), "leecher", MeshRoutingConfig::default());
+    let helper = make_shared_test_node(relay, "helper", MeshRoutingConfig::default());
+    let nodes = [&publisher, &leecher, &helper];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 32).await;
+
+    leecher.store.subscribe_pubsub("author:alice").await;
+    helper.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 48).await;
+
+    let mut interested = publisher.store.pubsub_interest_peers("author:alice").await;
+    interested.sort();
+    assert_eq!(
+        interested,
+        vec!["helper".to_string(), "leecher".to_string()]
+    );
+
+    publisher
+        .store
+        .record_useful_bytes_received_from_peer("helper", 64 * 1024)
+        .await;
+    let helper_before = publisher.store.peer_traffic_snapshot("helper").await;
+    let leecher_before = publisher.store.peer_traffic_snapshot("leecher").await;
+
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 1, vec![7; 512])
+        .await;
+    assert_eq!(stats.selected_peers, 1);
+    assert_eq!(stats.sent_peers, 1);
+    assert_eq!(stats.deferred_peers, 1);
+
+    let helper_after = publisher.store.peer_traffic_snapshot("helper").await;
+    let leecher_after = publisher.store.peer_traffic_snapshot("leecher").await;
+    assert!(helper_after.bytes_sent > helper_before.bytes_sent);
+    assert_eq!(leecher_after.bytes_sent, leecher_before.bytes_sent);
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_pubsub_unsubscribe_withdraws_interest_path() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
+    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let nodes = [&publisher, &subscriber];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    subscriber.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+    assert_eq!(
+        publisher.store.pubsub_interest_peers("author:alice").await,
+        vec!["subscriber".to_string()]
+    );
+
+    subscriber.store.unsubscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+    assert!(publisher
+        .store
+        .pubsub_interest_peers("author:alice")
+        .await
+        .is_empty());
+
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 1, b"after-unsub".to_vec())
+        .await;
+    assert_eq!(stats.sent_peers, 0);
+    pump_test_network(&nodes, 12).await;
+    assert!(subscriber.store.drain_pubsub_events().await.is_empty());
+
+    crate::mock::clear_channel_registry().await;
+}
+
 #[test]
 fn test_actor_draw_is_deterministic_per_peer_hash_and_salt() {
     let hash = hashtree_core::sha256(b"deterministic");

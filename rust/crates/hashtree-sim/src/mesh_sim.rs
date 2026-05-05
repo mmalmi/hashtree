@@ -661,6 +661,7 @@ impl Simulation {
                 cashu_peer_suggested_mint_max_cap_sat: 0,
                 dispatch: selected_strategy.dispatch,
                 response_behavior: selected_strategy.response_behavior,
+                pubsub_scheduler: Default::default(),
             },
         ));
 

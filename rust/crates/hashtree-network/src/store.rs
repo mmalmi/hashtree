@@ -96,6 +96,7 @@ impl<S: Store + Send + Sync + 'static> MeshStore<S> {
             cashu_peer_suggested_mint_max_cap_sat: 0,
             dispatch: self.config.request_dispatch,
             response_behavior: Default::default(),
+            pubsub_scheduler: Default::default(),
         }
     }
 

@@ -965,6 +965,7 @@ impl Peer {
                                     .await;
                             }
                         }
+                        DataMessage::PubsubInterest(_) | DataMessage::PubsubFrame(_) => {}
                     },
                     None => {
                         warn!("[Peer {}] Failed to parse message", peer_short);
@@ -1197,6 +1198,8 @@ fn encode_data_message(msg: &DataMessage) -> Vec<u8> {
         DataMessage::PaymentAck(res) => crate::encode_payment_ack(res),
         DataMessage::Chunk(chunk) => crate::encode_chunk(chunk),
         DataMessage::PeerHints(hints) => crate::encode_peer_hints(hints),
+        DataMessage::PubsubInterest(interest) => crate::encode_pubsub_interest(interest),
+        DataMessage::PubsubFrame(frame) => crate::encode_pubsub_frame(frame),
     }
 }
 

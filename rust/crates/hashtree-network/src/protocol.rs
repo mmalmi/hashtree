@@ -9,6 +9,8 @@
 //! - PaymentAck:     [0x05][msgpack: {h: bytes32, q: u64, c: u32, a: bool, e?: string}]
 //! - Chunk:          [0x06][msgpack: {h: bytes32, q: u64, c: u32, n: u32, p: u64, d: bytes}]
 //! - PeerHints:      [0x07][msgpack: {u: [WebRTC signaling endpoint URLs]}]
+//! - PubsubInterest: [0x08][msgpack: {s: stream, sub: subscriber peer id, q: seq, a: active, htl?: u8}]
+//! - PubsubFrame:    [0x09][msgpack: {s: stream, q: seq, o: origin peer id, htl?: u8, d: bytes}]
 //!
 //! Fragmented responses include `i` (index) and `n` (total), unfragmented omit them.
 
@@ -32,6 +34,8 @@ pub const MSG_TYPE_PAYMENT: u8 = 0x04;
 pub const MSG_TYPE_PAYMENT_ACK: u8 = 0x05;
 pub const MSG_TYPE_CHUNK: u8 = 0x06;
 pub const MSG_TYPE_PEER_HINTS: u8 = 0x07;
+pub const MSG_TYPE_PUBSUB_INTEREST: u8 = 0x08;
+pub const MSG_TYPE_PUBSUB_FRAME: u8 = 0x09;
 
 /// Fragment size for large data (32KB - safe limit for WebRTC)
 pub const FRAGMENT_SIZE: usize = 32 * 1024;
@@ -150,6 +154,46 @@ pub struct PeerHints {
     pub signal_urls: Vec<String>,
 }
 
+/// Pubsub interest advertisement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PubsubInterest {
+    /// Stream/topic/author key.
+    #[serde(rename = "s")]
+    pub stream_id: String,
+    /// Stable subscriber peer id that originated the interest.
+    #[serde(rename = "sub")]
+    pub subscriber_peer_id: String,
+    /// Monotonic sequence scoped to `subscriber_peer_id`.
+    #[serde(rename = "q")]
+    pub seq: u64,
+    /// Whether this is a subscribe (`true`) or unsubscribe (`false`).
+    #[serde(rename = "a")]
+    pub active: bool,
+    /// Hops To Live (defaults to MAX_HTL when omitted on the wire).
+    #[serde(default = "default_htl", skip_serializing_if = "is_max_htl")]
+    pub htl: u8,
+}
+
+/// Pubsub data frame delivered over mesh peer links.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PubsubFrame {
+    /// Stream/topic/author key.
+    #[serde(rename = "s")]
+    pub stream_id: String,
+    /// Monotonic sequence scoped to `origin_peer_id + stream_id`.
+    #[serde(rename = "q")]
+    pub seq: u64,
+    /// Peer id that originated this frame.
+    #[serde(rename = "o")]
+    pub origin_peer_id: String,
+    /// Hops To Live (defaults to MAX_HTL when omitted on the wire).
+    #[serde(default = "default_htl", skip_serializing_if = "is_max_htl")]
+    pub htl: u8,
+    /// Live payload bytes.
+    #[serde(with = "serde_bytes", rename = "d")]
+    pub payload: Vec<u8>,
+}
+
 /// Parsed data message
 #[derive(Debug, Clone)]
 pub enum DataMessage {
@@ -161,6 +205,8 @@ pub enum DataMessage {
     PaymentAck(DataPaymentAck),
     Chunk(DataChunk),
     PeerHints(PeerHints),
+    PubsubInterest(PubsubInterest),
+    PubsubFrame(PubsubFrame),
 }
 
 /// Encode a request message to wire format
@@ -237,6 +283,24 @@ pub fn encode_peer_hints(hints: &PeerHints) -> Vec<u8> {
     result
 }
 
+/// Encode a pubsub interest to wire format.
+pub fn encode_pubsub_interest(interest: &PubsubInterest) -> Vec<u8> {
+    let body = rmp_serde::to_vec_named(interest).expect("Failed to encode pubsub interest");
+    let mut result = Vec::with_capacity(1 + body.len());
+    result.push(MSG_TYPE_PUBSUB_INTEREST);
+    result.extend(body);
+    result
+}
+
+/// Encode a pubsub data frame to wire format.
+pub fn encode_pubsub_frame(frame: &PubsubFrame) -> Vec<u8> {
+    let body = rmp_serde::to_vec_named(frame).expect("Failed to encode pubsub frame");
+    let mut result = Vec::with_capacity(1 + body.len());
+    result.push(MSG_TYPE_PUBSUB_FRAME);
+    result.extend(body);
+    result
+}
+
 /// Parse a wire format message
 pub fn parse_message(data: &[u8]) -> Option<DataMessage> {
     if data.len() < 2 {
@@ -271,6 +335,12 @@ pub fn parse_message(data: &[u8]) -> Option<DataMessage> {
         MSG_TYPE_PEER_HINTS => rmp_serde::from_slice::<PeerHints>(body)
             .ok()
             .map(DataMessage::PeerHints),
+        MSG_TYPE_PUBSUB_INTEREST => rmp_serde::from_slice::<PubsubInterest>(body)
+            .ok()
+            .map(DataMessage::PubsubInterest),
+        MSG_TYPE_PUBSUB_FRAME => rmp_serde::from_slice::<PubsubFrame>(body)
+            .ok()
+            .map(DataMessage::PubsubFrame),
         _ => None,
     }
 }
@@ -300,6 +370,40 @@ pub fn create_response(hash: &Hash, data: Vec<u8>) -> DataResponse {
         d: data,
         i: None,
         n: None,
+    }
+}
+
+/// Create a pubsub interest message.
+pub fn create_pubsub_interest(
+    stream_id: impl Into<String>,
+    subscriber_peer_id: impl Into<String>,
+    seq: u64,
+    active: bool,
+    htl: u8,
+) -> PubsubInterest {
+    PubsubInterest {
+        stream_id: stream_id.into(),
+        subscriber_peer_id: subscriber_peer_id.into(),
+        seq,
+        active,
+        htl,
+    }
+}
+
+/// Create a pubsub data frame.
+pub fn create_pubsub_frame(
+    stream_id: impl Into<String>,
+    seq: u64,
+    origin_peer_id: impl Into<String>,
+    payload: Vec<u8>,
+    htl: u8,
+) -> PubsubFrame {
+    PubsubFrame {
+        stream_id: stream_id.into(),
+        seq,
+        origin_peer_id: origin_peer_id.into(),
+        payload,
+        htl,
     }
 }
 
@@ -602,6 +706,33 @@ mod tests {
                 assert_eq!(parsed.signal_urls, hints.signal_urls);
             }
             _ => panic!("Expected peer hints"),
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_pubsub_messages() {
+        let interest = create_pubsub_interest("author:alice", "subscriber-a", 42, true, 5);
+        match parse_message(&encode_pubsub_interest(&interest)).unwrap() {
+            DataMessage::PubsubInterest(parsed) => {
+                assert_eq!(parsed.stream_id, "author:alice");
+                assert_eq!(parsed.subscriber_peer_id, "subscriber-a");
+                assert_eq!(parsed.seq, 42);
+                assert!(parsed.active);
+                assert_eq!(parsed.htl, 5);
+            }
+            _ => panic!("Expected pubsub interest"),
+        }
+
+        let frame = create_pubsub_frame("author:alice", 7, "publisher-a", vec![1, 2, 3], 4);
+        match parse_message(&encode_pubsub_frame(&frame)).unwrap() {
+            DataMessage::PubsubFrame(parsed) => {
+                assert_eq!(parsed.stream_id, "author:alice");
+                assert_eq!(parsed.seq, 7);
+                assert_eq!(parsed.origin_peer_id, "publisher-a");
+                assert_eq!(parsed.htl, 4);
+                assert_eq!(parsed.payload, vec![1, 2, 3]);
+            }
+            _ => panic!("Expected pubsub frame"),
         }
     }
 }

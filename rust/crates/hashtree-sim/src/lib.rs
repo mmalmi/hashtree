@@ -11,6 +11,7 @@
 
 pub mod author_pubsub;
 pub mod cashu_test_mint;
+pub mod mesh_pubsub;
 pub mod mesh_sim;
 pub mod mint_client;
 #[cfg(feature = "nostr")]
@@ -20,6 +21,10 @@ pub mod ws_relay;
 // Re-export main types from mesh_sim
 pub use cashu_test_mint::{
     ChannelSettlement, ChannelState, LocalTestCashuMint, MintError, MintStats,
+};
+pub use mesh_pubsub::{
+    run_mesh_pubsub_sweep, run_mesh_pubsub_workload, MeshPubsubSweepResult,
+    MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport,
 };
 pub use mesh_sim::{
     run_parameter_sweep, CashuIncentiveConfig, LocalResourceStats, NodeStrategyProfile,
