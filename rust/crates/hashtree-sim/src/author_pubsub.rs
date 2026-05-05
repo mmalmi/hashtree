@@ -2,8 +2,8 @@
 //!
 //! This is intentionally separate from production mesh forwarding. It models the
 //! small protocol shape we want to evaluate first: leased author interests,
-//! bounded fanout, redundant parents, and local admission based on reciprocal
-//! bandwidth credit.
+//! bounded fanout, redundant parents, and publish scheduling that prioritizes
+//! reciprocal bandwidth credit without blocking uncredited subscribers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -12,8 +12,8 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionPolicy {
-    Open,
+pub enum SchedulingPolicy {
+    Fair,
     Reciprocal,
 }
 
@@ -27,10 +27,9 @@ pub enum NodeBehavior {
 pub struct PubsubConfig {
     pub max_children_per_author: usize,
     pub max_parents_per_author: usize,
-    pub admission_policy: AdmissionPolicy,
+    pub scheduling_policy: SchedulingPolicy,
     pub anonymous_free_credit_bytes: u64,
     pub reciprocal_credit_multiplier: f64,
-    pub subscription_cost_bytes: u64,
 }
 
 impl Default for PubsubConfig {
@@ -38,10 +37,9 @@ impl Default for PubsubConfig {
         Self {
             max_children_per_author: 8,
             max_parents_per_author: 1,
-            admission_policy: AdmissionPolicy::Reciprocal,
+            scheduling_policy: SchedulingPolicy::Reciprocal,
             anonymous_free_credit_bytes: 4 * 1024,
             reciprocal_credit_multiplier: 1.0,
-            subscription_cost_bytes: 1024,
         }
     }
 }
@@ -55,7 +53,7 @@ pub struct PubsubReport {
     pub rejected_subscriptions: u64,
     pub forwarded_bytes: u64,
     pub malicious_drops: u64,
-    pub credit_drops: u64,
+    pub deferred_sends: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,7 +116,7 @@ pub struct PubsubWorkloadReport {
     pub rejected_subscriptions: u64,
     pub forwarded_bytes: u64,
     pub malicious_drops: u64,
-    pub credit_drops: u64,
+    pub deferred_sends: u64,
     pub tree_edges: usize,
     pub churn_leaves: u64,
     pub churn_rejoins: u64,
@@ -158,6 +156,12 @@ struct WireStats {
 }
 
 #[derive(Debug, Clone)]
+struct ScheduledChildren {
+    children: Vec<String>,
+    deferred_count: usize,
+}
+
+#[derive(Debug, Clone)]
 struct AuthorState {
     publisher: String,
     explicit_subscribers: BTreeSet<String>,
@@ -177,10 +181,6 @@ impl AuthorState {
             last_seq: None,
             stats: PubsubReport::default(),
         }
-    }
-
-    fn child_count(&self, parent: &str) -> usize {
-        self.children.get(parent).map(BTreeSet::len).unwrap_or(0)
     }
 
     fn has_edge(&self, parent: &str, child: &str) -> bool {
@@ -359,14 +359,18 @@ impl AuthorPubsubSim {
                 continue;
             }
 
-            for child in children {
+            let selected_children = self.select_publish_children(&parent, children);
+            if let Some(state) = self.authors.get_mut(author) {
+                state.stats.deferred_sends = state.stats.deferred_sends.saturating_add(
+                    selected_children
+                        .deferred_count
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                );
+            }
+
+            for child in selected_children.children {
                 if !self.is_active(&child) {
-                    continue;
-                }
-                if !self.can_send_bytes(&parent, &child, bytes) {
-                    if let Some(state) = self.authors.get_mut(author) {
-                        state.stats.credit_drops = state.stats.credit_drops.saturating_add(1);
-                    }
                     continue;
                 }
 
@@ -555,24 +559,10 @@ impl AuthorPubsubSim {
         if state.has_edge(parent, child) {
             return true;
         }
-        if state.child_count(parent) >= self.config.max_children_per_author {
-            return false;
-        }
         if state.parent_count(child) >= self.config.max_parents_per_author {
             return false;
         }
-        self.has_credit(parent, child, self.config.subscription_cost_bytes)
-    }
-
-    fn can_send_bytes(&self, parent: &str, child: &str, bytes: u64) -> bool {
-        self.has_credit(parent, child, bytes)
-    }
-
-    fn has_credit(&self, parent: &str, child: &str, cost_bytes: u64) -> bool {
-        if self.config.admission_policy == AdmissionPolicy::Open {
-            return true;
-        }
-        self.peer_credit(parent, child) >= cost_bytes as f64
+        true
     }
 
     fn peer_credit(&self, parent: &str, child: &str) -> f64 {
@@ -584,6 +574,54 @@ impl AuthorPubsubSim {
         let reciprocal_credit =
             wire.bytes_received as f64 * self.config.reciprocal_credit_multiplier;
         self.config.anonymous_free_credit_bytes as f64 + reciprocal_credit - wire.bytes_sent as f64
+    }
+
+    fn peer_bytes_sent(&self, parent: &str, child: &str) -> u64 {
+        self.wire
+            .get(&(parent.to_string(), child.to_string()))
+            .map(|wire| wire.bytes_sent)
+            .unwrap_or(0)
+    }
+
+    fn select_publish_children(
+        &self,
+        parent: &str,
+        children: BTreeSet<String>,
+    ) -> ScheduledChildren {
+        let mut candidates = children
+            .into_iter()
+            .filter(|child| self.is_active(child))
+            .collect::<Vec<_>>();
+
+        match self.config.scheduling_policy {
+            SchedulingPolicy::Fair => {
+                candidates.sort_by(|left, right| {
+                    self.peer_bytes_sent(parent, left)
+                        .cmp(&self.peer_bytes_sent(parent, right))
+                        .then_with(|| left.cmp(right))
+                });
+            }
+            SchedulingPolicy::Reciprocal => {
+                candidates.sort_by(|left, right| {
+                    self.peer_credit(parent, right)
+                        .partial_cmp(&self.peer_credit(parent, left))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            self.peer_bytes_sent(parent, left)
+                                .cmp(&self.peer_bytes_sent(parent, right))
+                        })
+                        .then_with(|| left.cmp(right))
+                });
+            }
+        }
+
+        let capacity = self.config.max_children_per_author.min(candidates.len());
+        let deferred_count = candidates.len().saturating_sub(capacity);
+        candidates.truncate(capacity);
+        ScheduledChildren {
+            children: candidates,
+            deferred_count,
+        }
     }
 
     fn record_wire_sent(&mut self, from: &str, to: &str, bytes: u64) {
@@ -786,23 +824,34 @@ fn connect_workload_topology(
 
     let ring_degree = target_degree.max(2).min(node_ids.len().saturating_sub(1));
     let ring_radius = (ring_degree / 2).max(1);
+    let mut edges = BTreeSet::new();
     for i in 0..node_ids.len() {
         for offset in 1..=ring_radius {
             let j = (i + offset) % node_ids.len();
-            sim.link(&node_ids[i], &node_ids[j]);
+            let edge = ordered_edge(&node_ids[i], &node_ids[j]);
+            if edges.insert(edge.clone()) {
+                sim.link(&edge.0, &edge.1);
+            }
         }
     }
 
-    let desired_edges = node_ids.len().saturating_mul(target_degree.max(2)) / 2;
+    let max_edges = node_ids
+        .len()
+        .saturating_mul(node_ids.len().saturating_sub(1))
+        / 2;
+    let desired_edges = (node_ids.len().saturating_mul(target_degree.max(2)) / 2).min(max_edges);
     let max_attempts = desired_edges.saturating_mul(8).max(32);
     for _ in 0..max_attempts {
-        if unique_edges(sim).len() >= desired_edges {
+        if edges.len() >= desired_edges {
             break;
         }
         let a = rng.gen_range(0..node_ids.len());
         let b = rng.gen_range(0..node_ids.len());
         if a != b {
-            sim.link(&node_ids[a], &node_ids[b]);
+            let edge = ordered_edge(&node_ids[a], &node_ids[b]);
+            if edges.insert(edge.clone()) {
+                sim.link(&edge.0, &edge.1);
+            }
         }
     }
 }
@@ -825,15 +874,18 @@ fn unique_edges(sim: &AuthorPubsubSim) -> Vec<(String, String)> {
     let mut edges = BTreeSet::new();
     for (node_id, node) in &sim.nodes {
         for peer_id in &node.links {
-            let edge = if node_id < peer_id {
-                (node_id.clone(), peer_id.clone())
-            } else {
-                (peer_id.clone(), node_id.clone())
-            };
-            edges.insert(edge);
+            edges.insert(ordered_edge(node_id, peer_id));
         }
     }
     edges.into_iter().collect()
+}
+
+fn ordered_edge(a: &str, b: &str) -> (String, String) {
+    if a < b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
 }
 
 fn apply_workload_churn(
@@ -907,9 +959,9 @@ fn finalize_workload_report(sim: &AuthorPubsubSim, report: &mut PubsubWorkloadRe
         report.malicious_drops = report
             .malicious_drops
             .saturating_add(author_report.malicious_drops);
-        report.credit_drops = report
-            .credit_drops
-            .saturating_add(author_report.credit_drops);
+        report.deferred_sends = report
+            .deferred_sends
+            .saturating_add(author_report.deferred_sends);
 
         report.cooperative_accepted_subscribers =
             report.cooperative_accepted_subscribers.saturating_add(
