@@ -457,7 +457,9 @@ impl<R: SignalingTransport + 'static, F: PeerLinkFactory + 'static> MeshRouter<R
 
     /// Get peer IDs
     pub async fn peer_ids(&self) -> Vec<String> {
-        self.peers.read().await.keys().cloned().collect()
+        let mut peer_ids = self.peers.read().await.keys().cloned().collect::<Vec<_>>();
+        peer_ids.sort();
+        peer_ids
     }
 
     /// Get a peer's channel
