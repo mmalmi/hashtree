@@ -9,6 +9,7 @@
 //! - Shared router tests - exercise the production signaling/router core directly
 //! - `WsRelay` - WebSocket Nostr relay for integration testing
 
+pub mod author_pubsub;
 pub mod cashu_test_mint;
 pub mod mesh_sim;
 pub mod mint_client;
