@@ -445,6 +445,7 @@ fn test_response_scheduler_prefers_helpful_peer_over_queue_order() {
         PeerWireStats {
             bytes_sent: 16 * 1024,
             bytes_received: 0,
+            useful_bytes_received: 0,
             bandwidth_debt: 0.0,
         },
     );
@@ -453,6 +454,7 @@ fn test_response_scheduler_prefers_helpful_peer_over_queue_order() {
         PeerWireStats {
             bytes_sent: 1024,
             bytes_received: 16 * 1024,
+            useful_bytes_received: 16 * 1024,
             bandwidth_debt: 0.0,
         },
     );
@@ -463,6 +465,43 @@ fn test_response_scheduler_prefers_helpful_peer_over_queue_order() {
     assert_eq!(
         selected_job_id, 2,
         "reciprocity should outrank queue order when payloads are otherwise equal",
+    );
+}
+
+#[test]
+fn test_response_scheduler_ignores_useless_ingress_spam() {
+    let ready_at = Instant::now();
+    let ready_jobs = vec![
+        (1, "spammer".to_string(), 4096usize, ready_at, 1),
+        (2, "useful".to_string(), 4096usize, ready_at, 2),
+    ];
+
+    let mut stats = HashMap::new();
+    stats.insert(
+        "spammer".to_string(),
+        PeerWireStats {
+            bytes_sent: 1024,
+            bytes_received: 512 * 1024,
+            useful_bytes_received: 0,
+            bandwidth_debt: 0.0,
+        },
+    );
+    stats.insert(
+        "useful".to_string(),
+        PeerWireStats {
+            bytes_sent: 1024,
+            bytes_received: 16 * 1024,
+            useful_bytes_received: 16 * 1024,
+            bandwidth_debt: 0.0,
+        },
+    );
+
+    let (selected_job_id, _) = TestStore::choose_ready_response_job(&ready_jobs, &stats)
+        .expect("selected ready response job");
+
+    assert_eq!(
+        selected_job_id, 2,
+        "raw ingress spam must not buy response scheduling priority",
     );
 }
 

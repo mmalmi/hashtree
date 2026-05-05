@@ -26,6 +26,9 @@ use crate::protocol::{
     encode_quote_response, encode_request, encode_response, hash_to_key, parse_message,
     DataMessage, DataQuoteRequest, DataQuoteResponse,
 };
+use crate::pubsub_strategy::{
+    select_reciprocal_outbound_job, OutboundJobCandidate, PeerTrafficSnapshot,
+};
 use crate::signaling::MeshRouter;
 use crate::transport::{PeerLinkFactory, SignalingTransport, TransportError};
 use crate::types::{should_forward_htl, PeerHTLConfig, SignalingMessage, TimedSeenSet, MAX_HTL};
@@ -53,12 +56,7 @@ struct PendingForwardRequest {
     requester_ids: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct PeerWireStats {
-    bytes_sent: u64,
-    bytes_received: u64,
-    bandwidth_debt: f64,
-}
+type PeerWireStats = PeerTrafficSnapshot;
 
 struct PendingResponseSend {
     job_id: u64,
@@ -733,33 +731,51 @@ where
         entry.bytes_received = entry.bytes_received.saturating_add(bytes);
     }
 
-    fn peer_upload_weight(stats: &PeerWireStats) -> f64 {
-        let raw_ratio = (stats.bytes_received.saturating_add(1024) as f64)
-            / (stats.bytes_sent.saturating_add(1024) as f64);
-        let bounded_ratio = raw_ratio / (1.0 + raw_ratio);
-        0.5 + 1.5 * bounded_ratio
+    /// Record ingress from a peer that matched local or downstream demand.
+    ///
+    /// Raw bytes are tracked separately in `record_peer_wire_received`; this
+    /// counter is the reciprocity signal used by shared outbound scheduling.
+    pub async fn record_useful_bytes_received_from_peer(&self, peer_id: &str, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let mut stats = self.peer_wire_stats.write().await;
+        let entry = stats.entry(peer_id.to_string()).or_default();
+        entry.useful_bytes_received = entry.useful_bytes_received.saturating_add(bytes);
+    }
+
+    /// Snapshot peer traffic for production pubsub scheduling or diagnostics.
+    pub async fn peer_traffic_snapshot(&self, peer_id: &str) -> PeerTrafficSnapshot {
+        self.peer_wire_stats
+            .read()
+            .await
+            .get(peer_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Snapshot all known peer traffic for production pubsub scheduling.
+    pub async fn peer_traffic_snapshots(&self) -> HashMap<String, PeerTrafficSnapshot> {
+        self.peer_wire_stats.read().await.clone()
     }
 
     fn choose_ready_response_job(
         ready_jobs: &[(u64, String, usize, Instant, u64)],
         stats: &HashMap<String, PeerWireStats>,
     ) -> Option<(u64, f64)> {
-        ready_jobs
+        let jobs = ready_jobs
             .iter()
-            .map(|job| {
-                let peer_stats = stats.get(&job.1).cloned().unwrap_or_default();
-                let finish = peer_stats.bandwidth_debt
-                    + (job.2 as f64 / Self::peer_upload_weight(&peer_stats));
-                (job.0, job.1.as_str(), job.4, finish)
+            .map(|job| OutboundJobCandidate {
+                job_id: job.0,
+                peer_id: job.1.clone(),
+                message_bytes: job.2 as u64,
+                queue_sequence: job.4,
             })
-            .min_by(|left, right| {
-                left.3
-                    .partial_cmp(&right.3)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| left.2.cmp(&right.2))
-                    .then_with(|| left.1.cmp(right.1))
-            })
-            .map(|choice| (choice.0, choice.3))
+            .collect::<Vec<_>>();
+        select_reciprocal_outbound_job(&jobs, |peer_id| {
+            stats.get(peer_id).copied().unwrap_or_default()
+        })
+        .map(|choice| (choice.job_id, choice.virtual_finish))
     }
 
     async fn enqueue_response_send(
@@ -2289,6 +2305,8 @@ where
             return;
         }
 
+        self.record_useful_bytes_received_from_peer(from_peer, res.d.len() as u64)
+            .await;
         self.complete_pending_response(from_peer, &hash, hash_key, res.d)
             .await;
     }

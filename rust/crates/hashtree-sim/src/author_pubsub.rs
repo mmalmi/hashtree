@@ -11,11 +11,11 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchedulingPolicy {
-    Fair,
-    Reciprocal,
-}
+use hashtree_network::{
+    reciprocal_virtual_finish, PeerTrafficSnapshot, PubsubCandidate, PubsubSchedulerConfig,
+};
+
+pub use hashtree_network::PubsubSchedulingPolicy as SchedulingPolicy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeBehavior {
@@ -30,6 +30,9 @@ pub struct PubsubConfig {
     pub scheduling_policy: SchedulingPolicy,
     pub anonymous_free_credit_bytes: u64,
     pub reciprocal_credit_multiplier: f64,
+    pub aging_credit_bytes: u64,
+    pub max_outbound_bytes_per_node_per_round: u64,
+    pub latency_per_hop_ms: u64,
 }
 
 impl Default for PubsubConfig {
@@ -40,6 +43,9 @@ impl Default for PubsubConfig {
             scheduling_policy: SchedulingPolicy::Reciprocal,
             anonymous_free_credit_bytes: 4 * 1024,
             reciprocal_credit_multiplier: 1.0,
+            aging_credit_bytes: 2 * 1024,
+            max_outbound_bytes_per_node_per_round: u64::MAX,
+            latency_per_hop_ms: 25,
         }
     }
 }
@@ -52,8 +58,11 @@ pub struct PubsubReport {
     pub accepted_edges: u64,
     pub rejected_subscriptions: u64,
     pub forwarded_bytes: u64,
+    pub duplicate_deliveries: u64,
+    pub duplicate_bytes: u64,
     pub malicious_drops: u64,
     pub deferred_sends: u64,
+    pub budget_deferred_sends: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +81,9 @@ pub struct PubsubWorkloadConfig {
     pub churn_rate: f64,
     pub allow_rejoin: bool,
     pub prefer_uncredited_subscribers: bool,
+    pub spam_author_count: usize,
+    pub spam_subscriber_attempts_per_author: usize,
+    pub spam_publish_rounds_per_round: usize,
 }
 
 impl Default for PubsubWorkloadConfig {
@@ -91,6 +103,9 @@ impl Default for PubsubWorkloadConfig {
             churn_rate: 0.0,
             allow_rejoin: false,
             prefer_uncredited_subscribers: false,
+            spam_author_count: 0,
+            spam_subscriber_attempts_per_author: 0,
+            spam_publish_rounds_per_round: 0,
         }
     }
 }
@@ -112,14 +127,27 @@ pub struct PubsubWorkloadReport {
     pub cooperative_delivered_events: u64,
     pub delivery_rate: f64,
     pub cooperative_delivery_rate: f64,
+    pub loss_rate: f64,
     pub accepted_edges: u64,
     pub rejected_subscriptions: u64,
     pub forwarded_bytes: u64,
+    pub duplicate_deliveries: u64,
+    pub duplicate_bytes: u64,
+    pub bytes_per_delivered_event: f64,
+    pub delivery_latency_p50_ms: u64,
+    pub delivery_latency_p95_ms: u64,
+    pub delivery_latency_max_ms: u64,
     pub malicious_drops: u64,
     pub deferred_sends: u64,
+    pub budget_deferred_sends: u64,
     pub tree_edges: usize,
     pub churn_leaves: u64,
     pub churn_rejoins: u64,
+    pub spam_author_count: usize,
+    pub spam_publish_events: u64,
+    pub spam_delivery_opportunities: u64,
+    pub spam_delivered_events: u64,
+    pub spam_delivery_rate: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +163,7 @@ struct Node {
     reciprocal_provider: bool,
     links: BTreeSet<String>,
     received: BTreeSet<(String, u64)>,
+    received_hops: BTreeMap<(String, u64), u64>,
 }
 
 impl Node {
@@ -145,6 +174,7 @@ impl Node {
             reciprocal_provider: true,
             links: BTreeSet::new(),
             received: BTreeSet::new(),
+            received_hops: BTreeMap::new(),
         }
     }
 }
@@ -153,11 +183,14 @@ impl Node {
 struct WireStats {
     bytes_sent: u64,
     bytes_received: u64,
+    useful_bytes_received: u64,
+    bandwidth_debt: f64,
 }
 
 #[derive(Debug, Clone)]
 struct ScheduledChildren {
     children: Vec<String>,
+    deferred_children: Vec<String>,
     deferred_count: usize,
 }
 
@@ -214,6 +247,8 @@ pub struct AuthorPubsubSim {
     nodes: BTreeMap<String, Node>,
     authors: BTreeMap<String, AuthorState>,
     wire: BTreeMap<(String, String), WireStats>,
+    deferred_by_edge: BTreeMap<(String, String), u64>,
+    round_outbound_bytes: BTreeMap<String, u64>,
 }
 
 impl AuthorPubsubSim {
@@ -223,6 +258,8 @@ impl AuthorPubsubSim {
             nodes: BTreeMap::new(),
             authors: BTreeMap::new(),
             wire: BTreeMap::new(),
+            deferred_by_edge: BTreeMap::new(),
+            round_outbound_bytes: BTreeMap::new(),
         }
     }
 
@@ -252,11 +289,28 @@ impl AuthorPubsubSim {
     }
 
     pub fn record_bytes_received(&mut self, node_id: &str, from_peer: &str, bytes: u64) {
+        self.record_peer_bytes_received(node_id, from_peer, bytes, true);
+    }
+
+    pub fn record_raw_bytes_received(&mut self, node_id: &str, from_peer: &str, bytes: u64) {
+        self.record_peer_bytes_received(node_id, from_peer, bytes, false);
+    }
+
+    fn record_peer_bytes_received(
+        &mut self,
+        node_id: &str,
+        from_peer: &str,
+        bytes: u64,
+        useful_for_reciprocity: bool,
+    ) {
         let entry = self
             .wire
             .entry((node_id.to_string(), from_peer.to_string()))
             .or_default();
         entry.bytes_received = entry.bytes_received.saturating_add(bytes);
+        if useful_for_reciprocity {
+            entry.useful_bytes_received = entry.useful_bytes_received.saturating_add(bytes);
+        }
     }
 
     pub fn set_author_publisher(&mut self, author: &str, publisher: &str) {
@@ -316,7 +370,21 @@ impl AuthorPubsubSim {
         true
     }
 
+    pub fn begin_publish_round(&mut self) {
+        self.round_outbound_bytes.clear();
+    }
+
     pub fn publish(&mut self, author: &str, seq: u64, bytes: u64) {
+        self.publish_with_reciprocity(author, seq, bytes, true);
+    }
+
+    fn publish_with_reciprocity(
+        &mut self,
+        author: &str,
+        seq: u64,
+        bytes: u64,
+        useful_for_reciprocity: bool,
+    ) {
         let Some(publisher) = self
             .authors
             .get(author)
@@ -329,13 +397,13 @@ impl AuthorPubsubSim {
         }
 
         let mut seen = BTreeSet::from([publisher.clone()]);
-        let mut queue = VecDeque::from([publisher]);
+        let mut queue = VecDeque::from([(publisher, 0u64)]);
 
         if let Some(state) = self.authors.get_mut(author) {
             state.last_seq = Some(seq);
         }
 
-        while let Some(parent) = queue.pop_front() {
+        while let Some((parent, hop_count)) = queue.pop_front() {
             let children = self
                 .authors
                 .get(author)
@@ -359,7 +427,8 @@ impl AuthorPubsubSim {
                 continue;
             }
 
-            let selected_children = self.select_publish_children(&parent, children);
+            let selected_children =
+                self.select_publish_children(author, seq, &parent, bytes, children);
             if let Some(state) = self.authors.get_mut(author) {
                 state.stats.deferred_sends = state.stats.deferred_sends.saturating_add(
                     selected_children
@@ -368,25 +437,56 @@ impl AuthorPubsubSim {
                         .unwrap_or(u64::MAX),
                 );
             }
+            for child in &selected_children.deferred_children {
+                self.record_deferred_child(&parent, child);
+            }
 
             for child in selected_children.children {
                 if !self.is_active(&child) {
                     continue;
                 }
+                if !self.reserve_outbound_bytes(&parent, bytes) {
+                    self.record_deferred_child(&parent, &child);
+                    if let Some(state) = self.authors.get_mut(author) {
+                        state.stats.deferred_sends = state.stats.deferred_sends.saturating_add(1);
+                        state.stats.budget_deferred_sends =
+                            state.stats.budget_deferred_sends.saturating_add(1);
+                    }
+                    continue;
+                }
 
-                self.record_wire_sent(&parent, &child, bytes);
+                let bandwidth_debt = self.peer_virtual_finish(&parent, &child, bytes);
+                self.record_wire_sent(&parent, &child, bytes, useful_for_reciprocity);
+                self.set_peer_bandwidth_debt(&parent, &child, bandwidth_debt);
                 if let Some(state) = self.authors.get_mut(author) {
                     state.stats.forwarded_bytes = state.stats.forwarded_bytes.saturating_add(bytes);
                 }
 
+                let event_key = (author.to_string(), seq);
                 let first_delivery = self
                     .nodes
                     .get_mut(&child)
-                    .map(|node| node.received.insert((author.to_string(), seq)))
+                    .map(|node| {
+                        let inserted = node.received.insert(event_key.clone());
+                        if inserted {
+                            node.received_hops
+                                .insert(event_key.clone(), hop_count.saturating_add(1));
+                        }
+                        inserted
+                    })
                     .unwrap_or(false);
 
                 if first_delivery && seen.insert(child.clone()) {
-                    queue.push_back(child);
+                    self.clear_deferred_child(&parent, &child);
+                    queue.push_back((child, hop_count.saturating_add(1)));
+                } else {
+                    self.clear_deferred_child(&parent, &child);
+                    if let Some(state) = self.authors.get_mut(author) {
+                        state.stats.duplicate_deliveries =
+                            state.stats.duplicate_deliveries.saturating_add(1);
+                        state.stats.duplicate_bytes =
+                            state.stats.duplicate_bytes.saturating_add(bytes);
+                    }
                 }
             }
         }
@@ -396,6 +496,12 @@ impl AuthorPubsubSim {
         self.nodes
             .get(node_id)
             .is_some_and(|node| node.received.contains(&(author.to_string(), seq)))
+    }
+
+    pub fn received_hops(&self, node_id: &str, author: &str, seq: u64) -> Option<u64> {
+        self.nodes
+            .get(node_id)
+            .and_then(|node| node.received_hops.get(&(author.to_string(), seq)).copied())
     }
 
     pub fn report(&self, author: &str) -> PubsubReport {
@@ -565,66 +671,93 @@ impl AuthorPubsubSim {
         true
     }
 
-    fn peer_credit(&self, parent: &str, child: &str) -> f64 {
+    fn select_publish_children(
+        &self,
+        author: &str,
+        seq: u64,
+        parent: &str,
+        bytes: u64,
+        children: BTreeSet<String>,
+    ) -> ScheduledChildren {
+        let candidates = children
+            .into_iter()
+            .filter(|child| self.is_active(child))
+            .map(|child| PubsubCandidate {
+                deferred_count: self
+                    .deferred_by_edge
+                    .get(&(parent.to_string(), child.clone()))
+                    .copied()
+                    .unwrap_or_default(),
+                traffic: self.peer_traffic_snapshot(parent, &child),
+                peer_id: child,
+            })
+            .collect::<Vec<_>>();
+        let scheduler = PubsubSchedulerConfig {
+            policy: self.config.scheduling_policy,
+            fanout: self.config.max_children_per_author,
+            anonymous_free_credit_bytes: self.config.anonymous_free_credit_bytes,
+            reciprocal_credit_multiplier: self.config.reciprocal_credit_multiplier,
+            aging_credit_bytes: self.config.aging_credit_bytes,
+        };
+        let selection = scheduler.select(author, seq, parent, bytes, &candidates);
+        let deferred_count = selection.deferred.len();
+        ScheduledChildren {
+            children: selection.selected,
+            deferred_children: selection.deferred,
+            deferred_count,
+        }
+    }
+
+    fn peer_traffic_snapshot(&self, parent: &str, child: &str) -> PeerTrafficSnapshot {
         let wire = self
             .wire
             .get(&(parent.to_string(), child.to_string()))
             .cloned()
             .unwrap_or_default();
-        let reciprocal_credit =
-            wire.bytes_received as f64 * self.config.reciprocal_credit_multiplier;
-        self.config.anonymous_free_credit_bytes as f64 + reciprocal_credit - wire.bytes_sent as f64
-    }
-
-    fn peer_bytes_sent(&self, parent: &str, child: &str) -> u64 {
-        self.wire
-            .get(&(parent.to_string(), child.to_string()))
-            .map(|wire| wire.bytes_sent)
-            .unwrap_or(0)
-    }
-
-    fn select_publish_children(
-        &self,
-        parent: &str,
-        children: BTreeSet<String>,
-    ) -> ScheduledChildren {
-        let mut candidates = children
-            .into_iter()
-            .filter(|child| self.is_active(child))
-            .collect::<Vec<_>>();
-
-        match self.config.scheduling_policy {
-            SchedulingPolicy::Fair => {
-                candidates.sort_by(|left, right| {
-                    self.peer_bytes_sent(parent, left)
-                        .cmp(&self.peer_bytes_sent(parent, right))
-                        .then_with(|| left.cmp(right))
-                });
-            }
-            SchedulingPolicy::Reciprocal => {
-                candidates.sort_by(|left, right| {
-                    self.peer_credit(parent, right)
-                        .partial_cmp(&self.peer_credit(parent, left))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            self.peer_bytes_sent(parent, left)
-                                .cmp(&self.peer_bytes_sent(parent, right))
-                        })
-                        .then_with(|| left.cmp(right))
-                });
-            }
-        }
-
-        let capacity = self.config.max_children_per_author.min(candidates.len());
-        let deferred_count = candidates.len().saturating_sub(capacity);
-        candidates.truncate(capacity);
-        ScheduledChildren {
-            children: candidates,
-            deferred_count,
+        PeerTrafficSnapshot {
+            bytes_sent: wire.bytes_sent,
+            bytes_received: wire.bytes_received,
+            useful_bytes_received: wire.useful_bytes_received,
+            bandwidth_debt: wire.bandwidth_debt,
         }
     }
 
-    fn record_wire_sent(&mut self, from: &str, to: &str, bytes: u64) {
+    fn peer_virtual_finish(&self, parent: &str, child: &str, bytes: u64) -> f64 {
+        reciprocal_virtual_finish(self.peer_traffic_snapshot(parent, child), bytes)
+    }
+
+    fn record_deferred_child(&mut self, parent: &str, child: &str) {
+        let entry = self
+            .deferred_by_edge
+            .entry((parent.to_string(), child.to_string()))
+            .or_default();
+        *entry = entry.saturating_add(1);
+    }
+
+    fn clear_deferred_child(&mut self, parent: &str, child: &str) {
+        self.deferred_by_edge
+            .remove(&(parent.to_string(), child.to_string()));
+    }
+
+    fn reserve_outbound_bytes(&mut self, node_id: &str, bytes: u64) -> bool {
+        let budget = self.config.max_outbound_bytes_per_node_per_round;
+        if budget == u64::MAX {
+            return true;
+        }
+        let used = self
+            .round_outbound_bytes
+            .get(node_id)
+            .copied()
+            .unwrap_or_default();
+        if used.saturating_add(bytes) > budget {
+            return false;
+        }
+        self.round_outbound_bytes
+            .insert(node_id.to_string(), used.saturating_add(bytes));
+        true
+    }
+
+    fn record_wire_sent(&mut self, from: &str, to: &str, bytes: u64, useful_for_reciprocity: bool) {
         let sent = self
             .wire
             .entry((from.to_string(), to.to_string()))
@@ -636,6 +769,17 @@ impl AuthorPubsubSim {
             .entry((to.to_string(), from.to_string()))
             .or_default();
         received.bytes_received = received.bytes_received.saturating_add(bytes);
+        if useful_for_reciprocity {
+            received.useful_bytes_received = received.useful_bytes_received.saturating_add(bytes);
+        }
+    }
+
+    fn set_peer_bandwidth_debt(&mut self, from: &str, to: &str, bandwidth_debt: f64) {
+        let entry = self
+            .wire
+            .entry((from.to_string(), to.to_string()))
+            .or_default();
+        entry.bandwidth_debt = bandwidth_debt;
     }
 
     fn is_reachable_from_publisher(&self, author: &str, node_id: &str) -> bool {
@@ -708,10 +852,21 @@ pub fn run_author_pubsub_workload(config: PubsubWorkloadConfig) -> PubsubWorkloa
 
     connect_workload_topology(&mut sim, &node_ids, config.target_degree, &mut rng);
 
+    let total_author_count = config.author_count.saturating_add(config.spam_author_count);
     let mut publisher_pool = node_ids.clone();
     publisher_pool.shuffle(&mut rng);
-    let publisher_ids = (0..config.author_count)
+    let publisher_ids = (0..total_author_count)
         .map(|i| publisher_pool[i % publisher_pool.len()].clone())
+        .collect::<Vec<_>>();
+    let useful_publisher_ids = publisher_ids
+        .iter()
+        .take(config.author_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let spam_publisher_ids = publisher_ids
+        .iter()
+        .skip(config.author_count)
+        .cloned()
         .collect::<Vec<_>>();
     let protected_publishers = publisher_ids.iter().cloned().collect::<BTreeSet<_>>();
 
@@ -736,10 +891,11 @@ pub fn run_author_pubsub_workload(config: PubsubWorkloadConfig) -> PubsubWorkloa
         node_count: config.node_count,
         author_count: config.author_count,
         publish_rounds: config.publish_rounds,
+        spam_author_count: config.spam_author_count,
         ..Default::default()
     };
 
-    for (author_idx, publisher) in publisher_ids.iter().enumerate() {
+    for (author_idx, publisher) in useful_publisher_ids.iter().enumerate() {
         let author = author_id(author_idx);
         sim.set_author_publisher(&author, publisher);
 
@@ -770,6 +926,26 @@ pub fn run_author_pubsub_workload(config: PubsubWorkloadConfig) -> PubsubWorkloa
         }
     }
 
+    for (author_idx, publisher) in spam_publisher_ids.iter().enumerate() {
+        let author = spam_author_id(author_idx);
+        sim.set_author_publisher(&author, publisher);
+
+        let mut candidates = node_ids
+            .iter()
+            .filter(|node_id| *node_id != publisher)
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.shuffle(&mut rng);
+        for subscriber in candidates.into_iter().take(
+            config
+                .spam_subscriber_attempts_per_author
+                .min(config.node_count - 1),
+        ) {
+            let _ = sim.subscribe(&subscriber, &author);
+        }
+    }
+
+    let mut delivery_latencies_ms = Vec::new();
     for round in 0..config.publish_rounds {
         if round > 0 && config.churn_rate > 0.0 {
             apply_workload_churn(
@@ -786,14 +962,27 @@ pub fn run_author_pubsub_workload(config: PubsubWorkloadConfig) -> PubsubWorkloa
             sim.repair_author(&author);
         }
 
+        sim.begin_publish_round();
+
+        for spam_round in 0..config.spam_publish_rounds_per_round {
+            let seq = (round * config.spam_publish_rounds_per_round + spam_round + 1) as u64;
+            for author_idx in 0..config.spam_author_count {
+                let author = spam_author_id(author_idx);
+                report.spam_publish_events = report.spam_publish_events.saturating_add(1);
+                sim.publish_with_reciprocity(&author, seq, config.payload_bytes, false);
+                record_spam_delivery_round(&sim, &author, seq, &mut report);
+            }
+        }
+
         let seq = (round + 1) as u64;
-        for author in sim.author_ids() {
+        for author_idx in 0..config.author_count {
+            let author = author_id(author_idx);
             sim.publish(&author, seq, config.payload_bytes);
-            record_delivery_round(&sim, &author, seq, &mut report);
+            record_delivery_round(&sim, &author, seq, &mut report, &mut delivery_latencies_ms);
         }
     }
 
-    finalize_workload_report(&sim, &mut report);
+    finalize_workload_report(&sim, &mut report, &delivery_latencies_ms);
     report
 }
 
@@ -808,8 +997,220 @@ pub fn run_author_pubsub_sweep(configs: &[PubsubWorkloadConfig]) -> Vec<PubsubSw
         .collect()
 }
 
+pub fn run_author_pubsub_htl_flood_baseline(
+    config: PubsubWorkloadConfig,
+    htl: usize,
+) -> PubsubWorkloadReport {
+    if config.node_count == 0 || config.author_count == 0 || config.publish_rounds == 0 {
+        return PubsubWorkloadReport {
+            seed: config.seed,
+            node_count: config.node_count,
+            author_count: config.author_count,
+            publish_rounds: config.publish_rounds,
+            spam_author_count: config.spam_author_count,
+            ..Default::default()
+        };
+    }
+
+    let mut rng = StdRng::seed_from_u64(config.seed);
+    let mut sim = AuthorPubsubSim::new(config.pubsub.clone());
+    let node_ids = (0..config.node_count)
+        .map(|i| format!("node-{i:04}"))
+        .collect::<Vec<_>>();
+
+    for node_id in &node_ids {
+        sim.add_node(node_id, NodeBehavior::Honest);
+        let is_provider = rng.gen::<f64>() < config.reciprocal_provider_fraction.clamp(0.0, 1.0);
+        sim.set_reciprocal_provider(node_id, is_provider);
+    }
+
+    connect_workload_topology(&mut sim, &node_ids, config.target_degree, &mut rng);
+
+    let total_author_count = config.author_count.saturating_add(config.spam_author_count);
+    let mut publisher_pool = node_ids.clone();
+    publisher_pool.shuffle(&mut rng);
+    let publisher_ids = (0..total_author_count)
+        .map(|i| publisher_pool[i % publisher_pool.len()].clone())
+        .collect::<Vec<_>>();
+    let useful_publisher_ids = publisher_ids
+        .iter()
+        .take(config.author_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let spam_publisher_ids = publisher_ids
+        .iter()
+        .skip(config.author_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let protected_publishers = publisher_ids.iter().cloned().collect::<BTreeSet<_>>();
+
+    for publisher in &publisher_ids {
+        sim.set_reciprocal_provider(publisher, true);
+        sim.set_node_behavior(publisher, NodeBehavior::Honest);
+    }
+
+    for node_id in &node_ids {
+        if protected_publishers.contains(node_id) {
+            continue;
+        }
+        if rng.gen::<f64>() < config.malicious_forwarder_fraction.clamp(0.0, 1.0) {
+            sim.set_node_behavior(node_id, NodeBehavior::DropsPublications);
+        }
+    }
+
+    let mut report = PubsubWorkloadReport {
+        seed: config.seed,
+        node_count: config.node_count,
+        author_count: config.author_count,
+        publish_rounds: config.publish_rounds,
+        spam_author_count: config.spam_author_count,
+        ..Default::default()
+    };
+
+    for (author_idx, publisher) in useful_publisher_ids.iter().enumerate() {
+        let author = author_id(author_idx);
+        sim.set_author_publisher(&author, publisher);
+        let mut candidates = node_ids
+            .iter()
+            .filter(|node_id| *node_id != publisher)
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.shuffle(&mut rng);
+        if config.prefer_uncredited_subscribers {
+            candidates.sort_by(|left, right| {
+                sim.is_reciprocal_provider(left)
+                    .cmp(&sim.is_reciprocal_provider(right))
+                    .then_with(|| left.cmp(right))
+            });
+        }
+        for subscriber in candidates.into_iter().take(
+            config
+                .subscriber_attempts_per_author
+                .min(config.node_count - 1),
+        ) {
+            report.subscriber_attempts = report.subscriber_attempts.saturating_add(1);
+            if sim.is_reciprocal_provider(&subscriber) {
+                report.cooperative_attempts = report.cooperative_attempts.saturating_add(1);
+            }
+            add_explicit_subscriber(&mut sim, &author, &subscriber);
+        }
+    }
+
+    for (author_idx, publisher) in spam_publisher_ids.iter().enumerate() {
+        let author = spam_author_id(author_idx);
+        sim.set_author_publisher(&author, publisher);
+        let mut candidates = node_ids
+            .iter()
+            .filter(|node_id| *node_id != publisher)
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.shuffle(&mut rng);
+        for subscriber in candidates.into_iter().take(
+            config
+                .spam_subscriber_attempts_per_author
+                .min(config.node_count - 1),
+        ) {
+            add_explicit_subscriber(&mut sim, &author, &subscriber);
+        }
+    }
+
+    let mut delivery_latencies_ms = Vec::new();
+    for _round in 0..config.publish_rounds {
+        let spam_rounds = config.spam_publish_rounds_per_round;
+        for _spam_round in 0..spam_rounds {
+            for author_idx in 0..config.spam_author_count {
+                let author = spam_author_id(author_idx);
+                report.spam_publish_events = report.spam_publish_events.saturating_add(1);
+                let delivered =
+                    htl_flood_publish(&sim, &author, config.payload_bytes, htl, &mut report);
+                record_spam_flood_delivery_round(&sim, &author, &delivered, &mut report);
+            }
+        }
+
+        for author_idx in 0..config.author_count {
+            let author = author_id(author_idx);
+            let delivered =
+                htl_flood_publish(&sim, &author, config.payload_bytes, htl, &mut report);
+            record_flood_delivery_round(
+                &sim,
+                &author,
+                &delivered,
+                &mut report,
+                &mut delivery_latencies_ms,
+            );
+        }
+    }
+
+    finalize_workload_report(&sim, &mut report, &delivery_latencies_ms);
+    report
+}
+
 fn author_id(index: usize) -> String {
     format!("author-{index:04}")
+}
+
+fn spam_author_id(index: usize) -> String {
+    format!("spam-author-{index:04}")
+}
+
+fn add_explicit_subscriber(sim: &mut AuthorPubsubSim, author: &str, subscriber: &str) {
+    let Some(state) = sim.authors.get_mut(author) else {
+        return;
+    };
+    state.explicit_subscribers.insert(subscriber.to_string());
+}
+
+fn htl_flood_publish(
+    sim: &AuthorPubsubSim,
+    author: &str,
+    bytes: u64,
+    htl: usize,
+    report: &mut PubsubWorkloadReport,
+) -> BTreeMap<String, u64> {
+    let Some(publisher) = sim.author_publisher(author) else {
+        return BTreeMap::new();
+    };
+    if !sim.is_active(publisher) {
+        return BTreeMap::new();
+    }
+
+    let mut delivered_hops = BTreeMap::from([(publisher.to_string(), 0u64)]);
+    let mut queue = VecDeque::from([(publisher.to_string(), 0usize, 0u64)]);
+    while let Some((node_id, remaining_htl, hop_count)) = queue.pop_front() {
+        if remaining_htl >= htl {
+            continue;
+        }
+        let Some(node) = sim.nodes.get(&node_id) else {
+            continue;
+        };
+        if node.behavior == NodeBehavior::DropsPublications {
+            report.malicious_drops = report
+                .malicious_drops
+                .saturating_add(node.links.len() as u64);
+            continue;
+        }
+
+        for neighbor in &node.links {
+            if !sim.is_active(neighbor) {
+                continue;
+            }
+            report.forwarded_bytes = report.forwarded_bytes.saturating_add(bytes);
+            if delivered_hops.contains_key(neighbor) {
+                report.duplicate_deliveries = report.duplicate_deliveries.saturating_add(1);
+                report.duplicate_bytes = report.duplicate_bytes.saturating_add(bytes);
+                continue;
+            }
+            let next_hop_count = hop_count.saturating_add(1);
+            delivered_hops.insert(neighbor.clone(), next_hop_count);
+            queue.push_back((
+                neighbor.clone(),
+                remaining_htl.saturating_add(1),
+                next_hop_count,
+            ));
+        }
+    }
+
+    delivered_hops
 }
 
 fn connect_workload_topology(
@@ -918,6 +1319,7 @@ fn record_delivery_round(
     author: &str,
     seq: u64,
     report: &mut PubsubWorkloadReport,
+    delivery_latencies_ms: &mut Vec<u64>,
 ) {
     for subscriber in sim.subscribers(author) {
         if !sim.is_active(&subscriber) {
@@ -930,6 +1332,9 @@ fn record_delivery_round(
         }
         if sim.received(&subscriber, author, seq) {
             report.delivered_events = report.delivered_events.saturating_add(1);
+            if let Some(hops) = sim.received_hops(&subscriber, author, seq) {
+                delivery_latencies_ms.push(hops.saturating_mul(sim.config.latency_per_hop_ms));
+            }
             if sim.is_reciprocal_provider(&subscriber) {
                 report.cooperative_delivered_events =
                     report.cooperative_delivered_events.saturating_add(1);
@@ -938,44 +1343,138 @@ fn record_delivery_round(
     }
 }
 
-fn finalize_workload_report(sim: &AuthorPubsubSim, report: &mut PubsubWorkloadReport) {
+fn record_spam_delivery_round(
+    sim: &AuthorPubsubSim,
+    author: &str,
+    seq: u64,
+    report: &mut PubsubWorkloadReport,
+) {
+    for subscriber in sim.subscribers(author) {
+        if !sim.is_active(&subscriber) {
+            continue;
+        }
+        report.spam_delivery_opportunities = report.spam_delivery_opportunities.saturating_add(1);
+        if sim.received(&subscriber, author, seq) {
+            report.spam_delivered_events = report.spam_delivered_events.saturating_add(1);
+        }
+    }
+}
+
+fn record_flood_delivery_round(
+    sim: &AuthorPubsubSim,
+    author: &str,
+    delivered_hops: &BTreeMap<String, u64>,
+    report: &mut PubsubWorkloadReport,
+    delivery_latencies_ms: &mut Vec<u64>,
+) {
+    for subscriber in sim.subscribers(author) {
+        if !sim.is_active(&subscriber) {
+            continue;
+        }
+        report.delivery_opportunities = report.delivery_opportunities.saturating_add(1);
+        if sim.is_reciprocal_provider(&subscriber) {
+            report.cooperative_delivery_opportunities =
+                report.cooperative_delivery_opportunities.saturating_add(1);
+        }
+        if let Some(hops) = delivered_hops.get(&subscriber) {
+            report.delivered_events = report.delivered_events.saturating_add(1);
+            delivery_latencies_ms.push(hops.saturating_mul(sim.config.latency_per_hop_ms));
+            if sim.is_reciprocal_provider(&subscriber) {
+                report.cooperative_delivered_events =
+                    report.cooperative_delivered_events.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn record_spam_flood_delivery_round(
+    sim: &AuthorPubsubSim,
+    author: &str,
+    delivered_hops: &BTreeMap<String, u64>,
+    report: &mut PubsubWorkloadReport,
+) {
+    for subscriber in sim.subscribers(author) {
+        if !sim.is_active(&subscriber) {
+            continue;
+        }
+        report.spam_delivery_opportunities = report.spam_delivery_opportunities.saturating_add(1);
+        if delivered_hops.contains_key(&subscriber) {
+            report.spam_delivered_events = report.spam_delivered_events.saturating_add(1);
+        }
+    }
+}
+
+fn finalize_workload_report(
+    sim: &AuthorPubsubSim,
+    report: &mut PubsubWorkloadReport,
+    delivery_latencies_ms: &[u64],
+) {
     report.active_nodes = sim.active_node_count();
     report.tree_edges = sim.tree_edge_count();
 
     for author in sim.author_ids() {
         let author_report = sim.report(&author);
-        report.accepted_subscribers = report
-            .accepted_subscribers
-            .saturating_add(author_report.subscribers as u64);
-        report.accepted_edges = report
-            .accepted_edges
-            .saturating_add(author_report.accepted_edges);
-        report.rejected_subscriptions = report
-            .rejected_subscriptions
-            .saturating_add(author_report.rejected_subscriptions);
+        let useful_author = !author.starts_with("spam-author-");
+        if useful_author {
+            report.accepted_subscribers = report
+                .accepted_subscribers
+                .saturating_add(author_report.subscribers as u64);
+            report.accepted_edges = report
+                .accepted_edges
+                .saturating_add(author_report.accepted_edges);
+            report.rejected_subscriptions = report
+                .rejected_subscriptions
+                .saturating_add(author_report.rejected_subscriptions);
+        }
         report.forwarded_bytes = report
             .forwarded_bytes
             .saturating_add(author_report.forwarded_bytes);
+        report.duplicate_deliveries = report
+            .duplicate_deliveries
+            .saturating_add(author_report.duplicate_deliveries);
+        report.duplicate_bytes = report
+            .duplicate_bytes
+            .saturating_add(author_report.duplicate_bytes);
         report.malicious_drops = report
             .malicious_drops
             .saturating_add(author_report.malicious_drops);
         report.deferred_sends = report
             .deferred_sends
             .saturating_add(author_report.deferred_sends);
+        report.budget_deferred_sends = report
+            .budget_deferred_sends
+            .saturating_add(author_report.budget_deferred_sends);
 
-        report.cooperative_accepted_subscribers =
-            report.cooperative_accepted_subscribers.saturating_add(
-                sim.subscribers(&author)
-                    .iter()
-                    .filter(|subscriber| sim.is_reciprocal_provider(subscriber))
-                    .count() as u64,
-            );
+        if useful_author {
+            report.cooperative_accepted_subscribers =
+                report.cooperative_accepted_subscribers.saturating_add(
+                    sim.subscribers(&author)
+                        .iter()
+                        .filter(|subscriber| sim.is_reciprocal_provider(subscriber))
+                        .count() as u64,
+                );
+        }
     }
 
     report.delivery_rate = ratio(report.delivered_events, report.delivery_opportunities);
+    report.loss_rate = 1.0 - report.delivery_rate;
     report.cooperative_delivery_rate = ratio(
         report.cooperative_delivered_events,
         report.cooperative_delivery_opportunities,
+    );
+    report.bytes_per_delivered_event = if report.delivered_events == 0 {
+        0.0
+    } else {
+        report.forwarded_bytes as f64 / report.delivered_events as f64
+    };
+    let mut sorted_latencies = delivery_latencies_ms.to_vec();
+    sorted_latencies.sort_unstable();
+    report.delivery_latency_p50_ms = percentile(&sorted_latencies, 0.50);
+    report.delivery_latency_p95_ms = percentile(&sorted_latencies, 0.95);
+    report.delivery_latency_max_ms = sorted_latencies.last().copied().unwrap_or_default();
+    report.spam_delivery_rate = ratio(
+        report.spam_delivered_events,
+        report.spam_delivery_opportunities,
     );
 }
 
@@ -985,4 +1484,12 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
     } else {
         numerator as f64 / denominator as f64
     }
+}
+
+fn percentile(sorted: &[u64], p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * p.clamp(0.0, 1.0)).round() as usize;
+    sorted[idx]
 }

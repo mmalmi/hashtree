@@ -54,6 +54,7 @@ pub mod nostr;
 pub mod peer;
 pub mod peer_selector;
 pub mod protocol;
+pub mod pubsub_strategy;
 pub mod real_factory;
 pub mod relay_bridge;
 pub mod root_events;
@@ -111,6 +112,11 @@ pub use protocol::{
     DataQuoteRequest, DataQuoteResponse, DataRequest, DataResponse, PeerHints, FRAGMENT_SIZE,
     MSG_TYPE_CHUNK, MSG_TYPE_PAYMENT, MSG_TYPE_PAYMENT_ACK, MSG_TYPE_PEER_HINTS,
     MSG_TYPE_QUOTE_REQUEST, MSG_TYPE_QUOTE_RESPONSE, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE,
+};
+pub use pubsub_strategy::{
+    reciprocal_upload_weight, reciprocal_virtual_finish, select_reciprocal_outbound_job,
+    stable_pubsub_score, OutboundJobCandidate, OutboundJobSelection, PeerTrafficSnapshot,
+    PubsubCandidate, PubsubSchedulerConfig, PubsubSchedulingPolicy, PubsubSelection,
 };
 pub use real_factory::WebRtcPeerLinkFactory;
 pub use relay_bridge::{

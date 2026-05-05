@@ -1,6 +1,6 @@
 use hashtree_sim::author_pubsub::{
-    run_author_pubsub_sweep, run_author_pubsub_workload, AuthorPubsubSim, NodeBehavior,
-    PubsubConfig, PubsubWorkloadConfig, SchedulingPolicy,
+    run_author_pubsub_htl_flood_baseline, run_author_pubsub_sweep, run_author_pubsub_workload,
+    AuthorPubsubSim, NodeBehavior, PubsubConfig, PubsubWorkloadConfig, SchedulingPolicy,
 };
 
 fn spam_ids() -> Vec<String> {
@@ -139,6 +139,37 @@ fn reciprocal_credit_schedules_a_stranger_who_has_served_bandwidth_first() {
 }
 
 #[test]
+fn raw_publish_spam_does_not_buy_reciprocal_priority() {
+    let mut sim = AuthorPubsubSim::new(PubsubConfig {
+        max_children_per_author: 1,
+        scheduling_policy: SchedulingPolicy::ReciprocalDebt,
+        anonymous_free_credit_bytes: 0,
+        reciprocal_credit_multiplier: 2.0,
+        ..Default::default()
+    });
+    sim.add_node("source", NodeBehavior::Honest);
+    sim.add_node("hub", NodeBehavior::Honest);
+    sim.add_node("spam-publisher", NodeBehavior::Honest);
+    sim.add_node("useful-peer", NodeBehavior::Honest);
+    sim.link("source", "hub");
+    sim.link("hub", "spam-publisher");
+    sim.link("hub", "useful-peer");
+    sim.record_bytes_received("source", "hub", 64 * 1024);
+    sim.set_author_publisher("author-a", "source");
+    assert!(sim.subscribe("hub", "author-a"));
+
+    sim.record_raw_bytes_received("hub", "spam-publisher", 512 * 1024);
+    sim.record_bytes_received("hub", "useful-peer", 16 * 1024);
+
+    assert!(sim.subscribe("spam-publisher", "author-a"));
+    assert!(sim.subscribe("useful-peer", "author-a"));
+
+    sim.publish("author-a", 1, 1024);
+    assert!(sim.received("useful-peer", "author-a", 1));
+    assert!(!sim.received("spam-publisher", "author-a", 1));
+}
+
+#[test]
 fn redundant_parents_survive_a_malicious_forwarder() {
     let mut sim = AuthorPubsubSim::new(PubsubConfig {
         max_children_per_author: 4,
@@ -166,6 +197,104 @@ fn redundant_parents_survive_a_malicious_forwarder() {
 }
 
 #[test]
+fn publish_spam_pressure_reports_useful_delivery_and_budget_loss() {
+    let base = PubsubWorkloadConfig {
+        pubsub: PubsubConfig {
+            max_children_per_author: 5,
+            max_parents_per_author: 1,
+            scheduling_policy: SchedulingPolicy::Fair,
+            anonymous_free_credit_bytes: 0,
+            reciprocal_credit_multiplier: 1.0,
+            max_outbound_bytes_per_node_per_round: 6 * 1024,
+            ..Default::default()
+        },
+        seed: 2026,
+        node_count: 90,
+        author_count: 3,
+        subscriber_attempts_per_author: 70,
+        publish_rounds: 4,
+        payload_bytes: 1024,
+        target_degree: 89,
+        reciprocal_provider_fraction: 0.35,
+        reciprocal_credit_bytes: 256 * 1024,
+        malicious_forwarder_fraction: 0.0,
+        churn_rate: 0.0,
+        allow_rejoin: false,
+        prefer_uncredited_subscribers: true,
+        spam_author_count: 8,
+        spam_subscriber_attempts_per_author: 70,
+        spam_publish_rounds_per_round: 3,
+    };
+    let mut reciprocal_debt = base.clone();
+    reciprocal_debt.pubsub.scheduling_policy = SchedulingPolicy::ReciprocalDebt;
+
+    let results = run_author_pubsub_sweep(&[base, reciprocal_debt]);
+    let fair = &results[0].report;
+    let reciprocal_debt = &results[1].report;
+
+    assert!(fair.spam_publish_events > 0);
+    assert!(fair.budget_deferred_sends > 0);
+    assert_eq!(
+        reciprocal_debt.accepted_subscribers,
+        fair.accepted_subscribers
+    );
+    assert!(
+        reciprocal_debt.cooperative_delivery_rate >= fair.cooperative_delivery_rate,
+        "reciprocal debt should preserve at least as much useful cooperative delivery under publish spam (fair={}, reciprocal_debt={})",
+        fair.cooperative_delivery_rate,
+        reciprocal_debt.cooperative_delivery_rate
+    );
+}
+
+#[test]
+fn pubsub_reports_bandwidth_improvement_over_htl_flood_under_spam() {
+    let config = PubsubWorkloadConfig {
+        pubsub: PubsubConfig {
+            max_children_per_author: 6,
+            max_parents_per_author: 2,
+            scheduling_policy: SchedulingPolicy::ReciprocalDebt,
+            anonymous_free_credit_bytes: 0,
+            reciprocal_credit_multiplier: 1.0,
+            max_outbound_bytes_per_node_per_round: 8 * 1024,
+            ..Default::default()
+        },
+        seed: 77,
+        node_count: 100,
+        author_count: 4,
+        subscriber_attempts_per_author: 40,
+        publish_rounds: 3,
+        payload_bytes: 1024,
+        target_degree: 8,
+        reciprocal_provider_fraction: 0.70,
+        reciprocal_credit_bytes: 256 * 1024,
+        malicious_forwarder_fraction: 0.0,
+        churn_rate: 0.0,
+        allow_rejoin: false,
+        prefer_uncredited_subscribers: false,
+        spam_author_count: 8,
+        spam_subscriber_attempts_per_author: 40,
+        spam_publish_rounds_per_round: 2,
+    };
+
+    let pubsub = run_author_pubsub_workload(config.clone());
+    let htl = run_author_pubsub_htl_flood_baseline(config, 4);
+
+    assert!(pubsub.delivery_rate > 0.0);
+    assert!(
+        htl.forwarded_bytes > pubsub.forwarded_bytes,
+        "htl should spend more bandwidth (htl={}, pubsub={})",
+        htl.forwarded_bytes,
+        pubsub.forwarded_bytes
+    );
+    assert!(
+        htl.bytes_per_delivered_event > pubsub.bytes_per_delivered_event,
+        "htl should spend more bytes per useful delivery (htl={}, pubsub={})",
+        htl.bytes_per_delivered_event,
+        pubsub.bytes_per_delivered_event
+    );
+}
+
+#[test]
 fn large_workload_is_deterministic_for_same_seed() {
     let config = PubsubWorkloadConfig {
         pubsub: PubsubConfig {
@@ -174,6 +303,7 @@ fn large_workload_is_deterministic_for_same_seed() {
             scheduling_policy: SchedulingPolicy::Reciprocal,
             anonymous_free_credit_bytes: 0,
             reciprocal_credit_multiplier: 1.0,
+            ..Default::default()
         },
         seed: 1_337,
         node_count: 320,
@@ -213,6 +343,7 @@ fn churn_workload_repairs_rejoined_reciprocal_subscribers() {
             scheduling_policy: SchedulingPolicy::Reciprocal,
             anonymous_free_credit_bytes: 0,
             reciprocal_credit_multiplier: 1.0,
+            ..Default::default()
         },
         seed: 9_001,
         node_count: 260,
@@ -246,6 +377,7 @@ fn sweep_compares_fair_and_reciprocal_schedulers_under_uncredited_pressure() {
             scheduling_policy: SchedulingPolicy::Fair,
             anonymous_free_credit_bytes: 0,
             reciprocal_credit_multiplier: 1.0,
+            ..Default::default()
         },
         seed: 44,
         node_count: 80,
@@ -260,6 +392,7 @@ fn sweep_compares_fair_and_reciprocal_schedulers_under_uncredited_pressure() {
         churn_rate: 0.0,
         allow_rejoin: false,
         prefer_uncredited_subscribers: true,
+        ..Default::default()
     };
     let mut reciprocal = base.clone();
     reciprocal.pubsub.scheduling_policy = SchedulingPolicy::Reciprocal;
