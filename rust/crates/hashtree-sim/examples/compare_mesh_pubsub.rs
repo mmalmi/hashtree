@@ -4,8 +4,11 @@ use hashtree_sim::{
     run_mesh_pubsub_sweep, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
 };
 use std::env;
+use std::future::Future;
 use std::io::{self, Write};
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 struct Variant {
@@ -19,6 +22,13 @@ struct RunOptions {
     node_counts: Vec<usize>,
     subscribers_per_author: Option<usize>,
     spam_subscribers_per_author: Option<usize>,
+    progress_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunProgress {
+    index: usize,
+    total: usize,
 }
 
 fn scaled_count(node_count: usize, fraction: usize, minimum: usize) -> usize {
@@ -103,14 +113,70 @@ fn print_report(label: &str, report: &MeshPubsubWorkloadReport, elapsed_secs: f6
     );
 }
 
+async fn run_with_progress<T>(
+    label: &str,
+    node_count: usize,
+    progress: RunProgress,
+    progress_interval_secs: Option<u64>,
+    future: impl Future<Output = T>,
+) -> (T, f64) {
+    let started = Instant::now();
+    let progress_thread = progress_interval_secs
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| {
+            let label = label.to_string();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let handle = thread::spawn(move || loop {
+                match stop_rx.recv_timeout(Duration::from_secs(seconds)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let completed = progress.index.saturating_sub(1);
+                        let remaining = progress.total.saturating_sub(completed);
+                        let percent = if progress.total == 0 {
+                            100.0
+                        } else {
+                            completed as f64 / progress.total as f64 * 100.0
+                        };
+                        eprintln!(
+                            "[progress] run={}/{} completed={completed}/{} done={percent:5.1}% remaining_runs={} current={label:18} nodes={node_count} elapsed={:6.1}s",
+                            progress.index,
+                            progress.total,
+                            progress.total,
+                            remaining,
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                }
+            });
+            (stop_tx, handle)
+        });
+
+    let result = future.await;
+    let elapsed_secs = started.elapsed().as_secs_f64();
+    if let Some((stop_tx, handle)) = progress_thread {
+        let _ = stop_tx.send(());
+        let _ = handle.join();
+    }
+    (result, elapsed_secs)
+}
+
 fn run_options_from_args() -> RunOptions {
     let mut options = RunOptions {
         node_counts: Vec::new(),
         subscribers_per_author: None,
         spam_subscribers_per_author: None,
+        progress_interval_secs: Some(10),
     };
 
     for arg in env::args().skip(1) {
+        if arg == "--no-progress" {
+            options.progress_interval_secs = None;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--progress=") {
+            options.progress_interval_secs = value.parse::<u64>().ok();
+            continue;
+        }
         if let Some(value) = arg.strip_prefix("--subs=") {
             options.subscribers_per_author = value.parse::<usize>().ok();
             continue;
@@ -178,6 +244,8 @@ async fn main() {
     ];
 
     let options = run_options_from_args();
+    let run_total = options.node_counts.len() * (variants.len() + 2);
+    let mut run_index = 0usize;
     for node_count in options.node_counts {
         let subscribers = options
             .subscribers_per_author
@@ -202,10 +270,19 @@ async fn main() {
                 fanout: 4,
             },
         );
-        let started = Instant::now();
-        let htl_report =
-            run_mesh_pubsub_htl_flood_baseline(htl_config, MESH_EVENT_POLICY.max_htl).await;
-        print_report("htl-flood-h4", &htl_report, started.elapsed().as_secs_f64());
+        run_index += 1;
+        let (htl_report, elapsed_secs) = run_with_progress(
+            "htl-flood-h4",
+            node_count,
+            RunProgress {
+                index: run_index,
+                total: run_total,
+            },
+            options.progress_interval_secs,
+            run_mesh_pubsub_htl_flood_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
+        )
+        .await;
+        print_report("htl-flood-h4", &htl_report, elapsed_secs);
         io::stdout().flush().expect("flush stdout");
 
         let htl_config = workload(
@@ -219,25 +296,36 @@ async fn main() {
                 fanout: 4,
             },
         );
-        let started = Instant::now();
-        let htl_report =
-            run_mesh_pubsub_htl_inv_want_baseline(htl_config, MESH_EVENT_POLICY.max_htl).await;
-        print_report(
+        run_index += 1;
+        let (htl_report, elapsed_secs) = run_with_progress(
             "htl-invwant-h4",
-            &htl_report,
-            started.elapsed().as_secs_f64(),
-        );
+            node_count,
+            RunProgress {
+                index: run_index,
+                total: run_total,
+            },
+            options.progress_interval_secs,
+            run_mesh_pubsub_htl_inv_want_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
+        )
+        .await;
+        print_report("htl-invwant-h4", &htl_report, elapsed_secs);
         io::stdout().flush().expect("flush stdout");
 
         for variant in variants {
             let config = workload(17, node_count, subscribers, spam_subscribers, variant);
-            let started = Instant::now();
-            let result = run_mesh_pubsub_sweep(&[config]).await;
-            print_report(
+            run_index += 1;
+            let (result, elapsed_secs) = run_with_progress(
                 variant.label,
-                &result[0].report,
-                started.elapsed().as_secs_f64(),
-            );
+                node_count,
+                RunProgress {
+                    index: run_index,
+                    total: run_total,
+                },
+                options.progress_interval_secs,
+                run_mesh_pubsub_sweep(&[config]),
+            )
+            .await;
+            print_report(variant.label, &result[0].report, elapsed_secs);
             io::stdout().flush().expect("flush stdout");
         }
     }
