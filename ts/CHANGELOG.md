@@ -12,6 +12,19 @@
 
 - Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` / `HashTree.resolvePath` to wait for the directory block to load instead of returning `[]` / `null` when the data isn't local yet — a not-yet-synced block is a transient state, not a final answer. They now accept an optional `signal: AbortSignal` for callers that want a bounded wait. `[]` from `listDirectory` and `null` from `resolvePath` again mean "the directory loaded and the entry isn't there", which lets callers drop ad-hoc grace timers around `'not found'` UI.
 
+## 0.2.10 - 2026-05-06
+
+Changes since the previous npm package publish.
+
+### Added
+
+- Published `@hashtree/mesh@0.1.3`, `@hashtree/nostr@0.1.13`, and `@hashtree/worker@0.2.15`.
+- Added TypeScript wire support for the Rust-compatible pubsub messages `PubsubInterest`, `PubsubFrame`, `PubsubInventory`, and `PubsubWant`, including constants, creators, encoders, parsers, and Nostr re-exports.
+
+### Changed
+
+- Changed the worker WebRTC send queue to prioritize pubsub inventory and want frames alongside blob requests so small pull-control messages are not stuck behind bulk payload responses.
+
 ## 0.2.9 - 2026-04-24
 
 Changes since the previous npm package publish.

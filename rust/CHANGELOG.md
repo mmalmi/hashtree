@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.49 - 2026-05-06
+
+### Added
+
+- Added Rust wire protocol support for pubsub inventory and want messages:
+  `PubsubInventory` (`0x0a`) and `PubsubWant` (`0x0b`).
+- Added `PubsubDeliveryMode` so production mesh pubsub can choose between
+  old full-frame interest push and inventory-first HTL flood delivery.
+
+### Changed
+
+- Changed production `hashtree-network` pubsub to default to HTL
+  inventory/want delivery. Publishers flood small inventories and interested
+  peers pull payload frames back along want routes, while the previous
+  interest-push mode remains selectable for low-latency live-byte experiments.
+- Extended the pubsub comparison harness with explicit production delivery
+  modes and an `--only=` filter for large deterministic sweeps.
+
 ## 0.2.48 - 2026-05-04
 
 ### Fixed

@@ -5,24 +5,40 @@
  * TypeScript and Rust implementations.
  *
  * Wire format: [type byte][msgpack body]
- * Request:  [0x00][msgpack: {h: bytes32, htl?: u8}]
- * Response: [0x01][msgpack: {h: bytes32, d: bytes, i?: u32, n?: u32}]
+ * Request:        [0x00][msgpack: {h: bytes32, htl?: u8}]
+ * Response:       [0x01][msgpack: {h: bytes32, d: bytes, i?: u32, n?: u32}]
+ * PubsubInterest: [0x08][msgpack: {s: stream, sub: subscriber peer id, q: seq, a: active, htl?: u8}]
+ * PubsubFrame:    [0x09][msgpack: {s: stream, q: seq, o: origin peer id, htl?: u8, d: bytes}]
+ * PubsubInventory:[0x0a][msgpack: {s: stream, q: seq, o: origin peer id, b: bytes, htl?: u8}]
+ * PubsubWant:     [0x0b][msgpack: {s: stream, q: seq, o: origin peer id}]
  */
 
 import { describe, it, expect } from 'vitest';
 import {
   encodeRequest,
   encodeResponse,
+  encodePubsubInterest,
+  encodePubsubFrame,
+  encodePubsubInventory,
+  encodePubsubWant,
   parseMessage,
   createRequest,
   createResponse,
   createFragmentResponse,
+  createPubsubInterest,
+  createPubsubFrame,
+  createPubsubInventory,
+  createPubsubWant,
   isFragmented,
   hashToKey,
 } from '../src/webrtc/protocol.js';
 import {
   MSG_TYPE_REQUEST,
   MSG_TYPE_RESPONSE,
+  MSG_TYPE_PUBSUB_INTEREST,
+  MSG_TYPE_PUBSUB_FRAME,
+  MSG_TYPE_PUBSUB_INVENTORY,
+  MSG_TYPE_PUBSUB_WANT,
   FRAGMENT_SIZE,
   WEBRTC_KIND,
   MESH_PROTOCOL,
@@ -162,6 +178,58 @@ describe('Protocol Wire Format', () => {
     it('should return null for invalid msgpack', () => {
       // Type byte + garbage that's not valid msgpack
       expect(parseMessage(new Uint8Array([0x00, 0xff, 0xff, 0xff]))).toBeNull();
+    });
+  });
+
+  describe('Pubsub Encoding', () => {
+    it('should round-trip pubsub inventory-first messages', () => {
+      const payload = new Uint8Array([1, 2, 3]);
+
+      const interest = parseMessage(encodePubsubInterest(
+        createPubsubInterest('author:alice', 'subscriber-a', 42, true, 5),
+      ));
+      expect(interest!.type).toBe(MSG_TYPE_PUBSUB_INTEREST);
+      expect(interest!.body).toEqual({
+        s: 'author:alice',
+        sub: 'subscriber-a',
+        q: 42,
+        a: true,
+        htl: 5,
+      });
+
+      const frame = parseMessage(encodePubsubFrame(
+        createPubsubFrame('author:alice', 7, 'publisher-a', payload, 4),
+      ));
+      expect(frame!.type).toBe(MSG_TYPE_PUBSUB_FRAME);
+      expect(frame!.body).toEqual({
+        s: 'author:alice',
+        q: 7,
+        o: 'publisher-a',
+        d: payload,
+        htl: 4,
+      });
+
+      const inventory = parseMessage(encodePubsubInventory(
+        createPubsubInventory('author:alice', 7, 'publisher-a', payload.byteLength, 4),
+      ));
+      expect(inventory!.type).toBe(MSG_TYPE_PUBSUB_INVENTORY);
+      expect(inventory!.body).toEqual({
+        s: 'author:alice',
+        q: 7,
+        o: 'publisher-a',
+        b: 3,
+        htl: 4,
+      });
+
+      const want = parseMessage(encodePubsubWant(
+        createPubsubWant('author:alice', 7, 'publisher-a'),
+      ));
+      expect(want!.type).toBe(MSG_TYPE_PUBSUB_WANT);
+      expect(want!.body).toEqual({
+        s: 'author:alice',
+        q: 7,
+        o: 'publisher-a',
+      });
     });
   });
 

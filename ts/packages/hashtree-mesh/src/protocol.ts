@@ -3,29 +3,59 @@
  */
 import { encode, decode } from '@msgpack/msgpack';
 import { sha256 } from '@hashtree/core';
-import type { DataRequest, DataResponse, DataMessage } from './types.js';
+import type {
+  DataRequest,
+  DataResponse,
+  DataMessage,
+  PubsubFrame,
+  PubsubInterest,
+  PubsubInventory,
+  PubsubWant,
+} from './types.js';
 import {
   BLOB_REQUEST_POLICY,
   HtlMode,
+  MAX_HTL,
+  MESH_EVENT_POLICY,
   type HtlPolicy,
+  MSG_TYPE_PUBSUB_FRAME,
+  MSG_TYPE_PUBSUB_INTEREST,
+  MSG_TYPE_PUBSUB_INVENTORY,
+  MSG_TYPE_PUBSUB_WANT,
   MSG_TYPE_REQUEST,
   MSG_TYPE_RESPONSE,
 } from './types.js';
 
-export function encodeRequest(req: DataRequest): ArrayBuffer {
-  const body = encode(req);
-  const result = new Uint8Array(1 + body.length);
-  result[0] = MSG_TYPE_REQUEST;
-  result.set(body, 1);
+function encodeMessage(type: number, body: unknown): ArrayBuffer {
+  const encoded = encode(body);
+  const result = new Uint8Array(1 + encoded.length);
+  result[0] = type;
+  result.set(encoded, 1);
   return result.buffer;
 }
 
+export function encodeRequest(req: DataRequest): ArrayBuffer {
+  return encodeMessage(MSG_TYPE_REQUEST, req);
+}
+
 export function encodeResponse(res: DataResponse): ArrayBuffer {
-  const body = encode(res);
-  const result = new Uint8Array(1 + body.length);
-  result[0] = MSG_TYPE_RESPONSE;
-  result.set(body, 1);
-  return result.buffer;
+  return encodeMessage(MSG_TYPE_RESPONSE, res);
+}
+
+export function encodePubsubInterest(interest: PubsubInterest): ArrayBuffer {
+  return encodeMessage(MSG_TYPE_PUBSUB_INTEREST, interest);
+}
+
+export function encodePubsubFrame(frame: PubsubFrame): ArrayBuffer {
+  return encodeMessage(MSG_TYPE_PUBSUB_FRAME, frame);
+}
+
+export function encodePubsubInventory(inventory: PubsubInventory): ArrayBuffer {
+  return encodeMessage(MSG_TYPE_PUBSUB_INVENTORY, inventory);
+}
+
+export function encodePubsubWant(want: PubsubWant): ArrayBuffer {
+  return encodeMessage(MSG_TYPE_PUBSUB_WANT, want);
 }
 
 export function parseMessage(data: ArrayBuffer | Uint8Array): DataMessage | null {
@@ -41,6 +71,18 @@ export function parseMessage(data: ArrayBuffer | Uint8Array): DataMessage | null
     }
     if (type === MSG_TYPE_RESPONSE) {
       return { type: MSG_TYPE_RESPONSE, body: decode(body) as DataResponse };
+    }
+    if (type === MSG_TYPE_PUBSUB_INTEREST) {
+      return { type: MSG_TYPE_PUBSUB_INTEREST, body: decode(body) as PubsubInterest };
+    }
+    if (type === MSG_TYPE_PUBSUB_FRAME) {
+      return { type: MSG_TYPE_PUBSUB_FRAME, body: decode(body) as PubsubFrame };
+    }
+    if (type === MSG_TYPE_PUBSUB_INVENTORY) {
+      return { type: MSG_TYPE_PUBSUB_INVENTORY, body: decode(body) as PubsubInventory };
+    }
+    if (type === MSG_TYPE_PUBSUB_WANT) {
+      return { type: MSG_TYPE_PUBSUB_WANT, body: decode(body) as PubsubWant };
     }
     return null;
   } catch {
@@ -133,6 +175,44 @@ export function createFragmentResponse(
   total: number,
 ): DataResponse {
   return { h: hash, d: data, i: index, n: total };
+}
+
+export function createPubsubInterest(
+  streamId: string,
+  subscriberPeerId: string,
+  seq: number,
+  active: boolean,
+  htl: number = MAX_HTL,
+): PubsubInterest {
+  return { s: streamId, sub: subscriberPeerId, q: seq, a: active, htl };
+}
+
+export function createPubsubFrame(
+  streamId: string,
+  seq: number,
+  originPeerId: string,
+  payload: Uint8Array,
+  htl: number = MAX_HTL,
+): PubsubFrame {
+  return { s: streamId, q: seq, o: originPeerId, d: payload, htl };
+}
+
+export function createPubsubInventory(
+  streamId: string,
+  seq: number,
+  originPeerId: string,
+  payloadBytes: number,
+  htl: number = MESH_EVENT_POLICY.maxHtl,
+): PubsubInventory {
+  return { s: streamId, q: seq, o: originPeerId, b: payloadBytes, htl };
+}
+
+export function createPubsubWant(
+  streamId: string,
+  seq: number,
+  originPeerId: string,
+): PubsubWant {
+  return { s: streamId, q: seq, o: originPeerId };
 }
 
 export function isFragmented(res: DataResponse): boolean {

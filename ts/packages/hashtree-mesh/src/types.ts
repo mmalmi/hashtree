@@ -108,6 +108,10 @@ export const MAX_PENDING_BYTES = 64 * 1024 * 1024;
 // Message type bytes (prefix before MessagePack body)
 export const MSG_TYPE_REQUEST = 0x00;
 export const MSG_TYPE_RESPONSE = 0x01;
+export const MSG_TYPE_PUBSUB_INTEREST = 0x08;
+export const MSG_TYPE_PUBSUB_FRAME = 0x09;
+export const MSG_TYPE_PUBSUB_INVENTORY = 0x0a;
+export const MSG_TYPE_PUBSUB_WANT = 0x0b;
 
 export interface DataRequest {
   h: Uint8Array;
@@ -121,9 +125,43 @@ export interface DataResponse {
   n?: number;
 }
 
+export interface PubsubInterest {
+  s: string;
+  sub: string;
+  q: number;
+  a: boolean;
+  htl?: number;
+}
+
+export interface PubsubFrame {
+  s: string;
+  q: number;
+  o: string;
+  htl?: number;
+  d: Uint8Array;
+}
+
+export interface PubsubInventory {
+  s: string;
+  q: number;
+  o: string;
+  b: number;
+  htl?: number;
+}
+
+export interface PubsubWant {
+  s: string;
+  q: number;
+  o: string;
+}
+
 export type DataMessage =
   | { type: typeof MSG_TYPE_REQUEST; body: DataRequest }
-  | { type: typeof MSG_TYPE_RESPONSE; body: DataResponse };
+  | { type: typeof MSG_TYPE_RESPONSE; body: DataResponse }
+  | { type: typeof MSG_TYPE_PUBSUB_INTEREST; body: PubsubInterest }
+  | { type: typeof MSG_TYPE_PUBSUB_FRAME; body: PubsubFrame }
+  | { type: typeof MSG_TYPE_PUBSUB_INVENTORY; body: PubsubInventory }
+  | { type: typeof MSG_TYPE_PUBSUB_WANT; body: PubsubWant };
 
 // Signed event type (Nostr event with signature)
 export interface SignedEvent {

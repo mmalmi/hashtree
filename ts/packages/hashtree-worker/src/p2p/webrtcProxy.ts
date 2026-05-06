@@ -13,7 +13,7 @@ import { BoundedQueue } from './boundedQueue.js';
 import { getErrorMessage } from './errorMessage.js';
 import { UploadRateLimiter } from './uploadRateLimiter.js';
 
-const REQUEST_MESSAGE_TYPE = 0x00;
+const PRIORITY_DATA_MESSAGE_TYPES = new Set([0x00, 0x0a, 0x0b]);
 
 const isTestMode = typeof globalThis !== 'undefined' &&
   Boolean((globalThis as { __HTREE_P2P_TEST_MODE__?: boolean }).__HTREE_P2P_TEST_MODE__);
@@ -317,7 +317,7 @@ export class WebRTCProxy {
   }
 
   private isPriorityDataMessage(data: Uint8Array): boolean {
-    return data.byteLength > 0 && data[0] === REQUEST_MESSAGE_TYPE;
+    return data.byteLength > 0 && PRIORITY_DATA_MESSAGE_TYPES.has(data[0]);
   }
 
   private sendData(peerId: string, data: Uint8Array): void {

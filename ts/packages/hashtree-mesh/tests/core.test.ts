@@ -7,8 +7,16 @@ import {
 import {
   createRequest,
   createResponse,
+  createPubsubFrame,
+  createPubsubInterest,
+  createPubsubInventory,
+  createPubsubWant,
   encodeRequest,
   encodeResponse,
+  encodePubsubFrame,
+  encodePubsubInterest,
+  encodePubsubInventory,
+  encodePubsubWant,
   hashToKey,
   isFragmented,
   parseMessage,
@@ -38,6 +46,35 @@ describe('@hashtree/mesh protocol', () => {
     expect(isFragmented(parsedResponse!.body)).toBe(false);
     expect(hashToKey(hash)).toBe('ab'.repeat(32));
     await expect(verifyHash(data, hash)).resolves.toBe(false);
+  });
+
+  it('round-trips pubsub inventory-first messages', () => {
+    const payload = new Uint8Array([1, 2, 3]);
+
+    expect(parseMessage(encodePubsubInterest(
+      createPubsubInterest('author:alice', 'subscriber-a', 42, true, 5),
+    ))).toEqual({
+      type: 0x08,
+      body: { s: 'author:alice', sub: 'subscriber-a', q: 42, a: true, htl: 5 },
+    });
+    expect(parseMessage(encodePubsubFrame(
+      createPubsubFrame('author:alice', 7, 'publisher-a', payload, 4),
+    ))).toEqual({
+      type: 0x09,
+      body: { s: 'author:alice', q: 7, o: 'publisher-a', d: payload, htl: 4 },
+    });
+    expect(parseMessage(encodePubsubInventory(
+      createPubsubInventory('author:alice', 7, 'publisher-a', payload.byteLength, 4),
+    ))).toEqual({
+      type: 0x0a,
+      body: { s: 'author:alice', q: 7, o: 'publisher-a', b: 3, htl: 4 },
+    });
+    expect(parseMessage(encodePubsubWant(
+      createPubsubWant('author:alice', 7, 'publisher-a'),
+    ))).toEqual({
+      type: 0x0b,
+      body: { s: 'author:alice', q: 7, o: 'publisher-a' },
+    });
   });
 });
 
