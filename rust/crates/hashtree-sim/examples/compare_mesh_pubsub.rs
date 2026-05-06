@@ -170,6 +170,11 @@ async fn main() {
             policy: PubsubSchedulingPolicy::Fair,
             fanout: 8,
         },
+        Variant {
+            label: "fair-f14",
+            policy: PubsubSchedulingPolicy::Fair,
+            fanout: 14,
+        },
     ];
 
     let options = run_options_from_args();
