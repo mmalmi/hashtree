@@ -35,7 +35,12 @@ pub struct MockRelay {
 impl MockRelay {
     /// Create a new mock relay
     pub fn new() -> Arc<Self> {
-        let (tx, _) = broadcast::channel(1000);
+        Self::new_with_capacity(1000)
+    }
+
+    /// Create a new mock relay with an explicit broadcast buffer capacity.
+    pub fn new_with_capacity(capacity: usize) -> Arc<Self> {
+        let (tx, _) = broadcast::channel(capacity.max(1));
         Arc::new(Self { tx })
     }
 
@@ -243,6 +248,13 @@ impl PeerLink for MockDataChannel {
                     }
                 }
             }
+        }
+
+        if self.latency_mode == MockLatencyMode::YieldOnly {
+            return self
+                .tx
+                .try_send(data)
+                .map_err(|err| TransportError::SendFailed(err.to_string()));
         }
 
         self.tx

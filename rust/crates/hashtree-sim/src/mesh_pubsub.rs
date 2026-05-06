@@ -73,6 +73,10 @@ pub struct MeshPubsubWorkloadReport {
     pub seed: u64,
     pub node_count: usize,
     pub active_nodes: usize,
+    pub average_peer_count: f64,
+    pub min_peer_count: usize,
+    pub max_peer_count: usize,
+    pub isolated_nodes: usize,
     pub author_count: usize,
     pub publish_rounds: usize,
     pub subscriber_attempts: u64,
@@ -193,6 +197,12 @@ async fn pump_mesh(nodes: &[MeshPubsubNode], steps: usize) -> PumpStats {
         tokio::task::yield_now().await;
     }
     stats
+}
+
+async fn broadcast_hellos(nodes: &[MeshPubsubNode]) {
+    for node in nodes {
+        let _ = node.store.send_hello().await;
+    }
 }
 
 fn choose_publishers(rng: &mut StdRng, node_ids: &[String], stream_count: usize) -> Vec<String> {
@@ -327,6 +337,31 @@ fn finalize_rates(report: &mut MeshPubsubWorkloadReport, latencies_ms: &mut [u64
     report.delivery_latency_max_ms = latencies_ms.last().copied().unwrap_or_default();
 }
 
+async fn record_topology_report(nodes: &[MeshPubsubNode], report: &mut MeshPubsubWorkloadReport) {
+    if nodes.is_empty() {
+        return;
+    }
+
+    let mut total_peers = 0usize;
+    let mut min_peers = usize::MAX;
+    let mut max_peers = 0usize;
+    let mut isolated = 0usize;
+    for node in nodes {
+        let peer_count = node.store.peer_count().await;
+        total_peers = total_peers.saturating_add(peer_count);
+        min_peers = min_peers.min(peer_count);
+        max_peers = max_peers.max(peer_count);
+        if peer_count == 0 {
+            isolated = isolated.saturating_add(1);
+        }
+    }
+
+    report.average_peer_count = total_peers as f64 / nodes.len() as f64;
+    report.min_peer_count = min_peers;
+    report.max_peer_count = max_peers;
+    report.isolated_nodes = isolated;
+}
+
 pub async fn run_mesh_pubsub_workload(
     config: MeshPubsubWorkloadConfig,
 ) -> MeshPubsubWorkloadReport {
@@ -344,13 +379,27 @@ pub async fn run_mesh_pubsub_workload(
     clear_channel_registry().await;
 
     let mut rng = StdRng::seed_from_u64(config.seed);
-    let relay = MockRelay::new();
+    let relay_capacity = config
+        .node_count
+        .saturating_mul(
+            config
+                .pool
+                .max_connections
+                .max(config.pool.satisfied_connections),
+        )
+        .saturating_mul(4)
+        .max(1000);
+    let relay = MockRelay::new_with_capacity(relay_capacity);
     let node_ids = (0..config.node_count)
         .map(|index| format!("node-{index:04}"))
         .collect::<Vec<_>>();
     let mut nodes = Vec::with_capacity(config.node_count);
     for node_id in &node_ids {
         nodes.push(make_node(relay.clone(), node_id.clone(), &config).await);
+    }
+    for _ in 0..3 {
+        broadcast_hellos(&nodes).await;
+        pump_mesh(&nodes, config.pump_steps_after_setup / 3).await;
     }
     pump_mesh(&nodes, config.pump_steps_after_setup).await;
 
@@ -388,6 +437,7 @@ pub async fn run_mesh_pubsub_workload(
         spam_author_count: config.spam_author_count,
         ..Default::default()
     };
+    record_topology_report(&nodes, &mut report).await;
 
     for (author_index, publisher_id) in useful_publishers.iter().enumerate() {
         let stream_id = author_stream(author_index);
@@ -403,7 +453,10 @@ pub async fn run_mesh_pubsub_workload(
                 .min(config.node_count.saturating_sub(1)),
         ) {
             report.subscriber_attempts = report.subscriber_attempts.saturating_add(1);
-            subscribe_stream(&nodes_by_id, &mut subscriptions, &subscriber_id, &stream_id).await;
+            if subscribe_stream(&nodes_by_id, &mut subscriptions, &subscriber_id, &stream_id).await
+            {
+                pump_mesh(&nodes, 1).await;
+            }
         }
     }
 
@@ -420,7 +473,10 @@ pub async fn run_mesh_pubsub_workload(
                 .spam_subscribers_per_author
                 .min(config.node_count.saturating_sub(1)),
         ) {
-            subscribe_stream(&nodes_by_id, &mut subscriptions, &subscriber_id, &stream_id).await;
+            if subscribe_stream(&nodes_by_id, &mut subscriptions, &subscriber_id, &stream_id).await
+            {
+                pump_mesh(&nodes, 1).await;
+            }
         }
     }
 
@@ -439,6 +495,7 @@ pub async fn run_mesh_pubsub_workload(
                     .await
                 {
                     report.churn_rejoins = report.churn_rejoins.saturating_add(1);
+                    pump_mesh(&nodes, 1).await;
                 }
             } else if unsubscribe_stream(
                 &nodes_by_id,
@@ -449,6 +506,7 @@ pub async fn run_mesh_pubsub_workload(
             .await
             {
                 report.churn_unsubscribes = report.churn_unsubscribes.saturating_add(1);
+                pump_mesh(&nodes, 1).await;
             }
         }
         if config.subscription_churn_rate > 0.0 {

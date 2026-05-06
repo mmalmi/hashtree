@@ -2,6 +2,9 @@ use hashtree_network::{PubsubSchedulerConfig, PubsubSchedulingPolicy};
 use hashtree_sim::{
     run_mesh_pubsub_sweep, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
 };
+use std::env;
+use std::io::{self, Write};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
 struct Variant {
@@ -10,12 +13,51 @@ struct Variant {
     fanout: usize,
 }
 
-fn workload(seed: u64, variant: Variant) -> MeshPubsubWorkloadConfig {
+#[derive(Debug, Clone)]
+struct RunOptions {
+    node_counts: Vec<usize>,
+    subscribers_per_author: Option<usize>,
+    spam_subscribers_per_author: Option<usize>,
+}
+
+fn scaled_count(node_count: usize, fraction: usize, minimum: usize) -> usize {
+    (node_count / fraction)
+        .max(minimum)
+        .min(node_count.saturating_sub(1))
+}
+
+fn pump_steps_after_setup(node_count: usize) -> usize {
+    if node_count >= 1000 {
+        240
+    } else if node_count >= 100 {
+        160
+    } else {
+        80
+    }
+}
+
+fn pump_steps_per_publish_round(node_count: usize) -> usize {
+    if node_count >= 1000 {
+        128
+    } else if node_count >= 100 {
+        96
+    } else {
+        48
+    }
+}
+
+fn workload(
+    seed: u64,
+    node_count: usize,
+    subscribers_per_author: usize,
+    spam_subscribers_per_author: usize,
+    variant: Variant,
+) -> MeshPubsubWorkloadConfig {
     MeshPubsubWorkloadConfig {
         seed,
-        node_count: 24,
+        node_count,
         author_count: 3,
-        subscribers_per_author: 8,
+        subscribers_per_author,
         publish_rounds: 2,
         payload_bytes: 1200,
         pool: PoolConfig {
@@ -34,17 +76,17 @@ fn workload(seed: u64, variant: Variant) -> MeshPubsubWorkloadConfig {
         subscription_churn_rate: 0.05,
         allow_rejoin: true,
         spam_author_count: 3,
-        spam_subscribers_per_author: 6,
+        spam_subscribers_per_author,
         spam_publish_rounds_per_round: 2,
-        pump_steps_after_setup: 80,
-        pump_steps_per_publish_round: 48,
+        pump_steps_after_setup: pump_steps_after_setup(node_count),
+        pump_steps_per_publish_round: pump_steps_per_publish_round(node_count),
         latency_per_pump_step_ms: 10,
     }
 }
 
-fn print_report(label: &str, report: &MeshPubsubWorkloadReport) {
+fn print_report(label: &str, report: &MeshPubsubWorkloadReport, elapsed_secs: f64) {
     println!(
-        "{label:18} delivery={:6.2}% loss={:6.2}% p50={:4}ms p95={:4}ms bytes/event={:8.1} useful_credit={} spam_delivery={:6.2}% dupes={}",
+        "{label:18} delivery={:6.2}% loss={:6.2}% p50={:4}ms p95={:4}ms bytes/event={:8.1} useful_credit={} spam_delivery={:6.2}% dupes={} peers={:4.1}/{}/{} iso={} runtime={elapsed_secs:6.1}s",
         report.delivery_rate * 100.0,
         report.loss_rate * 100.0,
         report.delivery_latency_p50_ms,
@@ -53,7 +95,40 @@ fn print_report(label: &str, report: &MeshPubsubWorkloadReport) {
         report.useful_bytes_received,
         report.spam_delivery_rate * 100.0,
         report.duplicate_deliveries,
+        report.average_peer_count,
+        report.min_peer_count,
+        report.max_peer_count,
+        report.isolated_nodes,
     );
+}
+
+fn run_options_from_args() -> RunOptions {
+    let mut options = RunOptions {
+        node_counts: Vec::new(),
+        subscribers_per_author: None,
+        spam_subscribers_per_author: None,
+    };
+
+    for arg in env::args().skip(1) {
+        if let Some(value) = arg.strip_prefix("--subs=") {
+            options.subscribers_per_author = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--spam-subs=") {
+            options.spam_subscribers_per_author = value.parse::<usize>().ok();
+            continue;
+        }
+        options.node_counts.extend(
+            arg.split(',')
+                .filter_map(|part| part.parse::<usize>().ok())
+                .filter(|count| *count > 0),
+        );
+    }
+
+    if options.node_counts.is_empty() {
+        options.node_counts.push(24);
+    }
+    options
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -90,15 +165,31 @@ async fn main() {
             fanout: 4,
         },
     ];
-    let configs = variants
-        .iter()
-        .copied()
-        .map(|variant| workload(17, variant))
-        .collect::<Vec<_>>();
 
-    println!("production MeshStoreCore pubsub workload: 24 nodes, 3 useful authors, 3 spam authors, churn=5%, payload=1200B");
-    let results = run_mesh_pubsub_sweep(&configs).await;
-    for (variant, result) in variants.iter().zip(results.iter()) {
-        print_report(variant.label, &result.report);
+    let options = run_options_from_args();
+    for node_count in options.node_counts {
+        let subscribers = options
+            .subscribers_per_author
+            .unwrap_or_else(|| scaled_count(node_count, 4, 8))
+            .min(node_count.saturating_sub(1));
+        let spam_subscribers = options
+            .spam_subscribers_per_author
+            .unwrap_or_else(|| scaled_count(node_count, 8, 6))
+            .min(node_count.saturating_sub(1));
+
+        println!(
+            "production MeshStoreCore pubsub workload: {node_count} nodes, 3 useful authors x {subscribers} subscribers, 3 spam authors x {spam_subscribers} subscribers, churn=5%, payload=1200B"
+        );
+        for variant in variants {
+            let config = workload(17, node_count, subscribers, spam_subscribers, variant);
+            let started = Instant::now();
+            let result = run_mesh_pubsub_sweep(&[config]).await;
+            print_report(
+                variant.label,
+                &result[0].report,
+                started.elapsed().as_secs_f64(),
+            );
+            io::stdout().flush().expect("flush stdout");
+        }
     }
 }
