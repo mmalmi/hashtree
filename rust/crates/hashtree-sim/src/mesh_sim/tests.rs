@@ -412,6 +412,7 @@ async fn test_mesh_sim_accepts_injected_mint_client() {
 
 #[tokio::test]
 async fn test_cashu_post_delivery_payment_failure_records_default_in_peer_metadata() {
+    let _mock_registry = crate::mock_registry::lock_mock_channel_registry().await;
     hashtree_network::clear_channel_registry().await;
     let config = SimConfig {
         node_count: 2,

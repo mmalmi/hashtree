@@ -1,5 +1,6 @@
-use hashtree_network::{PubsubSchedulerConfig, PubsubSchedulingPolicy};
+use hashtree_network::{PubsubSchedulerConfig, PubsubSchedulingPolicy, MESH_EVENT_POLICY};
 use hashtree_sim::{
+    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
     run_mesh_pubsub_sweep, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
 };
 use std::env;
@@ -164,6 +165,11 @@ async fn main() {
             policy: PubsubSchedulingPolicy::Fair,
             fanout: 4,
         },
+        Variant {
+            label: "fair-f8",
+            policy: PubsubSchedulingPolicy::Fair,
+            fanout: 8,
+        },
     ];
 
     let options = run_options_from_args();
@@ -180,6 +186,44 @@ async fn main() {
         println!(
             "production MeshStoreCore pubsub workload: {node_count} nodes, 3 useful authors x {subscribers} subscribers, 3 spam authors x {spam_subscribers} subscribers, churn=5%, payload=1200B"
         );
+        let htl_config = workload(
+            17,
+            node_count,
+            subscribers,
+            spam_subscribers,
+            Variant {
+                label: "htl-flood-h4",
+                policy: PubsubSchedulingPolicy::Fair,
+                fanout: 4,
+            },
+        );
+        let started = Instant::now();
+        let htl_report =
+            run_mesh_pubsub_htl_flood_baseline(htl_config, MESH_EVENT_POLICY.max_htl).await;
+        print_report("htl-flood-h4", &htl_report, started.elapsed().as_secs_f64());
+        io::stdout().flush().expect("flush stdout");
+
+        let htl_config = workload(
+            17,
+            node_count,
+            subscribers,
+            spam_subscribers,
+            Variant {
+                label: "htl-invwant-h4",
+                policy: PubsubSchedulingPolicy::Fair,
+                fanout: 4,
+            },
+        );
+        let started = Instant::now();
+        let htl_report =
+            run_mesh_pubsub_htl_inv_want_baseline(htl_config, MESH_EVENT_POLICY.max_htl).await;
+        print_report(
+            "htl-invwant-h4",
+            &htl_report,
+            started.elapsed().as_secs_f64(),
+        );
+        io::stdout().flush().expect("flush stdout");
+
         for variant in variants {
             let config = workload(17, node_count, subscribers, spam_subscribers, variant);
             let started = Instant::now();

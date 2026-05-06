@@ -14,6 +14,7 @@ pub mod cashu_test_mint;
 pub mod mesh_pubsub;
 pub mod mesh_sim;
 pub mod mint_client;
+mod mock_registry;
 #[cfg(feature = "nostr")]
 pub mod nostr_mesh;
 pub mod ws_relay;
@@ -23,6 +24,7 @@ pub use cashu_test_mint::{
     ChannelSettlement, ChannelState, LocalTestCashuMint, MintError, MintStats,
 };
 pub use mesh_pubsub::{
+    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
     run_mesh_pubsub_sweep, run_mesh_pubsub_workload, MeshPubsubSweepResult,
     MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport,
 };

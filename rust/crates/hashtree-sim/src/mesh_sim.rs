@@ -459,6 +459,7 @@ impl Simulation {
 
     /// Run the simulation
     pub async fn run(&self) {
+        let _mock_registry = crate::mock_registry::lock_mock_channel_registry().await;
         // Mock negotiated channels share a global registry; each simulation run must
         // start from a clean slate or later runs inherit stale links.
         hashtree_network::clear_channel_registry().await;
