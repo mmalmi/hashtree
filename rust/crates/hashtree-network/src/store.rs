@@ -97,6 +97,7 @@ impl<S: Store + Send + Sync + 'static> MeshStore<S> {
             dispatch: self.config.request_dispatch,
             response_behavior: Default::default(),
             pubsub_scheduler: Default::default(),
+            pubsub_delivery_mode: self.config.pubsub_delivery_mode,
         }
     }
 

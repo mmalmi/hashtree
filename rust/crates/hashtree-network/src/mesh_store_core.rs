@@ -21,11 +21,13 @@ use hashtree_core::{Hash, Store, StoreError};
 
 use crate::peer_selector::{PeerMetadataSnapshot, PeerSelector, SelectionStrategy};
 use crate::protocol::{
-    create_pubsub_frame, create_pubsub_interest, create_quote_request,
-    create_quote_response_available, create_quote_response_unavailable, create_request,
-    create_request_with_quote, create_response, encode_pubsub_frame, encode_pubsub_interest,
-    encode_quote_request, encode_quote_response, encode_request, encode_response, hash_to_key,
-    parse_message, DataMessage, DataQuoteRequest, DataQuoteResponse, PubsubFrame, PubsubInterest,
+    create_pubsub_frame, create_pubsub_interest, create_pubsub_inventory, create_pubsub_want,
+    create_quote_request, create_quote_response_available, create_quote_response_unavailable,
+    create_request, create_request_with_quote, create_response, encode_pubsub_frame,
+    encode_pubsub_interest, encode_pubsub_inventory, encode_pubsub_want, encode_quote_request,
+    encode_quote_response, encode_request, encode_response, hash_to_key, parse_message,
+    DataMessage, DataQuoteRequest, DataQuoteResponse, PubsubFrame, PubsubInterest, PubsubInventory,
+    PubsubWant,
 };
 use crate::pubsub_strategy::{
     reciprocal_virtual_finish, select_reciprocal_outbound_job, OutboundJobCandidate,
@@ -33,7 +35,9 @@ use crate::pubsub_strategy::{
 };
 use crate::signaling::MeshRouter;
 use crate::transport::{PeerLinkFactory, SignalingTransport, TransportError};
-use crate::types::{should_forward_htl, PeerHTLConfig, SignalingMessage, TimedSeenSet, MAX_HTL};
+use crate::types::{
+    should_forward_htl, PeerHTLConfig, SignalingMessage, TimedSeenSet, MAX_HTL, MESH_EVENT_POLICY,
+};
 
 // Keep the on-disk namespace stable across the crate rename so existing peer
 // metadata does not disappear for users upgrading from the old package name.
@@ -42,6 +46,7 @@ const RECENT_FORWARD_MISS_CAPACITY: usize = 4096;
 const MIN_RECENT_FORWARD_MISS_TTL_MS: u64 = 250;
 const PUBSUB_SEEN_CAPACITY: usize = 16_384;
 const PUBSUB_INBOX_CAPACITY: usize = 4_096;
+const PUBSUB_FRAME_CACHE_CAPACITY: usize = 4_096;
 const PUBSUB_SEEN_TTL: Duration = Duration::from_secs(120);
 
 /// Pending request awaiting response
@@ -283,6 +288,8 @@ pub struct DataPumpStats {
     pub quote_response_messages: u64,
     pub pubsub_interest_messages: u64,
     pub pubsub_frame_messages: u64,
+    pub pubsub_inventory_messages: u64,
+    pub pubsub_want_messages: u64,
     pub processed_bytes: u64,
 }
 
@@ -303,6 +310,21 @@ pub struct PubsubPublishStats {
     pub sent_peers: usize,
     pub sent_bytes: u64,
     pub deferred_peers: usize,
+}
+
+/// Production pubsub delivery strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubsubDeliveryMode {
+    /// Push full frames only along advertised interest routes.
+    InterestPush,
+    /// Flood small inventories by HTL and pull payloads back along want paths.
+    HtlInvWant,
+}
+
+impl Default for PubsubDeliveryMode {
+    fn default() -> Self {
+        Self::HtlInvWant
+    }
 }
 
 /// Request dispatch strategy for peer queries.
@@ -551,6 +573,7 @@ pub struct MeshRoutingConfig {
     pub dispatch: RequestDispatchConfig,
     pub response_behavior: ResponseBehaviorConfig,
     pub pubsub_scheduler: PubsubSchedulerConfig,
+    pub pubsub_delivery_mode: PubsubDeliveryMode,
 }
 
 impl Default for MeshRoutingConfig {
@@ -569,6 +592,7 @@ impl Default for MeshRoutingConfig {
             dispatch: RequestDispatchConfig::default(),
             response_behavior: ResponseBehaviorConfig::default(),
             pubsub_scheduler: PubsubSchedulerConfig::default(),
+            pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
         }
     }
 }
@@ -629,6 +653,18 @@ where
     pubsub_seen_interests: Mutex<TimedSeenSet>,
     /// Bounded dedupe for pubsub data frames.
     pubsub_seen_frames: Mutex<TimedSeenSet>,
+    /// Bounded dedupe for pubsub inventory floods.
+    pubsub_seen_inventories: Mutex<TimedSeenSet>,
+    /// Bounded dedupe for pubsub wants by requesting peer.
+    pubsub_seen_wants: Mutex<TimedSeenSet>,
+    /// First upstream peer that announced each inventory key.
+    pubsub_inventory_routes: RwLock<HashMap<String, String>>,
+    /// Downstream peers waiting for a payload after sending a want.
+    pubsub_want_routes: RwLock<HashMap<String, HashSet<String>>>,
+    /// Dedupe for wants this node already sent upstream.
+    pubsub_upstream_wants: Mutex<TimedSeenSet>,
+    /// Small payload cache for serving wants after inventory-first announcements.
+    pubsub_frame_cache: Mutex<VecDeque<(String, PubsubFrame)>>,
     /// Local pubsub delivery inbox.
     pubsub_inbox: Mutex<VecDeque<PubsubEvent>>,
     /// Per stream/peer deferred counts for aging pubsub strategies.
@@ -716,6 +752,18 @@ where
                 PUBSUB_SEEN_CAPACITY,
                 PUBSUB_SEEN_TTL,
             )),
+            pubsub_seen_inventories: Mutex::new(TimedSeenSet::new(
+                PUBSUB_SEEN_CAPACITY,
+                PUBSUB_SEEN_TTL,
+            )),
+            pubsub_seen_wants: Mutex::new(TimedSeenSet::new(PUBSUB_SEEN_CAPACITY, PUBSUB_SEEN_TTL)),
+            pubsub_inventory_routes: RwLock::new(HashMap::new()),
+            pubsub_want_routes: RwLock::new(HashMap::new()),
+            pubsub_upstream_wants: Mutex::new(TimedSeenSet::new(
+                PUBSUB_SEEN_CAPACITY,
+                PUBSUB_SEEN_TTL,
+            )),
+            pubsub_frame_cache: Mutex::new(VecDeque::new()),
             pubsub_inbox: Mutex::new(VecDeque::new()),
             pubsub_deferred_counts: RwLock::new(HashMap::new()),
             next_pubsub_interest_seq: AtomicU64::new(1),
@@ -827,8 +875,12 @@ where
         self.peer_wire_stats.read().await.clone()
     }
 
+    fn pubsub_key(origin_peer_id: &str, stream_id: &str, seq: u64) -> String {
+        format!("{origin_peer_id}:{stream_id}:{seq}")
+    }
+
     fn pubsub_frame_key(frame: &PubsubFrame) -> String {
-        format!("{}:{}:{}", frame.origin_peer_id, frame.stream_id, frame.seq)
+        Self::pubsub_key(&frame.origin_peer_id, &frame.stream_id, frame.seq)
     }
 
     fn pubsub_interest_key(interest: &PubsubInterest) -> String {
@@ -1048,6 +1100,160 @@ where
         peers
     }
 
+    async fn decrement_pubsub_htl_for_peer(&self, peer_id: &str, htl: u8) -> u8 {
+        let htl_config = {
+            let configs = self.htl_configs.read().await;
+            configs
+                .get(peer_id)
+                .cloned()
+                .unwrap_or_else(PeerHTLConfig::random)
+        };
+        htl_config.decrement_with_policy(htl, &MESH_EVENT_POLICY)
+    }
+
+    async fn send_pubsub_inventory_to_peers(
+        &self,
+        inv: &PubsubInventory,
+        peer_ids: &[String],
+    ) -> PubsubPublishStats {
+        if peer_ids.is_empty() || !should_forward_htl(inv.htl) {
+            return PubsubPublishStats::default();
+        }
+
+        let mut stats = PubsubPublishStats {
+            selected_peers: peer_ids.len(),
+            ..Default::default()
+        };
+        for peer_id in peer_ids {
+            let send_htl = self.decrement_pubsub_htl_for_peer(peer_id, inv.htl).await;
+            if !should_forward_htl(send_htl) {
+                continue;
+            }
+            let Some(channel) = self.signaling.get_channel(peer_id).await else {
+                continue;
+            };
+            let mut outgoing = inv.clone();
+            outgoing.htl = send_htl;
+            let bytes = encode_pubsub_inventory(&outgoing);
+            let message_bytes = bytes.len() as u64;
+            if channel.send(bytes).await.is_ok() {
+                stats.sent_peers += 1;
+                stats.sent_bytes = stats.sent_bytes.saturating_add(message_bytes);
+                self.record_peer_wire_sent(peer_id, message_bytes).await;
+            }
+        }
+        stats
+    }
+
+    async fn flood_pubsub_inventory(
+        &self,
+        inv: &PubsubInventory,
+        exclude_peer_id: Option<&str>,
+    ) -> PubsubPublishStats {
+        let mut peer_ids = self.signaling.peer_ids().await;
+        peer_ids.sort();
+        peer_ids.retain(|peer_id| exclude_peer_id.is_none_or(|exclude| peer_id != exclude));
+        self.send_pubsub_inventory_to_peers(inv, &peer_ids).await
+    }
+
+    async fn send_pubsub_want_to_peer(&self, want: &PubsubWant, peer_id: &str) -> bool {
+        let Some(channel) = self.signaling.get_channel(peer_id).await else {
+            return false;
+        };
+        let bytes = encode_pubsub_want(want);
+        let message_bytes = bytes.len() as u64;
+        match channel.send(bytes).await {
+            Ok(()) => {
+                self.record_peer_wire_sent(peer_id, message_bytes).await;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    async fn send_pubsub_want_upstream(
+        &self,
+        key: &str,
+        want: &PubsubWant,
+        exclude_peer_id: Option<&str>,
+    ) -> bool {
+        let upstream = {
+            let routes = self.pubsub_inventory_routes.read().await;
+            routes.get(key).cloned()
+        };
+        let Some(upstream) = upstream else {
+            return false;
+        };
+        if exclude_peer_id.is_some_and(|exclude| exclude == upstream) {
+            return false;
+        }
+        let want_key = format!("{key}:{upstream}");
+        if !self
+            .pubsub_upstream_wants
+            .lock()
+            .await
+            .insert_if_new(want_key)
+        {
+            return false;
+        }
+        self.send_pubsub_want_to_peer(want, &upstream).await
+    }
+
+    async fn cache_pubsub_frame(&self, key: String, frame: PubsubFrame) {
+        let mut cache = self.pubsub_frame_cache.lock().await;
+        if let Some(index) = cache.iter().position(|(cached_key, _)| cached_key == &key) {
+            cache.remove(index);
+        }
+        cache.push_back((key, frame));
+        while cache.len() > PUBSUB_FRAME_CACHE_CAPACITY {
+            cache.pop_front();
+        }
+    }
+
+    async fn cached_pubsub_frame(&self, key: &str) -> Option<PubsubFrame> {
+        self.pubsub_frame_cache
+            .lock()
+            .await
+            .iter()
+            .find_map(|(cached_key, frame)| {
+                if cached_key == key {
+                    Some(frame.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    async fn remember_pubsub_want_peer(&self, key: String, from_peer: &str) -> bool {
+        let mut routes = self.pubsub_want_routes.write().await;
+        routes.entry(key).or_default().insert(from_peer.to_string())
+    }
+
+    async fn take_pubsub_want_peers(
+        &self,
+        key: &str,
+        exclude_peer_id: Option<&str>,
+    ) -> Vec<String> {
+        let connected = self
+            .signaling
+            .peer_ids()
+            .await
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut peers = self
+            .pubsub_want_routes
+            .write()
+            .await
+            .remove(key)
+            .map(|peers| peers.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        peers.retain(|peer_id| {
+            connected.contains(peer_id) && exclude_peer_id.is_none_or(|exclude| peer_id != exclude)
+        });
+        peers.sort();
+        peers
+    }
+
     async fn select_pubsub_peers(
         &self,
         stream_id: &str,
@@ -1197,7 +1403,7 @@ where
         self.send_pubsub_interest_to_peers(&interest, None).await
     }
 
-    /// Publish live bytes on a pubsub stream through currently known interest paths.
+    /// Publish bytes on a pubsub stream through the configured mesh delivery mode.
     pub async fn publish_pubsub(
         self: &Arc<Self>,
         stream_id: impl Into<String>,
@@ -1208,6 +1414,7 @@ where
         if stream_id.is_empty() {
             return PubsubPublishStats::default();
         }
+        let payload_bytes = payload.len() as u64;
         let frame = create_pubsub_frame(
             stream_id.clone(),
             seq,
@@ -1219,7 +1426,8 @@ where
         self.pubsub_seen_frames
             .lock()
             .await
-            .insert_if_new(frame_key);
+            .insert_if_new(frame_key.clone());
+        self.cache_pubsub_frame(frame_key, frame.clone()).await;
 
         if self
             .pubsub_local_interests
@@ -1237,8 +1445,22 @@ where
             .await;
         }
 
-        let peers = self.interested_pubsub_peers(&stream_id, None).await;
-        self.send_pubsub_frame_to_peers(&frame, &peers).await
+        match self.routing.pubsub_delivery_mode {
+            PubsubDeliveryMode::InterestPush => {
+                let peers = self.interested_pubsub_peers(&stream_id, None).await;
+                self.send_pubsub_frame_to_peers(&frame, &peers).await
+            }
+            PubsubDeliveryMode::HtlInvWant => {
+                let inv = create_pubsub_inventory(
+                    stream_id,
+                    seq,
+                    self.signaling.peer_id().to_string(),
+                    payload_bytes,
+                    MESH_EVENT_POLICY.max_htl,
+                );
+                self.flood_pubsub_inventory(&inv, None).await
+            }
+        }
     }
 
     /// Drain locally delivered pubsub events.
@@ -1999,6 +2221,8 @@ where
                         DataMessage::QuoteResponse(_) => stats.quote_response_messages += 1,
                         DataMessage::PubsubInterest(_) => stats.pubsub_interest_messages += 1,
                         DataMessage::PubsubFrame(_) => stats.pubsub_frame_messages += 1,
+                        DataMessage::PubsubInventory(_) => stats.pubsub_inventory_messages += 1,
+                        DataMessage::PubsubWant(_) => stats.pubsub_want_messages += 1,
                         DataMessage::Payment(_)
                         | DataMessage::PaymentAck(_)
                         | DataMessage::Chunk(_)
@@ -2999,22 +3223,41 @@ where
             .pubsub_seen_frames
             .lock()
             .await
-            .insert_if_new(frame_key)
+            .insert_if_new(frame_key.clone())
         {
             return;
         }
+        self.cache_pubsub_frame(frame_key.clone(), frame.clone())
+            .await;
 
         let local_interested = self
             .pubsub_local_interests
             .read()
             .await
             .contains(&frame.stream_id);
-        let downstream_peers = if frame.htl > 1 {
-            self.interested_pubsub_peers(&frame.stream_id, Some(from_peer))
-                .await
+        let mut downstream_peers = if frame.htl > 1 {
+            match self.routing.pubsub_delivery_mode {
+                PubsubDeliveryMode::InterestPush => {
+                    let mut peers = self
+                        .interested_pubsub_peers(&frame.stream_id, Some(from_peer))
+                        .await;
+                    peers.extend(
+                        self.take_pubsub_want_peers(&frame_key, Some(from_peer))
+                            .await,
+                    );
+                    peers.sort();
+                    peers.dedup();
+                    peers
+                }
+                PubsubDeliveryMode::HtlInvWant => {
+                    self.take_pubsub_want_peers(&frame_key, Some(from_peer))
+                        .await
+                }
+            }
         } else {
             Vec::new()
         };
+        downstream_peers.retain(|peer_id| peer_id != from_peer);
 
         if local_interested || !downstream_peers.is_empty() {
             self.record_useful_bytes_received_from_peer(from_peer, wire_bytes as u64)
@@ -3039,6 +3282,98 @@ where
         frame.htl = frame.htl.saturating_sub(1);
         let _ = self
             .send_pubsub_frame_to_peers(&frame, &downstream_peers)
+            .await;
+    }
+
+    async fn handle_pubsub_inventory_message(
+        self: &Arc<Self>,
+        from_peer: &str,
+        inv: PubsubInventory,
+        wire_bytes: usize,
+    ) {
+        if inv.stream_id.is_empty() || inv.origin_peer_id.is_empty() {
+            return;
+        }
+        if inv.origin_peer_id == self.signaling.peer_id() {
+            return;
+        }
+
+        let key = Self::pubsub_key(&inv.origin_peer_id, &inv.stream_id, inv.seq);
+        if !self
+            .pubsub_seen_inventories
+            .lock()
+            .await
+            .insert_if_new(key.clone())
+        {
+            return;
+        }
+        {
+            let mut routes = self.pubsub_inventory_routes.write().await;
+            routes
+                .entry(key.clone())
+                .or_insert_with(|| from_peer.to_string());
+        }
+
+        let local_interested = self
+            .pubsub_local_interests
+            .read()
+            .await
+            .contains(&inv.stream_id);
+        let downstream_peers = self
+            .interested_pubsub_peers(&inv.stream_id, Some(from_peer))
+            .await;
+        if local_interested || !downstream_peers.is_empty() {
+            self.record_useful_bytes_received_from_peer(from_peer, wire_bytes as u64)
+                .await;
+            let want =
+                create_pubsub_want(inv.stream_id.clone(), inv.seq, inv.origin_peer_id.clone());
+            let _ = self.send_pubsub_want_upstream(&key, &want, None).await;
+        }
+
+        if !should_forward_htl(inv.htl) {
+            return;
+        }
+        let _ = self.flood_pubsub_inventory(&inv, Some(from_peer)).await;
+    }
+
+    async fn handle_pubsub_want_message(
+        self: &Arc<Self>,
+        from_peer: &str,
+        want: PubsubWant,
+        wire_bytes: usize,
+    ) {
+        if want.stream_id.is_empty() || want.origin_peer_id.is_empty() {
+            return;
+        }
+        if want.origin_peer_id == from_peer {
+            return;
+        }
+
+        let key = Self::pubsub_key(&want.origin_peer_id, &want.stream_id, want.seq);
+        let want_key = format!("{from_peer}:{key}");
+        if !self.pubsub_seen_wants.lock().await.insert_if_new(want_key) {
+            return;
+        }
+
+        if let Some(frame) = self.cached_pubsub_frame(&key).await {
+            self.record_useful_bytes_received_from_peer(from_peer, wire_bytes as u64)
+                .await;
+            let peers = vec![from_peer.to_string()];
+            let _ = self.send_pubsub_frame_to_peers(&frame, &peers).await;
+            return;
+        }
+
+        let has_upstream_route = self.pubsub_inventory_routes.read().await.contains_key(&key);
+        if !has_upstream_route {
+            return;
+        }
+
+        if self.remember_pubsub_want_peer(key.clone(), from_peer).await {
+            self.record_useful_bytes_received_from_peer(from_peer, wire_bytes as u64)
+                .await;
+        }
+        let _ = self
+            .send_pubsub_want_upstream(&key, &want, Some(from_peer))
             .await;
     }
 
@@ -3070,6 +3405,14 @@ where
             }
             DataMessage::PubsubFrame(frame) => {
                 self.handle_pubsub_frame_message(from_peer, frame, data.len())
+                    .await;
+            }
+            DataMessage::PubsubInventory(inv) => {
+                self.handle_pubsub_inventory_message(from_peer, inv, data.len())
+                    .await;
+            }
+            DataMessage::PubsubWant(want) => {
+                self.handle_pubsub_want_message(from_peer, want, data.len())
                     .await;
             }
             DataMessage::Payment(_)

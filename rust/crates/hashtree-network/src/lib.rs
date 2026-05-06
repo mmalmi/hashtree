@@ -90,8 +90,8 @@ pub use mesh_session::{
 pub use mesh_store_core::{
     build_hedged_wave_plan, normalize_dispatch_config, run_hedged_waves, sync_selector_peers,
     DataPumpStats, HedgedWaveAction, MeshReadSource, MeshRoutingConfig, MeshStoreCore,
-    ProductionMeshStore, PubsubEvent, PubsubPublishStats, RequestDispatchConfig,
-    ResponseBehaviorConfig, SimMeshStore,
+    ProductionMeshStore, PubsubDeliveryMode, PubsubEvent, PubsubPublishStats,
+    RequestDispatchConfig, ResponseBehaviorConfig, SimMeshStore,
 };
 pub use mock::{
     clear_channel_registry, MockConnectionFactory, MockDataChannel, MockLatencyMode, MockRelay,
@@ -106,15 +106,18 @@ pub use peer_selector::{
 };
 pub use protocol::{
     bytes_to_hash, create_fragment_response, create_pubsub_frame, create_pubsub_interest,
-    create_quote_request, create_quote_response_available, create_quote_response_unavailable,
-    create_request, create_request_with_quote, create_response, encode_chunk, encode_payment,
-    encode_payment_ack, encode_peer_hints, encode_pubsub_frame, encode_pubsub_interest,
-    encode_quote_request, encode_quote_response, encode_request, encode_response, hash_to_bytes,
-    hash_to_key, is_fragmented, parse_message, DataChunk, DataMessage, DataPayment, DataPaymentAck,
-    DataQuoteRequest, DataQuoteResponse, DataRequest, DataResponse, PeerHints, PubsubFrame,
-    PubsubInterest, FRAGMENT_SIZE, MSG_TYPE_CHUNK, MSG_TYPE_PAYMENT, MSG_TYPE_PAYMENT_ACK,
-    MSG_TYPE_PEER_HINTS, MSG_TYPE_PUBSUB_FRAME, MSG_TYPE_PUBSUB_INTEREST, MSG_TYPE_QUOTE_REQUEST,
-    MSG_TYPE_QUOTE_RESPONSE, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE,
+    create_pubsub_inventory, create_pubsub_want, create_quote_request,
+    create_quote_response_available, create_quote_response_unavailable, create_request,
+    create_request_with_quote, create_response, encode_chunk, encode_payment, encode_payment_ack,
+    encode_peer_hints, encode_pubsub_frame, encode_pubsub_interest, encode_pubsub_inventory,
+    encode_pubsub_want, encode_quote_request, encode_quote_response, encode_request,
+    encode_response, hash_to_bytes, hash_to_key, is_fragmented, parse_message, DataChunk,
+    DataMessage, DataPayment, DataPaymentAck, DataQuoteRequest, DataQuoteResponse, DataRequest,
+    DataResponse, PeerHints, PubsubFrame, PubsubInterest, PubsubInventory, PubsubWant,
+    FRAGMENT_SIZE, MSG_TYPE_CHUNK, MSG_TYPE_PAYMENT, MSG_TYPE_PAYMENT_ACK, MSG_TYPE_PEER_HINTS,
+    MSG_TYPE_PUBSUB_FRAME, MSG_TYPE_PUBSUB_INTEREST, MSG_TYPE_PUBSUB_INVENTORY,
+    MSG_TYPE_PUBSUB_WANT, MSG_TYPE_QUOTE_REQUEST, MSG_TYPE_QUOTE_RESPONSE, MSG_TYPE_REQUEST,
+    MSG_TYPE_RESPONSE,
 };
 pub use pubsub_strategy::{
     reciprocal_upload_weight, reciprocal_virtual_finish, select_reciprocal_outbound_job,

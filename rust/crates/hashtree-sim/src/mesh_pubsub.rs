@@ -17,8 +17,8 @@ use hashtree_core::MemoryStore;
 use hashtree_network::{
     clear_channel_registry, decrement_htl_with_policy, should_forward_htl, MeshRouter,
     MeshRoutingConfig, MeshStoreCore, MockConnectionFactory, MockLatencyMode, MockRelay,
-    MockRelayTransport, PeerHTLConfig, PoolConfig, PoolSettings, PubsubSchedulerConfig,
-    SignalingTransport, SimMeshStore, MESH_EVENT_POLICY,
+    MockRelayTransport, PeerHTLConfig, PoolConfig, PoolSettings, PubsubDeliveryMode,
+    PubsubSchedulerConfig, SignalingTransport, SimMeshStore, MESH_EVENT_POLICY,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,7 @@ pub struct MeshPubsubWorkloadConfig {
     pub payload_bytes: usize,
     pub pool: PoolConfig,
     pub pubsub_scheduler: PubsubSchedulerConfig,
+    pub pubsub_delivery_mode: PubsubDeliveryMode,
     pub reciprocal_provider_fraction: f64,
     pub reciprocal_credit_bytes: u64,
     pub subscription_churn_rate: f64,
@@ -57,6 +58,7 @@ impl Default for MeshPubsubWorkloadConfig {
                 satisfied_connections: 8,
             },
             pubsub_scheduler: PubsubSchedulerConfig::default(),
+            pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
             reciprocal_provider_fraction: 0.75,
             reciprocal_credit_bytes: 256 * 1024,
             subscription_churn_rate: 0.0,
@@ -163,6 +165,7 @@ async fn make_node(
         false,
         MeshRoutingConfig {
             pubsub_scheduler: config.pubsub_scheduler.clone(),
+            pubsub_delivery_mode: config.pubsub_delivery_mode,
             ..Default::default()
         },
     ));

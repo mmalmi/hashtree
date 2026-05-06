@@ -1,8 +1,11 @@
-use hashtree_network::{PubsubSchedulerConfig, PubsubSchedulingPolicy, MESH_EVENT_POLICY};
+use hashtree_network::{
+    PubsubDeliveryMode, PubsubSchedulerConfig, PubsubSchedulingPolicy, MESH_EVENT_POLICY,
+};
 use hashtree_sim::{
     run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
     run_mesh_pubsub_sweep, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
 };
+use std::collections::BTreeSet;
 use std::env;
 use std::future::Future;
 use std::io::{self, Write};
@@ -13,6 +16,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy)]
 struct Variant {
     label: &'static str,
+    delivery_mode: PubsubDeliveryMode,
     policy: PubsubSchedulingPolicy,
     fanout: usize,
 }
@@ -23,6 +27,7 @@ struct RunOptions {
     subscribers_per_author: Option<usize>,
     spam_subscribers_per_author: Option<usize>,
     progress_interval_secs: Option<u64>,
+    only_labels: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +87,7 @@ fn workload(
             reciprocal_credit_multiplier: 1.0,
             aging_credit_bytes: 2 * 1024,
         },
+        pubsub_delivery_mode: variant.delivery_mode,
         reciprocal_provider_fraction: 0.65,
         reciprocal_credit_bytes: 192 * 1024,
         subscription_churn_rate: 0.05,
@@ -166,6 +172,7 @@ fn run_options_from_args() -> RunOptions {
         subscribers_per_author: None,
         spam_subscribers_per_author: None,
         progress_interval_secs: Some(10),
+        only_labels: BTreeSet::new(),
     };
 
     for arg in env::args().skip(1) {
@@ -185,6 +192,16 @@ fn run_options_from_args() -> RunOptions {
             options.spam_subscribers_per_author = value.parse::<usize>().ok();
             continue;
         }
+        if let Some(value) = arg.strip_prefix("--only=") {
+            options.only_labels.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_string),
+            );
+            continue;
+        }
         options.node_counts.extend(
             arg.split(',')
                 .filter_map(|part| part.parse::<usize>().ok())
@@ -198,55 +215,82 @@ fn run_options_from_args() -> RunOptions {
     options
 }
 
+fn includes_label(options: &RunOptions, label: &str) -> bool {
+    options.only_labels.is_empty() || options.only_labels.contains(label)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let variants = [
         Variant {
-            label: "fair-f2",
+            label: "push-fair-f2",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Fair,
             fanout: 2,
         },
         Variant {
-            label: "random-f2",
+            label: "push-rand-f2",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Random,
             fanout: 2,
         },
         Variant {
-            label: "reciprocal-f2",
+            label: "push-recip-f2",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Reciprocal,
             fanout: 2,
         },
         Variant {
-            label: "aging-recip-f2",
+            label: "push-aging-f2",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::AgingReciprocal,
             fanout: 2,
         },
         Variant {
-            label: "reciprocal-f4",
+            label: "push-recip-f4",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Reciprocal,
             fanout: 4,
         },
         Variant {
-            label: "fair-f4",
+            label: "push-fair-f4",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Fair,
             fanout: 4,
         },
         Variant {
-            label: "fair-f8",
+            label: "push-fair-f8",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Fair,
             fanout: 8,
         },
         Variant {
-            label: "fair-f14",
+            label: "push-fair-f14",
+            delivery_mode: PubsubDeliveryMode::InterestPush,
             policy: PubsubSchedulingPolicy::Fair,
             fanout: 14,
+        },
+        Variant {
+            label: "prod-invwant",
+            delivery_mode: PubsubDeliveryMode::HtlInvWant,
+            policy: PubsubSchedulingPolicy::Reciprocal,
+            fanout: 8,
         },
     ];
 
     let options = run_options_from_args();
-    let run_total = options.node_counts.len() * (variants.len() + 2);
+    let baseline_labels = ["htl-flood-h4", "htl-invwant-h4"];
+    let selected_baselines = baseline_labels
+        .iter()
+        .filter(|label| includes_label(&options, label))
+        .count();
+    let selected_variants = variants
+        .iter()
+        .filter(|variant| includes_label(&options, variant.label))
+        .count();
+    let run_total = options.node_counts.len() * (selected_baselines + selected_variants);
     let mut run_index = 0usize;
-    for node_count in options.node_counts {
+    for node_count in options.node_counts.iter().copied() {
         let subscribers = options
             .subscribers_per_author
             .unwrap_or_else(|| scaled_count(node_count, 4, 8))
@@ -259,59 +303,68 @@ async fn main() {
         println!(
             "production MeshStoreCore pubsub workload: {node_count} nodes, 3 useful authors x {subscribers} subscribers, 3 spam authors x {spam_subscribers} subscribers, churn=5%, payload=1200B"
         );
-        let htl_config = workload(
-            17,
-            node_count,
-            subscribers,
-            spam_subscribers,
-            Variant {
-                label: "htl-flood-h4",
-                policy: PubsubSchedulingPolicy::Fair,
-                fanout: 4,
-            },
-        );
-        run_index += 1;
-        let (htl_report, elapsed_secs) = run_with_progress(
-            "htl-flood-h4",
-            node_count,
-            RunProgress {
-                index: run_index,
-                total: run_total,
-            },
-            options.progress_interval_secs,
-            run_mesh_pubsub_htl_flood_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
-        )
-        .await;
-        print_report("htl-flood-h4", &htl_report, elapsed_secs);
-        io::stdout().flush().expect("flush stdout");
+        if includes_label(&options, "htl-flood-h4") {
+            let htl_config = workload(
+                17,
+                node_count,
+                subscribers,
+                spam_subscribers,
+                Variant {
+                    label: "htl-flood-h4",
+                    delivery_mode: PubsubDeliveryMode::InterestPush,
+                    policy: PubsubSchedulingPolicy::Fair,
+                    fanout: 4,
+                },
+            );
+            run_index += 1;
+            let (htl_report, elapsed_secs) = run_with_progress(
+                "htl-flood-h4",
+                node_count,
+                RunProgress {
+                    index: run_index,
+                    total: run_total,
+                },
+                options.progress_interval_secs,
+                run_mesh_pubsub_htl_flood_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
+            )
+            .await;
+            print_report("htl-flood-h4", &htl_report, elapsed_secs);
+            io::stdout().flush().expect("flush stdout");
+        }
 
-        let htl_config = workload(
-            17,
-            node_count,
-            subscribers,
-            spam_subscribers,
-            Variant {
-                label: "htl-invwant-h4",
-                policy: PubsubSchedulingPolicy::Fair,
-                fanout: 4,
-            },
-        );
-        run_index += 1;
-        let (htl_report, elapsed_secs) = run_with_progress(
-            "htl-invwant-h4",
-            node_count,
-            RunProgress {
-                index: run_index,
-                total: run_total,
-            },
-            options.progress_interval_secs,
-            run_mesh_pubsub_htl_inv_want_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
-        )
-        .await;
-        print_report("htl-invwant-h4", &htl_report, elapsed_secs);
-        io::stdout().flush().expect("flush stdout");
+        if includes_label(&options, "htl-invwant-h4") {
+            let htl_config = workload(
+                17,
+                node_count,
+                subscribers,
+                spam_subscribers,
+                Variant {
+                    label: "htl-invwant-h4",
+                    delivery_mode: PubsubDeliveryMode::HtlInvWant,
+                    policy: PubsubSchedulingPolicy::Fair,
+                    fanout: 4,
+                },
+            );
+            run_index += 1;
+            let (htl_report, elapsed_secs) = run_with_progress(
+                "htl-invwant-h4",
+                node_count,
+                RunProgress {
+                    index: run_index,
+                    total: run_total,
+                },
+                options.progress_interval_secs,
+                run_mesh_pubsub_htl_inv_want_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
+            )
+            .await;
+            print_report("htl-invwant-h4", &htl_report, elapsed_secs);
+            io::stdout().flush().expect("flush stdout");
+        }
 
         for variant in variants {
+            if !includes_label(&options, variant.label) {
+                continue;
+            }
             let config = workload(17, node_count, subscribers, spam_subscribers, variant);
             run_index += 1;
             let (result, elapsed_secs) = run_with_progress(

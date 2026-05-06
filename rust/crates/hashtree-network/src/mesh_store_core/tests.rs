@@ -555,6 +555,45 @@ async fn test_pubsub_production_path_delivers_subscribed_stream() {
 }
 
 #[tokio::test]
+async fn test_pubsub_inv_want_publish_sends_inventory_before_payload() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
+    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let nodes = [&publisher, &subscriber];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    subscriber.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+
+    let payload = vec![7; 4096];
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 1, payload.clone())
+        .await;
+    assert_eq!(stats.selected_peers, 1);
+    assert_eq!(stats.sent_peers, 1);
+    assert!(
+        stats.sent_bytes < payload.len() as u64,
+        "publish path should send inventory first, not the full payload"
+    );
+
+    pump_test_network(&nodes, 24).await;
+    let events = subscriber.store.drain_pubsub_events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload, payload);
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
 async fn test_pubsub_spam_ingress_does_not_buy_reciprocity_credit() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;
@@ -623,6 +662,7 @@ async fn test_pubsub_scheduler_uses_production_reciprocity_credit() {
         relay.clone(),
         "publisher",
         MeshRoutingConfig {
+            pubsub_delivery_mode: PubsubDeliveryMode::InterestPush,
             pubsub_scheduler: PubsubSchedulerConfig {
                 policy: crate::pubsub_strategy::PubsubSchedulingPolicy::Reciprocal,
                 fanout: 1,
@@ -683,8 +723,12 @@ async fn test_pubsub_unsubscribe_withdraws_interest_path() {
     crate::mock::clear_channel_registry().await;
 
     let relay = crate::mock::MockRelay::new();
-    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
-    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let routing = MeshRoutingConfig {
+        pubsub_delivery_mode: PubsubDeliveryMode::InterestPush,
+        ..Default::default()
+    };
+    let publisher = make_shared_test_node(relay.clone(), "publisher", routing.clone());
+    let subscriber = make_shared_test_node(relay, "subscriber", routing);
     let nodes = [&publisher, &subscriber];
 
     for node in &nodes {

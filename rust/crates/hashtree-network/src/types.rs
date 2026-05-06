@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 
-use crate::mesh_store_core::RequestDispatchConfig;
+use crate::mesh_store_core::{PubsubDeliveryMode, RequestDispatchConfig};
 use crate::peer_selector::SelectionStrategy;
 
 fn default_hash_get_enabled() -> bool {
@@ -515,6 +515,8 @@ pub struct MeshStoreConfig {
     pub request_fairness_enabled: bool,
     /// Hedged request dispatch policy for retrieval.
     pub request_dispatch: RequestDispatchConfig,
+    /// Pubsub delivery strategy used by the production mesh store.
+    pub pubsub_delivery_mode: PubsubDeliveryMode,
     /// Upstream Blossom servers used as adaptive fallback read sources.
     pub upstream_blossom_servers: Vec<String>,
 }
@@ -540,6 +542,7 @@ impl Default for MeshStoreConfig {
                 max_fanout: 8,
                 hedge_interval_ms: 120,
             },
+            pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
             upstream_blossom_servers: Vec::new(),
         }
     }

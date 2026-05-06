@@ -11,6 +11,8 @@
 //! - PeerHints:      [0x07][msgpack: {u: [WebRTC signaling endpoint URLs]}]
 //! - PubsubInterest: [0x08][msgpack: {s: stream, sub: subscriber peer id, q: seq, a: active, htl?: u8}]
 //! - PubsubFrame:    [0x09][msgpack: {s: stream, q: seq, o: origin peer id, htl?: u8, d: bytes}]
+//! - PubsubInventory:[0x0a][msgpack: {s: stream, q: seq, o: origin peer id, b: bytes, htl?: u8}]
+//! - PubsubWant:     [0x0b][msgpack: {s: stream, q: seq, o: origin peer id}]
 //!
 //! Fragmented responses include `i` (index) and `n` (total), unfragmented omit them.
 
@@ -36,6 +38,8 @@ pub const MSG_TYPE_CHUNK: u8 = 0x06;
 pub const MSG_TYPE_PEER_HINTS: u8 = 0x07;
 pub const MSG_TYPE_PUBSUB_INTEREST: u8 = 0x08;
 pub const MSG_TYPE_PUBSUB_FRAME: u8 = 0x09;
+pub const MSG_TYPE_PUBSUB_INVENTORY: u8 = 0x0a;
+pub const MSG_TYPE_PUBSUB_WANT: u8 = 0x0b;
 
 /// Fragment size for large data (32KB - safe limit for WebRTC)
 pub const FRAGMENT_SIZE: usize = 32 * 1024;
@@ -194,6 +198,40 @@ pub struct PubsubFrame {
     pub payload: Vec<u8>,
 }
 
+/// Pubsub inventory announcement for inventory-first delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PubsubInventory {
+    /// Stream/topic/author key.
+    #[serde(rename = "s")]
+    pub stream_id: String,
+    /// Monotonic sequence scoped to `origin_peer_id + stream_id`.
+    #[serde(rename = "q")]
+    pub seq: u64,
+    /// Peer id that originated this frame.
+    #[serde(rename = "o")]
+    pub origin_peer_id: String,
+    /// Payload size in bytes.
+    #[serde(rename = "b")]
+    pub payload_bytes: u64,
+    /// Hops To Live (defaults to MAX_HTL when omitted on the wire).
+    #[serde(default = "default_htl", skip_serializing_if = "is_max_htl")]
+    pub htl: u8,
+}
+
+/// Pubsub want request for inventory-first delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PubsubWant {
+    /// Stream/topic/author key.
+    #[serde(rename = "s")]
+    pub stream_id: String,
+    /// Monotonic sequence scoped to `origin_peer_id + stream_id`.
+    #[serde(rename = "q")]
+    pub seq: u64,
+    /// Peer id that originated the wanted frame.
+    #[serde(rename = "o")]
+    pub origin_peer_id: String,
+}
+
 /// Parsed data message
 #[derive(Debug, Clone)]
 pub enum DataMessage {
@@ -207,6 +245,8 @@ pub enum DataMessage {
     PeerHints(PeerHints),
     PubsubInterest(PubsubInterest),
     PubsubFrame(PubsubFrame),
+    PubsubInventory(PubsubInventory),
+    PubsubWant(PubsubWant),
 }
 
 /// Encode a request message to wire format
@@ -301,6 +341,24 @@ pub fn encode_pubsub_frame(frame: &PubsubFrame) -> Vec<u8> {
     result
 }
 
+/// Encode a pubsub inventory announcement to wire format.
+pub fn encode_pubsub_inventory(inv: &PubsubInventory) -> Vec<u8> {
+    let body = rmp_serde::to_vec_named(inv).expect("Failed to encode pubsub inventory");
+    let mut result = Vec::with_capacity(1 + body.len());
+    result.push(MSG_TYPE_PUBSUB_INVENTORY);
+    result.extend(body);
+    result
+}
+
+/// Encode a pubsub want request to wire format.
+pub fn encode_pubsub_want(want: &PubsubWant) -> Vec<u8> {
+    let body = rmp_serde::to_vec_named(want).expect("Failed to encode pubsub want");
+    let mut result = Vec::with_capacity(1 + body.len());
+    result.push(MSG_TYPE_PUBSUB_WANT);
+    result.extend(body);
+    result
+}
+
 /// Parse a wire format message
 pub fn parse_message(data: &[u8]) -> Option<DataMessage> {
     if data.len() < 2 {
@@ -341,6 +399,12 @@ pub fn parse_message(data: &[u8]) -> Option<DataMessage> {
         MSG_TYPE_PUBSUB_FRAME => rmp_serde::from_slice::<PubsubFrame>(body)
             .ok()
             .map(DataMessage::PubsubFrame),
+        MSG_TYPE_PUBSUB_INVENTORY => rmp_serde::from_slice::<PubsubInventory>(body)
+            .ok()
+            .map(DataMessage::PubsubInventory),
+        MSG_TYPE_PUBSUB_WANT => rmp_serde::from_slice::<PubsubWant>(body)
+            .ok()
+            .map(DataMessage::PubsubWant),
         _ => None,
     }
 }
@@ -404,6 +468,36 @@ pub fn create_pubsub_frame(
         origin_peer_id: origin_peer_id.into(),
         payload,
         htl,
+    }
+}
+
+/// Create a pubsub inventory announcement.
+pub fn create_pubsub_inventory(
+    stream_id: impl Into<String>,
+    seq: u64,
+    origin_peer_id: impl Into<String>,
+    payload_bytes: u64,
+    htl: u8,
+) -> PubsubInventory {
+    PubsubInventory {
+        stream_id: stream_id.into(),
+        seq,
+        origin_peer_id: origin_peer_id.into(),
+        payload_bytes,
+        htl,
+    }
+}
+
+/// Create a pubsub want request.
+pub fn create_pubsub_want(
+    stream_id: impl Into<String>,
+    seq: u64,
+    origin_peer_id: impl Into<String>,
+) -> PubsubWant {
+    PubsubWant {
+        stream_id: stream_id.into(),
+        seq,
+        origin_peer_id: origin_peer_id.into(),
     }
 }
 
@@ -733,6 +827,28 @@ mod tests {
                 assert_eq!(parsed.payload, vec![1, 2, 3]);
             }
             _ => panic!("Expected pubsub frame"),
+        }
+
+        let inv = create_pubsub_inventory("author:alice", 7, "publisher-a", 3, 4);
+        match parse_message(&encode_pubsub_inventory(&inv)).unwrap() {
+            DataMessage::PubsubInventory(parsed) => {
+                assert_eq!(parsed.stream_id, "author:alice");
+                assert_eq!(parsed.seq, 7);
+                assert_eq!(parsed.origin_peer_id, "publisher-a");
+                assert_eq!(parsed.payload_bytes, 3);
+                assert_eq!(parsed.htl, 4);
+            }
+            _ => panic!("Expected pubsub inventory"),
+        }
+
+        let want = create_pubsub_want("author:alice", 7, "publisher-a");
+        match parse_message(&encode_pubsub_want(&want)).unwrap() {
+            DataMessage::PubsubWant(parsed) => {
+                assert_eq!(parsed.stream_id, "author:alice");
+                assert_eq!(parsed.seq, 7);
+                assert_eq!(parsed.origin_peer_id, "publisher-a");
+            }
+            _ => panic!("Expected pubsub want"),
         }
     }
 }
