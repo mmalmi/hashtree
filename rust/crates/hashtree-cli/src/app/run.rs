@@ -405,22 +405,24 @@ pub(crate) async fn run() -> Result<()> {
                 spambox_db_max_bytes,
                 ..Default::default()
             };
-            let mut public_event_pubkeys = HashSet::new();
-            public_event_pubkeys.insert(hex::encode(pk_bytes));
-            let nostr_relay = Arc::new(
-                hashtree_cli::nostr_relay::NostrRelay::new(
-                    Arc::clone(&social_graph_store),
-                    data_dir.clone(),
-                    public_event_pubkeys,
-                    Some(social_graph.clone()),
-                    nostr_relay_config,
-                )
-                .context("Failed to initialize Nostr relay")?,
-            );
-
-            let crawler_spambox = if spambox_db_max_bytes == 0 {
-                None
+            let nostr_relay = if config.nostr.enabled {
+                let mut public_event_pubkeys = HashSet::new();
+                public_event_pubkeys.insert(hex::encode(pk_bytes));
+                Some(Arc::new(
+                    hashtree_cli::nostr_relay::NostrRelay::new(
+                        Arc::clone(&social_graph_store),
+                        data_dir.clone(),
+                        public_event_pubkeys,
+                        Some(social_graph.clone()),
+                        nostr_relay_config,
+                    )
+                    .context("Failed to initialize Nostr relay")?,
+                ))
             } else {
+                None
+            };
+
+            let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
                 let spam_dir = data_dir.join("socialgraph_spambox");
                 match hashtree_cli::socialgraph::open_social_graph_store_at_path(
                     &spam_dir,
@@ -432,6 +434,8 @@ pub(crate) async fn run() -> Result<()> {
                         None
                     }
                 }
+            } else {
+                None
             };
             let crawler_spambox_backend = crawler_spambox
                 .clone()
@@ -526,9 +530,11 @@ pub(crate) async fn run() -> Result<()> {
                             let _ = cashu_mint_metadata;
                             manager
                         };
-                        manager.set_nostr_relay(
-                            nostr_relay.clone() as hashtree_network::SharedMeshRelayClient
-                        );
+                        if let Some(nostr_relay) = nostr_relay.as_ref() {
+                            manager.set_nostr_relay(
+                                nostr_relay.clone() as hashtree_network::SharedMeshRelayClient
+                            );
+                        }
 
                         // Get the WebRTC state before spawning (for HTTP handler to query peers)
                         let webrtc_state = manager.state();
@@ -578,6 +584,7 @@ pub(crate) async fn run() -> Result<()> {
             // Combine legacy servers with configured public read servers.
             let upstream_blossom = config.blossom.all_read_servers();
             let active_nostr_relays = config.nostr.active_relays();
+            let active_nostr_relay_count = active_nostr_relays.len();
 
             // Set up server with allowed pubkeys for blossom write access
             let mut server = HashtreeServer::new(Arc::clone(&store), addr.clone())
@@ -596,7 +603,9 @@ pub(crate) async fn run() -> Result<()> {
                 social_graph_root_bytes,
                 config.server.socialgraph_snapshot_public,
             );
-            server = server.with_nostr_relay(nostr_relay.clone());
+            if let Some(nostr_relay) = nostr_relay.clone() {
+                server = server.with_nostr_relay(nostr_relay);
+            }
 
             // Add WebRTC peer state for P2P queries from HTTP handler
             if let Some(ref webrtc_state) = webrtc_state {
@@ -641,7 +650,7 @@ pub(crate) async fn run() -> Result<()> {
             if config.server.public_writes {
                 println!("Public writes: enabled");
             }
-            println!("Relays: {} configured", config.nostr.relays.len());
+            println!("Relays: {} configured", active_nostr_relay_count);
             println!("Git remote: http://{}/git/<pubkey>/<repo>", addr);
             #[cfg(feature = "p2p")]
             if let Some(ref handle) = stun_handle {
