@@ -386,24 +386,25 @@ impl EmbeddedBackgroundServicesController {
             });
         }
 
-        let has_pinned_refs = self
-            .store
-            .list_pinned_refs()
-            .map(|refs| !refs.is_empty())
-            .unwrap_or(false);
-        let has_tracked_authors = self
-            .store
-            .list_tracked_authors()
-            .map(|authors| !authors.is_empty())
-            .unwrap_or(false);
-
-        if config.sync.enabled
-            && (config.sync.sync_own
+        if config.sync.enabled && !active_relays.is_empty() {
+            let has_pinned_refs = self
+                .store
+                .list_pinned_refs()
+                .map(|refs| !refs.is_empty())
+                .unwrap_or(false);
+            let has_tracked_authors = self
+                .store
+                .list_tracked_authors()
+                .map(|authors| !authors.is_empty())
+                .unwrap_or(false);
+            let should_sync = config.sync.sync_own
                 || config.sync.sync_followed
                 || has_pinned_refs
-                || has_tracked_authors)
-            && !active_relays.is_empty()
-        {
+                || has_tracked_authors;
+            if !should_sync {
+                return Ok(runtime.status());
+            }
+
             let sync_config = crate::sync::SyncConfig {
                 sync_own: config.sync.sync_own,
                 sync_followed: config.sync.sync_followed,
