@@ -72,5 +72,11 @@ pub fn encode_message(msg: &DataMessage) -> Result<Vec<u8>, rmp_serde::encode::E
         DataMessage::PaymentAck(res) => encode_payment_ack(res),
         DataMessage::Chunk(chunk) => encode_chunk(chunk),
         DataMessage::PeerHints(hints) => Ok(hashtree_network::encode_peer_hints(hints)),
+        DataMessage::PubsubInterest(interest) => {
+            Ok(hashtree_network::encode_pubsub_interest(interest))
+        }
+        DataMessage::PubsubFrame(frame) => Ok(hashtree_network::encode_pubsub_frame(frame)),
+        DataMessage::PubsubInventory(inv) => Ok(hashtree_network::encode_pubsub_inventory(inv)),
+        DataMessage::PubsubWant(want) => Ok(hashtree_network::encode_pubsub_want(want)),
     }
 }

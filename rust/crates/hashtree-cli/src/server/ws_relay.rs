@@ -848,7 +848,11 @@ async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
             | DataMessage::Payment(_)
             | DataMessage::PaymentAck(_)
             | DataMessage::Chunk(_)
-            | DataMessage::PeerHints(_) => {}
+            | DataMessage::PeerHints(_)
+            | DataMessage::PubsubInterest(_)
+            | DataMessage::PubsubFrame(_)
+            | DataMessage::PubsubInventory(_)
+            | DataMessage::PubsubWant(_) => {}
         }
         return;
     }
@@ -980,7 +984,11 @@ fn parse_msgpack_message(data: &[u8]) -> Option<DataMessage> {
                 None
             }
         }
-        DataMessage::PeerHints(_) => None,
+        DataMessage::PeerHints(_)
+        | DataMessage::PubsubInterest(_)
+        | DataMessage::PubsubFrame(_)
+        | DataMessage::PubsubInventory(_)
+        | DataMessage::PubsubWant(_) => Some(msg),
     }
 }
 
