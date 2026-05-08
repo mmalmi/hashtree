@@ -73,7 +73,8 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                     peer_id,
                     &hash_hex[..16.min(hash_hex.len())]
                 );
-                if let Err(e) = state.store.put_cached_blob(&data) {
+                let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
+                if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
                 }
                 return true;
@@ -85,7 +86,8 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                     server,
                     &hash_hex[..16.min(hash_hex.len())]
                 );
-                if let Err(e) = state.store.put_cached_blob(&data) {
+                let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
+                if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache upstream data: {}", e);
                 }
                 return true;
@@ -101,6 +103,25 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
     }
 
     false
+}
+
+pub(super) async fn put_cached_blob_without_blocking_runtime(
+    state: &AppState,
+    data: Vec<u8>,
+) -> (Vec<u8>, Result<String, String>) {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || {
+        let result = store.put_cached_blob(&data).map_err(|e| e.to_string());
+        (data, result)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => (
+            Vec::new(),
+            Err(format!("cached blob write task failed: {}", err)),
+        ),
+    }
 }
 
 pub(super) async fn await_fetch_task<F, T>(source: &str, hash_hex: &str, future: F) -> Option<T>

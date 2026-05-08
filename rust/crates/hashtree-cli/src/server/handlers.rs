@@ -1204,7 +1204,8 @@ pub async fn serve_content_or_blob(
             // Query connected mesh peers
             if let Some((data, peer_id)) = query_webrtc_peers(webrtc_state, &hash_hex).await {
                 // Cache locally for future requests
-                if let Err(e) = state.store.put_cached_blob(&data) {
+                let (data, result) = put_cached_blob_without_blocking_runtime(&state, data).await;
+                if let Err(e) = result {
                     tracing::warn!("Failed to cache peer data: {}", e);
                 }
 
@@ -1224,7 +1225,8 @@ pub async fn serve_content_or_blob(
                 query_upstream_blossom(&state.upstream_blossom, &hash_hex).await
             {
                 // Cache locally for future requests
-                if let Err(e) = state.store.put_cached_blob(&data) {
+                let (data, result) = put_cached_blob_without_blocking_runtime(&state, data).await;
+                if let Err(e) = result {
                     tracing::warn!("Failed to cache upstream data: {}", e);
                 }
 

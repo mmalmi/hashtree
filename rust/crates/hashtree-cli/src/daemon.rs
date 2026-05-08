@@ -716,22 +716,24 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         spambox_db_max_bytes,
         ..Default::default()
     };
-    let mut public_event_pubkeys = HashSet::new();
-    public_event_pubkeys.insert(hex::encode(pk_bytes));
-    let nostr_relay = Arc::new(
-        NostrRelay::new(
-            Arc::clone(&social_graph_store),
-            opts.data_dir.clone(),
-            public_event_pubkeys,
-            Some(social_graph.clone()),
-            nostr_relay_config,
-        )
-        .context("Failed to initialize Nostr relay")?,
-    );
-
-    let crawler_spambox = if spambox_db_max_bytes == 0 {
-        None
+    let nostr_relay = if config.nostr.enabled {
+        let mut public_event_pubkeys = HashSet::new();
+        public_event_pubkeys.insert(hex::encode(pk_bytes));
+        Some(Arc::new(
+            NostrRelay::new(
+                Arc::clone(&social_graph_store),
+                opts.data_dir.clone(),
+                public_event_pubkeys,
+                Some(social_graph.clone()),
+                nostr_relay_config,
+            )
+            .context("Failed to initialize Nostr relay")?,
+        ))
     } else {
+        None
+    };
+
+    let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
         let spam_dir = opts.data_dir.join("socialgraph_spambox");
         match socialgraph::open_social_graph_store_at_path(&spam_dir, Some(spambox_db_max_bytes)) {
             Ok(store) => Some(store),
@@ -740,6 +742,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
                 None
             }
         }
+    } else {
+        None
     };
     let crawler_spambox_backend = crawler_spambox
         .clone()
@@ -749,7 +753,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     let (webrtc_state, peer_router_controller): (
         Option<Arc<WebRTCState>>,
         Option<Arc<EmbeddedPeerRouterController>>,
-    ) = {
+    ) = if let Some(nostr_relay) = nostr_relay.clone() {
         let router_config = crate::p2p_common::default_webrtc_config(&config);
         let peer_classifier = crate::p2p_common::build_peer_classifier(
             opts.data_dir.clone(),
@@ -808,6 +812,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         ));
         controller.apply_config(&config).await?;
         (Some(state), Some(controller))
+    } else {
+        (None, None)
     };
 
     #[cfg(not(feature = "p2p"))]
@@ -839,8 +845,10 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
             Arc::clone(&social_graph_store),
             social_graph_root_bytes,
             config.server.socialgraph_snapshot_public,
-        )
-        .with_nostr_relay(nostr_relay.clone());
+        );
+    if let Some(nostr_relay) = nostr_relay {
+        server = server.with_nostr_relay(nostr_relay);
+    }
 
     if crate::p2p_common::peer_router_enabled(&config) {
         if let Some(ref state) = webrtc_state {
