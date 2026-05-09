@@ -21,9 +21,10 @@ Options:
   --target-dir <dir>                 Cargo target dir to read/write
   --targets <csv>                    Comma-separated targets to build/package
   --windows-artifacts-dir <dir>      Directory containing Windows .exe binaries from a VM
-  --skip-windows-vm                  Skip auto-building Windows CLI artifacts from a Parallels VM
-  --windows-vm-name <name>           Override the Parallels Windows VM name for auto builds
-  --windows-shared-repo-path <path>  Override the repo path inside Parallels shared folders
+  --skip-windows-vm                  Skip auto-building Windows CLI artifacts on win11-dev
+  --windows-vm-name <name>           SSH host running Windows (default: win11-dev). Legacy alias.
+  --windows-ssh-host <host>          SSH host running Windows (default: win11-dev)
+  --windows-shared-repo-path <path>  Ignored (no longer using Parallels shared folders)
   --windows-guest-repo-path <path>   Override the guest repo path used for the Windows build
   --package-only                     Skip builds and package existing binaries only
   --linux-builder <mode>             Linux musl builder for release artifacts: auto, cross, or docker
@@ -109,7 +110,7 @@ while [ $# -gt 0 ]; do
             SKIP_WINDOWS_VM=1
             shift
             ;;
-        --windows-vm-name)
+        --windows-vm-name|--windows-ssh-host)
             WINDOWS_VM_NAME="${2:-}"
             shift 2
             ;;
@@ -236,11 +237,9 @@ auto_build_windows_vm_artifacts() {
 
     WINDOWS_BUILD_ARGS=("$helper_script" "--output-dir" "$windows_output_dir")
     if [ -n "$WINDOWS_VM_NAME" ]; then
-        WINDOWS_BUILD_ARGS+=("--vm-name" "$WINDOWS_VM_NAME")
+        WINDOWS_BUILD_ARGS+=("--ssh-host" "$WINDOWS_VM_NAME")
     fi
-    if [ -n "$WINDOWS_SHARED_REPO_PATH" ]; then
-        WINDOWS_BUILD_ARGS+=("--shared-repo-path" "$WINDOWS_SHARED_REPO_PATH")
-    fi
+    # WINDOWS_SHARED_REPO_PATH is ignored under the SSH flow.
     if [ -n "$WINDOWS_GUEST_REPO_PATH" ]; then
         WINDOWS_BUILD_ARGS+=("--guest-repo-path" "$WINDOWS_GUEST_REPO_PATH")
     fi

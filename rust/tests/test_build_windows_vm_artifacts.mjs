@@ -2,87 +2,56 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  autoDetectWindowsVmName,
-  defaultSharedWindowsPath,
-  hostPathFromSharedWindowsPath,
   parseArgs,
   windowsBuildScriptLines,
 } from '../scripts/build_windows_vm_artifacts.mjs'
 
-test('defaultSharedWindowsPath maps home-relative paths into Parallels shared folders', () => {
-  assert.equal(
-    defaultSharedWindowsPath('/Users/sirius/src/hashtree', '/Users/sirius'),
-    'C:\\Mac\\Home\\src\\hashtree',
-  )
-  assert.equal(defaultSharedWindowsPath('/tmp/hashtree', '/Users/sirius'), null)
+test('parseArgs reads new and legacy options', () => {
+  const parsed = parseArgs([
+    '--output-dir',
+    '/tmp/out',
+    '--ssh-host',
+    'win11-dev',
+    '--guest-repo-path',
+    'C:\\src\\hashtree',
+  ])
+
+  assert.equal(parsed.outputDir.endsWith('/tmp/out'), true)
+  assert.equal(parsed.sshHost, 'win11-dev')
+  assert.equal(parsed.guestRepoPath, 'C:\\src\\hashtree')
+  assert.equal(parsed.help, false)
 })
 
-test('hostPathFromSharedWindowsPath maps Parallels shared folders back onto the host', () => {
-  assert.equal(
-    hostPathFromSharedWindowsPath('C:\\Mac\\Home\\src\\hashtree', '/Users/sirius'),
-    '/Users/sirius/src/hashtree',
-  )
-  assert.equal(hostPathFromSharedWindowsPath('D:\\src\\hashtree', '/Users/sirius'), null)
-})
-
-test('autoDetectWindowsVmName returns the single running Windows VM', () => {
-  const listing = `UUID                                    STATUS       IP_ADDR         NAME
-{11111111-1111-1111-1111-111111111111}  running      -               Windows 11
-{22222222-2222-2222-2222-222222222222}  stopped      -               Linux`
-  assert.equal(autoDetectWindowsVmName(listing), 'Windows 11')
-})
-
-test('autoDetectWindowsVmName requires a unique running Windows VM', () => {
-  const listing = `UUID                                    STATUS       IP_ADDR         NAME
-{11111111-1111-1111-1111-111111111111}  running      -               Windows 11
-{33333333-3333-3333-3333-333333333333}  running      -               Windows Dev`
-  assert.equal(autoDetectWindowsVmName(listing), null)
-})
-
-test('parseArgs reads overrides and defaults', () => {
+test('parseArgs accepts legacy --vm-name as --ssh-host alias', () => {
   const parsed = parseArgs([
     '--output-dir',
     '/tmp/out',
     '--vm-name',
     'Windows 11',
-    '--shared-repo-path',
-    'C:\\Mac\\Home\\src\\hashtree',
-    '--guest-repo-path',
-    'C:\\Users\\sirius\\src\\hashtree',
   ])
 
-  assert.deepEqual(parsed, {
-    outputDir: '/tmp/out',
-    vmName: 'Windows 11',
-    sharedRepoPath: 'C:\\Mac\\Home\\src\\hashtree',
-    guestRepoPath: 'C:\\Users\\sirius\\src\\hashtree',
-    help: false,
-  })
+  assert.equal(parsed.sshHost, 'Windows 11')
 })
 
-test('windows build script extracts a source archive before cargo build', () => {
-  const lines = windowsBuildScriptLines({
-    sharedSourceArchivePath: 'C:\\Mac\\Home\\src\\hashtree\\rust\\dist\\windows-vm-source.tar',
-    guestRepoPath: 'C:\\Users\\sirius\\src\\hashtree',
-    sharedOutputDir: 'C:\\Mac\\Home\\src\\hashtree\\rust\\dist\\windows-vm-out',
-  })
+test('parseArgs ignores legacy --shared-repo-path', () => {
+  const parsed = parseArgs([
+    '--output-dir',
+    '/tmp/out',
+    '--shared-repo-path',
+    'C:\\Mac\\Home\\src\\hashtree',
+  ])
 
-  const cleanupIndex = lines.indexOf('if exist "%GUEST_REPO%" rmdir /S /Q "%GUEST_REPO%"')
-  const mkdirIndex = lines.indexOf('mkdir "%GUEST_REPO%"')
-  const extractIndex = lines.indexOf('tar.exe -xf "%SOURCE_ARCHIVE%" -C "%GUEST_REPO%"')
+  assert.equal(parsed.outputDir.endsWith('/tmp/out'), true)
+})
 
-  assert.ok(cleanupIndex >= 0)
-  assert.ok(mkdirIndex > cleanupIndex)
-  assert.ok(extractIndex > mkdirIndex)
+test('windowsBuildScriptLines emits a PowerShell-friendly preamble', () => {
+  const lines = windowsBuildScriptLines({ guestRepoPath: 'C:\\src\\hashtree' })
+
+  // Old cmd-batch directives should be gone.
   assert.equal(lines.findIndex((line) => line.startsWith('robocopy ')), -1)
-  assert.ok(
-    lines.includes('set "SOURCE_ARCHIVE=C:\\Mac\\Home\\src\\hashtree\\rust\\dist\\windows-vm-source.tar"'),
-  )
-  assert.ok(lines.includes('set "LOCKED_FLAG="'))
-  assert.ok(lines.includes('if exist "%GUEST_REPO%\\rust\\Cargo.lock" set "LOCKED_FLAG=--locked"'))
-  assert.ok(
-    lines.includes(
-      'cargo build --release %LOCKED_FLAG% --target x86_64-pc-windows-msvc -p hashtree-cli --bin htree',
-    ),
-  )
+  assert.equal(lines.findIndex((line) => line.startsWith('@echo off')), -1)
+
+  // Should set up the guest repo dir under the new path.
+  const guestRepoLine = lines.find((line) => line.includes("$guestRepo = 'C:\\src\\hashtree'"))
+  assert.ok(guestRepoLine, `expected $guestRepo assignment, got ${JSON.stringify(lines)}`)
 })

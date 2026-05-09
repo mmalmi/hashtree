@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import os from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -15,16 +14,20 @@ const repoDir = dirname(rustDir)
 function usage() {
   return `Usage: node rust/scripts/build_windows_vm_artifacts.mjs --output-dir <dir> [options]
 
-Build Windows CLI binaries inside a Parallels Windows VM and copy the resulting
-.exe files into a host output directory that is reachable through the Parallels
-shared home folder.
+Build Windows CLI binaries on the win11-dev VM (reachable over the Nostr VPN
+mesh — see ~/.claude/CLAUDE.md) and copy the resulting .exe files into a host
+output directory.
 
 Options:
   --output-dir <dir>             Host output directory for built .exe files
-  --vm-name <name>               Override the Parallels VM name
-  --shared-repo-path <path>      Override the repo path inside Parallels shared folders
+  --ssh-host <host>              SSH host (default: win11-dev)
   --guest-repo-path <path>       Override the guest repo path used for the build
+                                 (default: C:\\src\\hashtree)
   -h, --help                     Show this help
+
+Legacy options (accepted, mapped onto the SSH flow):
+  --vm-name <name>               Treated as --ssh-host
+  --shared-repo-path <path>      Ignored (no longer using Parallels shared folders)
 `
 }
 
@@ -32,8 +35,7 @@ export function parseArgs(argv) {
   const args = [...argv]
   const options = {
     outputDir: '',
-    vmName: '',
-    sharedRepoPath: '',
+    sshHost: '',
     guestRepoPath: '',
     help: false,
   }
@@ -44,14 +46,15 @@ export function parseArgs(argv) {
       case '--output-dir':
         options.outputDir = resolve(args[++index] ?? '')
         break
-      case '--vm-name':
-        options.vmName = args[++index] ?? ''
-        break
-      case '--shared-repo-path':
-        options.sharedRepoPath = args[++index] ?? ''
+      case '--ssh-host':
+      case '--vm-name': // legacy alias
+        options.sshHost = args[++index] ?? ''
         break
       case '--guest-repo-path':
         options.guestRepoPath = args[++index] ?? ''
+        break
+      case '--shared-repo-path': // legacy, ignored
+        ++index
         break
       case '--help':
       case '-h':
@@ -65,67 +68,16 @@ export function parseArgs(argv) {
   return options
 }
 
-export function defaultSharedWindowsPath(hostPath, homeDir = os.homedir()) {
-  const resolvedPath = resolve(hostPath)
-  const resolvedHome = resolve(homeDir)
-
-  if (resolvedPath === resolvedHome) {
-    return 'C:\\Mac\\Home'
-  }
-  if (!resolvedPath.startsWith(`${resolvedHome}/`)) {
-    return null
-  }
-
-  const relativePath = resolvedPath.slice(resolvedHome.length + 1).split('/').join('\\')
-  return `C:\\Mac\\Home\\${relativePath}`
-}
-
-export function hostPathFromSharedWindowsPath(sharedPath, homeDir = os.homedir()) {
-  const normalizedPath = String(sharedPath || '').replace(/\//g, '\\')
-  const normalizedHome = 'C:\\Mac\\Home'
-
-  if (!normalizedPath) {
-    return null
-  }
-  if (normalizedPath.toLowerCase() === normalizedHome.toLowerCase()) {
-    return resolve(homeDir)
-  }
-  if (!normalizedPath.toLowerCase().startsWith(`${normalizedHome.toLowerCase()}\\`)) {
-    return null
-  }
-
-  const relativePath = normalizedPath.slice(normalizedHome.length + 1).split('\\')
-  return resolve(homeDir, ...relativePath)
-}
-
-export function autoDetectWindowsVmName(prlctlListOutput) {
-  const candidates = []
-  for (const rawLine of prlctlListOutput.split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (!line.startsWith('{')) {
-      continue
-    }
-
-    const match = line.match(/^\{[^}]+\}\s+(\S+)\s+\S+\s+(.+)$/)
-    if (!match) {
-      continue
-    }
-
-    const status = match[1].toLowerCase()
-    const name = match[2].trim()
-    if ((status === 'running' || status === 'suspended') && /windows/i.test(name)) {
-      candidates.push(name)
-    }
-  }
-
-  return candidates.length === 1 ? candidates[0] : null
-}
-
-function run(command, args, { capture = false, env = {} } = {}) {
+function run(command, args, { capture = false, env = {}, input } = {}) {
   const result = spawnSync(command, args, {
-    encoding: 'utf8',
-    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    encoding: capture ? 'utf8' : undefined,
+    stdio: input
+      ? ['pipe', capture ? 'pipe' : 'inherit', capture ? 'pipe' : 'inherit']
+      : capture
+        ? ['ignore', 'pipe', 'pipe']
+        : 'inherit',
     env: { ...process.env, ...env },
+    input,
   })
 
   if (result.error) {
@@ -142,167 +94,148 @@ function run(command, args, { capture = false, env = {} } = {}) {
   return capture ? result.stdout.trim() : ''
 }
 
-function batchQuote(value) {
-  return `"${String(value).replace(/"/g, '""')}"`
+function runShellPipe(cmd) {
+  const result = spawnSync('bash', ['-c', cmd], { stdio: ['ignore', 'inherit', 'inherit'] })
+  if (result.status !== 0) {
+    throw new Error(`shell pipe failed (exit ${result.status}): ${cmd}`)
+  }
 }
 
-export function windowsBuildScriptLines({
-  sharedSourceArchivePath,
-  guestRepoPath,
-  sharedOutputDir,
-}) {
-  const guestRepoValue = guestRepoPath || '%USERPROFILE%\\src\\hashtree'
+function shQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`
+}
+
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+function encodePowerShellScript(script) {
+  return Buffer.from(script, 'utf16le').toString('base64')
+}
+
+function runRemotePowerShell(host, script, { capture = false } = {}) {
+  const encoded = encodePowerShellScript(script)
+  return run('ssh', [host, 'powershell.exe', '-NoProfile', '-EncodedCommand', encoded], { capture })
+}
+
+/// Build the PowerShell script that runs on win11-dev. Mirrors the old
+/// cmd-batch but uses bsdtar's stdin extract — the source archive is piped
+/// in over SSH, no shared folders are involved.
+export function windowsBuildScriptLines({ guestRepoPath }) {
+  const guestRepoValue = guestRepoPath || 'C:\\src\\hashtree'
   return [
-    '@echo off',
-    'setlocal',
-    `set "SOURCE_ARCHIVE=${sharedSourceArchivePath}"`,
-    `set "GUEST_REPO=${guestRepoValue}"`,
-    `set "SHARED_OUTPUT=${sharedOutputDir}"`,
-    'for %%I in ("%GUEST_REPO%") do set "GUEST_ROOT=%%~dpI"',
-    'if not exist "%GUEST_ROOT%" mkdir "%GUEST_ROOT%"',
-    'if exist "%GUEST_REPO%" rmdir /S /Q "%GUEST_REPO%"',
-    'if exist "%GUEST_REPO%" exit /b 20',
-    'mkdir "%GUEST_REPO%"',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'if not exist "%SOURCE_ARCHIVE%" exit /b 21',
-    'if not exist "%SHARED_OUTPUT%" mkdir "%SHARED_OUTPUT%"',
-    'tar.exe -xf "%SOURCE_ARCHIVE%" -C "%GUEST_REPO%"',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'set "VSWHERE=C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"',
-    'if not exist "%VSWHERE%" exit /b 10',
-    'set "VS_INSTALL_PATH="',
-    'for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath -utf8`) do set "VS_INSTALL_PATH=%%I"',
-    'if not defined VS_INSTALL_PATH exit /b 11',
-    'set "VS_DEV_CMD=%VS_INSTALL_PATH%\\Common7\\Tools\\VsDevCmd.bat"',
-    'if not exist "%VS_DEV_CMD%" exit /b 12',
-    'if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" (set "HOST_ARCH=arm64") else if /I "%PROCESSOR_ARCHITECTURE%"=="AMD64" (set "HOST_ARCH=amd64") else (set "HOST_ARCH=x86")',
-    'call "%VS_DEV_CMD%" -arch=amd64 -host_arch=%HOST_ARCH%',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'cd /d "%GUEST_REPO%\\rust"',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'set CARGO_NET_GIT_FETCH_WITH_CLI=false',
-    'set "LOCKED_FLAG="',
-    'if exist "%GUEST_REPO%\\rust\\Cargo.lock" set "LOCKED_FLAG=--locked"',
-    'cargo build --release %LOCKED_FLAG% --target x86_64-pc-windows-msvc -p hashtree-cli --bin htree',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'cargo build --release %LOCKED_FLAG% --target x86_64-pc-windows-msvc -p hashtree-cashu-cli --bin htree-cashu',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'cargo build --release %LOCKED_FLAG% --target x86_64-pc-windows-msvc -p git-remote-htree --bin git-remote-htree',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'copy /Y "%GUEST_REPO%\\rust\\target\\x86_64-pc-windows-msvc\\release\\htree.exe" "%SHARED_OUTPUT%\\htree.exe"',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'copy /Y "%GUEST_REPO%\\rust\\target\\x86_64-pc-windows-msvc\\release\\htree-cashu.exe" "%SHARED_OUTPUT%\\htree-cashu.exe"',
-    'if errorlevel 1 exit /b %errorlevel%',
-    'copy /Y "%GUEST_REPO%\\rust\\target\\x86_64-pc-windows-msvc\\release\\git-remote-htree.exe" "%SHARED_OUTPUT%\\git-remote-htree.exe"',
-    'if errorlevel 1 exit /b %errorlevel%',
+    '$ErrorActionPreference = "Stop"',
+    `$guestRepo = '${guestRepoValue.replace(/'/g, "''")}'`,
+    '$guestParent = Split-Path $guestRepo',
+    'New-Item -ItemType Directory -Force -Path $guestParent | Out-Null',
+    'if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }',
+    'New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null',
+    '$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\\Installer\\vswhere.exe"',
+    'if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }',
+    "$vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)",
+    'if (-not $vsInstall) { throw "VS x64 toolchain not found via vswhere" }',
+    '$vsDevCmd = Join-Path $vsInstall "Common7\\Tools\\VsDevCmd.bat"',
+    'if (-not (Test-Path $vsDevCmd)) { throw "VsDevCmd.bat not found at $vsDevCmd" }',
+    '$envOutput = cmd /d /s /c "call `"$vsDevCmd`" -arch=amd64 -host_arch=amd64 >nul && set"',
+    'foreach ($line in $envOutput) {',
+    '  if ($line -match "^([^=]+)=(.*)$") { Set-Item -Path ("Env:\\" + $matches[1]) -Value $matches[2] }',
+    '}',
   ]
-}
-
-function writeWindowsBuildScript({
-  scriptPath,
-  sharedSourceArchivePath,
-  guestRepoPath,
-  sharedOutputDir,
-}) {
-  const lines = windowsBuildScriptLines({
-    sharedSourceArchivePath,
-    guestRepoPath,
-    sharedOutputDir,
-  })
-  writeFileSync(scriptPath, `${lines.join('\r\n')}\r\n`, 'utf8')
 }
 
 export function buildWindowsVmArtifacts({
   outputDir,
-  vmName = '',
-  sharedRepoPath = '',
+  sshHost = '',
   guestRepoPath = '',
 }) {
   if (!outputDir) {
     throw new Error('Missing --output-dir')
   }
-  if (process.platform !== 'darwin') {
-    throw new Error('Windows VM builds are only supported from macOS hosts.')
+
+  const host = sshHost || process.env.HASHTREE_WINDOWS_SSH_HOST || 'win11-dev'
+  const guestRepo =
+    guestRepoPath || process.env.HASHTREE_WINDOWS_GUEST_REPO_PATH || 'C:\\src\\hashtree'
+  const guestRepoForward = guestRepo.replace(/\\/g, '/')
+
+  if (!existsSync(resolve(repoDir, 'rust'))) {
+    throw new Error(`Expected ${repoDir} to contain a rust workspace directory.`)
   }
 
   const resolvedOutputDir = resolve(outputDir)
-  const effectiveSharedRepoPath = sharedRepoPath || defaultSharedWindowsPath(repoDir)
-  if (!effectiveSharedRepoPath) {
-    throw new Error(
-      'Could not derive the Parallels shared repo path from the current workspace. Pass --shared-repo-path.',
-    )
-  }
-
-  const sharedOutputDir = defaultSharedWindowsPath(resolvedOutputDir)
-  if (!sharedOutputDir) {
-    throw new Error(
-      'Output dir must live under your home directory so Parallels shared folders can reach it.',
-    )
-  }
-
-  const effectiveVmName =
-    vmName || autoDetectWindowsVmName(run('prlctl', ['list', '-a'], { capture: true }))
-  if (!effectiveVmName) {
-    throw new Error(
-      'Could not find a unique running Windows VM. Pass --vm-name to choose one explicitly.',
-    )
-  }
-
-  const hostRepoDir = hostPathFromSharedWindowsPath(effectiveSharedRepoPath)
-  if (!hostRepoDir) {
-    throw new Error(
-      'Could not derive the host repo path from the current Parallels shared repo path. Pass --shared-repo-path under your home directory.',
-    )
-  }
-  if (!existsSync(resolve(hostRepoDir, 'rust'))) {
-    throw new Error(`Expected ${hostRepoDir} to contain a rust workspace directory.`)
-  }
-
   rmSync(resolvedOutputDir, { recursive: true, force: true })
   mkdirSync(resolvedOutputDir, { recursive: true })
-  mkdirSync(join(rustDir, 'dist'), { recursive: true })
-  const localScriptPath = join(rustDir, 'dist', `windows-vm-build-${Date.now()}.cmd`)
-  const localArchivePath = join(rustDir, 'dist', `windows-vm-source-${Date.now()}.tar`)
-  const sharedScriptPath = defaultSharedWindowsPath(localScriptPath)
-  const sharedSourceArchivePath = defaultSharedWindowsPath(localArchivePath)
-  if (!sharedScriptPath) {
-    throw new Error('Could not derive a Parallels shared path for the temporary Windows build script.')
-  }
-  if (!sharedSourceArchivePath) {
-    throw new Error('Could not derive a Parallels shared path for the temporary Windows source archive.')
-  }
 
-  run(
-    'tar',
-    ['-cf', localArchivePath, '--exclude=rust/target', '--exclude=rust/dist', '-C', hostRepoDir, 'rust'],
-    { env: { COPYFILE_DISABLE: '1' } },
+  // 1. Reset the guest repo dir.
+  runRemotePowerShell(
+    host,
+    `
+$ErrorActionPreference = 'Stop'
+$guestRepo = ${psQuote(guestRepo)}
+$guestParent = Split-Path $guestRepo
+New-Item -ItemType Directory -Force -Path $guestParent | Out-Null
+if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }
+New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null
+`,
   )
 
-  writeWindowsBuildScript({
-    scriptPath: localScriptPath,
-    sharedSourceArchivePath,
-    guestRepoPath,
-    sharedOutputDir,
-  })
+  // 2. Push only the rust workspace via tar over SSH.
+  runShellPipe(
+    `tar --exclude=./rust/target --exclude=./rust/dist -cf - -C ${shQuote(repoDir)} rust ` +
+      `| ssh ${shQuote(host)} tar -xf - -C ${shQuote(guestRepoForward)}`,
+  )
 
-  try {
-    run('prlctl', [
-      'exec',
-      effectiveVmName,
-      '--current-user',
-      'cmd.exe',
-      '/c',
-      batchQuote(sharedScriptPath),
-    ])
-  } finally {
-    rmSync(localScriptPath, { force: true })
-    rmSync(localArchivePath, { force: true })
-  }
+  // 3. Build inside MSVC environment and stage outputs into a guest dir.
+  const guestOutDir = `${guestRepo}\\dist\\windows-out`
+  const guestOutForward = guestOutDir.replace(/\\/g, '/')
+  runRemotePowerShell(
+    host,
+    `
+$ErrorActionPreference = 'Stop'
+$guestRepo = ${psQuote(guestRepo)}
+$guestOut = ${psQuote(guestOutDir)}
+if (Test-Path $guestOut) { Remove-Item -Recurse -Force $guestOut }
+New-Item -ItemType Directory -Force -Path $guestOut | Out-Null
+
+$vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
+if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+$vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+if (-not $vsInstall) { throw "VS x64 toolchain not found via vswhere" }
+$vsDevCmd = Join-Path $vsInstall 'Common7\\Tools\\VsDevCmd.bat'
+if (-not (Test-Path $vsDevCmd)) { throw "VsDevCmd.bat not found at $vsDevCmd" }
+$envLines = cmd /d /s /c ('"' + $vsDevCmd + '" -arch=amd64 -host_arch=amd64 >nul && set')
+foreach ($line in $envLines) {
+  if ($line -match '^([^=]+)=(.*)$') { Set-Item -Path ('Env:\\' + $matches[1]) -Value $matches[2] }
+}
+
+Set-Location (Join-Path $guestRepo 'rust')
+$env:CARGO_NET_GIT_FETCH_WITH_CLI = 'false'
+$lockedFlag = @()
+if (Test-Path (Join-Path $guestRepo 'rust\\Cargo.lock')) { $lockedFlag = @('--locked') }
+
+cargo build --release @lockedFlag --target x86_64-pc-windows-msvc -p hashtree-cli --bin htree
+if ($LASTEXITCODE -ne 0) { throw "htree build failed" }
+cargo build --release @lockedFlag --target x86_64-pc-windows-msvc -p hashtree-cashu-cli --bin htree-cashu
+if ($LASTEXITCODE -ne 0) { throw "htree-cashu build failed" }
+cargo build --release @lockedFlag --target x86_64-pc-windows-msvc -p git-remote-htree --bin git-remote-htree
+if ($LASTEXITCODE -ne 0) { throw "git-remote-htree build failed" }
+
+$releaseDir = Join-Path $guestRepo 'rust\\target\\x86_64-pc-windows-msvc\\release'
+foreach ($name in @('htree.exe', 'htree-cashu.exe', 'git-remote-htree.exe')) {
+  Copy-Item -Force (Join-Path $releaseDir $name) (Join-Path $guestOut $name)
+}
+`,
+  )
+
+  // 4. Pull artifacts back.
+  runShellPipe(
+    `ssh ${shQuote(host)} tar -cf - -C ${shQuote(guestOutForward)} . ` +
+      `| tar -xf - -C ${shQuote(resolvedOutputDir)}`,
+  )
 
   return {
     outputDir: resolvedOutputDir,
-    sharedOutputDir,
-    vmName: effectiveVmName,
+    sshHost: host,
+    guestRepoPath: guestRepo,
   }
 }
 
@@ -317,7 +250,7 @@ function main() {
   }
 
   const result = buildWindowsVmArtifacts(options)
-  console.log(`Built Windows CLI artifacts in ${result.outputDir} via ${result.vmName}.`)
+  console.log(`Built Windows CLI artifacts in ${result.outputDir} via ssh ${result.sshHost}.`)
 }
 
 if (process.argv[1] === scriptPath) {
