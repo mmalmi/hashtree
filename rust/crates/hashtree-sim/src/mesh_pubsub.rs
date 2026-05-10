@@ -553,13 +553,55 @@ struct PlumtreeStreamState {
     initialized: BTreeSet<String>,
 }
 
+fn deterministic_rank(stream_id: &str, owner: &str, neighbor: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    stream_id.hash(&mut hasher);
+    owner.hash(&mut hasher);
+    neighbor.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl PlumtreeStreamState {
-    fn ensure_initialized(&mut self, node: &str, graph: &BTreeMap<String, Vec<String>>) {
-        if self.initialized.insert(node.to_string()) {
-            let neighbors: BTreeSet<String> =
-                graph.get(node).into_iter().flatten().cloned().collect();
-            self.eager.insert(node.to_string(), neighbors);
-            self.lazy.insert(node.to_string(), BTreeSet::new());
+    /// Initialize a node's eager/lazy sets. With `target_degree = None`, every
+    /// neighbor starts eager (Plumtree's "broadcast" init: prune to a tree by
+    /// duplicate detection). With `target_degree = Some(D)`, the D
+    /// lowest-ranked neighbors start eager and the rest start lazy
+    /// (gossipsub-style bounded mesh).
+    fn ensure_initialized(
+        &mut self,
+        node: &str,
+        stream_id: &str,
+        graph: &BTreeMap<String, Vec<String>>,
+        target_degree: Option<usize>,
+    ) {
+        if !self.initialized.insert(node.to_string()) {
+            return;
+        }
+        let neighbors: Vec<String> = graph.get(node).into_iter().flatten().cloned().collect();
+        match target_degree {
+            None => {
+                self.eager
+                    .insert(node.to_string(), neighbors.into_iter().collect());
+                self.lazy.insert(node.to_string(), BTreeSet::new());
+            }
+            Some(degree) => {
+                let mut ranked: Vec<(u64, String)> = neighbors
+                    .into_iter()
+                    .map(|n| (deterministic_rank(stream_id, node, &n), n))
+                    .collect();
+                ranked.sort_by_key(|(rank, _)| *rank);
+                let mut eager_set = BTreeSet::new();
+                let mut lazy_set = BTreeSet::new();
+                for (i, (_, name)) in ranked.into_iter().enumerate() {
+                    if i < degree {
+                        eager_set.insert(name);
+                    } else {
+                        lazy_set.insert(name);
+                    }
+                }
+                self.eager.insert(node.to_string(), eager_set);
+                self.lazy.insert(node.to_string(), lazy_set);
+            }
         }
     }
 
@@ -596,22 +638,57 @@ impl PlumtreeStreamState {
             .or_default()
             .insert(a.to_string());
     }
+
+    /// Gossipsub-style heartbeat: for every node whose eager degree fell
+    /// below `target`, graft its lowest-ranked lazy neighbors back to eager.
+    fn rebalance_to_degree(&mut self, target: usize, stream_id: &str) {
+        let nodes: Vec<String> = self.initialized.iter().cloned().collect();
+        for node in nodes {
+            let current = self
+                .eager
+                .get(&node)
+                .map(|set| set.len())
+                .unwrap_or_default();
+            if current >= target {
+                continue;
+            }
+            let needed = target - current;
+            let lazy_set = self.lazy.get(&node).cloned().unwrap_or_default();
+            let mut candidates: Vec<(u64, String)> = lazy_set
+                .into_iter()
+                .map(|n| (deterministic_rank(stream_id, &node, &n), n))
+                .collect();
+            candidates.sort_by_key(|(rank, _)| *rank);
+            for (_, peer) in candidates.into_iter().take(needed) {
+                self.graft_edge(&node, &peer);
+            }
+        }
+    }
 }
 
 const PLUMTREE_IHAVE_BYTES: u64 = 96;
 const PLUMTREE_IWANT_BYTES: u64 = 64;
 const PLUMTREE_PRUNE_BYTES: u64 = 32;
 
+/// Eager+lazy push baseline. With `target_degree = None` and
+/// `ihave_timeout_hops = None` this is plain Plumtree (all-eager init,
+/// graft-only-on-payload-never). With `target_degree = Some(D)` and
+/// `ihave_timeout_hops = Some(T)` it behaves like a gossipsub mesh of
+/// degree D where IWANT fires T hops after IHAVE if payload hasn't arrived.
+#[allow(clippy::too_many_arguments)]
 fn htl_plumtree_publish(
     graph: &BTreeMap<String, Vec<String>>,
     publisher_id: &str,
+    stream_id: &str,
     state: &mut PlumtreeStreamState,
+    target_degree: Option<usize>,
+    ihave_timeout_hops: Option<u8>,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
 ) -> BTreeMap<String, u64> {
     let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
-    state.ensure_initialized(publisher_id, graph);
+    state.ensure_initialized(publisher_id, stream_id, graph, target_degree);
 
     let mut delivered_hops: BTreeMap<String, u64> = BTreeMap::new();
     delivered_hops.insert(publisher_id.to_string(), 0);
@@ -657,10 +734,10 @@ fn htl_plumtree_publish(
             continue;
         }
         delivered_hops.insert(node.clone(), hop);
-        // Drop pending IHAVEs for this node — payload arrived via eager path.
-        pending_ihave.remove(&node);
+        // Keep pending IHAVE entries — they may still trigger a graft if the
+        // IHAVE arrived sooner than the eager payload (timer expired race).
 
-        state.ensure_initialized(&node, graph);
+        state.ensure_initialized(&node, stream_id, graph, target_degree);
         let eager = state.eager.get(&node).cloned().unwrap_or_default();
         let lazy = state.lazy.get(&node).cloned().unwrap_or_default();
 
@@ -695,15 +772,12 @@ fn htl_plumtree_publish(
         }
     }
 
-    // Phase 2: IHAVE timer fires for nodes that never got payload via eager.
-    // They send IWANT to the closest IHAVE peer; that peer replies with payload.
-    // This grafts the edge bidirectionally (lazy → eager).
+    // Phase 2: IHAVE timer logic. For each (node, IHAVE) pair, decide whether
+    // the timer expired before payload arrived. If so, fire IWANT and graft.
     let pending_keys: Vec<String> = pending_ihave.keys().cloned().collect();
     for node in pending_keys {
-        if delivered_hops.contains_key(&node) {
-            continue;
-        }
         let entries = pending_ihave.remove(&node).unwrap_or_default();
+        // Pick the closest (lowest-hop) IHAVE peer.
         let mut best: Option<(String, u64)> = None;
         for (peer, h) in entries {
             match &best {
@@ -712,16 +786,46 @@ fn htl_plumtree_publish(
                 _ => {}
             }
         }
-        if let Some((peer, h)) = best {
-            // IWANT request + payload reply.
-            report.forwarded_bytes_sent = report
-                .forwarded_bytes_sent
-                .saturating_add(PLUMTREE_IWANT_BYTES)
-                .saturating_add(payload_bytes);
-            // Round-trip latency: IHAVE arrived at hop h, +1 for IWANT, +1 for payload reply.
-            delivered_hops.insert(node.clone(), h.saturating_add(2));
-            grafts.push((node.clone(), peer.clone()));
+        let Some((peer, ihave_hop)) = best else {
+            continue;
+        };
+        let payload_hop = delivered_hops.get(&node).copied();
+        let timer_expires_at = match ihave_timeout_hops {
+            None => u64::MAX, // infinite timer — only fires if payload never arrives
+            Some(t) => ihave_hop.saturating_add(t as u64),
+        };
+        let should_fire = match payload_hop {
+            None => true,
+            Some(hop) => hop > timer_expires_at,
+        };
+        if !should_fire {
+            continue;
         }
+        // IWANT request always costs IWANT_BYTES. Payload reply only flows if
+        // we don't already have it (i.e., payload_hop is None or strictly
+        // later than the IWANT round trip).
+        report.forwarded_bytes_sent = report
+            .forwarded_bytes_sent
+            .saturating_add(PLUMTREE_IWANT_BYTES);
+        let iwant_arrival = timer_expires_at.saturating_add(2);
+        let new_hop = match payload_hop {
+            None => {
+                report.forwarded_bytes_sent =
+                    report.forwarded_bytes_sent.saturating_add(payload_bytes);
+                iwant_arrival
+            }
+            Some(eager_hop) => {
+                if iwant_arrival < eager_hop {
+                    report.forwarded_bytes_sent =
+                        report.forwarded_bytes_sent.saturating_add(payload_bytes);
+                    iwant_arrival
+                } else {
+                    eager_hop
+                }
+            }
+        };
+        delivered_hops.insert(node.clone(), new_hop);
+        grafts.push((node.clone(), peer.clone()));
     }
 
     for (a, b) in prunes {
@@ -729,6 +833,11 @@ fn htl_plumtree_publish(
     }
     for (a, b) in grafts {
         state.graft_edge(&a, &b);
+    }
+
+    // Gossipsub heartbeat: keep each node's eager mesh at target degree.
+    if let Some(target) = target_degree {
+        state.rebalance_to_degree(target, stream_id);
     }
 
     delivered_hops
@@ -1003,7 +1112,18 @@ pub async fn run_mesh_pubsub_workload(
 enum HtlBaselineMode {
     FloodPayload,
     InvWant,
-    Plumtree,
+    /// Eager+lazy push (Plumtree / gossipsub-shaped). With
+    /// `target_degree = None` every neighbor is initially eager (Plumtree
+    /// "broadcast init"). With `Some(D)` the eager mesh is bounded to D
+    /// neighbors and rebalanced via heartbeat (gossipsub-style).
+    /// `ihave_timeout_hops = None` means IWANT only fires when payload never
+    /// arrives at all; `Some(t)` fires t hops after IHAVE if payload hasn't
+    /// caught up — modelled as a hop budget since each hop maps to
+    /// `latency_per_pump_step_ms` of real time in the workload pump.
+    EagerLazy {
+        target_degree: Option<usize>,
+        ihave_timeout_hops: Option<u8>,
+    },
 }
 
 pub async fn run_mesh_pubsub_htl_flood_baseline(
@@ -1020,14 +1140,67 @@ pub async fn run_mesh_pubsub_htl_inv_want_baseline(
     run_mesh_pubsub_htl_baseline(config, htl, HtlBaselineMode::InvWant).await
 }
 
-/// Streamr-style Plumtree baseline: stateful eager+lazy push with prune-on-duplicate
-/// and graft-on-IHAVE-before-payload. State persists across publish rounds keyed by
-/// stream id, so the spanning tree converges over time.
+/// Streamr-style Plumtree baseline (broadcast init, infinite IHAVE timer):
+/// every neighbor starts eager and the spanning tree converges as redundant
+/// deliveries get pruned. IWANT only fires when payload never arrives.
 pub async fn run_mesh_pubsub_htl_plumtree_baseline(
     config: MeshPubsubWorkloadConfig,
     htl: u8,
 ) -> MeshPubsubWorkloadReport {
-    run_mesh_pubsub_htl_baseline(config, htl, HtlBaselineMode::Plumtree).await
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: None,
+            ihave_timeout_hops: None,
+        },
+    )
+    .await
+}
+
+/// Plumtree with a finite IHAVE→IWANT timer measured in hops. `timeout_hops`
+/// controls how long a node waits after IHAVE for payload to arrive on the
+/// eager path before pulling via IWANT (and grafting the edge to eager).
+/// `0` is "always graft on IHAVE-before-payload race", higher values are more
+/// patient. Each hop maps to `latency_per_pump_step_ms` real time in the
+/// workload pump, so a tokio-clock-driven timer would be equivalent.
+pub async fn run_mesh_pubsub_htl_plumtree_baseline_with_timer(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+    timeout_hops: u8,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: None,
+            ihave_timeout_hops: Some(timeout_hops),
+        },
+    )
+    .await
+}
+
+/// Gossipsub-style baseline: each (node, stream) keeps an eager mesh of size
+/// `target_degree`, with the rest of the underlay neighbors as lazy-IHAVE
+/// peers. After every publish round we run a heartbeat-style rebalance that
+/// re-grafts lazy peers to eager whenever degree dropped below target.
+/// `ihave_timeout_hops` controls IWANT aggressiveness like the Plumtree-with-
+/// timer variant.
+pub async fn run_mesh_pubsub_htl_gossipsub_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+    target_degree: usize,
+    ihave_timeout_hops: Option<u8>,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: Some(target_degree),
+            ihave_timeout_hops,
+        },
+    )
+    .await
 }
 
 async fn run_mesh_pubsub_htl_baseline(
@@ -1165,10 +1338,16 @@ async fn run_mesh_pubsub_htl_baseline(
                         htl,
                         &mut report,
                     ),
-                    HtlBaselineMode::Plumtree => htl_plumtree_publish(
+                    HtlBaselineMode::EagerLazy {
+                        target_degree,
+                        ihave_timeout_hops,
+                    } => htl_plumtree_publish(
                         &graph,
                         publisher_id,
+                        &stream_id,
                         plumtree_streams.entry(stream_id.clone()).or_default(),
+                        target_degree,
+                        ihave_timeout_hops,
                         config.payload_bytes as u64,
                         htl,
                         &mut report,
@@ -1210,10 +1389,16 @@ async fn run_mesh_pubsub_htl_baseline(
                     htl,
                     &mut report,
                 ),
-                HtlBaselineMode::Plumtree => htl_plumtree_publish(
+                HtlBaselineMode::EagerLazy {
+                    target_degree,
+                    ihave_timeout_hops,
+                } => htl_plumtree_publish(
                     &graph,
                     publisher_id,
+                    &stream_id,
                     plumtree_streams.entry(stream_id.clone()).or_default(),
+                    target_degree,
+                    ihave_timeout_hops,
                     config.payload_bytes as u64,
                     htl,
                     &mut report,
@@ -1346,6 +1531,78 @@ mod tests {
             "plumtree {} should spend fewer bytes than flood {}",
             plumtree.forwarded_bytes_sent,
             flood.forwarded_bytes_sent
+        );
+    }
+
+    #[tokio::test]
+    async fn htl_plumtree_finite_timer_recovers_faster_when_eager_misses() {
+        // Tight HTL forces some subscribers to miss eager and fall back to
+        // IWANT. With a finite timer (t=1) the IWANT fires at hop ihave+1+2;
+        // with infinite timer the IWANT only fires when payload never came at
+        // all, so behaviour is identical iff every subscriber gets eager.
+        // Sanity check: both deliver, finite-timer's tail latency is no worse.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 41,
+            node_count: 32,
+            author_count: 2,
+            subscribers_per_author: 8,
+            publish_rounds: 4,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 96,
+            pump_steps_per_publish_round: 64,
+            ..Default::default()
+        };
+        let infinite =
+            run_mesh_pubsub_htl_plumtree_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
+        let finite =
+            run_mesh_pubsub_htl_plumtree_baseline_with_timer(cfg, MESH_EVENT_POLICY.max_htl, 1)
+                .await;
+        assert!(infinite.delivered_events > 0);
+        assert!(finite.delivered_events > 0);
+        // Finite timer never makes p95 worse than infinite (it can only pull
+        // earlier).
+        assert!(finite.delivery_latency_p95_ms <= infinite.delivery_latency_p95_ms);
+    }
+
+    #[tokio::test]
+    async fn htl_gossipsub_bounded_mesh_beats_plumtree_round_one() {
+        // Plumtree pays a "broadcast init" tax in round 1 (every neighbor
+        // eager). Gossipsub starts with a bounded mesh of degree D, so round-1
+        // bandwidth is much lower.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 53,
+            node_count: 64,
+            author_count: 2,
+            subscribers_per_author: 16,
+            publish_rounds: 1,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 128,
+            pump_steps_per_publish_round: 96,
+            ..Default::default()
+        };
+        let plumtree =
+            run_mesh_pubsub_htl_plumtree_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
+        let gossipsub = run_mesh_pubsub_htl_gossipsub_baseline(
+            cfg.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            6,
+            Some(1),
+        )
+        .await;
+        assert!(gossipsub.delivered_events > 0);
+        assert!(
+            gossipsub.forwarded_bytes_sent < plumtree.forwarded_bytes_sent,
+            "gossipsub round-1 {} should beat plumtree round-1 {}",
+            gossipsub.forwarded_bytes_sent,
+            plumtree.forwarded_bytes_sent
         );
     }
 

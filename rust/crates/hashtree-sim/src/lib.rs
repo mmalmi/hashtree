@@ -24,9 +24,11 @@ pub use cashu_test_mint::{
     ChannelSettlement, ChannelState, LocalTestCashuMint, MintError, MintStats,
 };
 pub use mesh_pubsub::{
-    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
-    run_mesh_pubsub_htl_plumtree_baseline, run_mesh_pubsub_sweep, run_mesh_pubsub_workload,
-    MeshPubsubSweepResult, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport,
+    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_gossipsub_baseline,
+    run_mesh_pubsub_htl_inv_want_baseline, run_mesh_pubsub_htl_plumtree_baseline,
+    run_mesh_pubsub_htl_plumtree_baseline_with_timer, run_mesh_pubsub_sweep,
+    run_mesh_pubsub_workload, MeshPubsubSweepResult, MeshPubsubWorkloadConfig,
+    MeshPubsubWorkloadReport,
 };
 pub use mesh_sim::{
     run_parameter_sweep, CashuIncentiveConfig, LocalResourceStats, NodeStrategyProfile,

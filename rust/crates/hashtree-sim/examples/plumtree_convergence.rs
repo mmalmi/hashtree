@@ -1,7 +1,8 @@
 use hashtree_network::MESH_EVENT_POLICY;
 use hashtree_sim::{
-    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
-    run_mesh_pubsub_htl_plumtree_baseline, MeshPubsubWorkloadConfig, PoolConfig,
+    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_gossipsub_baseline,
+    run_mesh_pubsub_htl_inv_want_baseline, run_mesh_pubsub_htl_plumtree_baseline,
+    run_mesh_pubsub_htl_plumtree_baseline_with_timer, MeshPubsubWorkloadConfig, PoolConfig,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,7 +34,33 @@ async fn main() {
         let f = run_mesh_pubsub_htl_flood_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
         let i = run_mesh_pubsub_htl_inv_want_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
         let p = run_mesh_pubsub_htl_plumtree_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
-        for (label, r) in [("flood", &f), ("invwant", &i), ("plumtree", &p)] {
+        let pt1 = run_mesh_pubsub_htl_plumtree_baseline_with_timer(
+            cfg.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            1,
+        )
+        .await;
+        let pt0 = run_mesh_pubsub_htl_plumtree_baseline_with_timer(
+            cfg.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            0,
+        )
+        .await;
+        let g = run_mesh_pubsub_htl_gossipsub_baseline(
+            cfg.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            6,
+            Some(1),
+        )
+        .await;
+        for (label, r) in [
+            ("flood", &f),
+            ("invwant", &i),
+            ("plumtree-tInf", &p),
+            ("plumtree-t1", &pt1),
+            ("plumtree-t0", &pt0),
+            ("gossipsub-d6-t1", &g),
+        ] {
             println!(
                 " {:>6} | {:<15} | {:>11.1} | {:>6} | {:>5} | {:>5}",
                 rounds,
