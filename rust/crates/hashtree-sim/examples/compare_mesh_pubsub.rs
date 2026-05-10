@@ -102,6 +102,7 @@ fn workload(
         pump_steps_per_publish_round: pump_steps_per_publish_round(node_count),
         latency_per_pump_step_ms: 10,
         broken_edge_fraction,
+        nostr: None,
     }
 }
 

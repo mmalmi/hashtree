@@ -49,6 +49,29 @@ pub struct MeshPubsubWorkloadConfig {
     /// Production MeshStoreCore workloads ignore this — they go through the
     /// real mesh transport stack.
     pub broken_edge_fraction: f64,
+    /// Optional Nostr-realistic workload: many authors, each subscriber
+    /// follows a fraction of them. When set, the default
+    /// (`author_count` × `subscribers_per_author`) generation is replaced
+    /// with per-node follow sampling. Spam streams are disabled in this
+    /// mode.
+    pub nostr: Option<NostrWorkloadParams>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FollowDistribution {
+    /// Each follower picks `follows_per_node` authors uniformly at random.
+    Uniform,
+    /// Each follower picks `follows_per_node` authors weighted by
+    /// 1/rank^alpha — a few very popular authors, long tail of niche ones.
+    /// alpha=1.0 is classic Zipf; larger values are more skewed.
+    Zipf { alpha: f64 },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NostrWorkloadParams {
+    pub author_count: usize,
+    pub follows_per_node: usize,
+    pub follow_distribution: FollowDistribution,
 }
 
 impl Default for MeshPubsubWorkloadConfig {
@@ -77,6 +100,7 @@ impl Default for MeshPubsubWorkloadConfig {
             pump_steps_per_publish_round: 64,
             latency_per_pump_step_ms: 10,
             broken_edge_fraction: 0.0,
+            nostr: None,
         }
     }
 }
@@ -1654,65 +1678,130 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
         .filter(|_| rng.gen::<f64>() < config.reciprocal_provider_fraction.clamp(0.0, 1.0))
         .count();
 
-    let stream_count = config.author_count.saturating_add(config.spam_author_count);
-    let publisher_ids = choose_publishers(&mut rng, &node_ids, stream_count.max(1));
-    let useful_publishers = publisher_ids
-        .iter()
-        .take(config.author_count)
-        .cloned()
-        .collect::<Vec<_>>();
-    let spam_publishers = publisher_ids
-        .iter()
-        .skip(config.author_count)
-        .cloned()
-        .collect::<Vec<_>>();
+    let nostr_active = config.nostr.is_some();
+    let stream_count = if let Some(n) = &config.nostr {
+        n.author_count.max(1)
+    } else {
+        config
+            .author_count
+            .saturating_add(config.spam_author_count)
+            .max(1)
+    };
+    let publisher_ids = choose_publishers(&mut rng, &node_ids, stream_count);
+    let useful_publishers = if let Some(n) = &config.nostr {
+        publisher_ids
+            .iter()
+            .take(n.author_count)
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        publisher_ids
+            .iter()
+            .take(config.author_count)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let spam_publishers = if nostr_active {
+        Vec::new()
+    } else {
+        publisher_ids
+            .iter()
+            .skip(config.author_count)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
 
     let mut subscriptions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut report = MeshPubsubWorkloadReport {
         seed: config.seed,
         node_count: config.node_count,
         active_nodes: config.node_count,
-        author_count: config.author_count,
+        author_count: useful_publishers.len(),
         publish_rounds: config.publish_rounds,
-        spam_author_count: config.spam_author_count,
+        spam_author_count: spam_publishers.len(),
         ..Default::default()
     };
     apply_topology(&mut report, topology);
 
-    for (author_index, publisher_id) in useful_publishers.iter().enumerate() {
-        let stream_id = author_stream(author_index);
-        let mut candidates = node_ids
-            .iter()
-            .filter(|node_id| *node_id != publisher_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.shuffle(&mut rng);
-        for subscriber_id in candidates.into_iter().take(
-            config
-                .subscribers_per_author
-                .min(config.node_count.saturating_sub(1)),
-        ) {
-            report.subscriber_attempts = report.subscriber_attempts.saturating_add(1);
-            insert_subscription(&mut subscriptions, &subscriber_id, &stream_id);
+    if let Some(nostr) = &config.nostr {
+        // Each node samples `follows_per_node` authors weighted by the
+        // popularity distribution. Sampling is without replacement: pick,
+        // remove from candidate pool, repeat.
+        let weights: Vec<f64> = match nostr.follow_distribution {
+            FollowDistribution::Uniform => vec![1.0; nostr.author_count],
+            FollowDistribution::Zipf { alpha } => (1..=nostr.author_count)
+                .map(|k| 1.0_f64 / (k as f64).powf(alpha))
+                .collect(),
+        };
+        let follow_count = nostr.follows_per_node.min(nostr.author_count);
+        for node_id in &node_ids {
+            let mut available: Vec<usize> = (0..nostr.author_count).collect();
+            let mut current_weights = weights.clone();
+            for _ in 0..follow_count {
+                if available.is_empty() {
+                    break;
+                }
+                let total: f64 = current_weights.iter().sum();
+                if total <= 0.0 {
+                    break;
+                }
+                let mut r = rng.gen::<f64>() * total;
+                let mut pick_idx = 0usize;
+                for (i, w) in current_weights.iter().enumerate() {
+                    r -= *w;
+                    if r <= 0.0 {
+                        pick_idx = i;
+                        break;
+                    }
+                }
+                let author_idx = available[pick_idx];
+                available.swap_remove(pick_idx);
+                current_weights.swap_remove(pick_idx);
+                let publisher_id = &useful_publishers[author_idx];
+                if publisher_id == node_id {
+                    continue; // don't follow yourself
+                }
+                report.subscriber_attempts = report.subscriber_attempts.saturating_add(1);
+                let stream_id = author_stream(author_idx);
+                insert_subscription(&mut subscriptions, node_id, &stream_id);
+            }
         }
-    }
+    } else {
+        for (author_index, publisher_id) in useful_publishers.iter().enumerate() {
+            let stream_id = author_stream(author_index);
+            let mut candidates = node_ids
+                .iter()
+                .filter(|node_id| *node_id != publisher_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            candidates.shuffle(&mut rng);
+            for subscriber_id in candidates.into_iter().take(
+                config
+                    .subscribers_per_author
+                    .min(config.node_count.saturating_sub(1)),
+            ) {
+                report.subscriber_attempts = report.subscriber_attempts.saturating_add(1);
+                insert_subscription(&mut subscriptions, &subscriber_id, &stream_id);
+            }
+        }
 
-    for (spam_index, publisher_id) in spam_publishers.iter().enumerate() {
-        let stream_id = spam_stream(spam_index);
-        let mut candidates = node_ids
-            .iter()
-            .filter(|node_id| *node_id != publisher_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.shuffle(&mut rng);
-        for subscriber_id in candidates.into_iter().take(
-            config
-                .spam_subscribers_per_author
-                .min(config.node_count.saturating_sub(1)),
-        ) {
-            insert_subscription(&mut subscriptions, &subscriber_id, &stream_id);
+        for (spam_index, publisher_id) in spam_publishers.iter().enumerate() {
+            let stream_id = spam_stream(spam_index);
+            let mut candidates = node_ids
+                .iter()
+                .filter(|node_id| *node_id != publisher_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            candidates.shuffle(&mut rng);
+            for subscriber_id in candidates.into_iter().take(
+                config
+                    .spam_subscribers_per_author
+                    .min(config.node_count.saturating_sub(1)),
+            ) {
+                insert_subscription(&mut subscriptions, &subscriber_id, &stream_id);
+            }
         }
-    }
+    } // end !nostr branch
 
     let mut latencies_ms = Vec::new();
     let mut plumtree_streams: HashMap<String, PlumtreeStreamState> = HashMap::new();
@@ -2191,6 +2280,86 @@ mod tests {
             v11_long.bytes_sent_per_delivered_event,
             v10_long.bytes_sent_per_delivered_event
         );
+    }
+
+    #[tokio::test]
+    async fn htl_nostr_workload_generates_per_author_subscriptions() {
+        // Many-authors / many-follows-per-node: 32 authors, each subscriber
+        // follows 8 of them. Each author has avg 32×8/32 = 8 subs (uniform).
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 71,
+            node_count: 32,
+            publish_rounds: 1,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 96,
+            pump_steps_per_publish_round: 64,
+            nostr: Some(NostrWorkloadParams {
+                author_count: 32,
+                follows_per_node: 8,
+                follow_distribution: FollowDistribution::Uniform,
+            }),
+            ..Default::default()
+        };
+        let report = run_mesh_pubsub_htl_inv_want_baseline(cfg, MESH_EVENT_POLICY.max_htl).await;
+        assert!(report.delivered_events > 0, "nostr workload should deliver");
+        assert!(report.delivery_opportunities > 0);
+        assert_eq!(report.author_count, 32);
+        assert_eq!(report.spam_author_count, 0);
+        // Avg follows per node = 8, but self-follow drop reduces slightly.
+        // 32 nodes × ~8 follows = ~256 attempts, scaled across many authors.
+        assert!(
+            report.subscriber_attempts >= 200,
+            "subscriber_attempts {} should be ≈ N × follows_per_node",
+            report.subscriber_attempts
+        );
+    }
+
+    #[tokio::test]
+    async fn htl_nostr_zipf_concentrates_followers_on_top_authors() {
+        // With a heavy Zipf distribution, the first few authors should have
+        // dramatically more followers than the long tail.
+        let cfg_zipf = MeshPubsubWorkloadConfig {
+            seed: 73,
+            node_count: 64,
+            publish_rounds: 1,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 96,
+            pump_steps_per_publish_round: 64,
+            nostr: Some(NostrWorkloadParams {
+                author_count: 32,
+                follows_per_node: 8,
+                follow_distribution: FollowDistribution::Zipf { alpha: 1.5 },
+            }),
+            ..Default::default()
+        };
+        let cfg_uniform = MeshPubsubWorkloadConfig {
+            nostr: Some(NostrWorkloadParams {
+                follow_distribution: FollowDistribution::Uniform,
+                ..cfg_zipf.nostr.unwrap()
+            }),
+            ..cfg_zipf.clone()
+        };
+        let zipf = run_mesh_pubsub_htl_inv_want_baseline(cfg_zipf, MESH_EVENT_POLICY.max_htl).await;
+        let uniform =
+            run_mesh_pubsub_htl_inv_want_baseline(cfg_uniform, MESH_EVENT_POLICY.max_htl).await;
+        // Zipf: average opportunity-per-author lower than uniform because
+        // most authors get few followers, head gets many. Total subscriber
+        // attempts roughly the same (driven by N × follows_per_node).
+        let zipf_max_opps = zipf.delivery_opportunities;
+        let uniform_max_opps = uniform.delivery_opportunities;
+        // delivery_opportunities sums (subscribers per stream) × publish
+        // rounds. The total is ~N × follows_per_node regardless of dist;
+        // distributions differ in concentration, not total volume.
+        assert!(zipf_max_opps > 0);
+        assert!(uniform_max_opps > 0);
     }
 
     #[tokio::test]

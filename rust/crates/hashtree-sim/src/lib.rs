@@ -30,8 +30,8 @@ pub use mesh_pubsub::{
     run_mesh_pubsub_htl_gossipsub_v11_topic_mesh_baseline, run_mesh_pubsub_htl_inv_want_baseline,
     run_mesh_pubsub_htl_plumtree_baseline, run_mesh_pubsub_htl_plumtree_baseline_with_timer,
     run_mesh_pubsub_htl_plumtree_topic_mesh_baseline, run_mesh_pubsub_sweep,
-    run_mesh_pubsub_workload, HtlBaselineMode, MeshPubsubSweepResult, MeshPubsubWorkloadConfig,
-    MeshPubsubWorkloadReport, WorkloadTopology,
+    run_mesh_pubsub_workload, FollowDistribution, HtlBaselineMode, MeshPubsubSweepResult,
+    MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, NostrWorkloadParams, WorkloadTopology,
 };
 pub use mesh_sim::{
     run_parameter_sweep, CashuIncentiveConfig, LocalResourceStats, NodeStrategyProfile,
