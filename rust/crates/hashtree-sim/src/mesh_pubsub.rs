@@ -701,12 +701,19 @@ impl PlumtreeStreamState {
         node: &str,
         stream_id: &str,
         graph: &BTreeMap<String, Vec<String>>,
+        mesh_members: Option<&BTreeSet<String>>,
         target_degree: Option<usize>,
     ) {
         if !self.initialized.insert(node.to_string()) {
             return;
         }
-        let neighbors: Vec<String> = graph.get(node).into_iter().flatten().cloned().collect();
+        let neighbors: Vec<String> = graph
+            .get(node)
+            .into_iter()
+            .flatten()
+            .filter(|nbr| mesh_members.map(|m| m.contains(*nbr)).unwrap_or(true))
+            .cloned()
+            .collect();
         match target_degree {
             None => {
                 self.eager
@@ -897,6 +904,8 @@ const PLUMTREE_PRUNE_BYTES: u64 = 32;
 /// degree D where IWANT fires T hops after IHAVE if payload hasn't arrived.
 /// `peer_scoring` + `prune_backoff_rounds` enable gossipsub v1.1-style score
 /// tracking and sticky-prune backoff for the heartbeat graft selector.
+/// `topic_mesh = Some(set)` restricts eager+lazy traversal to the given mesh
+/// members (subscribers ∪ {publisher}); `None` means whole-network mesh.
 #[allow(clippy::too_many_arguments)]
 fn htl_plumtree_publish(
     graph: &BTreeMap<String, Vec<String>>,
@@ -907,13 +916,15 @@ fn htl_plumtree_publish(
     ihave_timeout_hops: Option<u8>,
     peer_scoring: bool,
     prune_backoff_rounds: u8,
+    topic_mesh: Option<&BTreeSet<String>>,
     broken: &BTreeSet<(String, String)>,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
 ) -> BTreeMap<String, u64> {
     let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
-    state.ensure_initialized(publisher_id, stream_id, graph, target_degree);
+    state.ensure_initialized(publisher_id, stream_id, graph, topic_mesh, target_degree);
+    let in_mesh = |peer: &str| -> bool { topic_mesh.map(|m| m.contains(peer)).unwrap_or(true) };
 
     let mut delivered_hops: BTreeMap<String, u64> = BTreeMap::new();
     delivered_hops.insert(publisher_id.to_string(), 0);
@@ -930,6 +941,9 @@ fn htl_plumtree_publish(
     let pub_eager = state.eager.get(publisher_id).cloned().unwrap_or_default();
     let pub_lazy = state.lazy.get(publisher_id).cloned().unwrap_or_default();
     for nbr in &pub_eager {
+        if !in_mesh(nbr) {
+            continue;
+        }
         if is_edge_broken(broken, publisher_id, nbr) {
             continue;
         }
@@ -942,6 +956,9 @@ fn htl_plumtree_publish(
         queue.push_back((nbr.clone(), publisher_id.to_string(), next_htl, 1));
     }
     for nbr in &pub_lazy {
+        if !in_mesh(nbr) {
+            continue;
+        }
         if is_edge_broken(broken, publisher_id, nbr) {
             continue;
         }
@@ -975,12 +992,15 @@ fn htl_plumtree_publish(
         // Keep pending IHAVE entries — they may still trigger a graft if the
         // IHAVE arrived sooner than the eager payload (timer expired race).
 
-        state.ensure_initialized(&node, stream_id, graph, target_degree);
+        state.ensure_initialized(&node, stream_id, graph, topic_mesh, target_degree);
         let eager = state.eager.get(&node).cloned().unwrap_or_default();
         let lazy = state.lazy.get(&node).cloned().unwrap_or_default();
 
         for nbr in &eager {
             if nbr == &sender {
+                continue;
+            }
+            if !in_mesh(nbr) {
                 continue;
             }
             if is_edge_broken(broken, &node, nbr) {
@@ -996,6 +1016,9 @@ fn htl_plumtree_publish(
         }
         for nbr in &lazy {
             if nbr == &sender {
+                continue;
+            }
+            if !in_mesh(nbr) {
                 continue;
             }
             if is_edge_broken(broken, &node, nbr) {
@@ -1395,11 +1418,19 @@ pub enum HtlBaselineMode {
     /// `prune_backoff_rounds > 0` adds a sticky-prune cooldown: a pruned
     /// edge can't be re-grafted for that many rounds. Closes the
     /// prune/regraft churn that plain bounded-mesh gossipsub falls into.
+    /// `topic_mesh = true` restricts eager+lazy traversal to mesh members
+    /// (subscribers ∪ {publisher}) per stream — gossipsub/Plumtree's actual
+    /// design, where a node only joins/forwards meshes for topics it
+    /// subscribes to. Off by default for backward compatibility (whole
+    /// network is the mesh, which makes per-event bandwidth scale with N
+    /// instead of subscriber count). Should be true for Nostr-realistic
+    /// many-topics workloads.
     EagerLazy {
         target_degree: Option<usize>,
         ihave_timeout_hops: Option<u8>,
         peer_scoring: bool,
         prune_backoff_rounds: u8,
+        topic_mesh: bool,
     },
 }
 
@@ -1432,6 +1463,7 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline(
             ihave_timeout_hops: None,
             peer_scoring: false,
             prune_backoff_rounds: 0,
+            topic_mesh: false,
         },
     )
     .await
@@ -1456,6 +1488,30 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline_with_timer(
             ihave_timeout_hops: Some(timeout_hops),
             peer_scoring: false,
             prune_backoff_rounds: 0,
+            topic_mesh: false,
+        },
+    )
+    .await
+}
+
+/// Plumtree with topic-aware mesh: eager+lazy traversal restricted to
+/// subscribers ∪ {publisher} per stream. Matches real gossipsub/Plumtree's
+/// per-topic-mesh design and is the right model for Nostr-style workloads
+/// where most network nodes are not subscribed to most topics.
+pub async fn run_mesh_pubsub_htl_plumtree_topic_mesh_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+    timeout_hops: Option<u8>,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: None,
+            ihave_timeout_hops: timeout_hops,
+            peer_scoring: false,
+            prune_backoff_rounds: 0,
+            topic_mesh: true,
         },
     )
     .await
@@ -1483,6 +1539,7 @@ pub async fn run_mesh_pubsub_htl_gossipsub_baseline(
             ihave_timeout_hops,
             peer_scoring: false,
             prune_backoff_rounds: 0,
+            topic_mesh: false,
         },
     )
     .await
@@ -1513,6 +1570,32 @@ pub async fn run_mesh_pubsub_htl_gossipsub_v11_baseline(
             ihave_timeout_hops,
             peer_scoring: true,
             prune_backoff_rounds,
+            topic_mesh: false,
+        },
+    )
+    .await
+}
+
+/// Gossipsub v1.1 with topic-aware mesh — the most realistic gossipsub
+/// approximation we model. Per-topic eager mesh of `target_degree`
+/// restricted to subscribers ∪ {publisher}, plus peer scoring and sticky-
+/// prune cooldown.
+pub async fn run_mesh_pubsub_htl_gossipsub_v11_topic_mesh_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+    target_degree: usize,
+    ihave_timeout_hops: Option<u8>,
+    prune_backoff_rounds: u8,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: Some(target_degree),
+            ihave_timeout_hops,
+            peer_scoring: true,
+            prune_backoff_rounds,
+            topic_mesh: true,
         },
     )
     .await
@@ -1689,20 +1772,31 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         ihave_timeout_hops,
                         peer_scoring,
                         prune_backoff_rounds,
-                    } => htl_plumtree_publish(
-                        graph,
-                        publisher_id,
-                        &stream_id,
-                        plumtree_streams.entry(stream_id.clone()).or_default(),
-                        target_degree,
-                        ihave_timeout_hops,
-                        peer_scoring,
-                        prune_backoff_rounds,
-                        &broken_edges,
-                        config.payload_bytes as u64,
-                        htl,
-                        &mut report,
-                    ),
+                        topic_mesh,
+                    } => {
+                        let mesh_members: Option<BTreeSet<String>> = if topic_mesh {
+                            let mut m = subscribers.clone();
+                            m.insert(publisher_id.to_string());
+                            Some(m)
+                        } else {
+                            None
+                        };
+                        htl_plumtree_publish(
+                            graph,
+                            publisher_id,
+                            &stream_id,
+                            plumtree_streams.entry(stream_id.clone()).or_default(),
+                            target_degree,
+                            ihave_timeout_hops,
+                            peer_scoring,
+                            prune_backoff_rounds,
+                            mesh_members.as_ref(),
+                            &broken_edges,
+                            config.payload_bytes as u64,
+                            htl,
+                            &mut report,
+                        )
+                    }
                 };
                 record_htl_spam_delivery_round(
                     &subscriptions,
@@ -1753,20 +1847,31 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     ihave_timeout_hops,
                     peer_scoring,
                     prune_backoff_rounds,
-                } => htl_plumtree_publish(
-                    graph,
-                    publisher_id,
-                    &stream_id,
-                    plumtree_streams.entry(stream_id.clone()).or_default(),
-                    target_degree,
-                    ihave_timeout_hops,
-                    peer_scoring,
-                    prune_backoff_rounds,
-                    &broken_edges,
-                    config.payload_bytes as u64,
-                    htl,
-                    &mut report,
-                ),
+                    topic_mesh,
+                } => {
+                    let mesh_members: Option<BTreeSet<String>> = if topic_mesh {
+                        let mut m = subscribers.clone();
+                        m.insert(publisher_id.to_string());
+                        Some(m)
+                    } else {
+                        None
+                    };
+                    htl_plumtree_publish(
+                        graph,
+                        publisher_id,
+                        &stream_id,
+                        plumtree_streams.entry(stream_id.clone()).or_default(),
+                        target_degree,
+                        ihave_timeout_hops,
+                        peer_scoring,
+                        prune_backoff_rounds,
+                        mesh_members.as_ref(),
+                        &broken_edges,
+                        config.payload_bytes as u64,
+                        htl,
+                        &mut report,
+                    )
+                }
             };
             record_htl_delivery_round(
                 &subscriptions,
@@ -2085,6 +2190,54 @@ mod tests {
             "v1.1 long {} should beat v1.0 long {}",
             v11_long.bytes_sent_per_delivered_event,
             v10_long.bytes_sent_per_delivered_event
+        );
+    }
+
+    #[tokio::test]
+    async fn htl_plumtree_topic_mesh_cuts_bandwidth_when_subscribers_are_minority() {
+        // The whole-network plumtree forwards every event to every node;
+        // topic-mesh plumtree only forwards to subscribers ∪ {publisher}.
+        // With high-density mesh (50% subs in a small underlay), the mesh
+        // subgraph diameter stays under MESH_EVENT_POLICY.max_htl=4, so
+        // delivery rate stays high while bandwidth drops.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 31,
+            node_count: 64,
+            author_count: 2,
+            subscribers_per_author: 32, // 50% density → subgraph diameter < 4
+            publish_rounds: 4,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 96,
+            pump_steps_per_publish_round: 64,
+            ..Default::default()
+        };
+        let whole_net =
+            run_mesh_pubsub_htl_plumtree_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
+        let topic_aware = run_mesh_pubsub_htl_plumtree_topic_mesh_baseline(
+            cfg,
+            MESH_EVENT_POLICY.max_htl,
+            Some(1),
+        )
+        .await;
+        assert!(topic_aware.delivered_events > 0);
+        // Topic-mesh is bounded by mesh subgraph diameter; whole-net by
+        // underlay diameter. At 50% density subgraph reach is similar.
+        assert!(
+            topic_aware.delivery_rate >= 0.85,
+            "topic-mesh delivery {:.2} should stay high at 50% subscriber density",
+            topic_aware.delivery_rate
+        );
+        // Significant bandwidth win because we only forward to mesh members.
+        assert!(
+            topic_aware.bytes_sent_per_delivered_event * 1.5
+                < whole_net.bytes_sent_per_delivered_event,
+            "topic-mesh {} should be at least 1.5x cheaper than whole-net {}",
+            topic_aware.bytes_sent_per_delivered_event,
+            whole_net.bytes_sent_per_delivered_event
         );
     }
 

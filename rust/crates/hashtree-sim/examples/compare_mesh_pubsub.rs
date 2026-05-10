@@ -294,9 +294,11 @@ async fn main() {
         "htl-plumtree-h4",
         "htl-plumtree-h4-t1",
         "htl-plumtree-h4-t0",
+        "htl-plumtree-tm-h4",
         "htl-gossipsub-d6-h4",
         "htl-gossipsub-d6-h4-t0",
         "htl-gossipsub-d6-v11-h4",
+        "htl-gossipsub-d6-v11-tm-h4",
     ];
     let selected_baselines = baseline_labels
         .iter()
@@ -335,6 +337,7 @@ async fn main() {
                     ihave_timeout_hops: None,
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
+                    topic_mesh: false,
                 },
             ),
             (
@@ -344,6 +347,7 @@ async fn main() {
                     ihave_timeout_hops: Some(1),
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
+                    topic_mesh: false,
                 },
             ),
             (
@@ -353,6 +357,17 @@ async fn main() {
                     ihave_timeout_hops: Some(0),
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
+                    topic_mesh: false,
+                },
+            ),
+            (
+                "htl-plumtree-tm-h4",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: None,
+                    ihave_timeout_hops: Some(1),
+                    peer_scoring: false,
+                    prune_backoff_rounds: 0,
+                    topic_mesh: true,
                 },
             ),
             (
@@ -362,6 +377,7 @@ async fn main() {
                     ihave_timeout_hops: Some(1),
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
+                    topic_mesh: false,
                 },
             ),
             (
@@ -371,6 +387,7 @@ async fn main() {
                     ihave_timeout_hops: Some(0),
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
+                    topic_mesh: false,
                 },
             ),
             (
@@ -380,6 +397,17 @@ async fn main() {
                     ihave_timeout_hops: Some(1),
                     peer_scoring: true,
                     prune_backoff_rounds: 4,
+                    topic_mesh: false,
+                },
+            ),
+            (
+                "htl-gossipsub-d6-v11-tm-h4",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: Some(6),
+                    ihave_timeout_hops: Some(1),
+                    peer_scoring: true,
+                    prune_backoff_rounds: 4,
+                    topic_mesh: true,
                 },
             ),
         ];
