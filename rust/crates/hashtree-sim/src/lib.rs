@@ -25,8 +25,8 @@ pub use cashu_test_mint::{
 };
 pub use mesh_pubsub::{
     run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
-    run_mesh_pubsub_sweep, run_mesh_pubsub_workload, MeshPubsubSweepResult,
-    MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport,
+    run_mesh_pubsub_htl_plumtree_baseline, run_mesh_pubsub_sweep, run_mesh_pubsub_workload,
+    MeshPubsubSweepResult, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport,
 };
 pub use mesh_sim::{
     run_parameter_sweep, CashuIncentiveConfig, LocalResourceStats, NodeStrategyProfile,

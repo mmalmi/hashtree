@@ -3,7 +3,8 @@ use hashtree_network::{
 };
 use hashtree_sim::{
     run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_inv_want_baseline,
-    run_mesh_pubsub_sweep, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
+    run_mesh_pubsub_htl_plumtree_baseline, run_mesh_pubsub_sweep, MeshPubsubWorkloadConfig,
+    MeshPubsubWorkloadReport, PoolConfig,
 };
 use std::collections::BTreeSet;
 use std::env;
@@ -279,7 +280,7 @@ async fn main() {
     ];
 
     let options = run_options_from_args();
-    let baseline_labels = ["htl-flood-h4", "htl-invwant-h4"];
+    let baseline_labels = ["htl-flood-h4", "htl-invwant-h4", "htl-plumtree-h4"];
     let selected_baselines = baseline_labels
         .iter()
         .filter(|label| includes_label(&options, label))
@@ -358,6 +359,35 @@ async fn main() {
             )
             .await;
             print_report("htl-invwant-h4", &htl_report, elapsed_secs);
+            io::stdout().flush().expect("flush stdout");
+        }
+
+        if includes_label(&options, "htl-plumtree-h4") {
+            let htl_config = workload(
+                17,
+                node_count,
+                subscribers,
+                spam_subscribers,
+                Variant {
+                    label: "htl-plumtree-h4",
+                    delivery_mode: PubsubDeliveryMode::InterestPush,
+                    policy: PubsubSchedulingPolicy::Fair,
+                    fanout: 4,
+                },
+            );
+            run_index += 1;
+            let (htl_report, elapsed_secs) = run_with_progress(
+                "htl-plumtree-h4",
+                node_count,
+                RunProgress {
+                    index: run_index,
+                    total: run_total,
+                },
+                options.progress_interval_secs,
+                run_mesh_pubsub_htl_plumtree_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
+            )
+            .await;
+            print_report("htl-plumtree-h4", &htl_report, elapsed_secs);
             io::stdout().flush().expect("flush stdout");
         }
 

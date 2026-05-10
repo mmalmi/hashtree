@@ -543,6 +543,197 @@ fn htl_inv_want_publish(
     delivered_latency_steps
 }
 
+/// Streamr-Plumtree per-stream state: which neighbors are eager vs lazy for a
+/// given (node, stream) pair. Persists across publish rounds so the spanning
+/// tree converges as redundant deliveries get pruned.
+#[derive(Default)]
+struct PlumtreeStreamState {
+    eager: BTreeMap<String, BTreeSet<String>>,
+    lazy: BTreeMap<String, BTreeSet<String>>,
+    initialized: BTreeSet<String>,
+}
+
+impl PlumtreeStreamState {
+    fn ensure_initialized(&mut self, node: &str, graph: &BTreeMap<String, Vec<String>>) {
+        if self.initialized.insert(node.to_string()) {
+            let neighbors: BTreeSet<String> =
+                graph.get(node).into_iter().flatten().cloned().collect();
+            self.eager.insert(node.to_string(), neighbors);
+            self.lazy.insert(node.to_string(), BTreeSet::new());
+        }
+    }
+
+    fn prune_edge(&mut self, a: &str, b: &str) {
+        if let Some(set) = self.eager.get_mut(a) {
+            set.remove(b);
+        }
+        if let Some(set) = self.eager.get_mut(b) {
+            set.remove(a);
+        }
+        self.lazy
+            .entry(a.to_string())
+            .or_default()
+            .insert(b.to_string());
+        self.lazy
+            .entry(b.to_string())
+            .or_default()
+            .insert(a.to_string());
+    }
+
+    fn graft_edge(&mut self, a: &str, b: &str) {
+        if let Some(set) = self.lazy.get_mut(a) {
+            set.remove(b);
+        }
+        if let Some(set) = self.lazy.get_mut(b) {
+            set.remove(a);
+        }
+        self.eager
+            .entry(a.to_string())
+            .or_default()
+            .insert(b.to_string());
+        self.eager
+            .entry(b.to_string())
+            .or_default()
+            .insert(a.to_string());
+    }
+}
+
+const PLUMTREE_IHAVE_BYTES: u64 = 96;
+const PLUMTREE_IWANT_BYTES: u64 = 64;
+const PLUMTREE_PRUNE_BYTES: u64 = 32;
+
+fn htl_plumtree_publish(
+    graph: &BTreeMap<String, Vec<String>>,
+    publisher_id: &str,
+    state: &mut PlumtreeStreamState,
+    payload_bytes: u64,
+    htl: u8,
+    report: &mut MeshPubsubWorkloadReport,
+) -> BTreeMap<String, u64> {
+    let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
+    state.ensure_initialized(publisher_id, graph);
+
+    let mut delivered_hops: BTreeMap<String, u64> = BTreeMap::new();
+    delivered_hops.insert(publisher_id.to_string(), 0);
+
+    // Pending IHAVE entries per node: list of (peer_who_sent_ihave, hop_count_when_received).
+    let mut pending_ihave: BTreeMap<String, Vec<(String, u64)>> = BTreeMap::new();
+
+    let mut prunes: Vec<(String, String)> = Vec::new();
+    let mut grafts: Vec<(String, String)> = Vec::new();
+
+    let mut queue: VecDeque<(String, String, u8, u64)> = VecDeque::new();
+
+    // Seed from publisher: full payload to eager neighbors, IHAVE to lazy neighbors.
+    let pub_eager = state.eager.get(publisher_id).cloned().unwrap_or_default();
+    let pub_lazy = state.lazy.get(publisher_id).cloned().unwrap_or_default();
+    for nbr in &pub_eager {
+        report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(payload_bytes);
+        let nbr_htl_cfg = deterministic_htl_config(publisher_id, nbr);
+        let next_htl = decrement_htl_with_policy(htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
+        if !should_forward_htl(next_htl) {
+            continue;
+        }
+        queue.push_back((nbr.clone(), publisher_id.to_string(), next_htl, 1));
+    }
+    for nbr in &pub_lazy {
+        report.forwarded_bytes_sent = report
+            .forwarded_bytes_sent
+            .saturating_add(PLUMTREE_IHAVE_BYTES);
+        pending_ihave
+            .entry(nbr.clone())
+            .or_default()
+            .push((publisher_id.to_string(), 1));
+    }
+
+    while let Some((node, sender, frame_htl, hop)) = queue.pop_front() {
+        if delivered_hops.contains_key(&node) {
+            // Duplicate eager delivery → bidirectional prune (sender,node) to lazy.
+            report.duplicate_deliveries = report.duplicate_deliveries.saturating_add(1);
+            report.forwarded_bytes_sent = report
+                .forwarded_bytes_sent
+                .saturating_add(PLUMTREE_PRUNE_BYTES);
+            prunes.push((node.clone(), sender.clone()));
+            continue;
+        }
+        delivered_hops.insert(node.clone(), hop);
+        // Drop pending IHAVEs for this node — payload arrived via eager path.
+        pending_ihave.remove(&node);
+
+        state.ensure_initialized(&node, graph);
+        let eager = state.eager.get(&node).cloned().unwrap_or_default();
+        let lazy = state.lazy.get(&node).cloned().unwrap_or_default();
+
+        for nbr in &eager {
+            if nbr == &sender {
+                continue;
+            }
+            let nbr_htl_cfg = deterministic_htl_config(&node, nbr);
+            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
+            if !should_forward_htl(next_htl) {
+                continue;
+            }
+            report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(payload_bytes);
+            queue.push_back((nbr.clone(), node.clone(), next_htl, hop.saturating_add(1)));
+        }
+        for nbr in &lazy {
+            if nbr == &sender {
+                continue;
+            }
+            let nbr_htl_cfg = deterministic_htl_config(&node, nbr);
+            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
+            if !should_forward_htl(next_htl) {
+                continue;
+            }
+            report.forwarded_bytes_sent = report
+                .forwarded_bytes_sent
+                .saturating_add(PLUMTREE_IHAVE_BYTES);
+            pending_ihave
+                .entry(nbr.clone())
+                .or_default()
+                .push((node.clone(), hop.saturating_add(1)));
+        }
+    }
+
+    // Phase 2: IHAVE timer fires for nodes that never got payload via eager.
+    // They send IWANT to the closest IHAVE peer; that peer replies with payload.
+    // This grafts the edge bidirectionally (lazy → eager).
+    let pending_keys: Vec<String> = pending_ihave.keys().cloned().collect();
+    for node in pending_keys {
+        if delivered_hops.contains_key(&node) {
+            continue;
+        }
+        let entries = pending_ihave.remove(&node).unwrap_or_default();
+        let mut best: Option<(String, u64)> = None;
+        for (peer, h) in entries {
+            match &best {
+                None => best = Some((peer, h)),
+                Some((_, bh)) if h < *bh => best = Some((peer, h)),
+                _ => {}
+            }
+        }
+        if let Some((peer, h)) = best {
+            // IWANT request + payload reply.
+            report.forwarded_bytes_sent = report
+                .forwarded_bytes_sent
+                .saturating_add(PLUMTREE_IWANT_BYTES)
+                .saturating_add(payload_bytes);
+            // Round-trip latency: IHAVE arrived at hop h, +1 for IWANT, +1 for payload reply.
+            delivered_hops.insert(node.clone(), h.saturating_add(2));
+            grafts.push((node.clone(), peer.clone()));
+        }
+    }
+
+    for (a, b) in prunes {
+        state.prune_edge(&a, &b);
+    }
+    for (a, b) in grafts {
+        state.graft_edge(&a, &b);
+    }
+
+    delivered_hops
+}
+
 fn record_htl_delivery_round(
     subscriptions: &BTreeMap<String, BTreeSet<String>>,
     stream_id: &str,
@@ -812,6 +1003,7 @@ pub async fn run_mesh_pubsub_workload(
 enum HtlBaselineMode {
     FloodPayload,
     InvWant,
+    Plumtree,
 }
 
 pub async fn run_mesh_pubsub_htl_flood_baseline(
@@ -826,6 +1018,16 @@ pub async fn run_mesh_pubsub_htl_inv_want_baseline(
     htl: u8,
 ) -> MeshPubsubWorkloadReport {
     run_mesh_pubsub_htl_baseline(config, htl, HtlBaselineMode::InvWant).await
+}
+
+/// Streamr-style Plumtree baseline: stateful eager+lazy push with prune-on-duplicate
+/// and graft-on-IHAVE-before-payload. State persists across publish rounds keyed by
+/// stream id, so the spanning tree converges over time.
+pub async fn run_mesh_pubsub_htl_plumtree_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(config, htl, HtlBaselineMode::Plumtree).await
 }
 
 async fn run_mesh_pubsub_htl_baseline(
@@ -920,6 +1122,7 @@ async fn run_mesh_pubsub_htl_baseline(
     }
 
     let mut latencies_ms = Vec::new();
+    let mut plumtree_streams: HashMap<String, PlumtreeStreamState> = HashMap::new();
     for round in 0..config.publish_rounds {
         let churn_actions = apply_subscription_churn_plan(&mut rng, &subscriptions, &config);
         for (stream_id, subscriber_id, active) in churn_actions {
@@ -962,6 +1165,14 @@ async fn run_mesh_pubsub_htl_baseline(
                         htl,
                         &mut report,
                     ),
+                    HtlBaselineMode::Plumtree => htl_plumtree_publish(
+                        &graph,
+                        publisher_id,
+                        plumtree_streams.entry(stream_id.clone()).or_default(),
+                        config.payload_bytes as u64,
+                        htl,
+                        &mut report,
+                    ),
                 };
                 record_htl_spam_delivery_round(
                     &subscriptions,
@@ -995,6 +1206,14 @@ async fn run_mesh_pubsub_htl_baseline(
                     &graph,
                     publisher_id,
                     &subscribers,
+                    config.payload_bytes as u64,
+                    htl,
+                    &mut report,
+                ),
+                HtlBaselineMode::Plumtree => htl_plumtree_publish(
+                    &graph,
+                    publisher_id,
+                    plumtree_streams.entry(stream_id.clone()).or_default(),
                     config.payload_bytes as u64,
                     htl,
                     &mut report,
@@ -1094,6 +1313,72 @@ mod tests {
         assert!(results
             .iter()
             .all(|result| result.report.delivery_opportunities > 0));
+    }
+
+    #[tokio::test]
+    async fn htl_plumtree_baseline_converges_below_flood_bandwidth() {
+        let config = MeshPubsubWorkloadConfig {
+            seed: 19,
+            node_count: 24,
+            author_count: 3,
+            subscribers_per_author: 8,
+            publish_rounds: 4,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 80,
+            pump_steps_per_publish_round: 48,
+            ..Default::default()
+        };
+
+        let plumtree =
+            run_mesh_pubsub_htl_plumtree_baseline(config.clone(), MESH_EVENT_POLICY.max_htl).await;
+        let flood =
+            run_mesh_pubsub_htl_flood_baseline(config.clone(), MESH_EVENT_POLICY.max_htl).await;
+
+        assert!(plumtree.delivered_events > 0);
+        assert!(plumtree.forwarded_bytes_sent > 0);
+        // Plumtree should converge to a spanning tree and beat full-flood bandwidth.
+        assert!(
+            plumtree.forwarded_bytes_sent < flood.forwarded_bytes_sent,
+            "plumtree {} should spend fewer bytes than flood {}",
+            plumtree.forwarded_bytes_sent,
+            flood.forwarded_bytes_sent
+        );
+    }
+
+    #[tokio::test]
+    async fn htl_plumtree_bandwidth_improves_with_more_rounds() {
+        let base = MeshPubsubWorkloadConfig {
+            seed: 23,
+            node_count: 32,
+            author_count: 2,
+            subscribers_per_author: 8,
+            publish_rounds: 2,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 80,
+            pump_steps_per_publish_round: 48,
+            ..Default::default()
+        };
+        let mut long = base.clone();
+        long.publish_rounds = 8;
+
+        let short = run_mesh_pubsub_htl_plumtree_baseline(base, MESH_EVENT_POLICY.max_htl).await;
+        let long = run_mesh_pubsub_htl_plumtree_baseline(long, MESH_EVENT_POLICY.max_htl).await;
+
+        // After more rounds the spanning tree is converged; per-event cost drops.
+        assert!(
+            long.bytes_sent_per_delivered_event < short.bytes_sent_per_delivered_event,
+            "long-run bytes/event {} should be below short-run {} (convergence)",
+            long.bytes_sent_per_delivered_event,
+            short.bytes_sent_per_delivered_event
+        );
     }
 
     #[tokio::test]
