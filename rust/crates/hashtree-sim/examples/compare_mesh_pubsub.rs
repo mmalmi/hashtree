@@ -339,6 +339,7 @@ async fn main() {
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
                     topic_mesh: false,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -349,6 +350,7 @@ async fn main() {
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
                     topic_mesh: false,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -359,6 +361,7 @@ async fn main() {
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
                     topic_mesh: false,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -369,6 +372,7 @@ async fn main() {
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
                     topic_mesh: true,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -379,6 +383,7 @@ async fn main() {
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
                     topic_mesh: false,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -389,6 +394,7 @@ async fn main() {
                     peer_scoring: false,
                     prune_backoff_rounds: 0,
                     topic_mesh: false,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -399,6 +405,7 @@ async fn main() {
                     peer_scoring: true,
                     prune_backoff_rounds: 4,
                     topic_mesh: false,
+                    fanout_peers_per_member: 0,
                 },
             ),
             (
@@ -409,6 +416,7 @@ async fn main() {
                     peer_scoring: true,
                     prune_backoff_rounds: 4,
                     topic_mesh: true,
+                    fanout_peers_per_member: 0,
                 },
             ),
         ];

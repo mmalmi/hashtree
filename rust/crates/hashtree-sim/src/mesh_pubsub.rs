@@ -726,18 +726,46 @@ impl PlumtreeStreamState {
         stream_id: &str,
         graph: &BTreeMap<String, Vec<String>>,
         mesh_members: Option<&BTreeSet<String>>,
+        fanout_peers_per_member: u8,
         target_degree: Option<usize>,
     ) {
         if !self.initialized.insert(node.to_string()) {
             return;
         }
-        let neighbors: Vec<String> = graph
-            .get(node)
-            .into_iter()
-            .flatten()
-            .filter(|nbr| mesh_members.map(|m| m.contains(*nbr)).unwrap_or(true))
-            .cloned()
-            .collect();
+        let underlay: Vec<String> = graph.get(node).into_iter().flatten().cloned().collect();
+        let neighbors: Vec<String> = match mesh_members {
+            None => underlay,
+            Some(mesh) => {
+                let mesh_neighbors: Vec<String> = underlay
+                    .iter()
+                    .filter(|n| mesh.contains(*n))
+                    .cloned()
+                    .collect();
+                let is_member = mesh.contains(node);
+                if is_member && fanout_peers_per_member > 0 {
+                    // Augment with K lowest-rank non-mesh underlay neighbors
+                    // ("bridges"): they relay 1 hop into the mesh.
+                    let mut non_mesh: Vec<(u64, String)> = underlay
+                        .iter()
+                        .filter(|n| !mesh.contains(*n))
+                        .map(|n| (deterministic_rank(stream_id, node, n), n.clone()))
+                        .collect();
+                    non_mesh.sort_by_key(|(rank, _)| *rank);
+                    let bridges: Vec<String> = non_mesh
+                        .into_iter()
+                        .take(fanout_peers_per_member as usize)
+                        .map(|(_, n)| n)
+                        .collect();
+                    mesh_neighbors.into_iter().chain(bridges).collect()
+                } else {
+                    // Non-member (would be a bridge node reached via BFS) or
+                    // fanout disabled: forward only to mesh members. This is
+                    // what makes a bridge a true 1-hop relay rather than a
+                    // recursive flood.
+                    mesh_neighbors
+                }
+            }
+        };
         match target_degree {
             None => {
                 self.eager
@@ -930,6 +958,8 @@ const PLUMTREE_PRUNE_BYTES: u64 = 32;
 /// tracking and sticky-prune backoff for the heartbeat graft selector.
 /// `topic_mesh = Some(set)` restricts eager+lazy traversal to the given mesh
 /// members (subscribers ∪ {publisher}); `None` means whole-network mesh.
+/// `fanout_peers_per_member > 0` adds K non-mesh 1-hop relays to each
+/// member's eager set (only meaningful with `topic_mesh = Some(_)`).
 #[allow(clippy::too_many_arguments)]
 fn htl_plumtree_publish(
     graph: &BTreeMap<String, Vec<String>>,
@@ -941,14 +971,21 @@ fn htl_plumtree_publish(
     peer_scoring: bool,
     prune_backoff_rounds: u8,
     topic_mesh: Option<&BTreeSet<String>>,
+    fanout_peers_per_member: u8,
     broken: &BTreeSet<(String, String)>,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
 ) -> BTreeMap<String, u64> {
     let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
-    state.ensure_initialized(publisher_id, stream_id, graph, topic_mesh, target_degree);
-    let in_mesh = |peer: &str| -> bool { topic_mesh.map(|m| m.contains(peer)).unwrap_or(true) };
+    state.ensure_initialized(
+        publisher_id,
+        stream_id,
+        graph,
+        topic_mesh,
+        fanout_peers_per_member,
+        target_degree,
+    );
 
     let mut delivered_hops: BTreeMap<String, u64> = BTreeMap::new();
     delivered_hops.insert(publisher_id.to_string(), 0);
@@ -965,9 +1002,6 @@ fn htl_plumtree_publish(
     let pub_eager = state.eager.get(publisher_id).cloned().unwrap_or_default();
     let pub_lazy = state.lazy.get(publisher_id).cloned().unwrap_or_default();
     for nbr in &pub_eager {
-        if !in_mesh(nbr) {
-            continue;
-        }
         if is_edge_broken(broken, publisher_id, nbr) {
             continue;
         }
@@ -980,9 +1014,6 @@ fn htl_plumtree_publish(
         queue.push_back((nbr.clone(), publisher_id.to_string(), next_htl, 1));
     }
     for nbr in &pub_lazy {
-        if !in_mesh(nbr) {
-            continue;
-        }
         if is_edge_broken(broken, publisher_id, nbr) {
             continue;
         }
@@ -1016,15 +1047,19 @@ fn htl_plumtree_publish(
         // Keep pending IHAVE entries — they may still trigger a graft if the
         // IHAVE arrived sooner than the eager payload (timer expired race).
 
-        state.ensure_initialized(&node, stream_id, graph, topic_mesh, target_degree);
+        state.ensure_initialized(
+            &node,
+            stream_id,
+            graph,
+            topic_mesh,
+            fanout_peers_per_member,
+            target_degree,
+        );
         let eager = state.eager.get(&node).cloned().unwrap_or_default();
         let lazy = state.lazy.get(&node).cloned().unwrap_or_default();
 
         for nbr in &eager {
             if nbr == &sender {
-                continue;
-            }
-            if !in_mesh(nbr) {
                 continue;
             }
             if is_edge_broken(broken, &node, nbr) {
@@ -1040,9 +1075,6 @@ fn htl_plumtree_publish(
         }
         for nbr in &lazy {
             if nbr == &sender {
-                continue;
-            }
-            if !in_mesh(nbr) {
                 continue;
             }
             if is_edge_broken(broken, &node, nbr) {
@@ -1449,12 +1481,21 @@ pub enum HtlBaselineMode {
     /// network is the mesh, which makes per-event bandwidth scale with N
     /// instead of subscriber count). Should be true for Nostr-realistic
     /// many-topics workloads.
+    /// `fanout_peers_per_member > 0` augments each mesh member's eager set
+    /// with K non-mesh underlay neighbors as 1-hop relays ("bridges").
+    /// Bridges receive the payload and forward to their mesh-member
+    /// underlay neighbors only — they don't recursively introduce more
+    /// bridges, so the augmented mesh stays bounded. Closes
+    /// mesh-fragmentation gaps when subscriber density is below the per-
+    /// topic-mesh-diameter threshold (typical of Nostr long-tail topics).
+    /// Only meaningful when `topic_mesh = true`.
     EagerLazy {
         target_degree: Option<usize>,
         ihave_timeout_hops: Option<u8>,
         peer_scoring: bool,
         prune_backoff_rounds: u8,
         topic_mesh: bool,
+        fanout_peers_per_member: u8,
     },
 }
 
@@ -1488,6 +1529,7 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline(
             peer_scoring: false,
             prune_backoff_rounds: 0,
             topic_mesh: false,
+            fanout_peers_per_member: 0,
         },
     )
     .await
@@ -1513,6 +1555,7 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline_with_timer(
             peer_scoring: false,
             prune_backoff_rounds: 0,
             topic_mesh: false,
+            fanout_peers_per_member: 0,
         },
     )
     .await
@@ -1536,6 +1579,34 @@ pub async fn run_mesh_pubsub_htl_plumtree_topic_mesh_baseline(
             peer_scoring: false,
             prune_backoff_rounds: 0,
             topic_mesh: true,
+            fanout_peers_per_member: 0,
+        },
+    )
+    .await
+}
+
+/// Plumtree with topic-aware mesh + fanout bridges: each member augments
+/// its eager set with K non-subscriber underlay neighbors as 1-hop relays.
+/// Closes mesh-fragmentation gaps when subscriber density per topic is
+/// below the per-topic-mesh-diameter threshold (typical of Nostr
+/// long-tail topics). Bridges only forward 1 hop (to their own
+/// mesh-member underlay neighbors), so the augmented mesh stays bounded.
+pub async fn run_mesh_pubsub_htl_plumtree_topic_mesh_fanout_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+    timeout_hops: Option<u8>,
+    fanout_peers_per_member: u8,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: None,
+            ihave_timeout_hops: timeout_hops,
+            peer_scoring: false,
+            prune_backoff_rounds: 0,
+            topic_mesh: true,
+            fanout_peers_per_member,
         },
     )
     .await
@@ -1564,6 +1635,7 @@ pub async fn run_mesh_pubsub_htl_gossipsub_baseline(
             peer_scoring: false,
             prune_backoff_rounds: 0,
             topic_mesh: false,
+            fanout_peers_per_member: 0,
         },
     )
     .await
@@ -1595,6 +1667,7 @@ pub async fn run_mesh_pubsub_htl_gossipsub_v11_baseline(
             peer_scoring: true,
             prune_backoff_rounds,
             topic_mesh: false,
+            fanout_peers_per_member: 0,
         },
     )
     .await
@@ -1620,6 +1693,7 @@ pub async fn run_mesh_pubsub_htl_gossipsub_v11_topic_mesh_baseline(
             peer_scoring: true,
             prune_backoff_rounds,
             topic_mesh: true,
+            fanout_peers_per_member: 0,
         },
     )
     .await
@@ -1862,6 +1936,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         peer_scoring,
                         prune_backoff_rounds,
                         topic_mesh,
+                        fanout_peers_per_member,
                     } => {
                         let mesh_members: Option<BTreeSet<String>> = if topic_mesh {
                             let mut m = subscribers.clone();
@@ -1880,6 +1955,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                             peer_scoring,
                             prune_backoff_rounds,
                             mesh_members.as_ref(),
+                            fanout_peers_per_member,
                             &broken_edges,
                             config.payload_bytes as u64,
                             htl,
@@ -1937,6 +2013,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     peer_scoring,
                     prune_backoff_rounds,
                     topic_mesh,
+                    fanout_peers_per_member,
                 } => {
                     let mesh_members: Option<BTreeSet<String>> = if topic_mesh {
                         let mut m = subscribers.clone();
@@ -1955,6 +2032,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         peer_scoring,
                         prune_backoff_rounds,
                         mesh_members.as_ref(),
+                        fanout_peers_per_member,
                         &broken_edges,
                         config.payload_bytes as u64,
                         htl,
@@ -2360,6 +2438,49 @@ mod tests {
         // distributions differ in concentration, not total volume.
         assert!(zipf_max_opps > 0);
         assert!(uniform_max_opps > 0);
+    }
+
+    #[tokio::test]
+    async fn htl_plumtree_fanout_recovers_delivery_on_sparse_topic_mesh() {
+        // 1000 nodes, 100 subscribers (10% density). Pure topic-mesh fails
+        // because the subscriber-induced subgraph diameter > HTL=4. Adding
+        // fanout=2 bridges per member lets payload hop through non-mesh
+        // relayers, recovering delivery.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 41,
+            node_count: 256,
+            author_count: 1,
+            subscribers_per_author: 32, // ~12.5% density
+            publish_rounds: 2,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 160,
+            pump_steps_per_publish_round: 96,
+            ..Default::default()
+        };
+        let pure_tm = run_mesh_pubsub_htl_plumtree_topic_mesh_baseline(
+            cfg.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            Some(1),
+        )
+        .await;
+        let fanout = run_mesh_pubsub_htl_plumtree_topic_mesh_fanout_baseline(
+            cfg,
+            MESH_EVENT_POLICY.max_htl,
+            Some(1),
+            4,
+        )
+        .await;
+        // Fanout should rescue delivery rate by relaying through bridges.
+        assert!(
+            fanout.delivery_rate > pure_tm.delivery_rate,
+            "fanout {:.3} should beat pure-tm {:.3}",
+            fanout.delivery_rate,
+            pure_tm.delivery_rate
+        );
     }
 
     #[tokio::test]
