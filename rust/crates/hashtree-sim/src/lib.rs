@@ -26,10 +26,10 @@ pub use cashu_test_mint::{
 pub use mesh_pubsub::{
     compute_workload_peer_graph, run_mesh_pubsub_htl_baseline_on_graph,
     run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_gossipsub_baseline,
-    run_mesh_pubsub_htl_inv_want_baseline, run_mesh_pubsub_htl_plumtree_baseline,
-    run_mesh_pubsub_htl_plumtree_baseline_with_timer, run_mesh_pubsub_sweep,
-    run_mesh_pubsub_workload, HtlBaselineMode, MeshPubsubSweepResult, MeshPubsubWorkloadConfig,
-    MeshPubsubWorkloadReport, WorkloadTopology,
+    run_mesh_pubsub_htl_gossipsub_v11_baseline, run_mesh_pubsub_htl_inv_want_baseline,
+    run_mesh_pubsub_htl_plumtree_baseline, run_mesh_pubsub_htl_plumtree_baseline_with_timer,
+    run_mesh_pubsub_sweep, run_mesh_pubsub_workload, HtlBaselineMode, MeshPubsubSweepResult,
+    MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, WorkloadTopology,
 };
 pub use mesh_sim::{
     run_parameter_sweep, CashuIncentiveConfig, LocalResourceStats, NodeStrategyProfile,

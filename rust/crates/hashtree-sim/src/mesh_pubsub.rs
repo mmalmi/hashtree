@@ -588,14 +588,40 @@ fn htl_inv_want_publish(
     delivered_latency_steps
 }
 
+/// Per-(node, neighbor) score, gossipsub v1.1-style. Higher is better.
+/// Tracks first-delivery count (P2), duplicates from this peer (P3), and
+/// time-in-mesh (P1). Used to choose which lazy peer to graft on heartbeat.
+#[derive(Debug, Clone, Default)]
+struct PeerScore {
+    first_deliveries: u64,
+    duplicates_from: u64,
+    rounds_in_mesh: u64,
+}
+
+impl PeerScore {
+    fn weight(&self) -> f64 {
+        (self.first_deliveries as f64) - 0.3 * (self.duplicates_from as f64)
+            + 0.1 * (self.rounds_in_mesh.min(10) as f64)
+    }
+}
+
 /// Streamr-Plumtree per-stream state: which neighbors are eager vs lazy for a
 /// given (node, stream) pair. Persists across publish rounds so the spanning
 /// tree converges as redundant deliveries get pruned.
+///
+/// Optional gossipsub v1.1 augmentation:
+///   - `scores[node][peer]` records P2/P3/P1 signals from observed traffic.
+///   - `sticky_prune[node][peer] = round_until` blocks a pruned edge from
+///     being re-grafted until that round. Closes the prune/regraft churn
+///     loop in naive bounded-mesh gossipsub.
 #[derive(Default)]
 struct PlumtreeStreamState {
     eager: BTreeMap<String, BTreeSet<String>>,
     lazy: BTreeMap<String, BTreeSet<String>>,
     initialized: BTreeSet<String>,
+    scores: BTreeMap<String, BTreeMap<String, PeerScore>>,
+    sticky_prune: BTreeMap<String, BTreeMap<String, u64>>,
+    current_round: u64,
 }
 
 fn deterministic_rank(stream_id: &str, owner: &str, neighbor: &str) -> u64 {
@@ -709,6 +735,97 @@ impl PlumtreeStreamState {
             }
         }
     }
+
+    /// gossipsub v1.1-style heartbeat: graft the highest-scoring lazy peers
+    /// that are NOT in sticky-prune cooldown. Tie-break by deterministic
+    /// rank so the choice is stable across runs.
+    fn rebalance_with_scoring(&mut self, target: usize, stream_id: &str) {
+        let nodes: Vec<String> = self.initialized.iter().cloned().collect();
+        let now = self.current_round;
+        for node in nodes {
+            let current = self
+                .eager
+                .get(&node)
+                .map(|set| set.len())
+                .unwrap_or_default();
+            if current >= target {
+                continue;
+            }
+            let needed = target - current;
+            let lazy_set = self.lazy.get(&node).cloned().unwrap_or_default();
+            let cooldowns = self.sticky_prune.get(&node).cloned().unwrap_or_default();
+            let scores = self.scores.get(&node).cloned().unwrap_or_default();
+
+            let mut candidates: Vec<(f64, u64, String)> = lazy_set
+                .iter()
+                .filter(|peer| {
+                    cooldowns
+                        .get(*peer)
+                        .map(|until| *until <= now)
+                        .unwrap_or(true)
+                })
+                .map(|peer| {
+                    let score = scores.get(peer).map(|s| s.weight()).unwrap_or(0.0);
+                    let rank = deterministic_rank(stream_id, &node, peer);
+                    (score, rank, peer.clone())
+                })
+                .collect();
+            // Highest score first; tie-break by lowest rank.
+            candidates.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            for (_, _, peer) in candidates.into_iter().take(needed) {
+                self.graft_edge(&node, &peer);
+            }
+        }
+    }
+
+    fn record_first_delivery(&mut self, node: &str, peer: &str) {
+        self.scores
+            .entry(node.to_string())
+            .or_default()
+            .entry(peer.to_string())
+            .or_default()
+            .first_deliveries += 1;
+    }
+
+    fn record_duplicate(&mut self, node: &str, peer: &str) {
+        self.scores
+            .entry(node.to_string())
+            .or_default()
+            .entry(peer.to_string())
+            .or_default()
+            .duplicates_from += 1;
+    }
+
+    fn mark_sticky_prune(&mut self, a: &str, b: &str, until_round: u64) {
+        self.sticky_prune
+            .entry(a.to_string())
+            .or_default()
+            .insert(b.to_string(), until_round);
+        self.sticky_prune
+            .entry(b.to_string())
+            .or_default()
+            .insert(a.to_string(), until_round);
+    }
+
+    fn tick_round_for_eager(&mut self) {
+        let nodes: Vec<String> = self.initialized.iter().cloned().collect();
+        for node in nodes {
+            let eager = self.eager.get(&node).cloned().unwrap_or_default();
+            for peer in eager {
+                self.scores
+                    .entry(node.clone())
+                    .or_default()
+                    .entry(peer)
+                    .or_default()
+                    .rounds_in_mesh += 1;
+            }
+        }
+        self.current_round = self.current_round.saturating_add(1);
+    }
 }
 
 const PLUMTREE_IHAVE_BYTES: u64 = 96;
@@ -720,6 +837,8 @@ const PLUMTREE_PRUNE_BYTES: u64 = 32;
 /// graft-only-on-payload-never). With `target_degree = Some(D)` and
 /// `ihave_timeout_hops = Some(T)` it behaves like a gossipsub mesh of
 /// degree D where IWANT fires T hops after IHAVE if payload hasn't arrived.
+/// `peer_scoring` + `prune_backoff_rounds` enable gossipsub v1.1-style score
+/// tracking and sticky-prune backoff for the heartbeat graft selector.
 #[allow(clippy::too_many_arguments)]
 fn htl_plumtree_publish(
     graph: &BTreeMap<String, Vec<String>>,
@@ -728,6 +847,8 @@ fn htl_plumtree_publish(
     state: &mut PlumtreeStreamState,
     target_degree: Option<usize>,
     ihave_timeout_hops: Option<u8>,
+    peer_scoring: bool,
+    prune_backoff_rounds: u8,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
@@ -775,10 +896,17 @@ fn htl_plumtree_publish(
             report.forwarded_bytes_sent = report
                 .forwarded_bytes_sent
                 .saturating_add(PLUMTREE_PRUNE_BYTES);
+            if peer_scoring {
+                state.record_duplicate(&node, &sender);
+            }
             prunes.push((node.clone(), sender.clone()));
             continue;
         }
         delivered_hops.insert(node.clone(), hop);
+        if peer_scoring && hop > 0 {
+            // First eager delivery to `node` came from `sender` — credit P2.
+            state.record_first_delivery(&node, &sender);
+        }
         // Keep pending IHAVE entries — they may still trigger a graft if the
         // IHAVE arrived sooner than the eager payload (timer expired race).
 
@@ -873,16 +1001,32 @@ fn htl_plumtree_publish(
         grafts.push((node.clone(), peer.clone()));
     }
 
+    let cooldown_until = state
+        .current_round
+        .saturating_add(prune_backoff_rounds as u64);
     for (a, b) in prunes {
         state.prune_edge(&a, &b);
+        if prune_backoff_rounds > 0 {
+            state.mark_sticky_prune(&a, &b, cooldown_until);
+        }
     }
     for (a, b) in grafts {
         state.graft_edge(&a, &b);
     }
 
     // Gossipsub heartbeat: keep each node's eager mesh at target degree.
+    // With peer scoring on, favor highest-scoring lazy peers and skip those
+    // currently in sticky-prune cooldown.
     if let Some(target) = target_degree {
-        state.rebalance_to_degree(target, stream_id);
+        if peer_scoring {
+            state.rebalance_with_scoring(target, stream_id);
+        } else {
+            state.rebalance_to_degree(target, stream_id);
+        }
+    }
+
+    if peer_scoring {
+        state.tick_round_for_eager();
     }
 
     delivered_hops
@@ -1165,9 +1309,17 @@ pub enum HtlBaselineMode {
     /// arrives at all; `Some(t)` fires t hops after IHAVE if payload hasn't
     /// caught up — modelled as a hop budget since each hop maps to
     /// `latency_per_pump_step_ms` of real time in the workload pump.
+    /// `peer_scoring = true` enables gossipsub v1.1-style score tracking
+    /// (P1 time-in-mesh, P2 first-deliveries, P3 duplicates) and biases the
+    /// heartbeat graft toward high-scoring lazy peers.
+    /// `prune_backoff_rounds > 0` adds a sticky-prune cooldown: a pruned
+    /// edge can't be re-grafted for that many rounds. Closes the
+    /// prune/regraft churn that plain bounded-mesh gossipsub falls into.
     EagerLazy {
         target_degree: Option<usize>,
         ihave_timeout_hops: Option<u8>,
+        peer_scoring: bool,
+        prune_backoff_rounds: u8,
     },
 }
 
@@ -1198,6 +1350,8 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline(
         HtlBaselineMode::EagerLazy {
             target_degree: None,
             ihave_timeout_hops: None,
+            peer_scoring: false,
+            prune_backoff_rounds: 0,
         },
     )
     .await
@@ -1220,6 +1374,8 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline_with_timer(
         HtlBaselineMode::EagerLazy {
             target_degree: None,
             ihave_timeout_hops: Some(timeout_hops),
+            peer_scoring: false,
+            prune_backoff_rounds: 0,
         },
     )
     .await
@@ -1230,7 +1386,9 @@ pub async fn run_mesh_pubsub_htl_plumtree_baseline_with_timer(
 /// peers. After every publish round we run a heartbeat-style rebalance that
 /// re-grafts lazy peers to eager whenever degree dropped below target.
 /// `ihave_timeout_hops` controls IWANT aggressiveness like the Plumtree-with-
-/// timer variant.
+/// timer variant. This is the "naive" v1.0-shaped variant: prune-on-duplicate
+/// is symmetric and graft selection is deterministic-rank only — see
+/// `run_mesh_pubsub_htl_gossipsub_v11_baseline` for v1.1 peer scoring.
 pub async fn run_mesh_pubsub_htl_gossipsub_baseline(
     config: MeshPubsubWorkloadConfig,
     htl: u8,
@@ -1243,6 +1401,38 @@ pub async fn run_mesh_pubsub_htl_gossipsub_baseline(
         HtlBaselineMode::EagerLazy {
             target_degree: Some(target_degree),
             ihave_timeout_hops,
+            peer_scoring: false,
+            prune_backoff_rounds: 0,
+        },
+    )
+    .await
+}
+
+/// Gossipsub v1.1-style: bounded mesh of `target_degree`, plus per-peer
+/// scoring and sticky-prune cooldown. On every publish:
+///   - score++ for the peer whose eager edge first-delivered to us (P2)
+///   - score-- for any peer that sent us a duplicate (P3)
+///   - score++ for time-in-mesh (P1, capped)
+///   - on prune, mark a `prune_backoff_rounds`-round cooldown: that edge
+///     can't be re-grafted until the cooldown expires
+///   - heartbeat grafts the highest-scoring non-cooldowned lazy peer
+/// Designed to fix the prune/regraft churn that the v1.0 baseline falls into
+/// with a high underlay degree.
+pub async fn run_mesh_pubsub_htl_gossipsub_v11_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+    target_degree: usize,
+    ihave_timeout_hops: Option<u8>,
+    prune_backoff_rounds: u8,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(
+        config,
+        htl,
+        HtlBaselineMode::EagerLazy {
+            target_degree: Some(target_degree),
+            ihave_timeout_hops,
+            peer_scoring: true,
+            prune_backoff_rounds,
         },
     )
     .await
@@ -1408,6 +1598,8 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     HtlBaselineMode::EagerLazy {
                         target_degree,
                         ihave_timeout_hops,
+                        peer_scoring,
+                        prune_backoff_rounds,
                     } => htl_plumtree_publish(
                         graph,
                         publisher_id,
@@ -1415,6 +1607,8 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         plumtree_streams.entry(stream_id.clone()).or_default(),
                         target_degree,
                         ihave_timeout_hops,
+                        peer_scoring,
+                        prune_backoff_rounds,
                         config.payload_bytes as u64,
                         htl,
                         &mut report,
@@ -1459,6 +1653,8 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                 HtlBaselineMode::EagerLazy {
                     target_degree,
                     ihave_timeout_hops,
+                    peer_scoring,
+                    prune_backoff_rounds,
                 } => htl_plumtree_publish(
                     graph,
                     publisher_id,
@@ -1466,6 +1662,8 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     plumtree_streams.entry(stream_id.clone()).or_default(),
                     target_degree,
                     ihave_timeout_hops,
+                    peer_scoring,
+                    prune_backoff_rounds,
                     config.payload_bytes as u64,
                     htl,
                     &mut report,
@@ -1669,6 +1867,82 @@ mod tests {
             "gossipsub round-1 {} should beat plumtree round-1 {}",
             gossipsub.forwarded_bytes_sent,
             plumtree.forwarded_bytes_sent
+        );
+    }
+
+    #[tokio::test]
+    async fn htl_gossipsub_v11_does_not_grow_with_rounds() {
+        // The naive bounded-mesh gossipsub gets WORSE over rounds because of
+        // prune/regraft churn. v1.1 (peer scoring + sticky prune backoff)
+        // should keep per-event bandwidth bounded as rounds grow.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 71,
+            node_count: 64,
+            author_count: 3,
+            subscribers_per_author: 16,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            spam_author_count: 3,
+            spam_subscribers_per_author: 8,
+            spam_publish_rounds_per_round: 2,
+            subscription_churn_rate: 0.05,
+            allow_rejoin: true,
+            pump_steps_after_setup: 160,
+            pump_steps_per_publish_round: 96,
+            ..Default::default()
+        };
+
+        let cfg_short = MeshPubsubWorkloadConfig {
+            publish_rounds: 2,
+            ..cfg.clone()
+        };
+        let cfg_long = MeshPubsubWorkloadConfig {
+            publish_rounds: 16,
+            ..cfg
+        };
+
+        let v10_long = run_mesh_pubsub_htl_gossipsub_baseline(
+            cfg_long.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            6,
+            Some(1),
+        )
+        .await;
+        let v11_short = run_mesh_pubsub_htl_gossipsub_v11_baseline(
+            cfg_short,
+            MESH_EVENT_POLICY.max_htl,
+            6,
+            Some(1),
+            4,
+        )
+        .await;
+        let v11_long = run_mesh_pubsub_htl_gossipsub_v11_baseline(
+            cfg_long,
+            MESH_EVENT_POLICY.max_htl,
+            6,
+            Some(1),
+            4,
+        )
+        .await;
+
+        assert!(v11_long.delivered_events > 0);
+        // v1.1 long should NOT grow much vs v1.1 short.
+        let growth_ratio =
+            v11_long.bytes_sent_per_delivered_event / v11_short.bytes_sent_per_delivered_event;
+        assert!(
+            growth_ratio < 1.20,
+            "v1.1 long/short bytes ratio {:.3} should stay near 1.0; bandwidth growing implies churn isn't fixed",
+            growth_ratio
+        );
+        // v1.1 long should beat v1.0 long now that the churn loop is closed.
+        assert!(
+            v11_long.bytes_sent_per_delivered_event < v10_long.bytes_sent_per_delivered_event,
+            "v1.1 long {} should beat v1.0 long {}",
+            v11_long.bytes_sent_per_delivered_event,
+            v10_long.bytes_sent_per_delivered_event
         );
     }
 

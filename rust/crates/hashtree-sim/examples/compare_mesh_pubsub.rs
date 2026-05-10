@@ -288,6 +288,7 @@ async fn main() {
         "htl-plumtree-h4-t0",
         "htl-gossipsub-d6-h4",
         "htl-gossipsub-d6-h4-t0",
+        "htl-gossipsub-d6-v11-h4",
     ];
     let selected_baselines = baseline_labels
         .iter()
@@ -324,6 +325,8 @@ async fn main() {
                 HtlBaselineMode::EagerLazy {
                     target_degree: None,
                     ihave_timeout_hops: None,
+                    peer_scoring: false,
+                    prune_backoff_rounds: 0,
                 },
             ),
             (
@@ -331,6 +334,8 @@ async fn main() {
                 HtlBaselineMode::EagerLazy {
                     target_degree: None,
                     ihave_timeout_hops: Some(1),
+                    peer_scoring: false,
+                    prune_backoff_rounds: 0,
                 },
             ),
             (
@@ -338,6 +343,8 @@ async fn main() {
                 HtlBaselineMode::EagerLazy {
                     target_degree: None,
                     ihave_timeout_hops: Some(0),
+                    peer_scoring: false,
+                    prune_backoff_rounds: 0,
                 },
             ),
             (
@@ -345,6 +352,8 @@ async fn main() {
                 HtlBaselineMode::EagerLazy {
                     target_degree: Some(6),
                     ihave_timeout_hops: Some(1),
+                    peer_scoring: false,
+                    prune_backoff_rounds: 0,
                 },
             ),
             (
@@ -352,6 +361,17 @@ async fn main() {
                 HtlBaselineMode::EagerLazy {
                     target_degree: Some(6),
                     ihave_timeout_hops: Some(0),
+                    peer_scoring: false,
+                    prune_backoff_rounds: 0,
+                },
+            ),
+            (
+                "htl-gossipsub-d6-v11-h4",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: Some(6),
+                    ihave_timeout_hops: Some(1),
+                    peer_scoring: true,
+                    prune_backoff_rounds: 4,
                 },
             ),
         ];

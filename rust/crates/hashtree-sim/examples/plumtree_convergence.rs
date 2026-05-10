@@ -1,8 +1,9 @@
 use hashtree_network::MESH_EVENT_POLICY;
 use hashtree_sim::{
     run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_gossipsub_baseline,
-    run_mesh_pubsub_htl_inv_want_baseline, run_mesh_pubsub_htl_plumtree_baseline,
-    run_mesh_pubsub_htl_plumtree_baseline_with_timer, MeshPubsubWorkloadConfig, PoolConfig,
+    run_mesh_pubsub_htl_gossipsub_v11_baseline, run_mesh_pubsub_htl_inv_want_baseline,
+    run_mesh_pubsub_htl_plumtree_baseline, run_mesh_pubsub_htl_plumtree_baseline_with_timer,
+    MeshPubsubWorkloadConfig, PoolConfig,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -53,6 +54,14 @@ async fn main() {
             Some(1),
         )
         .await;
+        let gv11 = run_mesh_pubsub_htl_gossipsub_v11_baseline(
+            cfg.clone(),
+            MESH_EVENT_POLICY.max_htl,
+            6,
+            Some(1),
+            4,
+        )
+        .await;
         for (label, r) in [
             ("flood", &f),
             ("invwant", &i),
@@ -60,6 +69,7 @@ async fn main() {
             ("plumtree-t1", &pt1),
             ("plumtree-t0", &pt0),
             ("gossipsub-d6-t1", &g),
+            ("gossipsub-d6-v11", &gv11),
         ] {
             println!(
                 " {:>6} | {:<15} | {:>11.1} | {:>6} | {:>5} | {:>5}",
