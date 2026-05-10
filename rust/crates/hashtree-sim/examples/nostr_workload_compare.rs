@@ -12,7 +12,6 @@
 //! global INV flood, selective payload routing) and topic-mesh
 //! plumtree/gossipsub (per-topic mesh formation).
 
-use hashtree_network::MESH_EVENT_POLICY;
 use hashtree_sim::{
     compute_workload_peer_graph, run_mesh_pubsub_htl_baseline_on_graph, FollowDistribution,
     HtlBaselineMode, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, NostrWorkloadParams,
@@ -29,6 +28,7 @@ struct RunOptions {
     follows: Vec<usize>,
     rounds: usize,
     zipf_alphas: Vec<f64>, // empty = uniform
+    htls: Vec<u8>,         // HTL budget(s) to test
     seed: u64,
 }
 
@@ -40,6 +40,7 @@ impl Default for RunOptions {
             follows: vec![16, 64],
             rounds: 2,
             zipf_alphas: vec![0.0, 1.0], // 0 means Uniform; >0 means Zipf
+            htls: vec![4],
             seed: 31,
         }
     }
@@ -75,6 +76,15 @@ fn parse_args() -> RunOptions {
         } else if let Some(v) = arg.strip_prefix("--zipf=") {
             opts.zipf_alphas = v.split(',').filter_map(|p| p.parse::<f64>().ok()).collect();
             explicit_zipf = true;
+        } else if let Some(v) = arg.strip_prefix("--htl=") {
+            opts.htls = v
+                .split(',')
+                .filter_map(|p| p.parse::<u8>().ok())
+                .filter(|h| *h > 0)
+                .collect();
+            if opts.htls.is_empty() {
+                opts.htls.push(4);
+            }
         } else if let Some(v) = arg.strip_prefix("--seed=") {
             opts.seed = v.parse::<u64>().unwrap_or(opts.seed);
         }
@@ -235,54 +245,66 @@ async fn main() {
                     } else {
                         FollowDistribution::Zipf { alpha }
                     };
-                    let scenario_label = format!(
-                        "nodes={node_count} authors={authors} follows={follows} dist={}",
-                        distribution_label(alpha)
-                    );
-                    println!("\n=== {scenario_label} ===");
 
+                    // Graph setup is HTL-independent — compute once per
+                    // (nodes, authors, follows, dist) and reuse across HTL
+                    // values.
                     let setup_cfg =
                         workload(opts.seed, node_count, authors, follows, dist, opts.rounds);
                     let setup_started = Instant::now();
                     let (graph, topology) = compute_workload_peer_graph(&setup_cfg).await;
                     let setup_secs = setup_started.elapsed().as_secs_f64();
-                    eprintln!("[setup] graph_setup_elapsed={setup_secs:5.1}s");
-
                     let graph = Arc::new(graph);
                     let topology = Arc::new(topology);
-                    let mut handles = Vec::with_capacity(strategies.len());
-                    for (label, mode) in strategies {
-                        let label = (*label).to_string();
-                        let mode = *mode;
-                        let graph = graph.clone();
-                        let topology = topology.clone();
-                        let cfg =
-                            workload(opts.seed, node_count, authors, follows, dist, opts.rounds);
-                        let h = tokio::task::spawn_blocking(move || {
-                            let started = Instant::now();
-                            let r = run_mesh_pubsub_htl_baseline_on_graph(
-                                graph.as_ref(),
-                                topology.as_ref(),
-                                &cfg,
-                                MESH_EVENT_POLICY.max_htl,
-                                mode,
+
+                    for &htl in &opts.htls {
+                        let scenario_label = format!(
+                            "nodes={node_count} authors={authors} follows={follows} dist={} htl={htl}",
+                            distribution_label(alpha)
+                        );
+                        println!("\n=== {scenario_label} ===");
+                        eprintln!("[setup] graph_setup_elapsed={setup_secs:5.1}s (cached)");
+
+                        let mut handles = Vec::with_capacity(strategies.len());
+                        for (label, mode) in strategies {
+                            let label = (*label).to_string();
+                            let mode = *mode;
+                            let graph = graph.clone();
+                            let topology = topology.clone();
+                            let cfg = workload(
+                                opts.seed,
+                                node_count,
+                                authors,
+                                follows,
+                                dist,
+                                opts.rounds,
                             );
-                            (label, r, started.elapsed().as_secs_f64())
+                            let h = tokio::task::spawn_blocking(move || {
+                                let started = Instant::now();
+                                let r = run_mesh_pubsub_htl_baseline_on_graph(
+                                    graph.as_ref(),
+                                    topology.as_ref(),
+                                    &cfg,
+                                    htl,
+                                    mode,
+                                );
+                                (label, r, started.elapsed().as_secs_f64())
+                            });
+                            handles.push(h);
+                        }
+                        let mut results = Vec::with_capacity(handles.len());
+                        for h in handles {
+                            results.push(h.await.expect("nostr workload task panicked"));
+                        }
+                        results.sort_by_key(|(label, _, _)| {
+                            strategies
+                                .iter()
+                                .position(|(name, _)| *name == label.as_str())
+                                .unwrap_or(usize::MAX)
                         });
-                        handles.push(h);
-                    }
-                    let mut results = Vec::with_capacity(handles.len());
-                    for h in handles {
-                        results.push(h.await.expect("nostr workload task panicked"));
-                    }
-                    results.sort_by_key(|(label, _, _)| {
-                        strategies
-                            .iter()
-                            .position(|(name, _)| *name == label.as_str())
-                            .unwrap_or(usize::MAX)
-                    });
-                    for (label, r, secs) in results {
-                        print_report(&label, &r, secs);
+                        for (label, r, secs) in results {
+                            print_report(&label, &r, secs);
+                        }
                     }
                 }
             }

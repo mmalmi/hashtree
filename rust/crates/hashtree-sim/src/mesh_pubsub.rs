@@ -15,11 +15,22 @@ use std::time::Duration;
 
 use hashtree_core::MemoryStore;
 use hashtree_network::{
-    clear_channel_registry, decrement_htl_with_policy, should_forward_htl, MeshRouter,
+    clear_channel_registry, decrement_htl_with_policy, should_forward_htl, HtlPolicy, MeshRouter,
     MeshRoutingConfig, MeshStoreCore, MockConnectionFactory, MockLatencyMode, MockRelay,
     MockRelayTransport, PeerHTLConfig, PoolConfig, PoolSettings, PubsubDeliveryMode,
     PubsubSchedulerConfig, SignalingTransport, SimMeshStore, MESH_EVENT_POLICY,
 };
+
+/// Build a local HTL policy with the given `max_htl`, sharing the same
+/// probabilistic decrement parameters as the production
+/// `MESH_EVENT_POLICY`. Lets the simulator explore HTL budgets above 4
+/// without changing the production constant.
+fn sim_htl_policy(max_htl: u8) -> HtlPolicy {
+    HtlPolicy {
+        max_htl: max_htl.max(1),
+        ..MESH_EVENT_POLICY
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MeshPubsubWorkloadConfig {
@@ -565,7 +576,8 @@ fn htl_flood_publish(
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
 ) -> HtlFloodResult {
-    let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
+    let policy = sim_htl_policy(htl);
+    let htl = policy.max_htl;
     let mut delivered_hops = BTreeMap::from([(publisher_id.to_string(), 0u64)]);
     let mut parents = BTreeMap::new();
     let mut queue = VecDeque::new();
@@ -598,7 +610,7 @@ fn htl_flood_publish(
                 continue;
             }
             let htl_config = deterministic_htl_config(&node_id, neighbor);
-            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &htl_config);
+            let next_htl = decrement_htl_with_policy(frame_htl, &policy, &htl_config);
             if !should_forward_htl(next_htl) {
                 continue;
             }
@@ -639,7 +651,8 @@ fn htl_interest_routed_inv(
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
 ) -> HtlFloodResult {
-    let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
+    let policy = sim_htl_policy(htl);
+    let htl = policy.max_htl;
     let mut delivered_hops = BTreeMap::from([(publisher_id.to_string(), 0u64)]);
     let mut parents = BTreeMap::new();
     let mut queue = VecDeque::new();
@@ -690,7 +703,7 @@ fn htl_interest_routed_inv(
                 continue;
             }
             let htl_config = deterministic_htl_config(&node_id, neighbor);
-            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &htl_config);
+            let next_htl = decrement_htl_with_policy(frame_htl, &policy, &htl_config);
             if !should_forward_htl(next_htl) {
                 continue;
             }
@@ -1131,7 +1144,8 @@ fn htl_plumtree_publish(
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
 ) -> BTreeMap<String, u64> {
-    let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
+    let policy = sim_htl_policy(htl);
+    let htl = policy.max_htl;
     state.ensure_initialized(
         publisher_id,
         stream_id,
@@ -1161,7 +1175,7 @@ fn htl_plumtree_publish(
         }
         report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(payload_bytes);
         let nbr_htl_cfg = deterministic_htl_config(publisher_id, nbr);
-        let next_htl = decrement_htl_with_policy(htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
+        let next_htl = decrement_htl_with_policy(htl, &policy, &nbr_htl_cfg);
         if !should_forward_htl(next_htl) {
             continue;
         }
@@ -1220,7 +1234,7 @@ fn htl_plumtree_publish(
                 continue;
             }
             let nbr_htl_cfg = deterministic_htl_config(&node, nbr);
-            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
+            let next_htl = decrement_htl_with_policy(frame_htl, &policy, &nbr_htl_cfg);
             if !should_forward_htl(next_htl) {
                 continue;
             }
@@ -1235,7 +1249,7 @@ fn htl_plumtree_publish(
                 continue;
             }
             let nbr_htl_cfg = deterministic_htl_config(&node, nbr);
-            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
+            let next_htl = decrement_htl_with_policy(frame_htl, &policy, &nbr_htl_cfg);
             if !should_forward_htl(next_htl) {
                 continue;
             }
