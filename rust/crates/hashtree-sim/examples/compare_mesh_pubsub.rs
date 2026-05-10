@@ -29,6 +29,7 @@ struct RunOptions {
     spam_subscribers_per_author: Option<usize>,
     progress_interval_secs: Option<u64>,
     only_labels: BTreeSet<String>,
+    broken_edge_fraction: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +69,7 @@ fn workload(
     node_count: usize,
     subscribers_per_author: usize,
     spam_subscribers_per_author: usize,
+    broken_edge_fraction: f64,
     variant: Variant,
 ) -> MeshPubsubWorkloadConfig {
     MeshPubsubWorkloadConfig {
@@ -99,6 +101,7 @@ fn workload(
         pump_steps_after_setup: pump_steps_after_setup(node_count),
         pump_steps_per_publish_round: pump_steps_per_publish_round(node_count),
         latency_per_pump_step_ms: 10,
+        broken_edge_fraction,
     }
 }
 
@@ -174,6 +177,7 @@ fn run_options_from_args() -> RunOptions {
         spam_subscribers_per_author: None,
         progress_interval_secs: Some(10),
         only_labels: BTreeSet::new(),
+        broken_edge_fraction: 0.0,
     };
 
     for arg in env::args().skip(1) {
@@ -191,6 +195,10 @@ fn run_options_from_args() -> RunOptions {
         }
         if let Some(value) = arg.strip_prefix("--spam-subs=") {
             options.spam_subscribers_per_author = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--broken=") {
+            options.broken_edge_fraction = value.parse::<f64>().unwrap_or(0.0).clamp(0.0, 1.0);
             continue;
         }
         if let Some(value) = arg.strip_prefix("--only=") {
@@ -386,6 +394,7 @@ async fn main() {
                 node_count,
                 subscribers,
                 spam_subscribers,
+                options.broken_edge_fraction,
                 Variant {
                     label: "htl-graph-setup",
                     delivery_mode: PubsubDeliveryMode::InterestPush,
@@ -415,6 +424,7 @@ async fn main() {
                     node_count,
                     subscribers,
                     spam_subscribers,
+                    options.broken_edge_fraction,
                     Variant {
                         label: "htl-on-graph",
                         delivery_mode: PubsubDeliveryMode::InterestPush,
@@ -458,7 +468,14 @@ async fn main() {
             if !includes_label(&options, variant.label) {
                 continue;
             }
-            let config = workload(17, node_count, subscribers, spam_subscribers, variant);
+            let config = workload(
+                17,
+                node_count,
+                subscribers,
+                spam_subscribers,
+                options.broken_edge_fraction,
+                variant,
+            );
             run_index += 1;
             let (result, elapsed_secs) = run_with_progress(
                 variant.label,

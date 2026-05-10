@@ -42,6 +42,13 @@ pub struct MeshPubsubWorkloadConfig {
     pub pump_steps_after_setup: usize,
     pub pump_steps_per_publish_round: usize,
     pub latency_per_pump_step_ms: u64,
+    /// Per-publish independent edge failure probability for the HTL graph
+    /// baselines. Each publish samples a fresh broken-edge set deterministic
+    /// in `(seed, global_publish_index)` so every baseline sees the same
+    /// failures during one comparison run. 0.0 (default) means no failures.
+    /// Production MeshStoreCore workloads ignore this — they go through the
+    /// real mesh transport stack.
+    pub broken_edge_fraction: f64,
 }
 
 impl Default for MeshPubsubWorkloadConfig {
@@ -69,6 +76,7 @@ impl Default for MeshPubsubWorkloadConfig {
             pump_steps_after_setup: 96,
             pump_steps_per_publish_round: 64,
             latency_per_pump_step_ms: 10,
+            broken_edge_fraction: 0.0,
         }
     }
 }
@@ -466,6 +474,48 @@ async fn peer_graph(nodes: &[MeshPubsubNode]) -> BTreeMap<String, Vec<String>> {
     graph
 }
 
+/// Canonical undirected edge key (alphabetically ordered endpoints) so the
+/// broken-edge set can be checked symmetrically without storing both
+/// directions.
+fn edge_key(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
+}
+
+fn is_edge_broken(broken: &BTreeSet<(String, String)>, a: &str, b: &str) -> bool {
+    broken.contains(&edge_key(a, b))
+}
+
+/// Sample a broken-edge set for one publish. Independent Bernoulli per edge
+/// with probability `fraction`; deterministic in `seed` so all baselines see
+/// the same set during the same publish index.
+fn compute_broken_edges(
+    graph: &BTreeMap<String, Vec<String>>,
+    fraction: f64,
+    seed: u64,
+) -> BTreeSet<(String, String)> {
+    if fraction <= 0.0 {
+        return BTreeSet::new();
+    }
+    let fraction = fraction.clamp(0.0, 1.0);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut broken = BTreeSet::new();
+    for (a, neighbors) in graph {
+        for b in neighbors {
+            if a >= b {
+                continue;
+            }
+            if rng.gen::<f64>() < fraction {
+                broken.insert((a.clone(), b.clone()));
+            }
+        }
+    }
+    broken
+}
+
 fn deterministic_htl_config(from: &str, to: &str) -> PeerHTLConfig {
     fn sample(from: &str, to: &str, salt: u8) -> f64 {
         let mut hasher = DefaultHasher::new();
@@ -486,6 +536,7 @@ struct HtlFloodResult {
 fn htl_flood_publish(
     graph: &BTreeMap<String, Vec<String>>,
     publisher_id: &str,
+    broken: &BTreeSet<(String, String)>,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
@@ -496,6 +547,9 @@ fn htl_flood_publish(
     let mut queue = VecDeque::new();
     if let Some(neighbors) = graph.get(publisher_id) {
         for neighbor in neighbors {
+            if is_edge_broken(broken, publisher_id, neighbor) {
+                continue;
+            }
             report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(payload_bytes);
             queue.push_back((neighbor.clone(), publisher_id.to_string(), htl, 1u64));
         }
@@ -514,6 +568,9 @@ fn htl_flood_publish(
         };
         for neighbor in neighbors {
             if neighbor == &sender_id {
+                continue;
+            }
+            if is_edge_broken(broken, &node_id, neighbor) {
                 continue;
             }
             let htl_config = deterministic_htl_config(&node_id, neighbor);
@@ -542,6 +599,7 @@ fn htl_inv_want_publish(
     graph: &BTreeMap<String, Vec<String>>,
     publisher_id: &str,
     subscribers: &BTreeSet<String>,
+    broken: &BTreeSet<(String, String)>,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
@@ -549,7 +607,7 @@ fn htl_inv_want_publish(
     const INV_BYTES: u64 = 96;
     const WANT_BYTES: u64 = 64;
 
-    let inv = htl_flood_publish(graph, publisher_id, INV_BYTES, htl, report);
+    let inv = htl_flood_publish(graph, publisher_id, broken, INV_BYTES, htl, report);
     let mut want_edges = BTreeSet::<(String, String)>::new();
     let mut data_edges = BTreeSet::<(String, String)>::new();
     let mut delivered_latency_steps = BTreeMap::new();
@@ -849,6 +907,7 @@ fn htl_plumtree_publish(
     ihave_timeout_hops: Option<u8>,
     peer_scoring: bool,
     prune_backoff_rounds: u8,
+    broken: &BTreeSet<(String, String)>,
     payload_bytes: u64,
     htl: u8,
     report: &mut MeshPubsubWorkloadReport,
@@ -871,6 +930,9 @@ fn htl_plumtree_publish(
     let pub_eager = state.eager.get(publisher_id).cloned().unwrap_or_default();
     let pub_lazy = state.lazy.get(publisher_id).cloned().unwrap_or_default();
     for nbr in &pub_eager {
+        if is_edge_broken(broken, publisher_id, nbr) {
+            continue;
+        }
         report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(payload_bytes);
         let nbr_htl_cfg = deterministic_htl_config(publisher_id, nbr);
         let next_htl = decrement_htl_with_policy(htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
@@ -880,6 +942,9 @@ fn htl_plumtree_publish(
         queue.push_back((nbr.clone(), publisher_id.to_string(), next_htl, 1));
     }
     for nbr in &pub_lazy {
+        if is_edge_broken(broken, publisher_id, nbr) {
+            continue;
+        }
         report.forwarded_bytes_sent = report
             .forwarded_bytes_sent
             .saturating_add(PLUMTREE_IHAVE_BYTES);
@@ -918,6 +983,9 @@ fn htl_plumtree_publish(
             if nbr == &sender {
                 continue;
             }
+            if is_edge_broken(broken, &node, nbr) {
+                continue;
+            }
             let nbr_htl_cfg = deterministic_htl_config(&node, nbr);
             let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &nbr_htl_cfg);
             if !should_forward_htl(next_htl) {
@@ -928,6 +996,9 @@ fn htl_plumtree_publish(
         }
         for nbr in &lazy {
             if nbr == &sender {
+                continue;
+            }
+            if is_edge_broken(broken, &node, nbr) {
                 continue;
             }
             let nbr_htl_cfg = deterministic_htl_config(&node, nbr);
@@ -963,13 +1034,22 @@ fn htl_plumtree_publish(
             continue;
         };
         let payload_hop = delivered_hops.get(&node).copied();
-        let timer_expires_at = match ihave_timeout_hops {
-            None => u64::MAX, // infinite timer — only fires if payload never arrives
-            Some(t) => ihave_hop.saturating_add(t as u64),
-        };
-        let should_fire = match payload_hop {
-            None => true,
-            Some(hop) => hop > timer_expires_at,
+        // Timer modes:
+        //   None     → "infinite": fire only when payload missed entirely.
+        //              In real Plumtree the node would wait "long enough"; in
+        //              our discrete-hop sim that's the moment we conclude
+        //              payload didn't come, i.e., right at `ihave_hop`.
+        //   Some(t)  → fire at ihave_hop + t hops if payload hasn't arrived
+        //              by then.
+        let timer_expires_at = ihave_hop.saturating_add(ihave_timeout_hops.unwrap_or(0) as u64);
+        let should_fire = match (ihave_timeout_hops, payload_hop) {
+            // Infinite timer: only payload-never case fires.
+            (None, None) => true,
+            (None, Some(_)) => false,
+            // Finite timer: fires if payload missed, OR if eager arrived
+            // strictly later than the timer expiry.
+            (Some(_), None) => true,
+            (Some(_), Some(hop)) => hop > timer_expires_at,
         };
         if !should_fire {
             continue;
@@ -1553,6 +1633,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
 
     let mut latencies_ms = Vec::new();
     let mut plumtree_streams: HashMap<String, PlumtreeStreamState> = HashMap::new();
+    let mut publish_idx: u64 = 0;
     for round in 0..config.publish_rounds {
         let churn_actions = apply_subscription_churn_plan(&mut rng, &subscriptions, config);
         for (stream_id, subscriber_id, active) in churn_actions {
@@ -1576,11 +1657,18 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         .saturating_add(subscribers.len() as u64);
                 }
                 report.spam_publish_events = report.spam_publish_events.saturating_add(1);
+                let broken_edges = compute_broken_edges(
+                    graph,
+                    config.broken_edge_fraction,
+                    config.seed.wrapping_add(publish_idx),
+                );
+                publish_idx = publish_idx.wrapping_add(1);
                 let delivered_hops = match mode {
                     HtlBaselineMode::FloodPayload => {
                         htl_flood_publish(
                             graph,
                             publisher_id,
+                            &broken_edges,
                             config.payload_bytes as u64,
                             htl,
                             &mut report,
@@ -1591,6 +1679,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         graph,
                         publisher_id,
                         &subscribers,
+                        &broken_edges,
                         config.payload_bytes as u64,
                         htl,
                         &mut report,
@@ -1609,6 +1698,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         ihave_timeout_hops,
                         peer_scoring,
                         prune_backoff_rounds,
+                        &broken_edges,
                         config.payload_bytes as u64,
                         htl,
                         &mut report,
@@ -1631,11 +1721,18 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     .delivery_opportunities
                     .saturating_add(subscribers.len() as u64);
             }
+            let broken_edges = compute_broken_edges(
+                graph,
+                config.broken_edge_fraction,
+                config.seed.wrapping_add(publish_idx),
+            );
+            publish_idx = publish_idx.wrapping_add(1);
             let delivered_hops = match mode {
                 HtlBaselineMode::FloodPayload => {
                     htl_flood_publish(
                         graph,
                         publisher_id,
+                        &broken_edges,
                         config.payload_bytes as u64,
                         htl,
                         &mut report,
@@ -1646,6 +1743,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     graph,
                     publisher_id,
                     &subscribers,
+                    &broken_edges,
                     config.payload_bytes as u64,
                     htl,
                     &mut report,
@@ -1664,6 +1762,7 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     ihave_timeout_hops,
                     peer_scoring,
                     prune_backoff_rounds,
+                    &broken_edges,
                     config.payload_bytes as u64,
                     htl,
                     &mut report,
@@ -1867,6 +1966,49 @@ mod tests {
             "gossipsub round-1 {} should beat plumtree round-1 {}",
             gossipsub.forwarded_bytes_sent,
             plumtree.forwarded_bytes_sent
+        );
+    }
+
+    #[tokio::test]
+    async fn htl_gossipsub_timer_recovers_delivery_under_edge_failure() {
+        // Plumtree's broadcast-init eager mesh is so over-provisioned (full
+        // underlay degree) that even moderate failures rarely partition
+        // delivery. Bounded gossipsub at D=6 has fewer alternate paths, and
+        // at 50% per-publish edge failure the finite IHAVE timer earns its
+        // keep: it pulls payload via IWANT when the eager edge would have
+        // arrived later than the lazy IHAVE, and recovers more deliveries.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 17,
+            node_count: 64,
+            author_count: 3,
+            subscribers_per_author: 16,
+            publish_rounds: 4,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            spam_author_count: 3,
+            spam_subscribers_per_author: 8,
+            spam_publish_rounds_per_round: 2,
+            subscription_churn_rate: 0.05,
+            allow_rejoin: true,
+            pump_steps_after_setup: 160,
+            pump_steps_per_publish_round: 96,
+            broken_edge_fraction: 0.50,
+            ..Default::default()
+        };
+        let infinite =
+            run_mesh_pubsub_htl_gossipsub_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl, 6, None)
+                .await;
+        let finite =
+            run_mesh_pubsub_htl_gossipsub_baseline(cfg, MESH_EVENT_POLICY.max_htl, 6, Some(1))
+                .await;
+        assert!(
+            finite.delivery_rate > infinite.delivery_rate,
+            "under 50% edge failure, finite-timer gossipsub rate {:.3} should beat infinite rate {:.3}",
+            finite.delivery_rate,
+            infinite.delivery_rate
         );
     }
 
