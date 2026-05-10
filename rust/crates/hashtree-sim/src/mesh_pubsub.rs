@@ -386,11 +386,21 @@ fn finalize_rates(report: &mut MeshPubsubWorkloadReport, latencies_ms: &mut [u64
     report.delivery_latency_max_ms = latencies_ms.last().copied().unwrap_or_default();
 }
 
-async fn record_topology_report(nodes: &[MeshPubsubNode], report: &mut MeshPubsubWorkloadReport) {
-    if nodes.is_empty() {
-        return;
-    }
+/// Topology snapshot of a constructed workload mesh, captured once at graph
+/// extraction time so multiple HTL baselines can share it without re-running
+/// the heavy peer-formation setup.
+#[derive(Debug, Clone, Default)]
+pub struct WorkloadTopology {
+    pub average_peer_count: f64,
+    pub min_peer_count: usize,
+    pub max_peer_count: usize,
+    pub isolated_nodes: usize,
+}
 
+async fn compute_topology(nodes: &[MeshPubsubNode]) -> WorkloadTopology {
+    if nodes.is_empty() {
+        return WorkloadTopology::default();
+    }
     let mut total_peers = 0usize;
     let mut min_peers = usize::MAX;
     let mut max_peers = 0usize;
@@ -404,11 +414,46 @@ async fn record_topology_report(nodes: &[MeshPubsubNode], report: &mut MeshPubsu
             isolated = isolated.saturating_add(1);
         }
     }
+    WorkloadTopology {
+        average_peer_count: total_peers as f64 / nodes.len() as f64,
+        min_peer_count: min_peers,
+        max_peer_count: max_peers,
+        isolated_nodes: isolated,
+    }
+}
 
-    report.average_peer_count = total_peers as f64 / nodes.len() as f64;
-    report.min_peer_count = min_peers;
-    report.max_peer_count = max_peers;
-    report.isolated_nodes = isolated;
+fn apply_topology(report: &mut MeshPubsubWorkloadReport, topology: &WorkloadTopology) {
+    report.average_peer_count = topology.average_peer_count;
+    report.min_peer_count = topology.min_peer_count;
+    report.max_peer_count = topology.max_peer_count;
+    report.isolated_nodes = topology.isolated_nodes;
+}
+
+async fn record_topology_report(nodes: &[MeshPubsubNode], report: &mut MeshPubsubWorkloadReport) {
+    let topology = compute_topology(nodes).await;
+    apply_topology(report, &topology);
+}
+
+/// Compute the peer graph and topology stats for a workload configuration.
+/// This runs the full mesh setup (relay + signaling + hello pumps), then
+/// extracts the formed graph and tears the nodes down. Heavy: at 1000 nodes
+/// this dominates baseline runtime. Reusable across HTL-baseline variants
+/// since `pubsub_scheduler` and `pubsub_delivery_mode` do not affect peer
+/// formation — only `seed`, `node_count`, and `pool` do.
+pub async fn compute_workload_peer_graph(
+    config: &MeshPubsubWorkloadConfig,
+) -> (BTreeMap<String, Vec<String>>, WorkloadTopology) {
+    if config.node_count == 0 {
+        return (BTreeMap::new(), WorkloadTopology::default());
+    }
+    let _mock_registry = crate::mock_registry::lock_mock_channel_registry().await;
+    clear_channel_registry().await;
+    let nodes = make_workload_nodes(config).await;
+    let graph = peer_graph(&nodes).await;
+    let topology = compute_topology(&nodes).await;
+    drop(nodes);
+    clear_channel_registry().await;
+    (graph, topology)
 }
 
 async fn peer_graph(nodes: &[MeshPubsubNode]) -> BTreeMap<String, Vec<String>> {
@@ -1109,7 +1154,7 @@ pub async fn run_mesh_pubsub_workload(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum HtlBaselineMode {
+pub enum HtlBaselineMode {
     FloodPayload,
     InvWant,
     /// Eager+lazy push (Plumtree / gossipsub-shaped). With
@@ -1218,16 +1263,38 @@ async fn run_mesh_pubsub_htl_baseline(
             ..Default::default()
         };
     }
+    let (graph, topology) = compute_workload_peer_graph(&config).await;
+    run_mesh_pubsub_htl_baseline_on_graph(&graph, &topology, &config, htl, mode)
+}
 
-    let _mock_registry = crate::mock_registry::lock_mock_channel_registry().await;
-    clear_channel_registry().await;
+/// Run an HTL pubsub baseline against a precomputed peer graph. Pure sync —
+/// no mock registry lock, no node setup. Reuse a graph across many baseline
+/// variants (flood, invwant, plumtree, gossipsub) since the graph is fully
+/// determined by `seed`, `node_count`, and `pool` and is independent of
+/// `pubsub_scheduler`/`pubsub_delivery_mode`. Safe to call concurrently from
+/// `tokio::task::spawn_blocking` for parallel sweeps.
+pub fn run_mesh_pubsub_htl_baseline_on_graph(
+    graph: &BTreeMap<String, Vec<String>>,
+    topology: &WorkloadTopology,
+    config: &MeshPubsubWorkloadConfig,
+    htl: u8,
+    mode: HtlBaselineMode,
+) -> MeshPubsubWorkloadReport {
+    if config.node_count == 0 || config.publish_rounds == 0 {
+        return MeshPubsubWorkloadReport {
+            seed: config.seed,
+            node_count: config.node_count,
+            author_count: config.author_count,
+            publish_rounds: config.publish_rounds,
+            spam_author_count: config.spam_author_count,
+            ..Default::default()
+        };
+    }
 
     let mut rng = StdRng::seed_from_u64(config.seed);
     let node_ids = (0..config.node_count)
         .map(|index| format!("node-{index:04}"))
         .collect::<Vec<_>>();
-    let nodes = make_workload_nodes(&config).await;
-    let graph = peer_graph(&nodes).await;
 
     let _provider_draws = node_ids
         .iter()
@@ -1257,7 +1324,7 @@ async fn run_mesh_pubsub_htl_baseline(
         spam_author_count: config.spam_author_count,
         ..Default::default()
     };
-    record_topology_report(&nodes, &mut report).await;
+    apply_topology(&mut report, topology);
 
     for (author_index, publisher_id) in useful_publishers.iter().enumerate() {
         let stream_id = author_stream(author_index);
@@ -1297,7 +1364,7 @@ async fn run_mesh_pubsub_htl_baseline(
     let mut latencies_ms = Vec::new();
     let mut plumtree_streams: HashMap<String, PlumtreeStreamState> = HashMap::new();
     for round in 0..config.publish_rounds {
-        let churn_actions = apply_subscription_churn_plan(&mut rng, &subscriptions, &config);
+        let churn_actions = apply_subscription_churn_plan(&mut rng, &subscriptions, config);
         for (stream_id, subscriber_id, active) in churn_actions {
             if active {
                 if insert_subscription(&mut subscriptions, &subscriber_id, &stream_id) {
@@ -1322,7 +1389,7 @@ async fn run_mesh_pubsub_htl_baseline(
                 let delivered_hops = match mode {
                     HtlBaselineMode::FloodPayload => {
                         htl_flood_publish(
-                            &graph,
+                            graph,
                             publisher_id,
                             config.payload_bytes as u64,
                             htl,
@@ -1331,7 +1398,7 @@ async fn run_mesh_pubsub_htl_baseline(
                         .delivered_hops
                     }
                     HtlBaselineMode::InvWant => htl_inv_want_publish(
-                        &graph,
+                        graph,
                         publisher_id,
                         &subscribers,
                         config.payload_bytes as u64,
@@ -1342,7 +1409,7 @@ async fn run_mesh_pubsub_htl_baseline(
                         target_degree,
                         ihave_timeout_hops,
                     } => htl_plumtree_publish(
-                        &graph,
+                        graph,
                         publisher_id,
                         &stream_id,
                         plumtree_streams.entry(stream_id.clone()).or_default(),
@@ -1373,7 +1440,7 @@ async fn run_mesh_pubsub_htl_baseline(
             let delivered_hops = match mode {
                 HtlBaselineMode::FloodPayload => {
                     htl_flood_publish(
-                        &graph,
+                        graph,
                         publisher_id,
                         config.payload_bytes as u64,
                         htl,
@@ -1382,7 +1449,7 @@ async fn run_mesh_pubsub_htl_baseline(
                     .delivered_hops
                 }
                 HtlBaselineMode::InvWant => htl_inv_want_publish(
-                    &graph,
+                    graph,
                     publisher_id,
                     &subscribers,
                     config.payload_bytes as u64,
@@ -1393,7 +1460,7 @@ async fn run_mesh_pubsub_htl_baseline(
                     target_degree,
                     ihave_timeout_hops,
                 } => htl_plumtree_publish(
-                    &graph,
+                    graph,
                     publisher_id,
                     &stream_id,
                     plumtree_streams.entry(stream_id.clone()).or_default(),
@@ -1408,7 +1475,7 @@ async fn run_mesh_pubsub_htl_baseline(
                 &subscriptions,
                 &stream_id,
                 &delivered_hops,
-                &config,
+                config,
                 &mut report,
                 &mut latencies_ms,
             );
@@ -1422,7 +1489,6 @@ async fn run_mesh_pubsub_htl_baseline(
     report.wire_bytes_received = report.forwarded_bytes_sent;
 
     finalize_rates(&mut report, &mut latencies_ms);
-    clear_channel_registry().await;
     report
 }
 

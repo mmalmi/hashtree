@@ -2,16 +2,15 @@ use hashtree_network::{
     PubsubDeliveryMode, PubsubSchedulerConfig, PubsubSchedulingPolicy, MESH_EVENT_POLICY,
 };
 use hashtree_sim::{
-    run_mesh_pubsub_htl_flood_baseline, run_mesh_pubsub_htl_gossipsub_baseline,
-    run_mesh_pubsub_htl_inv_want_baseline, run_mesh_pubsub_htl_plumtree_baseline,
-    run_mesh_pubsub_htl_plumtree_baseline_with_timer, run_mesh_pubsub_sweep,
-    MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
+    compute_workload_peer_graph, run_mesh_pubsub_htl_baseline_on_graph, run_mesh_pubsub_sweep,
+    HtlBaselineMode, MeshPubsubWorkloadConfig, MeshPubsubWorkloadReport, PoolConfig,
 };
 use std::collections::BTreeSet;
 use std::env;
 use std::future::Future;
 use std::io::{self, Write};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -221,7 +220,7 @@ fn includes_label(options: &RunOptions, label: &str) -> bool {
     options.only_labels.is_empty() || options.only_labels.contains(label)
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     let variants = [
         Variant {
@@ -313,167 +312,126 @@ async fn main() {
         println!(
             "production MeshStoreCore pubsub workload: {node_count} nodes, 3 useful authors x {subscribers} subscribers, 3 spam authors x {spam_subscribers} subscribers, churn=5%, payload=1200B"
         );
-        if includes_label(&options, "htl-flood-h4") {
-            let htl_config = workload(
-                17,
-                node_count,
-                subscribers,
-                spam_subscribers,
-                Variant {
-                    label: "htl-flood-h4",
-                    delivery_mode: PubsubDeliveryMode::InterestPush,
-                    policy: PubsubSchedulingPolicy::Fair,
-                    fanout: 4,
-                },
-            );
-            run_index += 1;
-            let (htl_report, elapsed_secs) = run_with_progress(
-                "htl-flood-h4",
-                node_count,
-                RunProgress {
-                    index: run_index,
-                    total: run_total,
-                },
-                options.progress_interval_secs,
-                run_mesh_pubsub_htl_flood_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
-            )
-            .await;
-            print_report("htl-flood-h4", &htl_report, elapsed_secs);
-            io::stdout().flush().expect("flush stdout");
-        }
-
-        if includes_label(&options, "htl-invwant-h4") {
-            let htl_config = workload(
-                17,
-                node_count,
-                subscribers,
-                spam_subscribers,
-                Variant {
-                    label: "htl-invwant-h4",
-                    delivery_mode: PubsubDeliveryMode::HtlInvWant,
-                    policy: PubsubSchedulingPolicy::Fair,
-                    fanout: 4,
-                },
-            );
-            run_index += 1;
-            let (htl_report, elapsed_secs) = run_with_progress(
-                "htl-invwant-h4",
-                node_count,
-                RunProgress {
-                    index: run_index,
-                    total: run_total,
-                },
-                options.progress_interval_secs,
-                run_mesh_pubsub_htl_inv_want_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
-            )
-            .await;
-            print_report("htl-invwant-h4", &htl_report, elapsed_secs);
-            io::stdout().flush().expect("flush stdout");
-        }
-
-        if includes_label(&options, "htl-plumtree-h4") {
-            let htl_config = workload(
-                17,
-                node_count,
-                subscribers,
-                spam_subscribers,
-                Variant {
-                    label: "htl-plumtree-h4",
-                    delivery_mode: PubsubDeliveryMode::InterestPush,
-                    policy: PubsubSchedulingPolicy::Fair,
-                    fanout: 4,
-                },
-            );
-            run_index += 1;
-            let (htl_report, elapsed_secs) = run_with_progress(
+        // Collect all selected HTL graph baselines. They share a precomputed
+        // peer graph (formed by the same MeshRouter signaling regardless of
+        // pubsub_scheduler config), so we pay the heavy mesh-formation cost
+        // once and run all variants in parallel via spawn_blocking.
+        let htl_modes: &[(&str, HtlBaselineMode)] = &[
+            ("htl-flood-h4", HtlBaselineMode::FloodPayload),
+            ("htl-invwant-h4", HtlBaselineMode::InvWant),
+            (
                 "htl-plumtree-h4",
-                node_count,
-                RunProgress {
-                    index: run_index,
-                    total: run_total,
+                HtlBaselineMode::EagerLazy {
+                    target_degree: None,
+                    ihave_timeout_hops: None,
                 },
-                options.progress_interval_secs,
-                run_mesh_pubsub_htl_plumtree_baseline(htl_config, MESH_EVENT_POLICY.max_htl),
-            )
-            .await;
-            print_report("htl-plumtree-h4", &htl_report, elapsed_secs);
-            io::stdout().flush().expect("flush stdout");
-        }
-
-        for (label, timeout) in [("htl-plumtree-h4-t1", 1u8), ("htl-plumtree-h4-t0", 0u8)] {
-            if !includes_label(&options, label) {
-                continue;
-            }
-            let htl_config = workload(
+            ),
+            (
+                "htl-plumtree-h4-t1",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: None,
+                    ihave_timeout_hops: Some(1),
+                },
+            ),
+            (
+                "htl-plumtree-h4-t0",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: None,
+                    ihave_timeout_hops: Some(0),
+                },
+            ),
+            (
+                "htl-gossipsub-d6-h4",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: Some(6),
+                    ihave_timeout_hops: Some(1),
+                },
+            ),
+            (
+                "htl-gossipsub-d6-h4-t0",
+                HtlBaselineMode::EagerLazy {
+                    target_degree: Some(6),
+                    ihave_timeout_hops: Some(0),
+                },
+            ),
+        ];
+        let selected_htl: Vec<(&str, HtlBaselineMode)> = htl_modes
+            .iter()
+            .copied()
+            .filter(|(label, _)| includes_label(&options, label))
+            .collect();
+        if !selected_htl.is_empty() {
+            let setup_config = workload(
                 17,
                 node_count,
                 subscribers,
                 spam_subscribers,
                 Variant {
-                    label,
+                    label: "htl-graph-setup",
                     delivery_mode: PubsubDeliveryMode::InterestPush,
                     policy: PubsubSchedulingPolicy::Fair,
                     fanout: 4,
                 },
             );
-            run_index += 1;
-            let (htl_report, elapsed_secs) = run_with_progress(
-                label,
-                node_count,
-                RunProgress {
-                    index: run_index,
-                    total: run_total,
-                },
-                options.progress_interval_secs,
-                run_mesh_pubsub_htl_plumtree_baseline_with_timer(
-                    htl_config,
-                    MESH_EVENT_POLICY.max_htl,
-                    timeout,
-                ),
-            )
-            .await;
-            print_report(label, &htl_report, elapsed_secs);
-            io::stdout().flush().expect("flush stdout");
-        }
+            let setup_started = Instant::now();
+            let (graph, topology) = compute_workload_peer_graph(&setup_config).await;
+            let setup_secs = setup_started.elapsed().as_secs_f64();
+            eprintln!(
+                "[setup] node_count={node_count} graph_setup_elapsed={setup_secs:6.1}s baselines={}",
+                selected_htl.len()
+            );
 
-        for (label, timeout) in [
-            ("htl-gossipsub-d6-h4", Some(1u8)),
-            ("htl-gossipsub-d6-h4-t0", Some(0u8)),
-        ] {
-            if !includes_label(&options, label) {
-                continue;
+            let graph = Arc::new(graph);
+            let topology = Arc::new(topology);
+            let mut handles = Vec::with_capacity(selected_htl.len());
+            for (label, mode) in &selected_htl {
+                run_index += 1;
+                let label = (*label).to_string();
+                let mode = *mode;
+                let graph = graph.clone();
+                let topology = topology.clone();
+                let cfg = workload(
+                    17,
+                    node_count,
+                    subscribers,
+                    spam_subscribers,
+                    Variant {
+                        label: "htl-on-graph",
+                        delivery_mode: PubsubDeliveryMode::InterestPush,
+                        policy: PubsubSchedulingPolicy::Fair,
+                        fanout: 4,
+                    },
+                );
+                let handle = tokio::task::spawn_blocking(move || {
+                    let started = Instant::now();
+                    let report = run_mesh_pubsub_htl_baseline_on_graph(
+                        graph.as_ref(),
+                        topology.as_ref(),
+                        &cfg,
+                        MESH_EVENT_POLICY.max_htl,
+                        mode,
+                    );
+                    let elapsed = started.elapsed().as_secs_f64();
+                    (label, report, elapsed)
+                });
+                handles.push(handle);
             }
-            let htl_config = workload(
-                17,
-                node_count,
-                subscribers,
-                spam_subscribers,
-                Variant {
-                    label,
-                    delivery_mode: PubsubDeliveryMode::InterestPush,
-                    policy: PubsubSchedulingPolicy::Fair,
-                    fanout: 4,
-                },
-            );
-            run_index += 1;
-            let (htl_report, elapsed_secs) = run_with_progress(
-                label,
-                node_count,
-                RunProgress {
-                    index: run_index,
-                    total: run_total,
-                },
-                options.progress_interval_secs,
-                run_mesh_pubsub_htl_gossipsub_baseline(
-                    htl_config,
-                    MESH_EVENT_POLICY.max_htl,
-                    6,
-                    timeout,
-                ),
-            )
-            .await;
-            print_report(label, &htl_report, elapsed_secs);
-            io::stdout().flush().expect("flush stdout");
+            let _ = run_index; // silence unused-mut if all htl-* paths skip
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                results.push(handle.await.expect("htl baseline task panicked"));
+            }
+            // Print in declared order so output stays stable across runs.
+            results.sort_by_key(|(label, _, _)| {
+                htl_modes
+                    .iter()
+                    .position(|(name, _)| *name == label.as_str())
+                    .unwrap_or(usize::MAX)
+            });
+            for (label, report, elapsed_secs) in results {
+                print_report(&label, &report, elapsed_secs);
+                io::stdout().flush().expect("flush stdout");
+            }
         }
 
         for variant in variants {
