@@ -619,6 +619,97 @@ fn htl_flood_publish(
     }
 }
 
+/// Interest-routed INV BFS — the discovery half of `InvWantInterestRouted`.
+///
+/// Each node's INV-forwarding decision is asymmetric:
+/// - Subscribers (and the publisher) flood to all neighbors except sender.
+/// - Non-subscribers forward INV only to neighbors that subscribe to this
+///   stream — modelling the production `PubsubInterest` mechanism where
+///   every node knows the 1-hop interest graph from periodic Subscribe
+///   broadcasts.
+///
+/// Same return shape as `htl_flood_publish` so the WANT phase can reuse
+/// the parent-walk logic in `htl_inv_want_publish`.
+fn htl_interest_routed_inv(
+    graph: &BTreeMap<String, Vec<String>>,
+    publisher_id: &str,
+    subscribers: &BTreeSet<String>,
+    broken: &BTreeSet<(String, String)>,
+    inv_bytes: u64,
+    htl: u8,
+    report: &mut MeshPubsubWorkloadReport,
+) -> HtlFloodResult {
+    let htl = htl.clamp(1, MESH_EVENT_POLICY.max_htl);
+    let mut delivered_hops = BTreeMap::from([(publisher_id.to_string(), 0u64)]);
+    let mut parents = BTreeMap::new();
+    let mut queue = VecDeque::new();
+    // The publisher is treated as a "subscriber" for the purposes of
+    // forwarding (so it always floods its own event to all neighbors), even
+    // if it isn't in the subscriber set.
+    let is_interested = |node: &str| -> bool { node == publisher_id || subscribers.contains(node) };
+    let should_forward_inv = |from: &str, to: &str| -> bool {
+        if is_interested(from) {
+            true
+        } else {
+            subscribers.contains(to)
+        }
+    };
+
+    if let Some(neighbors) = graph.get(publisher_id) {
+        for neighbor in neighbors {
+            if !should_forward_inv(publisher_id, neighbor) {
+                continue;
+            }
+            if is_edge_broken(broken, publisher_id, neighbor) {
+                continue;
+            }
+            report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(inv_bytes);
+            queue.push_back((neighbor.clone(), publisher_id.to_string(), htl, 1u64));
+        }
+    }
+
+    while let Some((node_id, sender_id, frame_htl, hop_count)) = queue.pop_front() {
+        if delivered_hops.contains_key(&node_id) {
+            report.duplicate_deliveries = report.duplicate_deliveries.saturating_add(1);
+            continue;
+        }
+        delivered_hops.insert(node_id.clone(), hop_count);
+        parents.insert(node_id.clone(), sender_id.clone());
+
+        let Some(neighbors) = graph.get(&node_id) else {
+            continue;
+        };
+        for neighbor in neighbors {
+            if neighbor == &sender_id {
+                continue;
+            }
+            if !should_forward_inv(&node_id, neighbor) {
+                continue;
+            }
+            if is_edge_broken(broken, &node_id, neighbor) {
+                continue;
+            }
+            let htl_config = deterministic_htl_config(&node_id, neighbor);
+            let next_htl = decrement_htl_with_policy(frame_htl, &MESH_EVENT_POLICY, &htl_config);
+            if !should_forward_htl(next_htl) {
+                continue;
+            }
+            report.forwarded_bytes_sent = report.forwarded_bytes_sent.saturating_add(inv_bytes);
+            queue.push_back((
+                neighbor.clone(),
+                node_id.clone(),
+                next_htl,
+                hop_count.saturating_add(1),
+            ));
+        }
+    }
+
+    HtlFloodResult {
+        delivered_hops,
+        parents,
+    }
+}
+
 fn htl_inv_want_publish(
     graph: &BTreeMap<String, Vec<String>>,
     publisher_id: &str,
@@ -632,6 +723,69 @@ fn htl_inv_want_publish(
     const WANT_BYTES: u64 = 64;
 
     let inv = htl_flood_publish(graph, publisher_id, broken, INV_BYTES, htl, report);
+    let mut want_edges = BTreeSet::<(String, String)>::new();
+    let mut data_edges = BTreeSet::<(String, String)>::new();
+    let mut delivered_latency_steps = BTreeMap::new();
+
+    for subscriber in subscribers {
+        let Some(inv_hops) = inv.delivered_hops.get(subscriber).copied() else {
+            continue;
+        };
+
+        let mut current = subscriber.as_str();
+        let mut path_hops = 0u64;
+        while current != publisher_id {
+            let Some(parent) = inv.parents.get(current) else {
+                path_hops = 0;
+                break;
+            };
+            want_edges.insert((current.to_string(), parent.clone()));
+            data_edges.insert((parent.clone(), current.to_string()));
+            path_hops = path_hops.saturating_add(1);
+            current = parent;
+        }
+
+        if current == publisher_id {
+            delivered_latency_steps.insert(
+                subscriber.clone(),
+                inv_hops.saturating_add(path_hops.saturating_mul(2)),
+            );
+        }
+    }
+
+    report.forwarded_bytes_sent = report
+        .forwarded_bytes_sent
+        .saturating_add(want_edges.len() as u64 * WANT_BYTES)
+        .saturating_add(data_edges.len() as u64 * payload_bytes);
+
+    delivered_latency_steps
+}
+
+/// Interest-routed inv-want: combines `htl_interest_routed_inv` with the
+/// standard WANT pull-back phase. INV propagation is asymmetric per node
+/// (subs flood, non-subs forward only to known-subscriber neighbors); WANT
+/// is unchanged from the regular invwant.
+fn htl_interest_routed_inv_want_publish(
+    graph: &BTreeMap<String, Vec<String>>,
+    publisher_id: &str,
+    subscribers: &BTreeSet<String>,
+    broken: &BTreeSet<(String, String)>,
+    payload_bytes: u64,
+    htl: u8,
+    report: &mut MeshPubsubWorkloadReport,
+) -> BTreeMap<String, u64> {
+    const INV_BYTES: u64 = 96;
+    const WANT_BYTES: u64 = 64;
+
+    let inv = htl_interest_routed_inv(
+        graph,
+        publisher_id,
+        subscribers,
+        broken,
+        INV_BYTES,
+        htl,
+        report,
+    );
     let mut want_edges = BTreeSet::<(String, String)>::new();
     let mut data_edges = BTreeSet::<(String, String)>::new();
     let mut delivered_latency_steps = BTreeMap::new();
@@ -1497,6 +1651,16 @@ pub enum HtlBaselineMode {
         topic_mesh: bool,
         fanout_peers_per_member: u8,
     },
+    /// Interest-routed inv-want: same flood-INV → pull-WANT shape as
+    /// `InvWant`, but each node's INV-forwarding rule is asymmetric.
+    /// Subscribers (and the publisher) flood to all neighbors. Non-
+    /// subscribers forward INV only to neighbors they know are subscribed
+    /// to this stream. Models the production `PubsubInterest` mechanism:
+    /// each node periodically announces its subscriptions to its neighbors,
+    /// so every node knows the 1-hop interest graph for free. WANT phase
+    /// is unchanged. Designed to outperform pure invwant when many topics
+    /// have moderate density (long-tail Nostr).
+    InvWantInterestRouted,
 }
 
 pub async fn run_mesh_pubsub_htl_flood_baseline(
@@ -1511,6 +1675,17 @@ pub async fn run_mesh_pubsub_htl_inv_want_baseline(
     htl: u8,
 ) -> MeshPubsubWorkloadReport {
     run_mesh_pubsub_htl_baseline(config, htl, HtlBaselineMode::InvWant).await
+}
+
+/// Interest-routed inv-want baseline: subscribers flood INV, non-subscribers
+/// forward INV only to known-subscriber neighbors. WANT phase identical to
+/// regular invwant. See `HtlBaselineMode::InvWantInterestRouted` for full
+/// motivation.
+pub async fn run_mesh_pubsub_htl_inv_want_interest_routed_baseline(
+    config: MeshPubsubWorkloadConfig,
+    htl: u8,
+) -> MeshPubsubWorkloadReport {
+    run_mesh_pubsub_htl_baseline(config, htl, HtlBaselineMode::InvWantInterestRouted).await
 }
 
 /// Streamr-style Plumtree baseline (broadcast init, infinite IHAVE timer):
@@ -1930,6 +2105,15 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                         htl,
                         &mut report,
                     ),
+                    HtlBaselineMode::InvWantInterestRouted => htl_interest_routed_inv_want_publish(
+                        graph,
+                        publisher_id,
+                        &subscribers,
+                        &broken_edges,
+                        config.payload_bytes as u64,
+                        htl,
+                        &mut report,
+                    ),
                     HtlBaselineMode::EagerLazy {
                         target_degree,
                         ihave_timeout_hops,
@@ -1999,6 +2183,15 @@ pub fn run_mesh_pubsub_htl_baseline_on_graph(
                     .delivered_hops
                 }
                 HtlBaselineMode::InvWant => htl_inv_want_publish(
+                    graph,
+                    publisher_id,
+                    &subscribers,
+                    &broken_edges,
+                    config.payload_bytes as u64,
+                    htl,
+                    &mut report,
+                ),
+                HtlBaselineMode::InvWantInterestRouted => htl_interest_routed_inv_want_publish(
                     graph,
                     publisher_id,
                     &subscribers,
@@ -2438,6 +2631,50 @@ mod tests {
         // distributions differ in concentration, not total volume.
         assert!(zipf_max_opps > 0);
         assert!(uniform_max_opps > 0);
+    }
+
+    #[tokio::test]
+    async fn htl_invwant_interest_routed_saves_bandwidth_at_high_density() {
+        // At high subscriber density, most non-subscribers have a sub
+        // neighbor, so interest-routed forwarding behaves nearly like pure
+        // invwant — same delivery, slightly less bandwidth (the long-tail
+        // non-sub-to-non-sub edges that pure invwant would flood are
+        // skipped). At low density the interest filter could hurt delivery,
+        // so this test focuses on the favourable case.
+        let cfg = MeshPubsubWorkloadConfig {
+            seed: 91,
+            node_count: 256,
+            author_count: 1,
+            subscribers_per_author: 64, // 25% density
+            publish_rounds: 2,
+            payload_bytes: 1200,
+            pool: PoolConfig {
+                max_connections: 14,
+                satisfied_connections: 8,
+            },
+            pump_steps_after_setup: 160,
+            pump_steps_per_publish_round: 96,
+            ..Default::default()
+        };
+        let pure =
+            run_mesh_pubsub_htl_inv_want_baseline(cfg.clone(), MESH_EVENT_POLICY.max_htl).await;
+        let interest_routed =
+            run_mesh_pubsub_htl_inv_want_interest_routed_baseline(cfg, MESH_EVENT_POLICY.max_htl)
+                .await;
+        // Interest-routed shouldn't hurt delivery at this density.
+        assert!(
+            interest_routed.delivery_rate >= pure.delivery_rate * 0.95,
+            "interest-routed delivery {:.3} should match pure invwant {:.3} (-5% slack)",
+            interest_routed.delivery_rate,
+            pure.delivery_rate
+        );
+        // And should send strictly fewer bytes per delivered event.
+        assert!(
+            interest_routed.bytes_sent_per_delivered_event < pure.bytes_sent_per_delivered_event,
+            "interest-routed {} should beat pure invwant {} on bandwidth",
+            interest_routed.bytes_sent_per_delivered_event,
+            pure.bytes_sent_per_delivered_event
+        );
     }
 
     #[tokio::test]

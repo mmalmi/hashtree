@@ -157,6 +157,7 @@ async fn main() {
     let strategies: &[(&str, HtlBaselineMode)] = &[
         ("flood", HtlBaselineMode::FloodPayload),
         ("invwant", HtlBaselineMode::InvWant),
+        ("invwant-ir", HtlBaselineMode::InvWantInterestRouted),
         (
             "plumtree-tm",
             HtlBaselineMode::EagerLazy {

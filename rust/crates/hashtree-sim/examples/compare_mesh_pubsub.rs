@@ -292,6 +292,7 @@ async fn main() {
     let baseline_labels = [
         "htl-flood-h4",
         "htl-invwant-h4",
+        "htl-invwant-ir-h4",
         "htl-plumtree-h4",
         "htl-plumtree-h4-t1",
         "htl-plumtree-h4-t0",
@@ -331,6 +332,7 @@ async fn main() {
         let htl_modes: &[(&str, HtlBaselineMode)] = &[
             ("htl-flood-h4", HtlBaselineMode::FloodPayload),
             ("htl-invwant-h4", HtlBaselineMode::InvWant),
+            ("htl-invwant-ir-h4", HtlBaselineMode::InvWantInterestRouted),
             (
                 "htl-plumtree-h4",
                 HtlBaselineMode::EagerLazy {
