@@ -808,6 +808,7 @@ mod tests {
         AppState {
             store,
             auth: None,
+            daemon_started_at: 1_700_000_000,
             peer_mode: crate::config::ServerMode::Normal,
             hash_get_enabled: true,
             webrtc_peers: None,

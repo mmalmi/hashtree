@@ -194,6 +194,8 @@ impl WsRelayState {
 pub struct AppState {
     pub store: Arc<HashtreeStore>,
     pub auth: Option<AuthCredentials>,
+    /// Unix timestamp when this daemon state was created.
+    pub daemon_started_at: u64,
     pub peer_mode: crate::config::ServerMode,
     pub hash_get_enabled: bool,
     /// WebRTC peer state for forwarding requests to connected P2P peers

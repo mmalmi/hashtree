@@ -3,7 +3,9 @@ use super::add::{
     build_files_iris_to_url_for_published_target, build_sites_iris_to_url_for_add_route,
     build_sites_iris_to_url_for_published_ref, detect_site_entry_for_path,
 };
-use super::daemonize::{build_daemon_args, parse_pid, read_pid_file, write_pid_file};
+use super::daemonize::{
+    build_daemon_args, format_daemon_status, parse_pid, read_pid_file, write_pid_file,
+};
 #[cfg(unix)]
 use super::daemonize::{
     daemon_state_file_path, read_daemon_launch_state, write_daemon_launch_state, DaemonLaunchState,
@@ -24,6 +26,7 @@ use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_load_target_cid,
     stored_published_pin_hash, warn_if_stun_unavailable,
 };
+use super::util::format_bytes;
 use crate::app::args::{
     CashuCommands, CashuMintCommands, MirrorCommands, ReleaseCommands, SocialGraphCommands,
 };
@@ -124,6 +127,35 @@ fn test_warn_if_stun_unavailable_disables_stun_listener_when_feature_missing() {
 
     #[cfg(feature = "stun")]
     assert_eq!(config.server.stun_port, 3478);
+}
+
+#[test]
+fn test_format_bytes_uses_reasonable_binary_units() {
+    assert_eq!(format_bytes(0), "0 B");
+    assert_eq!(format_bytes(1023), "1023 B");
+    assert_eq!(format_bytes(1024), "1.0 KiB");
+    assert_eq!(format_bytes(222_944_845_229), "207.6 GiB");
+}
+
+#[test]
+fn test_daemon_status_uses_human_storage_labels() {
+    let status = serde_json::json!({
+        "status": "running",
+        "uptime_seconds": 125,
+        "storage": {
+            "total_dags": 12,
+            "pinned_dags": 3,
+            "total_bytes": 222_944_845_229u64
+        }
+    });
+
+    let rendered = format_daemon_status(&status, true);
+
+    assert!(rendered.contains("Uptime: 2m05s"));
+    assert!(rendered.contains("Stored objects: 12"));
+    assert!(rendered.contains("Pinned items: 3"));
+    assert!(rendered.contains("Total size: 207.6 GiB"));
+    assert!(!rendered.contains("DAGs"));
 }
 
 #[test]

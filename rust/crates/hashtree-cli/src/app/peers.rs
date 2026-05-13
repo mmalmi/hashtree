@@ -39,6 +39,58 @@ pub(crate) async fn list_peers(addr: &str) -> Result<()> {
         return Ok(());
     };
 
+    let total = data
+        .get("total")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(peers.len() as u64);
+    let connected_count = data
+        .get("connected")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_else(|| {
+            peers
+                .iter()
+                .filter(|p| {
+                    p.get("state")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("connected"))
+                        .unwrap_or(false)
+                })
+                .count() as u64
+        });
+    println!("Peer router: {connected_count}/{total} connected");
+
+    let bytes_sent = data.get("bytes_sent").and_then(|b| b.as_u64()).unwrap_or(0);
+    let bytes_received = data
+        .get("bytes_received")
+        .and_then(|b| b.as_u64())
+        .unwrap_or(0);
+    if bytes_sent > 0 || bytes_received > 0 {
+        println!(
+            "Traffic: up {}, down {}",
+            format_bytes(bytes_sent),
+            format_bytes(bytes_received)
+        );
+    }
+
+    let mesh_received = data
+        .get("mesh_received")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mesh_forwarded = data
+        .get("mesh_forwarded")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mesh_dropped_duplicate = data
+        .get("mesh_dropped_duplicate")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    if mesh_received > 0 || mesh_forwarded > 0 || mesh_dropped_duplicate > 0 {
+        println!(
+            "Mesh frames: received {}, forwarded {}, duplicate drops {}",
+            mesh_received, mesh_forwarded, mesh_dropped_duplicate
+        );
+    }
+
     // Collect connected peers
     let connected: Vec<_> = peers
         .iter()
@@ -51,11 +103,11 @@ pub(crate) async fn list_peers(addr: &str) -> Result<()> {
         .collect();
 
     if connected.is_empty() {
-        println!("No connected peers (total: {})", peers.len());
+        println!("No connected peers");
         return Ok(());
     }
 
-    println!("Connected peers ({}/{}):\n", connected.len(), peers.len());
+    println!("\nConnected peers:");
 
     // Load config for relays
     let config = Config::load()?;

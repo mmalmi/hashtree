@@ -137,10 +137,20 @@ pub fn root_page() -> Html<&'static str> {
             const response = await fetch('/api/stats');
             const data = await response.json();
             const stats = document.getElementById('stats');
+            const formatBytes = (bytes) => {
+                const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+                let value = Number(bytes || 0);
+                let unit = 0;
+                while (value >= 1024 && unit < units.length - 1) {
+                    value /= 1024;
+                    unit += 1;
+                }
+                return unit === 0 ? `${bytes} ${units[unit]}` : `${value.toFixed(1)} ${units[unit]}`;
+            };
             stats.innerHTML = `
-                <p>Total DAGs: ${data.total_dags}</p>
-                <p>Pinned DAGs: ${data.pinned_dags}</p>
-                <p>Total Size: ${(data.total_bytes / 1024).toFixed(2)} KB</p>
+                <p>Stored objects: ${data.total_dags}</p>
+                <p>Pinned items: ${data.pinned_dags}</p>
+                <p>Total size: ${formatBytes(data.total_bytes)}</p>
             `;
         }
 

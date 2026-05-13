@@ -103,6 +103,7 @@ impl HashtreeServer {
             state: AppState {
                 store,
                 auth: None,
+                daemon_started_at: current_unix_secs(),
                 peer_mode: crate::config::ServerMode::Normal,
                 hash_get_enabled: true,
                 webrtc_peers: None,
@@ -357,6 +358,13 @@ impl HashtreeServer {
     pub fn addr(&self) -> &str {
         &self.addr
     }
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_secs()
 }
 
 #[cfg(test)]

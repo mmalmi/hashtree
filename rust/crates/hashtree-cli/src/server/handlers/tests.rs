@@ -98,6 +98,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
     AppState {
         store,
         auth: None,
+        daemon_started_at: 1_700_000_000,
         peer_mode: crate::config::ServerMode::Normal,
         hash_get_enabled: true,
         webrtc_peers: None,
@@ -256,6 +257,8 @@ async fn webrtc_peers_reports_transport_and_signal_paths() {
     assert_eq!(json["enabled"], true);
     assert_eq!(json["transport_counts"]["webrtc"], 1);
     assert_eq!(json["transport_counts"]["bluetooth"], 0);
+    assert_eq!(json["bytes_sent"], 16);
+    assert_eq!(json["bytes_received"], 32);
     assert_eq!(json["peers"][0]["transport"], "webrtc");
     assert_eq!(json["peers"][0]["bytes_sent"], 80);
     assert_eq!(json["peers"][0]["bytes_received"], 160);
@@ -302,6 +305,8 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     assert_eq!(json["upstream"]["nostr_relays"], 2);
     assert_eq!(json["mode"], "normal");
     assert_eq!(json["capabilities"]["hash_get"], true);
+    assert_eq!(json["daemon_started_at"], 1_700_000_000u64);
+    assert!(json["uptime_seconds"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

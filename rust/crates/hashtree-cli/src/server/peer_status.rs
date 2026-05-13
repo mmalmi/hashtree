@@ -5,7 +5,11 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::webrtc::{ConnectionState, PeerEntry, PeerTransport, WebRTCState};
 #[cfg(feature = "p2p")]
@@ -38,6 +42,13 @@ fn bluetooth_transport_enabled() -> bool {
     crate::config::Config::load()
         .map(|config| config.server.enable_bluetooth && config.server.max_bluetooth_peers > 0)
         .unwrap_or(true)
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn peer_transport_visible(entry: &PeerEntry, bluetooth_enabled: bool) -> bool {
@@ -162,6 +173,8 @@ pub(super) async fn webrtc_peers(State(state): State<AppState>) -> impl IntoResp
         "connected": snapshot.connected,
         "with_data_channel": snapshot.with_data_channel,
         "transport_counts": snapshot.transport_counts(),
+        "bytes_sent": snapshot.bytes_sent,
+        "bytes_received": snapshot.bytes_received,
         "mesh_received": snapshot.mesh_received,
         "mesh_forwarded": snapshot.mesh_forwarded,
         "mesh_dropped_duplicate": snapshot.mesh_dropped_duplicate,
@@ -223,6 +236,8 @@ pub(super) async fn daemon_status(
 
     Json(json!({
         "status": "running",
+        "daemon_started_at": state.daemon_started_at,
+        "uptime_seconds": current_unix_secs().saturating_sub(state.daemon_started_at),
         "mode": state.peer_mode.as_str(),
         "capabilities": {
             "hash_get": state.hash_get_enabled,

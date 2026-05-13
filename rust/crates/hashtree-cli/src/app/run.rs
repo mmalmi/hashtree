@@ -51,7 +51,7 @@ use super::socialgraph::{
     run_socialgraph_warm,
 };
 use super::user::show_user_identity;
-use super::util::chrono_humanize_timestamp;
+use super::util::{chrono_humanize_timestamp, format_bytes};
 #[cfg(feature = "fuse")]
 use std::io;
 #[cfg(feature = "fuse")]
@@ -1062,17 +1062,16 @@ pub(crate) async fn run() -> Result<()> {
                 println!("Hash not found: {}", format_cid_for_display(&target_cid));
             }
         }
-        Commands::Stats => {
+        Commands::Stats { addr } => {
             let store = HashtreeStore::new(&data_dir)?;
             let stats = store.get_storage_stats()?;
             println!("Storage Statistics:");
-            println!("  Total DAGs: {}", stats.total_dags);
-            println!("  Pinned DAGs: {}", stats.pinned_dags);
-            println!(
-                "  Total size: {} bytes ({:.2} KB)",
-                stats.total_bytes,
-                stats.total_bytes as f64 / 1024.0
-            );
+            println!("  Stored objects: {}", stats.total_dags);
+            println!("  Pinned items: {}", stats.pinned_dags);
+            println!("  Total size: {}", format_bytes(stats.total_bytes));
+            if let Some(status) = fetch_daemon_status_quietly(&addr).await {
+                print_network_stats(&status);
+            }
         }
         Commands::Status { addr } => {
             let url = format!("http://{}/api/status", addr);
@@ -1504,18 +1503,14 @@ pub(crate) async fn run() -> Result<()> {
                         "  Max size:     {} GB ({} bytes)",
                         config.storage.max_size_gb, max_size_bytes
                     );
-                    println!(
-                        "  Total bytes:  {} ({:.2} GB)",
-                        stats.total_bytes,
-                        stats.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0
-                    );
+                    println!("  Total size:   {}", format_bytes(stats.total_bytes));
                     println!(
                         "  Tracked:      {} ({:.2} GB)",
                         tracked,
                         tracked as f64 / 1024.0 / 1024.0 / 1024.0
                     );
-                    println!("  Total DAGs:   {}", stats.total_dags);
-                    println!("  Pinned DAGs:  {}", stats.pinned_dags);
+                    println!("  Stored objects: {}", stats.total_dags);
+                    println!("  Pinned items: {}", stats.pinned_dags);
                     println!("  Indexed trees: {}", trees.len());
                     println!();
                     println!("Usage by priority:");
@@ -1936,6 +1931,86 @@ fn format_fetch_summary(snapshot: hashtree_cli::FetchProgressSnapshot) -> String
     )
 }
 
+async fn fetch_daemon_status_quietly(addr: &str) -> Option<serde_json::Value> {
+    let url = format!("http://{}/api/status", addr);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(700))
+        .build()
+        .ok()?;
+    let response = client.get(&url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().await.ok()
+}
+
+fn status_u64<'a>(status: &'a serde_json::Value, section: &str, key: &str) -> u64 {
+    status
+        .get(section)
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+}
+
+fn print_network_stats(status: &serde_json::Value) {
+    let mesh_enabled = status
+        .get("mesh")
+        .and_then(|mesh| mesh.get("enabled"))
+        .and_then(|enabled| enabled.as_bool())
+        .unwrap_or(false);
+    let relay_enabled = status
+        .get("relay")
+        .and_then(|relay| relay.get("enabled"))
+        .and_then(|enabled| enabled.as_bool())
+        .unwrap_or(false);
+    if !mesh_enabled && !relay_enabled {
+        return;
+    }
+
+    let mesh_sent = status_u64(status, "mesh", "bytes_sent");
+    let mesh_received = status_u64(status, "mesh", "bytes_received");
+    let relay_sent = status_u64(status, "relay", "bytes_sent");
+    let relay_received = status_u64(status, "relay", "bytes_received");
+
+    println!();
+    println!("Network:");
+    if mesh_enabled {
+        let total_peers = status_u64(status, "mesh", "total_peers");
+        let connected = status_u64(status, "mesh", "connected");
+        println!("  Peers: {connected}/{total_peers} connected");
+    }
+    let uptime = status
+        .get("uptime_seconds")
+        .and_then(|value| value.as_u64())
+        .map(|seconds| {
+            format!(
+                " (uptime {})",
+                format_duration_compact(Duration::from_secs(seconds))
+            )
+        })
+        .unwrap_or_default();
+    println!(
+        "  Traffic since daemon start{}: up {}, down {}",
+        uptime,
+        format_bytes(mesh_sent.saturating_add(relay_sent)),
+        format_bytes(mesh_received.saturating_add(relay_received))
+    );
+    if mesh_enabled {
+        println!(
+            "  Mesh traffic: up {}, down {}",
+            format_bytes(mesh_sent),
+            format_bytes(mesh_received)
+        );
+    }
+    if relay_enabled {
+        println!(
+            "  Relay traffic: up {}, down {}",
+            format_bytes(relay_sent),
+            format_bytes(relay_received)
+        );
+    }
+}
+
 fn format_duration_compact(duration: Duration) -> String {
     let seconds = duration.as_secs();
     if seconds >= 60 {
@@ -1945,22 +2020,6 @@ fn format_duration_compact(duration: Duration) -> String {
         return format!("{seconds}s");
     }
     format!("{}ms", duration.as_millis())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 async fn print_info_for_cid(store: &Arc<HashtreeStore>, cid: &Cid) -> Result<bool> {

@@ -9,6 +9,13 @@ use super::util::format_bytes;
 #[cfg(unix)]
 use super::util::process_is_running;
 
+fn format_duration_compact(seconds: u64) -> String {
+    if seconds >= 60 {
+        return format!("{}m{:02}s", seconds / 60, seconds % 60);
+    }
+    format!("{seconds}s")
+}
+
 pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: bool) -> String {
     let mut lines = Vec::new();
     if include_header {
@@ -16,6 +23,12 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
     }
     let status_text = status["status"].as_str().unwrap_or("unknown");
     lines.push(format!("  Status: {}", status_text));
+    if let Some(uptime) = status
+        .get("uptime_seconds")
+        .and_then(|value| value.as_u64())
+    {
+        lines.push(format!("  Uptime: {}", format_duration_compact(uptime)));
+    }
     if let Some(mode) = status.get("mode").and_then(|value| value.as_str()) {
         lines.push(format!("  Mode: {}", mode));
     }
@@ -34,10 +47,10 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
         lines.push(String::new());
         lines.push("Storage:".to_string());
         if let Some(total) = storage.get("total_dags") {
-            lines.push(format!("  Total DAGs: {}", total));
+            lines.push(format!("  Stored objects: {}", total));
         }
         if let Some(pinned) = storage.get("pinned_dags") {
-            lines.push(format!("  Pinned DAGs: {}", pinned));
+            lines.push(format!("  Pinned items: {}", pinned));
         }
         if let Some(bytes) = storage.get("total_bytes").and_then(|b| b.as_u64()) {
             lines.push(format!("  Total size: {}", format_bytes(bytes)));

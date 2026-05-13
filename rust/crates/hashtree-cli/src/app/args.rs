@@ -297,7 +297,11 @@ pub(crate) enum Commands {
 
     // ── Storage ─────────────────────────────────────────────
     /// Get storage statistics
-    Stats,
+    Stats {
+        /// Daemon address for peer/network stats (default: 127.0.0.1:8080)
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        addr: String,
+    },
 
     /// Run garbage collection
     Gc,
