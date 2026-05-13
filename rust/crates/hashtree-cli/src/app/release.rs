@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::blossom::background_blossom_push;
+use super::blossom::background_blossom_push_incremental_with_store;
 use super::resolve::resolve_cid_input;
 
 pub(crate) struct PublishedRelease {
@@ -260,16 +260,18 @@ pub(crate) async fn publish_release_version(
         .await?;
     }
 
-    let new_root = publish_release_root(&tree, current_root, version_path, &release_cid).await?;
+    let new_root =
+        publish_release_root(&tree, current_root.clone(), version_path, &release_cid).await?;
 
     if !local {
         let mut write_servers = config.blossom.servers.clone();
         write_servers.extend(config.blossom.write_servers.clone());
         if !write_servers.is_empty() {
             println!("Pushing updated release root to file servers...");
-            background_blossom_push(
-                &data_dir.to_path_buf(),
-                &new_root.to_string(),
+            background_blossom_push_incremental_with_store(
+                store.clone(),
+                new_root.clone(),
+                current_root.clone(),
                 &write_servers,
             )
             .await
