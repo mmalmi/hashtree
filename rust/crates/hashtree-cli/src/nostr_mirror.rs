@@ -94,7 +94,7 @@ const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob";
 
 fn trim_transient_allocations() {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
         // SAFETY: malloc_trim asks glibc to return free heap pages to the OS.
         // It does not touch live allocations and is safe to call after the

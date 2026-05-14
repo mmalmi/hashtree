@@ -84,7 +84,7 @@ pub fn nostr_filters_summary(filters: &[Filter]) -> String {
     summaries.join("; ")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn trim_process_allocations() {
     // SAFETY: malloc_trim asks glibc to return free heap pages to the OS.
     unsafe {
@@ -92,7 +92,7 @@ pub fn trim_process_allocations() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn trim_process_allocations() {}
 
 #[cfg(target_os = "linux")]
