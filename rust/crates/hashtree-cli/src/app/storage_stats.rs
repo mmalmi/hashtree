@@ -7,7 +7,7 @@ use hashtree_core::{from_hex, to_hex, types::Hash};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::util::{chrono_humanize_timestamp, format_bytes};
+use super::util::format_bytes;
 
 const PIN_DETAIL_LIMIT: usize = 20;
 const TREE_DETAIL_LIMIT: usize = 5;
@@ -65,7 +65,6 @@ pub(crate) struct TreeDetail {
     pub root: String,
     pub size_bytes: u64,
     pub pinned: bool,
-    pub last_accessed_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +252,6 @@ fn collect_storage_inventory_with_graph(
             root: to_hex(&root),
             size_bytes: meta.total_size,
             pinned: is_pinned,
-            last_accessed_at: meta.effective_last_accessed_at(),
         });
     }
 
@@ -409,14 +407,12 @@ pub(crate) fn render_storage_inventory(inventory: &StorageInventory) -> String {
             out.push_str("    Largest indexed trees:\n");
             for tree in bucket.trees.iter().take(TREE_DETAIL_LIMIT) {
                 let pinned = if tree.pinned { " (pinned)" } else { "" };
-                let accessed = chrono_humanize_timestamp(tree.last_accessed_at);
                 out.push_str(&format!(
-                    "      - {} - {} - {}{} - accessed {} - {}\n",
+                    "      - {} - {} - {}{} - {}\n",
                     tree.name,
                     format_bytes(tree.size_bytes),
                     tree.owner,
                     pinned,
-                    accessed,
                     short_hash(&tree.root)
                 ));
             }

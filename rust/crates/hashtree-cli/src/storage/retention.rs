@@ -8,9 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{
-    BlobMetadata, HashtreeStore, ACCESS_UPDATE_INTERVAL_SECS, PRIORITY_FOLLOWED, PRIORITY_OWN,
-};
+use super::{BlobMetadata, HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
 
 /// Metadata for a synced tree (for eviction tracking)
 #[derive(Debug, Clone, Serialize)]
@@ -21,18 +19,10 @@ pub struct TreeMeta {
     pub name: Option<String>,
     /// Unix timestamp when this tree was synced
     pub synced_at: u64,
-    /// Unix timestamp when this tree root was last read through a user-facing path
-    pub last_accessed_at: u64,
     /// Total size of all blobs in this tree
     pub total_size: u64,
     /// Eviction priority: 255=own/pinned, 128=followed, 64=other
     pub priority: u8,
-}
-
-impl TreeMeta {
-    pub fn effective_last_accessed_at(&self) -> u64 {
-        self.last_accessed_at.max(self.synced_at)
-    }
 }
 
 impl<'de> Deserialize<'de> for TreeMeta {
@@ -62,7 +52,7 @@ impl<'de> Deserialize<'de> for TreeMeta {
             where
                 A: SeqAccess<'de>,
             {
-                let legacy = matches!(seq.size_hint(), Some(5));
+                let has_accidental_access_field = matches!(seq.size_hint(), Some(6));
                 let owner = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(0, &self))?;
@@ -73,38 +63,23 @@ impl<'de> Deserialize<'de> for TreeMeta {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(2, &self))?;
 
-                if legacy {
-                    let total_size = seq
+                if has_accidental_access_field {
+                    let _: IgnoredAny = seq
                         .next_element()?
                         .ok_or_else(|| de::Error::invalid_length(3, &self))?;
-                    let priority = seq
-                        .next_element()?
-                        .ok_or_else(|| de::Error::invalid_length(4, &self))?;
-                    return Ok(TreeMeta {
-                        owner,
-                        name,
-                        synced_at,
-                        last_accessed_at: 0,
-                        total_size,
-                        priority,
-                    });
                 }
 
-                let last_accessed_at = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(3, &self))?;
                 let total_size = seq
                     .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(4, &self))?;
+                    .ok_or_else(|| de::Error::invalid_length(3, &self))?;
                 let priority = seq
                     .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(5, &self))?;
+                    .ok_or_else(|| de::Error::invalid_length(4, &self))?;
 
                 Ok(TreeMeta {
                     owner,
                     name,
                     synced_at,
-                    last_accessed_at,
                     total_size,
                     priority,
                 })
@@ -117,7 +92,6 @@ impl<'de> Deserialize<'de> for TreeMeta {
                 let mut owner = None;
                 let mut name = None;
                 let mut synced_at = None;
-                let mut last_accessed_at = None;
                 let mut total_size = None;
                 let mut priority = None;
 
@@ -126,7 +100,9 @@ impl<'de> Deserialize<'de> for TreeMeta {
                         "owner" => owner = Some(map.next_value()?),
                         "name" => name = Some(map.next_value()?),
                         "synced_at" => synced_at = Some(map.next_value()?),
-                        "last_accessed_at" => last_accessed_at = Some(map.next_value()?),
+                        "last_accessed_at" => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
                         "total_size" => total_size = Some(map.next_value()?),
                         "priority" => priority = Some(map.next_value()?),
                         _ => {
@@ -139,7 +115,6 @@ impl<'de> Deserialize<'de> for TreeMeta {
                     owner: owner.ok_or_else(|| de::Error::missing_field("owner"))?,
                     name: name.unwrap_or(None),
                     synced_at: synced_at.ok_or_else(|| de::Error::missing_field("synced_at"))?,
-                    last_accessed_at: last_accessed_at.unwrap_or(0),
                     total_size: total_size.ok_or_else(|| de::Error::missing_field("total_size"))?,
                     priority: priority.ok_or_else(|| de::Error::missing_field("priority"))?,
                 })
@@ -613,7 +588,6 @@ impl HashtreeStore {
             owner: owner.to_string(),
             name: name.map(|s| s.to_string()),
             synced_at: now,
-            last_accessed_at: now,
             total_size,
             priority,
         };
@@ -753,41 +727,6 @@ impl HashtreeStore {
         }
     }
 
-    pub(super) fn note_tree_access(&self, root_hash: &Hash) {
-        if let Err(err) = self.touch_tree_accessed_at(root_hash, unix_timestamp_now()) {
-            tracing::debug!(
-                "Failed to update tree access metadata for {}: {}",
-                &to_hex(root_hash)[..8],
-                err
-            );
-        }
-    }
-
-    fn touch_tree_accessed_at(&self, root_hash: &Hash, now: u64) -> Result<bool> {
-        if !self.access_update_gate.should_update(root_hash, now) {
-            return Ok(false);
-        }
-
-        let mut wtxn = self.env.write_txn()?;
-        let Some(bytes) = self.tree_meta.get(&wtxn, root_hash.as_slice())? else {
-            return Ok(false);
-        };
-        let mut meta: TreeMeta = rmp_serde::from_slice(bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize TreeMeta: {}", e))?;
-
-        if now.saturating_sub(meta.effective_last_accessed_at()) < ACCESS_UPDATE_INTERVAL_SECS {
-            return Ok(false);
-        }
-
-        meta.last_accessed_at = now;
-        let meta_bytes = rmp_serde::to_vec(&meta)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize TreeMeta: {}", e))?;
-        self.tree_meta
-            .put(&mut wtxn, root_hash.as_slice(), &meta_bytes)?;
-        wtxn.commit()?;
-        Ok(true)
-    }
-
     pub fn get_tree_ref(&self, key: &str) -> Result<Option<Hash>> {
         let rtxn = self.env.read_txn()?;
         let Some(bytes) = self.tree_refs.get(&rtxn, key)? else {
@@ -833,17 +772,17 @@ impl HashtreeStore {
         Ok(total)
     }
 
-    /// Get evictable trees sorted by (priority ASC, last_accessed_at ASC)
+    /// Get evictable trees sorted by (priority ASC, synced_at ASC).
+    ///
+    /// Blob-level access and raw LRU order live in the storage adapter. Indexed
+    /// tree metadata stays cheap and does not try to summarize all descendant
+    /// blob access on every stats or eviction pass.
     fn get_evictable_trees(&self) -> Result<Vec<(Hash, TreeMeta)>> {
         let mut trees = self.list_indexed_trees()?;
 
-        // Sort by priority (lower first), then by access time (least recently used first).
+        // Sort by priority (lower first), then by age.
         trees.sort_by(|a, b| match a.1.priority.cmp(&b.1.priority) {
-            std::cmp::Ordering::Equal => {
-                a.1.effective_last_accessed_at()
-                    .cmp(&b.1.effective_last_accessed_at())
-                    .then_with(|| a.1.synced_at.cmp(&b.1.synced_at))
-            }
+            std::cmp::Ordering::Equal => a.1.synced_at.cmp(&b.1.synced_at),
             other => other,
         });
 
@@ -1093,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_meta_deserializes_legacy_metadata_without_access_field() {
+    fn tree_meta_deserializes_metadata_without_tree_access_field() {
         #[derive(Serialize)]
         struct LegacyTreeMeta {
             owner: String,
@@ -1116,68 +1055,48 @@ mod tests {
         assert_eq!(meta.owner, "owner");
         assert_eq!(meta.name.as_deref(), Some("tree"));
         assert_eq!(meta.synced_at, 123);
-        assert_eq!(meta.last_accessed_at, 0);
-        assert_eq!(meta.effective_last_accessed_at(), 123);
         assert_eq!(meta.total_size, 456);
         assert_eq!(meta.priority, PRIORITY_OTHER);
     }
 
     #[test]
-    fn tree_access_updates_are_throttled() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024 * 1024).expect("store");
-        let cid = build_test_tree(&store);
+    fn tree_meta_deserializes_accidental_access_field_but_drops_it_on_write() {
+        #[derive(Serialize)]
+        struct AccidentalTreeMeta {
+            owner: String,
+            name: Option<String>,
+            synced_at: u64,
+            last_accessed_at: u64,
+            total_size: u64,
+            priority: u8,
+        }
 
-        store
-            .index_tree(
-                &cid.hash,
-                "npub1example",
-                Some("playlist"),
-                PRIORITY_OTHER,
-                Some("npub1example/playlist"),
-            )
-            .expect("index tree");
+        let bytes = rmp_serde::to_vec(&AccidentalTreeMeta {
+            owner: "owner".to_string(),
+            name: Some("tree".to_string()),
+            synced_at: 123,
+            last_accessed_at: 999,
+            total_size: 456,
+            priority: PRIORITY_OTHER,
+        })
+        .expect("serialize accidental metadata");
+        let meta: TreeMeta = rmp_serde::from_slice(&bytes).expect("deserialize tree metadata");
+        let encoded = rmp_serde::to_vec(&meta).expect("serialize current metadata");
+        let reparsed: (String, Option<String>, u64, u64, u8) =
+            rmp_serde::from_slice(&encoded).expect("parse current metadata shape");
 
-        let original = store
-            .get_tree_meta(&cid.hash)
-            .expect("tree meta")
-            .expect("indexed tree");
-        let first_touch = original
-            .effective_last_accessed_at()
-            .saturating_add(super::ACCESS_UPDATE_INTERVAL_SECS + 1);
-        assert!(
-            store
-                .touch_tree_accessed_at(&cid.hash, first_touch)
-                .expect("touch tree"),
-            "first due touch should update metadata"
-        );
-        assert_eq!(
-            store
-                .get_tree_meta(&cid.hash)
-                .expect("tree meta")
-                .expect("indexed tree")
-                .last_accessed_at,
-            first_touch
-        );
-
-        assert!(
-            !store
-                .touch_tree_accessed_at(&cid.hash, first_touch + 1)
-                .expect("touch tree"),
-            "immediate repeated touch should be skipped"
-        );
-        assert_eq!(
-            store
-                .get_tree_meta(&cid.hash)
-                .expect("tree meta")
-                .expect("indexed tree")
-                .last_accessed_at,
-            first_touch
-        );
+        assert_eq!(meta.owner, "owner");
+        assert_eq!(meta.name.as_deref(), Some("tree"));
+        assert_eq!(meta.synced_at, 123);
+        assert_eq!(meta.total_size, 456);
+        assert_eq!(meta.priority, PRIORITY_OTHER);
+        assert_eq!(reparsed.0, "owner");
+        assert_eq!(reparsed.3, 456);
+        assert_eq!(reparsed.4, PRIORITY_OTHER);
     }
 
     #[test]
-    fn eviction_prefers_least_recently_accessed_tree_within_priority() {
+    fn eviction_prefers_oldest_tree_within_priority() {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = HashtreeStore::with_options(temp_dir.path(), None, 500).expect("store");
 
@@ -1197,25 +1116,12 @@ mod tests {
             .index_tree(&hash3, "owner3", Some("tree3"), PRIORITY_OTHER, None)
             .expect("index tree 3");
 
-        let meta1 = store
-            .get_tree_meta(&hash1)
-            .expect("tree meta")
-            .expect("indexed tree");
-        store
-            .touch_tree_accessed_at(
-                &hash1,
-                meta1
-                    .effective_last_accessed_at()
-                    .saturating_add(super::ACCESS_UPDATE_INTERVAL_SECS + 1),
-            )
-            .expect("touch tree");
-
         let freed = store.evict_if_needed().expect("evict");
 
         assert!(freed > 0);
         assert!(
-            store.get_tree_meta(&hash1).expect("tree meta").is_some(),
-            "recently accessed tree should survive before older peers at the same priority"
+            store.get_tree_meta(&hash3).expect("tree meta").is_some(),
+            "newest tree should survive before older peers at the same priority"
         );
     }
 

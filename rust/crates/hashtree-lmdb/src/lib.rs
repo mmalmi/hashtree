@@ -7,6 +7,7 @@ use heed::types::*;
 use heed::{Database, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Re-export sha256 for convenience
 pub use hashtree_core::hash::sha256 as compute_sha256;
@@ -20,7 +21,8 @@ const DATABASE_COUNT: u32 = 5;
 const REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 const EVICTION_BATCH_TARGET_BYTES: u64 = 256 * 1024 * 1024;
 const EVICTION_BATCH_MAX_ITEMS: usize = 4096;
-const BLOB_META_BYTES: usize = 16;
+const LEGACY_BLOB_META_BYTES: usize = 16;
+const BLOB_META_BYTES: usize = 24;
 const ORDER_KEY_BYTES: usize = 40;
 const PIN_COUNT_BYTES: usize = 4;
 const STORE_TOTALS_BYTES: usize = 32;
@@ -30,6 +32,7 @@ const STORE_TOTALS_KEY: &[u8] = b"totals";
 struct BlobMeta {
     order: u64,
     size: u64,
+    last_accessed_at: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -362,6 +365,7 @@ impl LmdbBlobStore {
             let meta = Self::encode_blob_meta(BlobMeta {
                 order,
                 size: data.len() as u64,
+                last_accessed_at: unix_timestamp_now(),
             });
             let order_key = Self::encode_order_key(order, &hash);
             self.metadata.put(&mut wtxn, &hash, &meta)?;
@@ -410,6 +414,7 @@ impl LmdbBlobStore {
             let meta = Self::encode_blob_meta(BlobMeta {
                 order,
                 size: data.len() as u64,
+                last_accessed_at: unix_timestamp_now(),
             });
             let order_key = Self::encode_order_key(order, hash);
             self.metadata.put(&mut wtxn, hash, &meta)?;
@@ -548,6 +553,98 @@ impl LmdbBlobStore {
             .get(&rtxn, hash)
             .map_err(|e| StoreError::Other(e.to_string()))?
             .map(|b| b.to_vec()))
+    }
+
+    pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
+        self.touch_many_accessed_sync(std::slice::from_ref(hash), now)
+            .map(|updated| updated > 0)
+    }
+
+    pub fn touch_many_accessed_sync(&self, hashes: &[Hash], now: u64) -> Result<usize, StoreError> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+
+        let mut wtxn = self
+            .env
+            .write_txn()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        let mut updated = 0usize;
+
+        for hash in hashes {
+            let meta = self
+                .metadata
+                .get(&wtxn, hash)
+                .map_err(|e| StoreError::Other(e.to_string()))?
+                .map(Self::decode_blob_meta)
+                .transpose()?;
+            let Some(mut meta) = meta else {
+                continue;
+            };
+
+            if meta.last_accessed_at >= now {
+                continue;
+            }
+
+            let old_order_key = Self::encode_order_key(meta.order, hash);
+            let _ = self
+                .eviction_order
+                .delete(&mut wtxn, &old_order_key)
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+
+            meta.order = self.next_order.fetch_add(1, Ordering::Relaxed);
+            meta.last_accessed_at = now;
+            let meta_bytes = Self::encode_blob_meta(meta);
+            let new_order_key = Self::encode_order_key(meta.order, hash);
+            self.metadata
+                .put(&mut wtxn, hash, &meta_bytes)
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            self.eviction_order
+                .put(&mut wtxn, &new_order_key, &())
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            updated += 1;
+        }
+
+        wtxn.commit()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        Ok(updated)
+    }
+
+    pub fn last_accessed_at_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let rtxn = self
+            .env
+            .read_txn()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        self.metadata
+            .get(&rtxn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+            .map(Self::decode_blob_meta)
+            .transpose()
+            .map(|meta| meta.map(|meta| meta.last_accessed_at))
+    }
+
+    pub fn many_last_accessed_at_sync(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<(Hash, u64)>, StoreError> {
+        let rtxn = self
+            .env
+            .read_txn()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        let mut results = Vec::new();
+        for hash in hashes {
+            let Some(meta) = self
+                .metadata
+                .get(&rtxn, hash)
+                .map_err(|e| StoreError::Other(e.to_string()))?
+                .map(Self::decode_blob_meta)
+                .transpose()?
+            else {
+                continue;
+            };
+            results.push((*hash, meta.last_accessed_at));
+        }
+        Ok(results)
     }
 
     /// Sync delete operation (for use in sync contexts).
@@ -781,12 +878,13 @@ impl LmdbBlobStore {
     fn encode_blob_meta(meta: BlobMeta) -> [u8; BLOB_META_BYTES] {
         let mut encoded = [0u8; BLOB_META_BYTES];
         encoded[..8].copy_from_slice(&meta.order.to_be_bytes());
-        encoded[8..].copy_from_slice(&meta.size.to_be_bytes());
+        encoded[8..16].copy_from_slice(&meta.size.to_be_bytes());
+        encoded[16..].copy_from_slice(&meta.last_accessed_at.to_be_bytes());
         encoded
     }
 
     fn decode_blob_meta(bytes: &[u8]) -> Result<BlobMeta, StoreError> {
-        if bytes.len() != BLOB_META_BYTES {
+        if bytes.len() != LEGACY_BLOB_META_BYTES && bytes.len() != BLOB_META_BYTES {
             return Err(StoreError::Other(format!(
                 "invalid blob metadata length: {}",
                 bytes.len()
@@ -799,6 +897,15 @@ impl LmdbBlobStore {
                     .try_into()
                     .map_err(|_| StoreError::Other("invalid blob size bytes".into()))?,
             ),
+            last_accessed_at: if bytes.len() >= BLOB_META_BYTES {
+                u64::from_be_bytes(
+                    bytes[16..24]
+                        .try_into()
+                        .map_err(|_| StoreError::Other("invalid blob access time bytes".into()))?,
+                )
+            } else {
+                0
+            },
         })
     }
 
@@ -888,6 +995,13 @@ fn map_heed_error(error: HeedError) -> StoreError {
         HeedError::Io(io_error) => StoreError::Io(io_error),
         other => StoreError::Other(other.to_string()),
     }
+}
+
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Debug, Clone)]
@@ -1085,6 +1199,42 @@ mod tests {
         assert!(hashes.contains(&h2));
         assert!(hashes.contains(&h3));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_blob_last_accessed_persists_and_updates_eviction_order() -> Result<(), StoreError>
+    {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+
+        let first = sha256(b"first");
+        let second = sha256(b"second");
+        store.put(first, b"first".to_vec()).await?;
+        store.put(second, b"second".to_vec()).await?;
+
+        assert!(store.last_accessed_at_sync(&first)?.unwrap_or(0) > 0);
+        let access_time = unix_timestamp_now().saturating_add(1000);
+        store.touch_accessed_sync(&first, access_time)?;
+
+        assert_eq!(store.last_accessed_at_sync(&first)?, Some(access_time));
+        assert!(store.delete_sync(&first)?);
+        assert!(store.exists(&second)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decodes_legacy_blob_metadata_without_access_time() -> Result<(), StoreError> {
+        let mut encoded = [0u8; LEGACY_BLOB_META_BYTES];
+        encoded[..8].copy_from_slice(&7u64.to_be_bytes());
+        encoded[8..].copy_from_slice(&42u64.to_be_bytes());
+
+        let meta = LmdbBlobStore::decode_blob_meta(&encoded)?;
+
+        assert_eq!(meta.order, 7);
+        assert_eq!(meta.size, 42);
+        assert_eq!(meta.last_accessed_at, 0);
         Ok(())
     }
 

@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Filesystem-backed blob store implementing hashtree's Store trait.
 ///
@@ -194,6 +194,41 @@ impl FsBlobStore {
         }
     }
 
+    pub fn touch_accessed_sync(&self, _hash: &Hash, _now: u64) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    pub fn touch_many_accessed_sync(
+        &self,
+        _hashes: &[Hash],
+        _now: u64,
+    ) -> Result<usize, StoreError> {
+        Ok(0)
+    }
+
+    pub fn last_accessed_at_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let Some(path) = self.existing_blob_path(hash) else {
+            return Ok(None);
+        };
+        let metadata = fs::metadata(path)?;
+        Ok(Some(system_time_to_unix_secs(
+            metadata.accessed().or_else(|_| metadata.modified())?,
+        )))
+    }
+
+    pub fn many_last_accessed_at_sync(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<(Hash, u64)>, StoreError> {
+        let mut results = Vec::new();
+        for hash in hashes {
+            if let Some(last_accessed_at) = self.last_accessed_at_sync(hash)? {
+                results.push((*hash, last_accessed_at));
+            }
+        }
+        Ok(results)
+    }
+
     /// Check if a hash exists.
     pub fn exists(&self, hash: &Hash) -> bool {
         self.existing_blob_path(hash).is_some()
@@ -315,6 +350,12 @@ impl FsBlobStore {
 
         freed
     }
+}
+
+fn system_time_to_unix_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Storage statistics.

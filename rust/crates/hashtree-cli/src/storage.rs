@@ -13,7 +13,7 @@ use hashtree_lmdb::LmdbBlobStore;
 use heed::types::*;
 use heed::{Database, EnvOpenOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "s3")]
 use std::future::Future;
 use std::io::Write;
@@ -40,6 +40,13 @@ const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Cached root info from Nostr events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedRoot {
@@ -61,21 +68,18 @@ pub struct LocalStoreStats {
 }
 
 #[derive(Default)]
-struct AccessUpdateGate {
+struct BlobAccessUpdateGate {
     next_update_by_hash: Mutex<HashMap<Hash, u64>>,
 }
 
-impl AccessUpdateGate {
-    fn should_update(&self, hash: &Hash, now: u64) -> bool {
+impl BlobAccessUpdateGate {
+    fn due_hashes<I>(&self, hashes: I, now: u64) -> Vec<Hash>
+    where
+        I: IntoIterator<Item = Hash>,
+    {
         let Ok(mut next_update_by_hash) = self.next_update_by_hash.try_lock() else {
-            return false;
+            return Vec::new();
         };
-
-        if let Some(next_update) = next_update_by_hash.get(hash) {
-            if now < *next_update {
-                return false;
-            }
-        }
 
         if next_update_by_hash.len() >= ACCESS_UPDATE_GATE_MAX_ENTRIES {
             next_update_by_hash.retain(|_, next_update| *next_update > now);
@@ -84,8 +88,22 @@ impl AccessUpdateGate {
             }
         }
 
-        next_update_by_hash.insert(*hash, now.saturating_add(ACCESS_UPDATE_INTERVAL_SECS));
-        true
+        let mut due = Vec::new();
+        let mut seen = HashSet::new();
+        for hash in hashes {
+            if !seen.insert(hash) {
+                continue;
+            }
+            if next_update_by_hash
+                .get(&hash)
+                .is_some_and(|next_update| now < *next_update)
+            {
+                continue;
+            }
+            next_update_by_hash.insert(hash, now.saturating_add(ACCESS_UPDATE_INTERVAL_SECS));
+            due.push(hash);
+        }
+        due
     }
 }
 
@@ -234,6 +252,41 @@ impl LocalStore {
             LocalStore::Fs(store) => store.get_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.get_sync(hash),
+        }
+    }
+
+    pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.touch_accessed_sync(hash, now),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.touch_accessed_sync(hash, now),
+        }
+    }
+
+    pub fn touch_many_accessed_sync(&self, hashes: &[Hash], now: u64) -> Result<usize, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.touch_many_accessed_sync(hashes, now),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.touch_many_accessed_sync(hashes, now),
+        }
+    }
+
+    pub fn last_accessed_at_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.last_accessed_at_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.last_accessed_at_sync(hash),
+        }
+    }
+
+    pub fn many_last_accessed_at_sync(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<(Hash, u64)>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.many_last_accessed_at_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.many_last_accessed_at_sync(hashes),
         }
     }
 
@@ -644,6 +697,25 @@ impl StorageRouter {
         Ok(None)
     }
 
+    pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
+        self.local.touch_accessed_sync(hash, now)
+    }
+
+    pub fn touch_many_accessed_sync(&self, hashes: &[Hash], now: u64) -> Result<usize, StoreError> {
+        self.local.touch_many_accessed_sync(hashes, now)
+    }
+
+    pub fn last_accessed_at_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.local.last_accessed_at_sync(hash)
+    }
+
+    pub fn many_last_accessed_at_sync(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<(Hash, u64)>, StoreError> {
+        self.local.many_last_accessed_at_sync(hashes)
+    }
+
     /// Check if hash exists
     pub fn exists(&self, hash: &Hash) -> Result<bool, StoreError> {
         // Check local first
@@ -712,6 +784,62 @@ impl StorageRouter {
     }
 }
 
+#[derive(Clone)]
+struct AccessRecordingStore {
+    inner: Arc<StorageRouter>,
+    accessed: Arc<Mutex<HashSet<Hash>>>,
+}
+
+impl AccessRecordingStore {
+    fn new(inner: Arc<StorageRouter>) -> Self {
+        Self {
+            inner,
+            accessed: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn take_accessed_hashes(&self) -> Vec<Hash> {
+        let Ok(mut accessed) = self.accessed.lock() else {
+            return Vec::new();
+        };
+        accessed.drain().collect()
+    }
+
+    fn record_access(&self, hash: &Hash) {
+        let Ok(mut accessed) = self.accessed.lock() else {
+            return;
+        };
+        accessed.insert(*hash);
+    }
+}
+
+#[async_trait]
+impl Store for AccessRecordingStore {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.inner.put(hash, data).await
+    }
+
+    async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.inner.put_many(items).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        let data = self.inner.get(hash).await?;
+        if data.is_some() {
+            self.record_access(hash);
+        }
+        Ok(data)
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.delete(hash).await
+    }
+}
+
 // Implement async Store trait for StorageRouter so it can be used directly with HashTree
 // This ensures all writes go through S3 sync
 #[async_trait]
@@ -764,8 +892,8 @@ pub struct HashtreeStore {
     max_size_bytes: u64,
     /// Whether quota enforcement may delete local blobs not tracked by any indexed tree.
     evict_orphans: bool,
-    /// Best-effort in-memory throttle for tree access metadata writes.
-    access_update_gate: AccessUpdateGate,
+    /// Best-effort in-memory throttle for blob access metadata writes.
+    blob_access_update_gate: BlobAccessUpdateGate,
 }
 
 impl HashtreeStore {
@@ -935,7 +1063,7 @@ impl HashtreeStore {
             router,
             max_size_bytes,
             evict_orphans,
-            access_update_gate: AccessUpdateGate::default(),
+            blob_access_update_gate: BlobAccessUpdateGate::default(),
         })
     }
 
@@ -954,16 +1082,52 @@ impl HashtreeStore {
         Arc::clone(&self.router)
     }
 
+    fn access_tracking_tree(&self) -> (HashTree<AccessRecordingStore>, AccessRecordingStore) {
+        let access_store = AccessRecordingStore::new(self.store_arc());
+        let tree = HashTree::new(HashTreeConfig::new(Arc::new(access_store.clone())).public());
+        (tree, access_store)
+    }
+
+    pub fn record_blob_accesses<I>(&self, hashes: I)
+    where
+        I: IntoIterator<Item = Hash>,
+    {
+        let now = unix_timestamp_now();
+        let due_hashes = self.blob_access_update_gate.due_hashes(hashes, now);
+        if due_hashes.is_empty() {
+            return;
+        }
+
+        if let Err(err) = self.router.touch_many_accessed_sync(&due_hashes, now) {
+            tracing::debug!("Failed to update blob access metadata: {}", err);
+        }
+    }
+
+    pub fn blob_last_accessed_at(&self, hash: &Hash) -> Result<Option<u64>> {
+        self.router
+            .last_accessed_at_sync(hash)
+            .map_err(|e| anyhow::anyhow!("Failed to read blob access metadata: {}", e))
+    }
+
+    pub fn blob_last_accessed_many(&self, hashes: &[Hash]) -> Result<Vec<(Hash, u64)>> {
+        self.router
+            .many_last_accessed_at_sync(hashes)
+            .map_err(|e| anyhow::anyhow!("Failed to read blob access metadata: {}", e))
+    }
+
     /// Get tree node by hash (raw bytes)
     pub fn get_tree_node(&self, hash: &[u8; 32]) -> Result<Option<TreeNode>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
 
-        sync_block_on(async {
+        let result = sync_block_on(async {
             tree.get_tree_node(hash)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))
-        })
+        })?;
+        if result.is_some() {
+            self.record_blob_accesses(access_store.take_accessed_hashes());
+        }
+        Ok(result)
     }
 
     /// Store a raw blob, returns SHA256 hash as hex.
@@ -1028,9 +1192,14 @@ impl HashtreeStore {
 
     /// Get a raw blob by SHA256 hash (raw bytes).
     pub fn get_blob(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-        self.router
+        let data = self
+            .router
             .get_sync(hash)
-            .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?;
+        if data.is_some() {
+            self.record_blob_accesses(std::iter::once(*hash));
+        }
+        Ok(data)
     }
 
     /// Check if a blob exists by SHA256 hash (raw bytes).
@@ -1080,7 +1249,9 @@ impl HashtreeStore {
 
             // Get size from raw blob
             let size = self
-                .get_blob(sha256)?
+                .router
+                .get_sync(sha256)
+                .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
                 .map(|data| data.len() as u64)
                 .unwrap_or(0);
 
@@ -1222,16 +1393,20 @@ impl HashtreeStore {
 
     /// Get a single chunk/blob by hash (raw bytes)
     pub fn get_chunk(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-        self.router
+        let data = self
+            .router
             .get_sync(hash)
-            .map_err(|e| anyhow::anyhow!("Failed to get chunk: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to get chunk: {}", e))?;
+        if data.is_some() {
+            self.record_blob_accesses(std::iter::once(*hash));
+        }
+        Ok(data)
     }
 
     /// Get file content by hash (raw bytes)
     /// Returns raw bytes (caller handles decryption if needed)
     pub fn get_file(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
 
         let result = sync_block_on(async {
             tree.read_file(hash)
@@ -1239,7 +1414,7 @@ impl HashtreeStore {
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
         })?;
         if result.is_some() {
-            self.note_tree_access(hash);
+            self.record_blob_accesses(access_store.take_accessed_hashes());
         }
         Ok(result)
     }
@@ -1247,8 +1422,7 @@ impl HashtreeStore {
     /// Get file content by Cid (hash + optional decryption key as raw bytes)
     /// Handles decryption automatically if key is present
     pub fn get_file_by_cid(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
 
         let result = sync_block_on(async {
             tree.get(cid, None)
@@ -1256,7 +1430,7 @@ impl HashtreeStore {
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
         })?;
         if result.is_some() {
-            self.note_tree_access(&cid.hash);
+            self.record_blob_accesses(access_store.take_accessed_hashes());
         }
         Ok(result)
     }
@@ -1276,8 +1450,7 @@ impl HashtreeStore {
     pub fn write_file_by_cid_to_writer<W: Write>(&self, cid: &Cid, writer: &mut W) -> Result<u64> {
         self.ensure_cid_exists(cid)?;
 
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
         let mut total_bytes = 0u64;
         let mut streamed_any_chunk = false;
 
@@ -1298,7 +1471,7 @@ impl HashtreeStore {
         if !streamed_any_chunk {
             anyhow::bail!("CID not found: {}", to_hex(&cid.hash));
         }
-        self.note_tree_access(&cid.hash);
+        self.record_blob_accesses(access_store.take_accessed_hashes());
 
         writer
             .flush()
@@ -1331,8 +1504,7 @@ impl HashtreeStore {
 
     /// Resolve a path within a tree (returns Cid with key if encrypted)
     pub fn resolve_path(&self, cid: &Cid, path: &str) -> Result<Option<Cid>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
 
         let result = sync_block_on(async {
             tree.resolve_path(cid, path)
@@ -1340,20 +1512,20 @@ impl HashtreeStore {
                 .map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))
         })?;
         if result.is_some() {
-            self.note_tree_access(&cid.hash);
+            self.record_blob_accesses(access_store.take_accessed_hashes());
         }
         Ok(result)
     }
 
     /// Get chunk metadata for a file (chunk list, sizes, total size)
     pub fn get_file_chunk_metadata(&self, hash: &[u8; 32]) -> Result<Option<FileChunkMetadata>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store.clone()).public());
+        let access_store = AccessRecordingStore::new(self.store_arc());
+        let tree = HashTree::new(HashTreeConfig::new(Arc::new(access_store.clone())).public());
 
         let metadata: Result<Option<FileChunkMetadata>> = sync_block_on(async {
             // First check if the hash exists in the store at all
             // (either as a blob or tree node)
-            let exists = store
+            let exists = access_store
                 .has(hash)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to check existence: {}", e))?;
@@ -1417,7 +1589,7 @@ impl HashtreeStore {
         });
         let metadata = metadata?;
         if metadata.is_some() {
-            self.note_tree_access(hash);
+            self.record_blob_accesses(access_store.take_accessed_hashes());
         }
         Ok(metadata)
     }
@@ -1529,8 +1701,7 @@ impl HashtreeStore {
 
     /// Get directory structure by hash (raw bytes)
     pub fn get_directory_listing(&self, hash: &[u8; 32]) -> Result<Option<DirectoryListing>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
 
         let listing: Result<Option<DirectoryListing>> = sync_block_on(async {
             // Check if it's a directory
@@ -1567,15 +1738,14 @@ impl HashtreeStore {
         });
         let listing = listing?;
         if listing.is_some() {
-            self.note_tree_access(hash);
+            self.record_blob_accesses(access_store.take_accessed_hashes());
         }
         Ok(listing)
     }
 
     /// Get directory structure by CID, supporting encrypted directories.
     pub fn get_directory_listing_by_cid(&self, cid: &Cid) -> Result<Option<DirectoryListing>> {
-        let store = self.store_arc();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let (tree, access_store) = self.access_tracking_tree();
         let cid = cid.clone();
 
         let listing: Result<Option<DirectoryListing>> = sync_block_on(async {
@@ -1614,7 +1784,7 @@ impl HashtreeStore {
         });
         let listing = listing?;
         if listing.is_some() {
-            self.note_tree_access(&cid.hash);
+            self.record_blob_accesses(access_store.take_accessed_hashes());
         }
         Ok(listing)
     }
@@ -1869,6 +2039,23 @@ mod tests {
     use super::*;
     #[cfg(feature = "lmdb")]
     use tempfile::TempDir;
+
+    #[test]
+    fn blob_access_update_gate_deduplicates_and_throttles() {
+        let gate = BlobAccessUpdateGate::default();
+        let first = sha256(b"first");
+        let second = sha256(b"second");
+
+        assert_eq!(
+            gate.due_hashes([first, first, second], 10),
+            vec![first, second]
+        );
+        assert!(gate.due_hashes([first, second], 11).is_empty());
+        assert_eq!(
+            gate.due_hashes([second, first], 10 + ACCESS_UPDATE_INTERVAL_SECS),
+            vec![second, first]
+        );
+    }
 
     #[cfg(feature = "lmdb")]
     #[test]
