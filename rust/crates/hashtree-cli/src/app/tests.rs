@@ -27,7 +27,7 @@ use super::run::{
     stored_published_pin_hash, warn_if_stun_unavailable,
 };
 use super::storage_stats::{
-    classify_storage_bucket, render_storage_inventory, PinnedDetail, StorageBucket,
+    classify_storage_bucket, render_storage_inventory, AuthorSummary, PinnedDetail, StorageBucket,
     StorageBucketSummary, StorageInventory, TreeDetail,
 };
 use super::util::format_bytes;
@@ -183,6 +183,15 @@ fn test_storage_inventory_render_shows_bucket_details() {
         size_bytes: 4096,
         pinned: true,
     });
+    inventory.buckets[1].authors.push(AuthorSummary {
+        key: "alice".to_string(),
+        label: "Alice (npub1alice...)".to_string(),
+        indexed_tree_count: 1,
+        indexed_tree_bytes: 4096,
+        pinned_tree_count: 1,
+        owned_blob_count: 2,
+        owned_blob_bytes: 2048,
+    });
 
     let rendered = render_storage_inventory(&inventory);
 
@@ -190,6 +199,9 @@ fn test_storage_inventory_render_shows_bucket_details() {
     assert!(rendered.contains("Followed users' stuff: 6.0 KiB"));
     assert!(rendered.contains("Indexed trees: 1 tree (4.0 KiB)"));
     assert!(rendered.contains("Owned Blossom blobs: 2 blobs (2.0 KiB)"));
+    assert!(rendered.contains("Authors:"));
+    assert!(rendered
+        .contains("Alice (npub1alice...) - 1 tree (4.0 KiB), 1 tree pinned; 2 blobs (2.0 KiB)"));
     assert!(rendered.contains("Pinned items:"));
     assert!(rendered.contains("[dir] alice/photos - 4.0 KiB - aaaaaaaaaaaa..."));
     assert!(rendered.contains("Social graph people's stuff: 0 B"));
@@ -207,6 +219,7 @@ fn empty_storage_bucket(bucket: StorageBucket) -> StorageBucketSummary {
         pinned_unindexed_bytes: 0,
         pinned_items: Vec::new(),
         trees: Vec::new(),
+        authors: Vec::new(),
     }
 }
 

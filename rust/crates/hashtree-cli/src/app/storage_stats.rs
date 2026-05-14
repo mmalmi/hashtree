@@ -11,6 +11,7 @@ use super::util::format_bytes;
 
 const PIN_DETAIL_LIMIT: usize = 20;
 const TREE_DETAIL_LIMIT: usize = 5;
+const AUTHOR_DETAIL_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StorageBucket {
@@ -67,6 +68,36 @@ pub(crate) struct TreeDetail {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct AuthorSummary {
+    pub key: String,
+    pub label: String,
+    pub indexed_tree_count: usize,
+    pub indexed_tree_bytes: u64,
+    pub pinned_tree_count: usize,
+    pub owned_blob_count: usize,
+    pub owned_blob_bytes: u64,
+}
+
+impl AuthorSummary {
+    fn new(key: String, label: String) -> Self {
+        Self {
+            key,
+            label,
+            indexed_tree_count: 0,
+            indexed_tree_bytes: 0,
+            pinned_tree_count: 0,
+            owned_blob_count: 0,
+            owned_blob_bytes: 0,
+        }
+    }
+
+    fn known_bytes(&self) -> u64 {
+        self.indexed_tree_bytes
+            .saturating_add(self.owned_blob_bytes)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct StorageBucketSummary {
     pub bucket: StorageBucket,
     pub indexed_tree_count: usize,
@@ -77,6 +108,7 @@ pub(crate) struct StorageBucketSummary {
     pub pinned_unindexed_bytes: u64,
     pub pinned_items: Vec<PinnedDetail>,
     pub trees: Vec<TreeDetail>,
+    pub authors: Vec<AuthorSummary>,
 }
 
 impl StorageBucketSummary {
@@ -91,7 +123,18 @@ impl StorageBucketSummary {
             pinned_unindexed_bytes: 0,
             pinned_items: Vec::new(),
             trees: Vec::new(),
+            authors: Vec::new(),
         }
+    }
+
+    fn author_mut(&mut self, key: &str, label: String) -> &mut AuthorSummary {
+        if let Some(index) = self.authors.iter().position(|author| author.key == key) {
+            return &mut self.authors[index];
+        }
+
+        self.authors
+            .push(AuthorSummary::new(key.to_string(), label));
+        self.authors.last_mut().expect("just pushed author")
     }
 
     fn known_bytes(&self) -> u64 {
@@ -184,20 +227,31 @@ fn collect_storage_inventory_with_graph(
     let pins = store.list_pins_with_names()?;
     let pinned_hashes = pin_hashes(&pins);
     let mut tree_buckets = HashMap::<Hash, StorageBucket>::new();
+    let mut author_labels = AuthorLabelCache::new(social_graph);
 
     for (root, meta) in trees {
         let bucket = classify_tree_bucket(&meta, social_graph);
+        let author = author_labels.for_owner(&meta.owner);
+        let is_pinned = pinned_hashes.contains(&root);
         tree_buckets.insert(root, bucket);
 
         let summary = inventory.bucket_mut(bucket);
         summary.indexed_tree_count += 1;
         summary.indexed_tree_bytes = summary.indexed_tree_bytes.saturating_add(meta.total_size);
+        let author_summary = summary.author_mut(&author.key, author.label.clone());
+        author_summary.indexed_tree_count += 1;
+        author_summary.indexed_tree_bytes = author_summary
+            .indexed_tree_bytes
+            .saturating_add(meta.total_size);
+        if is_pinned {
+            author_summary.pinned_tree_count += 1;
+        }
         summary.trees.push(TreeDetail {
             name: tree_display_name(&root, &meta),
-            owner: owner_display_name(&meta.owner),
+            owner: author.label,
             root: to_hex(&root),
             size_bytes: meta.total_size,
-            pinned: pinned_hashes.contains(&root),
+            pinned: is_pinned,
         });
     }
 
@@ -228,9 +282,16 @@ fn collect_storage_inventory_with_graph(
     for owned in store.owned_blob_stats()? {
         let distance = social_graph.and_then(|graph| graph.follow_distance(&owned.owner).ok()?);
         let bucket = classify_storage_bucket(0, distance);
+        let author = author_labels.for_pubkey(&owned.owner);
         let summary = inventory.bucket_mut(bucket);
         summary.owned_blob_count = summary.owned_blob_count.saturating_add(owned.count);
         summary.owned_blob_bytes = summary.owned_blob_bytes.saturating_add(owned.total_bytes);
+        let author_summary = summary.author_mut(&author.key, author.label);
+        author_summary.owned_blob_count =
+            author_summary.owned_blob_count.saturating_add(owned.count);
+        author_summary.owned_blob_bytes = author_summary
+            .owned_blob_bytes
+            .saturating_add(owned.total_bytes);
     }
 
     for bucket in &mut inventory.buckets {
@@ -240,6 +301,12 @@ fn collect_storage_inventory_with_graph(
         bucket
             .pinned_items
             .sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes));
+        bucket.authors.sort_by(|left, right| {
+            right
+                .known_bytes()
+                .cmp(&left.known_bytes())
+                .then_with(|| left.label.cmp(&right.label))
+        });
     }
 
     Ok(inventory)
@@ -276,6 +343,45 @@ pub(crate) fn render_storage_inventory(inventory: &StorageInventory) -> String {
                 count_label(bucket.pinned_unindexed_count, "item", "items"),
                 format_bytes(bucket.pinned_unindexed_bytes)
             ));
+        }
+        if !bucket.authors.is_empty() {
+            out.push_str("    Authors:\n");
+            for author in bucket.authors.iter().take(AUTHOR_DETAIL_LIMIT) {
+                let mut parts = Vec::new();
+                if author.indexed_tree_count > 0 {
+                    let mut trees = format!(
+                        "{} ({})",
+                        count_label(author.indexed_tree_count, "tree", "trees"),
+                        format_bytes(author.indexed_tree_bytes)
+                    );
+                    if author.pinned_tree_count > 0 {
+                        trees.push_str(&format!(
+                            ", {} pinned",
+                            count_label(author.pinned_tree_count, "tree", "trees")
+                        ));
+                    }
+                    parts.push(trees);
+                }
+                if author.owned_blob_count > 0 {
+                    parts.push(format!(
+                        "{} ({})",
+                        count_label(author.owned_blob_count, "blob", "blobs"),
+                        format_bytes(author.owned_blob_bytes)
+                    ));
+                }
+                out.push_str(&format!(
+                    "      - {} - {}\n",
+                    author.label,
+                    parts.join("; ")
+                ));
+            }
+            append_more_line(
+                &mut out,
+                bucket.authors.len(),
+                AUTHOR_DETAIL_LIMIT,
+                "author",
+                "authors",
+            );
         }
         if !bucket.pinned_items.is_empty() {
             out.push_str("    Pinned items:\n");
@@ -367,6 +473,78 @@ fn classify_tree_bucket(meta: &TreeMeta, social_graph: Option<&SocialGraphStore>
         owner_pubkey_bytes(&meta.owner).and_then(|owner| graph.follow_distance(&owner).ok()?)
     });
     classify_storage_bucket(meta.priority, distance)
+}
+
+#[derive(Debug, Clone)]
+struct AuthorIdentity {
+    key: String,
+    label: String,
+}
+
+struct AuthorLabelCache<'a> {
+    graph: Option<&'a SocialGraphStore>,
+    labels: HashMap<String, String>,
+}
+
+impl<'a> AuthorLabelCache<'a> {
+    fn new(graph: Option<&'a SocialGraphStore>) -> Self {
+        Self {
+            graph,
+            labels: HashMap::new(),
+        }
+    }
+
+    fn for_owner(&mut self, owner: &str) -> AuthorIdentity {
+        if let Some(pubkey) = owner_pubkey_bytes(owner) {
+            return self.for_pubkey_with_fallback(&pubkey, owner);
+        }
+
+        let label = owner_display_name(owner);
+        AuthorIdentity {
+            key: label.clone(),
+            label,
+        }
+    }
+
+    fn for_pubkey(&mut self, pubkey: &[u8; 32]) -> AuthorIdentity {
+        self.for_pubkey_with_fallback(pubkey, &to_hex(pubkey))
+    }
+
+    fn for_pubkey_with_fallback(&mut self, pubkey: &[u8; 32], fallback: &str) -> AuthorIdentity {
+        let key = to_hex(pubkey);
+        if let Some(label) = self.labels.get(&key) {
+            return AuthorIdentity {
+                key,
+                label: label.clone(),
+            };
+        }
+
+        let fallback_label = owner_display_name(fallback);
+        let label = self
+            .graph
+            .and_then(|graph| graph.latest_profile_event(&key).ok().flatten())
+            .and_then(|event| profile_name_from_json(&event.content))
+            .map(|name| format!("{name} ({fallback_label})"))
+            .unwrap_or(fallback_label);
+        self.labels.insert(key.clone(), label.clone());
+        AuthorIdentity { key, label }
+    }
+}
+
+fn profile_name_from_json(content: &str) -> Option<String> {
+    let profile = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    ["display_name", "displayName", "name", "username"]
+        .into_iter()
+        .find_map(|key| normalize_profile_name(profile.get(key)?))
+}
+
+fn normalize_profile_name(value: &serde_json::Value) -> Option<String> {
+    let raw = value.as_str()?;
+    let trimmed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(100).collect())
 }
 
 fn owner_pubkey_bytes(owner: &str) -> Option<[u8; 32]> {
