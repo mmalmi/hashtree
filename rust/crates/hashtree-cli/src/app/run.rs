@@ -1552,14 +1552,17 @@ pub(crate) async fn run() -> Result<()> {
                             };
                             let name = meta.name.as_deref().unwrap_or("<unnamed>");
                             let synced = chrono_humanize_timestamp(meta.synced_at);
+                            let accessed =
+                                chrono_humanize_timestamp(meta.effective_last_accessed_at());
                             println!(
-                                "  {}... {} ({}) - {} - {} - {}",
+                                "  {}... {} ({}) - {} - {} - synced {} - accessed {}",
                                 &root_hex[..12],
                                 name,
                                 priority_str,
                                 &meta.owner[..12.min(meta.owner.len())],
                                 format_bytes(meta.total_size),
-                                synced
+                                synced,
+                                accessed
                             );
                         }
                     }

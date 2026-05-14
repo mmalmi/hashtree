@@ -13,11 +13,12 @@ use hashtree_lmdb::LmdbBlobStore;
 use heed::types::*;
 use heed::{Database, EnvOpenOptions};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[cfg(feature = "s3")]
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod upload;
@@ -36,6 +37,8 @@ const LMDB_MAX_READERS: u32 = 1024;
 const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 1024 * 1024;
 #[cfg(feature = "lmdb")]
 const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
+const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
+const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 
 /// Cached root info from Nostr events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,35 @@ pub struct CachedRoot {
 pub struct LocalStoreStats {
     pub count: usize,
     pub total_bytes: u64,
+}
+
+#[derive(Default)]
+struct AccessUpdateGate {
+    next_update_by_hash: Mutex<HashMap<Hash, u64>>,
+}
+
+impl AccessUpdateGate {
+    fn should_update(&self, hash: &Hash, now: u64) -> bool {
+        let Ok(mut next_update_by_hash) = self.next_update_by_hash.try_lock() else {
+            return false;
+        };
+
+        if let Some(next_update) = next_update_by_hash.get(hash) {
+            if now < *next_update {
+                return false;
+            }
+        }
+
+        if next_update_by_hash.len() >= ACCESS_UPDATE_GATE_MAX_ENTRIES {
+            next_update_by_hash.retain(|_, next_update| *next_update > now);
+            if next_update_by_hash.len() >= ACCESS_UPDATE_GATE_MAX_ENTRIES {
+                next_update_by_hash.clear();
+            }
+        }
+
+        next_update_by_hash.insert(*hash, now.saturating_add(ACCESS_UPDATE_INTERVAL_SECS));
+        true
+    }
 }
 
 /// Local blob store - wraps either FsBlobStore or LmdbBlobStore
@@ -732,6 +764,8 @@ pub struct HashtreeStore {
     max_size_bytes: u64,
     /// Whether quota enforcement may delete local blobs not tracked by any indexed tree.
     evict_orphans: bool,
+    /// Best-effort in-memory throttle for tree access metadata writes.
+    access_update_gate: AccessUpdateGate,
 }
 
 impl HashtreeStore {
@@ -901,6 +935,7 @@ impl HashtreeStore {
             router,
             max_size_bytes,
             evict_orphans,
+            access_update_gate: AccessUpdateGate::default(),
         })
     }
 
@@ -1198,11 +1233,15 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        sync_block_on(async {
+        let result = sync_block_on(async {
             tree.read_file(hash)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
-        })
+        })?;
+        if result.is_some() {
+            self.note_tree_access(hash);
+        }
+        Ok(result)
     }
 
     /// Get file content by Cid (hash + optional decryption key as raw bytes)
@@ -1211,11 +1250,15 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        sync_block_on(async {
+        let result = sync_block_on(async {
             tree.get(cid, None)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
-        })
+        })?;
+        if result.is_some() {
+            self.note_tree_access(&cid.hash);
+        }
+        Ok(result)
     }
 
     fn ensure_cid_exists(&self, cid: &Cid) -> Result<()> {
@@ -1255,6 +1298,7 @@ impl HashtreeStore {
         if !streamed_any_chunk {
             anyhow::bail!("CID not found: {}", to_hex(&cid.hash));
         }
+        self.note_tree_access(&cid.hash);
 
         writer
             .flush()
@@ -1290,11 +1334,15 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        sync_block_on(async {
+        let result = sync_block_on(async {
             tree.resolve_path(cid, path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))
-        })
+        })?;
+        if result.is_some() {
+            self.note_tree_access(&cid.hash);
+        }
+        Ok(result)
     }
 
     /// Get chunk metadata for a file (chunk list, sizes, total size)
@@ -1302,7 +1350,7 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store.clone()).public());
 
-        sync_block_on(async {
+        let metadata: Result<Option<FileChunkMetadata>> = sync_block_on(async {
             // First check if the hash exists in the store at all
             // (either as a blob or tree node)
             let exists = store
@@ -1366,7 +1414,12 @@ impl HashtreeStore {
                 chunk_sizes,
                 is_chunked: !node.links.is_empty(),
             }))
-        })
+        });
+        let metadata = metadata?;
+        if metadata.is_some() {
+            self.note_tree_access(hash);
+        }
+        Ok(metadata)
     }
 
     /// Get byte range from file
@@ -1479,7 +1532,7 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        sync_block_on(async {
+        let listing: Result<Option<DirectoryListing>> = sync_block_on(async {
             // Check if it's a directory
             let is_dir = tree
                 .is_directory(hash)
@@ -1511,7 +1564,12 @@ impl HashtreeStore {
                 dir_name: String::new(),
                 entries,
             }))
-        })
+        });
+        let listing = listing?;
+        if listing.is_some() {
+            self.note_tree_access(hash);
+        }
+        Ok(listing)
     }
 
     /// Get directory structure by CID, supporting encrypted directories.
@@ -1520,7 +1578,7 @@ impl HashtreeStore {
         let tree = HashTree::new(HashTreeConfig::new(store).public());
         let cid = cid.clone();
 
-        sync_block_on(async {
+        let listing: Result<Option<DirectoryListing>> = sync_block_on(async {
             let is_dir = tree
                 .is_dir(&cid)
                 .await
@@ -1553,7 +1611,12 @@ impl HashtreeStore {
                 dir_name: String::new(),
                 entries,
             }))
-        })
+        });
+        let listing = listing?;
+        if listing.is_some() {
+            self.note_tree_access(&cid.hash);
+        }
+        Ok(listing)
     }
 
     // === Cached roots ===

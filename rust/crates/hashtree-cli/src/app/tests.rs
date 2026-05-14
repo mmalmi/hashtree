@@ -182,6 +182,7 @@ fn test_storage_inventory_render_shows_bucket_details() {
         root: "aa".repeat(32),
         size_bytes: 4096,
         pinned: true,
+        last_accessed_at: 0,
     });
     inventory.buckets[1].authors.push(AuthorSummary {
         key: "alice".to_string(),
@@ -204,6 +205,7 @@ fn test_storage_inventory_render_shows_bucket_details() {
         .contains("Alice (npub1alice...) - 1 tree (4.0 KiB), 1 tree pinned; 2 blobs (2.0 KiB)"));
     assert!(rendered.contains("Pinned items:"));
     assert!(rendered.contains("[dir] alice/photos - 4.0 KiB - aaaaaaaaaaaa..."));
+    assert!(rendered.contains("accessed "));
     assert!(rendered.contains("Social graph people's stuff: 0 B"));
     assert!(rendered.contains("Known indexed payloads: 4.0 KiB across 1 tree"));
 }
