@@ -26,7 +26,7 @@ mod maintenance;
 mod retention;
 
 pub use maintenance::{compact_lmdb_environments_under, CompactResult, VerifyResult};
-pub use retention::{PinnedItem, StorageByPriority, StorageStats, TreeMeta};
+pub use retention::{OwnedBlobStats, PinnedItem, StorageByPriority, StorageStats, TreeMeta};
 
 /// Priority levels for tree eviction
 pub const PRIORITY_OTHER: u8 = 64;

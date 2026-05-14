@@ -50,6 +50,7 @@ use super::socialgraph::{
     run_socialgraph_rebuild_profile_index, run_socialgraph_snapshot, run_socialgraph_stats,
     run_socialgraph_warm,
 };
+use super::storage_stats::print_storage_inventory;
 use super::user::show_user_identity;
 use super::util::{chrono_humanize_timestamp, format_bytes};
 #[cfg(feature = "fuse")]
@@ -984,7 +985,13 @@ pub(crate) async fn run() -> Result<()> {
                 println!("Pinned items ({}):", pins.len());
                 for pin in pins {
                     let icon = if pin.is_directory { "dir" } else { "file" };
-                    println!("  [{}] {} ({})", icon, pin.name, pin.cid);
+                    println!(
+                        "  [{}] {} - {} ({})",
+                        icon,
+                        pin.name,
+                        format_bytes(pin.size_bytes),
+                        pin.cid
+                    );
                 }
             }
         }
@@ -1069,6 +1076,7 @@ pub(crate) async fn run() -> Result<()> {
             println!("  Stored objects: {}", stats.total_dags);
             println!("  Pinned items: {}", stats.pinned_dags);
             println!("  Total size: {}", format_bytes(stats.total_bytes));
+            print_storage_inventory(&store, &data_dir)?;
             if let Some(status) = fetch_daemon_status_quietly(&addr).await {
                 print_network_stats(&status);
             }
@@ -1494,7 +1502,6 @@ pub(crate) async fn run() -> Result<()> {
                         max_size_bytes,
                     )?;
                     let stats = store.get_storage_stats()?;
-                    let by_priority = store.storage_by_priority()?;
                     let tracked = store.tracked_size()?;
                     let trees = store.list_indexed_trees()?;
 
@@ -1512,23 +1519,7 @@ pub(crate) async fn run() -> Result<()> {
                     println!("  Stored objects: {}", stats.total_dags);
                     println!("  Pinned items: {}", stats.pinned_dags);
                     println!("  Indexed trees: {}", trees.len());
-                    println!();
-                    println!("Usage by priority:");
-                    println!(
-                        "  Own (255):      {} ({:.2} MB)",
-                        by_priority.own,
-                        by_priority.own as f64 / 1024.0 / 1024.0
-                    );
-                    println!(
-                        "  Followed (128): {} ({:.2} MB)",
-                        by_priority.followed,
-                        by_priority.followed as f64 / 1024.0 / 1024.0
-                    );
-                    println!(
-                        "  Other (64):     {} ({:.2} MB)",
-                        by_priority.other,
-                        by_priority.other as f64 / 1024.0 / 1024.0
-                    );
+                    print_storage_inventory(&store, &data_dir)?;
 
                     let utilization = if max_size_bytes > 0 {
                         (tracked as f64 / max_size_bytes as f64) * 100.0
@@ -1562,12 +1553,12 @@ pub(crate) async fn run() -> Result<()> {
                             let name = meta.name.as_deref().unwrap_or("<unnamed>");
                             let synced = chrono_humanize_timestamp(meta.synced_at);
                             println!(
-                                "  {}... {} ({}) - {} - {} bytes - {}",
+                                "  {}... {} ({}) - {} - {} - {}",
                                 &root_hex[..12],
                                 name,
                                 priority_str,
                                 &meta.owner[..12.min(meta.owner.len())],
-                                meta.total_size,
+                                format_bytes(meta.total_size),
                                 synced
                             );
                         }

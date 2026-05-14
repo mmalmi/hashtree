@@ -1410,7 +1410,8 @@ pub async fn list_pins(State(state): State<AppState>) -> impl IntoResponse {
             "pins": pins.iter().map(|p| json!({
                 "cid": p.cid,
                 "name": p.name,
-                "is_directory": p.is_directory
+                "is_directory": p.is_directory,
+                "size_bytes": p.size_bytes
             })).collect::<Vec<_>>()
         })),
         Err(e) => Json(json!({

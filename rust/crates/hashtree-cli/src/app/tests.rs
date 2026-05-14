@@ -26,6 +26,10 @@ use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_load_target_cid,
     stored_published_pin_hash, warn_if_stun_unavailable,
 };
+use super::storage_stats::{
+    classify_storage_bucket, render_storage_inventory, PinnedDetail, StorageBucket,
+    StorageBucketSummary, StorageInventory, TreeDetail,
+};
 use super::util::format_bytes;
 use crate::app::args::{
     CashuCommands, CashuMintCommands, MirrorCommands, ReleaseCommands, SocialGraphCommands,
@@ -135,6 +139,75 @@ fn test_format_bytes_uses_reasonable_binary_units() {
     assert_eq!(format_bytes(1023), "1023 B");
     assert_eq!(format_bytes(1024), "1.0 KiB");
     assert_eq!(format_bytes(222_944_845_229), "207.6 GiB");
+}
+
+#[test]
+fn test_storage_bucket_classification_prefers_social_graph_distance() {
+    assert_eq!(classify_storage_bucket(255, None), StorageBucket::Mine);
+    assert_eq!(classify_storage_bucket(128, None), StorageBucket::Followed);
+    assert_eq!(classify_storage_bucket(64, None), StorageBucket::Other);
+    assert_eq!(
+        classify_storage_bucket(255, Some(1)),
+        StorageBucket::Followed
+    );
+    assert_eq!(
+        classify_storage_bucket(64, Some(2)),
+        StorageBucket::SocialGraph
+    );
+}
+
+#[test]
+fn test_storage_inventory_render_shows_bucket_details() {
+    let mut inventory = StorageInventory {
+        buckets: vec![
+            empty_storage_bucket(StorageBucket::Mine),
+            empty_storage_bucket(StorageBucket::Followed),
+            empty_storage_bucket(StorageBucket::SocialGraph),
+            empty_storage_bucket(StorageBucket::Other),
+        ],
+    };
+    inventory.buckets[1].indexed_tree_count = 1;
+    inventory.buckets[1].indexed_tree_bytes = 4096;
+    inventory.buckets[1].owned_blob_count = 2;
+    inventory.buckets[1].owned_blob_bytes = 2048;
+    inventory.buckets[1].pinned_items.push(PinnedDetail {
+        name: "alice/photos".to_string(),
+        cid: "aa".repeat(32),
+        is_directory: true,
+        size_bytes: 4096,
+    });
+    inventory.buckets[1].trees.push(TreeDetail {
+        name: "alice/photos".to_string(),
+        owner: "npub1alice...".to_string(),
+        root: "aa".repeat(32),
+        size_bytes: 4096,
+        pinned: true,
+    });
+
+    let rendered = render_storage_inventory(&inventory);
+
+    assert!(rendered.contains("Known content:"));
+    assert!(rendered.contains("Followed users' stuff: 6.0 KiB"));
+    assert!(rendered.contains("Indexed trees: 1 tree (4.0 KiB)"));
+    assert!(rendered.contains("Owned Blossom blobs: 2 blobs (2.0 KiB)"));
+    assert!(rendered.contains("Pinned items:"));
+    assert!(rendered.contains("[dir] alice/photos - 4.0 KiB - aaaaaaaaaaaa..."));
+    assert!(rendered.contains("Social graph people's stuff: 0 B"));
+    assert!(rendered.contains("Known indexed payloads: 4.0 KiB across 1 tree"));
+}
+
+fn empty_storage_bucket(bucket: StorageBucket) -> StorageBucketSummary {
+    StorageBucketSummary {
+        bucket,
+        indexed_tree_count: 0,
+        indexed_tree_bytes: 0,
+        owned_blob_count: 0,
+        owned_blob_bytes: 0,
+        pinned_unindexed_count: 0,
+        pinned_unindexed_bytes: 0,
+        pinned_items: Vec::new(),
+        trees: Vec::new(),
+    }
 }
 
 #[test]

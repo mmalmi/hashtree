@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
+use super::{BlobMetadata, HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
 
 /// Metadata for a synced tree (for eviction tracking)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +47,14 @@ pub struct PinnedItem {
     pub cid: String,
     pub name: String,
     pub is_directory: bool,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnedBlobStats {
+    pub owner: [u8; 32],
+    pub count: usize,
+    pub total_bytes: u64,
 }
 
 fn pinned_item_name(hash: &Hash, meta: Option<&TreeMeta>) -> String {
@@ -366,15 +374,53 @@ impl HashtreeStore {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize TreeMeta: {}", e))
                 })
                 .transpose()?;
+            let size_bytes = if let Some(meta) = meta.as_ref() {
+                meta.total_size
+            } else {
+                self.router
+                    .get_sync(&hash)
+                    .map_err(|e| anyhow::anyhow!("Failed to get pinned blob: {}", e))?
+                    .map(|data| data.len() as u64)
+                    .unwrap_or(0)
+            };
 
             pins.push(PinnedItem {
                 cid: to_hex(&hash),
                 name: pinned_item_name(&hash, meta.as_ref()),
                 is_directory,
+                size_bytes,
             });
         }
 
         Ok(pins)
+    }
+
+    pub fn owned_blob_stats(&self) -> Result<Vec<OwnedBlobStats>> {
+        let rtxn = self.env.read_txn()?;
+        let mut owners = Vec::new();
+
+        for item in self.pubkey_blobs.iter(&rtxn)? {
+            let (owner_bytes, blobs_bytes) = item?;
+            if owner_bytes.len() != 32 {
+                continue;
+            }
+
+            let blobs: Vec<BlobMetadata> = serde_json::from_slice(blobs_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize blob metadata: {}", e))?;
+            let mut owner = [0u8; 32];
+            owner.copy_from_slice(owner_bytes);
+            let total_bytes = blobs
+                .iter()
+                .fold(0u64, |total, blob| total.saturating_add(blob.size));
+            owners.push(OwnedBlobStats {
+                owner,
+                count: blobs.len(),
+                total_bytes,
+            });
+        }
+
+        owners.sort_by(|a, b| a.owner.cmp(&b.owner));
+        Ok(owners)
     }
 
     // === Tree indexing for eviction ===
@@ -848,6 +894,7 @@ mod tests {
 
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].name, "npub1example/playlist");
+        assert!(pins[0].size_bytes > 0);
     }
 
     #[test]
