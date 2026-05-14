@@ -138,13 +138,13 @@ fn clear_stale_mountpoint(path: &std::path::Path) -> Result<bool> {
     }
 }
 
-pub(crate) fn warn_if_stun_unavailable(config: &mut Config) {
+pub(crate) fn warn_if_stun_unavailable(_config: &mut Config) {
     #[cfg(not(feature = "stun"))]
-    if config.server.enable_webrtc && config.server.stun_port > 0 {
+    if _config.server.enable_webrtc && _config.server.stun_port > 0 {
         eprintln!(
             "warning: STUN server support is not built into this htree binary; disabling local STUN listener"
         );
-        config.server.stun_port = 0;
+        _config.server.stun_port = 0;
     }
 }
 

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.50 - 2026-05-14
+
+### Added
+
+- `htree stats` now reports storage size in human-readable units and, when the
+  daemon is reachable, includes peer count plus in-memory mesh/relay traffic
+  totals with the daemon uptime window.
+- `htree peer` now prints aggregate peer-router traffic and mesh frame counters
+  before the per-peer list.
+- The daemon status API now exposes `daemon_started_at`, `uptime_seconds`, and
+  aggregate `/api/peers` bandwidth counters so CLI traffic totals are clearly
+  scoped to the current daemon process.
+
+### Changed
+
+- Reworded user-facing storage counters from internal "DAG" labels to
+  "stored objects" and "pinned items".
+- Release publishing now pushes updated release DAGs incrementally instead of
+  re-uploading the whole release tree.
+- The simulation harness gained additional pubsub baselines, shared peer-graph
+  setup, tunable HTL budgets, and larger author workload distributions.
+
+### Fixed
+
+- `htree add` no longer runs storage eviction before the newly added root is
+  pinned.
+- Disabled Nostr/sync configurations now skip their background ref scans and
+  keep request handlers responsive.
+- Windows release artifact builds now run over SSH on `win11-dev` instead of
+  relying on Parallels shared folders.
+
 ## 0.2.49 - 2026-05-06
 
 ### Added
