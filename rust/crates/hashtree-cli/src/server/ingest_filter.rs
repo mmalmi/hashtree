@@ -1,4 +1,5 @@
 use axum::http::StatusCode;
+use hashtree_core::is_tree_node;
 
 /// Minimum plausible encrypted CHK blob size.
 const MIN_CHK_SIZE: usize = 16;
@@ -67,6 +68,10 @@ pub fn validate_untrusted_blob(data: &[u8], require_random: bool) -> Result<(), 
         return Ok(());
     }
 
+    if is_tree_node(data) {
+        return Ok(());
+    }
+
     let (is_random, unique, threshold) = looks_random(data);
     if is_random {
         return Ok(());
@@ -88,6 +93,7 @@ pub fn validate_untrusted_blob(data: &[u8], require_random: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashtree_core::{encode_tree_node, Link, LinkType, TreeNode};
 
     #[test]
     fn rejects_too_small_blobs() {
@@ -105,6 +111,22 @@ mod tests {
     #[test]
     fn accepts_high_entropy_sample() {
         let data: Vec<u8> = (0..=255).collect();
+        assert!(validate_untrusted_blob(&data, true).is_ok());
+    }
+
+    #[test]
+    fn accepts_low_entropy_hashtree_metadata_node() {
+        let links = (0..20)
+            .map(|_| {
+                Link::new([0u8; 32])
+                    .with_name("root.json")
+                    .with_link_type(LinkType::File)
+            })
+            .collect();
+        let data = encode_tree_node(&TreeNode::dir(links)).expect("tree node");
+
+        assert!(data.len() >= 64);
+        assert!(!looks_random(&data).0);
         assert!(validate_untrusted_blob(&data, true).is_ok());
     }
 
