@@ -92,9 +92,9 @@ pub fn install_binary_archive(
             .map_err(|err| UpdateError::Install(format!("entry has invalid path: {err}")))?;
         if path.to_string_lossy() == entry_name {
             let mut buf = Vec::with_capacity(entry.header().size().unwrap_or(0) as usize);
-            entry
-                .read_to_end(&mut buf)
-                .map_err(|err| UpdateError::Install(format!("failed to read entry bytes: {err}")))?;
+            entry.read_to_end(&mut buf).map_err(|err| {
+                UpdateError::Install(format!("failed to read entry bytes: {err}"))
+            })?;
             return install_binary(destination, &buf, true);
         }
     }

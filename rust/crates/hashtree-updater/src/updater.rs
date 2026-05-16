@@ -153,11 +153,17 @@ where
             }
         }
 
-        emit(&on_event, DownloadEvent::Started { content_length: total });
+        emit(
+            &on_event,
+            DownloadEvent::Started {
+                content_length: total,
+            },
+        );
 
         let bytes = match total {
             Some(size) if size > 0 => {
-                self.read_with_progress(&cid, size, &options, &on_event).await?
+                self.read_with_progress(&cid, size, &options, &on_event)
+                    .await?
             }
             _ => {
                 let bytes = self
@@ -194,7 +200,10 @@ where
     ) -> Result<DownloadedAsset, UpdateError> {
         self.download(
             check,
-            DownloadOptions { max_size, ..Default::default() },
+            DownloadOptions {
+                max_size,
+                ..Default::default()
+            },
             None,
         )
         .await
@@ -207,7 +216,10 @@ where
         options: &DownloadOptions,
         on_event: &Option<DownloadCallback>,
     ) -> Result<Vec<u8>, UpdateError> {
-        let chunk = options.progress_chunk.unwrap_or(DEFAULT_PROGRESS_CHUNK).max(1);
+        let chunk = options
+            .progress_chunk
+            .unwrap_or(DEFAULT_PROGRESS_CHUNK)
+            .max(1);
         let mut buf = Vec::with_capacity(total as usize);
         let mut offset = 0u64;
         while offset < total {

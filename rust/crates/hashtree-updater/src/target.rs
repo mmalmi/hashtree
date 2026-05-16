@@ -61,15 +61,14 @@ fn aliases_for(target: &str) -> BTreeSet<String> {
             "macos-x86_64",
             "macos-x64",
         ],
-        "x86_64-unknown-linux-gnu"
-        | "x86_64-unknown-linux-musl"
-        | "linux-x86_64"
-        | "linux-x64" => &[
-            "x86_64-unknown-linux-gnu",
-            "x86_64-unknown-linux-musl",
-            "linux-x86_64",
-            "linux-x64",
-        ],
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" | "linux-x86_64" | "linux-x64" => {
+            &[
+                "x86_64-unknown-linux-gnu",
+                "x86_64-unknown-linux-musl",
+                "linux-x86_64",
+                "linux-x64",
+            ]
+        }
         "aarch64-unknown-linux-gnu"
         | "aarch64-unknown-linux-musl"
         | "linux-aarch64"

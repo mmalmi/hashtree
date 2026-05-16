@@ -306,16 +306,13 @@ async fn check_parses_existing_release_json_schema_with_filename_inference() {
     )
     .await;
     let releases_root = make_releases_root(&tree, &release_cid, "v0.3.12").await;
-    let resolver =
-        SingleRootResolver::new("npub1publisher/releases/squirreldisk", releases_root);
+    let resolver = SingleRootResolver::new("npub1publisher/releases/squirreldisk", releases_root);
     let updater = HashtreeUpdater::new(resolver, tree);
 
     let check = updater
         .check(UpdateCheckOptions {
-            reference: UpdateRef::parse(
-                "htree://npub1publisher/releases%2Fsquirreldisk/latest",
-            )
-            .expect("ref"),
+            reference: UpdateRef::parse("htree://npub1publisher/releases%2Fsquirreldisk/latest")
+                .expect("ref"),
             current_version: "0.3.11".to_string(),
             target: UpdateTarget::new("linux-aarch64"),
             ..UpdateCheckOptions::default()
@@ -344,11 +341,31 @@ fn filename_inference_covers_common_release_artifacts() {
     use hashtree_updater::{infer_kind_from_name, infer_target_from_name};
 
     let cases = [
-        ("squirreldisk-v0.3.12-linux-arm64.AppImage", "linux-aarch64", AssetKind::AppImage),
-        ("squirreldisk-v0.3.12-linux-x64.deb", "linux-x86_64", AssetKind::Deb),
-        ("nostr-vpn-v1.0-macos-arm64.app.tar.gz", "darwin-aarch64", AssetKind::AppBundle),
-        ("nostr-vpn-v1.0-windows-x64.msi", "windows-x86_64", AssetKind::Msi),
-        ("nostr-vpn-v1.0-windows-x64.exe", "windows-x86_64", AssetKind::Nsis),
+        (
+            "squirreldisk-v0.3.12-linux-arm64.AppImage",
+            "linux-aarch64",
+            AssetKind::AppImage,
+        ),
+        (
+            "squirreldisk-v0.3.12-linux-x64.deb",
+            "linux-x86_64",
+            AssetKind::Deb,
+        ),
+        (
+            "nostr-vpn-v1.0-macos-arm64.app.tar.gz",
+            "darwin-aarch64",
+            AssetKind::AppBundle,
+        ),
+        (
+            "nostr-vpn-v1.0-windows-x64.msi",
+            "windows-x86_64",
+            AssetKind::Msi,
+        ),
+        (
+            "nostr-vpn-v1.0-windows-x64.exe",
+            "windows-x86_64",
+            AssetKind::Nsis,
+        ),
     ];
     for (name, expected_target, expected_kind) in cases {
         assert_eq!(
@@ -425,7 +442,9 @@ async fn download_emits_started_progress_finished_with_total_size() {
     let events = events.lock().unwrap();
     assert!(matches!(
         events.first(),
-        Some(DownloadEvent::Started { content_length: Some(4096) })
+        Some(DownloadEvent::Started {
+            content_length: Some(4096)
+        })
     ));
     assert!(matches!(
         events.last(),
@@ -651,7 +670,11 @@ fn install_appimage_decompresses_gzip_and_preserves_executable_bit() {
 
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
     let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
-    assert_ne!(mode & 0o111, 0, "appimage should be executable after install");
+    assert_ne!(
+        mode & 0o111,
+        0,
+        "appimage should be executable after install"
+    );
 }
 
 struct SingleRootResolver {

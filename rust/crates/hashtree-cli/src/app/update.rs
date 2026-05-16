@@ -8,7 +8,7 @@ use hashtree_cli::config::ensure_keys_string;
 use hashtree_cli::{
     Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver,
 };
-use hashtree_core::{HashTree, HashTreeConfig, Hash, Store, StoreError};
+use hashtree_core::{Hash, HashTree, HashTreeConfig, Store, StoreError};
 use hashtree_updater::{
     install, AssetKind, DownloadEvent, DownloadOptions, HashtreeUpdater, InstallTarget,
     UpdateAsset, UpdateCheckOptions, UpdateRef, UpdateTarget,
@@ -42,7 +42,11 @@ impl Store for FetchingStore {
         if let Some(data) = self.store.store_arc().get(hash).await? {
             return Ok(Some(data));
         }
-        match self.fetcher.fetch_chunk_with_store(&self.store, None, hash).await {
+        match self
+            .fetcher
+            .fetch_chunk_with_store(&self.store, None, hash)
+            .await
+        {
             Ok(data) => Ok(Some(data)),
             Err(_) => Ok(None),
         }
@@ -135,8 +139,7 @@ pub(crate) async fn run_install(
     only_if_newer: bool,
 ) -> Result<()> {
     let updater = build_updater(data_dir).await?;
-    let options =
-        build_check_options(&reference, current_version.clone(), target, manifest_path)?;
+    let options = build_check_options(&reference, current_version.clone(), target, manifest_path)?;
     let check = updater.check(options).await?;
 
     let mut asset: UpdateAsset = check
@@ -277,10 +280,7 @@ pub(crate) fn print_cached_update_notification(data_dir: &Path) {
 /// read doesn't complete within `timeout`. The worker is orphaned on
 /// timeout — fine, the OS reaps it on process exit and the FS layer
 /// will eventually unblock or the kernel will tear down the syscall.
-fn read_to_string_with_timeout(
-    path: PathBuf,
-    timeout: std::time::Duration,
-) -> Option<String> {
+fn read_to_string_with_timeout(path: PathBuf, timeout: std::time::Duration) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(std::fs::read_to_string(&path).ok());
@@ -454,11 +454,7 @@ fn upgrade_command_hint() -> &'static str {
 /// Refuses when the binary lives under a known package-manager path
 /// (cargo, brew) so the package manager's metadata stays in sync. Pass
 /// `force = true` to bypass and replace the binary directly anyway.
-pub(crate) async fn run_self_update(
-    data_dir: &Path,
-    check_only: bool,
-    force: bool,
-) -> Result<()> {
+pub(crate) async fn run_self_update(data_dir: &Path, check_only: bool, force: bool) -> Result<()> {
     let current_exe = std::env::current_exe()?;
     if !check_only && !force {
         match detect_install_source() {

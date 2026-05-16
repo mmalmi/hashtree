@@ -12,18 +12,11 @@ use hashtree_updater::DownloadEvent as CoreDownloadEvent;
 #[serde(tag = "event", content = "data", rename_all = "camelCase")]
 pub enum DownloadEvent {
     #[serde(rename_all = "camelCase")]
-    Started {
-        content_length: Option<u64>,
-    },
+    Started { content_length: Option<u64> },
     #[serde(rename_all = "camelCase")]
-    Progress {
-        chunk_length: u64,
-        downloaded: u64,
-    },
+    Progress { chunk_length: u64, downloaded: u64 },
     #[serde(rename_all = "camelCase")]
-    Finished {
-        total: u64,
-    },
+    Finished { total: u64 },
 }
 
 impl From<CoreDownloadEvent> for DownloadEvent {
@@ -91,8 +84,6 @@ pub(crate) async fn download_and_install<R: Runtime>(
         kind,
         executable: executable.unwrap_or(false),
     };
-    let result = ctx
-        .download_and_install(overrides, Some(on_event))
-        .await?;
+    let result = ctx.download_and_install(overrides, Some(on_event)).await?;
     Ok(UpdateMetadata::from(result))
 }
