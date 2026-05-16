@@ -268,6 +268,9 @@ pub struct BlossomConfig {
     /// Max upload size in MB
     #[serde(default = "default_max_upload_mb")]
     pub max_upload_mb: u64,
+    /// Require public Blossom and peer-fetched cached blobs to look encrypted.
+    #[serde(default = "default_require_random_untrusted_ingest")]
+    pub require_random_untrusted_ingest: bool,
     /// Max number of concurrent blob uploads during push/repair.
     #[serde(default = "default_upload_concurrency")]
     pub upload_concurrency: usize,
@@ -283,6 +286,7 @@ impl Default for BlossomConfig {
             read_servers: default_read_servers(),
             write_servers: default_write_servers(),
             max_upload_mb: default_max_upload_mb(),
+            require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
             upload_concurrency: default_upload_concurrency(),
             force_upload: false,
         }
@@ -304,6 +308,10 @@ fn default_write_servers() -> Vec<String> {
 
 fn default_max_upload_mb() -> u64 {
     100
+}
+
+fn default_require_random_untrusted_ingest() -> bool {
+    true
 }
 
 fn default_upload_concurrency() -> usize {
@@ -809,6 +817,7 @@ upload_concurrency = 24
             read_servers: vec![],
             write_servers: vec![],
             max_upload_mb: default_max_upload_mb(),
+            require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
             upload_concurrency: default_upload_concurrency(),
             force_upload: false,
         };

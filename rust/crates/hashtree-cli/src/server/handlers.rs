@@ -1207,10 +1207,14 @@ pub async fn serve_content_or_blob(
                 let (data, result) = put_cached_blob_without_blocking_runtime(&state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("Failed to cache peer data: {}", e);
-                }
-
-                return build_blob_response(data, BlobSource::WebRtcPeer { peer_id }, is_localhost)
+                } else {
+                    return build_blob_response(
+                        data,
+                        BlobSource::WebRtcPeer { peer_id },
+                        is_localhost,
+                    )
                     .into_response();
+                }
             }
         }
 
@@ -1228,10 +1232,14 @@ pub async fn serve_content_or_blob(
                 let (data, result) = put_cached_blob_without_blocking_runtime(&state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("Failed to cache upstream data: {}", e);
-                }
-
-                return build_blob_response(data, BlobSource::Upstream { server }, is_localhost)
+                } else {
+                    return build_blob_response(
+                        data,
+                        BlobSource::Upstream { server },
+                        is_localhost,
+                    )
                     .into_response();
+                }
             }
         }
     }

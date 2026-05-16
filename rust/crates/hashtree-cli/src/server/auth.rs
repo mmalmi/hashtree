@@ -207,6 +207,8 @@ pub struct AppState {
     /// Allow anyone with valid Nostr auth to write (default: true)
     /// When false, only allowed_pubkeys can write
     pub public_writes: bool,
+    /// Require untrusted cached blob ingress to look like encrypted CHK blobs.
+    pub require_random_untrusted_ingest: bool,
     /// Pubkeys allowed to write (hex format, from config allowed_npubs)
     pub allowed_pubkeys: HashSet<String>,
     /// Upstream Blossom servers for cascade fetching

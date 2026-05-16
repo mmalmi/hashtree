@@ -1247,6 +1247,7 @@ mod tests {
             ws_relay: Arc::new(super::super::auth::WsRelayState::new()),
             max_upload_bytes: 5 * 1024 * 1024,
             public_writes: true,
+            require_random_untrusted_ingest: false,
             allowed_pubkeys: HashSet::new(),
             upstream_blossom: Vec::new(),
             social_graph: None,

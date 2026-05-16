@@ -16,6 +16,9 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
+use super::ingest_filter::{
+    content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
+};
 use super::mime::get_mime_type;
 
 /// Blossom authorization event kind (NIP-98 style)
@@ -64,6 +67,40 @@ fn check_write_access(state: &AppState, pubkey: &str) -> Result<(), Response<Bod
             r#"{"error":"Write access denied. Your pubkey is not in the allowed list."}"#,
         ))
         .unwrap())
+}
+
+fn validate_upload_payload(
+    body: &[u8],
+    content_type: &str,
+    is_allowed_writer: bool,
+    require_random_untrusted_ingest: bool,
+) -> Result<(), (StatusCode, String)> {
+    let is_chk_upload = is_chk_content_type(content_type);
+
+    if !is_chk_upload && !is_allowed_writer {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Raw media uploads require write access".to_string(),
+        ));
+    }
+
+    if is_chk_upload {
+        validate_untrusted_blob(body, require_random_untrusted_ingest)
+            .map_err(|IngestRejection { status, reason }| (status, reason))?;
+    }
+
+    Ok(())
+}
+
+fn blossom_json_error(status: StatusCode, reason: impl Into<String>) -> Response<Body> {
+    let reason = reason.into();
+    Response::builder()
+        .status(status)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header("X-Reason", reason.as_str())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
+        .unwrap()
 }
 
 /// Blob descriptor returned by upload and list endpoints
@@ -444,6 +481,15 @@ pub async fn upload_blob(
             .unwrap();
     }
 
+    if let Err((status, reason)) = validate_upload_payload(
+        &body,
+        &content_type,
+        is_allowed,
+        state.require_random_untrusted_ingest,
+    ) {
+        return blossom_json_error(status, reason);
+    }
+
     // Compute SHA256 of uploaded data
     let mut hasher = Sha256::new();
     hasher.update(&body);
@@ -490,7 +536,7 @@ pub async fn upload_blob(
                 .as_secs();
 
             // Determine file extension from content type
-            let ext = mime_to_extension(&content_type);
+            let ext = mime_to_extension(&content_type_base(&content_type));
 
             let descriptor = BlobDescriptor {
                 url: format!("/{}{}", sha256_hex, ext),
@@ -815,6 +861,7 @@ mod tests {
             ws_relay: Arc::new(WsRelayState::new()),
             max_upload_bytes: 5 * 1024 * 1024,
             public_writes: true,
+            require_random_untrusted_ingest: true,
             allowed_pubkeys: HashSet::new(),
             upstream_blossom: Vec::new(),
             social_graph: None,

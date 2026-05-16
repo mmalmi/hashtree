@@ -105,6 +105,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
         max_upload_bytes: 5 * 1024 * 1024,
         public_writes: true,
+        require_random_untrusted_ingest: false,
         allowed_pubkeys: HashSet::new(),
         upstream_blossom,
         social_graph: None,

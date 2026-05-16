@@ -76,6 +76,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
+                    return false;
                 }
                 return true;
             }
@@ -89,6 +90,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache upstream data: {}", e);
+                    return false;
                 }
                 return true;
             }
@@ -109,6 +111,13 @@ pub(super) async fn put_cached_blob_without_blocking_runtime(
     state: &AppState,
     data: Vec<u8>,
 ) -> (Vec<u8>, Result<String, String>) {
+    if let Err(rejection) = crate::server::ingest_filter::validate_untrusted_blob(
+        &data,
+        state.require_random_untrusted_ingest,
+    ) {
+        return (data, Err(rejection.reason));
+    }
+
     let store = state.store.clone();
     match tokio::task::spawn_blocking(move || {
         let result = store.put_cached_blob(&data).map_err(|e| e.to_string());

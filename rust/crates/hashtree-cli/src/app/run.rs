@@ -594,6 +594,9 @@ pub(crate) async fn run() -> Result<()> {
                 .with_allowed_pubkeys(allowed_pubkeys.clone())
                 .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
                 .with_public_writes(config.server.public_writes)
+                .with_require_random_untrusted_ingest(
+                    config.blossom.require_random_untrusted_ingest,
+                )
                 .with_upstream_blossom(upstream_blossom)
                 .with_nostr_relay_urls(active_nostr_relays);
 

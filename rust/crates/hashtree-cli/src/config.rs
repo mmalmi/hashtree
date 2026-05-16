@@ -262,6 +262,9 @@ pub struct BlossomConfig {
     /// Maximum upload size in MB (default: 5)
     #[serde(default = "default_max_upload_mb")]
     pub max_upload_mb: u64,
+    /// Require public Blossom and peer-fetched cached blobs to look encrypted.
+    #[serde(default = "default_require_random_untrusted_ingest")]
+    pub require_random_untrusted_ingest: bool,
 }
 
 impl BlossomConfig {
@@ -323,6 +326,10 @@ fn default_write_servers() -> Vec<String> {
 
 fn default_max_upload_mb() -> u64 {
     5
+}
+
+fn default_require_random_untrusted_ingest() -> bool {
+    true
 }
 
 fn default_nostr_enabled() -> bool {
@@ -666,6 +673,7 @@ impl Default for BlossomConfig {
             read_servers: default_read_servers(),
             write_servers: default_write_servers(),
             max_upload_mb: default_max_upload_mb(),
+            require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
         }
     }
 }
@@ -1202,6 +1210,7 @@ chunk_target_bytes = 65536
             read_servers: Vec::new(),
             write_servers: Vec::new(),
             max_upload_mb: default_max_upload_mb(),
+            require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
         };
 
         let read = config.all_read_servers();
@@ -1230,6 +1239,7 @@ chunk_target_bytes = 65536
             read_servers: vec!["https://read.example".to_string()],
             write_servers: vec!["https://write.example".to_string()],
             max_upload_mb: default_max_upload_mb(),
+            require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
         };
         assert!(blossom.all_read_servers().is_empty());
         assert!(blossom.all_write_servers().is_empty());

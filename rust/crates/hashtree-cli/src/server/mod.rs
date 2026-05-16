@@ -1,6 +1,7 @@
 mod auth;
 pub mod blossom;
 mod handlers;
+mod ingest_filter;
 mod mime;
 mod nostr_query;
 mod peer_status;
@@ -110,6 +111,7 @@ impl HashtreeServer {
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
                 public_writes: true,               // Allow anyone with valid Nostr auth by default
+                require_random_untrusted_ingest: true,
                 allowed_pubkeys: HashSet::new(), // No pubkeys allowed by default (use public_writes)
                 upstream_blossom: Vec::new(),
                 social_graph: None,
@@ -143,6 +145,11 @@ impl HashtreeServer {
     /// When false, only social graph members can write
     pub fn with_public_writes(mut self, public: bool) -> Self {
         self.state.public_writes = public;
+        self
+    }
+
+    pub fn with_require_random_untrusted_ingest(mut self, require: bool) -> Self {
+        self.state.require_random_untrusted_ingest = require;
         self
     }
 
