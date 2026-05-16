@@ -35,23 +35,12 @@ pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 #[allow(clippy::result_large_err)]
 fn check_write_access(state: &AppState, pubkey: &str) -> Result<(), Response<Body>> {
     // Check if pubkey is in the allowed list (converted from npub to hex)
-    if state.allowed_pubkeys.contains(pubkey) {
+    if is_allowed_write_author(state, pubkey) {
         tracing::debug!(
-            "Blossom write allowed for {}... (allowed npub)",
+            "Blossom write allowed for {}... (allowed writer)",
             &pubkey[..8.min(pubkey.len())]
         );
         return Ok(());
-    }
-
-    // Check social graph follow distance.
-    if let Some(ref sg) = state.social_graph {
-        if sg.check_write_access(pubkey) {
-            tracing::debug!(
-                "Blossom write allowed for {}... (social graph)",
-                &pubkey[..8.min(pubkey.len())]
-            );
-            return Ok(());
-        }
     }
 
     // Not in allowed list or social graph
@@ -67,6 +56,22 @@ fn check_write_access(state: &AppState, pubkey: &str) -> Result<(), Response<Bod
             r#"{"error":"Write access denied. Your pubkey is not in the allowed list."}"#,
         ))
         .unwrap())
+}
+
+fn is_allowed_write_author(state: &AppState, pubkey: &str) -> bool {
+    if state.allowed_pubkeys.contains(pubkey) {
+        return true;
+    }
+
+    state
+        .social_graph
+        .as_ref()
+        .map(|sg| sg.check_write_access(pubkey))
+        .unwrap_or(false)
+}
+
+fn can_accept_upload_author(state: &AppState, pubkey: &str) -> bool {
+    state.public_writes || is_allowed_write_author(state, pubkey)
 }
 
 fn validate_upload_payload(
@@ -468,11 +473,11 @@ pub async fn upload_blob(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    // Check write access: either in allowed_npubs list OR public_writes is enabled
-    let is_allowed = check_write_access(&state, &auth.pubkey).is_ok();
-    let can_upload = is_allowed || state.public_writes;
-
+    // Check write access: either in allowed_npubs/social graph OR public_writes is enabled.
+    let is_allowed_author = is_allowed_write_author(&state, &auth.pubkey);
+    let can_upload = can_accept_upload_author(&state, &auth.pubkey);
     if !can_upload {
+        let _ = check_write_access(&state, &auth.pubkey);
         return Response::builder()
             .status(StatusCode::FORBIDDEN)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -484,7 +489,7 @@ pub async fn upload_blob(
     if let Err((status, reason)) = validate_upload_payload(
         &body,
         &content_type,
-        is_allowed,
+        can_upload,
         state.require_random_untrusted_ingest,
     ) {
         return blossom_json_error(status, reason);
@@ -525,8 +530,15 @@ pub async fn upload_blob(
 
     let size = body.len() as u64;
 
-    // Store the blob (only track ownership if user is in allowed list)
-    let store_result = store_blossom_blob(&state, &body, &sha256_hash, &pubkey_bytes, is_allowed);
+    // Store public-write blobs in cache storage unless the writer is explicitly
+    // allowed, so untrusted public uploads do not become protected owned data.
+    let store_result = store_blossom_blob(
+        &state,
+        &body,
+        &sha256_hash,
+        &pubkey_bytes,
+        is_allowed_author,
+    );
 
     match store_result {
         Ok(()) => {
@@ -926,6 +938,45 @@ mod tests {
         assert_eq!(mime_to_extension("video/mp4"), ".mp4");
         assert_eq!(mime_to_extension("application/octet-stream"), "");
         assert_eq!(mime_to_extension("unknown/type"), "");
+    }
+
+    #[test]
+    fn public_writes_accept_unlisted_authors_for_uploads() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store =
+            Arc::new(HashtreeStore::with_options(temp_dir.path(), None, 700).expect("store"));
+        let mut state = test_app_state(store);
+        let pubkey = "ea4fe79e57f209309bffed2f92f0b95b59d3d1cb4e8892444398aeea7ee317ed";
+
+        state.public_writes = true;
+        assert!(can_accept_upload_author(&state, pubkey));
+        assert!(!is_allowed_write_author(&state, pubkey));
+
+        state.public_writes = false;
+        assert!(!can_accept_upload_author(&state, pubkey));
+    }
+
+    #[test]
+    fn public_write_trust_allows_octet_stream_and_raw_media_payloads() {
+        let encrypted_block: Vec<u8> = (0..=255).collect();
+
+        assert_eq!(
+            validate_upload_payload(&encrypted_block, "application/octet-stream", false, true,),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_upload_payload(b"audio bytes", "audio/mpeg", true, true,),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_upload_payload(b"audio bytes", "audio/mpeg", false, true,),
+            Err((
+                StatusCode::FORBIDDEN,
+                "Raw media uploads require write access".to_string(),
+            ))
+        );
     }
 
     #[test]
