@@ -101,6 +101,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         daemon_started_at: 1_700_000_000,
         peer_mode: crate::config::ServerMode::Normal,
         hash_get_enabled: true,
+        http_webrtc_fetch: true,
         webrtc_peers: None,
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
         max_upload_bytes: 5 * 1024 * 1024,
@@ -120,7 +121,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_reads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        blob_cache: Arc::new(crate::server::blob_cache::BlobCache::for_tests()),
+        blob_cache: Arc::new(crate::blob_cache::BlobCache::for_tests()),
         directory_listing_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         resolved_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         thumbnail_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
@@ -315,6 +316,7 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     assert_eq!(json["upstream"]["nostr_relays"], 2);
     assert_eq!(json["mode"], "normal");
     assert_eq!(json["capabilities"]["hash_get"], true);
+    assert_eq!(json["capabilities"]["http_webrtc_fetch"], true);
     assert_eq!(json["daemon_started_at"], 1_700_000_000u64);
     assert!(json["uptime_seconds"].as_u64().unwrap() > 0);
     assert!(json["queues"]["blob_reads"]["limit"].as_u64().unwrap() > 0);

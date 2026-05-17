@@ -22,7 +22,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
 
     let mut fetches: Vec<BoxFuture<'static, Option<FetchResult>>> = Vec::new();
 
-    if state.hash_get_enabled {
+    if state.hash_get_enabled && state.http_webrtc_fetch {
         if let Some(ref webrtc_state) = state.webrtc_peers {
             tracing::info!(
                 "[htree-fetch] Querying mesh peers for {}",

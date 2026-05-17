@@ -126,14 +126,13 @@ pub fn should_start_stun_server(config: &Config) -> bool {
 
 /// Build default WebRTC config from daemon/app config.
 pub fn default_webrtc_config(config: &Config) -> WebRTCConfig {
-    let active_relays = config.nostr.active_relays();
-    let local_only_relays =
-        !active_relays.is_empty() && active_relays.iter().all(|relay| relay_is_loopback(relay));
     let relays = if config.server.enable_webrtc {
-        active_relays
+        config.nostr.relays.clone()
     } else {
         Vec::new()
     };
+    let local_only_relays =
+        !relays.is_empty() && relays.iter().all(|relay| relay_is_loopback(relay));
     let stun_servers =
         if !config.server.enable_webrtc || (config.server.enable_multicast && local_only_relays) {
             Vec::new()
@@ -301,6 +300,18 @@ mod tests {
         assert!(!webrtc.signaling_enabled);
         assert!(webrtc.relays.is_empty());
         assert!(webrtc.stun_servers.is_empty());
+    }
+
+    #[test]
+    fn default_webrtc_config_uses_relays_when_nostr_service_disabled() {
+        let mut config = Config::default();
+        config.nostr.enabled = false;
+        config.nostr.relays = vec!["wss://relay.example".to_string()];
+
+        let webrtc = default_webrtc_config(&config);
+
+        assert_eq!(webrtc.relays, vec!["wss://relay.example".to_string()]);
+        assert!(webrtc.signaling_enabled);
     }
 
     #[test]

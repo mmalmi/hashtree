@@ -285,6 +285,7 @@ pub(super) async fn daemon_status(
         "mode": state.peer_mode.as_str(),
         "capabilities": {
             "hash_get": state.hash_get_enabled,
+            "http_webrtc_fetch": state.http_webrtc_fetch,
         },
         "mesh": mesh.clone(),
         "webrtc": mesh,

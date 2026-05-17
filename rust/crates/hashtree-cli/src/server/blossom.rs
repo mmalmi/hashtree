@@ -1173,6 +1173,7 @@ mod tests {
             daemon_started_at: 1_700_000_000,
             peer_mode: crate::config::ServerMode::Normal,
             hash_get_enabled: true,
+            http_webrtc_fetch: true,
             webrtc_peers: None,
             ws_relay: Arc::new(WsRelayState::new()),
             max_upload_bytes: 5 * 1024 * 1024,
@@ -1196,7 +1197,7 @@ mod tests {
             inflight_blob_reads: Arc::new(
                 tokio::sync::Mutex::new(std::collections::HashMap::new()),
             ),
-            blob_cache: Arc::new(crate::server::blob_cache::BlobCache::for_tests()),
+            blob_cache: Arc::new(crate::blob_cache::BlobCache::for_tests()),
             directory_listing_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             resolved_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             thumbnail_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),

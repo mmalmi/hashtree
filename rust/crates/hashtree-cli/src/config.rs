@@ -96,6 +96,9 @@ pub struct ServerConfig {
     /// Enable WebRTC P2P connections
     #[serde(default = "default_enable_webrtc")]
     pub enable_webrtc: bool,
+    /// Allow HTTP misses to fetch blobs from connected WebRTC peers.
+    #[serde(default = "default_http_webrtc_fetch")]
+    pub http_webrtc_fetch: bool,
     /// Explicit daemon endpoint URLs this node may share privately with connected peers
     /// for WebRTC signaling handoff.
     #[serde(default, alias = "peer_direct_urls", alias = "peer_advertise_urls")]
@@ -563,6 +566,10 @@ fn default_enable_webrtc() -> bool {
     true
 }
 
+fn default_http_webrtc_fetch() -> bool {
+    true
+}
+
 fn default_enable_multicast() -> bool {
     true
 }
@@ -618,6 +625,7 @@ impl Default for ServerConfig {
             enable_auth: default_enable_auth(),
             stun_port: default_stun_port(),
             enable_webrtc: default_enable_webrtc(),
+            http_webrtc_fetch: default_http_webrtc_fetch(),
             peer_signal_urls: Vec::new(),
             enable_multicast: default_enable_multicast(),
             multicast_group: default_multicast_group(),

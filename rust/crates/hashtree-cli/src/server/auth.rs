@@ -1,4 +1,4 @@
-use super::blob_cache::BlobCache;
+use crate::blob_cache::BlobCache;
 use crate::nostr_relay::NostrRelay;
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
@@ -200,6 +200,9 @@ pub struct AppState {
     pub daemon_started_at: u64,
     pub peer_mode: crate::config::ServerMode,
     pub hash_get_enabled: bool,
+    /// Whether HTTP cache misses should ask connected WebRTC peers before
+    /// falling back to upstream Blossom.
+    pub http_webrtc_fetch: bool,
     /// WebRTC peer state for forwarding requests to connected P2P peers
     pub webrtc_peers: Option<Arc<WebRTCState>>,
     /// WebSocket relay state for /ws clients

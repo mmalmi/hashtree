@@ -1,3 +1,4 @@
+pub(crate) mod blob_cache;
 pub mod blossom_push;
 pub mod bootstrap;
 #[cfg(feature = "cashu")]
@@ -20,6 +21,8 @@ pub mod sync;
 
 #[cfg(feature = "p2p")]
 pub mod webrtc;
+#[cfg(feature = "p2p")]
+pub mod webrtc_store;
 #[cfg(not(feature = "p2p"))]
 pub mod webrtc_stub;
 #[cfg(not(feature = "p2p"))]

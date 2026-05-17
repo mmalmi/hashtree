@@ -131,13 +131,13 @@ impl BlobBodyCache {
     }
 }
 
-pub(super) struct BlobCache {
+pub(crate) struct BlobCache {
     bodies: Mutex<BlobBodyCache>,
     sizes: Mutex<BlobSizeCache>,
 }
 
 impl BlobCache {
-    pub(super) fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self::new(
             env_usize(BLOB_BODY_CACHE_BYTES_ENV, DEFAULT_BLOB_BODY_CACHE_BYTES),
             env_usize(
@@ -164,27 +164,27 @@ impl BlobCache {
         }
     }
 
-    pub(super) fn get_body(&self, hash_hex: &str) -> Option<Vec<u8>> {
+    pub(crate) fn get_body(&self, hash_hex: &str) -> Option<Vec<u8>> {
         self.bodies
             .lock()
             .ok()
             .and_then(|mut cache| cache.get(hash_hex))
     }
 
-    pub(super) fn put_body(&self, hash_hex: String, bytes: &[u8]) {
+    pub(crate) fn put_body(&self, hash_hex: String, bytes: &[u8]) {
         if let Ok(mut cache) = self.bodies.lock() {
             cache.put(hash_hex, bytes);
         }
     }
 
-    pub(super) fn get_size(&self, hash_hex: &str) -> Option<Option<u64>> {
+    pub(crate) fn get_size(&self, hash_hex: &str) -> Option<Option<u64>> {
         self.sizes
             .lock()
             .ok()
             .and_then(|mut cache| cache.get(hash_hex))
     }
 
-    pub(super) fn put_size(&self, hash_hex: String, size: Option<u64>) {
+    pub(crate) fn put_size(&self, hash_hex: String, size: Option<u64>) {
         if let Ok(mut cache) = self.sizes.lock() {
             cache.put(hash_hex, size);
         }

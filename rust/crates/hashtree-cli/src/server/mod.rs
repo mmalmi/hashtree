@@ -1,5 +1,4 @@
 mod auth;
-mod blob_cache;
 mod blob_read;
 pub mod blossom;
 mod handlers;
@@ -111,6 +110,7 @@ impl HashtreeServer {
                 daemon_started_at: current_unix_secs(),
                 peer_mode: crate::config::ServerMode::Normal,
                 hash_get_enabled: true,
+                http_webrtc_fetch: true,
                 webrtc_peers: None,
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
@@ -136,7 +136,7 @@ impl HashtreeServer {
                 inflight_blob_reads: Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
-                blob_cache: Arc::new(blob_cache::BlobCache::from_env()),
+                blob_cache: Arc::new(crate::blob_cache::BlobCache::from_env()),
                 directory_listing_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
                 resolved_path_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
                 thumbnail_path_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
@@ -178,6 +178,11 @@ impl HashtreeServer {
 
     pub fn with_hash_get_enabled(mut self, enabled: bool) -> Self {
         self.state.hash_get_enabled = enabled;
+        self
+    }
+
+    pub fn with_http_webrtc_fetch(mut self, enabled: bool) -> Self {
+        self.state.http_webrtc_fetch = enabled;
         self
     }
 

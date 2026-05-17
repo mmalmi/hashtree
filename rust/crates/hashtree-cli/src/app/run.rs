@@ -512,10 +512,14 @@ pub(crate) async fn run() -> Result<()> {
                         };
 
                         let mut manager = if config.server.mode.hash_get_enabled() {
+                            let content_store =
+                                hashtree_cli::webrtc_store::CachedWebRtcContentStore::new(
+                                    Arc::clone(&store),
+                                );
                             WebRTCManager::new_with_store_and_classifier_and_cashu(
                                 keys.clone(),
                                 webrtc_config,
-                                Arc::clone(&store) as Arc<dyn hashtree_cli::ContentStore>,
+                                Arc::new(content_store) as Arc<dyn hashtree_cli::ContentStore>,
                                 peer_classifier,
                                 hashtree_cli::webrtc::CashuRoutingConfig::from(&config.cashu),
                                 cashu_payment_client,
@@ -591,6 +595,7 @@ pub(crate) async fn run() -> Result<()> {
             let mut server = HashtreeServer::new(Arc::clone(&store), addr.clone())
                 .with_server_mode(config.server.mode)
                 .with_hash_get_enabled(config.server.mode.hash_get_enabled())
+                .with_http_webrtc_fetch(config.server.http_webrtc_fetch)
                 .with_allowed_pubkeys(allowed_pubkeys.clone())
                 .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
                 .with_public_writes(config.server.public_writes)

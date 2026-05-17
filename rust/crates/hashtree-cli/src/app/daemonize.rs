@@ -117,6 +117,20 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
             if hash_get { "enabled" } else { "disabled" }
         ));
     }
+    if let Some(http_webrtc_fetch) = status
+        .get("capabilities")
+        .and_then(|value| value.get("http_webrtc_fetch"))
+        .and_then(|value| value.as_bool())
+    {
+        lines.push(format!(
+            "  HTTP WebRTC fetch: {}",
+            if http_webrtc_fetch {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ));
+    }
 
     if let Some(storage) = status.get("storage") {
         lines.push(String::new());
