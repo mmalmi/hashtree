@@ -839,6 +839,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
         .with_public_writes(config.server.public_writes)
         .with_require_random_untrusted_ingest(config.blossom.require_random_untrusted_ingest)
+        .with_optimistic_blossom_uploads(config.blossom.optimistic_uploads)
         .with_upstream_blossom(upstream_blossom)
         .with_nostr_relay_urls(active_nostr_relays)
         .with_social_graph(social_graph)

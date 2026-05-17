@@ -454,6 +454,15 @@ async fn store_blossom_blob_without_blocking_runtime(
     .map_err(|err| anyhow::anyhow!("blob write task failed: {}", err))?
 }
 
+fn upload_descriptor_response(status: StatusCode, descriptor: &BlobDescriptor) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_string(descriptor).unwrap()))
+        .unwrap()
+}
+
 /// PUT /upload - Upload a new blob (BUD-02)
 pub async fn upload_blob(
     State(state): State<AppState>,
@@ -553,9 +562,68 @@ pub async fn upload_blob(
     };
 
     let size = body.len() as u64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let ext = mime_to_extension(&content_type_base(&content_type));
+    let descriptor = BlobDescriptor {
+        url: format!("/{}{}", sha256_hex, ext),
+        sha256: sha256_hex.clone(),
+        size,
+        mime_type: content_type,
+        uploaded: now,
+    };
 
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
+    if state.optimistic_blossom_uploads {
+        let queued_bytes = body.len().max(1);
+        if queued_bytes <= state.optimistic_upload_queue_bytes {
+            let permits = queued_bytes as u32;
+            let permit = match state
+                .optimistic_upload_queue
+                .clone()
+                .try_acquire_many_owned(permits)
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return blossom_json_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Optimistic upload queue is full",
+                    );
+                }
+            };
+            let state_for_write = state.clone();
+            let hash_for_log = sha256_hex.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(error) = store_blossom_blob_without_blocking_runtime(
+                    &state_for_write,
+                    body,
+                    pubkey_bytes,
+                    is_allowed_author,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Background Blossom storage failed for {}: {:#}",
+                        hash_for_log,
+                        error
+                    );
+                }
+            });
+
+            return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
+        }
+
+        tracing::warn!(
+            "Blossom upload {} is larger than optimistic queue budget {}; storing synchronously",
+            queued_bytes,
+            state.optimistic_upload_queue_bytes
+        );
+    }
+
     let store_result = store_blossom_blob_without_blocking_runtime(
         &state,
         body.clone(),
@@ -565,30 +633,7 @@ pub async fn upload_blob(
     .await;
 
     match store_result {
-        Ok(()) => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            // Determine file extension from content type
-            let ext = mime_to_extension(&content_type_base(&content_type));
-
-            let descriptor = BlobDescriptor {
-                url: format!("/{}{}", sha256_hex, ext),
-                sha256: sha256_hex,
-                size,
-                mime_type: content_type,
-                uploaded: now,
-            };
-
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_string(&descriptor).unwrap()))
-                .unwrap()
-        }
+        Ok(()) => upload_descriptor_response(StatusCode::OK, &descriptor),
         Err(e) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -880,9 +925,12 @@ mod tests {
     use super::*;
     use crate::server::auth::WsRelayState;
     use crate::storage::HashtreeStore;
+    use axum::response::IntoResponse;
+    use base64::Engine;
     use hashtree_core::sha256;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn test_app_state(store: Arc<HashtreeStore>) -> AppState {
@@ -897,6 +945,9 @@ mod tests {
             max_upload_bytes: 5 * 1024 * 1024,
             public_writes: true,
             require_random_untrusted_ingest: true,
+            optimistic_blossom_uploads: false,
+            optimistic_upload_queue_bytes: 512 * 1024 * 1024,
+            optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
             allowed_pubkeys: HashSet::new(),
             upstream_blossom: Vec::new(),
             social_graph: None,
@@ -914,6 +965,31 @@ mod tests {
             thumbnail_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             cid_size_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
         }
+    }
+
+    fn create_upload_auth_header(keys: &nostr::Keys) -> String {
+        use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
+
+        let now = Timestamp::now();
+        let event = EventBuilder::new(
+            Kind::Custom(BLOSSOM_AUTH_KIND),
+            "",
+            vec![
+                Tag::custom(TagKind::Custom("t".into()), vec!["upload".to_string()]),
+                Tag::custom(
+                    TagKind::Custom("expiration".into()),
+                    vec![(now.as_u64() + 300).to_string()],
+                ),
+            ],
+        )
+        .custom_created_at(now)
+        .to_event(keys)
+        .expect("sign blossom auth");
+        let json = serde_json::to_vec(&event).expect("serialize auth event");
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(json)
+        )
     }
 
     #[test]
@@ -961,6 +1037,47 @@ mod tests {
         assert_eq!(mime_to_extension("video/mp4"), ".mp4");
         assert_eq!(mime_to_extension("application/octet-stream"), "");
         assert_eq!(mime_to_extension("unknown/type"), "");
+    }
+
+    #[tokio::test]
+    async fn optimistic_uploads_return_accepted_and_store_in_background() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let mut state = test_app_state(Arc::clone(&store));
+        state.optimistic_blossom_uploads = true;
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let body = axum::body::Bytes::from((0u8..=255).collect::<Vec<_>>());
+        let hash = sha256(&body);
+        let response = upload_blob(State(state), headers, body)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..50 {
+            if store.blob_exists(&hash).expect("blob exists check") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("optimistic upload was not stored in the background");
     }
 
     #[test]

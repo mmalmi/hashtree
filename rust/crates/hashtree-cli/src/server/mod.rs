@@ -30,6 +30,7 @@ use tower_http::cors::CorsLayer;
 pub use auth::{new_lookup_cache, AppState, AuthCredentials, CachedTreeRootEntry};
 
 static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 512 * 1024 * 1024;
 
 fn virtual_tree_hosts() -> &'static RwLock<HashMap<String, String>> {
     VIRTUAL_TREE_HOSTS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -112,6 +113,11 @@ impl HashtreeServer {
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
                 public_writes: true,               // Allow anyone with valid Nostr auth by default
                 require_random_untrusted_ingest: true,
+                optimistic_blossom_uploads: false,
+                optimistic_upload_queue_bytes: DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES,
+                optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(
+                    DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES,
+                )),
                 allowed_pubkeys: HashSet::new(), // No pubkeys allowed by default (use public_writes)
                 upstream_blossom: Vec::new(),
                 social_graph: None,
@@ -150,6 +156,11 @@ impl HashtreeServer {
 
     pub fn with_require_random_untrusted_ingest(mut self, require: bool) -> Self {
         self.state.require_random_untrusted_ingest = require;
+        self
+    }
+
+    pub fn with_optimistic_blossom_uploads(mut self, enabled: bool) -> Self {
+        self.state.optimistic_blossom_uploads = enabled;
         self
     }
 

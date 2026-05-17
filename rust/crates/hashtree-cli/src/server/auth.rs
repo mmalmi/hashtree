@@ -21,7 +21,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::{
-    sync::{mpsc, watch, Mutex},
+    sync::{mpsc, watch, Mutex, Semaphore},
     task::JoinHandle,
 };
 
@@ -209,6 +209,13 @@ pub struct AppState {
     pub public_writes: bool,
     /// Require untrusted cached blob ingress to look like encrypted CHK blobs.
     pub require_random_untrusted_ingest: bool,
+    /// Return from Blossom upload after validation while storage writes finish in
+    /// a bounded background queue.
+    pub optimistic_blossom_uploads: bool,
+    /// Background upload queue byte budget. Each queued body holds one permit per
+    /// byte until the storage write completes.
+    pub optimistic_upload_queue_bytes: usize,
+    pub optimistic_upload_queue: Arc<Semaphore>,
     /// Pubkeys allowed to write (hex format, from config allowed_npubs)
     pub allowed_pubkeys: HashSet<String>,
     /// Upstream Blossom servers for cascade fetching

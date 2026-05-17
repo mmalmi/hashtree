@@ -597,6 +597,7 @@ pub(crate) async fn run() -> Result<()> {
                 .with_require_random_untrusted_ingest(
                     config.blossom.require_random_untrusted_ingest,
                 )
+                .with_optimistic_blossom_uploads(config.blossom.optimistic_uploads)
                 .with_upstream_blossom(upstream_blossom)
                 .with_nostr_relay_urls(active_nostr_relays);
 

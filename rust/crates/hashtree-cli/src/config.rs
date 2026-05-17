@@ -265,6 +265,10 @@ pub struct BlossomConfig {
     /// Require public Blossom and peer-fetched cached blobs to look encrypted.
     #[serde(default = "default_require_random_untrusted_ingest")]
     pub require_random_untrusted_ingest: bool,
+    /// Return from Blossom PUT /upload after validation and queue local storage
+    /// writes in the background.
+    #[serde(default = "default_optimistic_uploads")]
+    pub optimistic_uploads: bool,
 }
 
 impl BlossomConfig {
@@ -330,6 +334,10 @@ fn default_max_upload_mb() -> u64 {
 
 fn default_require_random_untrusted_ingest() -> bool {
     true
+}
+
+fn default_optimistic_uploads() -> bool {
+    false
 }
 
 fn default_nostr_enabled() -> bool {
@@ -674,6 +682,7 @@ impl Default for BlossomConfig {
             write_servers: default_write_servers(),
             max_upload_mb: default_max_upload_mb(),
             require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
+            optimistic_uploads: default_optimistic_uploads(),
         }
     }
 }
@@ -967,6 +976,7 @@ mod tests {
             .relays
             .contains(&"wss://upload.iris.to/nostr".to_string()));
         assert!(config.blossom.enabled);
+        assert!(!config.blossom.optimistic_uploads);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);
         assert_eq!(config.nostr.mirror_max_follow_distance, None);
         assert_eq!(config.nostr.max_write_distance, 3);
@@ -1001,6 +1011,17 @@ mod tests {
         assert_eq!(config.cashu.peer_suggested_mint_max_cap_sat, 21);
         assert_eq!(config.cashu.payment_default_block_threshold, 0);
         assert_eq!(config.cashu.chunk_target_bytes, 32 * 1024);
+    }
+
+    #[test]
+    fn test_blossom_optimistic_uploads_deserialize() {
+        let toml_str = r#"
+[blossom]
+optimistic_uploads = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.blossom.optimistic_uploads);
+        assert!(config.blossom.require_random_untrusted_ingest);
     }
 
     #[test]
@@ -1211,6 +1232,7 @@ chunk_target_bytes = 65536
             write_servers: Vec::new(),
             max_upload_mb: default_max_upload_mb(),
             require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
+            optimistic_uploads: default_optimistic_uploads(),
         };
 
         let read = config.all_read_servers();
@@ -1240,6 +1262,7 @@ chunk_target_bytes = 65536
             write_servers: vec!["https://write.example".to_string()],
             max_upload_mb: default_max_upload_mb(),
             require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
+            optimistic_uploads: default_optimistic_uploads(),
         };
         assert!(blossom.all_read_servers().is_empty());
         assert!(blossom.all_write_servers().is_empty());
