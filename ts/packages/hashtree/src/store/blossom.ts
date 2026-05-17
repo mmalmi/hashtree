@@ -66,6 +66,8 @@ export interface BlossomStoreConfig {
   logger?: BlossomLogger;
   /** Optional callback for upload progress (per-server, per-chunk) */
   onUploadProgress?: BlossomUploadCallback;
+  /** Timeout for a single Blossom upload request (defaults to 120 seconds) */
+  putTimeoutMs?: number;
 }
 
 /** Server health tracking for backoff */
@@ -103,6 +105,7 @@ const EXISTENCE_CHECK_THRESHOLD = 256 * 1024;
 /** Timeout for HEAD requests (5 seconds) */
 const HEAD_TIMEOUT_MS = 15_000;
 const GET_TIMEOUT_MS = 15_000;
+const PUT_TIMEOUT_MS = 120_000;
 const GET_HEDGE_INTERVAL_MS = 75;
 const READ_SCORE_TIE_DELTA = 0.12;
 
@@ -129,6 +132,7 @@ export class BlossomStore implements StoreWithMeta {
   private signer?: BlossomSigner;
   private logger?: BlossomLogger;
   private onUploadProgress?: BlossomUploadCallback;
+  private putTimeoutMs: number;
   private serverHealth: Map<string, ServerHealth> = new Map();
   private readStats: Map<string, ReadServerStats> = new Map();
   private hashAttempts: Map<string, HashAttempts> = new Map();
@@ -141,6 +145,7 @@ export class BlossomStore implements StoreWithMeta {
     this.signer = config.signer;
     this.logger = config.logger;
     this.onUploadProgress = config.onUploadProgress;
+    this.putTimeoutMs = config.putTimeoutMs ?? PUT_TIMEOUT_MS;
   }
 
   /** Get list of write-enabled server URLs */
@@ -515,6 +520,7 @@ export class BlossomStore implements StoreWithMeta {
         try {
           const response = await fetch(`${server.url}/upload`, {
             method: 'PUT',
+            signal: AbortSignal.timeout(this.putTimeoutMs),
             headers: {
               'Authorization': authHeader,
               'Content-Type': contentType || 'application/octet-stream',

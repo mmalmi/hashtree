@@ -146,4 +146,49 @@ describe('BlossomStore', () => {
     await vi.advanceTimersByTimeAsync(10);
     await expect(hedgedRead).resolves.toEqual(secondData);
   });
+
+  it('aborts stalled upload requests', async () => {
+    vi.useFakeTimers();
+    const hash = await makeHash();
+    const uploadEvents: string[] = [];
+
+    const fetchMock = vi.fn((_input: string | URL | RequestInfo, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal instanceof AbortSignal) {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }
+      })
+    ));
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://write.example', write: true }],
+      signer: async () => ({
+        kind: 24242,
+        created_at: 1,
+        content: '',
+        tags: [],
+        pubkey: '0'.repeat(64),
+        id: '1'.repeat(64),
+        sig: '2'.repeat(128),
+      }),
+      putTimeoutMs: 5,
+      onUploadProgress: (_serverUrl, status) => uploadEvents.push(status),
+    });
+
+    const putPromise = store.put(hash, DATA);
+    await vi.advanceTimersByTimeAsync(5);
+
+    await expect(putPromise).rejects.toThrow(/Blossom upload failed/);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://write.example/upload',
+      expect.objectContaining({
+        method: 'PUT',
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(uploadEvents).toEqual(['failed']);
+  });
 });
