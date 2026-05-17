@@ -1333,12 +1333,12 @@ impl HashtreeStore {
                 .unwrap()
                 .as_secs();
 
-            // Get size from raw blob
+            // Only metadata is needed here. Reading the full blob body makes
+            // duplicate Blossom uploads compete with normal content serving.
             let size = self
                 .router
-                .get_sync(sha256)
+                .blob_size_sync(sha256)
                 .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
-                .map(|data| data.len() as u64)
                 .unwrap_or(0);
 
             blobs.push(BlobMetadata {

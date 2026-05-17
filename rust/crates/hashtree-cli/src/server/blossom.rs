@@ -13,7 +13,7 @@ use base64::Engine;
 use hashtree_core::from_hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
 use super::blob_read::{acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY};
@@ -29,6 +29,8 @@ const BLOSSOM_AUTH_KIND: u16 = 24242;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
 const IMMUTABLE_NOT_FOUND_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=5";
+const OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS_ENV: &str = "HTREE_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS";
+const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS: u64 = 15_000;
 
 /// Default maximum upload size in bytes (5 MB)
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
@@ -107,6 +109,22 @@ fn blossom_json_error(status: StatusCode, reason: impl Into<String>) -> Response
         .status(status)
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header("X-Reason", reason.as_str())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
+        .unwrap()
+}
+
+fn blossom_retryable_json_error(
+    status: StatusCode,
+    reason: impl Into<String>,
+    retry_after_seconds: u64,
+) -> Response<Body> {
+    let reason = reason.into();
+    Response::builder()
+        .status(status)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header("X-Reason", reason.as_str())
+        .header(header::RETRY_AFTER, retry_after_seconds.to_string())
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
         .unwrap()
@@ -510,6 +528,74 @@ fn upload_descriptor_response(status: StatusCode, descriptor: &BlobDescriptor) -
         .unwrap()
 }
 
+fn optimistic_upload_queue_timeout() -> Duration {
+    let millis = std::env::var(OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS);
+    Duration::from_millis(millis)
+}
+
+async fn acquire_optimistic_upload_queue(
+    state: &AppState,
+    permits: u32,
+) -> Result<tokio::sync::OwnedSemaphorePermit, &'static str> {
+    match tokio::time::timeout(
+        optimistic_upload_queue_timeout(),
+        state
+            .optimistic_upload_queue
+            .clone()
+            .acquire_many_owned(permits),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err("Optimistic upload queue is closed"),
+        Err(_) => Err("Optimistic upload queue is full"),
+    }
+}
+
+async fn uploaded_blob_already_exists(
+    state: &AppState,
+    sha256_hash: [u8; 32],
+    sha256_hex: &str,
+) -> Result<bool, String> {
+    if let Some(cached) = state.blob_cache.get_size(sha256_hex) {
+        return Ok(cached.is_some());
+    }
+
+    let permit = acquire_blob_read().await.map_err(str::to_string)?;
+    let store = state.store.clone();
+    let size_read = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store
+            .blob_size(&sha256_hash)
+            .map_err(|error| error.to_string())
+    });
+
+    match tokio::time::timeout(blob_read_timeout(), size_read).await {
+        Ok(Ok(Ok(size))) => {
+            state.blob_cache.put_size(sha256_hex.to_string(), size);
+            Ok(size.is_some())
+        }
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(error)) => Err(format!("blob existence task failed: {}", error)),
+        Err(_) => Err("blob existence check timed out".to_string()),
+    }
+}
+
+async fn set_existing_blob_owner_without_body_write(
+    state: AppState,
+    sha256_hash: [u8; 32],
+    pubkey: [u8; 32],
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || state.store.set_blob_owner(&sha256_hash, &pubkey))
+        .await
+        .map_err(|error| anyhow::anyhow!("blob owner task failed: {}", error))??;
+    Ok(())
+}
+
 /// PUT /upload - Upload a new blob (BUD-02)
 pub async fn upload_blob(
     State(state): State<AppState>,
@@ -622,22 +708,50 @@ pub async fn upload_blob(
         uploaded: now,
     };
 
+    match uploaded_blob_already_exists(&state, sha256_hash, &sha256_hex).await {
+        Ok(true) => {
+            if is_allowed_author {
+                if let Err(error) = set_existing_blob_owner_without_body_write(
+                    state.clone(),
+                    sha256_hash,
+                    pubkey_bytes,
+                )
+                .await
+                {
+                    return Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .header("X-Reason", "Storage error")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
+                        .unwrap();
+                }
+            }
+            return upload_descriptor_response(StatusCode::CONFLICT, &descriptor);
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::debug!(
+                "Could not preflight Blossom upload {} before queueing: {}",
+                sha256_hex,
+                error
+            );
+        }
+    }
+
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
     if state.optimistic_blossom_uploads {
         let queued_bytes = body.len().max(OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES);
         if queued_bytes <= state.optimistic_upload_queue_bytes {
             let permits = queued_bytes as u32;
-            let permit = match state
-                .optimistic_upload_queue
-                .clone()
-                .try_acquire_many_owned(permits)
-            {
+            let permit = match acquire_optimistic_upload_queue(&state, permits).await {
                 Ok(permit) => permit,
                 Err(_) => {
-                    return blossom_json_error(
+                    return blossom_retryable_json_error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Optimistic upload queue is full",
+                        2,
                     );
                 }
             };
@@ -1130,6 +1244,41 @@ mod tests {
         }
 
         panic!("optimistic upload was not stored in the background");
+    }
+
+    #[tokio::test]
+    async fn optimistic_upload_existing_blob_skips_queue() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let body = axum::body::Bytes::from((0u8..=255).collect::<Vec<_>>());
+        store.put_cached_blob(&body).expect("seed blob");
+
+        let mut state = test_app_state(Arc::clone(&store));
+        state.optimistic_blossom_uploads = true;
+        state.optimistic_upload_queue_bytes = 1;
+        state.optimistic_upload_queue = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let response = upload_blob(State(state), headers, body)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[test]
