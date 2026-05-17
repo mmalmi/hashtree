@@ -1685,6 +1685,7 @@ pub(crate) async fn run() -> Result<()> {
                     state_file,
                     max_objects,
                     progress_every,
+                    scan_delay_ms,
                 } => {
                     let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
                     let store = HashtreeStore::with_options(
@@ -1704,6 +1705,7 @@ pub(crate) async fn run() -> Result<()> {
                                 state_file,
                                 max_objects,
                                 progress_every,
+                                scan_delay_ms,
                             })
                             .await?;
                         println!(
@@ -1728,6 +1730,7 @@ pub(crate) async fn run() -> Result<()> {
                             state_file,
                             max_objects,
                             progress_every,
+                            scan_delay_ms,
                             store,
                         );
                         anyhow::bail!("R2 import requires building htree with the s3 feature");

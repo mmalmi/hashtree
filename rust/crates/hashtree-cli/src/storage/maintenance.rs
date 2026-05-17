@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "s3")]
 use std::sync::Arc;
 #[cfg(feature = "s3")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{GcStats, HashtreeStore};
 
@@ -42,6 +42,7 @@ pub struct R2ImportOptions {
     pub state_file: Option<PathBuf>,
     pub max_objects: Option<usize>,
     pub progress_every: usize,
+    pub scan_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -647,6 +648,10 @@ impl HashtreeStore {
                 result.listed += 1;
                 listed_this_run += 1;
                 listed_since_progress += 1;
+
+                if options.scan_delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(options.scan_delay_ms)).await;
+                }
 
                 if let Some(local_hashes) = &local_hashes {
                     if local_hashes.binary_search(&hash).is_ok() {

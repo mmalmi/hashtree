@@ -638,6 +638,9 @@ pub(crate) enum StorageCommands {
         /// Print progress every N listed objects
         #[arg(long, default_value_t = 5_000)]
         progress_every: usize,
+        /// Sleep this many milliseconds between canonical object checks
+        #[arg(long, default_value_t = 0)]
+        scan_delay_ms: u64,
     },
 }
 
