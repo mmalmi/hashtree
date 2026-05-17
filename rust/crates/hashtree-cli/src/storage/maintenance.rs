@@ -101,6 +101,9 @@ fn unix_timestamp_now() -> u64 {
 fn r2_import_key_hash(prefix: &str, key: &str) -> Option<hashtree_core::types::Hash> {
     let filename = key.strip_prefix(prefix).unwrap_or(key);
     let hash_hex = filename.strip_suffix(".bin")?;
+    if hash_hex.contains('/') {
+        return None;
+    }
     if hash_hex.len() != 64 {
         return None;
     }
@@ -597,6 +600,7 @@ impl HashtreeStore {
         let mut continuation_token: Option<String> = None;
         let mut pending = FuturesUnordered::new();
         let mut listed_since_progress = 0usize;
+        let mut listed_this_run = 0usize;
         let mut first_page = true;
         let mut hit_max_objects = false;
 
@@ -623,7 +627,7 @@ impl HashtreeStore {
             for object in list_resp.contents() {
                 if options
                     .max_objects
-                    .is_some_and(|max_objects| result.listed >= max_objects)
+                    .is_some_and(|max_objects| listed_this_run >= max_objects)
                 {
                     hit_max_objects = true;
                     break;
@@ -634,15 +638,15 @@ impl HashtreeStore {
                     continue;
                 }
 
-                result.listed += 1;
-                listed_since_progress += 1;
                 result.last_key = Some(key.clone());
 
                 let Some(hash) = r2_import_key_hash(&prefix, &key) else {
-                    result.corrupted += 1;
-                    println!("  INVALID KEY: {key}");
                     continue;
                 };
+
+                result.listed += 1;
+                listed_this_run += 1;
+                listed_since_progress += 1;
 
                 if let Some(local_hashes) = &local_hashes {
                     if local_hashes.binary_search(&hash).is_ok() {
@@ -834,4 +838,25 @@ fn existing_lmdb_map_size_bytes(data_path: &Path) -> Result<usize> {
     Ok(usize::try_from(aligned_bytes)
         .unwrap_or(usize::MAX)
         .max(COMPACT_OPEN_MAP_SIZE_BYTES))
+}
+
+#[cfg(all(test, feature = "s3"))]
+mod tests {
+    use super::r2_import_key_hash;
+
+    const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn r2_import_key_hash_accepts_only_root_blob_keys() {
+        assert!(r2_import_key_hash("", &format!("{HASH}.bin")).is_some());
+        assert!(r2_import_key_hash("legacy/", &format!("legacy/{HASH}.bin")).is_some());
+
+        assert!(r2_import_key_hash("", &format!("hot/{HASH}.bin")).is_none());
+        assert!(
+            r2_import_key_hash("", &format!("site-bytes/pubkey/tree/root/{HASH}.bin")).is_none()
+        );
+        assert!(r2_import_key_hash("", "roots/pubkey/tree.json").is_none());
+        assert!(r2_import_key_hash("", &format!("{HASH}.png")).is_none());
+        assert!(r2_import_key_hash("", "not-a-hash.bin").is_none());
+    }
 }
