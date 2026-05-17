@@ -584,6 +584,40 @@ impl LmdbBlobStore {
             .map(|b| b.to_vec()))
     }
 
+    pub fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let rtxn = self
+            .env
+            .read_txn()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        let Some(blob) = self
+            .blobs
+            .get(&rtxn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        if blob.is_empty() || end_inclusive < start {
+            return Ok(Some(Vec::new()));
+        }
+        let len = blob.len() as u64;
+        if start >= len {
+            return Ok(Some(Vec::new()));
+        }
+
+        let actual_end = end_inclusive.min(len - 1);
+        let start = usize::try_from(start)
+            .map_err(|_| StoreError::Other("blob range start is too large".to_string()))?;
+        let end_exclusive = usize::try_from(actual_end.saturating_add(1))
+            .map_err(|_| StoreError::Other("blob range end is too large".to_string()))?;
+        Ok(Some(blob[start..end_exclusive].to_vec()))
+    }
+
     pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
         self.touch_many_accessed_sync(std::slice::from_ref(hash), now)
             .map(|updated| updated > 0)

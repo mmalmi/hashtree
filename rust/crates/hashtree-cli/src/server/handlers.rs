@@ -1133,6 +1133,86 @@ pub async fn serve_content_or_blob(
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
+            if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+                match get_blob_size_without_blocking_runtime(&state, hash_bytes).await {
+                    Ok(Some(total_size)) => match parse_byte_range(range_header, total_size) {
+                        Some(ParsedByteRange::Satisfiable {
+                            start,
+                            end_inclusive,
+                        }) => {
+                            match get_blob_range_without_blocking_runtime(
+                                &state,
+                                hash_bytes,
+                                start,
+                                end_inclusive,
+                            )
+                            .await
+                            {
+                                Ok(Some(data)) => {
+                                    let content_range =
+                                        format!("bytes {}-{}/{}", start, end_inclusive, total_size);
+                                    let mut builder = Response::builder()
+                                        .status(StatusCode::PARTIAL_CONTENT)
+                                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                                        .header(header::CONTENT_LENGTH, data.len())
+                                        .header(header::CONTENT_RANGE, content_range)
+                                        .header(header::ACCEPT_RANGES, "bytes")
+                                        .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
+                                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                                        .header(
+                                            CROSS_ORIGIN_RESOURCE_POLICY_HEADER,
+                                            CORP_CROSS_ORIGIN,
+                                        );
+                                    if is_localhost {
+                                        builder = builder.header("X-Source", "local");
+                                    }
+                                    return builder.body(Body::from(data)).unwrap().into_response();
+                                }
+                                Ok(None) => {}
+                                Err(error) if error == blob_read_busy_error() => {
+                                    return Response::builder()
+                                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                                        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                                        .header("Retry-After", "1")
+                                        .body(Body::from("Blob read queue is full"))
+                                        .unwrap()
+                                        .into_response();
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Failed to read local blob range {}: {}",
+                                        hash_hex,
+                                        error
+                                    );
+                                    return Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                                        .body(Body::from("Blob range read failed"))
+                                        .unwrap()
+                                        .into_response();
+                                }
+                            }
+                        }
+                        Some(ParsedByteRange::Unsatisfiable) => {
+                            return Response::builder()
+                                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                                .header(header::CONTENT_TYPE, "text/plain")
+                                .header(header::CONTENT_RANGE, format!("bytes */{}", total_size))
+                                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                                .body(Body::from("Range not satisfiable"))
+                                .unwrap()
+                                .into_response();
+                        }
+                        None => {}
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!("Failed to read local blob size {}: {}", hash_hex, error);
+                    }
+                }
+            }
+
             match get_blob_without_blocking_runtime(&state, hash_bytes).await {
                 Ok(Some(data)) => {
                     return build_blob_response(data, BlobSource::Local, is_localhost)

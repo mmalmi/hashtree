@@ -257,6 +257,19 @@ impl LocalStore {
         }
     }
 
+    pub fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.get_range_sync(hash, start, end_inclusive),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.get_range_sync(hash, start, end_inclusive),
+        }
+    }
+
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
         match self {
             LocalStore::Fs(store) => store.blob_size_sync(hash),
@@ -705,6 +718,15 @@ impl StorageRouter {
         }
 
         Ok(None)
+    }
+
+    pub fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.local.get_range_sync(hash, start, end_inclusive)
     }
 
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
@@ -1223,6 +1245,22 @@ impl HashtreeStore {
             .router
             .get_sync(hash)
             .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?;
+        if data.is_some() {
+            self.record_blob_accesses(std::iter::once(*hash));
+        }
+        Ok(data)
+    }
+
+    pub fn get_blob_range(
+        &self,
+        hash: &[u8; 32],
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let data = self
+            .router
+            .get_range_sync(hash, start, end_inclusive)
+            .map_err(|e| anyhow::anyhow!("Failed to get blob range: {}", e))?;
         if data.is_some() {
             self.record_blob_accesses(std::iter::once(*hash));
         }

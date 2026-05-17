@@ -1200,6 +1200,46 @@ async fn serve_content_internal_honors_suffix_ranges() {
 }
 
 #[tokio::test]
+async fn serve_content_or_blob_honors_raw_blob_ranges() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let data = b"raw-blob-range";
+    let hash_hex = store.put_blob(data).unwrap();
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=4-7"));
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(format!("{hash_hex}.bin")),
+        Query(HashMap::new()),
+        headers,
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes 4-7/14")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCEPT_RANGES)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes")
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"blob");
+}
+
+#[tokio::test]
 async fn cache_tree_root_seeds_mutable_root_cache() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());

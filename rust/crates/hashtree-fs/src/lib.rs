@@ -11,6 +11,7 @@ use hashtree_core::store::{Store, StoreError, StoreStats};
 use hashtree_core::types::Hash;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -192,6 +193,32 @@ impl FsBlobStore {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(path) = self.existing_blob_path(hash) else {
+            return Ok(None);
+        };
+
+        let mut file = fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        if len == 0 || start >= len || end_inclusive < start {
+            return Ok(Some(Vec::new()));
+        }
+
+        let actual_end = end_inclusive.min(len - 1);
+        let read_len = actual_end.saturating_sub(start).saturating_add(1);
+        let read_len = usize::try_from(read_len)
+            .map_err(|_| StoreError::Other("blob range is too large to read".to_string()))?;
+        let mut data = vec![0; read_len];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut data)?;
+        Ok(Some(data))
     }
 
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
