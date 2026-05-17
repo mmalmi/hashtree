@@ -38,6 +38,7 @@ pub struct R2ImportOptions {
     pub check_only: bool,
     pub resume: bool,
     pub fast_list: bool,
+    pub stream_merge: bool,
     pub keys: Vec<String>,
     pub keys_file: Option<PathBuf>,
     pub start_after: Option<String>,
@@ -133,6 +134,31 @@ fn r2_import_key_candidate(prefix: &str, input: &str) -> Option<R2ObjectCandidat
 }
 
 #[cfg(feature = "s3")]
+fn existing_r2_candidates(
+    local: &super::LocalStore,
+    candidates: &[R2ObjectCandidate],
+) -> Result<Vec<bool>> {
+    let mut indexed_hashes: Vec<(usize, hashtree_core::types::Hash)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (index, candidate.hash))
+        .collect();
+    indexed_hashes.sort_unstable_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+
+    let sorted_hashes: Vec<hashtree_core::types::Hash> =
+        indexed_hashes.iter().map(|(_, hash)| *hash).collect();
+    let sorted_existing = local
+        .existing_hashes_in_sorted_candidates(&sorted_hashes)
+        .map_err(|err| anyhow::anyhow!("Failed to compare local hashes: {err}"))?;
+
+    let mut existing = vec![false; candidates.len()];
+    for ((candidate_index, _), exists) in indexed_hashes.into_iter().zip(sorted_existing) {
+        existing[candidate_index] = exists;
+    }
+    Ok(existing)
+}
+
+#[cfg(feature = "s3")]
 fn read_r2_import_keys_file(path: &Path) -> Result<Vec<String>> {
     let raw = std::fs::read_to_string(path)?;
     Ok(raw
@@ -169,21 +195,24 @@ async fn import_r2_object_to_local(
     local: Arc<super::LocalStore>,
     candidate: R2ObjectCandidate,
     check_only: bool,
+    prechecked_missing: bool,
 ) -> R2ObjectImportOutcome {
-    match local.exists(&candidate.hash) {
-        Ok(true) => {
-            return R2ObjectImportOutcome {
-                skipped: true,
-                ..Default::default()
-            };
-        }
-        Ok(false) => {}
-        Err(err) => {
-            return R2ObjectImportOutcome {
-                failed: true,
-                message: Some(format!("local exists failed for {}: {err}", candidate.key)),
-                ..Default::default()
-            };
+    if !prechecked_missing {
+        match local.exists(&candidate.hash) {
+            Ok(true) => {
+                return R2ObjectImportOutcome {
+                    skipped: true,
+                    ..Default::default()
+                };
+            }
+            Ok(false) => {}
+            Err(err) => {
+                return R2ObjectImportOutcome {
+                    failed: true,
+                    message: Some(format!("local exists failed for {}: {err}", candidate.key)),
+                    ..Default::default()
+                };
+            }
         }
     }
 
@@ -624,6 +653,7 @@ impl HashtreeStore {
                     local.clone(),
                     candidate,
                     options.check_only,
+                    false,
                 ));
 
                 while pending.len() >= concurrency {
@@ -674,7 +704,11 @@ impl HashtreeStore {
             state_file.display(),
         );
 
-        let local_hashes = if options.fast_list {
+        if options.stream_merge && options.fast_list {
+            println!("  Stream merge enabled; skipping in-memory --fast-list index");
+        }
+
+        let local_hashes = if options.fast_list && !options.stream_merge {
             println!("  Loading local hash index...");
             let mut local_hashes = self
                 .router
@@ -714,6 +748,8 @@ impl HashtreeStore {
                 .await
                 .map_err(|err| anyhow::anyhow!("Failed to list S3 objects: {err}"))?;
 
+            let mut page_candidates = Vec::new();
+            let mut page_last_key = None;
             for object in list_resp.contents() {
                 if options
                     .max_objects
@@ -724,11 +760,10 @@ impl HashtreeStore {
                 }
 
                 let key = object.key().unwrap_or("").to_string();
+                page_last_key = Some(key.clone());
                 if !key.ends_with(".bin") {
                     continue;
                 }
-
-                result.last_key = Some(key.clone());
 
                 let Some(hash) = r2_import_key_hash(&prefix, &key) else {
                     continue;
@@ -737,13 +772,31 @@ impl HashtreeStore {
                 result.listed += 1;
                 listed_this_run += 1;
                 listed_since_progress += 1;
+                page_candidates.push(R2ObjectCandidate { key, hash });
+            }
+
+            let page_existing = if options.stream_merge && !page_candidates.is_empty() {
+                Some(existing_r2_candidates(local.as_ref(), &page_candidates)?)
+            } else {
+                None
+            };
+
+            for (candidate_index, candidate) in page_candidates.into_iter().enumerate() {
+                let already_exists = page_existing
+                    .as_ref()
+                    .is_some_and(|existing| existing[candidate_index]);
 
                 if options.scan_delay_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(options.scan_delay_ms)).await;
                 }
 
+                if already_exists {
+                    result.skipped += 1;
+                    continue;
+                }
+
                 if let Some(local_hashes) = &local_hashes {
-                    if local_hashes.binary_search(&hash).is_ok() {
+                    if local_hashes.binary_search(&candidate.hash).is_ok() {
                         result.skipped += 1;
                         continue;
                     }
@@ -753,32 +806,34 @@ impl HashtreeStore {
                     client.clone(),
                     bucket.clone(),
                     local.clone(),
-                    R2ObjectCandidate { key, hash },
+                    candidate,
                     options.check_only,
+                    page_existing.is_some(),
                 ));
 
                 while pending.len() >= concurrency {
                     settle_one_r2_import(&mut pending, &mut result).await;
                 }
-
-                if listed_since_progress >= progress_every {
-                    listed_since_progress = 0;
-                    println!(
-                        "  Progress: {} listed, {} imported, {} skipped, {} missing, {} corrupted, {} failed, {:.2} GB imported",
-                        result.listed,
-                        result.imported,
-                        result.skipped,
-                        result.missing,
-                        result.corrupted,
-                        result.failed,
-                        result.bytes_imported as f64 / 1024.0 / 1024.0 / 1024.0,
-                    );
-                    let _ = write_r2_import_state(&state_file, &result);
-                }
             }
 
             while !pending.is_empty() {
                 settle_one_r2_import(&mut pending, &mut result).await;
+            }
+            if let Some(last_key) = page_last_key {
+                result.last_key = Some(last_key);
+            }
+            if listed_since_progress >= progress_every {
+                listed_since_progress = 0;
+                println!(
+                    "  Progress: {} listed, {} imported, {} skipped, {} missing, {} corrupted, {} failed, {:.2} GB imported",
+                    result.listed,
+                    result.imported,
+                    result.skipped,
+                    result.missing,
+                    result.corrupted,
+                    result.failed,
+                    result.bytes_imported as f64 / 1024.0 / 1024.0 / 1024.0,
+                );
             }
             write_r2_import_state(&state_file, &result)?;
 

@@ -626,6 +626,9 @@ pub(crate) enum StorageCommands {
         /// Load the local blob list once and compare in memory
         #[arg(long)]
         fast_list: bool,
+        /// Compare each R2 listing page against LMDB with bounded range scans
+        #[arg(long)]
+        stream_merge: bool,
         /// Import one explicit blob key or bare SHA-256 hash; repeatable
         #[arg(long = "key")]
         keys: Vec<String>,

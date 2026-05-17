@@ -5,6 +5,7 @@ use hashtree_core::store::{Store, StoreError, StoreStats};
 use hashtree_core::types::Hash;
 use heed::types::*;
 use heed::{Database, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -317,6 +318,64 @@ impl LmdbBlobStore {
             .get(&rtxn, hash)
             .map_err(|e| StoreError::Other(e.to_string()))?
             .is_some())
+    }
+
+    fn mark_existing_hashes_in_db(
+        db: Database<Bytes, Bytes>,
+        rtxn: &heed::RoTxn,
+        sorted_hashes: &[Hash],
+        existing: &mut [bool],
+    ) -> Result<(), StoreError> {
+        debug_assert_eq!(sorted_hashes.len(), existing.len());
+        debug_assert!(sorted_hashes.windows(2).all(|pair| pair[0] <= pair[1]));
+
+        if sorted_hashes.is_empty() {
+            return Ok(());
+        }
+
+        let first = sorted_hashes[0].as_slice();
+        let last = sorted_hashes[sorted_hashes.len() - 1].as_slice();
+        let range = (Bound::Included(first), Bound::Included(last));
+        let mut candidate_index = 0usize;
+
+        for item in db.range(rtxn, &range).map_err(map_heed_error)? {
+            let (stored_hash, _) = item.map_err(map_heed_error)?;
+            while candidate_index < sorted_hashes.len()
+                && sorted_hashes[candidate_index].as_slice() < stored_hash
+            {
+                candidate_index += 1;
+            }
+            while candidate_index < sorted_hashes.len()
+                && sorted_hashes[candidate_index].as_slice() == stored_hash
+            {
+                existing[candidate_index] = true;
+                candidate_index += 1;
+            }
+            if candidate_index >= sorted_hashes.len() {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Mark which sorted hashes already exist using bounded LMDB range scans.
+    pub fn existing_hashes_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        let mut existing = vec![false; sorted_hashes.len()];
+        if sorted_hashes.is_empty() {
+            return Ok(existing);
+        }
+
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        Self::mark_existing_hashes_in_db(self.metadata, &rtxn, sorted_hashes, &mut existing)?;
+        if existing.iter().all(|exists| *exists) {
+            return Ok(existing);
+        }
+        Self::mark_existing_hashes_in_db(self.blobs, &rtxn, sorted_hashes, &mut existing)?;
+        Ok(existing)
     }
 
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
@@ -1261,6 +1320,29 @@ mod tests {
         assert!(hashes.contains(&h1));
         assert!(hashes.contains(&h2));
         assert!(hashes.contains(&h3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn existing_hashes_in_sorted_candidates_marks_present_hashes() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+
+        let h1 = sha256(b"range present one");
+        let h2 = sha256(b"range present two");
+        let missing = sha256(b"range missing");
+        store.put_sync(h1, b"range present one")?;
+        store.put_sync(h2, b"range present two")?;
+
+        let mut candidates = vec![missing, h2, h1, h1];
+        candidates.sort_unstable();
+        let existing = store.existing_hashes_in_sorted_candidates(&candidates)?;
+
+        assert_eq!(existing.len(), candidates.len());
+        for (hash, exists) in candidates.iter().zip(existing) {
+            assert_eq!(exists, *hash == h1 || *hash == h2);
+        }
 
         Ok(())
     }

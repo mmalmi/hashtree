@@ -322,6 +322,21 @@ impl LocalStore {
         }
     }
 
+    /// Mark which sorted hashes already exist in local storage.
+    pub fn existing_hashes_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => Ok(sorted_hashes
+                .iter()
+                .map(|hash| store.exists(hash))
+                .collect()),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
+        }
+    }
+
     /// Sync delete operation
     pub fn delete_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
         match self {
