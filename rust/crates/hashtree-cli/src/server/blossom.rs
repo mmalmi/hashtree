@@ -13,6 +13,8 @@ use base64::Engine;
 use hashtree_core::from_hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
@@ -537,6 +539,30 @@ fn optimistic_upload_queue_timeout() -> Duration {
     Duration::from_millis(millis)
 }
 
+fn optimistic_upload_inflight() -> &'static Mutex<HashSet<String>> {
+    static INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn optimistic_upload_is_inflight(hash_hex: &str) -> bool {
+    optimistic_upload_inflight()
+        .lock()
+        .is_ok_and(|inflight| inflight.contains(hash_hex))
+}
+
+fn mark_optimistic_upload_inflight(hash_hex: &str) -> bool {
+    optimistic_upload_inflight()
+        .lock()
+        .map(|mut inflight| inflight.insert(hash_hex.to_string()))
+        .unwrap_or(true)
+}
+
+fn clear_optimistic_upload_inflight(hash_hex: &str) {
+    if let Ok(mut inflight) = optimistic_upload_inflight().lock() {
+        inflight.remove(hash_hex);
+    }
+}
+
 async fn acquire_optimistic_upload_queue(
     state: &AppState,
     permits: u32,
@@ -561,8 +587,8 @@ async fn uploaded_blob_already_exists(
     sha256_hash: [u8; 32],
     sha256_hex: &str,
 ) -> Result<bool, String> {
-    if let Some(cached) = state.blob_cache.get_size(sha256_hex) {
-        return Ok(cached.is_some());
+    if let Some(Some(_)) = state.blob_cache.get_size(sha256_hex) {
+        return Ok(true);
     }
 
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
@@ -708,6 +734,10 @@ pub async fn upload_blob(
         uploaded: now,
     };
 
+    if state.optimistic_blossom_uploads && optimistic_upload_is_inflight(&sha256_hex) {
+        return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
+    }
+
     match uploaded_blob_already_exists(&state, sha256_hash, &sha256_hex).await {
         Ok(true) => {
             if is_allowed_author {
@@ -745,9 +775,14 @@ pub async fn upload_blob(
         let queued_bytes = body.len().max(OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES);
         if queued_bytes <= state.optimistic_upload_queue_bytes {
             let permits = queued_bytes as u32;
+            let marked_inflight = mark_optimistic_upload_inflight(&sha256_hex);
+            if !marked_inflight {
+                return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
+            }
             let permit = match acquire_optimistic_upload_queue(&state, permits).await {
                 Ok(permit) => permit,
                 Err(_) => {
+                    clear_optimistic_upload_inflight(&sha256_hex);
                     return blossom_retryable_json_error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Optimistic upload queue is full",
@@ -773,6 +808,7 @@ pub async fn upload_blob(
                         error
                     );
                 }
+                clear_optimistic_upload_inflight(&hash_for_log);
             });
 
             return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
@@ -1279,6 +1315,43 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn optimistic_upload_inflight_duplicate_skips_queue() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let body = axum::body::Bytes::from((0u8..=255).collect::<Vec<_>>());
+        let hash_hex = hex::encode(sha256(&body));
+        assert!(mark_optimistic_upload_inflight(&hash_hex));
+
+        let mut state = test_app_state(store);
+        state.optimistic_blossom_uploads = true;
+        state.optimistic_upload_queue_bytes = 1;
+        state.optimistic_upload_queue = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let response = upload_blob(State(state), headers, body)
+            .await
+            .into_response();
+        clear_optimistic_upload_inflight(&hash_hex);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[test]
