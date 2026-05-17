@@ -145,6 +145,38 @@ pub(super) async fn get_blob_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
+    let hash_hex = to_hex(&hash);
+    let read = {
+        let mut inflight = state.inflight_blob_reads.lock().await;
+        if let Some(existing) = inflight.get(&hash_hex) {
+            existing.clone()
+        } else {
+            let state = state.clone();
+            let hash_for_read = hash;
+            let hash_hex_for_task = hash_hex.clone();
+            let read = async move {
+                let result = get_blob_once_without_blocking_runtime(&state, hash_for_read).await;
+                state
+                    .inflight_blob_reads
+                    .lock()
+                    .await
+                    .remove(&hash_hex_for_task);
+                result
+            }
+            .boxed()
+            .shared();
+            inflight.insert(hash_hex, read.clone());
+            read
+        }
+    };
+
+    read.await
+}
+
+async fn get_blob_once_without_blocking_runtime(
+    state: &AppState,
+    hash: [u8; 32],
+) -> Result<Option<Vec<u8>>, String> {
     let permit = try_acquire_blob_read().map_err(str::to_string)?;
     let store = state.store.clone();
     let read = tokio::task::spawn_blocking(move || {

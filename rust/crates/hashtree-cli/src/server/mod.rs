@@ -131,6 +131,9 @@ impl HashtreeServer {
                 inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
+                inflight_blob_reads: Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
                 directory_listing_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
                 resolved_path_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
                 thumbnail_path_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),

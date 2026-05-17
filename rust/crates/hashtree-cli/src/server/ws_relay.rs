@@ -1263,6 +1263,9 @@ mod tests {
             inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            inflight_blob_reads: Arc::new(
+                tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
             directory_listing_cache: Arc::new(std::sync::Mutex::new(
                 super::super::auth::new_lookup_cache(),
             )),

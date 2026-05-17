@@ -33,6 +33,7 @@ const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
 
 /// Default maximum upload size in bytes (5 MB)
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
+const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 
 /// Check if a pubkey has write access based on allowed_npubs config or social graph
 /// Returns Ok(()) if allowed, Err with JSON error body if denied
@@ -609,7 +610,7 @@ pub async fn upload_blob(
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
     if state.optimistic_blossom_uploads {
-        let queued_bytes = body.len().max(1);
+        let queued_bytes = body.len().max(OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES);
         if queued_bytes <= state.optimistic_upload_queue_bytes {
             let permits = queued_bytes as u32;
             let permit = match state
@@ -992,6 +993,9 @@ mod tests {
             inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            inflight_blob_reads: Arc::new(
+                tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
             directory_listing_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             resolved_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             thumbnail_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),

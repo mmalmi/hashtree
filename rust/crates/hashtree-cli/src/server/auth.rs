@@ -115,6 +115,7 @@ pub struct CachedTreeRootEntry {
 }
 
 pub type SharedBlobFetch = Shared<BoxFuture<'static, bool>>;
+pub type SharedBlobRead = Shared<BoxFuture<'static, Result<Option<Vec<u8>>, String>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WsProtocol {
@@ -236,6 +237,9 @@ pub struct AppState {
     pub tree_root_cache: Arc<StdMutex<HashMap<String, CachedTreeRootEntry>>>,
     /// Shared in-flight blob fetches so concurrent misses only hit upstream once per hash
     pub inflight_blob_fetches: Arc<Mutex<HashMap<String, SharedBlobFetch>>>,
+    /// Shared in-flight local blob reads so request bursts for the same hash
+    /// only spend one blocking storage read.
+    pub inflight_blob_reads: Arc<Mutex<HashMap<String, SharedBlobRead>>>,
     /// Immutable directory listings keyed by CID
     pub directory_listing_cache: Arc<StdMutex<TimedLruCache<String, LookupResult<Vec<TreeEntry>>>>>,
     /// Immutable resolved paths keyed by root CID + path
