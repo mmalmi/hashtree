@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
+use super::blob_read::{try_acquire_blob_read, BLOB_READ_BUSY};
 use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
 };
@@ -397,8 +398,23 @@ pub async fn head_blob(
         }
     };
 
+    let _permit = match try_acquire_blob_read() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("Retry-After", "1")
+                .header("X-Reason", BLOB_READ_BUSY)
+                .body(Body::empty())
+                .unwrap()
+        }
+    };
+
     // Blossom HEAD only needs metadata; avoid reading the full blob body just to
-    // answer cache probes and CDN revalidation.
+    // answer cache probes and CDN revalidation. The read permit keeps CDN probe
+    // storms from filling Tokio's blocking thread pool while old blobs without
+    // metadata are still being normalized.
     let store = state.store.clone();
     let blob_size = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes))
         .await

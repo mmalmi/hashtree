@@ -1,4 +1,5 @@
 mod auth;
+mod blob_read;
 pub mod blossom;
 mod handlers;
 mod ingest_filter;
