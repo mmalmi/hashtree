@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 pub(super) const BLOB_READ_BUSY: &str = "blob read queue is full";
-const MAX_CONCURRENT_BLOB_READS: usize = 8;
+const MAX_CONCURRENT_BLOB_READS: usize = 2;
 
 fn blob_read_limiter() -> &'static Semaphore {
     static LIMITER: OnceLock<Semaphore> = OnceLock::new();
