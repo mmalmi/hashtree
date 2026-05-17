@@ -1,3 +1,4 @@
+use super::blob_cache::BlobCache;
 use crate::nostr_relay::NostrRelay;
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
@@ -240,6 +241,8 @@ pub struct AppState {
     /// Shared in-flight local blob reads so request bursts for the same hash
     /// only spend one blocking storage read.
     pub inflight_blob_reads: Arc<Mutex<HashMap<String, SharedBlobRead>>>,
+    /// Bounded hot cache for immutable blob bodies and metadata probes.
+    pub(super) blob_cache: Arc<BlobCache>,
     /// Immutable directory listings keyed by CID
     pub directory_listing_cache: Arc<StdMutex<TimedLruCache<String, LookupResult<Vec<TreeEntry>>>>>,
     /// Immutable resolved paths keyed by root CID + path

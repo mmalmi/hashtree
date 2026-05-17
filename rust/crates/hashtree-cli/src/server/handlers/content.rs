@@ -126,9 +126,14 @@ pub(super) async fn put_cached_blob_without_blocking_runtime(
         Err(error) => return (data, Err(error.to_string())),
     };
     let store = state.store.clone();
+    let blob_cache = state.blob_cache.clone();
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let result = store.put_cached_blob(&data).map_err(|e| e.to_string());
+        if let Ok(hash_hex) = &result {
+            blob_cache.put_size(hash_hex.clone(), Some(data.len() as u64));
+            blob_cache.put_body(hash_hex.clone(), &data);
+        }
         (data, result)
     })
     .await
@@ -146,6 +151,10 @@ pub(super) async fn get_blob_without_blocking_runtime(
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
     let hash_hex = to_hex(&hash);
+    if let Some(data) = state.blob_cache.get_body(&hash_hex) {
+        return Ok(Some(data));
+    }
+
     let read = {
         let mut inflight = state.inflight_blob_reads.lock().await;
         if let Some(existing) = inflight.get(&hash_hex) {
@@ -177,11 +186,24 @@ pub(super) async fn get_blob_size_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<u64>, String> {
+    let hash_hex = to_hex(&hash);
+    if let Some(size) = state.blob_cache.get_size(&hash_hex) {
+        return Ok(size);
+    }
+
+    let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read =
-        tokio::task::spawn_blocking(move || store.blob_size(&hash).map_err(|e| e.to_string()));
+    let read = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store.blob_size(&hash).map_err(|e| e.to_string())
+    });
     match tokio::time::timeout(blob_read_timeout(), read).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok(result)) => {
+            if let Ok(size) = &result {
+                state.blob_cache.put_size(hash_hex, *size);
+            }
+            result
+        }
         Ok(Err(err)) => Err(format!("blob size task failed: {}", err)),
         Err(_) => Err("blob size timed out".to_string()),
     }
@@ -219,7 +241,23 @@ async fn get_blob_once_without_blocking_runtime(
         store.get_blob(&hash).map_err(|e| e.to_string())
     });
     match tokio::time::timeout(blob_read_timeout(), read).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok(result)) => {
+            if let Ok(data) = &result {
+                match data {
+                    Some(data) => {
+                        let hash_hex = to_hex(&hash);
+                        state
+                            .blob_cache
+                            .put_size(hash_hex.clone(), Some(data.len() as u64));
+                        state.blob_cache.put_body(hash_hex, data);
+                    }
+                    None => {
+                        state.blob_cache.put_size(to_hex(&hash), None);
+                    }
+                }
+            }
+            result
+        }
         Ok(Err(err)) => Err(format!("blob read task failed: {}", err)),
         Err(_) => Err("blob read timed out".to_string()),
     }

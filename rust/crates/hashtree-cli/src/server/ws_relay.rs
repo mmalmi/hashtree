@@ -1266,6 +1266,7 @@ mod tests {
             inflight_blob_reads: Arc::new(
                 tokio::sync::Mutex::new(std::collections::HashMap::new()),
             ),
+            blob_cache: Arc::new(crate::server::blob_cache::BlobCache::for_tests()),
             directory_listing_cache: Arc::new(std::sync::Mutex::new(
                 super::super::auth::new_lookup_cache(),
             )),

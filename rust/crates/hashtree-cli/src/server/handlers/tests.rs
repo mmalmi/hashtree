@@ -120,6 +120,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_reads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        blob_cache: Arc::new(crate::server::blob_cache::BlobCache::for_tests()),
         directory_listing_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         resolved_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         thumbnail_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
@@ -1237,6 +1238,46 @@ async fn serve_content_or_blob_honors_raw_blob_ranges() {
     );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), b"blob");
+}
+
+#[tokio::test]
+async fn hot_blob_cache_serves_repeated_raw_blob_reads() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let data = b"hot-cache-blob";
+    let hash_hex = store.put_blob(data).unwrap();
+    let hash = from_hex(&hash_hex).unwrap();
+
+    assert_eq!(
+        get_blob_size_without_blocking_runtime(&state, hash)
+            .await
+            .unwrap(),
+        Some(data.len() as u64)
+    );
+    assert_eq!(
+        get_blob_without_blocking_runtime(&state, hash)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(data.as_slice())
+    );
+
+    assert!(store.router().delete_sync(&hash).unwrap());
+
+    assert_eq!(
+        get_blob_size_without_blocking_runtime(&state, hash)
+            .await
+            .unwrap(),
+        Some(data.len() as u64)
+    );
+    assert_eq!(
+        get_blob_without_blocking_runtime(&state, hash)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(data.as_slice())
+    );
 }
 
 #[tokio::test]

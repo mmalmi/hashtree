@@ -400,32 +400,39 @@ pub async fn head_blob(
         }
     };
 
-    let permit = match acquire_blob_read().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
-                .header("Retry-After", "1")
-                .header("X-Reason", BLOB_READ_BUSY)
-                .body(Body::empty())
-                .unwrap()
-        }
-    };
-
     // Blossom HEAD only needs metadata; avoid reading the full blob body just to
     // answer cache probes and CDN revalidation. The read permit keeps CDN probe
     // storms from filling Tokio's blocking thread pool while old blobs without
     // metadata are still being normalized.
-    let store = state.store.clone();
-    let size_read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.blob_size(&sha256_bytes)
-    });
-    let blob_size = match tokio::time::timeout(blob_read_timeout(), size_read).await {
-        Ok(result) => result.map_err(|_| ()),
-        Err(_) => Err(()),
+    let blob_size = if let Some(cached) = state.blob_cache.get_size(&sha256_hex) {
+        Ok(Ok(cached))
+    } else {
+        let permit = match acquire_blob_read().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                    .header("Retry-After", "1")
+                    .header("X-Reason", BLOB_READ_BUSY)
+                    .body(Body::empty())
+                    .unwrap()
+            }
+        };
+        let store = state.store.clone();
+        let size_read = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.blob_size(&sha256_bytes)
+        });
+        let result = match tokio::time::timeout(blob_read_timeout(), size_read).await {
+            Ok(result) => result.map_err(|_| ()),
+            Err(_) => Err(()),
+        };
+        if let Ok(Ok(size)) = result {
+            state.blob_cache.put_size(sha256_hex.clone(), size);
+        }
+        result
     };
 
     match blob_size {
@@ -467,6 +474,10 @@ async fn store_blossom_blob_without_blocking_runtime(
     pubkey: [u8; 32],
     track_ownership: bool,
 ) -> anyhow::Result<()> {
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let hash_hex = hex::encode(hasher.finalize());
+    let data_for_cache = data.clone();
     let permit = acquire_blob_write()
         .await
         .map_err(|err| anyhow::anyhow!(err))?;
@@ -478,10 +489,15 @@ async fn store_blossom_blob_without_blocking_runtime(
         } else {
             store.put_cached_blob(&data)?;
         }
-        Ok(())
+        Ok::<(), anyhow::Error>(())
     })
     .await
-    .map_err(|err| anyhow::anyhow!("blob write task failed: {}", err))?
+    .map_err(|err| anyhow::anyhow!("blob write task failed: {}", err))??;
+    state
+        .blob_cache
+        .put_size(hash_hex.clone(), Some(data_for_cache.len() as u64));
+    state.blob_cache.put_body(hash_hex, &data_for_cache);
+    Ok(())
 }
 
 fn upload_descriptor_response(status: StatusCode, descriptor: &BlobDescriptor) -> Response<Body> {
@@ -994,6 +1010,7 @@ mod tests {
             inflight_blob_reads: Arc::new(
                 tokio::sync::Mutex::new(std::collections::HashMap::new()),
             ),
+            blob_cache: Arc::new(crate::server::blob_cache::BlobCache::for_tests()),
             directory_listing_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             resolved_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             thumbnail_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
