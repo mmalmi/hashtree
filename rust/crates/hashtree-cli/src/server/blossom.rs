@@ -28,6 +28,7 @@ const BLOSSOM_AUTH_KIND: u16 = 24242;
 /// Cache-Control header for immutable content-addressed data (1 year)
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
+const IMMUTABLE_NOT_FOUND_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=5";
 
 /// Default maximum upload size in bytes (5 MB)
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
@@ -456,7 +457,7 @@ pub async fn head_blob(
         Ok(Ok(None)) => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+            .header(header::CACHE_CONTROL, IMMUTABLE_NOT_FOUND_CACHE_CONTROL)
             .header("X-Reason", "Blob not found")
             .body(Body::empty())
             .unwrap(),

@@ -1281,6 +1281,47 @@ async fn hot_blob_cache_serves_repeated_raw_blob_reads() {
 }
 
 #[tokio::test]
+async fn raw_blob_miss_allows_short_edge_negative_cache() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store, Vec::new());
+    let missing_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(format!("{missing_hash}.bin")),
+        Query(HashMap::new()),
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(IMMUTABLE_NOT_FOUND_CACHE_CONTROL)
+    );
+}
+
+#[tokio::test]
+async fn generic_not_found_stays_uncacheable() {
+    let response = not_found_response("missing");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(NOT_FOUND_CACHE_CONTROL)
+    );
+}
+
+#[tokio::test]
 async fn cache_tree_root_seeds_mutable_root_cache() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());

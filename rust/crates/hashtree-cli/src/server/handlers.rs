@@ -43,12 +43,24 @@ use resolve::*;
 
 const CID_RANGE_STREAM_CHUNK_SIZE: u64 = 256 * 1024;
 const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
+const IMMUTABLE_NOT_FOUND_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=5";
 
 fn not_found_response(body: impl Into<Body>) -> Response<Body> {
+    not_found_response_with_cache_control(body, NOT_FOUND_CACHE_CONTROL)
+}
+
+fn immutable_not_found_response(body: impl Into<Body>) -> Response<Body> {
+    not_found_response_with_cache_control(body, IMMUTABLE_NOT_FOUND_CACHE_CONTROL)
+}
+
+fn not_found_response_with_cache_control(
+    body: impl Into<Body>,
+    cache_control: &'static str,
+) -> Response<Body> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+        .header(header::CACHE_CONTROL, cache_control)
         .body(body.into())
         .unwrap()
 }
@@ -995,7 +1007,12 @@ async fn serve_content_internal(
                                     .into_response();
                             }
                             Ok(None) => {
-                                return not_found_response("File not found").into_response();
+                                let response = if is_immutable {
+                                    immutable_not_found_response("File not found")
+                                } else {
+                                    not_found_response("File not found")
+                                };
+                                return response.into_response();
                             }
                             Err(e) => {
                                 return Response::builder()
@@ -1029,7 +1046,12 @@ async fn serve_content_internal(
                                     .into_response();
                             }
                             Ok(None) => {
-                                return not_found_response("File not found").into_response();
+                                let response = if is_immutable {
+                                    immutable_not_found_response("File not found")
+                                } else {
+                                    not_found_response("File not found")
+                                };
+                                return response.into_response();
                             }
                             Err(e) => {
                                 return Response::builder()
@@ -1044,7 +1066,12 @@ async fn serve_content_internal(
                 }
             }
             Ok(None) => {
-                return not_found_response("File not found").into_response();
+                let response = if is_immutable {
+                    immutable_not_found_response("File not found")
+                } else {
+                    not_found_response("File not found")
+                };
+                return response.into_response();
             }
             Err(e) => {
                 return Response::builder()
@@ -1077,7 +1104,14 @@ async fn serve_content_internal(
             }
             builder.body(Body::from(content)).unwrap().into_response()
         }
-        Ok(None) => not_found_response("Not found").into_response(),
+        Ok(None) => {
+            let response = if is_immutable {
+                immutable_not_found_response("Not found")
+            } else {
+                not_found_response("Not found")
+            };
+            response.into_response()
+        }
         Err(e) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -1305,7 +1339,11 @@ pub async fn serve_content_or_blob(
     }
 
     // Not found anywhere
-    not_found_response("Not found").into_response()
+    if is_sha256 {
+        immutable_not_found_response("Not found").into_response()
+    } else {
+        not_found_response("Not found").into_response()
+    }
 }
 
 /// Serve content by npub/ref_name (Nostr resolver)
