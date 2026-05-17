@@ -399,7 +399,7 @@ pub async fn head_blob(
         }
     };
 
-    let _permit = match try_acquire_blob_read() {
+    let permit = match try_acquire_blob_read() {
         Ok(permit) => permit,
         Err(_) => {
             return Response::builder()
@@ -418,7 +418,10 @@ pub async fn head_blob(
     // storms from filling Tokio's blocking thread pool while old blobs without
     // metadata are still being normalized.
     let store = state.store.clone();
-    let size_read = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes));
+    let size_read = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store.blob_size(&sha256_bytes)
+    });
     let blob_size = match tokio::time::timeout(blob_read_timeout(), size_read).await {
         Ok(result) => result.map_err(|_| ()),
         Err(_) => Err(()),

@@ -138,10 +138,12 @@ pub(super) async fn get_blob_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
-    let _permit = try_acquire_blob_read().map_err(str::to_string)?;
+    let permit = try_acquire_blob_read().map_err(str::to_string)?;
     let store = state.store.clone();
-    let read =
-        tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()));
+    let read = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store.get_blob(&hash).map_err(|e| e.to_string())
+    });
     match tokio::time::timeout(blob_read_timeout(), read).await {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => Err(format!("blob read task failed: {}", err)),
