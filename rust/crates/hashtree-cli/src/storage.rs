@@ -1103,6 +1103,12 @@ impl HashtreeStore {
         }
     }
 
+    fn record_blob_access_now(&self, hash: &Hash) {
+        if let Err(err) = self.router.touch_accessed_sync(hash, unix_timestamp_now()) {
+            tracing::debug!("Failed to update blob access metadata: {}", err);
+        }
+    }
+
     pub fn blob_last_accessed_at(&self, hash: &Hash) -> Result<Option<u64>> {
         self.router
             .last_accessed_at_sync(hash)
@@ -1133,9 +1139,13 @@ impl HashtreeStore {
     /// Store a raw blob, returns SHA256 hash as hex.
     pub fn put_blob(&self, data: &[u8]) -> Result<String> {
         let hash = sha256(data);
-        self.router
+        let inserted = self
+            .router
             .put_sync(hash, data)
             .map_err(|e| anyhow::anyhow!("Failed to store blob: {}", e))?;
+        if !inserted {
+            self.record_blob_access_now(&hash);
+        }
         Ok(to_hex(&hash))
     }
 
@@ -1151,6 +1161,8 @@ impl HashtreeStore {
             self.router
                 .put_sync(hash, data)
                 .map_err(|e| anyhow::anyhow!("Failed to store blob: {}", e))?;
+        } else {
+            self.record_blob_access_now(&hash);
         }
         self.set_blob_owner(&hash, pubkey)?;
         Ok(to_hex(&hash))
@@ -1168,6 +1180,7 @@ impl HashtreeStore {
             .exists(&hash)
             .map_err(|e| anyhow::anyhow!("Failed to check cached blob: {}", e))?
         {
+            self.record_blob_access_now(&hash);
             return Ok(to_hex(&hash));
         }
 
@@ -2131,6 +2144,36 @@ mod tests {
         assert!(path.join("keep-me").exists());
         assert!(path.join("data.mdb").exists());
         assert!(path.join("lock.mdb").exists());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn duplicate_blossom_writes_refresh_blob_last_accessed() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = HashtreeStore::with_options_and_backend(
+            temp.path(),
+            None,
+            LMDB_BLOB_MIN_MAP_SIZE_BYTES,
+            true,
+            &StorageBackend::Lmdb,
+        )?;
+
+        let data = b"cached blossom duplicate";
+        let hash = sha256(data);
+        store.put_cached_blob(data)?;
+        store.router.touch_accessed_sync(&hash, 1)?;
+        store.put_cached_blob(data)?;
+        assert!(store.blob_last_accessed_at(&hash)?.unwrap_or(0) > 1);
+
+        let owned = b"owned blossom duplicate";
+        let owned_hash = sha256(owned);
+        let owner = [7u8; 32];
+        store.put_owned_blob(owned, &owner)?;
+        store.router.touch_accessed_sync(&owned_hash, 1)?;
+        store.put_owned_blob(owned, &owner)?;
+        assert!(store.blob_last_accessed_at(&owned_hash)?.unwrap_or(0) > 1);
 
         Ok(())
     }

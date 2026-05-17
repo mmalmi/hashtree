@@ -492,6 +492,8 @@ impl LmdbBlobStore {
                     if inserted {
                         self.current_bytes
                             .fetch_add(incoming_bytes, Ordering::Relaxed);
+                    } else {
+                        self.touch_accessed_sync(&hash, unix_timestamp_now())?;
                     }
                     return Ok(inserted);
                 }
@@ -1220,6 +1222,22 @@ mod tests {
         assert_eq!(store.last_accessed_at_sync(&first)?, Some(access_time));
         assert!(store.delete_sync(&first)?);
         assert!(store.exists(&second)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_put_refreshes_blob_last_accessed() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+
+        let data = b"already here";
+        let hash = sha256(data);
+        assert!(store.put_sync(hash, data)?);
+        store.touch_accessed_sync(&hash, 1)?;
+
+        assert!(!store.put_sync(hash, data)?);
+        assert!(store.last_accessed_at_sync(&hash)?.unwrap_or(0) > 1);
 
         Ok(())
     }
