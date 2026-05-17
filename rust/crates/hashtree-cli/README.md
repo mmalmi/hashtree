@@ -82,8 +82,8 @@ Config file: `~/.hashtree/config.toml`
 
 ```toml
 [blossom]
-read_servers = ["https://cdn.iris.to", "https://hashtree.iris.to"]
-write_servers = ["https://hashtree.iris.to"]
+read_servers = ["https://cdn.iris.to"]
+write_servers = ["https://upload.iris.to"]
 
 [nostr]
 relays = ["wss://relay.damus.io", "wss://relay.snort.social"]

@@ -42,6 +42,16 @@ use content::*;
 use resolve::*;
 
 const CID_RANGE_STREAM_CHUNK_SIZE: u64 = 256 * 1024;
+const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
+
+fn not_found_response(body: impl Into<Body>) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+        .body(body.into())
+        .unwrap()
+}
 
 pub async fn serve_root() -> impl IntoResponse {
     root_page()
@@ -105,11 +115,7 @@ async fn serve_virtual_tree_host_request(
     connect_info: ConnectInfo<std::net::SocketAddr>,
 ) -> Response<Body> {
     let Some(root) = parse_virtual_tree_root(virtual_root) else {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from("Not found"))
-            .unwrap();
+        return not_found_response("Not found");
     };
 
     let initial_response = match &root {
@@ -179,11 +185,7 @@ pub async fn serve_virtual_host_fallback(
     connect_info: ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
     let Some(virtual_root) = request_virtual_tree_root(&headers) else {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from("Not found"))
-            .unwrap();
+        return not_found_response("Not found");
     };
 
     serve_virtual_tree_host_request(
@@ -340,6 +342,7 @@ pub async fn nostr_profile(
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
             .body(Body::from(
                 json!({
                     "error": "Profile not found",
@@ -395,11 +398,7 @@ async fn list_directory_json(
     let entries = match list_directory_with_fetch(state, &tree, cid).await {
         Ok(Some(list)) => list,
         Ok(None) => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from("Directory not found"))
-                .unwrap();
+            return not_found_response("Directory not found");
         }
         Err(e) => {
             return Response::builder()
@@ -562,11 +561,7 @@ async fn serve_tree_root_response(
                 return list_directory_json(state, &listing_cid, is_immutable, is_localhost).await;
             }
             Ok(None) => {
-                return Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from("File not found"))
-                    .unwrap();
+                return not_found_response("File not found");
             }
             Err(e) => {
                 return Response::builder()
@@ -584,11 +579,7 @@ async fn serve_tree_root_response(
             .map(|requested_path| requested_path.contains('/'))
             .unwrap_or(false)
     {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from("Not found"))
-            .unwrap();
+        return not_found_response("Not found");
     }
 
     serve_cid_with_range(
@@ -839,11 +830,7 @@ async fn serve_cid_with_range(
         let total_size = match get_size_cid_with_fetch(state, &tree, cid).await {
             Ok(Some(size)) => size,
             Ok(None) => {
-                return Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from("Not found"))
-                    .unwrap();
+                return not_found_response("Not found");
             }
             Err(e) => {
                 return Response::builder()
@@ -901,11 +888,7 @@ async fn serve_cid_with_range(
     let data = match get_cid_with_fetch(state, &tree, cid).await {
         Ok(Some(data)) => data,
         Ok(None) => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from("Not found"))
-                .unwrap();
+            return not_found_response("Not found");
         }
         Err(e) => {
             return Response::builder()
@@ -1012,12 +995,7 @@ async fn serve_content_internal(
                                     .into_response();
                             }
                             Ok(None) => {
-                                return Response::builder()
-                                    .status(StatusCode::NOT_FOUND)
-                                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                                    .body(Body::from("File not found"))
-                                    .unwrap()
-                                    .into_response();
+                                return not_found_response("File not found").into_response();
                             }
                             Err(e) => {
                                 return Response::builder()
@@ -1051,12 +1029,7 @@ async fn serve_content_internal(
                                     .into_response();
                             }
                             Ok(None) => {
-                                return Response::builder()
-                                    .status(StatusCode::NOT_FOUND)
-                                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                                    .body(Body::from("File not found"))
-                                    .unwrap()
-                                    .into_response();
+                                return not_found_response("File not found").into_response();
                             }
                             Err(e) => {
                                 return Response::builder()
@@ -1071,12 +1044,7 @@ async fn serve_content_internal(
                 }
             }
             Ok(None) => {
-                return Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from("File not found"))
-                    .unwrap()
-                    .into_response();
+                return not_found_response("File not found").into_response();
             }
             Err(e) => {
                 return Response::builder()
@@ -1109,12 +1077,7 @@ async fn serve_content_internal(
             }
             builder.body(Body::from(content)).unwrap().into_response()
         }
-        Ok(None) => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from("Not found"))
-            .unwrap()
-            .into_response(),
+        Ok(None) => not_found_response("Not found").into_response(),
         Err(e) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -1180,6 +1143,7 @@ pub async fn serve_content_or_blob(
                     return Response::builder()
                         .status(StatusCode::SERVICE_UNAVAILABLE)
                         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
                         .header("Retry-After", "1")
                         .body(Body::from("Blob read queue is full"))
                         .unwrap()
@@ -1261,12 +1225,7 @@ pub async fn serve_content_or_blob(
     }
 
     // Not found anywhere
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(Body::from("Not found"))
-        .unwrap()
-        .into_response()
+    not_found_response("Not found").into_response()
 }
 
 /// Serve content by npub/ref_name (Nostr resolver)
@@ -1321,12 +1280,7 @@ pub async fn serve_npub(
         }
         Ok(Err(e)) => {
             let _ = resolver.stop().await;
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from(format!("Resolution failed: {}", e)))
-                .unwrap()
-                .into_response()
+            not_found_response(format!("Resolution failed: {}", e)).into_response()
         }
         Err(_) => {
             let _ = resolver.stop().await;

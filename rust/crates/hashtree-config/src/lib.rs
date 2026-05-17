@@ -8,11 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Default read-only file servers
-pub const DEFAULT_READ_SERVERS: &[&str] = &[
-    "https://cdn.iris.to",
-    "https://hashtree.iris.to",
-    "https://blossom.primal.net",
-];
+pub const DEFAULT_READ_SERVERS: &[&str] = &["https://cdn.iris.to", "https://blossom.primal.net"];
 
 /// Default write-enabled file servers
 pub const DEFAULT_WRITE_SERVERS: &[&str] = &["https://upload.iris.to"];

@@ -318,7 +318,6 @@ fn default_read_servers() -> Vec<String> {
     let mut servers = vec![
         "https://blossom.primal.net".to_string(),
         "https://cdn.iris.to".to_string(),
-        "https://hashtree.iris.to".to_string(),
     ];
     servers.sort();
     servers
