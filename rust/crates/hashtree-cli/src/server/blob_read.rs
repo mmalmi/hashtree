@@ -7,6 +7,8 @@ const DEFAULT_MAX_CONCURRENT_BLOB_READS: usize = 16;
 const MAX_CONCURRENT_BLOB_READS_ENV: &str = "HTREE_MAX_CONCURRENT_BLOB_READS";
 const DEFAULT_BLOB_READ_TIMEOUT_MS: u64 = 5_000;
 const BLOB_READ_TIMEOUT_MS_ENV: &str = "HTREE_BLOB_READ_TIMEOUT_MS";
+const DEFAULT_BLOB_READ_QUEUE_TIMEOUT_MS: u64 = 2_000;
+const BLOB_READ_QUEUE_TIMEOUT_MS_ENV: &str = "HTREE_BLOB_READ_QUEUE_TIMEOUT_MS";
 const DEFAULT_MAX_CONCURRENT_BLOB_WRITES: usize = 4;
 const MAX_CONCURRENT_BLOB_WRITES_ENV: &str = "HTREE_MAX_CONCURRENT_BLOB_WRITES";
 
@@ -36,11 +38,17 @@ fn max_concurrent_blob_writes() -> usize {
         .unwrap_or(DEFAULT_MAX_CONCURRENT_BLOB_WRITES)
 }
 
-pub(super) fn try_acquire_blob_read() -> Result<OwnedSemaphorePermit, &'static str> {
-    blob_read_limiter()
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| BLOB_READ_BUSY)
+pub(super) async fn acquire_blob_read() -> Result<OwnedSemaphorePermit, &'static str> {
+    match tokio::time::timeout(
+        blob_read_queue_timeout(),
+        blob_read_limiter().clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err("blob read queue is closed"),
+        Err(_) => Err(BLOB_READ_BUSY),
+    }
 }
 
 pub(super) async fn acquire_blob_write() -> Result<OwnedSemaphorePermit, &'static str> {
@@ -57,5 +65,14 @@ pub(super) fn blob_read_timeout() -> Duration {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_BLOB_READ_TIMEOUT_MS);
+    Duration::from_millis(millis)
+}
+
+fn blob_read_queue_timeout() -> Duration {
+    let millis = std::env::var(BLOB_READ_QUEUE_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOB_READ_QUEUE_TIMEOUT_MS);
     Duration::from_millis(millis)
 }

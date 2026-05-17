@@ -16,9 +16,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
-use super::blob_read::{
-    acquire_blob_write, blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY,
-};
+use super::blob_read::{acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY};
 use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
 };
@@ -402,7 +400,7 @@ pub async fn head_blob(
         }
     };
 
-    let permit = match try_acquire_blob_read() {
+    let permit = match acquire_blob_read().await {
         Ok(permit) => permit,
         Err(_) => {
             return Response::builder()

@@ -1,6 +1,6 @@
 use super::*;
 use crate::server::blob_read::{
-    acquire_blob_write, blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY,
+    acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY,
 };
 use crate::webrtc::WebRTCState;
 
@@ -177,7 +177,7 @@ async fn get_blob_once_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
-    let permit = try_acquire_blob_read().map_err(str::to_string)?;
+    let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
     let read = tokio::task::spawn_blocking(move || {
         let _permit = permit;
