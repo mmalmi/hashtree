@@ -1675,6 +1675,63 @@ pub(crate) async fn run() -> Result<()> {
                         println!("All blobs verified successfully!");
                     }
                 }
+                StorageCommands::ImportR2 {
+                    concurrency,
+                    check_only,
+                    resume,
+                    fast_list,
+                    start_after,
+                    state_file,
+                    max_objects,
+                    progress_every,
+                } => {
+                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+                    let store = HashtreeStore::with_options(
+                        &data_dir,
+                        config.storage.s3.as_ref(),
+                        max_size_bytes,
+                    )?;
+                    #[cfg(feature = "s3")]
+                    {
+                        let result = store
+                            .import_r2_to_local(hashtree_cli::storage::R2ImportOptions {
+                                concurrency,
+                                check_only,
+                                resume,
+                                fast_list,
+                                start_after,
+                                state_file,
+                                max_objects,
+                                progress_every,
+                            })
+                            .await?;
+                        println!(
+                            "R2 import complete: {} listed, {} skipped, {} missing, {} imported, {} corrupted, {} failed, {:.2} GB imported",
+                            result.listed,
+                            result.skipped,
+                            result.missing,
+                            result.imported,
+                            result.corrupted,
+                            result.failed,
+                            result.bytes_imported as f64 / 1024.0 / 1024.0 / 1024.0,
+                        );
+                    }
+                    #[cfg(not(feature = "s3"))]
+                    {
+                        let _ = (
+                            concurrency,
+                            check_only,
+                            resume,
+                            fast_list,
+                            start_after,
+                            state_file,
+                            max_objects,
+                            progress_every,
+                            store,
+                        );
+                        anyhow::bail!("R2 import requires building htree with the s3 feature");
+                    }
+                }
             }
         }
         Commands::Peer { addr } => {

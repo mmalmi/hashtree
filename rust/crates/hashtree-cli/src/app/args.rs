@@ -612,6 +612,33 @@ pub(crate) enum StorageCommands {
         #[arg(long)]
         r2: bool,
     },
+    /// Import missing blobs from configured R2/S3 storage into local storage
+    ImportR2 {
+        /// Concurrent object downloads for missing blobs
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        /// Only list/compare source objects against local storage; do not download
+        #[arg(long)]
+        check_only: bool,
+        /// Resume an interrupted scan from the saved last key
+        #[arg(long)]
+        resume: bool,
+        /// Load the local blob list once and compare in memory
+        #[arg(long)]
+        fast_list: bool,
+        /// Explicit R2/S3 key to start after
+        #[arg(long)]
+        start_after: Option<String>,
+        /// Persist scan progress here
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+        /// Stop after this many listed objects, useful for spot checks
+        #[arg(long)]
+        max_objects: Option<usize>,
+        /// Print progress every N listed objects
+        #[arg(long, default_value_t = 5_000)]
+        progress_every: usize,
+    },
 }
 
 #[derive(Subcommand)]

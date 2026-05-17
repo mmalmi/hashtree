@@ -303,6 +303,15 @@ impl LmdbBlobStore {
             .read_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
 
+        if self
+            .metadata
+            .get(&rtxn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+
         Ok(self
             .blobs
             .get(&rtxn, hash)
@@ -465,16 +474,26 @@ impl LmdbBlobStore {
             .map_err(|e| StoreError::Other(e.to_string()))?;
 
         let mut hashes = Vec::new();
-        for item in self
-            .blobs
-            .iter(&rtxn)
-            .map_err(|e| StoreError::Other(e.to_string()))?
-        {
+        for item in self.metadata.iter(&rtxn).map_err(map_heed_error)? {
             let (hash, _) = item.map_err(|e| StoreError::Other(e.to_string()))?;
             let hash_arr: Hash = hash
                 .try_into()
                 .map_err(|_| StoreError::Other("invalid hash length".into()))?;
             hashes.push(hash_arr);
+        }
+
+        if hashes.is_empty() {
+            for item in self
+                .blobs
+                .iter(&rtxn)
+                .map_err(|e| StoreError::Other(e.to_string()))?
+            {
+                let (hash, _) = item.map_err(|e| StoreError::Other(e.to_string()))?;
+                let hash_arr: Hash = hash
+                    .try_into()
+                    .map_err(|_| StoreError::Other("invalid hash length".into()))?;
+                hashes.push(hash_arr);
+            }
         }
 
         Ok(hashes)
