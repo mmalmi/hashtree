@@ -16,6 +16,81 @@ fn format_duration_compact(seconds: u64) -> String {
     format!("{seconds}s")
 }
 
+fn json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(|value| value.as_u64())
+}
+
+fn append_queue_status(lines: &mut Vec<String>, queues: &serde_json::Value) {
+    lines.push(String::new());
+    lines.push("Queues:".to_string());
+
+    if let Some(reads) = queues.get("blob_reads") {
+        let in_use = json_u64(reads, "in_use").unwrap_or(0);
+        let limit = json_u64(reads, "limit").unwrap_or(0);
+        let available = json_u64(reads, "available").unwrap_or(0);
+        let queue_timeout = json_u64(reads, "queue_timeout_ms").unwrap_or(0);
+        let task_timeout = json_u64(reads, "task_timeout_ms").unwrap_or(0);
+        lines.push(format!(
+            "  Blob reads: {in_use}/{limit} in use, {available} available, queue {queue_timeout}ms, task {task_timeout}ms"
+        ));
+    }
+
+    if let Some(writes) = queues.get("blob_writes") {
+        let in_use = json_u64(writes, "in_use").unwrap_or(0);
+        let limit = json_u64(writes, "limit").unwrap_or(0);
+        let available = json_u64(writes, "available").unwrap_or(0);
+        lines.push(format!(
+            "  Blob writes: {in_use}/{limit} in use, {available} available"
+        ));
+    }
+
+    if let Some(uploads) = queues.get("optimistic_uploads") {
+        let enabled = uploads
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let reserved = json_u64(uploads, "reserved_bytes").unwrap_or(0);
+        let max = json_u64(uploads, "max_bytes").unwrap_or(0);
+        let in_flight = json_u64(uploads, "in_flight").unwrap_or(0);
+        let queue_timeout = json_u64(uploads, "queue_timeout_ms").unwrap_or(0);
+        lines.push(format!(
+            "  Optimistic uploads: {}, {}/{} reserved, {} in flight, queue {}ms",
+            if enabled { "enabled" } else { "disabled" },
+            format_bytes(reserved),
+            format_bytes(max),
+            in_flight,
+            queue_timeout
+        ));
+    }
+}
+
+fn append_http_status(lines: &mut Vec<String>, status: &serde_json::Value) {
+    let Some(classes) = status
+        .get("http")
+        .and_then(|http| http.get("status_classes"))
+    else {
+        return;
+    };
+    let Some(recent) = classes.get("recent") else {
+        return;
+    };
+
+    let window = json_u64(classes, "window_seconds").unwrap_or(0);
+    lines.push(String::new());
+    lines.push("HTTP:".to_string());
+    lines.push(format!(
+        "  Last {}s: {} total, {} 1xx, {} 2xx, {} 3xx, {} 4xx, {} 5xx, {} other",
+        window,
+        json_u64(recent, "total").unwrap_or(0),
+        json_u64(recent, "1xx").unwrap_or(0),
+        json_u64(recent, "2xx").unwrap_or(0),
+        json_u64(recent, "3xx").unwrap_or(0),
+        json_u64(recent, "4xx").unwrap_or(0),
+        json_u64(recent, "5xx").unwrap_or(0),
+        json_u64(recent, "other").unwrap_or(0)
+    ));
+}
+
 pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: bool) -> String {
     let mut lines = Vec::new();
     if include_header {
@@ -56,6 +131,11 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
             lines.push(format!("  Total size: {}", format_bytes(bytes)));
         }
     }
+
+    if let Some(queues) = status.get("queues") {
+        append_queue_status(&mut lines, queues);
+    }
+    append_http_status(&mut lines, status);
 
     if let Some(webrtc) = status.get("webrtc") {
         lines.push(String::new());

@@ -286,6 +286,10 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     ];
     state.ws_relay.note_upstream_relay_send(512);
     state.ws_relay.note_upstream_relay_receive(1024);
+    crate::server::status_metrics::record_http_status_for_test(StatusCode::SWITCHING_PROTOCOLS);
+    crate::server::status_metrics::record_http_status_for_test(StatusCode::OK);
+    crate::server::status_metrics::record_http_status_for_test(StatusCode::NOT_FOUND);
+    crate::server::status_metrics::record_http_status_for_test(StatusCode::SERVICE_UNAVAILABLE);
 
     let response = daemon_status(
         AxumState(state),
@@ -313,6 +317,36 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     assert_eq!(json["capabilities"]["hash_get"], true);
     assert_eq!(json["daemon_started_at"], 1_700_000_000u64);
     assert!(json["uptime_seconds"].as_u64().unwrap() > 0);
+    assert!(json["queues"]["blob_reads"]["limit"].as_u64().unwrap() > 0);
+    assert!(json["queues"]["blob_writes"]["limit"].as_u64().unwrap() > 0);
+    assert_eq!(
+        json["queues"]["optimistic_uploads"]["max_bytes"],
+        512 * 1024 * 1024u64
+    );
+    assert!(
+        json["http"]["status_classes"]["recent"]["1xx"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        json["http"]["status_classes"]["recent"]["2xx"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        json["http"]["status_classes"]["recent"]["4xx"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        json["http"]["status_classes"]["recent"]["5xx"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
 }
 
 #[tokio::test]

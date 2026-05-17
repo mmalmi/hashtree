@@ -8,6 +8,7 @@ mod mime;
 mod nostr_query;
 mod peer_status;
 mod request_paths;
+mod status_metrics;
 #[cfg(feature = "p2p")]
 pub mod stun;
 mod ui;
@@ -359,7 +360,8 @@ impl HashtreeServer {
 
         let mut app = public_routes
             .merge(protected_routes)
-            .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10GB limit
+            .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10GB limit
+            .layer(middleware::from_fn(status_metrics::record_http_status));
 
         if let Some(extra) = self.extra_routes {
             app = app.merge(extra.with_state(state));

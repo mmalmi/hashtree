@@ -1,4 +1,4 @@
-use super::auth::AppState;
+use super::{auth::AppState, blob_read, blossom, status_metrics};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -36,6 +36,18 @@ impl MeshSnapshot {
             "bluetooth": self.transport_bluetooth,
         })
     }
+}
+
+fn status_counts_json(counts: status_metrics::StatusClassCounts) -> Value {
+    json!({
+        "total": counts.total,
+        "1xx": counts.status_1xx,
+        "2xx": counts.status_2xx,
+        "3xx": counts.status_3xx,
+        "4xx": counts.status_4xx,
+        "5xx": counts.status_5xx,
+        "other": counts.other,
+    })
 }
 
 fn bluetooth_transport_enabled() -> bool {
@@ -233,6 +245,38 @@ pub(super) async fn daemon_status(
         "bytes_sent": relay_bytes_sent,
         "bytes_received": relay_bytes_received,
     });
+    let blob_io = blob_read::blob_io_queue_snapshot();
+    let optimistic_uploads = blossom::optimistic_upload_queue_snapshot(&state);
+    let queues = json!({
+        "blob_reads": {
+            "limit": blob_io.read_limit,
+            "in_use": blob_io.read_in_use,
+            "available": blob_io.read_available,
+            "queue_timeout_ms": blob_io.read_queue_timeout_ms,
+            "task_timeout_ms": blob_io.read_task_timeout_ms,
+        },
+        "blob_writes": {
+            "limit": blob_io.write_limit,
+            "in_use": blob_io.write_in_use,
+            "available": blob_io.write_available,
+        },
+        "optimistic_uploads": {
+            "enabled": optimistic_uploads.enabled,
+            "max_bytes": optimistic_uploads.max_bytes,
+            "available_bytes": optimistic_uploads.available_bytes,
+            "reserved_bytes": optimistic_uploads.reserved_bytes,
+            "in_flight": optimistic_uploads.in_flight,
+            "queue_timeout_ms": optimistic_uploads.queue_timeout_ms,
+        },
+    });
+    let http_status = status_metrics::http_status_snapshot();
+    let http = json!({
+        "status_classes": {
+            "window_seconds": http_status.window_seconds,
+            "recent": status_counts_json(http_status.recent),
+            "total": status_counts_json(http_status.lifetime),
+        }
+    });
 
     Json(json!({
         "status": "running",
@@ -246,6 +290,8 @@ pub(super) async fn daemon_status(
         "webrtc": mesh,
         "relay": relay,
         "upstream": upstream,
+        "queues": queues,
+        "http": http,
     }))
     .into_response()
 }

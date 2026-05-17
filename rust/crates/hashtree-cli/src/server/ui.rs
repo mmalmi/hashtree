@@ -134,8 +134,12 @@ pub fn root_page() -> Html<&'static str> {
         }
 
         async function loadStats() {
-            const response = await fetch('/api/stats');
+            const [response, statusResponse] = await Promise.all([
+                fetch('/api/stats'),
+                fetch('/api/status').catch(() => null)
+            ]);
             const data = await response.json();
+            const statusData = statusResponse && statusResponse.ok ? await statusResponse.json() : null;
             const stats = document.getElementById('stats');
             const formatBytes = (bytes) => {
                 const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -147,11 +151,29 @@ pub fn root_page() -> Html<&'static str> {
                 }
                 return unit === 0 ? `${bytes} ${units[unit]}` : `${value.toFixed(1)} ${units[unit]}`;
             };
-            stats.innerHTML = `
+            let html = `
                 <p>Stored objects: ${data.total_dags}</p>
                 <p>Pinned items: ${data.pinned_dags}</p>
                 <p>Total size: ${formatBytes(data.total_bytes)}</p>
             `;
+            const queues = statusData && statusData.queues;
+            if (queues) {
+                const reads = queues.blob_reads || {};
+                const writes = queues.blob_writes || {};
+                const uploads = queues.optimistic_uploads || {};
+                html += `
+                    <p>Read queue: ${reads.in_use || 0}/${reads.limit || 0}</p>
+                    <p>Write queue: ${writes.in_use || 0}/${writes.limit || 0}</p>
+                    <p>Upload queue: ${formatBytes(uploads.reserved_bytes || 0)} / ${formatBytes(uploads.max_bytes || 0)}, in-flight ${uploads.in_flight || 0}</p>
+                `;
+            }
+            const http = statusData && statusData.http && statusData.http.status_classes;
+            if (http && http.recent) {
+                html += `
+                    <p>HTTP ${http.window_seconds || 0}s: ${http.recent.total || 0} total, ${http.recent['1xx'] || 0} 1xx, ${http.recent['2xx'] || 0} 2xx, ${http.recent['4xx'] || 0} 4xx, ${http.recent['5xx'] || 0} 5xx</p>
+                `;
+            }
+            stats.innerHTML = html;
         }
 
         async function loadGitRepos() {

@@ -246,6 +246,58 @@ fn test_daemon_status_uses_human_storage_labels() {
 }
 
 #[test]
+fn test_daemon_status_formats_queue_and_http_counters() {
+    let status = serde_json::json!({
+        "status": "running",
+        "queues": {
+            "blob_reads": {
+                "limit": 16,
+                "in_use": 2,
+                "available": 14,
+                "queue_timeout_ms": 2000,
+                "task_timeout_ms": 5000
+            },
+            "blob_writes": {
+                "limit": 4,
+                "in_use": 1,
+                "available": 3
+            },
+            "optimistic_uploads": {
+                "enabled": true,
+                "max_bytes": 512 * 1024 * 1024u64,
+                "reserved_bytes": 256 * 1024u64,
+                "in_flight": 3,
+                "queue_timeout_ms": 15000
+            }
+        },
+        "http": {
+            "status_classes": {
+                "window_seconds": 60,
+                "recent": {
+                    "total": 42,
+                    "1xx": 1,
+                    "2xx": 30,
+                    "3xx": 2,
+                    "4xx": 8,
+                    "5xx": 1,
+                    "other": 1
+                }
+            }
+        }
+    });
+
+    let rendered = format_daemon_status(&status, true);
+
+    assert!(rendered.contains("Queues:"));
+    assert!(rendered.contains("Blob reads: 2/16 in use, 14 available, queue 2000ms, task 5000ms"));
+    assert!(rendered.contains("Blob writes: 1/4 in use, 3 available"));
+    assert!(rendered.contains(
+        "Optimistic uploads: enabled, 256.0 KiB/512.0 MiB reserved, 3 in flight, queue 15000ms"
+    ));
+    assert!(rendered.contains("Last 60s: 42 total, 1 1xx, 30 2xx, 2 3xx, 8 4xx, 1 5xx, 1 other"));
+}
+
+#[test]
 fn test_update_hex_list_file_add_remove() {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().join("mutes.json");

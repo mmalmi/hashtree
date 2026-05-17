@@ -38,6 +38,16 @@ const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OptimisticUploadQueueSnapshot {
+    pub enabled: bool,
+    pub max_bytes: usize,
+    pub available_bytes: usize,
+    pub reserved_bytes: usize,
+    pub in_flight: usize,
+    pub queue_timeout_ms: u64,
+}
+
 /// Check if a pubkey has write access based on allowed_npubs config or social graph
 /// Returns Ok(()) if allowed, Err with JSON error body if denied
 #[allow(clippy::result_large_err)]
@@ -561,6 +571,31 @@ fn clear_optimistic_upload_inflight(hash_hex: &str) {
     if let Ok(mut inflight) = optimistic_upload_inflight().lock() {
         inflight.remove(hash_hex);
     }
+}
+
+pub(super) fn optimistic_upload_queue_snapshot(state: &AppState) -> OptimisticUploadQueueSnapshot {
+    let max_bytes = state.optimistic_upload_queue_bytes;
+    let available_bytes = state
+        .optimistic_upload_queue
+        .available_permits()
+        .min(max_bytes);
+    let in_flight = optimistic_upload_inflight()
+        .lock()
+        .map(|inflight| inflight.len())
+        .unwrap_or(0);
+
+    OptimisticUploadQueueSnapshot {
+        enabled: state.optimistic_blossom_uploads,
+        max_bytes,
+        available_bytes,
+        reserved_bytes: max_bytes.saturating_sub(available_bytes),
+        in_flight,
+        queue_timeout_ms: duration_millis_u64(optimistic_upload_queue_timeout()),
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 async fn acquire_optimistic_upload_queue(
