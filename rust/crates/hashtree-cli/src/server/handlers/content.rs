@@ -1,5 +1,7 @@
 use super::*;
-use crate::server::blob_read::{blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY};
+use crate::server::blob_read::{
+    acquire_blob_write, blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY,
+};
 use crate::webrtc::WebRTCState;
 
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
@@ -119,8 +121,13 @@ pub(super) async fn put_cached_blob_without_blocking_runtime(
         return (data, Err(rejection.reason));
     }
 
+    let permit = match acquire_blob_write().await {
+        Ok(permit) => permit,
+        Err(error) => return (data, Err(error.to_string())),
+    };
     let store = state.store.clone();
     match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let result = store.put_cached_blob(&data).map_err(|e| e.to_string());
         (data, result)
     })

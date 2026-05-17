@@ -16,7 +16,9 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
-use super::blob_read::{blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY};
+use super::blob_read::{
+    acquire_blob_write, blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY,
+};
 use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
 };
@@ -466,8 +468,12 @@ async fn store_blossom_blob_without_blocking_runtime(
     pubkey: [u8; 32],
     track_ownership: bool,
 ) -> anyhow::Result<()> {
+    let permit = acquire_blob_write()
+        .await
+        .map_err(|err| anyhow::anyhow!(err))?;
     let store = state.store.clone();
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         if track_ownership {
             store.put_owned_blob(&data, &pubkey)?;
         } else {
