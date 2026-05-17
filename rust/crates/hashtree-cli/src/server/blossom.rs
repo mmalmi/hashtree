@@ -398,8 +398,13 @@ pub async fn head_blob(
     };
 
     // Blossom only serves raw blobs (not merkle tree structures)
-    match state.store.get_blob(&sha256_bytes) {
-        Ok(Some(data)) => {
+    let store = state.store.clone();
+    let blob = tokio::task::spawn_blocking(move || store.get_blob(&sha256_bytes))
+        .await
+        .map_err(|_| ());
+
+    match blob {
+        Ok(Ok(Some(data))) => {
             let mime_type = ext
                 .map(|e| get_mime_type(&format!("file{}", e)))
                 .unwrap_or("application/octet-stream");
@@ -416,18 +421,37 @@ pub async fn head_blob(
             }
             builder.body(Body::empty()).unwrap()
         }
-        Ok(None) => Response::builder()
+        Ok(Ok(None)) => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header("X-Reason", "Blob not found")
             .body(Body::empty())
             .unwrap(),
-        Err(_) => Response::builder()
+        _ => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(Body::empty())
             .unwrap(),
     }
+}
+
+async fn store_blossom_blob_without_blocking_runtime(
+    state: &AppState,
+    data: axum::body::Bytes,
+    pubkey: [u8; 32],
+    track_ownership: bool,
+) -> anyhow::Result<()> {
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        if track_ownership {
+            store.put_owned_blob(&data, &pubkey)?;
+        } else {
+            store.put_cached_blob(&data)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("blob write task failed: {}", err))?
 }
 
 /// PUT /upload - Upload a new blob (BUD-02)
@@ -532,13 +556,13 @@ pub async fn upload_blob(
 
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
-    let store_result = store_blossom_blob(
+    let store_result = store_blossom_blob_without_blocking_runtime(
         &state,
-        &body,
-        &sha256_hash,
-        &pubkey_bytes,
+        body.clone(),
+        pubkey_bytes,
         is_allowed_author,
-    );
+    )
+    .await;
 
     match store_result {
         Ok(()) => {
@@ -815,6 +839,7 @@ fn is_valid_sha256(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
 fn store_blossom_blob(
     state: &AppState,
     data: &[u8],
@@ -822,8 +847,6 @@ fn store_blossom_blob(
     pubkey: &[u8; 32],
     track_ownership: bool,
 ) -> anyhow::Result<()> {
-    // Store as raw blob only - no tree creation needed for blossom
-    // This avoids sync_block_on which can deadlock under load
     if track_ownership {
         state.store.put_owned_blob(data, pubkey)?;
     } else {

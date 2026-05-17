@@ -1170,7 +1170,7 @@ pub async fn serve_content_or_blob(
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
-            if let Ok(Some(data)) = state.store.get_blob(&hash_bytes) {
+            if let Ok(Some(data)) = get_blob_without_blocking_runtime(&state, hash_bytes).await {
                 return build_blob_response(data, BlobSource::Local, is_localhost).into_response();
             }
         }

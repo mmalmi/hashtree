@@ -133,6 +133,16 @@ pub(super) async fn put_cached_blob_without_blocking_runtime(
     }
 }
 
+pub(super) async fn get_blob_without_blocking_runtime(
+    state: &AppState,
+    hash: [u8; 32],
+) -> Result<Option<Vec<u8>>, String> {
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()))
+        .await
+        .map_err(|err| format!("blob read task failed: {}", err))?
+}
+
 pub(super) async fn await_fetch_task<F, T>(source: &str, hash_hex: &str, future: F) -> Option<T>
 where
     F: std::future::Future<Output = Option<T>>,
