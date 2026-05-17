@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
-use super::blob_read::{try_acquire_blob_read, BLOB_READ_BUSY};
+use super::blob_read::{blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY};
 use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
 };
@@ -418,9 +418,11 @@ pub async fn head_blob(
     // storms from filling Tokio's blocking thread pool while old blobs without
     // metadata are still being normalized.
     let store = state.store.clone();
-    let blob_size = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes))
-        .await
-        .map_err(|_| ());
+    let size_read = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes));
+    let blob_size = match tokio::time::timeout(blob_read_timeout(), size_read).await {
+        Ok(result) => result.map_err(|_| ()),
+        Err(_) => Err(()),
+    };
 
     match blob_size {
         Ok(Ok(Some(size))) => {

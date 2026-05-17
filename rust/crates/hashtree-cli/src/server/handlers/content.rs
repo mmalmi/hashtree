@@ -1,5 +1,5 @@
 use super::*;
-use crate::server::blob_read::{try_acquire_blob_read, BLOB_READ_BUSY};
+use crate::server::blob_read::{blob_read_timeout, try_acquire_blob_read, BLOB_READ_BUSY};
 use crate::webrtc::WebRTCState;
 
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
@@ -140,9 +140,13 @@ pub(super) async fn get_blob_without_blocking_runtime(
 ) -> Result<Option<Vec<u8>>, String> {
     let _permit = try_acquire_blob_read().map_err(str::to_string)?;
     let store = state.store.clone();
-    tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()))
-        .await
-        .map_err(|err| format!("blob read task failed: {}", err))?
+    let read =
+        tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()));
+    match tokio::time::timeout(blob_read_timeout(), read).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => Err(format!("blob read task failed: {}", err)),
+        Err(_) => Err("blob read timed out".to_string()),
+    }
 }
 
 pub(super) fn blob_read_busy_error() -> &'static str {
