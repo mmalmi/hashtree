@@ -1,5 +1,6 @@
 use axum::http::StatusCode;
 use hashtree_core::is_tree_node;
+use nostr::Event;
 
 /// Minimum plausible encrypted CHK blob size.
 const MIN_CHK_SIZE: usize = 16;
@@ -68,7 +69,7 @@ pub fn validate_untrusted_blob(data: &[u8], require_random: bool) -> Result<(), 
         return Ok(());
     }
 
-    if is_tree_node(data) {
+    if is_tree_node(data) || is_signed_nostr_event(data) {
         return Ok(());
     }
 
@@ -88,6 +89,10 @@ pub fn validate_untrusted_blob(data: &[u8], require_random: bool) -> Result<(), 
         status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
         reason: format!("Data not encrypted. Unique: {unique} (min: {threshold})"),
     })
+}
+
+fn is_signed_nostr_event(data: &[u8]) -> bool {
+    serde_json::from_slice::<Event>(data).is_ok_and(|event| event.verify().is_ok())
 }
 
 #[cfg(test)]
@@ -126,6 +131,27 @@ mod tests {
         let data = encode_tree_node(&TreeNode::dir(links)).expect("tree node");
 
         assert!(data.len() >= 64);
+        assert!(!looks_random(&data).0);
+        assert!(validate_untrusted_blob(&data, true).is_ok());
+    }
+
+    #[test]
+    fn accepts_signed_nostr_event_snapshots() {
+        let keys = nostr::Keys::generate();
+        let hash = "11".repeat(32);
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::ParameterizedReplaceable(30078),
+            "",
+            [
+                nostr::Tag::parse(&["d", "metal-catalog"]).expect("d tag"),
+                nostr::Tag::parse(&["l", "hashtree"]).expect("label tag"),
+                nostr::Tag::parse(&["hash", hash.as_str()]).expect("hash tag"),
+            ],
+        )
+        .to_event(&keys)
+        .expect("signed event");
+        let data = serde_json::to_vec(&event).expect("event json");
+
         assert!(!looks_random(&data).0);
         assert!(validate_untrusted_blob(&data, true).is_ok());
     }
