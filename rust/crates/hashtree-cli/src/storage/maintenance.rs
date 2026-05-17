@@ -38,6 +38,8 @@ pub struct R2ImportOptions {
     pub check_only: bool,
     pub resume: bool,
     pub fast_list: bool,
+    pub keys: Vec<String>,
+    pub keys_file: Option<PathBuf>,
     pub start_after: Option<String>,
     pub state_file: Option<PathBuf>,
     pub max_objects: Option<usize>,
@@ -109,6 +111,36 @@ fn r2_import_key_hash(prefix: &str, key: &str) -> Option<hashtree_core::types::H
         return None;
     }
     from_hex(hash_hex).ok()
+}
+
+#[cfg(feature = "s3")]
+fn r2_import_key_candidate(prefix: &str, input: &str) -> Option<R2ObjectCandidate> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    let key = if input.len() == 64 && input.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        format!("{prefix}{input}.bin")
+    } else if !prefix.is_empty() && !input.starts_with(prefix) && !input.contains('/') {
+        format!("{prefix}{input}")
+    } else {
+        input.to_string()
+    };
+
+    let hash = r2_import_key_hash(prefix, &key)?;
+    Some(R2ObjectCandidate { key, hash })
+}
+
+#[cfg(feature = "s3")]
+fn read_r2_import_keys_file(path: &Path) -> Result<Vec<String>> {
+    let raw = std::fs::read_to_string(path)?;
+    Ok(raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 #[cfg(feature = "s3")]
@@ -549,6 +581,67 @@ impl HashtreeStore {
 
         let bucket = Arc::new(s3_config.bucket);
         let prefix = s3_config.prefix.unwrap_or_default();
+        let mut explicit_keys = options.keys.clone();
+        if let Some(keys_file) = options.keys_file.as_ref() {
+            explicit_keys.extend(read_r2_import_keys_file(keys_file)?);
+        }
+
+        let local = self.router.local_store();
+        let client = Arc::new(s3_client);
+        let concurrency = options.concurrency.max(1);
+        let mut pending = FuturesUnordered::new();
+
+        if !explicit_keys.is_empty() {
+            let mut result = R2ImportResult {
+                completed: false,
+                ..Default::default()
+            };
+
+            println!(
+                "R2 import {} targeted: bucket={}, prefix={}, requested_keys={}, state_file={}",
+                if options.check_only { "check" } else { "sync" },
+                bucket.as_str(),
+                prefix,
+                explicit_keys.len(),
+                options
+                    .state_file
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+            );
+            for key in explicit_keys {
+                let Some(candidate) = r2_import_key_candidate(&prefix, &key) else {
+                    result.failed += 1;
+                    println!("  invalid R2 blob key/hash: {key}");
+                    continue;
+                };
+
+                result.last_key = Some(candidate.key.clone());
+                result.listed += 1;
+                pending.push(import_r2_object_to_local(
+                    client.clone(),
+                    bucket.clone(),
+                    local.clone(),
+                    candidate,
+                    options.check_only,
+                ));
+
+                while pending.len() >= concurrency {
+                    settle_one_r2_import(&mut pending, &mut result).await;
+                }
+            }
+
+            while !pending.is_empty() {
+                settle_one_r2_import(&mut pending, &mut result).await;
+            }
+
+            result.completed = true;
+            if let Some(state_file) = options.state_file.as_ref() {
+                write_r2_import_state(state_file, &result)?;
+            }
+            return Ok(result);
+        }
+
         let state_file = options
             .state_file
             .unwrap_or_else(|| self.base_path().join("r2-import-state.json"));
@@ -594,12 +687,8 @@ impl HashtreeStore {
             None
         };
 
-        let local = self.router.local_store();
-        let client = Arc::new(s3_client);
-        let concurrency = options.concurrency.max(1);
         let progress_every = options.progress_every.max(1);
         let mut continuation_token: Option<String> = None;
-        let mut pending = FuturesUnordered::new();
         let mut listed_since_progress = 0usize;
         let mut listed_this_run = 0usize;
         let mut first_page = true;
@@ -847,7 +936,7 @@ fn existing_lmdb_map_size_bytes(data_path: &Path) -> Result<usize> {
 
 #[cfg(all(test, feature = "s3"))]
 mod tests {
-    use super::r2_import_key_hash;
+    use super::{r2_import_key_candidate, r2_import_key_hash};
 
     const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -863,5 +952,30 @@ mod tests {
         assert!(r2_import_key_hash("", "roots/pubkey/tree.json").is_none());
         assert!(r2_import_key_hash("", &format!("{HASH}.png")).is_none());
         assert!(r2_import_key_hash("", "not-a-hash.bin").is_none());
+    }
+
+    #[test]
+    fn r2_import_key_candidate_accepts_hash_or_canonical_key() {
+        let bare = r2_import_key_candidate("", HASH).expect("bare hash");
+        assert_eq!(bare.key, format!("{HASH}.bin"));
+
+        let explicit = r2_import_key_candidate("", &format!("{HASH}.bin")).expect("hash key");
+        assert_eq!(explicit.key, format!("{HASH}.bin"));
+
+        assert!(r2_import_key_candidate("", &format!("hot/{HASH}.bin")).is_none());
+    }
+
+    #[test]
+    fn r2_import_key_candidate_applies_configured_prefix() {
+        let bare = r2_import_key_candidate("legacy/", HASH).expect("prefixed bare hash");
+        assert_eq!(bare.key, format!("legacy/{HASH}.bin"));
+
+        let explicit =
+            r2_import_key_candidate("legacy/", &format!("{HASH}.bin")).expect("prefixed key");
+        assert_eq!(explicit.key, format!("legacy/{HASH}.bin"));
+
+        let already_prefixed =
+            r2_import_key_candidate("legacy/", &format!("legacy/{HASH}.bin")).expect("key");
+        assert_eq!(already_prefixed.key, format!("legacy/{HASH}.bin"));
     }
 }

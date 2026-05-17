@@ -626,6 +626,12 @@ pub(crate) enum StorageCommands {
         /// Load the local blob list once and compare in memory
         #[arg(long)]
         fast_list: bool,
+        /// Import one explicit blob key or bare SHA-256 hash; repeatable
+        #[arg(long = "key")]
+        keys: Vec<String>,
+        /// Import explicit blob keys or bare SHA-256 hashes from a newline-delimited file
+        #[arg(long)]
+        keys_file: Option<PathBuf>,
         /// Explicit R2/S3 key to start after
         #[arg(long)]
         start_after: Option<String>,
