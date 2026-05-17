@@ -319,6 +319,14 @@ impl LmdbBlobStore {
             .is_some())
     }
 
+    pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let rtxn = self
+            .env
+            .read_txn()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        self.blob_size_in_txn(&rtxn, hash)
+    }
+
     pub fn map_size_bytes(&self) -> usize {
         self.env.info().map_size
     }

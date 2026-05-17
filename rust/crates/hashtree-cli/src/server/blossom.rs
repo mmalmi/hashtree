@@ -397,14 +397,15 @@ pub async fn head_blob(
         }
     };
 
-    // Blossom only serves raw blobs (not merkle tree structures)
+    // Blossom HEAD only needs metadata; avoid reading the full blob body just to
+    // answer cache probes and CDN revalidation.
     let store = state.store.clone();
-    let blob = tokio::task::spawn_blocking(move || store.get_blob(&sha256_bytes))
+    let blob_size = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes))
         .await
         .map_err(|_| ());
 
-    match blob {
-        Ok(Ok(Some(data))) => {
+    match blob_size {
+        Ok(Ok(Some(size))) => {
             let mime_type = ext
                 .map(|e| get_mime_type(&format!("file{}", e)))
                 .unwrap_or("application/octet-stream");
@@ -412,7 +413,7 @@ pub async fn head_blob(
             let mut builder = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime_type)
-                .header(header::CONTENT_LENGTH, data.len())
+                .header(header::CONTENT_LENGTH, size)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");

@@ -1170,8 +1170,24 @@ pub async fn serve_content_or_blob(
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
-            if let Ok(Some(data)) = get_blob_without_blocking_runtime(&state, hash_bytes).await {
-                return build_blob_response(data, BlobSource::Local, is_localhost).into_response();
+            match get_blob_without_blocking_runtime(&state, hash_bytes).await {
+                Ok(Some(data)) => {
+                    return build_blob_response(data, BlobSource::Local, is_localhost)
+                        .into_response();
+                }
+                Ok(None) => {}
+                Err(error) if error == blob_read_busy_error() => {
+                    return Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .header("Retry-After", "1")
+                        .body(Body::from("Blob read queue is full"))
+                        .unwrap()
+                        .into_response();
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to read local blob {}: {}", hash_hex, error);
+                }
             }
         }
     }

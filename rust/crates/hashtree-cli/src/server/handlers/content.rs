@@ -1,5 +1,15 @@
 use super::*;
 use crate::webrtc::WebRTCState;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
+
+const BLOB_READ_BUSY: &str = "blob read queue is full";
+const MAX_CONCURRENT_BLOB_READS: usize = 16;
+
+fn blob_read_limiter() -> &'static Semaphore {
+    static LIMITER: OnceLock<Semaphore> = OnceLock::new();
+    LIMITER.get_or_init(|| Semaphore::new(MAX_CONCURRENT_BLOB_READS))
+}
 
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
     if !state.hash_get_enabled {
@@ -137,10 +147,17 @@ pub(super) async fn get_blob_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
+    let _permit = blob_read_limiter()
+        .try_acquire()
+        .map_err(|_| BLOB_READ_BUSY.to_string())?;
     let store = state.store.clone();
     tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()))
         .await
         .map_err(|err| format!("blob read task failed: {}", err))?
+}
+
+pub(super) fn blob_read_busy_error() -> &'static str {
+    BLOB_READ_BUSY
 }
 
 pub(super) async fn await_fetch_task<F, T>(source: &str, hash_hex: &str, future: F) -> Option<T>

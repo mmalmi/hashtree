@@ -257,6 +257,14 @@ impl LocalStore {
         }
     }
 
+    pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.blob_size_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.blob_size_sync(hash),
+        }
+    }
+
     pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
         match self {
             LocalStore::Fs(store) => store.touch_accessed_sync(hash, now),
@@ -697,6 +705,10 @@ impl StorageRouter {
         }
 
         Ok(None)
+    }
+
+    pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.local.blob_size_sync(hash)
     }
 
     pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
@@ -1215,6 +1227,12 @@ impl HashtreeStore {
             self.record_blob_accesses(std::iter::once(*hash));
         }
         Ok(data)
+    }
+
+    pub fn blob_size(&self, hash: &[u8; 32]) -> Result<Option<u64>> {
+        self.router
+            .blob_size_sync(hash)
+            .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))
     }
 
     /// Check if a blob exists by SHA256 hash (raw bytes).

@@ -194,6 +194,13 @@ impl FsBlobStore {
         }
     }
 
+    pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let Some(path) = self.existing_blob_path(hash) else {
+            return Ok(None);
+        };
+        Ok(Some(fs::metadata(path)?.len()))
+    }
+
     pub fn touch_accessed_sync(&self, _hash: &Hash, _now: u64) -> Result<bool, StoreError> {
         Ok(false)
     }
