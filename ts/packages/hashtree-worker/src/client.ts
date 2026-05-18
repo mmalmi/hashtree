@@ -4,7 +4,9 @@ import type {
   BlossomServerConfig,
   BlobSource,
   ConnectivityState,
+  RawBlockInput,
   RootResolveOptions,
+  StoredBlockResult,
   WorkerDiagnosticEvent,
   UploadProgressState,
   WorkerConfig,
@@ -308,6 +310,38 @@ export class HashtreeWorkerClient {
       throw new Error('Failed to store blob');
     }
     return { hashHex: res.hashHex, nhash: res.nhash };
+  }
+
+  async putBlock(
+    data: Uint8Array,
+    options: { hashHex?: string; mimeType?: string; upload?: boolean } = {},
+  ): Promise<StoredBlockResult> {
+    const res = await this.request({
+      type: 'putBlock',
+      data,
+      hashHex: options.hashHex,
+      mimeType: options.mimeType,
+      upload: options.upload,
+    }, PUT_BLOB_TIMEOUT_MS);
+    if (res.type !== 'blockStored') {
+      throw new Error('Unexpected response for putBlock');
+    }
+    return res.block;
+  }
+
+  async putBlocks(
+    blocks: RawBlockInput[],
+    options: { upload?: boolean } = {},
+  ): Promise<StoredBlockResult[]> {
+    const res = await this.request({
+      type: 'putBlocks',
+      blocks,
+      upload: options.upload,
+    }, PUT_BLOB_TIMEOUT_MS);
+    if (res.type !== 'blocksStored') {
+      throw new Error('Unexpected response for putBlocks');
+    }
+    return res.blocks;
   }
 
   async beginPutBlobStream(mimeType?: string, upload = true): Promise<string> {

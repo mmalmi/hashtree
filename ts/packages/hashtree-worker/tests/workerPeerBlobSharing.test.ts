@@ -93,13 +93,21 @@ class FakeIdbBlobStorage {
     return idbDataByHash.delete(hashHex);
   }
 
+  async putByHash(hashHex: string, data: Uint8Array): Promise<void> {
+    idbDataByHash.set(hashHex, data.slice());
+  }
+
   async putByHashTrusted(hashHex: string, data: Uint8Array): Promise<void> {
     idbDataByHash.set(hashHex, data.slice());
   }
 }
 
 class FakeBlossomTransport {
-  constructor(_servers: unknown, _onBandwidthUpdate?: (stats: unknown) => void) {}
+  private readonly servers: Array<{ url: string; read?: boolean; write?: boolean }>;
+
+  constructor(servers: Array<{ url: string; read?: boolean; write?: boolean }> = [], _onBandwidthUpdate?: (stats: unknown) => void) {
+    this.servers = servers;
+  }
 
   getBandwidthStats(): { totalBytesSent: number; totalBytesReceived: number; updatedAt: number; servers: [] } {
     return {
@@ -110,15 +118,44 @@ class FakeBlossomTransport {
     };
   }
 
-  getServers(): Array<{ read: boolean; write: boolean }> {
-    return [{ read: true, write: false }];
+  getServers(): Array<{ url: string; read: boolean; write: boolean }> {
+    return this.servers.map((server) => ({
+      url: server.url,
+      read: server.read !== false,
+      write: !!server.write,
+    }));
   }
 
   getReadServers(): Array<{ url: string; read: boolean; write: boolean }> {
-    return [{ url: 'https://cdn.example', read: true, write: false }];
+    return this.servers
+      .filter((server) => server.read !== false)
+      .map((server) => ({
+        url: server.url,
+        read: true,
+        write: !!server.write,
+      }));
+  }
+
+  getWriteServers(): Array<{ url: string; read: boolean; write: boolean }> {
+    return this.servers
+      .filter((server) => !!server.write)
+      .map((server) => ({
+        url: server.url,
+        read: server.read !== false,
+        write: true,
+      }));
   }
 
   setServers(_servers: unknown): void {}
+
+  createUploadStore(): { put: (hash: Uint8Array, data: Uint8Array) => Promise<boolean> } {
+    return {
+      put: async (hash: Uint8Array, data: Uint8Array): Promise<boolean> => {
+        blossomDataByHash.set(bytesToHex(hash), data.slice());
+        return true;
+      },
+    };
+  }
 
   async fetch(hashHex: string): Promise<Uint8Array | null> {
     const found = blossomDataByHash.get(hashHex);
@@ -148,7 +185,7 @@ vi.mock('@hashtree/core', () => ({
   decryptChk: vi.fn(),
   fromHex: (value: string) => hexToBytes(value),
   nhashDecode: vi.fn(),
-  nhashEncode: vi.fn(),
+  nhashEncode: ({ hash }: { hash: Uint8Array }) => `nhash1${bytesToHex(hash).slice(0, 8)}`,
   toHex: (value: Uint8Array) => bytesToHex(value),
   tryDecodeTreeNode: vi.fn(),
 }));
@@ -200,11 +237,28 @@ function readBlobResponse(id: string): { type: string; id: string; data?: Uint8A
     } | undefined;
 }
 
+function readBlockStoredResponse(id: string): { type: string; id: string; block?: { hashHex: string; nhash: string } } | undefined {
+  return postMessageMock.mock.calls
+    .map((call) => call[0] as { type: string; id?: string })
+    .find((message) => message.type === 'blockStored' && message.id === id) as {
+      type: string;
+      id: string;
+      block?: { hashHex: string; nhash: string };
+    } | undefined;
+}
+
 async function waitForBlobResponse(id: string): Promise<{ type: string; id: string; data?: Uint8Array; source?: string; error?: string }> {
   await vi.waitFor(() => {
     expect(readBlobResponse(id)).toBeDefined();
   });
   return readBlobResponse(id)!;
+}
+
+async function waitForBlockStoredResponse(id: string): Promise<{ type: string; id: string; block?: { hashHex: string; nhash: string } }> {
+  await vi.waitFor(() => {
+    expect(readBlockStoredResponse(id)).toBeDefined();
+  });
+  return readBlockStoredResponse(id)!;
 }
 
 describe('worker peer blob sharing', () => {
@@ -396,5 +450,56 @@ describe('worker peer blob sharing', () => {
         ),
       ),
     ).toBe(true);
+  });
+
+  it('stores raw blocks locally, uploads them through Blossom, and serves them to peers', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    const hashHex = '55'.repeat(32);
+    const blobData = new Uint8Array([11, 12, 13]);
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-5',
+      config: {
+        relays: [],
+        blossomServers: [{ url: 'https://upload.example', read: true, write: true }],
+      },
+    });
+    await flush();
+
+    ctx.dispatch({
+      type: 'putBlock',
+      id: 'put-1',
+      hashHex,
+      data: blobData,
+      upload: true,
+    });
+
+    expect(await waitForBlockStoredResponse('put-1')).toEqual({
+      type: 'blockStored',
+      id: 'put-1',
+      block: {
+        hashHex,
+        nhash: `nhash1${hashHex.slice(0, 8)}`,
+      },
+    });
+    expect(idbDataByHash.get(hashHex)).toEqual(blobData);
+    expect(blossomDataByHash.get(hashHex)).toEqual(blobData);
+
+    ctx.dispatch({
+      type: 'getBlob',
+      id: 'blob-5',
+      hashHex,
+      forPeer: true,
+    });
+    expect(await waitForBlobResponse('blob-5')).toEqual({
+      type: 'blob',
+      id: 'blob-5',
+      data: blobData,
+      source: 'idb',
+    });
   });
 });

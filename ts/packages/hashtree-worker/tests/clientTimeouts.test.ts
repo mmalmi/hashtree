@@ -21,6 +21,27 @@ class FakeWorker {
       return;
     }
 
+    if (message.type === 'putBlock') {
+      this.emitMessage({
+        type: 'blockStored',
+        id: message.id,
+        block: { hashHex: message.hashHex ?? 'abc', nhash: 'nhash1abc' },
+      });
+      return;
+    }
+
+    if (message.type === 'putBlocks') {
+      this.emitMessage({
+        type: 'blocksStored',
+        id: message.id,
+        blocks: message.blocks.map((block, index) => ({
+          hashHex: block.hashHex ?? `hash-${index}`,
+          nhash: `nhash1${index}`,
+        })),
+      });
+      return;
+    }
+
     if (message.type === 'appendPutBlobStream' || message.type === 'cancelPutBlobStream') {
       this.emitMessage({ type: 'void', id: message.id });
       return;
@@ -93,6 +114,26 @@ describe('HashtreeWorkerClient timeouts', () => {
     expect(stored).toEqual({ hashHex: 'abc', nhash: 'nhash1abc' });
 
     await client.cancelPutBlobStream(streamId);
+    await client.close();
+  });
+
+  it('stores raw blocks through the worker protocol', async () => {
+    const client = new HashtreeWorkerClient(FakeWorker as unknown as new () => Worker);
+    const single = await client.putBlock(new Uint8Array([1, 2, 3]), {
+      hashHex: 'a'.repeat(64),
+      upload: true,
+    });
+    expect(single).toEqual({ hashHex: 'a'.repeat(64), nhash: 'nhash1abc' });
+
+    const many = await client.putBlocks([
+      { data: new Uint8Array([4]), hashHex: 'b'.repeat(64) },
+      { data: new Uint8Array([5]), hashHex: 'c'.repeat(64) },
+    ], { upload: true });
+    expect(many).toEqual([
+      { hashHex: 'b'.repeat(64), nhash: 'nhash10' },
+      { hashHex: 'c'.repeat(64), nhash: 'nhash11' },
+    ]);
+
     await client.close();
   });
 

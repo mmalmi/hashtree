@@ -81,6 +81,17 @@ export interface BlobStreamStarted {
   streamId: string;
 }
 
+export interface RawBlockInput {
+  data: Uint8Array;
+  hashHex?: string;
+  mimeType?: string;
+}
+
+export interface StoredBlockResult {
+  hashHex: string;
+  nhash: string;
+}
+
 export interface RootResolveOptions {
   timeoutMs?: number;
   settleMs?: number;
@@ -90,6 +101,8 @@ export type WorkerRequest =
   | { type: 'init'; id: string; config: WorkerConfig }
   | { type: 'close'; id: string }
   | { type: 'putBlob'; id: string; data: Uint8Array; mimeType?: string; upload?: boolean }
+  | { type: 'putBlock'; id: string; data: Uint8Array; hashHex?: string; mimeType?: string; upload?: boolean }
+  | { type: 'putBlocks'; id: string; blocks: RawBlockInput[]; upload?: boolean }
   | { type: 'beginPutBlobStream'; id: string; mimeType?: string; upload?: boolean }
   | { type: 'appendPutBlobStream'; id: string; streamId: string; chunk: Uint8Array }
   | { type: 'finishPutBlobStream'; id: string; streamId: string }
@@ -114,6 +127,8 @@ export type WorkerResponse =
   | { type: 'p2pPeerList'; requestId: string }
   | { type: 'blobStreamStarted'; id: string; streamId: string }
   | { type: 'blobStored'; id: string; hashHex: string; nhash: string }
+  | { type: 'blockStored'; id: string; block: StoredBlockResult }
+  | { type: 'blocksStored'; id: string; blocks: StoredBlockResult[] }
   | { type: 'blob'; id: string; data?: Uint8Array; source?: BlobSource; error?: string }
   | { type: 'cid'; id: string; cid?: CID; error?: string }
   | { type: 'void'; id: string; error?: string }

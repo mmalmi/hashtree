@@ -37,6 +37,7 @@ const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_SLOW_LOG_MS = 15_000;
+const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
 // Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
 // keeps the local read alive after this delay instead of treating it as a miss.
 const PRIMARY_READ_TIMEOUT_MS = 300;
@@ -72,6 +73,7 @@ const pendingP2PPeerLists = new Map<string, { resolve: (peerIds: string[]) => vo
 let inflightP2PPeerList: Promise<string[]> | null = null;
 let p2pPeerIds: string[] = [];
 const peerShareableEncryptedHashes = new Set<string>();
+const peerShareablePublishedHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
 let putBlobStreamCounter = 0;
 const activePutBlobStreams = new Map<string, {
@@ -483,6 +485,7 @@ function resetState(): void {
   inflightP2PPeerList = null;
   p2pPeerIds = [];
   peerShareableEncryptedHashes.clear();
+  peerShareablePublishedHashes.clear();
   activePutBlobStreams.clear();
   clearMemoryCache();
   blossomBandwidth = { ...EMPTY_BLOSSOM_BANDWIDTH };
@@ -663,16 +666,17 @@ async function loadBlobData(
 
 async function loadPeerBlobData(hashHex: string): Promise<LoadedBlobData | null> {
   const trustedEncryptedHash = shouldServeHashToPeer(hashHex, peerShareableEncryptedHashes);
+  const trustedPublishedHash = shouldServeHashToPeer(hashHex, peerShareablePublishedHashes);
   const loaded = await loadBlobData(
     hashHex,
-    trustedEncryptedHash ? {} : { sourceIds: PEER_SHARED_READ_SOURCE_IDS },
+    trustedEncryptedHash || trustedPublishedHash ? {} : { sourceIds: PEER_SHARED_READ_SOURCE_IDS },
   );
   if (!loaded) {
     return null;
   }
-  if (trustedEncryptedHash || loaded.sourceId !== 'idb') {
+  if (trustedEncryptedHash || trustedPublishedHash || loaded.sourceId !== 'idb') {
     if (!trustedEncryptedHash) {
-      markEncryptedHashes([hashHex], peerShareableEncryptedHashes);
+      markEncryptedHashes([hashHex], trustedPublishedHash ? peerShareablePublishedHashes : peerShareableEncryptedHashes);
     }
     return loaded;
   }
@@ -1276,6 +1280,99 @@ function nextPutBlobStreamId(): string {
   return `pbs_${Date.now()}_${putBlobStreamCounter}`;
 }
 
+type RawBlockWrite = {
+  data: Uint8Array;
+  hashHex?: string;
+  mimeType?: string;
+};
+
+type StoredRawBlock = {
+  hashHex: string;
+  nhash: string;
+  data: Uint8Array;
+  mimeType?: string;
+};
+
+function normalizeHashHex(value: string | undefined): string | undefined {
+  const normalized = `${value ?? ''}`.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error('Invalid raw block hash');
+  }
+  return normalized;
+}
+
+async function storeRawBlock(block: RawBlockWrite): Promise<StoredRawBlock> {
+  if (!storage) {
+    throw new Error('Worker storage not initialized');
+  }
+
+  const hashHex = normalizeHashHex(block.hashHex);
+  const data = block.data.slice();
+  const storedHashHex = hashHex
+    ? (await storage.putByHash(hashHex, data), hashHex)
+    : await storage.put(data);
+  return {
+    hashHex: storedHashHex,
+    nhash: nhashEncode({ hash: fromHex(storedHashHex) as Hash }),
+    data,
+    mimeType: block.mimeType,
+  };
+}
+
+async function uploadRawBlocks(blocks: StoredRawBlock[]): Promise<void> {
+  if (!blossom || blocks.length === 0 || blossom.getWriteServers().length === 0) {
+    return;
+  }
+
+  const failures: Array<{ hashHex: string; error: Error }> = [];
+  let nextIndex = 0;
+  const workerCount = Math.min(RAW_BLOCK_UPLOAD_CONCURRENCY, blocks.length);
+  const uploadStores = Array.from({ length: workerCount }, () => blossom!.createUploadStore());
+
+  await Promise.all(uploadStores.map(async (store) => {
+    while (nextIndex < blocks.length) {
+      const block = blocks[nextIndex];
+      nextIndex += 1;
+      if (!block) {
+        continue;
+      }
+
+      try {
+        await store.put(fromHex(block.hashHex) as Hash, block.data, block.mimeType || 'application/octet-stream');
+      } catch (error) {
+        failures.push({
+          hashHex: block.hashHex,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+  }));
+
+  if (failures.length > 0) {
+    const detail = failures
+      .slice(0, 3)
+      .map(({ hashHex, error }) => `${hashHex}: ${error.message}`)
+      .join('; ');
+    throw new Error(detail ? `Raw block upload failed: ${detail}` : 'Raw block upload failed');
+  }
+
+  markEncryptedHashes(blocks.map(({ hashHex }) => hashHex), peerShareablePublishedHashes);
+}
+
+async function storeAndMaybeUploadRawBlocks(
+  blocks: RawBlockWrite[],
+  upload: boolean,
+): Promise<StoredRawBlock[]> {
+  const storedBlocks = await Promise.all(blocks.map((block) => storeRawBlock(block)));
+  if (upload) {
+    await uploadRawBlocks(storedBlocks);
+  }
+  return storedBlocks;
+}
+
 function startBlossomUploadProgress(hashHex: string, nhash: string, fileCid: CID): void {
   if (!blossom || !tree) return;
   const writeServers = blossom.getWriteServers();
@@ -1438,6 +1535,43 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
       }
 
       respondBlobStored(req.id, fileCid, req.upload !== false);
+      return;
+    }
+
+    case 'putBlock': {
+      if (!storage) {
+        respond({ type: 'error', id: req.id, error: 'Worker not initialized' });
+        return;
+      }
+
+      const [storedBlock] = await storeAndMaybeUploadRawBlocks([{
+        data: req.data,
+        hashHex: req.hashHex,
+        mimeType: req.mimeType,
+      }], req.upload === true);
+      respond({
+        type: 'blockStored',
+        id: req.id,
+        block: {
+          hashHex: storedBlock.hashHex,
+          nhash: storedBlock.nhash,
+        },
+      });
+      return;
+    }
+
+    case 'putBlocks': {
+      if (!storage) {
+        respond({ type: 'error', id: req.id, error: 'Worker not initialized' });
+        return;
+      }
+
+      const storedBlocks = await storeAndMaybeUploadRawBlocks(req.blocks, req.upload === true);
+      respond({
+        type: 'blocksStored',
+        id: req.id,
+        blocks: storedBlocks.map(({ hashHex, nhash }) => ({ hashHex, nhash })),
+      });
       return;
     }
 
