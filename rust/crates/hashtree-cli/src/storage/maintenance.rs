@@ -42,6 +42,7 @@ pub struct R2ImportOptions {
     pub keys: Vec<String>,
     pub keys_file: Option<PathBuf>,
     pub start_after: Option<String>,
+    pub scan_prefix: Option<String>,
     pub state_file: Option<PathBuf>,
     pub max_objects: Option<usize>,
     pub progress_every: usize,
@@ -639,6 +640,11 @@ impl HashtreeStore {
 
         let bucket = Arc::new(s3_config.bucket);
         let prefix = s3_config.prefix.unwrap_or_default();
+        let list_prefix = options
+            .scan_prefix
+            .as_ref()
+            .map(|scan_prefix| format!("{prefix}{scan_prefix}"))
+            .unwrap_or_else(|| prefix.clone());
         let mut explicit_keys = options.keys.clone();
         if let Some(keys_file) = options.keys_file.as_ref() {
             explicit_keys.extend(read_r2_import_keys_file(keys_file)?);
@@ -725,10 +731,11 @@ impl HashtreeStore {
         result.completed = false;
 
         println!(
-            "R2 import {}: bucket={}, prefix={}, start_after={}, state_file={}",
+            "R2 import {}: bucket={}, prefix={}, list_prefix={}, start_after={}, state_file={}",
             if options.check_only { "check" } else { "sync" },
             bucket.as_str(),
             prefix,
+            list_prefix,
             start_after.as_deref().unwrap_or("<beginning>"),
             state_file.display(),
         );
@@ -761,7 +768,7 @@ impl HashtreeStore {
             let mut list_req = client
                 .list_objects_v2()
                 .bucket(bucket.as_str())
-                .prefix(&prefix);
+                .prefix(&list_prefix);
 
             if let Some(ref token) = continuation_token {
                 list_req = list_req.continuation_token(token);

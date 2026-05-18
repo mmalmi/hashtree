@@ -638,6 +638,9 @@ pub(crate) enum StorageCommands {
         /// Explicit R2/S3 key to start after
         #[arg(long)]
         start_after: Option<String>,
+        /// Only scan R2/S3 keys whose names start with this prefix after the configured bucket prefix
+        #[arg(long)]
+        scan_prefix: Option<String>,
         /// Persist scan progress here
         #[arg(long)]
         state_file: Option<PathBuf>,
