@@ -88,6 +88,11 @@ struct R2ObjectImportOutcome {
     message: Option<String>,
 }
 
+#[cfg(feature = "s3")]
+const R2_IMPORT_OBJECT_READ_ATTEMPTS: usize = 4;
+#[cfg(feature = "s3")]
+const R2_IMPORT_OBJECT_RETRY_BASE_DELAY_MS: u64 = 250;
+
 const COMPACT_MAX_DBS: u32 = 64;
 const COMPACT_MAX_READERS: u32 = 2048;
 const COMPACT_OPEN_MAP_SIZE_BYTES: usize = 10 * 1024 * 1024;
@@ -176,6 +181,45 @@ fn read_r2_import_state(path: &Path) -> Option<R2ImportState> {
 }
 
 #[cfg(feature = "s3")]
+async fn fetch_r2_object_body_with_retries(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Vec<u8>, String> {
+    let mut last_error = None;
+    for attempt in 1..=R2_IMPORT_OBJECT_READ_ATTEMPTS {
+        let output = match client.get_object().bucket(bucket).key(key).send().await {
+            Ok(output) => output,
+            Err(err) => {
+                last_error = Some(format!("fetch failed for {key}: {err}"));
+                if attempt < R2_IMPORT_OBJECT_READ_ATTEMPTS {
+                    let delay_ms = R2_IMPORT_OBJECT_RETRY_BASE_DELAY_MS << (attempt - 1);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                continue;
+            }
+        };
+
+        match output.body.collect().await {
+            Ok(body) => return Ok(body.into_bytes().to_vec()),
+            Err(err) => {
+                last_error = Some(format!("read failed for {key}: {err}"));
+                if attempt < R2_IMPORT_OBJECT_READ_ATTEMPTS {
+                    let delay_ms = R2_IMPORT_OBJECT_RETRY_BASE_DELAY_MS << (attempt - 1);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "{} after {} attempt(s)",
+        last_error.unwrap_or_else(|| format!("fetch failed for {key}: unknown error")),
+        R2_IMPORT_OBJECT_READ_ATTEMPTS
+    ))
+}
+
+#[cfg(feature = "s3")]
 fn write_r2_import_state(path: &Path, result: &R2ImportResult) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -223,36 +267,21 @@ async fn import_r2_object_to_local(
         };
     }
 
-    let output = match client
-        .get_object()
-        .bucket(bucket.as_str())
-        .key(&candidate.key)
-        .send()
-        .await
-    {
-        Ok(output) => output,
-        Err(err) => {
-            return R2ObjectImportOutcome {
-                missing: true,
-                failed: true,
-                message: Some(format!("fetch failed for {}: {err}", candidate.key)),
-                ..Default::default()
-            };
-        }
-    };
-
-    let body = match output.body.collect().await {
-        Ok(body) => body.into_bytes(),
-        Err(err) => {
-            return R2ObjectImportOutcome {
-                missing: true,
-                failed: true,
-                message: Some(format!("read failed for {}: {err}", candidate.key)),
-                ..Default::default()
-            };
-        }
-    };
-    let data = body.as_ref();
+    let body =
+        match fetch_r2_object_body_with_retries(client.as_ref(), bucket.as_str(), &candidate.key)
+            .await
+        {
+            Ok(body) => body,
+            Err(err) => {
+                return R2ObjectImportOutcome {
+                    missing: true,
+                    failed: true,
+                    message: Some(err),
+                    ..Default::default()
+                };
+            }
+        };
+    let data = body.as_slice();
     let actual_hash = sha256(data);
     if actual_hash != candidate.hash {
         return R2ObjectImportOutcome {
