@@ -773,37 +773,6 @@ pub async fn upload_blob(
         return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
     }
 
-    match uploaded_blob_already_exists(&state, sha256_hash, &sha256_hex).await {
-        Ok(true) => {
-            if is_allowed_author {
-                if let Err(error) = set_existing_blob_owner_without_body_write(
-                    state.clone(),
-                    sha256_hash,
-                    pubkey_bytes,
-                )
-                .await
-                {
-                    return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .header("X-Reason", "Storage error")
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
-                        .unwrap();
-                }
-            }
-            return upload_descriptor_response(StatusCode::CONFLICT, &descriptor);
-        }
-        Ok(false) => {}
-        Err(error) => {
-            tracing::debug!(
-                "Could not preflight Blossom upload {} before queueing: {}",
-                sha256_hex,
-                error
-            );
-        }
-    }
-
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
     if state.optimistic_blossom_uploads {
@@ -854,6 +823,37 @@ pub async fn upload_blob(
             queued_bytes,
             state.optimistic_upload_queue_bytes
         );
+    }
+
+    match uploaded_blob_already_exists(&state, sha256_hash, &sha256_hex).await {
+        Ok(true) => {
+            if is_allowed_author {
+                if let Err(error) = set_existing_blob_owner_without_body_write(
+                    state.clone(),
+                    sha256_hash,
+                    pubkey_bytes,
+                )
+                .await
+                {
+                    return Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .header("X-Reason", "Storage error")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
+                        .unwrap();
+                }
+            }
+            return upload_descriptor_response(StatusCode::CONFLICT, &descriptor);
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::debug!(
+                "Could not preflight Blossom upload {} before synchronous storage: {}",
+                sha256_hex,
+                error
+            );
+        }
     }
 
     let store_result = store_blossom_blob_without_blocking_runtime(
@@ -1301,7 +1301,7 @@ mod tests {
                 .expect("content type header value"),
         );
 
-        let body = axum::body::Bytes::from((0u8..=255).collect::<Vec<_>>());
+        let body = axum::body::Bytes::from((0u8..=255).map(|byte| byte ^ 0x55).collect::<Vec<_>>());
         let hash = sha256(&body);
         let response = upload_blob(State(state), headers, body)
             .await
@@ -1324,7 +1324,11 @@ mod tests {
         let store = Arc::new(
             HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
         );
-        let body = axum::body::Bytes::from((0u8..=255).collect::<Vec<_>>());
+        let body = axum::body::Bytes::from(
+            (0u16..=255)
+                .map(|value| ((value * 73 + 19) % 256) as u8)
+                .collect::<Vec<_>>(),
+        );
         store.put_cached_blob(&body).expect("seed blob");
 
         let mut state = test_app_state(Arc::clone(&store));
@@ -1351,6 +1355,50 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn optimistic_upload_existing_blob_uses_queue_before_preflight_when_queue_has_room() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let body = axum::body::Bytes::from((0u8..=255).rev().collect::<Vec<_>>());
+        let hash_hex = hex::encode(sha256(&body));
+        store.put_cached_blob(&body).expect("seed blob");
+
+        let mut state = test_app_state(store);
+        state.optimistic_blossom_uploads = true;
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let response = upload_blob(State(state), headers, body)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..50 {
+            if !optimistic_upload_is_inflight(&hash_hex) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        clear_optimistic_upload_inflight(&hash_hex);
+        panic!("optimistic upload in-flight marker was not cleared");
     }
 
     #[tokio::test]

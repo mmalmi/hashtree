@@ -13,6 +13,7 @@ We are building a decentralized system independent of DNS, SSL certificates, web
 - When one peer is slow, ask additional peers without immediately cancelling the first request. First valid response wins; cancel or ignore losers only after a winner is established.
 - Treat explicit misses differently from timeouts. Record slow-source expiry as timeout, not not-found, so routing and reputation can distinguish dead/slow paths from absent data.
 - Progress or fragment arrival should extend a request; unauthenticated "still working" heartbeats without bytes should not keep requests alive forever. Keep per-peer work and memory bounded.
+- Record performance experiments in `docs/EXPERIMENTS.md`, omitting identifying information such as pubkeys, secrets, IPs, private hostnames, exact repo names, and raw hashes unless the user explicitly asks otherwise.
 - Never run `git pull`/`git rebase` from `htree://self/*` (or a remote pointing there) because it is publish/storage, not an integration upstream.
 - If push to `htree://self/hashtree` is non-fast-forward, do not pull from that remote; resolve locally and update the hashtree remote via push strategy (for example `git push --force origin master`) only when needed. Release remote is also push only.
 - Commit after relevant tests (and build/lint if applicable) pass, then push to htree remote (`htree://self/hashtree`).
