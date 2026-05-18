@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.51 - 2026-05-19
+
+Changes since the `0.2.50` release.
+
+### Added
+
+- Added daemon and HTTP status metrics for Blossom upload queues, blob-read
+  backpressure, and peer/router bandwidth so production storage pressure is
+  visible without digging through logs.
+- Added targeted R2 blob-import helpers plus resumable/import comparison paths
+  that can stream through local storage instead of loading whole scans into
+  memory.
+- Added raw block storage APIs to the TypeScript worker so apps can store
+  already-addressed blocks, optionally upload them to Blossom, and safely serve
+  published raw blocks to peers.
+
+### Changed
+
+- Changed Blossom upload admission so optimistic uploads enter the bounded byte
+  queue before the LMDB existence preflight, reducing push-visible latency while
+  keeping the origin as the backpressure point.
+- Changed Blossom and blob read paths to coalesce duplicate reads, bound
+  blocking storage work, serve raw blob ranges efficiently, and cache immutable
+  misses/hot reads at the edge.
+- Reduced origin read/upload pressure with throttled Blossom HEAD/origin reads,
+  transient R2 read retries, and cheaper duplicate optimistic upload handling.
+
+### Fixed
+
+- Fixed repeated no-op `git-remote-htree` pushes so exact fast-forward no-ops
+  skip local repo-tree rebuilds instead of rewalking unchanged refs and tags.
+- Fixed stalled Blossom uploads and TypeScript Blossom writes to abort rather
+  than hang indefinitely.
+- Fixed public Blossom ingest so signed Nostr snapshots and hashtree metadata
+  pass the untrusted ingest filter while non-canonical import keys are skipped.
+- Fixed WebRTC peer fetches so local HTTP peer discovery no longer stalls the
+  worker path.
+
 ## 0.2.50 - 2026-05-14
 
 ### Added

@@ -4,7 +4,7 @@ exclude = ["vendor/fuser"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.50"
+version = "0.2.51"
 edition = "2021"
 license = "MIT"
 repository = "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree"

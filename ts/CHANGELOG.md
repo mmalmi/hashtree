@@ -1,16 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.2.11 - 2026-05-19
+
+Changes since the previous npm package publish.
 
 ### Added
 
-- Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
-- Added optional `watch(hash, callback)` to the `Store` interface so the tree layer can react to block arrivals without polling. `MemoryStore` implements it; existing stores remain compatible because the method is optional.
-- Added `loadBlock(store, hash, signal?)` (re-exported from `@hashtree/core`). Resolves once data for `hash` is available, using `watch` when present and falling back to polling otherwise.
+- Published `@hashtree/core@0.1.7`, `@hashtree/nostr@0.1.14`, and
+  `@hashtree/worker@0.2.16`.
+- Added `putBlock(...)` and `putBlocks(...)` to `@hashtree/worker/client` so
+  callers can store raw content-addressed blocks, optionally upload them to
+  Blossom, and share published raw blocks with peers.
+- Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps
+  can coalesce same-coordinate replaceable publishes, sign at send time, and
+  avoid app-side future `created_at` drift.
+- Added optional `watch(hash, callback)` to the `Store` interface so the tree
+  layer can react to block arrivals without polling. `MemoryStore` implements
+  it; existing stores remain compatible because the method is optional.
+- Added `loadBlock(store, hash, signal?)` (re-exported from `@hashtree/core`).
+  Resolves once data for `hash` is available, using `watch` when present and
+  falling back to polling otherwise.
 
 ### Changed
 
-- Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` / `HashTree.resolvePath` to wait for the directory block to load instead of returning `[]` / `null` when the data isn't local yet — a not-yet-synced block is a transient state, not a final answer. They now accept an optional `signal: AbortSignal` for callers that want a bounded wait. `[]` from `listDirectory` and `null` from `resolvePath` again mean "the directory loaded and the entry isn't there", which lets callers drop ad-hoc grace timers around `'not found'` UI.
+- Changed `@hashtree/core` Blossom uploads to abort stalled `PUT /upload`
+  requests instead of waiting indefinitely.
+- Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` /
+  `HashTree.resolvePath` to wait for the directory block to load instead of
+  returning `[]` / `null` when the data isn't local yet. They now accept an
+  optional `signal: AbortSignal` for callers that want a bounded wait. `[]` from
+  `listDirectory` and `null` from `resolvePath` again mean "the directory loaded
+  and the entry isn't there", which lets callers drop ad-hoc grace timers around
+  `'not found'` UI.
 
 ## 0.2.10 - 2026-05-06
 

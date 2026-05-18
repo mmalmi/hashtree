@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -84,7 +84,7 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@hashtree/core": "0.1.6",
+    "@hashtree/core": "0.1.7",
     "@hashtree/dexie": "0.1.5",
     "@hashtree/mesh": "workspace:*",
     "@hashtree/nostr": "workspace:*",
