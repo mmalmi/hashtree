@@ -777,6 +777,37 @@ fn test_import_preserved_remote_objects_from_local_git_uses_exclusive_history() 
 }
 
 #[test]
+fn test_push_objects_skips_exact_remote_tip_without_local_tree_rebuild() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, _base_sha, master_sha, _dev_sha) = create_repo_with_diverged_master_and_dev();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let mut helper = create_test_helper().expect("helper");
+    helper
+        .storage
+        .import_ref("refs/tags/v0.1.0", &master_sha)
+        .expect("import preserved tag ref");
+
+    helper
+        .push_objects(&master_sha, "refs/heads/master", false, Some(&master_sha))
+        .expect("exact no-op push should succeed");
+
+    assert_eq!(
+        helper.storage.object_count().expect("object count"),
+        0,
+        "no-op push should not import local git objects just to rebuild an unchanged tree"
+    );
+    assert!(
+        !helper
+            .storage
+            .has_ref("refs/heads/master")
+            .expect("branch ref presence"),
+        "no-op push should leave the in-memory tree untouched"
+    );
+}
+
+#[test]
 fn test_push_to_file_servers_with_diff_does_not_fetch_old_tree_from_blossom() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");

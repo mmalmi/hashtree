@@ -440,6 +440,14 @@ impl RemoteHelper {
         force_push: bool,
         remote_tip_sha: Option<&str>,
     ) -> Result<()> {
+        if !force_push && remote_tip_sha == Some(sha) {
+            debug!(
+                "Skipping push for {} because remote tip already equals {}",
+                dst_ref, sha
+            );
+            return Ok(());
+        }
+
         eprint!("  Listing objects...");
         let _ = std::io::stderr().flush();
         let delta_base = (!force_push)

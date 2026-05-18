@@ -37,3 +37,25 @@ Result:
 - The p50 response time dropped from 524 ms to 139 ms for 1 KiB bodies and from 476 ms to 134 ms for 64 KiB bodies.
 - The endpoint still answered only after the origin accepted each body into the bounded optimistic upload queue.
 - A post-Worker-deploy smoke pass with 12 concurrent 1 KiB uploads returned 12 x 202 in 202 ms total, with 146 ms min, 148 ms p50, 168 ms p95, and 168 ms max.
+
+## 2026-05-18 - Git Remote No-Op Push Rebuild
+
+Question: after the upload admission fix, is a no-change `git push` to a hashtree remote reasonably fast?
+
+Setup:
+- Local repository was already at the same branch tip as the hashtree remote.
+- Push used the normal public hashtree remote helper path.
+- No pubkeys, relay account data, IPs, raw hashes, or exact repository names were retained.
+
+Results:
+
+| State | Total wall time | Local object walk | Upload result |
+| --- | ---: | ---: | --- |
+| Before helper fix | 133.91 s | Full rebuild of 19,342 Git objects | 5 new hashtree blobs |
+| Repeat before helper fix | 19.86 s | Full rebuild of 19,342 Git objects | 3 new hashtree blobs |
+| After helper fix | 4.75 s | No rebuild; remote refs/root only | No repo tree/blob upload |
+
+Interpretation:
+- The slow no-op pushes were not caused by the Blossom upload origin after the server fix.
+- The remote helper was rebuilding the local repo tree because it had an unchanged pushed branch but preserved direct refs that pointed at objects not loaded into the in-memory tree.
+- Exact no-op branch pushes now return before local object listing and repo-tree rebuild. Force pushes still take the normal publish path.
