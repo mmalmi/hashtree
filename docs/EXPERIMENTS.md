@@ -36,3 +36,4 @@ Follow-up after moving the LMDB existence preflight behind bounded optimistic qu
 Result:
 - The p50 response time dropped from 524 ms to 139 ms for 1 KiB bodies and from 476 ms to 134 ms for 64 KiB bodies.
 - The endpoint still answered only after the origin accepted each body into the bounded optimistic upload queue.
+- A post-Worker-deploy smoke pass with 12 concurrent 1 KiB uploads returned 12 x 202 in 202 ms total, with 146 ms min, 148 ms p50, 168 ms p95, and 168 ms max.
