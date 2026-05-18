@@ -25,3 +25,14 @@ Interpretation:
 - The likely client-visible cost was the Worker-to-origin hop plus origin validation and LMDB existence preflight, not the final LMDB body write.
 - A safer optimization is to keep the origin as the backpressure point, acquire the bounded optimistic upload queue before responding, and avoid the LMDB existence preflight on the queued optimistic path.
 - A Worker-only fire-and-forget mode should remain experimental because it can hide origin queue-full/storage failures from the pushing client.
+
+Follow-up after moving the LMDB existence preflight behind bounded optimistic queue admission:
+
+| Body size | Responses | Total wall time | Min | P50 | P95 | Max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 KiB | 12 x 202 | 251 ms | 107 ms | 139 ms | 210 ms | 210 ms |
+| 64 KiB | 12 x 202 | 178 ms | 112 ms | 134 ms | 157 ms | 157 ms |
+
+Result:
+- The p50 response time dropped from 524 ms to 139 ms for 1 KiB bodies and from 476 ms to 134 ms for 64 KiB bodies.
+- The endpoint still answered only after the origin accepted each body into the bounded optimistic upload queue.
