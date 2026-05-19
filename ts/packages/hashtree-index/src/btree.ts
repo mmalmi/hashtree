@@ -15,6 +15,12 @@ type LinkTraversalCache = {
   counts: Map<string, number>;
 };
 
+type BTreeMutationResult = {
+  cid: CID;
+  count: number;
+  split?: SplitResult;
+};
+
 export class BTree {
   private tree: HashTree;
   private order: number;
@@ -106,13 +112,13 @@ export class BTree {
         {
           name: escapeKey(result.split.leftFirstKey),
           cid: result.split.left,
-          size: 0,
+          size: result.split.leftCount,
           type: LinkType.Dir,
         },
         {
           name: escapeKey(result.split.rightFirstKey),
           cid: result.split.right,
-          size: 0,
+          size: result.split.rightCount,
           type: LinkType.Dir,
         },
       ])).cid;
@@ -263,6 +269,7 @@ export class BTree {
       level.push({
         firstKey: chunk[0][0],
         cid: await this.createLeaf(chunk),
+        count: 0,
       });
     }
 
@@ -273,6 +280,7 @@ export class BTree {
         nextLevel.push({
           firstKey: chunk[0].firstKey,
           cid: await this.createInternalNode(chunk),
+          count: 0,
         });
       }
       level = nextLevel;
@@ -305,6 +313,7 @@ export class BTree {
       level.push({
         firstKey: chunk[0][0],
         cid: await this.createLeafWithLink(chunk),
+        count: chunk.length,
       });
     }
 
@@ -315,6 +324,7 @@ export class BTree {
         nextLevel.push({
           firstKey: chunk[0].firstKey,
           cid: await this.createInternalNode(chunk),
+          count: chunk.reduce((sum, child) => sum + child.count, 0),
         });
       }
       level = nextLevel;
@@ -347,7 +357,7 @@ export class BTree {
     node: CID,
     key: string,
     targetCid: CID
-  ): Promise<{ cid: CID; split?: SplitResult }> {
+  ): Promise<BTreeMutationResult> {
     const entries = await this.tree.listDirectory(node);
     const isLeaf = this.isLeafNode(entries);
 
@@ -363,16 +373,24 @@ export class BTree {
     entries: TreeEntry[],
     key: string,
     targetCid: CID
-  ): Promise<{ cid: CID; split?: SplitResult }> {
+  ): Promise<BTreeMutationResult> {
     const escapedKey = escapeKey(key);
     const newNode = await this.tree.setEntry(node, [], escapedKey, targetCid, 0, LinkType.File);
 
     const newEntries = await this.tree.listDirectory(newNode);
     if (newEntries.length > this.maxKeys) {
-      return { cid: newNode, split: await this.splitLeafWithLinks(newEntries) };
+      const split = await this.splitLeafWithLinks(newEntries);
+      return {
+        cid: newNode,
+        count: split.leftCount + split.rightCount,
+        split,
+      };
     }
 
-    return { cid: newNode };
+    return {
+      cid: newNode,
+      count: this.countLinkEntries(newEntries),
+    };
   }
 
   private async insertLinkIntoInternal(
@@ -380,24 +398,46 @@ export class BTree {
     entries: TreeEntry[],
     key: string,
     targetCid: CID
-  ): Promise<{ cid: CID; split?: SplitResult }> {
+  ): Promise<BTreeMutationResult> {
     const { child } = this.findChild(entries, key);
     const result = await this.insertLinkRecursive(child.cid, key, targetCid);
 
-    let newNode = await this.tree.setEntry(node, [], child.name, result.cid, 0, LinkType.Dir);
+    let newNode = await this.tree.setEntry(node, [], child.name, result.cid, result.count, LinkType.Dir);
 
     if (result.split) {
       newNode = await this.tree.removeEntry(newNode, [], child.name);
-      newNode = await this.tree.setEntry(newNode, [], escapeKey(result.split.leftFirstKey), result.split.left, 0, LinkType.Dir);
-      newNode = await this.tree.setEntry(newNode, [], escapeKey(result.split.rightFirstKey), result.split.right, 0, LinkType.Dir);
+      newNode = await this.tree.setEntry(
+        newNode,
+        [],
+        escapeKey(result.split.leftFirstKey),
+        result.split.left,
+        result.split.leftCount,
+        LinkType.Dir,
+      );
+      newNode = await this.tree.setEntry(
+        newNode,
+        [],
+        escapeKey(result.split.rightFirstKey),
+        result.split.right,
+        result.split.rightCount,
+        LinkType.Dir,
+      );
     }
 
     const newEntries = await this.tree.listDirectory(newNode);
     if (newEntries.length > this.maxKeys) {
-      return { cid: newNode, split: await this.splitInternal(newEntries) };
+      const split = await this.splitInternal(newEntries, true);
+      return {
+        cid: newNode,
+        count: split.leftCount + split.rightCount,
+        split,
+      };
     }
 
-    return { cid: newNode };
+    return {
+      cid: newNode,
+      count: await this.countLinkEntriesOrSubtrees(newEntries),
+    };
   }
 
   private async splitLeafWithLinks(entries: TreeEntry[]): Promise<SplitResult> {
@@ -414,6 +454,8 @@ export class BTree {
       right,
       leftFirstKey: unescapeKey(leftEntries[0].name),
       rightFirstKey: unescapeKey(rightEntries[0].name),
+      leftCount: this.countLinkEntries(leftEntries),
+      rightCount: this.countLinkEntries(rightEntries),
     };
   }
 
@@ -475,12 +517,36 @@ export class BTree {
 
     const entries = await this.listCachedEntries(node, cache);
     const count = this.isLeafNode(entries)
-      ? entries.filter((entry) => entry.type === LinkType.File).length
-      : (await Promise.all(entries.map(async (entry) => await this.countLinksRecursive(entry.cid, cache))))
-        .reduce((sum, childCount) => sum + childCount, 0);
+      ? this.countLinkEntries(entries)
+      : (await Promise.all(entries.map(async (entry) => {
+        const childCount = this.storedLinkSubtreeCount(entry);
+        return childCount ?? await this.countLinksRecursive(entry.cid, cache);
+      }))).reduce((sum, childCount) => sum + childCount, 0);
 
     cache.counts.set(cacheKey, count);
     return count;
+  }
+
+  private countLinkEntries(entries: TreeEntry[]): number {
+    return entries.filter((entry) => entry.type === LinkType.File).length;
+  }
+
+  private storedLinkSubtreeCount(entry: TreeEntry): number | null {
+    if (entry.type !== LinkType.Dir || !Number.isFinite(entry.size) || entry.size <= 0) {
+      return null;
+    }
+    return Math.floor(entry.size);
+  }
+
+  private async countLinkEntriesOrSubtrees(entries: TreeEntry[]): Promise<number> {
+    if (this.isLeafNode(entries)) {
+      return this.countLinkEntries(entries);
+    }
+    const counts = await Promise.all(entries.map(async (entry) => {
+      const childCount = this.storedLinkSubtreeCount(entry);
+      return childCount ?? await this.countLinksRecursive(entry.cid, createLinkTraversalCache());
+    }));
+    return counts.reduce((sum, count) => sum + count, 0);
   }
 
   private async getLinkEntryAtRecursive(
@@ -498,7 +564,8 @@ export class BTree {
 
     let remaining = ordinal;
     for (const entry of entries) {
-      const childCount = await this.countLinksRecursive(entry.cid, cache);
+      const childCount = this.storedLinkSubtreeCount(entry)
+        ?? await this.countLinksRecursive(entry.cid, cache);
       if (remaining < childCount) {
         return await this.getLinkEntryAtRecursive(entry.cid, remaining, cache);
       }
@@ -600,23 +667,27 @@ export class BTree {
       right,
       leftFirstKey: unescapeKey(leftEntries[0].name),
       rightFirstKey: unescapeKey(rightEntries[0].name),
+      leftCount: 0,
+      rightCount: 0,
     };
   }
 
-  private async splitInternal(entries: TreeEntry[]): Promise<SplitResult> {
+  private async splitInternal(entries: TreeEntry[], preserveCounts = false): Promise<SplitResult> {
     const sorted = this.sortEntries(entries);
     const mid = Math.floor(sorted.length / 2);
     const leftEntries = sorted.slice(0, mid);
     const rightEntries = sorted.slice(mid);
+    const leftCount = preserveCounts ? await this.countLinkEntriesOrSubtrees(leftEntries) : 0;
+    const rightCount = preserveCounts ? await this.countLinkEntriesOrSubtrees(rightEntries) : 0;
 
     const left = (await this.tree.putDirectory(leftEntries.map((entry) => ({
       ...entry,
-      size: 0,
+      size: preserveCounts ? entry.size : 0,
       type: LinkType.Dir,
     })))).cid;
     const right = (await this.tree.putDirectory(rightEntries.map((entry) => ({
       ...entry,
-      size: 0,
+      size: preserveCounts ? entry.size : 0,
       type: LinkType.Dir,
     })))).cid;
 
@@ -625,6 +696,8 @@ export class BTree {
       right,
       leftFirstKey: unescapeKey(leftEntries[0].name),
       rightFirstKey: unescapeKey(rightEntries[0].name),
+      leftCount,
+      rightCount,
     };
   }
 
@@ -670,7 +743,7 @@ export class BTree {
     const entries: TreeEntry[] = children.map((child) => ({
       name: escapeKey(child.firstKey),
       cid: child.cid,
-      size: 0,
+      size: child.count,
       type: LinkType.Dir,
     }));
     return (await this.tree.putDirectory(entries)).cid;
@@ -807,11 +880,14 @@ interface SplitResult {
   right: CID;
   leftFirstKey: string;
   rightFirstKey: string;
+  leftCount: number;
+  rightCount: number;
 }
 
 interface BuiltNode {
   firstKey: string;
   cid: CID;
+  count: number;
 }
 
 export function escapeKey(key: string): string {

@@ -23,6 +23,11 @@ Changes since the previous npm package publish.
 
 ### Changed
 
+- Changed `@hashtree/index` CID-link B-trees to store subtree link counts in
+  internal directory entry sizes during `buildLinks(...)` and `insertLink(...)`,
+  so `countLinks(...)`, `getLinkEntryAt(...)`, and `sampleLinks(...)` can avoid
+  recursively counting every child on counted trees while still falling back for
+  legacy roots.
 - Changed `@hashtree/core` Blossom uploads to abort stalled `PUT /upload`
   requests instead of waiting indefinitely.
 - Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` /
