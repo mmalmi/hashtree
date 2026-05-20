@@ -1,4 +1,5 @@
 use super::*;
+use crate::fips_transport::DaemonFipsTransport;
 use crate::server::blob_read::{
     acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY,
 };
@@ -17,6 +18,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
 
     enum FetchResult {
         WebRtc { data: Vec<u8>, peer_id: String },
+        Fips { data: Vec<u8> },
         Upstream { data: Vec<u8>, server: String },
     }
 
@@ -38,6 +40,28 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                     })
                     .await
                     .map(|(data, peer_id)| FetchResult::WebRtc { data, peer_id })
+                }
+                .boxed(),
+            );
+        }
+    }
+
+    if state.hash_get_enabled && state.http_fips_fetch {
+        if let Some(ref fips_transport) = state.fips_transport {
+            tracing::info!(
+                "[htree-fetch] Querying FIPS peers for {}",
+                &hash_hex[..16.min(hash_hex.len())]
+            );
+            let fips_transport = fips_transport.clone();
+            let fips_hash = hash.to_vec();
+            let fips_hash_hex = hash_hex.clone();
+            fetches.push(
+                async move {
+                    await_fetch_task("fips", &fips_hash_hex, async move {
+                        query_fips_peers(&fips_transport, &fips_hash).await
+                    })
+                    .await
+                    .map(|data| FetchResult::Fips { data })
                 }
                 .boxed(),
             );
@@ -79,6 +103,19 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
+                    return false;
+                }
+                return true;
+            }
+            FetchResult::Fips { data } => {
+                tracing::info!(
+                    "[htree-fetch] Got {} bytes from FIPS peers for {}",
+                    data.len(),
+                    &hash_hex[..16.min(hash_hex.len())]
+                );
+                let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
+                if let Err(e) = result {
+                    tracing::warn!("[htree-fetch] Failed to cache FIPS peer data: {}", e);
                     return false;
                 }
                 return true;
@@ -193,11 +230,11 @@ pub(super) async fn get_blob_size_without_blocking_runtime(
 
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.blob_size(&hash).map_err(|e| e.to_string())
-    });
-    match tokio::time::timeout(blob_read_timeout(), read).await {
+    let read =
+        tokio::task::spawn_blocking(move || store.blob_size(&hash).map_err(|e| e.to_string()));
+    let result = tokio::time::timeout(blob_read_timeout(), read).await;
+    drop(permit);
+    match result {
         Ok(Ok(result)) => {
             if let Ok(size) = &result {
                 state.blob_cache.put_size(hash_hex, *size);
@@ -218,12 +255,13 @@ pub(super) async fn get_blob_range_without_blocking_runtime(
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
     let read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
         store
             .get_blob_range(&hash, start, end_inclusive)
             .map_err(|e| e.to_string())
     });
-    match tokio::time::timeout(blob_read_timeout(), read).await {
+    let result = tokio::time::timeout(blob_read_timeout(), read).await;
+    drop(permit);
+    match result {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => Err(format!("blob range read task failed: {}", err)),
         Err(_) => Err("blob range read timed out".to_string()),
@@ -236,11 +274,11 @@ async fn get_blob_once_without_blocking_runtime(
 ) -> Result<Option<Vec<u8>>, String> {
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.get_blob(&hash).map_err(|e| e.to_string())
-    });
-    match tokio::time::timeout(blob_read_timeout(), read).await {
+    let read =
+        tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()));
+    let result = tokio::time::timeout(blob_read_timeout(), read).await;
+    drop(permit);
+    match result {
         Ok(Ok(result)) => {
             if let Ok(data) = &result {
                 match data {
@@ -644,16 +682,12 @@ where
 
 pub(super) enum BlobSource {
     Local,
-    WebRtcPeer { peer_id: String },
-    Upstream { server: String },
 }
 
 impl BlobSource {
-    fn to_header_value(&self) -> String {
+    fn to_header_value(&self) -> &'static str {
         match self {
-            BlobSource::Local => "local".to_string(),
-            BlobSource::WebRtcPeer { peer_id } => format!("webrtc:{}", peer_id),
-            BlobSource::Upstream { server } => format!("upstream:{}", server),
+            BlobSource::Local => "local",
         }
     }
 }
@@ -678,6 +712,21 @@ pub(super) fn build_blob_response(
     }
 
     builder.body(Body::from(data)).unwrap()
+}
+
+pub(super) async fn query_fips_peers(
+    fips_transport: &Arc<DaemonFipsTransport>,
+    hash: &[u8],
+) -> Option<Vec<u8>> {
+    let hash: [u8; 32] = hash.try_into().ok()?;
+    match fips_transport.get(&hash).await {
+        Ok(Some(data)) => Some(data),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!("FIPS peer fetch failed: {}", err);
+            None
+        }
+    }
 }
 
 pub(super) async fn query_webrtc_peers(

@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod diagnostics;
 pub mod eviction;
 pub mod fetch;
+pub mod fips_transport;
 pub mod ignore_rules;
 pub mod nostr_mirror;
 pub mod nostr_relay;

@@ -583,15 +583,13 @@ pub mod types {
             MSG_TYPE_PUBSUB_INTEREST => Ok(DataMessage::PubsubInterest(rmp_serde::from_slice(
                 &data[1..],
             )?)),
-            MSG_TYPE_PUBSUB_FRAME => Ok(DataMessage::PubsubFrame(rmp_serde::from_slice(
+            MSG_TYPE_PUBSUB_FRAME => {
+                Ok(DataMessage::PubsubFrame(rmp_serde::from_slice(&data[1..])?))
+            }
+            MSG_TYPE_PUBSUB_INVENTORY => Ok(DataMessage::PubsubInventory(rmp_serde::from_slice(
                 &data[1..],
             )?)),
-            MSG_TYPE_PUBSUB_INVENTORY => Ok(DataMessage::PubsubInventory(
-                rmp_serde::from_slice(&data[1..])?,
-            )),
-            MSG_TYPE_PUBSUB_WANT => Ok(DataMessage::PubsubWant(rmp_serde::from_slice(
-                &data[1..],
-            )?)),
+            MSG_TYPE_PUBSUB_WANT => Ok(DataMessage::PubsubWant(rmp_serde::from_slice(&data[1..])?)),
             other => Err(rmp_serde::decode::Error::LengthMismatch(other as u32)),
         }
     }

@@ -239,6 +239,20 @@ pub(super) async fn daemon_status(
         "blossom_servers": state.upstream_blossom.len(),
         "nostr_relays": state.nostr_relay_urls.len(),
     });
+    let fips = if let Some(ref transport) = state.fips_transport {
+        let peers = transport.peer_ids().await;
+        json!({
+            "enabled": true,
+            "http_fetch": state.http_fips_fetch,
+            "total_peers": peers.len(),
+            "peers": peers,
+        })
+    } else {
+        json!({
+            "enabled": false,
+            "http_fetch": state.http_fips_fetch,
+        })
+    };
     let (relay_bytes_sent, relay_bytes_received) = state.ws_relay.upstream_relay_bandwidth();
     let relay = json!({
         "enabled": !state.nostr_relay_urls.is_empty(),
@@ -286,7 +300,10 @@ pub(super) async fn daemon_status(
         "capabilities": {
             "hash_get": state.hash_get_enabled,
             "http_webrtc_fetch": state.http_webrtc_fetch,
+            "http_fips_fetch": state.http_fips_fetch,
+            "fips": state.fips_transport.is_some(),
         },
+        "fips": fips,
         "mesh": mesh.clone(),
         "webrtc": mesh,
         "relay": relay,

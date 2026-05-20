@@ -56,7 +56,7 @@ fn args_to_strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
 fn test_build_daemon_args_with_overrides() {
     let data_dir = PathBuf::from("data-dir");
     let args = args_to_strings(build_daemon_args(
-        "127.0.0.1:8080",
+        Some("127.0.0.1:8080"),
         Some("wss://relay.example"),
         Some(ServerMode::Assist),
         Some(&data_dir),
@@ -79,7 +79,13 @@ fn test_build_daemon_args_with_overrides() {
 
 #[test]
 fn test_build_daemon_args_minimal() {
-    let args = args_to_strings(build_daemon_args("0.0.0.0:8080", None, None, None));
+    let args = args_to_strings(build_daemon_args(None, None, None, None));
+    assert!(args.is_empty());
+}
+
+#[test]
+fn test_build_daemon_args_with_addr_override() {
+    let args = args_to_strings(build_daemon_args(Some("0.0.0.0:8080"), None, None, None));
     assert_eq!(args, vec!["--addr", "0.0.0.0:8080"]);
 }
 
@@ -106,7 +112,7 @@ fn test_daemon_launch_state_roundtrip() {
     let path = temp_dir.path().join("htree.pid");
     let state_path = daemon_state_file_path(&path);
     let state = DaemonLaunchState {
-        addr: "127.0.0.1:18080".to_string(),
+        addr: Some("127.0.0.1:18080".to_string()),
         relays: Some("wss://relay.example,wss://relay.two".to_string()),
         mode: Some(ServerMode::Assist),
         data_dir: Some(PathBuf::from("/tmp/htree-data")),

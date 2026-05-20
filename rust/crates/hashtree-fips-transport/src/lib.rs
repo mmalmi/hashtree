@@ -5,15 +5,16 @@
 //! app-owned endpoint bytes.
 
 use async_trait::async_trait;
+use fips_core::config::{NostrDiscoveryPolicy, TransportInstances};
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
@@ -30,6 +31,8 @@ pub struct FipsEndpointPacket {
 
 #[derive(Debug, Error)]
 pub enum FipsTransportError {
+    #[error("endpoint failed: {0}")]
+    Endpoint(String),
     #[error("endpoint send failed: {0}")]
     Send(String),
     #[error("wire decode failed: {0}")]
@@ -48,6 +51,120 @@ pub trait FipsEndpointIo: Send + Sync {
     fn local_peer_id(&self) -> Option<String> {
         None
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct FipsEndpointOptions {
+    pub identity_nsec: String,
+    pub discovery_scope: String,
+    pub relays: Vec<String>,
+    pub enable_udp: bool,
+    pub enable_webrtc: bool,
+    pub udp_bind_addr: Option<String>,
+    pub udp_public: bool,
+    pub udp_external_addr: Option<String>,
+    pub packet_channel_capacity: usize,
+}
+
+impl FipsEndpointOptions {
+    pub fn new(identity_nsec: impl Into<String>) -> Self {
+        Self {
+            identity_nsec: identity_nsec.into(),
+            discovery_scope: DEFAULT_FIPS_DISCOVERY_SCOPE.to_string(),
+            relays: Vec::new(),
+            enable_udp: true,
+            enable_webrtc: true,
+            udp_bind_addr: None,
+            udp_public: false,
+            udp_external_addr: None,
+            packet_channel_capacity: 1024,
+        }
+    }
+}
+
+pub struct BoundFipsEndpoint {
+    pub endpoint: Arc<dyn FipsEndpointIo>,
+    pub local_peer_id: String,
+    pub discovery_scope: String,
+}
+
+pub async fn bind_fips_endpoint(
+    options: FipsEndpointOptions,
+) -> Result<BoundFipsEndpoint, FipsTransportError> {
+    if !options.enable_udp && !options.enable_webrtc {
+        return Err(FipsTransportError::Endpoint(
+            "at least one FIPS transport must be enabled".to_string(),
+        ));
+    }
+
+    let discovery_scope = options
+        .discovery_scope
+        .trim()
+        .is_empty()
+        .then(|| DEFAULT_FIPS_DISCOVERY_SCOPE.to_string())
+        .unwrap_or_else(|| options.discovery_scope.trim().to_string());
+    let mut config = fips_core::Config::new();
+    config.node.identity = fips_core::IdentityConfig {
+        nsec: Some(options.identity_nsec),
+        persistent: false,
+    };
+    config.tun.enabled = false;
+    config.dns.enabled = false;
+    config.node.system_files_enabled = false;
+    config.node.discovery.lan.scope = Some(discovery_scope.clone());
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.advertise = true;
+    config.node.discovery.nostr.policy = NostrDiscoveryPolicy::Open;
+    config.node.discovery.nostr.share_local_candidates = true;
+    config.node.discovery.nostr.app = discovery_scope.clone();
+    if !options.relays.is_empty() {
+        config.node.discovery.nostr.advert_relays = options.relays.clone();
+        config.node.discovery.nostr.dm_relays = options.relays;
+    }
+
+    if options.enable_udp {
+        config.transports.udp = TransportInstances::Single(fips_core::UdpConfig {
+            bind_addr: Some(
+                options
+                    .udp_bind_addr
+                    .filter(|addr| !addr.trim().is_empty())
+                    .unwrap_or_else(|| "0.0.0.0:0".to_string()),
+            ),
+            advertise_on_nostr: Some(true),
+            public: Some(options.udp_public),
+            external_addr: options
+                .udp_external_addr
+                .filter(|addr| !addr.trim().is_empty()),
+            outbound_only: Some(false),
+            accept_connections: Some(true),
+            ..Default::default()
+        });
+    }
+
+    if options.enable_webrtc {
+        config.transports.webrtc = TransportInstances::Single(fips_core::WebRtcConfig {
+            advertise_on_nostr: Some(true),
+            auto_connect: Some(true),
+            accept_connections: Some(true),
+            ..Default::default()
+        });
+    }
+
+    let endpoint = fips_core::FipsEndpoint::builder()
+        .config(config)
+        .discovery_scope(discovery_scope.clone())
+        .without_system_tun()
+        .packet_channel_capacity(options.packet_channel_capacity)
+        .bind()
+        .await
+        .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
+    let local_peer_id = endpoint.npub().to_string();
+
+    Ok(BoundFipsEndpoint {
+        endpoint: Arc::new(endpoint),
+        local_peer_id,
+        discovery_scope,
+    })
 }
 
 #[async_trait]
@@ -222,12 +339,24 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
         let mut out = Vec::new();
         for peer in peers {
             let peer = peer.trim().to_string();
-            if peer.is_empty() || Some(peer.as_str()) == local.as_deref() || !seen.insert(peer.clone()) {
+            if peer.is_empty()
+                || Some(peer.as_str()) == local.as_deref()
+                || !seen.insert(peer.clone())
+            {
                 continue;
             }
             out.push(peer);
         }
         *self.peers.write().await = out;
+    }
+
+    pub async fn peer_ids(&self) -> Vec<String> {
+        let configured = self.peers.read().await.clone();
+        if configured.is_empty() {
+            self.endpoint.peer_ids().await
+        } else {
+            configured
+        }
     }
 
     pub fn start(self: &Arc<Self>) -> JoinHandle<()> {
@@ -350,12 +479,7 @@ impl<S: Store + Send + Sync + 'static> Store for HashtreeFipsTransport<S> {
                 return Ok(Some(data));
             }
         }
-        let configured = self.peers.read().await.clone();
-        let peers = if configured.is_empty() {
-            self.endpoint.peer_ids().await
-        } else {
-            configured
-        };
+        let peers = self.peer_ids().await;
         self.get_from_peers(hash, &peers)
             .await
             .map_err(|err| StoreError::Other(err.to_string()))

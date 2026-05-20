@@ -6,6 +6,7 @@ use crate::webrtc::{
     ConnectionState, PeerDirection, PeerEntry, PeerPool, PeerRootEvent, PeerSignalPath,
     PeerTransport, WebRTCState,
 };
+use async_trait::async_trait;
 use axum::{
     body::{to_bytes, Body},
     extract::{Path as AxumPath, State as AxumState},
@@ -14,7 +15,10 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use hashtree_core::DirEntry;
+use hashtree_core::{DirEntry, MemoryStore, Store};
+use hashtree_fips_transport::{
+    FipsEndpointIo, FipsEndpointPacket, FipsTransportError, HashtreeFipsTransport,
+};
 use http_body_util::BodyExt;
 use nostr::{
     nips::nip19::ToBech32, Alphabet, ClientMessage as NostrClientMessage, EventBuilder,
@@ -23,7 +27,7 @@ use nostr::{
 };
 use sha2::Digest;
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     time::Instant,
 };
@@ -103,6 +107,8 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         hash_get_enabled: true,
         http_webrtc_fetch: true,
         webrtc_peers: None,
+        fips_transport: None,
+        http_fips_fetch: true,
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
         max_upload_bytes: 5 * 1024 * 1024,
         public_writes: true,
@@ -126,6 +132,69 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         resolved_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         thumbnail_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         cid_size_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
+    }
+}
+
+struct FakeFipsEndpoint {
+    id: String,
+    network: Arc<
+        tokio::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<FipsEndpointPacket>>>,
+    >,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FipsEndpointPacket>>,
+}
+
+impl FakeFipsEndpoint {
+    async fn new(
+        id: &str,
+        network: Arc<
+            tokio::sync::Mutex<
+                HashMap<String, tokio::sync::mpsc::UnboundedSender<FipsEndpointPacket>>,
+            >,
+        >,
+    ) -> Arc<Self> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        network.lock().await.insert(id.to_string(), tx);
+        Arc::new(Self {
+            id: id.to_string(),
+            network,
+            rx: tokio::sync::Mutex::new(rx),
+        })
+    }
+}
+
+#[async_trait]
+impl FipsEndpointIo for FakeFipsEndpoint {
+    async fn send(&self, peer_id: &str, data: Vec<u8>) -> Result<(), FipsTransportError> {
+        let tx = self
+            .network
+            .lock()
+            .await
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| FipsTransportError::Send(format!("unknown peer {peer_id}")))?;
+        tx.send(FipsEndpointPacket {
+            peer_id: self.id.clone(),
+            data,
+        })
+        .map_err(|_| FipsTransportError::Send("receiver closed".to_string()))
+    }
+
+    async fn recv(&self) -> Option<FipsEndpointPacket> {
+        self.rx.lock().await.recv().await
+    }
+
+    async fn peer_ids(&self) -> Vec<String> {
+        self.network
+            .lock()
+            .await
+            .keys()
+            .filter(|id| *id != &self.id)
+            .cloned()
+            .collect()
+    }
+
+    fn local_peer_id(&self) -> Option<String> {
+        Some(self.id.clone())
     }
 }
 
@@ -434,6 +503,89 @@ async fn await_fetch_task_recovers_from_panic() {
     .await;
 
     assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn fetch_and_cache_blob_uses_fips_transport() {
+    let network = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let source_endpoint = FakeFipsEndpoint::new("source", network.clone()).await;
+    let target_endpoint = FakeFipsEndpoint::new("target", network).await;
+    let source_store = Arc::new(MemoryStore::new());
+    let data = b"hashtree daemon over fips".to_vec();
+    let digest = sha2::Sha256::digest(&data);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&digest);
+    source_store.put(hash, data.clone()).await.unwrap();
+
+    let source_transport = Arc::new(HashtreeFipsTransport::new(source_endpoint, source_store));
+    let source_task = source_transport.start();
+
+    let temp_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let target_transport = Arc::new(
+        HashtreeFipsTransport::new(target_endpoint, local_store.store_arc())
+            .with_request_timeout(Duration::from_millis(100))
+            .with_cache_responses(false),
+    );
+    target_transport.set_peers(vec!["source".to_string()]).await;
+    let target_task = target_transport.start();
+
+    let mut state = test_app_state(local_store.clone(), Vec::new());
+    state.fips_transport = Some(target_transport);
+
+    assert!(fetch_and_cache_blob(&state, &hash).await);
+    assert_eq!(local_store.get_blob(&hash).unwrap(), Some(data));
+
+    source_task.abort();
+    target_task.abort();
+}
+
+#[tokio::test]
+async fn serve_content_or_blob_fetches_raw_blob_over_fips() {
+    let network = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let source_endpoint = FakeFipsEndpoint::new("source", network.clone()).await;
+    let target_endpoint = FakeFipsEndpoint::new("target", network).await;
+    let source_store = Arc::new(MemoryStore::new());
+    let data = b"raw hashtree/fips route fetch".to_vec();
+    let digest = sha2::Sha256::digest(&data);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&digest);
+    let hash_hex = hex::encode(hash);
+    source_store.put(hash, data.clone()).await.unwrap();
+
+    let source_transport = Arc::new(HashtreeFipsTransport::new(source_endpoint, source_store));
+    let source_task = source_transport.start();
+
+    let temp_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let target_transport = Arc::new(
+        HashtreeFipsTransport::new(target_endpoint, local_store.store_arc())
+            .with_request_timeout(Duration::from_millis(100))
+            .with_cache_responses(false),
+    );
+    target_transport.set_peers(vec!["source".to_string()]).await;
+    let target_task = target_transport.start();
+
+    let mut state = test_app_state(local_store.clone(), Vec::new());
+    state.fips_transport = Some(target_transport);
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(format!("{hash_hex}.bin")),
+        Query(HashMap::new()),
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), data.as_slice());
+    assert_eq!(local_store.get_blob(&hash).unwrap(), Some(data));
+
+    source_task.abort();
+    target_task.abort();
 }
 
 #[tokio::test]

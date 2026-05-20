@@ -207,7 +207,7 @@ fn default_daemon_pid_file() -> PathBuf {
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DaemonLaunchState {
-    pub(crate) addr: String,
+    pub(crate) addr: Option<String>,
     pub(crate) relays: Option<String>,
     pub(crate) mode: Option<hashtree_cli::config::ServerMode>,
     pub(crate) data_dir: Option<PathBuf>,
@@ -239,14 +239,16 @@ pub(crate) fn write_daemon_launch_state(
 
 #[cfg(unix)]
 pub(crate) fn build_daemon_args(
-    addr: &str,
+    addr: Option<&str>,
     relays: Option<&str>,
     mode: Option<hashtree_cli::config::ServerMode>,
     data_dir: Option<&PathBuf>,
 ) -> Vec<std::ffi::OsString> {
     let mut args = Vec::new();
-    args.push(std::ffi::OsString::from("--addr"));
-    args.push(std::ffi::OsString::from(addr));
+    if let Some(addr) = addr {
+        args.push(std::ffi::OsString::from("--addr"));
+        args.push(std::ffi::OsString::from(addr));
+    }
     if let Some(relays) = relays {
         args.push(std::ffi::OsString::from("--relays"));
         args.push(std::ffi::OsString::from(relays));
@@ -263,7 +265,7 @@ pub(crate) fn build_daemon_args(
 }
 
 pub(crate) fn spawn_daemon(
-    addr: &str,
+    addr: Option<&str>,
     relays: Option<&str>,
     mode: Option<hashtree_cli::config::ServerMode>,
     data_dir: Option<PathBuf>,
@@ -311,7 +313,7 @@ pub(crate) fn spawn_daemon(
         let log_err = log.try_clone().context("Failed to clone log file handle")?;
 
         let launch_state = DaemonLaunchState {
-            addr: addr.to_string(),
+            addr: addr.map(ToOwned::to_owned),
             relays: relays.map(ToOwned::to_owned),
             mode,
             data_dir,
@@ -323,7 +325,7 @@ pub(crate) fn spawn_daemon(
         let mut cmd = Command::new(exe);
         cmd.arg("start")
             .args(build_daemon_args(
-                &launch_state.addr,
+                launch_state.addr.as_deref(),
                 launch_state.relays.as_deref(),
                 launch_state.mode,
                 launch_state.data_dir.as_ref(),
@@ -454,7 +456,7 @@ pub(crate) fn reload_daemon(pid_file: Option<&PathBuf>) -> Result<()> {
         println!("Reloading hashtree daemon (pid {})", pid);
         stop_daemon(Some(&pid_path))?;
         spawn_daemon(
-            &state.addr,
+            state.addr.as_deref(),
             state.relays.as_deref(),
             state.mode,
             state.data_dir,

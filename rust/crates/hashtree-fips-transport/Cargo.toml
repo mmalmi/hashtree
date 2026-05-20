@@ -9,6 +9,10 @@ authors.workspace = true
 description = "Hashtree blob transport over FIPS endpoint bytes"
 keywords = ["hashtree", "fips", "p2p", "merkle"]
 
+[features]
+default = []
+webrtc = ["fips-core/webrtc-transport"]
+
 [dependencies]
 async-trait.workspace = true
 fips-core = { version = "0.3.15", path = "../../../../fips/crates/fips-core" }

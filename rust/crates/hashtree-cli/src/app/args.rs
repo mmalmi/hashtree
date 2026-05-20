@@ -165,8 +165,9 @@ pub(crate) enum Commands {
     // ── Daemon ──────────────────────────────────────────────
     /// Start the hashtree daemon
     Start {
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        addr: String,
+        /// Override daemon bind address from config
+        #[arg(long)]
+        addr: Option<String>,
         /// Override Nostr relays (comma-separated)
         #[arg(long)]
         relays: Option<String>,

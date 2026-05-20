@@ -41,6 +41,7 @@ hashtree-config = { version = "0.2.43", path = "crates/hashtree-config" }
 hashtree-fs = { version = "0.2.43", path = "crates/hashtree-fs" }
 hashtree-nostr = { version = "0.2.43", path = "crates/hashtree-nostr" }
 hashtree-network = { version = "0.2.50", path = "crates/hashtree-network" }
+hashtree-fips-transport = { version = "0.2.53", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.2.47", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.2.43", path = "crates/cashu-service", default-features = false }
 
