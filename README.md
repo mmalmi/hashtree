@@ -1,6 +1,6 @@
 # hashtree
 
-Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots can be published to get mutable `npub/tree/path` addresses. Data is chunked, CHK-encrypted by default, and can be fetched from Blossom-compatible storage, peers over WebRTC, or a local daemon.
+Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots can be published to get mutable `npub/tree/path` addresses. Data is chunked, CHK-encrypted by default, and can be fetched from Blossom-compatible storage, FIPS/WebRTC peers, or a local daemon.
 
 ## Installation
 
@@ -103,7 +103,7 @@ Hashtree is the canonical remote for this repository:
 - Simple storage interface: `get(hash) -> bytes`, `put(hash, bytes)`
 - 2MB chunks optimized for Blossom uploads
 - Nostr-published roots for mutable addresses
-- WebRTC fetches with Blossom fallback
+- FIPS/WebRTC peer fetches with Blossom fallback
 
 ## Getting started
 
@@ -128,6 +128,7 @@ Hashtree is the canonical remote for this repository:
 ## Protocol spec
 
 - [`docs/HTS-01.md`](docs/HTS-01.md) - hashtree core protocol (draft)
+- [`docs/hashtree-on-fips.md`](docs/hashtree-on-fips.md) - FIPS discovery, signaling, and transport plan for Hashtree blobs
 - [`docs/URL-ENCODING.md`](docs/URL-ENCODING.md) - concise routing rules for slash-containing tree names
 - [`docs/architecture.html`](docs/architecture.html) - visual overview of the current content, routing, and transport layers
 - [`docs/blossom-reconciliation-and-large-fetch-plan.md`](docs/blossom-reconciliation-and-large-fetch-plan.md) - deterministic Blossom reconciliation and large-repo fetch plan

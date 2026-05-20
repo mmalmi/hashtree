@@ -129,6 +129,22 @@ importers:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@24.10.1)(happy-dom@15.11.7)(jsdom@26.1.0)(terser@5.44.1)
 
+  packages/hashtree-fips-transport:
+    dependencies:
+      '@hashtree/core':
+        specifier: workspace:*
+        version: link:../hashtree
+      '@hashtree/mesh':
+        specifier: workspace:*
+        version: link:../hashtree-mesh
+    devDependencies:
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@24.10.1)(happy-dom@15.11.7)(jsdom@26.1.0)(terser@5.44.1)
+
   packages/hashtree-git:
     dependencies:
       '@hashtree/core':
@@ -221,10 +237,10 @@ importers:
     dependencies:
       '@hashtree/core':
         specifier: 0.1.7
-        version: link:../hashtree
+        version: 0.1.7
       '@hashtree/dexie':
         specifier: 0.1.5
-        version: link:../hashtree-dexie
+        version: 0.1.5
       '@hashtree/mesh':
         specifier: workspace:*
         version: link:../hashtree-mesh
@@ -1087,6 +1103,15 @@ packages:
   '@gerrit0/mini-shiki@3.22.0':
     resolution: {integrity: sha512-jMpciqEVUBKE1QwU64S4saNMzpsSza6diNCk4MWAeCxO2+LFi2FIFmL2S0VDLzEJCxuvCbU783xi8Hp/gkM5CQ==}
 
+  '@hashtree/core@0.1.5':
+    resolution: {integrity: sha512-BMwqDIGHS2ycgd19WD1yTWJqUjEAhwGYmmUrBhOLCF1RXQsyAMIlI9FNK3zBEds8joDcSunX0lcvp52atNgQ0g==}
+
+  '@hashtree/core@0.1.7':
+    resolution: {integrity: sha512-VoSt33mejcaZ1+tbJYpjOD2FnnJaXKEHZAFurbjqILxVNXJTxFjuHPYzqFVxI3i7vJF5dJ+5LYSKOEhy0Im5Jg==}
+
+  '@hashtree/dexie@0.1.5':
+    resolution: {integrity: sha512-FoKzaLQoTeIWMsTuGl9UMkt5zINoPICDWfcUiCkJIw6mzK+41EjeVYI39ypzv/oeC854sVC3NAOzgNU7BleVvg==}
+
   '@humanfs/core@0.19.1':
     resolution: {integrity: sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA==}
     engines: {node: '>=18.18.0'}
@@ -1789,9 +1814,6 @@ packages:
   '@vitest/pretty-format@3.2.4':
     resolution: {integrity: sha512-IVNZik8IVRJRTr9fxlitMKeJeXFFFN0JaB9PHPGQ8NKQbGpfjlTx9zO4RefN8gp7eqjNy8nyK3NZmBzOPeIxtA==}
 
-  '@vitest/pretty-format@4.0.17':
-    resolution: {integrity: sha512-Ah3VAYmjcEdHg6+MwFE17qyLqBHZ+ni2ScKCiW2XrlSBV4H3Z7vYfPfz7CWQ33gyu76oc0Ai36+kgLU3rfF4nw==}
-
   '@vitest/pretty-format@4.1.2':
     resolution: {integrity: sha512-dwQga8aejqeuB+TvXCMzSQemvV9hNEtDDpgUKDzOmNQayl2OG241PSWeJwKRH3CiC+sESrmoFd49rfnq7T4RnA==}
 
@@ -1809,9 +1831,6 @@ packages:
 
   '@vitest/snapshot@3.2.4':
     resolution: {integrity: sha512-dEYtS7qQP2CjU27QBC5oUOxLE/v5eLkGqPE0ZKEIDGMs4vKWe7IjgLOeauHsR0D5YuuycGRO5oSRXnwnmA78fQ==}
-
-  '@vitest/snapshot@4.0.17':
-    resolution: {integrity: sha512-npPelD7oyL+YQM2gbIYvlavlMVWUfNNGZPcu0aEUQXt7FXTuqhmgiYupPnAanhKvyP6Srs2pIbWo30K0RbDtRQ==}
 
   '@vitest/snapshot@4.1.2':
     resolution: {integrity: sha512-g7yfUmxYS4mNxk31qbOYsSt2F4m1E02LFqO53Xpzg3zKMhLAPZAjjfyl9e6z7HrW6LvUdTwAQR3HHfLjpko16A==}
@@ -4251,10 +4270,6 @@ packages:
     resolution: {integrity: sha512-op4nsTR47R6p0vMUUoYl/a+ljLFVtlfaXkLQmqfLR1qHma1h/ysYk4hEXZ880bf2CYgTskvTa/e196Vd5dDQXw==}
     engines: {node: '>=14.0.0'}
 
-  tinyrainbow@3.0.3:
-    resolution: {integrity: sha512-PSkbLUoxOFRzJYjjxHJt9xro7D+iilgMX/C9lawzVuYiIdcihh9DXmVibBe8lmcFrRi/VzlPjBxbN7rH24q8/Q==}
-    engines: {node: '>=14.0.0'}
-
   tinyrainbow@3.1.0:
     resolution: {integrity: sha512-Bf+ILmBgretUrdJxzXM0SgXLZ3XfiaUuOj/IKQHuTXip+05Xn+uyEYdVg0kYDipTBcLrCVyUzAPz7QmArb0mmw==}
     engines: {node: '>=14.0.0'}
@@ -5248,6 +5263,23 @@ snapshots:
       '@shikijs/types': 3.22.0
       '@shikijs/vscode-textmate': 10.0.2
 
+  '@hashtree/core@0.1.5':
+    dependencies:
+      '@msgpack/msgpack': 3.1.3
+      '@noble/hashes': 2.0.1
+      '@scure/base': 2.0.0
+
+  '@hashtree/core@0.1.7':
+    dependencies:
+      '@msgpack/msgpack': 3.1.3
+      '@noble/hashes': 2.0.1
+      '@scure/base': 2.0.0
+
+  '@hashtree/dexie@0.1.5':
+    dependencies:
+      '@hashtree/core': 0.1.5
+      dexie: 4.2.1
+
   '@humanfs/core@0.19.1': {}
 
   '@humanfs/node@0.16.7':
@@ -6042,10 +6074,6 @@ snapshots:
     dependencies:
       tinyrainbow: 2.0.0
 
-  '@vitest/pretty-format@4.0.17':
-    dependencies:
-      tinyrainbow: 3.0.3
-
   '@vitest/pretty-format@4.1.2':
     dependencies:
       tinyrainbow: 3.1.0
@@ -6075,12 +6103,6 @@ snapshots:
   '@vitest/snapshot@3.2.4':
     dependencies:
       '@vitest/pretty-format': 3.2.4
-      magic-string: 0.30.21
-      pathe: 2.0.3
-
-  '@vitest/snapshot@4.0.17':
-    dependencies:
-      '@vitest/pretty-format': 4.0.17
       magic-string: 0.30.21
       pathe: 2.0.3
 
@@ -7204,7 +7226,7 @@ snapshots:
 
   expect-webdriverio@5.6.1(@wdio/globals@9.17.0)(@wdio/logger@9.18.0)(webdriverio@9.22.0):
     dependencies:
-      '@vitest/snapshot': 4.0.17
+      '@vitest/snapshot': 4.1.2
       '@wdio/globals': 9.17.0(expect-webdriverio@5.6.1)(webdriverio@9.22.0)
       '@wdio/logger': 9.18.0
       deep-eql: 5.0.2
@@ -8916,8 +8938,6 @@ snapshots:
   tinyrainbow@1.2.0: {}
 
   tinyrainbow@2.0.0: {}
-
-  tinyrainbow@3.0.3: {}
 
   tinyrainbow@3.1.0: {}
 

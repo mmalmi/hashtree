@@ -22,6 +22,7 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 - [`@hashtree/core`](https://www.npmjs.com/package/@hashtree/core) - Core merkle tree library ([source](packages/hashtree))
 - [`@hashtree/merge`](https://www.npmjs.com/package/@hashtree/merge) - Deterministic path-based overlay merge primitives ([source](packages/hashtree-merge))
 - [`@hashtree/nostr`](https://www.npmjs.com/package/@hashtree/nostr) - WebRTC P2P store and Nostr ref resolver ([source](packages/hashtree-nostr))
+- [`@hashtree/fips-transport`](https://www.npmjs.com/package/@hashtree/fips-transport) - Hashtree mesh blob transport over FIPS endpoint bytes ([source](packages/hashtree-fips-transport))
 - [`@hashtree/git`](https://www.npmjs.com/package/@hashtree/git) - Git/htree interoperability helpers ([source](packages/hashtree-git))
 - [`@hashtree/dexie`](https://www.npmjs.com/package/@hashtree/dexie) - IndexedDB/Dexie storage adapter ([source](packages/hashtree-dexie))
 - [`@hashtree/index`](https://www.npmjs.com/package/@hashtree/index) - B-Tree index structures ([source](packages/hashtree-index))
@@ -48,6 +49,7 @@ npm install @hashtree/core
 # Optional:
 npm install @hashtree/merge  # Path-based overlay merge primitives
 npm install @hashtree/nostr  # WebRTC P2P + Nostr resolver
+npm install @hashtree/fips-transport  # FIPS endpoint byte transport
 npm install @hashtree/dexie  # IndexedDB storage
 npm install @hashtree/index  # B-Tree indexes
 npm install @hashtree/worker  # Worker runtime + tree-root helpers
@@ -61,6 +63,7 @@ The `Store` interface is just `get(hash) → bytes` and `put(hash, bytes)`. Impl
 - `BlossomStore` - Remote blossom server (in `@hashtree/core`)
 - `DexieStore` - IndexedDB via Dexie (in `@hashtree/dexie`)
 - `WebRTCStore` - P2P network via WebRTC (in `@hashtree/nostr`)
+- `FipsTransportStore` - P2P network via FIPS endpoint bytes (in `@hashtree/fips-transport`)
 
 ## Usage
 
@@ -150,14 +153,42 @@ Falls back to Blossom servers when data isn't found on peers or WebRTC isn't ava
 If `requestDispatch` is omitted but `peerQueryDelay` is set, legacy staged probing
 is preserved (`1 + 1` fanout with `peerQueryDelay` hedge interval).
 
-**Data channel protocol**: Just 2 message types, MessagePack-encoded with a type prefix byte:
+## P2P Transport (FIPS)
+
+`@hashtree/fips-transport` sends the same `@hashtree/mesh` request/response
+frames over FIPS endpoint bytes. FIPS owns peer discovery, signaling, and
+underlay transports; Hashtree owns hash verification and source selection.
+Hashtree peers are discovered in the `hashtree-v1` FIPS app scope, separately
+from generic FIPS daemon reachability adverts.
+
+```typescript
+import { FipsTransportStore, DEFAULT_FIPS_DISCOVERY_APP } from '@hashtree/fips-transport';
+
+const store = new FipsTransportStore({
+  endpoint: fipsEndpoint,
+  localStore,
+  peers: () => fipsEndpoint.listPeerIds?.() ?? [],
+});
+
+console.log(DEFAULT_FIPS_DISCOVERY_APP); // hashtree-v1
+const data = await store.get(hash);
+```
+
+Peers that do not have a blob can stay silent. The read resolves `null` after
+the request timeout without retrying the same peer forever.
+
+**Blob exchange protocol**: WebRTC and FIPS transports carry the same two
+MessagePack-encoded message types with a type prefix byte:
 
 | Type | Byte | Format | Description |
 |------|------|--------|-------------|
 | Request | `0x00` | `{h: hash32, htl?: u8}` | Request data by hash |
 | Response | `0x01` | `{h: hash32, d: bytes}` | Return data |
 
-**Request forwarding**: Peers forward requests they can't fulfill locally. HTL (Hops-To-Live, default `MAX_HTL`, currently 10) limits propagation depth. Uses Freenet-style probabilistic decrement—each peer randomly decides whether to decrement at HTL boundaries, making it harder to infer request origin.
+**Request forwarding**: Mesh-aware peers can forward requests they can't fulfill
+locally. HTL (Hops-To-Live, default `MAX_HTL`, currently 10) limits propagation
+depth. The FIPS transport currently keeps the boundary point-to-point and relies
+on Hashtree's source selection to ask additional peers.
 
 ## Iris App Repos
 
