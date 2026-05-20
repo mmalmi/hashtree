@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Changed Rust CID-link B-trees to store subtree link counts on internal
+  directory entries, matching the TypeScript counted B-tree root format.
+- Added Rust `BTree::count_stored_links(...)` for no-scan stored counts and
+  `BTree::scan_links(...)` for explicit full scans. `BTree::count_links(...)`
+  remains the compatibility scanning count.
+
 ## 0.2.51 - 2026-05-19
 
 Changes since the `0.2.50` release.

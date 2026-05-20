@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::executor::block_on;
-use hashtree_core::{Cid, HashTree, HashTreeConfig, MemoryStore};
+use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, MemoryStore};
 use hashtree_index::{escape_key, BTree, BTreeOptions};
 
 fn cid_from_hex(hex: &str) -> Cid {
@@ -70,11 +70,11 @@ fn link_btree_matches_typescript_fixture_root() {
         let root = root.expect("root");
         assert_eq!(
             hex::encode(root.hash),
-            "3107fabdefe0b5e58650caf14c891af6f6c7c08ebebb2549dafc4c7c83965407"
+            "2199cfc5fe036befe0932abf001df5cbe24a876e4caee661cba8a217be81f27c"
         );
         assert_eq!(
             root.key.map(hex::encode),
-            Some("7dcc2db7539c3d2f29952d60fe57b875ccb40e1da55f7d5decb7566c95e5c248".to_string())
+            Some("3df5002dd988d4c842309e2d79722300b885194229f43ad3a08e09d4285d4e30".to_string())
         );
 
         let prefix = btree.prefix_links(&root, "author1:").await.unwrap();
@@ -195,6 +195,100 @@ fn bulk_link_build_matches_incremental_entries() {
                 .into_iter()
                 .take(3)
                 .collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
+fn link_counts_distinguish_stored_counts_from_scans() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)));
+
+        let fixtures = [
+            (
+                "author1:fffffffffffffff5:event-a",
+                cid_from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+            ),
+            (
+                "author1:fffffffffffffff4:event-b",
+                cid_from_hex("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0"),
+            ),
+            (
+                "author2:fffffffffffffff6:event-c",
+                cid_from_hex("00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9"),
+            ),
+            (
+                "author1:00000001:fffffffffffffff3:event-d",
+                cid_from_hex("000d1a2734414e5b6875828f9ca9b6c3d0ddeaf704111e2b3845525f6c798693"),
+            ),
+            (
+                "author2:fffffffffffffff1:event-e",
+                cid_from_hex("303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f"),
+            ),
+            (
+                "author3:fffffffffffffff2:event-f",
+                cid_from_hex("101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"),
+            ),
+        ];
+
+        let counted_root = btree
+            .build_links(
+                fixtures
+                    .iter()
+                    .map(|(key, cid)| ((*key).to_string(), cid.clone())),
+            )
+            .await
+            .unwrap()
+            .expect("counted root");
+
+        assert_eq!(
+            btree.count_stored_links(Some(&counted_root)).await.unwrap(),
+            Some(fixtures.len() as u64)
+        );
+        assert_eq!(
+            btree.scan_links(Some(&counted_root)).await.unwrap(),
+            fixtures.len() as u64
+        );
+        assert_eq!(
+            btree.count_links(Some(&counted_root)).await.unwrap(),
+            fixtures.len() as u64
+        );
+
+        let left = btree
+            .build_links(
+                fixtures[..3]
+                    .iter()
+                    .map(|(key, cid)| ((*key).to_string(), cid.clone())),
+            )
+            .await
+            .unwrap()
+            .expect("left leaf");
+        let right = btree
+            .build_links(
+                fixtures[3..]
+                    .iter()
+                    .map(|(key, cid)| ((*key).to_string(), cid.clone())),
+            )
+            .await
+            .unwrap()
+            .expect("right leaf");
+        let legacy_root = tree
+            .put_directory(vec![
+                DirEntry::from_cid(escape_key(fixtures[0].0), &left).with_link_type(LinkType::Dir),
+                DirEntry::from_cid(escape_key(fixtures[3].0), &right).with_link_type(LinkType::Dir),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            btree.count_stored_links(Some(&legacy_root)).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            btree.scan_links(Some(&legacy_root)).await.unwrap(),
+            fixtures.len() as u64
         );
     });
 }

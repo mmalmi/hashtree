@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.12 - 2026-05-20
+
+Changes since the previous npm package publish.
+
+### Changed
+
+- Prepared `@hashtree/index@0.1.9` and `@hashtree/collection@0.2.5` for npm
+  publication.
+- Added `BTree.countStoredLinks(...)` for no-scan stored link counts and
+  `BTree.scanLinks(...)` for explicit full scans. `BTree.countLinks(...)`
+  remains the backwards-compatible scanning count.
+- Changed `@hashtree/collection` to depend on the counted B-tree writer so
+  rebuilt collection indexes store subtree sizes for ordinal reads and random
+  sampling.
+
 ## 0.2.11 - 2026-05-19
 
 Changes since the previous npm package publish.
