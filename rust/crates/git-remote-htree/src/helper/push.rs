@@ -1,6 +1,6 @@
 use super::progress::emit_upload_progress;
 use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir, queue_hash_if_new};
-use super::{upload_progress, AncestorCheck, PushSpec, RemoteHelper, SERVER_COVERAGE_SAMPLE_SIZE};
+use super::{upload_progress, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::refs::Ref;
 use crate::nostr_client::{BlossomResult, PullRequestStateFilter};
 use crate::runtime::new_multi_thread_runtime;
@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::process::Command;
 use tracing::{debug, info, warn};
+
+const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 
 fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize {
     let configured = configured.max(1);
@@ -677,9 +679,14 @@ impl RemoteHelper {
             old_encryption_key.as_ref(),
             true,
         );
-        if !blossom_result.failed.is_empty() {
+        if !blossom_result.local_complete {
             anyhow::bail!(
-                "Failed to upload repo tree to Blossom server(s): {}",
+                "Failed to prepare complete repo tree in local hashtree store; not publishing incomplete root"
+            );
+        }
+        if blossom_result.degraded && !blossom_result.failed.is_empty() {
+            eprintln!(
+                "  Warning: remote Blossom replication incomplete: {}",
                 blossom_result.failed.join(", ")
             );
         }
@@ -712,6 +719,9 @@ impl RemoteHelper {
         }
         if !blossom_result.failed.is_empty() {
             eprintln!("  Blossom failed: {}", blossom_result.failed.join(", "));
+        }
+        if blossom_result.degraded {
+            eprintln!("  Local store: complete (published with degraded Blossom replication)");
         }
 
         eprintln!("  Config: ~/.hashtree/config.toml");
@@ -903,6 +913,8 @@ impl RemoteHelper {
                     configured: configured.clone(),
                     succeeded: vec![],
                     failed: configured,
+                    local_complete: false,
+                    degraded: true,
                 };
             }
         };
@@ -919,6 +931,8 @@ impl RemoteHelper {
                     configured: configured.clone(),
                     succeeded: vec![],
                     failed: configured,
+                    local_complete: false,
+                    degraded: true,
                 };
             }
         };
@@ -942,7 +956,7 @@ impl RemoteHelper {
 
         let verbose = self.is_slow();
         let trust_server_old_tree_coverage = trust_server_old_tree_coverage && !force_upload;
-        let success = rt.block_on(async {
+        let (local_complete, degraded_replication) = rt.block_on(async {
             use hashtree_core::{collect_hashes, Cid, HashTree, HashTreeConfig};
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::sync::Arc;
@@ -952,6 +966,7 @@ impl RemoteHelper {
             let skipped_diff = Arc::new(AtomicUsize::new(0));
             let skipped_server = Arc::new(AtomicUsize::new(0));
             let failed = Arc::new(AtomicUsize::new(0));
+            let local_failed = Arc::new(AtomicUsize::new(0));
             let completed = Arc::new(AtomicUsize::new(0));
             let discovered_total = Arc::new(AtomicUsize::new(1));
             let discovery_complete = Arc::new(AtomicBool::new(false));
@@ -961,7 +976,7 @@ impl RemoteHelper {
                     if verbose {
                         eprintln!("  No changes detected (same root hash)");
                     }
-                    return true;
+                    return (true, false);
                 }
 
                 if verbose {
@@ -1021,75 +1036,61 @@ impl RemoteHelper {
 
             let has_old_tree = !old_hashes.is_empty();
             let all_servers: Vec<String> = blossom.write_servers().to_vec();
-            let servers_needing_full: Arc<Vec<String>> = if force_upload {
-                Arc::new(all_servers.clone())
-            } else if has_old_tree && !all_servers.is_empty() {
-                let old_root = old_root_bytes.unwrap();
-                let mut sample_hashes = vec![hex::encode(old_root)];
-                for hash in old_hashes
-                    .iter()
-                    .filter(|h| **h != old_root)
-                    .take(SERVER_COVERAGE_SAMPLE_SIZE.saturating_sub(1))
-                {
-                    sample_hashes.push(hex::encode(hash));
-                }
-                let sample_refs: Vec<&str> = sample_hashes.iter().map(|s| s.as_str()).collect();
-                let mut needs_full = Vec::new();
-                let mut inconclusive = Vec::new();
-                for server in &all_servers {
+            let servers_needing_full: Arc<Vec<String>> =
+                if has_old_tree && all_servers.len() == 1 {
+                    let old_root = old_root_bytes.unwrap();
+                    let mut sample_hashes = vec![hex::encode(old_root)];
+                    for hash in old_hashes
+                        .iter()
+                        .filter(|h| **h != old_root)
+                        .take(SERVER_COVERAGE_SAMPLE_SIZE.saturating_sub(1))
+                    {
+                        sample_hashes.push(hex::encode(hash));
+                    }
+                    let sample_refs: Vec<&str> = sample_hashes.iter().map(|s| s.as_str()).collect();
                     match blossom
                         .server_tree_sample_coverage(
-                            server,
+                            &all_servers[0],
                             &sample_refs,
                             SERVER_COVERAGE_SAMPLE_SIZE,
                         )
                         .await
                     {
-                        hashtree_blossom::BlobAvailability::Present => {}
                         hashtree_blossom::BlobAvailability::Missing => {
-                            needs_full.push(server.clone());
+                            if verbose {
+                                let server_name = all_servers[0]
+                                    .trim_start_matches("https://")
+                                    .trim_start_matches("http://")
+                                    .split('/')
+                                    .next()
+                                    .unwrap_or(&all_servers[0]);
+                                eprintln!(
+                                    "  Full upload needed: {} (missing old tree)",
+                                    server_name
+                                );
+                            }
+                            Arc::new(all_servers.clone())
                         }
                         hashtree_blossom::BlobAvailability::Unknown => {
-                            inconclusive.push(server.clone());
+                            if verbose {
+                                let server_name = all_servers[0]
+                                    .trim_start_matches("https://")
+                                    .trim_start_matches("http://")
+                                    .split('/')
+                                    .next()
+                                    .unwrap_or(&all_servers[0]);
+                                eprintln!(
+                                    "  Old-tree coverage probe inconclusive: {}",
+                                    server_name
+                                );
+                            }
+                            Arc::new(Vec::new())
                         }
+                        hashtree_blossom::BlobAvailability::Present => Arc::new(Vec::new()),
                     }
-                }
-                if !needs_full.is_empty() && verbose {
-                    let server_names: Vec<_> = needs_full
-                        .iter()
-                        .map(|s| {
-                            s.trim_start_matches("https://")
-                                .trim_start_matches("http://")
-                                .split('/')
-                                .next()
-                                .unwrap_or(s)
-                        })
-                        .collect();
-                    eprintln!(
-                        "  Full upload needed: {} (missing old tree)",
-                        server_names.join(", ")
-                    );
-                }
-                if !inconclusive.is_empty() && verbose {
-                    let server_names: Vec<_> = inconclusive
-                        .iter()
-                        .map(|s| {
-                            s.trim_start_matches("https://")
-                                .trim_start_matches("http://")
-                                .split('/')
-                                .next()
-                                .unwrap_or(s)
-                        })
-                        .collect();
-                    eprintln!(
-                        "  Old-tree coverage probe inconclusive: {}",
-                        server_names.join(", ")
-                    );
-                }
-                Arc::new(needs_full)
-            } else {
-                Arc::new(Vec::new())
-            };
+                } else {
+                    Arc::new(Vec::new())
+                };
             let prune_known_subtrees =
                 has_old_tree && trust_server_old_tree_coverage && servers_needing_full.is_empty();
 
@@ -1133,19 +1134,11 @@ impl RemoteHelper {
                                         blossom.upload_if_missing(&data).await
                                     } else {
                                         blossom
-                                            .upload_to_all_servers(&data)
+                                            .upload_to_any_selected_server(
+                                                &data,
+                                                blossom.write_servers(),
+                                            )
                                             .await
-                                            .and_then(|(h, c)| {
-                                                if c == write_server_count {
-                                                    Ok((h, c > 0))
-                                                } else {
-                                                    Err(hashtree_blossom::BlossomError::UploadFailed(
-                                                        format!(
-                                                            "only {c}/{write_server_count} write servers accepted blob"
-                                                        ),
-                                                    ))
-                                                }
-                                            })
                                     }
                                 } else if from_old_tree && !servers_needing_full.is_empty() {
                                     if servers_needing_full.len() == 1 {
@@ -1155,24 +1148,12 @@ impl RemoteHelper {
                                             .upload_if_missing(&data)
                                             .await
                                     } else {
-                                        let server_count = servers_needing_full.len();
                                         blossom
-                                            .upload_to_selected_servers(
+                                            .upload_to_any_selected_server(
                                                 &data,
                                                 servers_needing_full.as_ref().as_slice(),
                                             )
                                             .await
-                                            .and_then(|(h, c)| {
-                                                if c == server_count {
-                                                    Ok((h, c > 0))
-                                                } else {
-                                                    Err(hashtree_blossom::BlossomError::UploadFailed(
-                                                        format!(
-                                                            "only {c}/{server_count} repair servers accepted blob"
-                                                        ),
-                                                    ))
-                                                }
-                                            })
                                     }
                                 } else {
                                     blossom.upload_if_missing(&data).await
@@ -1246,33 +1227,31 @@ impl RemoteHelper {
                 let mut force_all_servers_for_hash = false;
                 if from_old_tree {
                     if trust_server_old_tree_coverage {
-                        if servers_needing_full.is_empty() {
-                            skipped_diff.fetch_add(1, Ordering::Relaxed);
-                            let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                            if count == 1 || count.is_multiple_of(10) {
-                                emit_upload_progress(upload_progress(
-                                    count,
-                                    discovered,
-                                    None,
-                                    uploaded.load(Ordering::Relaxed),
-                                    skipped_diff.load(Ordering::Relaxed),
-                                    skipped_server.load(Ordering::Relaxed),
-                                    failed.load(Ordering::Relaxed),
-                                    has_old_tree,
-                                ));
-                            }
-                            continue;
+                        skipped_diff.fetch_add(1, Ordering::Relaxed);
+                        let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count == 1 || count.is_multiple_of(10) {
+                            emit_upload_progress(upload_progress(
+                                count,
+                                discovered,
+                                None,
+                                uploaded.load(Ordering::Relaxed),
+                                skipped_diff.load(Ordering::Relaxed),
+                                skipped_server.load(Ordering::Relaxed),
+                                failed.load(Ordering::Relaxed),
+                                has_old_tree,
+                            ));
                         }
+                        continue;
                     } else {
                         let hash_hex = hex::encode(hash);
-                        let mut missing_on_any_server = false;
+                        let mut present_on_any_server = false;
                         for server in blossom.write_servers() {
-                            if !blossom.exists_on_server(&hash_hex, server).await {
-                                missing_on_any_server = true;
+                            if blossom.exists_on_server(&hash_hex, server).await {
+                                present_on_any_server = true;
                                 break;
                             }
                         }
-                        if !missing_on_any_server {
+                        if present_on_any_server {
                             skipped_diff.fetch_add(1, Ordering::Relaxed);
                             let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                             if count == 1 || count.is_multiple_of(10) {
@@ -1297,6 +1276,7 @@ impl RemoteHelper {
                     Ok(Some(data)) => data,
                     Ok(None) => {
                         failed.fetch_add(1, Ordering::Relaxed);
+                        local_failed.fetch_add(1, Ordering::Relaxed);
                         let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         eprintln!("\n  Missing from local store: {}", hex::encode(hash));
                         if count == 1 || count.is_multiple_of(10) {
@@ -1315,6 +1295,7 @@ impl RemoteHelper {
                     }
                     Err(e) => {
                         failed.fetch_add(1, Ordering::Relaxed);
+                        local_failed.fetch_add(1, Ordering::Relaxed);
                         let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         eprintln!("\n  Store read error for {}: {}", hex::encode(hash), e);
                         if count == 1 || count.is_multiple_of(10) {
@@ -1396,6 +1377,7 @@ impl RemoteHelper {
             let final_skipped_diff = skipped_diff.load(Ordering::Relaxed);
             let final_skipped_server = skipped_server.load(Ordering::Relaxed);
             let final_failed = failed.load(Ordering::Relaxed);
+            let final_local_failed = local_failed.load(Ordering::Relaxed);
             let final_completed = completed.load(Ordering::Relaxed);
 
             emit_upload_progress(upload_progress(
@@ -1415,21 +1397,34 @@ impl RemoteHelper {
                 final_uploaded, final_skipped_diff, final_skipped_server, final_failed
             );
 
-            final_failed == 0
-                && (final_uploaded > 0 || final_skipped_server > 0 || final_skipped_diff > 0)
+            let local_complete = final_local_failed == 0 && final_completed == final_total_seen;
+            let degraded_replication = final_failed > final_local_failed;
+            (local_complete, degraded_replication)
         });
 
-        if success {
+        if local_complete {
             BlossomResult {
                 configured: configured.clone(),
-                succeeded: configured,
-                failed: vec![],
+                succeeded: if degraded_replication {
+                    vec![]
+                } else {
+                    configured.clone()
+                },
+                failed: if degraded_replication {
+                    configured
+                } else {
+                    vec![]
+                },
+                local_complete: true,
+                degraded: degraded_replication,
             }
         } else {
             BlossomResult {
                 configured: configured.clone(),
                 succeeded: vec![],
                 failed: configured,
+                local_complete: false,
+                degraded: true,
             }
         }
     }

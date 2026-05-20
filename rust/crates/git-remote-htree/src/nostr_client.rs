@@ -277,6 +277,10 @@ pub struct BlossomResult {
     pub succeeded: Vec<String>,
     /// Servers that failed
     pub failed: Vec<String>,
+    /// Whether the repo tree is complete in the local hashtree store.
+    pub local_complete: bool,
+    /// Whether remote replication was incomplete but the local push can still be published.
+    pub degraded: bool,
 }
 
 /// Nostr client for git operations

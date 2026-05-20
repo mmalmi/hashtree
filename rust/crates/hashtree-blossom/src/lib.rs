@@ -441,6 +441,72 @@ impl BlossomClient {
             .await
     }
 
+    /// Upload to selected servers in parallel and return after the first success.
+    ///
+    /// This is useful when servers are redundant replication targets and a slow
+    /// or broken secondary should not block publishing a root that is already
+    /// available from another source.
+    pub async fn upload_to_any_selected_server(
+        &self,
+        data: &[u8],
+        servers: &[String],
+    ) -> Result<(String, bool), BlossomError> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+        if servers.is_empty() {
+            return Err(BlossomError::NoServers);
+        }
+
+        let hash = compute_sha256(data);
+        let mut pending: Vec<String> = servers.to_vec();
+        let mut last_error = String::new();
+
+        for attempt in 0..Self::max_upload_retries() {
+            if pending.is_empty() {
+                break;
+            }
+            if attempt > 0 {
+                tokio::time::sleep(Self::upload_retry_delay(attempt - 1)).await;
+            }
+
+            let auth = self.create_upload_auth(&hash).await?;
+            let mut uploads = FuturesUnordered::new();
+            for server in pending.drain(..) {
+                let hash = hash.clone();
+                let auth = auth.clone();
+                uploads.push(async move {
+                    let result = self.upload_to_server(&server, data, &hash, &auth).await;
+                    (server, result)
+                });
+            }
+
+            let mut retryable_servers = Vec::new();
+            while let Some((server, result)) = uploads.next().await {
+                match result {
+                    Ok(outcome) => return Ok((hash, outcome.was_uploaded())),
+                    Err(error) => {
+                        last_error = format!("{server}: {}", error.detail);
+                        warn!("Upload to {} failed: {}", server, error.detail);
+                        if error.retryable {
+                            retryable_servers.push(server);
+                        }
+                    }
+                }
+            }
+
+            pending = retryable_servers;
+        }
+
+        Err(BlossomError::UploadFailed(format!(
+            "all selected servers failed after {} retries{}",
+            Self::max_upload_retries(),
+            if last_error.is_empty() {
+                String::new()
+            } else {
+                format!(" (last: {last_error})")
+            }
+        )))
+    }
+
     /// Upload to the selected servers in parallel, returns (hash, success_count)
     pub async fn upload_to_selected_servers(
         &self,

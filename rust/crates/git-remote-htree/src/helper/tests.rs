@@ -999,8 +999,8 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
         "push diff should not need GET requests when old tree is already local"
     );
     assert!(
-        fake_blossom.get_head_request_count() <= old_hash_count.min(SERVER_COVERAGE_SAMPLE_SIZE),
-        "expected only sampled HEAD probes, got {} for {} old hashes",
+        fake_blossom.get_head_request_count() <= old_hash_count.min(32),
+        "expected only sampled HEAD probes for a single write server, got {} for {} old hashes",
         fake_blossom.get_head_request_count(),
         old_hash_count
     );
@@ -1074,7 +1074,7 @@ fn test_push_to_file_servers_with_diff_force_upload_skips_old_tree_probes() {
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_every_write_server() {
+fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_any_write_server() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -1106,7 +1106,7 @@ fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_every_write_server(
     let root_cid = rt.block_on(async {
         let store = helper.storage.store().clone();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
-        tree.put(b"new root must land on every write server")
+        tree.put(b"new root must land on at least one write server")
             .await
             .expect("write root")
             .0
@@ -1117,41 +1117,37 @@ fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_every_write_server(
 
     assert!(
         result.failed.is_empty(),
-        "push upload should succeed on all write servers: {:?}",
+        "push upload should succeed when at least one write server accepts it: {:?}",
         result.failed
     );
     assert!(
-        server_a.has_blob(&root_cid.hash),
-        "first write server should have the new root"
-    );
-    assert!(
-        server_b.has_blob(&root_cid.hash),
-        "second write server should have the new root so the next push does not need a full upload"
+        server_a.has_blob(&root_cid.hash) || server_b.has_blob(&root_cid.hash),
+        "at least one write server should have the new root"
     );
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_fails_on_partial_write_server_upload() {
+fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
-    let healthy_server = CountingBlossomServer::new();
-    let failing_server = CountingBlossomServer::failing_uploads();
+    let failing_server_a = CountingBlossomServer::failing_uploads();
+    let failing_server_b = CountingBlossomServer::failing_uploads();
     write_test_config_for_servers(
         home.path(),
-        &[healthy_server.base_url(), failing_server.base_url()],
+        &[failing_server_a.base_url(), failing_server_b.base_url()],
         false,
     );
 
     let mut config = Config::default();
     config.nostr.relays = vec![];
     config.blossom.read_servers = vec![
-        healthy_server.base_url().to_string(),
-        failing_server.base_url().to_string(),
+        failing_server_a.base_url().to_string(),
+        failing_server_b.base_url().to_string(),
     ];
     config.blossom.write_servers = vec![
-        healthy_server.base_url().to_string(),
-        failing_server.base_url().to_string(),
+        failing_server_a.base_url().to_string(),
+        failing_server_b.base_url().to_string(),
     ];
 
     let helper = create_test_helper_with_config(config).expect("helper");
@@ -1163,7 +1159,7 @@ fn test_push_to_file_servers_with_diff_fails_on_partial_write_server_upload() {
     let root_cid = rt.block_on(async {
         let store = helper.storage.store().clone();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
-        tree.put(b"new root must not publish after a partial upload")
+        tree.put(b"new root can publish from local store only")
             .await
             .expect("write root")
             .0
@@ -1173,16 +1169,20 @@ fn test_push_to_file_servers_with_diff_fails_on_partial_write_server_upload() {
         helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
 
     assert!(
+        result.local_complete,
+        "local store should still be a complete availability source"
+    );
+    assert!(
+        result.degraded,
+        "all write server failures should be reported as degraded replication"
+    );
+    assert!(
         !result.failed.is_empty(),
-        "partial write-server upload should fail closed"
+        "write server failures should be reported"
     );
     assert!(
-        healthy_server.has_blob(&root_cid.hash),
-        "healthy server should still receive the blob"
-    );
-    assert!(
-        !failing_server.has_blob(&root_cid.hash),
-        "failing server should not receive the blob"
+        !failing_server_a.has_blob(&root_cid.hash) && !failing_server_b.has_blob(&root_cid.hash),
+        "failing servers should not receive the blob"
     );
 }
 
