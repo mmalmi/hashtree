@@ -576,13 +576,48 @@ fn test_cli_parses_release_publish_command() {
                     tree_name,
                     version_path,
                     cid,
+                    draft,
                     local,
                 },
         } => {
             assert_eq!(tree_name, "releases/hashtree");
             assert_eq!(version_path, "releases/v0.2.3");
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
+            assert!(!draft);
             assert!(local);
+        }
+        _ => panic!("expected release publish command"),
+    }
+}
+
+#[test]
+fn test_cli_parses_release_publish_draft_flag() {
+    let cli = Cli::parse_from([
+        "htree",
+        "release",
+        "publish",
+        "releases/hashtree",
+        "releases/v0.2.4-rc.1",
+        "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh",
+        "--draft",
+    ]);
+
+    match cli.command {
+        Commands::Release {
+            command:
+                ReleaseCommands::Publish {
+                    tree_name,
+                    version_path,
+                    cid,
+                    draft,
+                    local,
+                },
+        } => {
+            assert_eq!(tree_name, "releases/hashtree");
+            assert_eq!(version_path, "releases/v0.2.4-rc.1");
+            assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
+            assert!(draft);
+            assert!(!local);
         }
         _ => panic!("expected release publish command"),
     }

@@ -1252,20 +1252,31 @@ pub(crate) async fn run() -> Result<()> {
                 tree_name,
                 version_path,
                 cid,
+                draft,
                 local,
             } => {
-                let published =
-                    publish_release_version(&data_dir, &tree_name, &version_path, &cid, local)
-                        .await?;
+                let published = publish_release_version(
+                    &data_dir,
+                    &tree_name,
+                    &version_path,
+                    &cid,
+                    local,
+                    draft,
+                )
+                .await?;
 
                 println!(
                     "Published release: htree://{}/{}/{}",
                     published.npub, published.tree_name, published.version_path
                 );
-                println!(
-                    "Latest release:    htree://{}/{}/{}",
-                    published.npub, published.tree_name, published.latest_path
-                );
+                if let Some(latest_path) = published.latest_path {
+                    println!(
+                        "Latest release:    htree://{}/{}/{}",
+                        published.npub, published.tree_name, latest_path
+                    );
+                } else {
+                    println!("Draft release:     latest unchanged");
+                }
             }
         },
         Commands::Install {
