@@ -8,8 +8,11 @@ import {
   DEFAULT_FIPS_DISCOVERY_APP,
   FipsTransportStore,
   HashtreeFipsTransport,
+  createFipsNodeEndpoint,
   type FipsEndpoint,
   type FipsEndpointMessage,
+  type FipsNodeEndpointData,
+  type FipsNodePeerEvent,
 } from '../src/index.js';
 
 class FakeFipsEndpoint implements FipsEndpoint {
@@ -52,9 +55,77 @@ class FakeFipsEndpoint implements FipsEndpoint {
   }
 }
 
+class FakeFipsNode {
+  readonly sentEndpointData: Array<{
+    dst: string;
+    payload: Uint8Array;
+  }> = [];
+  readonly identity = { publicKey: new Uint8Array([2, 1, 2, 3]) };
+  private readonly endpointDataHandlers = new Set<(event: FipsNodeEndpointData) => void>();
+  private readonly peerHandlers = new Set<(event: FipsNodePeerEvent) => void>();
+
+  async sendEndpointData(args: {
+    dst: string;
+    payload: Uint8Array;
+  }): Promise<void> {
+    this.sentEndpointData.push({ ...args, payload: args.payload.slice() });
+  }
+
+  on(event: 'endpointData', handler: (event: FipsNodeEndpointData) => void): () => void;
+  on(event: 'peer', handler: (event: FipsNodePeerEvent) => void): () => void;
+  on(
+    event: 'endpointData' | 'peer',
+    handler: ((event: FipsNodeEndpointData) => void) | ((event: FipsNodePeerEvent) => void),
+  ): () => void {
+    if (event === 'endpointData') {
+      const typed = handler as (event: FipsNodeEndpointData) => void;
+      this.endpointDataHandlers.add(typed);
+      return () => this.endpointDataHandlers.delete(typed);
+    }
+    const typed = handler as (event: FipsNodePeerEvent) => void;
+    this.peerHandlers.add(typed);
+    return () => this.peerHandlers.delete(typed);
+  }
+
+  emitEndpointData(event: FipsNodeEndpointData): void {
+    for (const handler of this.endpointDataHandlers) handler(event);
+  }
+
+  emitPeer(event: FipsNodePeerEvent): void {
+    for (const handler of this.peerHandlers) handler(event);
+  }
+}
+
 describe('@hashtree/fips-transport', () => {
   it('uses the hashtree FIPS discovery app scope', () => {
     expect(DEFAULT_FIPS_DISCOVERY_APP).toBe('hashtree-v1');
+  });
+
+  it('adapts FIPS node endpoint data into the endpoint surface', async () => {
+    const node = new FakeFipsNode();
+    const endpoint = createFipsNodeEndpoint(node, { initialPeers: ['peer-a'] });
+    const messages: FipsEndpointMessage[] = [];
+    const off = endpoint.onMessage((message) => {
+      messages.push(message);
+    });
+
+    await endpoint.send('peer-a', new Uint8Array([1, 2, 3]));
+    expect(node.sentEndpointData).toEqual([{
+      dst: 'peer-a',
+      payload: new Uint8Array([1, 2, 3]),
+    }]);
+
+    node.emitPeer({ remotePubkey: 'peer-b', state: 'connected' });
+    expect(endpoint.listPeerIds?.()).toEqual(['peer-a', 'peer-b']);
+    node.emitEndpointData({
+      src: 'peer-b',
+      dst: 'local',
+      payload: new Uint8Array([5, 6]),
+    });
+
+    expect(messages).toEqual([{ peerId: 'peer-b', data: new Uint8Array([5, 6]) }]);
+    off();
+    endpoint.close?.();
   });
 
   it('fetches a hash-verified blob over opaque FIPS endpoint bytes', async () => {

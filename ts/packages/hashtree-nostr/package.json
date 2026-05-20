@@ -1,7 +1,7 @@
 {
   "name": "@hashtree/nostr",
   "version": "0.1.14",
-  "description": "Nostr integration for hashtree - WebRTC P2P store and ref resolver",
+  "description": "Nostr integration for hashtree - ref resolver and event collections",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,8 +25,8 @@
   "keywords": [
     "hashtree",
     "nostr",
-    "webrtc",
-    "p2p",
+    "resolver",
+    "events",
     "merkle"
   ],
   "author": "Martti Malmi",

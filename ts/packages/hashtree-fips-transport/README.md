@@ -12,7 +12,7 @@ Public Hashtree FIPS swarms use a Hashtree-specific FIPS discovery app scope:
 hashtree-v1
 ```
 
-The endpoint surface is intentionally tiny:
+The adapter surface is intentionally tiny:
 
 ```ts
 export interface FipsEndpoint {
@@ -23,17 +23,26 @@ export interface FipsEndpoint {
 }
 ```
 
+For a real `@fips/core` node, use the built-in endpoint-data bridge. It maps
+Hashtree blob frames onto FIPS app-owned endpoint bytes:
+
 Use it as a local-first store wrapper:
 
 ```ts
 import { MemoryStore, sha256 } from '@hashtree/core';
-import { FipsTransportStore, DEFAULT_FIPS_DISCOVERY_APP } from '@hashtree/fips-transport';
+import {
+  FipsTransportStore,
+  createFipsNodeEndpoint,
+  DEFAULT_FIPS_DISCOVERY_APP,
+} from '@hashtree/fips-transport';
+
+const endpoint = createFipsNodeEndpoint(fipsNode);
 
 const localStore = new MemoryStore();
 const store = new FipsTransportStore({
-  endpoint: fipsEndpoint,
+  endpoint,
   localStore,
-  peers: () => fipsEndpoint.listPeerIds?.() ?? [],
+  peers: () => endpoint.listPeerIds?.() ?? [],
 });
 
 console.log(DEFAULT_FIPS_DISCOVERY_APP); // hashtree-v1

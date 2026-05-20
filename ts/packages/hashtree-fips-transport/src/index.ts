@@ -33,6 +33,34 @@ export interface FipsEndpoint {
   onMessage(handler: (message: FipsEndpointMessage) => void | Promise<void>): () => void;
   listPeerIds?(): readonly string[] | Promise<readonly string[]>;
   localPeerId?(): string;
+  close?(): void;
+}
+
+export interface FipsNodeEndpointData {
+  src: string;
+  dst: string;
+  payload: Uint8Array;
+}
+
+export interface FipsNodePeerEvent {
+  remotePubkey: string;
+  state: 'connected' | 'disconnected';
+}
+
+export interface FipsNodeLike {
+  identity?: {
+    publicKey?: Uint8Array;
+  };
+  sendEndpointData(args: {
+    dst: string;
+    payload: Uint8Array;
+  }): Promise<void>;
+  on(event: 'endpointData', handler: (event: FipsNodeEndpointData) => void): () => void;
+  on(event: 'peer', handler: (event: FipsNodePeerEvent) => void): () => void;
+}
+
+export interface FipsNodeEndpointOptions {
+  initialPeers?: readonly string[];
 }
 
 export type FipsPeerSource = readonly string[] | (() => readonly string[] | Promise<readonly string[]>);
@@ -60,6 +88,14 @@ interface PendingBlobRequest {
 
 function copyBytes(data: Uint8Array): Uint8Array {
   return data.slice();
+}
+
+function bytesToHex(data: Uint8Array): string {
+  let out = '';
+  for (const byte of data) {
+    out += byte.toString(16).padStart(2, '0');
+  }
+  return out;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -98,6 +134,55 @@ async function verifiedLocalGet(store: Store, hash: Hash): Promise<Uint8Array | 
   return await verifyHash(data, hash) ? data : null;
 }
 
+export function createFipsNodeEndpoint(
+  node: FipsNodeLike,
+  options: FipsNodeEndpointOptions = {},
+): FipsEndpoint {
+  const peers = new Set<string>();
+  const dataUnsubs = new Set<() => void>();
+  for (const peer of options.initialPeers ?? []) {
+    const id = `${peer}`.trim();
+    if (id) peers.add(id);
+  }
+  const localPeerId = node.identity?.publicKey ? bytesToHex(node.identity.publicKey) : undefined;
+
+  const peerUnsub = node.on('peer', (event) => {
+    if (event.state === 'connected') {
+      peers.add(event.remotePubkey);
+    } else {
+      peers.delete(event.remotePubkey);
+    }
+  });
+
+  return {
+    localPeerId: () => localPeerId ?? '',
+    listPeerIds: () => normalizePeers(Array.from(peers), localPeerId),
+    send: (peerId, data) => node.sendEndpointData({
+      dst: peerId,
+      payload: copyBytes(data),
+    }),
+    onMessage: (handler) => {
+      const dataUnsub = node.on('endpointData', (event) => {
+        peers.add(event.src);
+        void Promise.resolve(handler({
+          peerId: event.src,
+          data: copyBytes(event.payload),
+        })).catch(() => undefined);
+      });
+      dataUnsubs.add(dataUnsub);
+      return () => {
+        dataUnsub();
+        dataUnsubs.delete(dataUnsub);
+      };
+    },
+    close: () => {
+      peerUnsub();
+      for (const unsubscribe of dataUnsubs) unsubscribe();
+      dataUnsubs.clear();
+    },
+  };
+}
+
 export class HashtreeFipsTransport {
   private readonly endpoint: FipsEndpoint;
   private readonly localStore: Store;
@@ -123,6 +208,7 @@ export class HashtreeFipsTransport {
   close(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.endpoint.close?.();
     for (const pending of this.pending.values()) {
       for (const request of pending) {
         clearTimeout(request.timer);

@@ -38,7 +38,7 @@ FIPS endpoint bytes carry the existing `@hashtree/mesh` frames:
 0x01 msgpack({ h, d })          DataResponse
 ```
 
-There is no Hashtree service-port registry in FIPS. The adapter boundary is:
+There is no Hashtree service-port registry in FIPS. The local adapter boundary is:
 
 ```ts
 send(peerId, bytes)

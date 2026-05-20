@@ -1,7 +1,9 @@
-# Formal WebRTC Invariants
+# Formal Legacy WebRTC Invariants
 
 ## Scope
-This document defines formal-style invariants for WebRTC forwarding, mesh signaling, reassembly, and peer selection.
+This document records formal-style invariants for the legacy Hashtree-owned
+WebRTC adapter. New Hashtree P2P transport should use FIPS and keep shared mesh
+protocol invariants in `ts/packages/hashtree-mesh`.
 
 Code scope:
 - `rust/crates/hashtree-webrtc/src/types.rs`
@@ -10,9 +12,9 @@ Code scope:
 - `rust/crates/hashtree-cli/src/webrtc/types.rs`
 - `rust/crates/hashtree-cli/src/webrtc/signaling.rs`
 - `rust/crates/hashtree-cli/tests/two_instances.rs`
-- `ts/packages/hashtree-nostr/src/webrtc/types.ts`
-- `ts/packages/hashtree-nostr/src/webrtc/protocol.ts`
-- `ts/packages/hashtree-nostr/src/webrtc/store.ts`
+- `ts/packages/hashtree-mesh/src/types.ts`
+- `ts/packages/hashtree-mesh/src/protocol.ts`
+- `ts/packages/hashtree-mesh/src/peerSelector.ts`
 
 ## Invariants
 - `HT-WEBRTC-001`: HTL is monotonic non-increasing per hop, and requests with `htl=0` are not forwarded.
@@ -39,8 +41,8 @@ Code scope:
   - `rust/crates/hashtree-cli/src/webrtc/tests.rs`
   - `rust/crates/hashtree-cli/src/webrtc/signaling.rs` (`mod tests`)
   - `rust/crates/hashtree-cli/tests/two_instances.rs`
-  - `ts/packages/hashtree-nostr/tests/webrtc.test.ts`
-  - `ts/packages/hashtree-nostr/tests/protocol-wire.test.ts`
+  - `ts/packages/hashtree-mesh/tests/core.test.ts`
+  - `ts/packages/hashtree-fips-transport/tests/fipsTransport.test.ts`
 - No public relay dependencies for formal invariants; relayless mesh proof uses local test relays.
 
 ## CI

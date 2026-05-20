@@ -1,0 +1,25 @@
+[package]
+name = "hashtree-fips-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Hashtree blob transport over FIPS endpoint bytes"
+keywords = ["hashtree", "fips", "p2p", "merkle"]
+
+[dependencies]
+async-trait.workspace = true
+fips-core = { version = "0.3.15", path = "../../../../fips/crates/fips-core" }
+hashtree-core.workspace = true
+hex.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "test-util"] }

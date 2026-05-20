@@ -1,6 +1,6 @@
 # hashtree
 
-Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots can be published to get mutable `npub/tree/path` addresses. Data is chunked, CHK-encrypted by default, and can be fetched from Blossom-compatible storage, FIPS/WebRTC peers, or a local daemon.
+Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots can be published to get mutable `npub/tree/path` addresses. Data is chunked, CHK-encrypted by default, and can be fetched from Blossom-compatible storage, FIPS peers, or a local daemon.
 
 ## Installation
 
@@ -103,7 +103,7 @@ Hashtree is the canonical remote for this repository:
 - Simple storage interface: `get(hash) -> bytes`, `put(hash, bytes)`
 - 2MB chunks optimized for Blossom uploads
 - Nostr-published roots for mutable addresses
-- FIPS/WebRTC peer fetches with Blossom fallback
+- FIPS peer fetches with Blossom fallback
 
 ## Getting started
 
