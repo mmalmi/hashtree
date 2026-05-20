@@ -1,7 +1,7 @@
-# WebRTC Strategy Observations
+# Mesh Strategy Observations
 
 Date: March 3, 2026
-Scope: `hashtree-sim` / `hashtree-webrtc` routing and actor strategy tuning
+Scope: `hashtree-sim` / `hashtree-network` routing and actor strategy tuning
 
 ## Strategy Set
 
@@ -12,7 +12,7 @@ We keep a small stable strategy set and iterate inside it:
 3. `hedged_utility`
 4. `hedged_latency`
 
-`auto` mode in `tune_webrtc_params` focuses on baseline + primary challenger to keep iteration fast.
+`auto` mode in `tune_mesh_params` focuses on baseline + primary challenger to keep iteration fast.
 
 ## Actor Model Notes
 
@@ -30,7 +30,7 @@ This is intended to avoid rewarding unresponsive or one-way peers while still ex
 Command:
 
 ```bash
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=manual
 ```
 
 Result file: `/tmp/hsim_manual_weighted.out`

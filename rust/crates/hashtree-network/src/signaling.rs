@@ -25,7 +25,7 @@ pub struct PeerEntry {
 ///
 /// This is the shared routing logic between production transports and simulation.
 /// It uses traits for signaling transport and negotiated link factories so the
-/// same router can drive Nostr websockets, LAN buses, BLE, WebRTC, or mocks.
+/// same router can drive Nostr websockets, LAN buses, FIPS, BLE, or mocks.
 ///
 /// Uses the standard concurrent-offer "perfect negotiation" pattern:
 /// - Both peers can send offers when they discover each other

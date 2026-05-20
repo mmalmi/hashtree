@@ -1,4 +1,4 @@
-//! Wire protocol for hashtree WebRTC data exchange
+//! Wire protocol for hashtree mesh data exchange.
 //!
 //! Compatible with hashtree-ts wire format:
 //! - Request:        [0x00][msgpack: {h: bytes32, htl?: u8, q?: u64}]
@@ -8,7 +8,7 @@
 //! - Payment:        [0x04][msgpack: {h: bytes32, q: u64, c: u32, p: u64, m?: string, tok: string}]
 //! - PaymentAck:     [0x05][msgpack: {h: bytes32, q: u64, c: u32, a: bool, e?: string}]
 //! - Chunk:          [0x06][msgpack: {h: bytes32, q: u64, c: u32, n: u32, p: u64, d: bytes}]
-//! - PeerHints:      [0x07][msgpack: {u: [WebRTC signaling endpoint URLs]}]
+//! - PeerHints:      [0x07][msgpack: {u: [direct signaling endpoint URLs]}]
 //! - PubsubInterest: [0x08][msgpack: {s: stream, sub: subscriber peer id, q: seq, a: active, htl?: u8}]
 //! - PubsubFrame:    [0x09][msgpack: {s: stream, q: seq, o: origin peer id, htl?: u8, d: bytes}]
 //! - PubsubInventory:[0x0a][msgpack: {s: stream, q: seq, o: origin peer id, b: bytes, htl?: u8}]
@@ -41,7 +41,7 @@ pub const MSG_TYPE_PUBSUB_FRAME: u8 = 0x09;
 pub const MSG_TYPE_PUBSUB_INVENTORY: u8 = 0x0a;
 pub const MSG_TYPE_PUBSUB_WANT: u8 = 0x0b;
 
-/// Fragment size for large data (32KB - safe limit for WebRTC)
+/// Fragment size for large data.
 pub const FRAGMENT_SIZE: usize = 32 * 1024;
 
 /// Data request message body

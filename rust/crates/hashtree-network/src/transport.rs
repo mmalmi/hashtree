@@ -1,7 +1,7 @@
 //! Signaling and peer-link transport abstractions
 //!
 //! Defines traits for signaling transports and direct peer links that can be
-//! implemented by Nostr websockets, LAN buses, BLE, WebRTC, or mocks.
+//! implemented by Nostr websockets, LAN buses, FIPS, BLE, or mocks.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ pub trait SignalingTransport: Send + Sync {
 /// Bidirectional peer link for direct data exchange.
 ///
 /// Abstracts the underlying byte stream so the data protocol can be shared
-/// across WebRTC, BLE, and mock links.
+/// across FIPS, BLE, and mock links.
 #[async_trait]
 pub trait PeerLink: Send + Sync {
     /// Send data to the peer.

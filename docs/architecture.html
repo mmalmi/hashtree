@@ -482,14 +482,14 @@
       </div>
 
       <div class="fanout">
-        <p class="fanout-label">Default production composition beneath the mesh router</p>
+        <p class="fanout-label">Transport composition beneath the mesh router</p>
         <div class="branch-grid">
           <article class="branch signal">
             <span class="label">Signaling</span>
             <h2><code>SignalingTransport</code></h2>
             <p>
-              Production uses <code>NostrRelayTransport</code> over relays for WebRTC signaling
-              and peer discovery.
+              The mesh router accepts any <code>SignalingTransport</code>; production peerfinding
+              should come from FIPS.
             </p>
           </article>
 
@@ -497,8 +497,8 @@
             <span class="label">Direct links</span>
             <h2><code>PeerLinkFactory</code> + <code>PeerLink</code></h2>
             <p>
-              Production uses <code>WebRtcPeerLinkFactory</code> and real WebRTC data channels for
-              peer-to-peer byte transport.
+              Production byte links should be owned by FIPS, while this crate only sees opaque
+              peer-to-peer bytes.
             </p>
           </article>
 
@@ -593,12 +593,12 @@
               <text x="170" y="517" text-anchor="middle" class="cat">Naming / Signaling</text>
               <rect x="102" y="524" width="136" height="28" class="layer xport"/>
               <text x="170" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Nostr relays</text>
-              <text x="170" y="548" text-anchor="middle" class="sub">publish, resolve, WebRTC signaling</text>
+              <text x="170" y="548" text-anchor="middle" class="sub">publish, resolve, FIPS signaling</text>
               <rect x="286" y="504" width="288" height="58" class="cat"/>
               <text x="430" y="517" text-anchor="middle" class="cat">Direct peer links</text>
               <rect x="298" y="524" width="100" height="28" class="layer xport"/>
-              <text x="348" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">WebRTC</text>
-              <text x="348" y="548" text-anchor="middle" class="sub">current</text>
+              <text x="348" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">FIPS</text>
+              <text x="348" y="548" text-anchor="middle" class="sub">UDP / WebRTC</text>
               <rect x="404" y="524" width="158" height="28" class="layer xport"/>
               <text x="483" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">LAN / BLE / radio ...</text>
               <text x="483" y="548" text-anchor="middle" class="sub">future</text>
@@ -610,9 +610,9 @@
               <rect x="692" y="524" width="66" height="28" class="layer xport"/>
               <text x="725" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Blossom</text>
               <text x="725" y="548" text-anchor="middle" class="sub">S3 ...</text>
-              <text x="170" y="592" text-anchor="middle" class="sub">Optional mutable refs and WebRTC signaling</text>
+              <text x="170" y="592" text-anchor="middle" class="sub">Optional mutable refs and FIPS discovery</text>
               <line x1="170" y1="574" x2="170" y2="584" class="peer"/>
-              <text x="430" y="592" text-anchor="middle" class="sub">P2P peers</text>
+              <text x="430" y="592" text-anchor="middle" class="sub">FIPS peers</text>
               <line x1="430" y1="574" x2="430" y2="584" class="peer"/>
               <text x="690" y="592" text-anchor="middle" class="sub">Blob stores</text>
               <line x1="690" y1="574" x2="690" y2="584" class="peer"/>
@@ -678,7 +678,7 @@
               <rect x="50" y="668" width="800" height="74" class="layer xport"/>
               <text x="75" y="701" class="name">Backing Media and Stores</text>
               <text x="825" y="701" class="scope" text-anchor="end">(local, peer-to-peer, server)</text>
-              <text x="75" y="723" class="desc">Nostr relays for publish/resolve + WebRTC signaling, local LMDB, Blossom, S3, memory</text>
+              <text x="75" y="723" class="desc">Nostr relays for publish/resolve + FIPS discovery, local LMDB, Blossom, S3, memory</text>
               <text x="450" y="790" text-anchor="middle" class="caption">hashtree layer stack - apps and adapters on top of the API, optional mutable names above verified content, swappable transport underneath</text>
             </svg>
           </div>
@@ -691,9 +691,8 @@
         <article class="note">
           <h2>What is fixed today</h2>
           <p>
-            The current production pair is Nostr for signaling plus WebRTC for direct links. That
-            is the composition wired by the thin <code>MeshStore</code> wrapper in
-            <code>hashtree-network</code>.
+            <code>hashtree-network</code> is now the transport-neutral mesh core. Production
+            networking is composed outside it, with FIPS providing discovery and byte links.
           </p>
         </article>
 
@@ -719,7 +718,7 @@
       <p class="footer">
         Source anchors: <code>README.md</code>, <code>rust/README.md</code>,
         <code>rust/crates/hashtree-network/README.md</code>,
-        <code>rust/crates/hashtree-network/src/store.rs</code>, and
+        <code>rust/crates/hashtree-network/src/mesh_store_core.rs</code>, and
         <code>rust/crates/hashtree-resolver/README.md</code>.
       </p>
     </section>

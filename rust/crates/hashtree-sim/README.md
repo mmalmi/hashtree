@@ -242,24 +242,24 @@ Requests include a **Hops-To-Live** counter (like Freenet):
 
 ```bash
 # Manual candidate sweep
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=manual
 
 # Auto-generated candidate grid
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=auto
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=auto
 
 # Heavy-media workload preset (larger payloads, longer timeout)
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual --heavy-media
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=manual --heavy-media
 
 # Focus on a subset of manual candidates
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual \
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=manual \
   --heavy-media --candidate-offset=8 --candidate-limit=4
 
 # Override timeout or seeds for focused comparisons
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual \
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=manual \
   --heavy-media --timeout-ms=2600 --seeds=11,22,33,44
 
 # Progress prints once per config; redirect stdout if you want just the final tables in a file
-cargo run -p hashtree-sim --example tune_webrtc_params -- --mode=manual \
+cargo run -p hashtree-sim --example tune_mesh_params -- --mode=manual \
   --heavy-media > /tmp/hashtree-sim-heavy.txt
 
 # 1000-node connectivity/scalability test
@@ -267,7 +267,7 @@ cargo test -p hashtree-sim mesh_sim::tests::test_mesh_sim_1000_nodes_connectivit
 ```
 
 Progress notes and experiment outcomes are tracked in:
-`/Users/sirius/src/hashtree/docs/webrtc-strategy-observations.md`
+`/Users/sirius/src/hashtree/docs/mesh-strategy-observations.md`
 
 ## Key Learnings
 

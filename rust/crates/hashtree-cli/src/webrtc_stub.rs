@@ -332,6 +332,11 @@ pub mod types {
     pub const MSG_TYPE_PAYMENT: u8 = 0x04;
     pub const MSG_TYPE_PAYMENT_ACK: u8 = 0x05;
     pub const MSG_TYPE_CHUNK: u8 = 0x06;
+    pub const MSG_TYPE_PEER_HINTS: u8 = 0x07;
+    pub const MSG_TYPE_PUBSUB_INTEREST: u8 = 0x08;
+    pub const MSG_TYPE_PUBSUB_FRAME: u8 = 0x09;
+    pub const MSG_TYPE_PUBSUB_INVENTORY: u8 = 0x0a;
+    pub const MSG_TYPE_PUBSUB_WANT: u8 = 0x0b;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct DataRequest {
@@ -415,6 +420,64 @@ pub mod types {
         pub d: Vec<u8>,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PeerHints {
+        #[serde(default, rename = "u")]
+        pub signal_urls: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PubsubInterest {
+        #[serde(rename = "s")]
+        pub stream_id: String,
+        #[serde(rename = "sub")]
+        pub subscriber_peer_id: String,
+        #[serde(rename = "q")]
+        pub seq: u64,
+        #[serde(rename = "a")]
+        pub active: bool,
+        #[serde(default = "default_htl", skip_serializing_if = "is_max_htl")]
+        pub htl: u8,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PubsubFrame {
+        #[serde(rename = "s")]
+        pub stream_id: String,
+        #[serde(rename = "q")]
+        pub seq: u64,
+        #[serde(rename = "o")]
+        pub origin_peer_id: String,
+        #[serde(default = "default_htl", skip_serializing_if = "is_max_htl")]
+        pub htl: u8,
+        #[serde(with = "serde_bytes", rename = "d")]
+        pub payload: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PubsubInventory {
+        #[serde(rename = "s")]
+        pub stream_id: String,
+        #[serde(rename = "q")]
+        pub seq: u64,
+        #[serde(rename = "o")]
+        pub origin_peer_id: String,
+        #[serde(rename = "b")]
+        pub payload_bytes: u64,
+        #[serde(default = "default_htl", skip_serializing_if = "is_max_htl")]
+        pub htl: u8,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PubsubWant {
+        #[serde(rename = "s")]
+        pub stream_id: String,
+        #[serde(rename = "q")]
+        pub seq: u64,
+        #[serde(rename = "o")]
+        pub origin_peer_id: String,
+    }
+
     #[derive(Debug, Clone)]
     pub enum DataMessage {
         Request(DataRequest),
@@ -424,10 +487,19 @@ pub mod types {
         Payment(DataPayment),
         PaymentAck(DataPaymentAck),
         Chunk(DataChunk),
+        PeerHints(PeerHints),
+        PubsubInterest(PubsubInterest),
+        PubsubFrame(PubsubFrame),
+        PubsubInventory(PubsubInventory),
+        PubsubWant(PubsubWant),
     }
 
     fn default_htl() -> u8 {
         MAX_HTL
+    }
+
+    fn is_max_htl(htl: &u8) -> bool {
+        *htl == MAX_HTL
     }
 
     pub fn encode_request(req: &DataRequest) -> Result<Vec<u8>, rmp_serde::encode::Error> {
@@ -507,6 +579,19 @@ pub mod types {
             MSG_TYPE_PAYMENT => Ok(DataMessage::Payment(rmp_serde::from_slice(&data[1..])?)),
             MSG_TYPE_PAYMENT_ACK => Ok(DataMessage::PaymentAck(rmp_serde::from_slice(&data[1..])?)),
             MSG_TYPE_CHUNK => Ok(DataMessage::Chunk(rmp_serde::from_slice(&data[1..])?)),
+            MSG_TYPE_PEER_HINTS => Ok(DataMessage::PeerHints(rmp_serde::from_slice(&data[1..])?)),
+            MSG_TYPE_PUBSUB_INTEREST => Ok(DataMessage::PubsubInterest(rmp_serde::from_slice(
+                &data[1..],
+            )?)),
+            MSG_TYPE_PUBSUB_FRAME => Ok(DataMessage::PubsubFrame(rmp_serde::from_slice(
+                &data[1..],
+            )?)),
+            MSG_TYPE_PUBSUB_INVENTORY => Ok(DataMessage::PubsubInventory(
+                rmp_serde::from_slice(&data[1..])?,
+            )),
+            MSG_TYPE_PUBSUB_WANT => Ok(DataMessage::PubsubWant(rmp_serde::from_slice(
+                &data[1..],
+            )?)),
             other => Err(rmp_serde::decode::Error::LengthMismatch(other as u32)),
         }
     }

@@ -18,6 +18,8 @@
 //!   htree publish <ref_name> <hash> [--key <key>]
 //!   htree release publish <tree_name> <version_path> <cid> [--draft] [--local]
 
+#![allow(unexpected_cfgs)]
+
 mod app;
 
 use anyhow::Result;

@@ -214,7 +214,7 @@ echo "✓ Installed htree, htree-cashu, and git-remote-htree"
 if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
   echo ""
   echo "Note: macOS release binaries omit FUSE mount support so htree runs without macFUSE."
-  echo "Build from source with: cargo install hashtree-cli --no-default-features --features p2p,lmdb,fuse"
+  echo "Build from source with: cargo install hashtree-cli --no-default-features --features lmdb,fuse"
 fi
 if ! path_contains "$INSTALL_DIR"; then
   echo ""
@@ -286,7 +286,7 @@ Usage:
 macOS note:
   Prebuilt macOS release binaries omit FUSE mount support so htree still runs
   without macFUSE installed. Build from source with:
-    cargo install hashtree-cli --no-default-features --features p2p,lmdb,fuse
+    cargo install hashtree-cli --no-default-features --features lmdb,fuse
 
 More info: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
 EOF

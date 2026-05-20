@@ -347,7 +347,7 @@ mod tests {
                 last_seen: Instant::now(),
                 peer: None,
                 pool: PeerPool::Other,
-                transport: PeerTransport::WebRtc,
+                transport: PeerTransport::Direct,
                 signal_paths: BTreeSet::from([PeerSignalPath::Relay]),
                 bytes_sent: 0,
                 bytes_received: 0,

@@ -2,7 +2,7 @@
 //!
 //! This module provides a concrete store wrapper that works with any local storage
 //! backend plus any signaling transport and peer-link factory. Both production
-//! (Nostr websockets + WebRTC) and simulation (mocks) use this same code.
+//! and simulation (mocks) use this same code.
 
 use async_trait::async_trait;
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
@@ -41,7 +41,7 @@ use crate::types::{
 
 // Keep the on-disk namespace stable across the crate rename so existing peer
 // metadata does not disappear for users upgrading from the old package name.
-const PEER_METADATA_POINTER_SLOT_KEY: &[u8] = b"hashtree-webrtc/peer-metadata/latest/v1";
+const PEER_METADATA_POINTER_SLOT_KEY: &[u8] = b"hashtree-mesh/peer-metadata/latest/v1";
 const RECENT_FORWARD_MISS_CAPACITY: usize = 4096;
 const MIN_RECENT_FORWARD_MISS_TTL_MS: u64 = 250;
 const PUBSUB_SEEN_CAPACITY: usize = 16_384;
@@ -601,7 +601,7 @@ impl Default for MeshRoutingConfig {
 /// implementation.
 ///
 /// This is the shared code between production and simulation.
-/// - Production: `MeshStoreCore<LmdbStore, NostrRelayTransport, WebRtcPeerLinkFactory>`
+/// - Production: transport-specific crates compose `MeshStoreCore` with their links
 /// - Simulation: `MeshStoreCore<MemoryStore, MockRelayTransport, MockConnectionFactory>`
 pub struct MeshStoreCore<S, R, F>
 where
@@ -3459,7 +3459,3 @@ mod tests;
 /// Type alias for simulation store.
 pub type SimMeshStore<S> =
     MeshStoreCore<S, crate::mock::MockRelayTransport, crate::mock::MockConnectionFactory>;
-
-/// Type alias for the default production core (Nostr signaling + WebRTC links).
-pub type ProductionMeshStore<S> =
-    MeshStoreCore<S, crate::nostr::NostrRelayTransport, crate::real_factory::WebRtcPeerLinkFactory>;

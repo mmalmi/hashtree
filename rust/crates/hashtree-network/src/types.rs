@@ -2,7 +2,7 @@
 //!
 //! Defines signaling frames, negotiated peer-link messages, and shared mesh
 //! constants used across Nostr websocket transports, local buses, direct-link
-//! transports such as WebRTC, and simulation.
+//! transports, and simulation.
 
 use hashtree_core::Hash;
 use nostr_sdk::nostr::{Event, Kind};
@@ -53,7 +53,7 @@ impl PeerId {
     }
 }
 
-/// Persisted private WebRTC signaling hints for a stable peer identity.
+/// Persisted private direct-link signaling hints for a stable peer identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownPeerRecord {
     pub peer_id: String,
@@ -107,7 +107,9 @@ pub enum SignalingMessage {
         hash_get: bool,
     },
 
-    /// Negotiation offer payload (currently SDP for WebRTC links).
+    /// Opaque negotiation offer payload.
+    ///
+    /// Serialized as `sdp` for compatibility with older signaling envelopes.
     #[serde(rename = "offer")]
     Offer {
         #[serde(rename = "peerId")]
@@ -117,7 +119,9 @@ pub enum SignalingMessage {
         sdp: String,
     },
 
-    /// Negotiation answer payload (currently SDP for WebRTC links).
+    /// Opaque negotiation answer payload.
+    ///
+    /// Serialized as `sdp` for compatibility with older signaling envelopes.
     #[serde(rename = "answer")]
     Answer {
         #[serde(rename = "peerId")]
@@ -574,9 +578,6 @@ pub struct MeshStats {
     pub requests_fulfilled: u64,
 }
 
-/// Backward-compatible alias for the previous production-specific name.
-pub type WebRTCStats = MeshStats;
-
 /// Nostr event kind for hashtree signaling envelopes (ephemeral, NIP-17 style).
 pub const NOSTR_KIND_HASHTREE: u16 = 25050;
 pub const MESH_SIGNALING_EVENT_KIND: u16 = NOSTR_KIND_HASHTREE;
@@ -739,6 +740,3 @@ pub fn validate_mesh_frame(frame: &MeshNostrFrame) -> Result<(), &'static str> {
 
     Ok(())
 }
-
-/// Default data channel label used by the WebRTC peer-link implementation.
-pub const DATA_CHANNEL_LABEL: &str = "hashtree";

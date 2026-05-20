@@ -22,8 +22,7 @@ async-trait = "0.1"
 thiserror = "1.0"
 semver = "1"
 
-# WebRTC transport
-webrtc = "0.11"
+# P2P/discovery support
 nostr-sdk = { version = "0.35", default-features = false, features = ["nip44", "nip59"] }
 tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
 futures = "0.3"
