@@ -1,6 +1,7 @@
 use super::progress::emit_upload_progress;
 use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir, queue_hash_if_new};
 use super::{upload_progress, AncestorCheck, PushSpec, RemoteHelper};
+use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
 use crate::nostr_client::{BlossomResult, PullRequestStateFilter};
 use crate::runtime::new_multi_thread_runtime;
@@ -9,9 +10,81 @@ use hashtree_core::{HashTree, Store};
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
+
+struct RepoTreeProgressReporter {
+    stop: Arc<AtomicBool>,
+    printed: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl RepoTreeProgressReporter {
+    fn start(label: &str, progress: RepoTreeBuildProgress) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let printed = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_printed = Arc::clone(&printed);
+        let label = label.to_string();
+
+        let handle = thread::spawn(move || {
+            for _ in 0..5 {
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            while !thread_stop.load(Ordering::Relaxed) {
+                eprint!("\r{}", progress.snapshot().format_for_label(&label));
+                let _ = std::io::stderr().flush();
+                thread_printed.store(true, Ordering::Relaxed);
+
+                for _ in 0..5 {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        });
+
+        Self {
+            stop,
+            printed,
+            handle,
+        }
+    }
+
+    fn finish<E: std::fmt::Display>(
+        self,
+        label: &str,
+        progress: &RepoTreeBuildProgress,
+        error: Option<&E>,
+    ) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
+
+        if !self.printed.load(Ordering::Relaxed) {
+            return;
+        }
+
+        match error {
+            Some(err) => {
+                eprintln!("\r  {}: failed ({})", label, err);
+            }
+            None => {
+                eprintln!("\r{}", progress.snapshot().format_for_label(label));
+            }
+        }
+    }
+}
 
 fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize {
     let configured = configured.max(1);
@@ -48,17 +121,10 @@ impl RemoteHelper {
     }
 
     fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
-        if self.is_slow() {
-            eprint!("  {}...", label);
-            let _ = std::io::stderr().flush();
-        }
-        let result = self.storage.build_tree();
-        if self.is_slow() {
-            match &result {
-                Ok(_) => eprintln!(" done"),
-                Err(err) => eprintln!(" failed ({})", err),
-            }
-        }
+        let progress = RepoTreeBuildProgress::new();
+        let reporter = RepoTreeProgressReporter::start(label, progress.clone());
+        let result = self.storage.build_tree_with_progress(&progress);
+        reporter.finish(label, &progress, result.as_ref().err());
         Ok(result?)
     }
 
@@ -69,19 +135,12 @@ impl RemoteHelper {
         base_root: Option<&hashtree_core::Cid>,
         delta_base: Option<&str>,
     ) -> Result<hashtree_core::Cid> {
-        if self.is_slow() {
-            eprint!("  {}...", label);
-            let _ = std::io::stderr().flush();
-        }
-        let result = self
-            .storage
-            .build_tree_with_base_objects(base_tree, base_root, delta_base);
-        if self.is_slow() {
-            match &result {
-                Ok(_) => eprintln!(" done"),
-                Err(err) => eprintln!(" failed ({})", err),
-            }
-        }
+        let progress = RepoTreeBuildProgress::new();
+        let reporter = RepoTreeProgressReporter::start(label, progress.clone());
+        let result = self.storage.build_tree_with_base_objects_with_progress(
+            base_tree, base_root, delta_base, &progress,
+        );
+        reporter.finish(label, &progress, result.as_ref().err());
         Ok(result?)
     }
 

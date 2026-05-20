@@ -30,6 +30,7 @@ use tokio::runtime::{Handle, Runtime};
 use tracing::{debug, info, warn};
 
 use super::object::{parse_tree, GitObject, ObjectId, ObjectType};
+use super::progress::{RepoTreeBuildPhase, RepoTreeBuildProgress};
 use super::refs::{validate_ref_name, Ref};
 use super::{Error, Result};
 
@@ -805,6 +806,10 @@ impl GitStorage {
         self.build_tree_with_base_objects::<LocalStore>(None, None, None)
     }
 
+    pub fn build_tree_with_progress(&self, progress: &RepoTreeBuildProgress) -> Result<Cid> {
+        self.build_tree_with_base_objects_internal::<LocalStore>(None, None, None, Some(progress))
+    }
+
     pub fn validate_root_contains_direct_refs(&self, root_cid: &Cid) -> Result<()> {
         let direct_refs: Vec<String> = {
             let refs = self
@@ -855,9 +860,37 @@ impl GitStorage {
         base_root: Option<&Cid>,
         base_commit_sha: Option<&str>,
     ) -> Result<Cid> {
+        self.build_tree_with_base_objects_internal(base_tree, base_root, base_commit_sha, None)
+    }
+
+    pub fn build_tree_with_base_objects_with_progress<S: Store>(
+        &self,
+        base_tree: Option<&HashTree<S>>,
+        base_root: Option<&Cid>,
+        base_commit_sha: Option<&str>,
+        progress: &RepoTreeBuildProgress,
+    ) -> Result<Cid> {
+        self.build_tree_with_base_objects_internal(
+            base_tree,
+            base_root,
+            base_commit_sha,
+            Some(progress),
+        )
+    }
+
+    fn build_tree_with_base_objects_internal<S: Store>(
+        &self,
+        base_tree: Option<&HashTree<S>>,
+        base_root: Option<&Cid>,
+        base_commit_sha: Option<&str>,
+        progress: Option<&RepoTreeBuildProgress>,
+    ) -> Result<Cid> {
         // Check if we have a cached root
         if let Ok(root) = self.root_cid.read() {
             if let Some(ref cid) = *root {
+                if let Some(progress) = progress {
+                    progress.mark_done();
+                }
                 return Ok(cid.clone());
             }
         }
@@ -959,17 +992,34 @@ impl GitStorage {
             let build_result = self.runtime.block_on(async {
                 // Build objects directory
                 let objects_cid = self
-                    .build_objects_dir_with_base(&objects_clone, base_tree, base_objects_cid.as_ref())
+                    .build_objects_dir_with_base(
+                        &objects_clone,
+                        base_tree,
+                        base_objects_cid.as_ref(),
+                        progress,
+                    )
                     .await?;
 
                 // Build refs directory
-                let refs_cid = self.build_refs_dir(&refs).await?;
+                if let Some(progress) = progress {
+                    progress.start_phase(RepoTreeBuildPhase::Refs, Some(refs.len()));
+                }
+                let refs_cid = self.build_refs_dir(&refs, progress).await?;
 
                 // Build dumb-HTTP info directory
+                if let Some(progress) = progress {
+                    progress.start_phase(RepoTreeBuildPhase::Info, Some(1));
+                }
                 let info_cid = self.build_info_dir(&refs, &objects_clone).await?;
+                if let Some(progress) = progress {
+                    progress.increment_processed();
+                }
 
                 // Build HEAD file - use default_branch if no explicit HEAD
                 // Git expects HEAD to end with newline, so add it if missing
+                if let Some(progress) = progress {
+                    progress.start_phase(RepoTreeBuildPhase::Head, Some(1));
+                }
                 let head_content = refs.get("HEAD")
                     .map(|h| if h.ends_with('\n') { h.clone() } else { format!("{}\n", h) })
                     .or_else(|| default_branch.as_ref().map(|b| format!("ref: {}\n", b)))
@@ -978,6 +1028,9 @@ impl GitStorage {
                 let (head_cid, head_size) = self.tree.put(head_content.as_bytes()).await
                     .map_err(|e| Error::StorageError(format!("put HEAD: {}", e)))?;
                 debug!("HEAD hash: {}", hex::encode(head_cid.hash));
+                if let Some(progress) = progress {
+                    progress.increment_processed();
+                }
 
                 // Build .git directory - use from_cid to preserve encryption keys
                 let mut git_entries = vec![
@@ -1000,6 +1053,9 @@ impl GitStorage {
 
                 // Build and add index file if we have a tree SHA
                 if let Some(ref tree_oid) = tree_sha {
+                    if let Some(progress) = progress {
+                        progress.start_phase(RepoTreeBuildPhase::Index, None);
+                    }
                     let index_result = if let (Some(base_tree), Some(base_objects_cid), Some(base_tree_sha)) =
                         (base_tree, base_objects_cid.as_ref(), base_tree_sha.as_deref())
                     {
@@ -1010,10 +1066,11 @@ impl GitStorage {
                             base_objects_cid,
                             base_tree_sha,
                             base_root_entries.as_ref(),
+                            progress,
                         )
                         .await
                     } else {
-                        self.build_index_file(tree_oid, &objects_clone)
+                        self.build_index_file(tree_oid, &objects_clone, progress)
                     };
                     match index_result {
                         Ok(index_data) => {
@@ -1028,8 +1085,14 @@ impl GitStorage {
                     }
                 }
 
+                if let Some(progress) = progress {
+                    progress.start_phase(RepoTreeBuildPhase::GitDir, Some(1));
+                }
                 let git_cid = self.tree.put_directory(git_entries).await
                     .map_err(|e| Error::StorageError(format!("put .git: {}", e)))?;
+                if let Some(progress) = progress {
+                    progress.increment_processed();
+                }
 
                 // Build root entries starting with .git
                 // Use from_cid to preserve the encryption key
@@ -1037,6 +1100,9 @@ impl GitStorage {
 
                 // Add working tree files if we have a tree SHA
                 if let Some(ref tree_oid) = tree_sha {
+                    if let Some(progress) = progress {
+                        progress.start_phase(RepoTreeBuildPhase::WorkingTree, None);
+                    }
                     let working_tree_entries = if let (Some(base_tree), Some(base_objects_cid), Some(base_tree_sha)) =
                         (base_tree, base_objects_cid.as_ref(), base_tree_sha.as_deref())
                     {
@@ -1047,10 +1113,11 @@ impl GitStorage {
                             base_objects_cid,
                             base_tree_sha,
                             base_root_entries.as_ref(),
+                            progress,
                         )
                         .await?
                     } else {
-                        self.build_working_tree_entries(tree_oid, &objects_clone).await?
+                        self.build_working_tree_entries(tree_oid, &objects_clone, progress).await?
                     };
                     root_entries.extend(working_tree_entries);
                     info!("Added {} working tree entries to root", root_entries.len() - 1);
@@ -1059,8 +1126,14 @@ impl GitStorage {
                 // Sort entries for deterministic ordering
                 root_entries.sort_by(|a, b| a.name.cmp(&b.name));
 
+                if let Some(progress) = progress {
+                    progress.start_phase(RepoTreeBuildPhase::Root, Some(1));
+                }
                 let root_cid = self.tree.put_directory(root_entries).await
                     .map_err(|e| Error::StorageError(format!("put root: {}", e)))?;
+                if let Some(progress) = progress {
+                    progress.increment_processed();
+                }
 
                 info!("Built hashtree root: {} (encrypted: {}) (.git dir: {})",
                     hex::encode(root_cid.hash),
@@ -1096,6 +1169,9 @@ impl GitStorage {
         if let Ok(mut root) = self.root_cid.write() {
             *root = Some(root_cid.clone());
         }
+        if let Some(progress) = progress {
+            progress.mark_done();
+        }
 
         Ok(root_cid)
     }
@@ -1105,6 +1181,7 @@ impl GitStorage {
         &self,
         tree_oid: &str,
         objects: &HashMap<String, Vec<u8>>,
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Vec<DirEntry>> {
         let mut entries = Vec::new();
 
@@ -1129,7 +1206,7 @@ impl GitStorage {
             if entry.is_tree() {
                 // Recursively build subdirectory
                 let sub_entries = self
-                    .build_working_tree_entries_boxed(&oid_hex, objects)
+                    .build_working_tree_entries_boxed(&oid_hex, objects, progress)
                     .await?;
 
                 // Create subdirectory in hashtree
@@ -1141,6 +1218,9 @@ impl GitStorage {
                 // Use from_cid to preserve encryption key
                 entries
                     .push(DirEntry::from_cid(&entry.name, &dir_cid).with_link_type(LinkType::Dir));
+                if let Some(progress) = progress {
+                    progress.record_working_dir(false);
+                }
             } else {
                 // Get blob content
                 if let Some((ObjectType::Blob, blob_content)) =
@@ -1153,6 +1233,9 @@ impl GitStorage {
 
                     // Use from_cid to preserve encryption key
                     entries.push(DirEntry::from_cid(&entry.name, &cid).with_size(size));
+                    if let Some(progress) = progress {
+                        progress.record_working_file(false);
+                    }
                 }
             }
         }
@@ -1168,8 +1251,9 @@ impl GitStorage {
         &'a self,
         tree_oid: &'a str,
         objects: &'a HashMap<String, Vec<u8>>,
+        progress: Option<&'a RepoTreeBuildProgress>,
     ) -> BoxFuture<'a, Result<Vec<DirEntry>>> {
-        Box::pin(self.build_working_tree_entries(tree_oid, objects))
+        Box::pin(self.build_working_tree_entries(tree_oid, objects, progress))
     }
 
     fn build_working_tree_entries_with_base_recursive_boxed<'a, S: Store + 'a>(
@@ -1180,6 +1264,7 @@ impl GitStorage {
         base_objects_cid: &'a Cid,
         old_tree_oid: Option<&'a str>,
         old_dir_entries: Option<&'a Vec<hashtree_core::TreeEntry>>,
+        progress: Option<&'a RepoTreeBuildProgress>,
     ) -> BoxFuture<'a, Result<Vec<DirEntry>>> {
         Box::pin(async move {
             let tree_entries = self
@@ -1231,6 +1316,9 @@ impl GitStorage {
                             && old_dir_entry.link_type == LinkType::Dir
                         {
                             entries.push(Self::tree_entry_to_dir_entry(old_dir_entry));
+                            if let Some(progress) = progress {
+                                progress.record_working_dir(true);
+                            }
                             continue;
                         }
                     }
@@ -1270,6 +1358,7 @@ impl GitStorage {
                             base_objects_cid,
                             old_subtree_oid.as_deref(),
                             old_subdir_entries.as_ref(),
+                            progress,
                         )
                         .await?;
                     let dir_cid = self.tree.put_directory(sub_entries).await.map_err(|e| {
@@ -1278,6 +1367,9 @@ impl GitStorage {
                     entries.push(
                         DirEntry::from_cid(&entry.name, &dir_cid).with_link_type(LinkType::Dir),
                     );
+                    if let Some(progress) = progress {
+                        progress.record_working_dir(false);
+                    }
                     continue;
                 }
 
@@ -1289,6 +1381,9 @@ impl GitStorage {
                         && old_dir_entry.link_type != LinkType::Dir
                     {
                         entries.push(Self::tree_entry_to_dir_entry(old_dir_entry));
+                        if let Some(progress) = progress {
+                            progress.record_working_file(true);
+                        }
                         continue;
                     }
                 }
@@ -1321,6 +1416,9 @@ impl GitStorage {
                         Error::StorageError(format!("put blob {}: {}", entry.name, e))
                     })?;
                 entries.push(DirEntry::from_cid(&entry.name, &cid).with_size(size));
+                if let Some(progress) = progress {
+                    progress.record_working_file(false);
+                }
             }
 
             entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1336,6 +1434,7 @@ impl GitStorage {
         base_objects_cid: &Cid,
         base_tree_oid: &str,
         base_root_entries: Option<&Vec<hashtree_core::TreeEntry>>,
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Vec<DirEntry>> {
         let root_entries = base_root_entries.map(|entries| {
             entries
@@ -1352,6 +1451,7 @@ impl GitStorage {
             base_objects_cid,
             Some(base_tree_oid),
             root_entries.as_ref(),
+            progress,
         )
         .await
     }
@@ -1361,6 +1461,7 @@ impl GitStorage {
         prefix: &str,
         old_entries: Option<Vec<hashtree_core::TreeEntry>>,
         new_objects: &[(String, Vec<u8>)],
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Cid> {
         let mut sub_entries: BTreeMap<String, DirEntry> = old_entries
             .unwrap_or_default()
@@ -1376,12 +1477,20 @@ impl GitStorage {
                 suffix.clone(),
                 DirEntry::from_cid(suffix, &cid).with_size(size),
             );
+            if let Some(progress) = progress {
+                progress.record_object_blob();
+            }
         }
 
-        self.tree
+        let cid = self
+            .tree
             .put_directory(sub_entries.into_values().collect())
             .await
-            .map_err(|e| Error::StorageError(format!("put objects/{}: {}", prefix, e)))
+            .map_err(|e| Error::StorageError(format!("put objects/{}: {}", prefix, e)))?;
+        if let Some(progress) = progress {
+            progress.record_object_prefix();
+        }
+        Ok(cid)
     }
 
     /// Build the objects directory using HashTree, reusing unchanged prefix directories
@@ -1391,7 +1500,12 @@ impl GitStorage {
         objects: &HashMap<String, Vec<u8>>,
         base_tree: Option<&HashTree<S>>,
         base_objects_cid: Option<&Cid>,
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Cid> {
+        if let Some(progress) = progress {
+            progress.start_phase(RepoTreeBuildPhase::Objects, Some(objects.len()));
+        }
+
         let mut buckets: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
         for (oid, data) in objects {
             let prefix = &oid[..2];
@@ -1433,7 +1547,12 @@ impl GitStorage {
                     None
                 };
                 let merged_cid = self
-                    .build_objects_prefix_dir(&entry.name, old_prefix_entries, delta_objects)
+                    .build_objects_prefix_dir(
+                        &entry.name,
+                        old_prefix_entries,
+                        delta_objects,
+                        progress,
+                    )
                     .await?;
                 top_entries.insert(
                     entry.name.clone(),
@@ -1447,7 +1566,9 @@ impl GitStorage {
             if merged_prefixes.contains(prefix) {
                 continue;
             }
-            let sub_cid = self.build_objects_prefix_dir(prefix, None, objs).await?;
+            let sub_cid = self
+                .build_objects_prefix_dir(prefix, None, objs, progress)
+                .await?;
             top_entries.insert(
                 prefix.clone(),
                 DirEntry::from_cid(prefix, &sub_cid).with_link_type(LinkType::Dir),
@@ -1489,7 +1610,11 @@ impl GitStorage {
     }
 
     /// Build the refs directory using HashTree
-    async fn build_refs_dir(&self, refs: &HashMap<String, String>) -> Result<Cid> {
+    async fn build_refs_dir(
+        &self,
+        refs: &HashMap<String, String>,
+        progress: Option<&RepoTreeBuildProgress>,
+    ) -> Result<Cid> {
         let mut root = RefDirectory::default();
 
         for (ref_name, value) in refs {
@@ -1499,7 +1624,9 @@ impl GitStorage {
             }
         }
 
-        let mut ref_entries = self.build_ref_entries_recursive(&root, "refs").await?;
+        let mut ref_entries = self
+            .build_ref_entries_recursive(&root, "refs", progress)
+            .await?;
 
         if ref_entries.is_empty() {
             // Return empty directory Cid
@@ -1526,6 +1653,7 @@ impl GitStorage {
         &'a self,
         dir: &'a RefDirectory,
         prefix: &'a str,
+        progress: Option<&'a RepoTreeBuildProgress>,
     ) -> BoxFuture<'a, Result<Vec<DirEntry>>> {
         Box::pin(async move {
             let mut entries = Vec::new();
@@ -1538,12 +1666,15 @@ impl GitStorage {
                     .map_err(|e| Error::StorageError(format!("put ref: {}", e)))?;
                 debug!("{}/{} -> blob {}", prefix, name, hex::encode(cid.hash));
                 entries.push(DirEntry::from_cid(name, &cid).with_size(size));
+                if let Some(progress) = progress {
+                    progress.increment_processed();
+                }
             }
 
             for (name, child) in &dir.dirs {
                 let child_prefix = format!("{prefix}/{name}");
                 let child_entries = self
-                    .build_ref_entries_recursive(child, &child_prefix)
+                    .build_ref_entries_recursive(child, &child_prefix, progress)
                     .await?;
                 let child_cid =
                     self.tree.put_directory(child_entries).await.map_err(|e| {
@@ -1564,10 +1695,11 @@ impl GitStorage {
         &self,
         tree_oid: &str,
         objects: &HashMap<String, Vec<u8>>,
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Vec<u8>> {
         // Collect all file entries from the tree (recursively)
         let mut entries: Vec<(String, [u8; 20], u32, u32)> = Vec::new(); // (path, sha1, mode, size)
-        self.collect_tree_entries_for_index(tree_oid, objects, "", &mut entries)?;
+        self.collect_tree_entries_for_index(tree_oid, objects, "", &mut entries, progress)?;
 
         self.build_index_bytes(entries)
     }
@@ -1580,6 +1712,7 @@ impl GitStorage {
         base_objects_cid: &Cid,
         base_tree_oid: &str,
         base_root_entries: Option<&Vec<hashtree_core::TreeEntry>>,
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Vec<u8>> {
         let mut entries: Vec<(String, [u8; 20], u32, u32)> = Vec::new();
         let root_entries = base_root_entries.map(|entries| {
@@ -1599,6 +1732,7 @@ impl GitStorage {
             root_entries.as_ref(),
             "",
             &mut entries,
+            progress,
         )
         .await?;
 
@@ -1681,6 +1815,7 @@ impl GitStorage {
         objects: &HashMap<String, Vec<u8>>,
         prefix: &str,
         entries: &mut Vec<(String, [u8; 20], u32, u32)>,
+        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<()> {
         let (obj_type, content) = self
             .get_object_content(tree_oid, objects)
@@ -1706,7 +1841,7 @@ impl GitStorage {
 
             if entry.is_tree() {
                 // Recursively process subdirectory
-                self.collect_tree_entries_for_index(&oid_hex, objects, &path, entries)?;
+                self.collect_tree_entries_for_index(&oid_hex, objects, &path, entries, progress)?;
             } else {
                 // Get blob content for size and SHA-1
                 if let Some((ObjectType::Blob, blob_content)) =
@@ -1725,6 +1860,9 @@ impl GitStorage {
                     let size = blob_content.len() as u32;
 
                     entries.push((path, sha1_bytes, mode, size));
+                    if let Some(progress) = progress {
+                        progress.record_index_entry();
+                    }
                 }
             }
         }
@@ -1742,6 +1880,7 @@ impl GitStorage {
         old_dir_entries: Option<&'a Vec<hashtree_core::TreeEntry>>,
         prefix: &'a str,
         entries: &'a mut Vec<(String, [u8; 20], u32, u32)>,
+        progress: Option<&'a RepoTreeBuildProgress>,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let tree_entries = self
@@ -1824,6 +1963,7 @@ impl GitStorage {
                         old_subdir_entries.as_ref(),
                         &path,
                         entries,
+                        progress,
                     )
                     .await?;
                     continue;
@@ -1864,6 +2004,9 @@ impl GitStorage {
                 };
 
                 entries.push((path, sha1_bytes, entry.mode, size));
+                if let Some(progress) = progress {
+                    progress.record_index_entry();
+                }
             }
 
             Ok(())
@@ -2376,6 +2519,32 @@ mod tests {
         assert!(
             evicted_stale > 0,
             "expected build_tree preflight eviction to remove stale blobs before writing"
+        );
+    }
+
+    #[test]
+    fn test_build_tree_progress_tracks_repo_tree_work() {
+        let (storage, _temp) = create_test_storage();
+        let commit_oid = write_test_commit(&storage);
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(commit_oid))
+            .unwrap();
+        storage
+            .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+            .unwrap();
+
+        let progress = RepoTreeBuildProgress::new();
+        storage.build_tree_with_progress(&progress).unwrap();
+
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.phase, RepoTreeBuildPhase::Done);
+        assert_eq!(snapshot.object_blobs, 3);
+        assert_eq!(snapshot.files, 1);
+        assert_eq!(snapshot.dirs, 0);
+        assert_eq!(snapshot.reused, 0);
+        assert_eq!(
+            snapshot.format_for_label("Building repo tree"),
+            "  Building repo tree: done (3 object blobs, 1 files, 0 dirs, 0 reused)"
         );
     }
 
