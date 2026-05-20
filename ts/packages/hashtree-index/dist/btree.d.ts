@@ -7,6 +7,9 @@ export interface BTreeSampleOptions {
     totalCount?: number;
     random?: () => number;
 }
+export interface BTreeLinkEntriesOptions {
+    verifyCount?: boolean;
+}
 export declare class BTree {
     private tree;
     private order;
@@ -27,7 +30,13 @@ export declare class BTree {
     /**
      * Iterate all CID links in the tree.
      */
-    linksEntries(root: CID | null): AsyncGenerator<[string, CID]>;
+    linksEntries(root: CID | null, options?: BTreeLinkEntriesOptions): AsyncGenerator<[string, CID]>;
+    /**
+     * Iterate all CID links and throw if stored subtree counts disagree with
+     * the number of yielded links. This protects callers from accepting a
+     * partial traversal when a child node is unreadable or malformed.
+     */
+    verifiedLinksEntries(root: CID | null): AsyncGenerator<[string, CID]>;
     /**
      * Prefix search for CID links.
      */
@@ -43,11 +52,21 @@ export declare class BTree {
      */
     scanLinks(root: CID | null): Promise<number>;
     /**
+     * Explicit count-scan alias for callers that need to make scan semantics
+     * clear at the call site.
+     */
+    scanLinkCount(root: CID | null): Promise<number>;
+    /**
      * Read the stored CID-link count from the root node without scanning.
      * Returns null when the root was built by older code that does not store
      * complete subtree sizes.
      */
     countStoredLinks(root: CID | null): Promise<number | null>;
+    /**
+     * Explicit no-scan reported-count alias. Returns null when the B-tree does
+     * not carry complete stored subtree sizes.
+     */
+    countReportedLinks(root: CID | null): Promise<number | null>;
     /**
      * Read the Nth CID link in sorted key order.
      */
@@ -69,6 +88,7 @@ export declare class BTree {
     private insertLinkIntoInternal;
     private splitLeafWithLinks;
     private traverseLinksInOrder;
+    private traverseLinksInOrderVerified;
     private rangeLinkTraverse;
     private countLinksRecursive;
     private countLinkEntries;

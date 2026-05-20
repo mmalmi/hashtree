@@ -6,7 +6,6 @@ export class CollectionSource {
     byIdIndex;
     linkIndex;
     byIdRoot;
-    itemCount;
     searchIndexes = new Map();
     searchDefinitions = new Map();
     constructor(store, manifest, definition) {
@@ -14,9 +13,6 @@ export class CollectionSource {
         this.byIdIndex = new BTree(store);
         this.linkIndex = new BTree(store);
         this.byIdRoot = deserializeCid(manifest.byIdRoot);
-        this.itemCount = Number.isFinite(manifest.itemCount) && manifest.itemCount >= 0
-            ? Math.floor(manifest.itemCount)
-            : null;
         for (const [name, index] of Object.entries(manifest.indexes ?? {})) {
             if (index.kind === 'search') {
                 this.searchIndexes.set(name, new SearchIndex(store, {
@@ -48,10 +44,13 @@ export class CollectionSource {
         return await this.linkIndex.getLink(root, key);
     }
     async count() {
-        if (this.itemCount !== null) {
-            return this.itemCount;
-        }
         return await this.exactCount();
+    }
+    async countReported() {
+        if (!this.byIdRoot) {
+            return 0;
+        }
+        return await this.byIdIndex.countReportedLinks(this.byIdRoot);
     }
     async exactCount() {
         if (!this.byIdRoot) {

@@ -10,6 +10,10 @@ export interface BTreeSampleOptions {
   random?: () => number;
 }
 
+export interface BTreeLinkEntriesOptions {
+  verifyCount?: boolean;
+}
+
 type LinkTraversalCache = {
   entries: Map<string, TreeEntry[]>;
   counts: Map<string, number>;
@@ -150,9 +154,32 @@ export class BTree {
   /**
    * Iterate all CID links in the tree.
    */
-  async *linksEntries(root: CID | null): AsyncGenerator<[string, CID]> {
+  async *linksEntries(
+    root: CID | null,
+    options: BTreeLinkEntriesOptions = {}
+  ): AsyncGenerator<[string, CID]> {
     if (!root) return;
+    if (options.verifyCount === true) {
+      yield* this.verifiedLinksEntries(root);
+      return;
+    }
     yield* this.traverseLinksInOrder(root);
+  }
+
+  /**
+   * Iterate all CID links and throw if stored subtree counts disagree with
+   * the number of yielded links. This protects callers from accepting a
+   * partial traversal when a child node is unreadable or malformed.
+   */
+  async *verifiedLinksEntries(root: CID | null): AsyncGenerator<[string, CID]> {
+    if (!root) return;
+    const expectedCount = await this.countReportedLinks(root);
+    const yieldedCount = yield* this.traverseLinksInOrderVerified(root, expectedCount);
+    if (expectedCount !== null && yieldedCount !== expectedCount) {
+      throw new Error(
+        `BTree link traversal yielded ${yieldedCount} links, expected ${expectedCount}`,
+      );
+    }
   }
 
   /**
@@ -184,6 +211,14 @@ export class BTree {
   }
 
   /**
+   * Explicit count-scan alias for callers that need to make scan semantics
+   * clear at the call site.
+   */
+  async scanLinkCount(root: CID | null): Promise<number> {
+    return await this.scanLinks(root);
+  }
+
+  /**
    * Read the stored CID-link count from the root node without scanning.
    * Returns null when the root was built by older code that does not store
    * complete subtree sizes.
@@ -207,6 +242,14 @@ export class BTree {
       count += childCount;
     }
     return count;
+  }
+
+  /**
+   * Explicit no-scan reported-count alias. Returns null when the B-tree does
+   * not carry complete stored subtree sizes.
+   */
+  async countReportedLinks(root: CID | null): Promise<number | null> {
+    return await this.countStoredLinks(root);
   }
 
   /**
@@ -510,6 +553,49 @@ export class BTree {
         yield* this.traverseLinksInOrder(child.cid);
       }
     }
+  }
+
+  private async *traverseLinksInOrderVerified(
+    node: CID,
+    expectedCount: number | null
+  ): AsyncGenerator<[string, CID], number, undefined> {
+    const entries = await this.tree.listDirectory(node);
+    const isLeaf = this.isLeafNode(entries);
+    const sorted = this.sortEntries(entries);
+    let yieldedCount = 0;
+
+    if (isLeaf) {
+      for (const entry of sorted) {
+        if (entry.type === LinkType.File) {
+          yieldedCount += 1;
+          yield [unescapeKey(entry.name), entry.cid];
+        }
+      }
+    } else {
+      for (const child of sorted) {
+        const childExpectedCount = this.storedLinkSubtreeCount(child);
+        const childYieldedCount = yield* this.traverseLinksInOrderVerified(
+          child.cid,
+          childExpectedCount,
+        );
+        if (childExpectedCount !== null && childYieldedCount !== childExpectedCount) {
+          throw new Error(
+            `BTree link subtree ${toHex(child.cid.hash)} yielded `
+            + `${childYieldedCount} links, expected ${childExpectedCount}`,
+          );
+        }
+        yieldedCount += childYieldedCount;
+      }
+    }
+
+    if (expectedCount !== null && yieldedCount !== expectedCount) {
+      throw new Error(
+        `BTree link subtree ${toHex(node.hash)} yielded `
+        + `${yieldedCount} links, expected ${expectedCount}`,
+      );
+    }
+
+    return yieldedCount;
   }
 
   private async *rangeLinkTraverse(

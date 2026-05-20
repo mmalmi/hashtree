@@ -95,7 +95,6 @@ export interface CollectionManifest {
     sourceId: string;
     schemaVersion: number;
     updatedAt: number;
-    itemCount: number;
     byIdRoot: SerializedCid | null;
     indexes: Record<string, CollectionManifestIndex>;
     publishedSchema?: CollectionPublishedSchema;

@@ -289,7 +289,9 @@ describe('BTree', () => {
       expect(rootEntries.every((entry) => entry.type === LinkType.Dir && entry.size > 0)).toBe(true);
       expect(rootEntries.reduce((sum, entry) => sum + entry.size, 0)).toBe(entries.length);
       expect(await btree.countStoredLinks(root)).toBe(entries.length);
+      expect(await btree.countReportedLinks(root)).toBe(entries.length);
       expect(await btree.countLinks(root)).toBe(entries.length);
+      expect(await btree.scanLinkCount(root)).toBe(entries.length);
       expect(await btree.getLinkEntryAt(root, 11)).toEqual(['song-11', entries[11][1]]);
     });
 
@@ -321,6 +323,31 @@ describe('BTree', () => {
       expect(await btree.countStoredLinks(root)).toBeNull();
       expect(await btree.scanLinks(root)).toBe(entries.length);
       expect(await btree.countLinks(root)).toBe(entries.length);
+    });
+
+    it('verified link iteration rejects partial counted link roots', async () => {
+      const { cid } = await tree.putFile(new TextEncoder().encode('song-00'));
+      const goodLeaf = (await tree.putDirectory([
+        {
+          name: 'song-00',
+          cid,
+          size: 0,
+          type: LinkType.File,
+        },
+      ])).cid;
+      const emptyLeaf = (await tree.putDirectory([])).cid;
+      const root = (await tree.putDirectory([
+        { name: 'song-00', cid: goodLeaf, size: 1, type: LinkType.Dir },
+        { name: 'song-01', cid: emptyLeaf, size: 1, type: LinkType.Dir },
+      ])).cid;
+      const entries: Array<[string, CID]> = [];
+
+      await expect((async () => {
+        for await (const entry of btree.linksEntries(root, { verifyCount: true })) {
+          entries.push(entry);
+        }
+      })()).rejects.toThrow(/expected 1/);
+      expect(entries).toEqual([['song-00', cid]]);
     });
   });
 

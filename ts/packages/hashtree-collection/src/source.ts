@@ -16,7 +16,6 @@ export class CollectionSource {
   private readonly byIdIndex: BTree;
   private readonly linkIndex: BTree;
   private readonly byIdRoot;
-  private readonly itemCount;
   private readonly searchIndexes = new Map<string, SearchIndex>();
   private readonly searchDefinitions = new Map<string, NonNullable<CollectionSourceQueryDefinition['searchIndexes']>[number]>();
 
@@ -25,9 +24,6 @@ export class CollectionSource {
     this.byIdIndex = new BTree(store);
     this.linkIndex = new BTree(store);
     this.byIdRoot = deserializeCid(manifest.byIdRoot);
-    this.itemCount = Number.isFinite(manifest.itemCount) && manifest.itemCount >= 0
-      ? Math.floor(manifest.itemCount)
-      : null;
 
     for (const [name, index] of Object.entries(manifest.indexes ?? {})) {
       if (index.kind === 'search') {
@@ -67,11 +63,15 @@ export class CollectionSource {
   }
 
   async count(): Promise<number> {
-    if (this.itemCount !== null) {
-      return this.itemCount;
+    return await this.exactCount();
+  }
+
+  async countReported(): Promise<number | null> {
+    if (!this.byIdRoot) {
+      return 0;
     }
 
-    return await this.exactCount();
+    return await this.byIdIndex.countReportedLinks(this.byIdRoot);
   }
 
   async exactCount(): Promise<number> {

@@ -5,13 +5,13 @@ export declare class CollectionSource {
     private readonly byIdIndex;
     private readonly linkIndex;
     private readonly byIdRoot;
-    private readonly itemCount;
     private readonly searchIndexes;
     private readonly searchDefinitions;
     constructor(store: Store, manifest: CollectionManifest, definition?: CollectionSourceQueryDefinition | null);
     get(id: string): Promise<CID | null>;
     getIndexLink(indexName: string, key: string): Promise<CID | null>;
     count(): Promise<number>;
+    countReported(): Promise<number | null>;
     exactCount(): Promise<number>;
     sampleById(limit: number, random?: () => number): Promise<CollectionIndexLinkResult[]>;
     queryById(options?: {
