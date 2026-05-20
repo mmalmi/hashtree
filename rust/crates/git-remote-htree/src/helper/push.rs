@@ -675,8 +675,14 @@ impl RemoteHelper {
             chk_key.as_ref(),
             old_root_hash.as_deref(),
             old_encryption_key.as_ref(),
-            !force_push,
+            true,
         );
+        if !blossom_result.failed.is_empty() {
+            anyhow::bail!(
+                "Failed to upload repo tree to Blossom server(s): {}",
+                blossom_result.failed.join(", ")
+            );
+        }
 
         let key_with_privacy = key_to_publish
             .as_ref()
@@ -917,20 +923,24 @@ impl RemoteHelper {
             }
         };
 
-        let old_root_bytes: Option<[u8; 32]> = old_root_hash.and_then(|h| {
-            hex::decode(h).ok().and_then(|b| {
-                if b.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&b);
-                    Some(arr)
-                } else {
-                    None
-                }
+        let force_upload = self.config.blossom.force_upload;
+        let old_root_bytes: Option<[u8; 32]> = if force_upload {
+            None
+        } else {
+            old_root_hash.and_then(|h| {
+                hex::decode(h).ok().and_then(|b| {
+                    if b.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        Some(arr)
+                    } else {
+                        None
+                    }
+                })
             })
-        });
+        };
 
         let verbose = self.is_slow();
-        let force_upload = self.config.blossom.force_upload;
         let trust_server_old_tree_coverage = trust_server_old_tree_coverage && !force_upload;
         let success = rt.block_on(async {
             use hashtree_core::{collect_hashes, Cid, HashTree, HashTreeConfig};
@@ -1025,16 +1035,23 @@ impl RemoteHelper {
                 }
                 let sample_refs: Vec<&str> = sample_hashes.iter().map(|s| s.as_str()).collect();
                 let mut needs_full = Vec::new();
+                let mut inconclusive = Vec::new();
                 for server in &all_servers {
-                    if !blossom
-                        .server_has_tree_samples(
+                    match blossom
+                        .server_tree_sample_coverage(
                             server,
                             &sample_refs,
                             SERVER_COVERAGE_SAMPLE_SIZE,
                         )
                         .await
                     {
-                        needs_full.push(server.clone());
+                        hashtree_blossom::BlobAvailability::Present => {}
+                        hashtree_blossom::BlobAvailability::Missing => {
+                            needs_full.push(server.clone());
+                        }
+                        hashtree_blossom::BlobAvailability::Unknown => {
+                            inconclusive.push(server.clone());
+                        }
                     }
                 }
                 if !needs_full.is_empty() && verbose {
@@ -1050,6 +1067,22 @@ impl RemoteHelper {
                         .collect();
                     eprintln!(
                         "  Full upload needed: {} (missing old tree)",
+                        server_names.join(", ")
+                    );
+                }
+                if !inconclusive.is_empty() && verbose {
+                    let server_names: Vec<_> = inconclusive
+                        .iter()
+                        .map(|s| {
+                            s.trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .split('/')
+                                .next()
+                                .unwrap_or(s)
+                        })
+                        .collect();
+                    eprintln!(
+                        "  Old-tree coverage probe inconclusive: {}",
                         server_names.join(", ")
                     );
                 }
@@ -1092,14 +1125,27 @@ impl RemoteHelper {
                             let discovery_complete = Arc::clone(&discovery_complete);
                             let servers_needing_full = Arc::clone(&servers_needing_full);
                             async move {
-                                let result = if force_all_servers {
-                                    if blossom.write_servers().len() <= 1 {
+                                let write_server_count = blossom.write_servers().len();
+                                let result = if force_all_servers
+                                    || (!from_old_tree && write_server_count > 1)
+                                {
+                                    if write_server_count <= 1 {
                                         blossom.upload_if_missing(&data).await
                                     } else {
                                         blossom
                                             .upload_to_all_servers(&data)
                                             .await
-                                            .map(|(h, c)| (h, c > 0))
+                                            .and_then(|(h, c)| {
+                                                if c == write_server_count {
+                                                    Ok((h, c > 0))
+                                                } else {
+                                                    Err(hashtree_blossom::BlossomError::UploadFailed(
+                                                        format!(
+                                                            "only {c}/{write_server_count} write servers accepted blob"
+                                                        ),
+                                                    ))
+                                                }
+                                            })
                                     }
                                 } else if from_old_tree && !servers_needing_full.is_empty() {
                                     if servers_needing_full.len() == 1 {
@@ -1109,13 +1155,24 @@ impl RemoteHelper {
                                             .upload_if_missing(&data)
                                             .await
                                     } else {
+                                        let server_count = servers_needing_full.len();
                                         blossom
                                             .upload_to_selected_servers(
                                                 &data,
                                                 servers_needing_full.as_ref().as_slice(),
                                             )
                                             .await
-                                            .map(|(h, c)| (h, c > 0))
+                                            .and_then(|(h, c)| {
+                                                if c == server_count {
+                                                    Ok((h, c > 0))
+                                                } else {
+                                                    Err(hashtree_blossom::BlossomError::UploadFailed(
+                                                        format!(
+                                                            "only {c}/{server_count} repair servers accepted blob"
+                                                        ),
+                                                    ))
+                                                }
+                                            })
                                     }
                                 } else {
                                     blossom.upload_if_missing(&data).await
@@ -1358,7 +1415,8 @@ impl RemoteHelper {
                 final_uploaded, final_skipped_diff, final_skipped_server, final_failed
             );
 
-            final_uploaded > 0 || final_skipped_server > 0 || final_skipped_diff > 0
+            final_failed == 0
+                && (final_uploaded > 0 || final_skipped_server > 0 || final_skipped_diff > 0)
         });
 
         if success {

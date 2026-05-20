@@ -55,6 +55,14 @@ pub enum BlossomError {
     Signing(String),
 }
 
+/// Result of probing a blob's presence on one Blossom server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobAvailability {
+    Present,
+    Missing,
+    Unknown,
+}
+
 /// Blossom protocol client
 #[derive(Clone)]
 pub struct BlossomClient {
@@ -325,7 +333,7 @@ impl BlossomClient {
     /// Check if a blob exists on any write server
     pub async fn exists(&self, hash: &str) -> bool {
         for server in &self.write_servers {
-            if self.exists_on_server(hash, server).await {
+            if self.check_on_server(hash, server).await == BlobAvailability::Present {
                 return true;
             }
         }
@@ -334,16 +342,30 @@ impl BlossomClient {
 
     /// Check if a blob exists on a specific server
     pub async fn exists_on_server(&self, hash: &str, server: &str) -> bool {
+        self.check_on_server(hash, server).await == BlobAvailability::Present
+    }
+
+    /// Probe a blob on a specific server, distinguishing explicit misses from
+    /// inconclusive network/server failures.
+    pub async fn check_on_server(&self, hash: &str, server: &str) -> BlobAvailability {
         let url = format!("{}/{}.bin", server.trim_end_matches('/'), hash);
         debug!("Checking exists: {}", url);
-        if let Ok(resp) = self.http.head(&url).send().await {
-            debug!("  -> status: {}", resp.status());
-            if resp.status().is_success() {
+        match self.http.head(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                debug!("  -> status: {}", status);
+                if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
+                    return BlobAvailability::Missing;
+                }
+                if !status.is_success() {
+                    return BlobAvailability::Unknown;
+                }
+
                 // Verify content-type is binary, not HTML error page
                 if let Some(ct) = resp.headers().get("content-type") {
                     if let Ok(ct_str) = ct.to_str() {
                         if ct_str.starts_with("text/html") {
-                            return false;
+                            return BlobAvailability::Unknown;
                         }
                     }
                 }
@@ -351,14 +373,17 @@ impl BlossomClient {
                 if let Some(cl) = resp.headers().get("content-length") {
                     if let Ok(cl_str) = cl.to_str() {
                         if cl_str == "0" {
-                            return false;
+                            return BlobAvailability::Unknown;
                         }
                     }
                 }
-                return true;
+                BlobAvailability::Present
+            }
+            Err(err) => {
+                debug!("  -> probe failed: {}", err);
+                BlobAvailability::Unknown
             }
         }
-        false
     }
 
     /// Check if server has a tree by sampling hashes (parallel checks)
@@ -368,18 +393,43 @@ impl BlossomClient {
         hashes: &[&str],
         sample_size: usize,
     ) -> bool {
+        self.server_tree_sample_coverage(server, hashes, sample_size)
+            .await
+            == BlobAvailability::Present
+    }
+
+    /// Probe sampled tree coverage on one server.
+    pub async fn server_tree_sample_coverage(
+        &self,
+        server: &str,
+        hashes: &[&str],
+        sample_size: usize,
+    ) -> BlobAvailability {
         use futures::future::join_all;
         if hashes.is_empty() {
-            return false;
+            return BlobAvailability::Missing;
         }
         // Spread samples across the hash list
         let step = (hashes.len() / sample_size.min(hashes.len())).max(1);
         let samples: Vec<_> = hashes.iter().step_by(step).take(sample_size).collect();
         let checks: Vec<_> = samples
             .iter()
-            .map(|h| self.exists_on_server(h, server))
+            .map(|h| self.check_on_server(h, server))
             .collect();
-        join_all(checks).await.iter().all(|&exists| exists)
+        let results = join_all(checks).await;
+        if results
+            .iter()
+            .any(|result| *result == BlobAvailability::Missing)
+        {
+            BlobAvailability::Missing
+        } else if results
+            .iter()
+            .all(|result| *result == BlobAvailability::Present)
+        {
+            BlobAvailability::Present
+        } else {
+            BlobAvailability::Unknown
+        }
     }
 
     /// Upload to all write servers in parallel, returns (hash, success_count)
@@ -871,6 +921,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_on_server_distinguishes_missing_from_unknown() {
+        let mut missing_server = TestUploadServer::new(vec![404]);
+        let mut unknown_server = TestUploadServer::new(vec![503]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+
+        assert_eq!(
+            client.check_on_server("abc123", &missing_server.url).await,
+            BlobAvailability::Missing
+        );
+        assert_eq!(
+            client.check_on_server("abc123", &unknown_server.url).await,
+            BlobAvailability::Unknown
+        );
+
+        missing_server.wait_for_requests().await;
+        unknown_server.wait_for_requests().await;
+    }
+
+    #[tokio::test]
     async fn test_server_has_tree_samples() {
         let keys = Keys::generate();
         let client = BlossomClient::new(keys).with_servers(vec!["https://example.com".to_string()]);
@@ -881,6 +951,21 @@ mod tests {
             .server_has_tree_samples("https://example.com", &hashes, 3)
             .await;
         assert!(!result); // Non-existent hashes
+    }
+
+    #[tokio::test]
+    async fn test_server_tree_sample_coverage_keeps_unknown_separate_from_missing() {
+        let mut server = TestUploadServer::new(vec![200, 503]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let hashes = vec!["hash1", "hash2"];
+
+        let result = client
+            .server_tree_sample_coverage(&server.url, &hashes, 2)
+            .await;
+
+        assert_eq!(result, BlobAvailability::Unknown);
+        server.wait_for_requests().await;
     }
 
     #[tokio::test]

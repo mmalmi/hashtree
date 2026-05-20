@@ -143,5 +143,48 @@ fn test_server_coverage_full_upload() {
         "Push should show blossom server activity"
     );
 
+    // Make one more small change. Server B should have received the new root
+    // from the second push, so this follow-up push must not need another full
+    // upload just to repair the same newly added server.
+    std::fs::write(
+        repo.path().join("another-file.txt"),
+        "Testing repeated server coverage\n",
+    )
+    .expect("Failed to write follow-up file");
+
+    Command::new("git")
+        .args(["add", "another-file.txt"])
+        .current_dir(repo.path())
+        .output()
+        .expect("Failed to git add follow-up");
+
+    Command::new("git")
+        .args(["commit", "-m", "Add follow-up file for coverage test"])
+        .current_dir(repo.path())
+        .stdout(Stdio::null())
+        .output()
+        .expect("Failed to commit follow-up");
+
+    println!("\n=== Third push (should not need repeated full upload) ===");
+    let push3 = Command::new("git")
+        .args(["push", "htree", "master"])
+        .current_dir(repo.path())
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("Failed to push follow-up");
+
+    let stderr3 = String::from_utf8_lossy(&push3.stderr);
+    println!("Third push stderr:\n{}", stderr3);
+
+    if !push3.status.success() && !stderr3.contains("-> master") {
+        panic!("Third push failed: {}", stderr3);
+    }
+
+    assert!(
+        !stderr3.contains("Full upload needed"),
+        "follow-up push should not repeatedly fall back to a full upload:\n{}",
+        stderr3
+    );
+
     println!("\n=== SUCCESS: Server coverage test passed! ===");
 }
