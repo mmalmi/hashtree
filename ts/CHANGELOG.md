@@ -8,6 +8,8 @@ Changes since the previous npm package publish.
 
 - Prepared `@hashtree/index@0.1.9` and `@hashtree/collection@0.2.5` for npm
   publication.
+- Added `prepare` builds so the same package versions can be consumed directly
+  from pinned Git subdirectory dependencies when npm publication is blocked.
 - Added `BTree.countStoredLinks(...)` for no-scan stored link counts and
   `BTree.scanLinks(...)` for explicit full scans. `BTree.countLinks(...)`
   remains the backwards-compatible scanning count.
