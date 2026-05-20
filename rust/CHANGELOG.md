@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.53 - 2026-05-20
+
+Changes since the `0.2.52` release.
+
+### Changed
+
+- Changed `git-remote-htree` repo-tree construction to emit live progress
+  phases and counters while pushes build objects, refs, index entries, and
+  working-tree files, so slow cached-root retries no longer appear stuck at
+  `Building repo tree...`.
+- Replaced the legacy Hashtree WebRTC adapter path with the FIPS transport
+  direction and removed the old WebRTC stack from the Rust/TypeScript surface.
+
 ## 0.2.52 - 2026-05-20
 
 Changes since the `0.2.51` release.
