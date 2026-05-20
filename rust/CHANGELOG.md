@@ -1,9 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.52 - 2026-05-20
+
+Changes since the `0.2.51` release.
+
+### Added
+
+- Added `htree release publish --draft` for publishing versioned release
+  entries without repointing the sibling `latest` pointer.
 
 ### Changed
 
+- Changed `git-remote-htree` pushes so configured write servers act as
+  best-effort replicas; a complete local publish can still succeed when remote
+  Blossom replication is degraded.
 - Changed Rust CID-link B-trees to store subtree link counts on internal
   directory entries, matching the TypeScript counted B-tree root format.
 - Added Rust `BTree::count_stored_links(...)` for no-scan stored counts and
