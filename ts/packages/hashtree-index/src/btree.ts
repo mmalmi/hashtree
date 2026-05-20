@@ -164,14 +164,49 @@ export class BTree {
   }
 
   /**
-   * Count CID links in the tree.
+   * Count CID links by walking the tree.
+   * Uses stored subtree sizes when available, but may scan descendants when
+   * older roots do not carry complete counts.
    */
   async countLinks(root: CID | null): Promise<number> {
+    return await this.scanLinks(root);
+  }
+
+  /**
+   * Count CID links by walking the tree.
+   */
+  async scanLinks(root: CID | null): Promise<number> {
     if (!root) {
       return 0;
     }
 
     return await this.countLinksRecursive(root, createLinkTraversalCache());
+  }
+
+  /**
+   * Read the stored CID-link count from the root node without scanning.
+   * Returns null when the root was built by older code that does not store
+   * complete subtree sizes.
+   */
+  async countStoredLinks(root: CID | null): Promise<number | null> {
+    if (!root) {
+      return 0;
+    }
+
+    const entries = await this.tree.listDirectory(root);
+    if (this.isLeafNode(entries)) {
+      return this.countLinkEntries(entries);
+    }
+
+    let count = 0;
+    for (const entry of entries) {
+      const childCount = this.storedLinkSubtreeCount(entry);
+      if (childCount === null) {
+        return null;
+      }
+      count += childCount;
+    }
+    return count;
   }
 
   /**

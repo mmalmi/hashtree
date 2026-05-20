@@ -288,8 +288,39 @@ describe('BTree', () => {
 
       expect(rootEntries.every((entry) => entry.type === LinkType.Dir && entry.size > 0)).toBe(true);
       expect(rootEntries.reduce((sum, entry) => sum + entry.size, 0)).toBe(entries.length);
+      expect(await btree.countStoredLinks(root)).toBe(entries.length);
       expect(await btree.countLinks(root)).toBe(entries.length);
       expect(await btree.getLinkEntryAt(root, 11)).toEqual(['song-11', entries[11][1]]);
+    });
+
+    it('keeps stored counts separate from scan counts for legacy link roots', async () => {
+      const entries: Array<[string, CID]> = [];
+      for (let index = 0; index < 12; index += 1) {
+        const key = `legacy-${String(index).padStart(2, '0')}`;
+        const { cid } = await tree.putFile(new TextEncoder().encode(key));
+        entries.push([key, cid]);
+      }
+
+      const leafA = (await tree.putDirectory(entries.slice(0, 6).map(([key, cid]) => ({
+        name: key,
+        cid,
+        size: 0,
+        type: LinkType.File,
+      })))).cid;
+      const leafB = (await tree.putDirectory(entries.slice(6).map(([key, cid]) => ({
+        name: key,
+        cid,
+        size: 0,
+        type: LinkType.File,
+      })))).cid;
+      const root = (await tree.putDirectory([
+        { name: 'legacy-00', cid: leafA, size: 0, type: LinkType.Dir },
+        { name: 'legacy-06', cid: leafB, size: 0, type: LinkType.Dir },
+      ])).cid;
+
+      expect(await btree.countStoredLinks(root)).toBeNull();
+      expect(await btree.scanLinks(root)).toBe(entries.length);
+      expect(await btree.countLinks(root)).toBe(entries.length);
     });
   });
 
