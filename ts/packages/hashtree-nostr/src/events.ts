@@ -601,12 +601,7 @@ export class NostrEventStore {
     root: CID | null,
     sourceId: string = DEFAULT_NOSTR_EVENT_COLLECTION_SOURCE_ID,
   ): Promise<CollectionManifest> {
-    const manifest = nostrEventManifestToCollectionManifest(await this.getManifest(root), sourceId);
-    const source = new CollectionSource(this.store, manifest);
-    return {
-      ...manifest,
-      itemCount: await source.count(),
-    };
+    return nostrEventManifestToCollectionManifest(await this.getManifest(root), sourceId);
   }
 
   async getCollectionSource(

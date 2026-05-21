@@ -1,7 +1,7 @@
 //! Mock implementations for testing and simulation
 //!
 //! Provides mock relay transport and peer connection factory that use
-//! in-memory channels instead of real Nostr relays and WebRTC.
+//! in-memory channels instead of real signaling relays and direct links.
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -290,7 +290,7 @@ impl PeerLink for MockDataChannel {
 
 /// Mock peer connection factory
 ///
-/// Creates mock data channels instead of real WebRTC connections.
+/// Creates mock data channels instead of real direct-link connections.
 /// Uses a global registry to connect offer/answer sides.
 pub struct MockConnectionFactory {
     our_peer_id: String,

@@ -1284,58 +1284,41 @@ pub async fn serve_content_or_blob(
         }
     }
 
-    // Not found locally - try querying connected WebRTC peers
+    // Not found locally - try the shared daemon fetch path. This includes
+    // FIPS, legacy mesh peers, and configured Blossom fallback sources.
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
-
-        // Try WebRTC peers first
-        if state.http_webrtc_fetch {
-            if let Some(ref webrtc_state) = state.webrtc_peers {
-                tracing::info!(
-                    "Hash {} not found locally, querying WebRTC peers",
-                    &hash_hex[..16.min(hash_hex.len())]
-                );
-
-                // Query connected mesh peers
-                if let Some((data, peer_id)) = query_webrtc_peers(webrtc_state, &hash_hex).await {
-                    // Cache locally for future requests
-                    let (data, result) =
-                        put_cached_blob_without_blocking_runtime(&state, data).await;
-                    if let Err(e) = result {
-                        tracing::warn!("Failed to cache peer data: {}", e);
-                    } else {
-                        return build_blob_response(
-                            data,
-                            BlobSource::WebRtcPeer { peer_id },
-                            is_localhost,
-                        )
-                        .into_response();
+        if let Ok(hash_bytes) = from_hex(&hash_hex) {
+            match ensure_blob_available(&state, &hash_bytes).await {
+                Ok(true) => match get_blob_without_blocking_runtime(&state, hash_bytes).await {
+                    Ok(Some(data)) => {
+                        return build_blob_response(data, BlobSource::Local, is_localhost)
+                            .into_response();
                     }
-                }
-            }
-        }
-
-        // Try upstream Blossom servers
-        if !state.upstream_blossom.is_empty() {
-            tracing::info!(
-                "Hash {} not found via WebRTC, trying upstream Blossom",
-                &hash_hex[..16.min(hash_hex.len())]
-            );
-
-            if let Some((data, server)) =
-                query_upstream_blossom(&state.upstream_blossom, &hash_hex).await
-            {
-                // Cache locally for future requests
-                let (data, result) = put_cached_blob_without_blocking_runtime(&state, data).await;
-                if let Err(e) = result {
-                    tracing::warn!("Failed to cache upstream data: {}", e);
-                } else {
-                    return build_blob_response(
-                        data,
-                        BlobSource::Upstream { server },
-                        is_localhost,
-                    )
-                    .into_response();
+                    Ok(None) => {}
+                    Err(error) if error == blob_read_busy_error() => {
+                        return Response::builder()
+                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                            .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                            .header("Retry-After", "1")
+                            .body(Body::from("Blob read queue is full"))
+                            .unwrap()
+                            .into_response();
+                    }
+                    Err(error) => {
+                        tracing::warn!("Failed to read fetched blob {}: {}", hash_hex, error);
+                        return Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                            .body(Body::from("Blob read failed"))
+                            .unwrap()
+                            .into_response();
+                    }
+                },
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!("Failed to fetch blob {}: {}", hash_hex, error);
                 }
             }
         }

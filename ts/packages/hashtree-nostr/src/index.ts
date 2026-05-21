@@ -1,81 +1,20 @@
 /**
  * @hashtree/nostr - Nostr integration for hashtree
  *
- * Provides WebRTC P2P storage and Nostr ref resolver
+ * Provides Nostr ref resolving and event storage. Transport-neutral mesh
+ * primitives are re-exported for compatibility; blob transport now lives in
+ * @hashtree/fips-transport so FIPS owns peer discovery and WebRTC/UDP links.
  */
 
-// WebRTC P2P store
-export {
-  WebRTCStore,
-  DEFAULT_RELAYS,
-  Peer,
-  PeerSelector,
-  PeerId,
-  generateUuid,
-  MAX_HTL,
-  MSG_TYPE_REQUEST,
-  MSG_TYPE_RESPONSE,
-  MSG_TYPE_PUBSUB_INTEREST,
-  MSG_TYPE_PUBSUB_FRAME,
-  MSG_TYPE_PUBSUB_INVENTORY,
-  MSG_TYPE_PUBSUB_WANT,
-  FRAGMENT_SIZE,
-  // Protocol functions
-  encodeRequest,
-  encodeResponse,
-  encodePubsubInterest,
-  encodePubsubFrame,
-  encodePubsubInventory,
-  encodePubsubWant,
-  parseMessage,
-  createRequest,
-  createResponse,
-  createFragmentResponse,
-  createPubsubInterest,
-  createPubsubFrame,
-  createPubsubInventory,
-  createPubsubWant,
-  hashToKey,
-  verifyHash,
-  generatePeerHTLConfig,
-  decrementHTLWithPolicy,
-  decrementHTL,
-  shouldForwardHTL,
-  peerPrincipal,
-  normalizeDispatchConfig,
-  buildHedgedWavePlan,
-  syncSelectorPeers,
-  shouldForward,
-  type SignalingMessage,
-  type WebRTCStoreConfig,
-  type PeerStatus,
-  type WebRTCStoreEvent,
-  type WebRTCStoreEventHandler,
-  type EventSigner,
-  type EventEncrypter,
-  type EventDecrypter,
-  type GiftWrapper,
-  type GiftUnwrapper,
-  type SignedEvent,
-  type PeerPool,
-  type PeerClassifier,
-  type PoolConfig,
-  type SelectionStrategy,
-  type RequestDispatchConfig,
-  type PersistedPeerMetadata,
-  type PeerMetadataSnapshot,
-  type MeshStats,
-  type WebRTCStats,
-  type BandwidthSample,
-  type DataRequest,
-  type DataResponse,
-  type PubsubInterest,
-  type PubsubFrame,
-  type PubsubInventory,
-  type PubsubWant,
-  type PeerHTLConfig,
-  type PendingRequest,
-} from './webrtc/index.js';
+export const DEFAULT_RELAYS: string[] = [
+  'wss://relay.damus.io',
+  'wss://relay.primal.net',
+  'wss://relay.nostr.band',
+  'wss://temp.iris.to',
+  'wss://relay.snort.social',
+];
+
+export * from '@hashtree/mesh';
 
 // Ref resolvers
 export {

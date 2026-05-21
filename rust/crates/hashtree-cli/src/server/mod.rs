@@ -139,6 +139,8 @@ impl HashtreeServer {
                 hash_get_enabled: true,
                 http_webrtc_fetch: true,
                 webrtc_peers: None,
+                fips_transport: None,
+                fetch_from_fips_peers: true,
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
                 public_writes: true,               // Allow anyone with valid Nostr auth by default
@@ -210,6 +212,19 @@ impl HashtreeServer {
 
     pub fn with_http_webrtc_fetch(mut self, enabled: bool) -> Self {
         self.state.http_webrtc_fetch = enabled;
+        self
+    }
+
+    pub fn with_fetch_from_fips_peers(mut self, enabled: bool) -> Self {
+        self.state.fetch_from_fips_peers = enabled;
+        self
+    }
+
+    pub fn with_fips_transport(
+        mut self,
+        transport: Arc<crate::fips_transport::DaemonFipsTransport>,
+    ) -> Self {
+        self.state.fips_transport = Some(transport);
         self
     }
 

@@ -9,24 +9,24 @@ Hashtree daemon and CLI - content-addressed storage with P2P sync.
 cargo install hashtree-cli
 
 # Add mount support explicitly when you want it
-cargo install hashtree-cli --no-default-features --features p2p,lmdb,fuse
+cargo install hashtree-cli --no-default-features --features lmdb,fuse
 
-# Without social graph
-cargo install hashtree-cli --no-default-features --features p2p
-
-# Minimal install without P2P or social graph
+# Without default LMDB storage
 cargo install hashtree-cli --no-default-features
+
+# Minimal install with LMDB storage
+cargo install hashtree-cli --no-default-features --features lmdb
 
 # Cashu wallet helper for `htree cashu ...`
 cargo install hashtree-cashu-cli
 ```
 
-For cargo installs, `fuse` is opt-in. Building with `--features p2p,lmdb,fuse` needs platform FUSE headers/libs:
+For cargo installs, `fuse` is opt-in. Building with `--features lmdb,fuse` needs platform FUSE headers/libs:
 
 - Linux: typically `pkg-config` plus `libfuse3-dev` (or the distro equivalent).
 - macOS: install macFUSE first.
 
-Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Build from source with `--no-default-features --features p2p,lmdb,fuse` if you need `htree mount` on macOS. Linux release binaries keep FUSE mount support, and Windows builds do not ship it.
+Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Build from source with `--no-default-features --features lmdb,fuse` if you need `htree mount` on macOS. Linux release binaries keep FUSE mount support, and Windows builds do not ship it.
 
 ## Commands
 

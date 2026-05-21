@@ -24,7 +24,7 @@ echo '==> Installing build deps...'
 apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev clang lld file ca-certificates >/dev/null
 
 echo '==> Installing htree CLI ${HTREE_VERSION} from crates.io (this is the slow step)...'
-cargo install --quiet --root /usr/local --locked --no-default-features --features p2p,cashu,fuse hashtree-cli --version ${HTREE_VERSION} 2>&1 | tail -5 || \
+cargo install --quiet --root /usr/local --locked --no-default-features --features cashu,fuse hashtree-cli --version ${HTREE_VERSION} 2>&1 | tail -5 || \
   cargo install --quiet --root /usr/local hashtree-cli --version ${HTREE_VERSION} 2>&1 | tail -5
 
 DEST=/tmp/MyApp.AppImage

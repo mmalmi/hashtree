@@ -91,8 +91,6 @@ impl MulticastNostrBus {
             .with_context(|| format!("invalid multicast group {}", config.group))?;
         let std_socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         std_socket.set_reuse_address(true)?;
-        #[cfg(unix)]
-        std_socket.set_reuse_port(true)?;
         std_socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.port).into())?;
         std_socket.set_multicast_loop_v4(true)?;
         std_socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;

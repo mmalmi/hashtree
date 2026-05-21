@@ -50,7 +50,7 @@
   <rect x="50" y="668" width="800" height="74" class="layer xport"/>
   <text x="75" y="701" class="name">Backing Media and Stores</text>
   <text x="825" y="701" class="scope" text-anchor="end">(local, peer-to-peer, server)</text>
-  <text x="75" y="723" class="desc">Nostr relays for publish/resolve + WebRTC signaling, local LMDB, Blossom, S3, memory</text>
+  <text x="75" y="723" class="desc">Nostr relays for publish/resolve + FIPS discovery, local LMDB, Blossom, S3, memory</text>
 
   <text x="450" y="790" text-anchor="middle" class="caption">hashtree layer stack - apps and adapters on top of the API, optional mutable names above verified content, swappable transport underneath</text>
 </svg>

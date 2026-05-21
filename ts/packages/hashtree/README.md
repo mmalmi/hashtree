@@ -38,7 +38,7 @@ const data = await tree.readFile(cid);
 - `BlossomStore` - Remote Blossom server
 - `FallbackStore` - Chain multiple stores
 
-See [@hashtree/dexie](https://npmjs.com/package/@hashtree/dexie) for IndexedDB and [@hashtree/nostr](https://npmjs.com/package/@hashtree/nostr) for WebRTC P2P.
+See [@hashtree/dexie](https://npmjs.com/package/@hashtree/dexie) for IndexedDB and [@hashtree/fips-transport](https://npmjs.com/package/@hashtree/fips-transport) for P2P blob transport.
 
 ## License
 

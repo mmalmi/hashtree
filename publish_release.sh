@@ -20,6 +20,7 @@ All other flags are forwarded to rust/scripts/release_to_htree.sh, including:
   --cargo-publish
   --release-stage-dir <dir>
   --output-dir <dir>
+  --fips-dir <dir>
   --target-dir <dir>
   --targets <csv>
   --windows-artifacts-dir <dir>

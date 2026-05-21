@@ -56,7 +56,7 @@ fn args_to_strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
 fn test_build_daemon_args_with_overrides() {
     let data_dir = PathBuf::from("data-dir");
     let args = args_to_strings(build_daemon_args(
-        "127.0.0.1:8080",
+        Some("127.0.0.1:8080"),
         Some("wss://relay.example"),
         Some(ServerMode::Assist),
         Some(&data_dir),
@@ -79,7 +79,13 @@ fn test_build_daemon_args_with_overrides() {
 
 #[test]
 fn test_build_daemon_args_minimal() {
-    let args = args_to_strings(build_daemon_args("0.0.0.0:8080", None, None, None));
+    let args = args_to_strings(build_daemon_args(None, None, None, None));
+    assert!(args.is_empty());
+}
+
+#[test]
+fn test_build_daemon_args_with_addr_override() {
+    let args = args_to_strings(build_daemon_args(Some("0.0.0.0:8080"), None, None, None));
     assert_eq!(args, vec!["--addr", "0.0.0.0:8080"]);
 }
 
@@ -106,7 +112,7 @@ fn test_daemon_launch_state_roundtrip() {
     let path = temp_dir.path().join("htree.pid");
     let state_path = daemon_state_file_path(&path);
     let state = DaemonLaunchState {
-        addr: "127.0.0.1:18080".to_string(),
+        addr: Some("127.0.0.1:18080".to_string()),
         relays: Some("wss://relay.example,wss://relay.two".to_string()),
         mode: Some(ServerMode::Assist),
         data_dir: Some(PathBuf::from("/tmp/htree-data")),
@@ -576,13 +582,48 @@ fn test_cli_parses_release_publish_command() {
                     tree_name,
                     version_path,
                     cid,
+                    draft,
                     local,
                 },
         } => {
             assert_eq!(tree_name, "releases/hashtree");
             assert_eq!(version_path, "releases/v0.2.3");
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
+            assert!(!draft);
             assert!(local);
+        }
+        _ => panic!("expected release publish command"),
+    }
+}
+
+#[test]
+fn test_cli_parses_release_publish_draft_flag() {
+    let cli = Cli::parse_from([
+        "htree",
+        "release",
+        "publish",
+        "releases/hashtree",
+        "releases/v0.2.4-rc.1",
+        "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh",
+        "--draft",
+    ]);
+
+    match cli.command {
+        Commands::Release {
+            command:
+                ReleaseCommands::Publish {
+                    tree_name,
+                    version_path,
+                    cid,
+                    draft,
+                    local,
+                },
+        } => {
+            assert_eq!(tree_name, "releases/hashtree");
+            assert_eq!(version_path, "releases/v0.2.4-rc.1");
+            assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
+            assert!(draft);
+            assert!(!local);
         }
         _ => panic!("expected release publish command"),
     }

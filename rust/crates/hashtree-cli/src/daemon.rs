@@ -573,6 +573,7 @@ impl EmbeddedPeerRouterController {
 
 pub struct EmbeddedDaemonController {
     server_controller: Arc<EmbeddedServerController>,
+    fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
     #[cfg(feature = "p2p")]
     peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
     background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
@@ -582,11 +583,13 @@ impl EmbeddedDaemonController {
     #[cfg(feature = "p2p")]
     pub fn new(
         server_controller: Arc<EmbeddedServerController>,
+        fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
         peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
         background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
     ) -> Self {
         Self {
             server_controller,
+            fips_handle,
             #[cfg(feature = "p2p")]
             peer_router_controller,
             background_services_controller,
@@ -596,16 +599,21 @@ impl EmbeddedDaemonController {
     #[cfg(not(feature = "p2p"))]
     pub fn new(
         server_controller: Arc<EmbeddedServerController>,
+        fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
         background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
     ) -> Self {
         Self {
             server_controller,
+            fips_handle,
             background_services_controller,
         }
     }
 
     pub async fn shutdown(&self) {
         self.server_controller.shutdown().await;
+        if let Some(handle) = self.fips_handle.as_ref() {
+            handle.shutdown();
+        }
         if let Some(controller) = self.background_services_controller.as_ref() {
             controller.shutdown().await;
         }
@@ -831,10 +839,15 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
 
     let upstream_blossom = config.blossom.all_read_servers();
     let active_nostr_relays = config.nostr.active_relays();
+    let fips_handle =
+        crate::fips_transport::start_daemon_fips_transport(&config, &keys, Arc::clone(&store))
+            .await?
+            .map(Arc::new);
 
     let mut server = HashtreeServer::new(Arc::clone(&store), opts.bind_address.clone())
         .with_server_mode(config.server.mode)
         .with_hash_get_enabled(config.server.mode.hash_get_enabled())
+        .with_fetch_from_fips_peers(config.server.fetch_from_fips_peers)
         .with_allowed_pubkeys(allowed_pubkeys.clone())
         .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
         .with_public_writes(config.server.public_writes)
@@ -856,6 +869,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         if let Some(ref state) = webrtc_state {
             server = server.with_webrtc_peers(state.clone());
         }
+    }
+    if let Some(ref fips_handle) = fips_handle {
+        server = server.with_fips_transport(fips_handle.transport.clone());
     }
 
     if let Some(extra) = opts.extra_routes {
@@ -892,12 +908,14 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     #[cfg(feature = "p2p")]
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
+        fips_handle.clone(),
         peer_router_controller.clone(),
         Some(background_services_controller.clone()),
     ));
     #[cfg(not(feature = "p2p"))]
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
+        fips_handle.clone(),
         Some(background_services_controller.clone()),
     ));
 

@@ -27,9 +27,6 @@ use storage_support::{build_repo_viewer_url, queue_hash_if_new};
 
 /// Threshold for showing detailed progress (3 seconds)
 const VERBOSE_THRESHOLD: Duration = Duration::from_secs(3);
-/// Number of old-tree hashes to probe per server before deciding whether an
-/// incremental push can safely skip unchanged content.
-const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 
 use crate::nostr_client::NostrClient;
 use hashtree_config::Config;

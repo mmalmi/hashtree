@@ -1,13 +1,14 @@
-//! Server coverage tests
+//! Server coverage tests.
 //!
-//! Tests that adding a new blossom server triggers full upload to it.
+//! Tests that adding an optional Blossom write server does not make pushes
+//! repeatedly repair old history.
 
 mod common;
 
 use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
 use std::process::{Command, Stdio};
 
-/// Test that adding a new blossom server triggers full upload to it
+/// Test that adding a new Blossom write server does not force repeated full uploads.
 #[test]
 fn test_server_coverage_full_upload() {
     if skip_if_no_binary() {
@@ -37,7 +38,7 @@ fn test_server_coverage_full_upload() {
     };
     println!("Started blossom server B at: {}", server_b.base_url());
 
-    println!("\n=== Server Coverage Test (Full Upload to New Server) ===\n");
+    println!("\n=== Server Coverage Test (Optional New Server) ===\n");
 
     // Create test environment with ONLY server A initially
     let test_env = TestEnv::new(Some(&server_a.base_url()), Some(&relay.url()));
@@ -97,8 +98,8 @@ fn test_server_coverage_full_upload() {
         .output()
         .expect("Failed to commit");
 
-    // Second push - should detect server B needs full upload
-    println!("\n=== Second push (should detect server B needs full upload) ===");
+    // Second push should keep using the old-tree diff even though server B is new.
+    println!("\n=== Second push (should keep diffing with optional server B) ===");
     let push2 = Command::new("git")
         .args(["push", "htree", "master"])
         .current_dir(repo.path())
@@ -113,9 +114,6 @@ fn test_server_coverage_full_upload() {
         panic!("Second push failed: {}", stderr2);
     }
 
-    // Verify that either:
-    // 1. Full upload was triggered for server B ("Full upload needed")
-    // 2. Or the output shows it's uploading to both servers
     let full_upload_detected = stderr2.contains("Full upload needed")
         || stderr2.contains("not have old tree")
         || stderr2.contains("full upload");
@@ -128,6 +126,11 @@ fn test_server_coverage_full_upload() {
         full_upload_detected
     );
     println!("Diff optimization for existing server: {}", diff_used);
+    assert!(
+        !full_upload_detected,
+        "optional write server should not force a full upload:\n{}",
+        stderr2
+    );
 
     // At minimum, the push should succeed and show upload activity
     // Server URLs in output have http:// stripped, so check for the host:port part
@@ -141,6 +144,48 @@ fn test_server_coverage_full_upload() {
             || stderr2.contains("Blossom")
             || stderr2.contains("Uploading"),
         "Push should show blossom server activity"
+    );
+
+    // Make one more small change. Server B is optional, so this follow-up push
+    // must not need a full upload just to repair the same newly added server.
+    std::fs::write(
+        repo.path().join("another-file.txt"),
+        "Testing repeated server coverage\n",
+    )
+    .expect("Failed to write follow-up file");
+
+    Command::new("git")
+        .args(["add", "another-file.txt"])
+        .current_dir(repo.path())
+        .output()
+        .expect("Failed to git add follow-up");
+
+    Command::new("git")
+        .args(["commit", "-m", "Add follow-up file for coverage test"])
+        .current_dir(repo.path())
+        .stdout(Stdio::null())
+        .output()
+        .expect("Failed to commit follow-up");
+
+    println!("\n=== Third push (should not need repeated full upload) ===");
+    let push3 = Command::new("git")
+        .args(["push", "htree", "master"])
+        .current_dir(repo.path())
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .expect("Failed to push follow-up");
+
+    let stderr3 = String::from_utf8_lossy(&push3.stderr);
+    println!("Third push stderr:\n{}", stderr3);
+
+    if !push3.status.success() && !stderr3.contains("-> master") {
+        panic!("Third push failed: {}", stderr3);
+    }
+
+    assert!(
+        !stderr3.contains("Full upload needed"),
+        "follow-up push should not repeatedly fall back to a full upload:\n{}",
+        stderr3
     );
 
     println!("\n=== SUCCESS: Server coverage test passed! ===");

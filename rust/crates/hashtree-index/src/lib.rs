@@ -35,6 +35,8 @@ struct SplitResult {
     right: Cid,
     left_first_key: String,
     right_first_key: String,
+    left_count: u64,
+    right_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ pub struct BTree<S: Store> {
 struct BuiltNode {
     first_key: String,
     cid: Cid,
+    count: u64,
 }
 
 impl<S: Store> BTree<S> {
@@ -184,6 +187,46 @@ impl<S: Store> BTree<S> {
         };
         self.range_link_traverse_limited(root.clone(), None, None, limit)
             .await
+    }
+
+    /// Count CID links by walking the tree.
+    ///
+    /// Uses stored subtree sizes when available, but scans descendants when
+    /// older roots do not carry complete counts.
+    pub async fn count_links(&self, root: Option<&Cid>) -> Result<u64, BTreeError> {
+        self.scan_links(root).await
+    }
+
+    /// Count CID links by explicitly walking the tree.
+    pub async fn scan_links(&self, root: Option<&Cid>) -> Result<u64, BTreeError> {
+        let Some(root) = root else {
+            return Ok(0);
+        };
+        self.count_links_recursive(root.clone()).await
+    }
+
+    /// Read the stored CID-link count from the root node without scanning.
+    ///
+    /// Returns `Ok(None)` when the root was built by older code that does not
+    /// store complete subtree sizes.
+    pub async fn count_stored_links(&self, root: Option<&Cid>) -> Result<Option<u64>, BTreeError> {
+        let Some(root) = root else {
+            return Ok(Some(0));
+        };
+
+        let entries = self.tree.list_directory(root).await?;
+        if is_leaf_node(&entries) {
+            return Ok(Some(count_link_entries(&entries)));
+        }
+
+        let mut count = 0;
+        for entry in &entries {
+            let Some(child_count) = stored_link_subtree_count(entry) else {
+                return Ok(None);
+            };
+            count += child_count;
+        }
+        Ok(Some(count))
     }
 
     pub async fn range(
@@ -317,6 +360,7 @@ impl<S: Store> BTree<S> {
             level.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
+                count: 0,
             });
         }
 
@@ -327,6 +371,7 @@ impl<S: Store> BTree<S> {
                 next_level.push(BuiltNode {
                     first_key: chunk[0].first_key.clone(),
                     cid,
+                    count: 0,
                 });
             }
             level = next_level;
@@ -363,6 +408,7 @@ impl<S: Store> BTree<S> {
             level.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
+                count: chunk.len() as u64,
             });
         }
 
@@ -373,6 +419,7 @@ impl<S: Store> BTree<S> {
                 next_level.push(BuiltNode {
                     first_key: chunk[0].first_key.clone(),
                     cid,
+                    count: chunk.iter().map(|child| child.count).sum(),
                 });
             }
             level = next_level;
@@ -387,8 +434,10 @@ impl<S: Store> BTree<S> {
                 .create_internal_root(
                     &split.left_first_key,
                     &split.left,
+                    split.left_count,
                     &split.right_first_key,
                     &split.right,
+                    split.right_count,
                 )
                 .await;
         }
@@ -479,12 +528,14 @@ impl<S: Store> BTree<S> {
             if new_entries.len() > self.max_keys {
                 return Ok(InsertResult {
                     cid: new_node,
+                    count: count_link_entries_or_subtrees(self, &new_entries).await?,
                     split: Some(self.split_leaf(new_entries).await?),
                 });
             }
 
             Ok(InsertResult {
                 cid: new_node,
+                count: count_link_entries_or_subtrees(self, &new_entries).await?,
                 split: None,
             })
         })
@@ -505,7 +556,14 @@ impl<S: Store> BTree<S> {
 
             let mut new_node = self
                 .tree
-                .set_entry(&node, &[], &child_name, &result.cid, 0, LinkType::Dir)
+                .set_entry(
+                    &node,
+                    &[],
+                    &child_name,
+                    &result.cid,
+                    result.count,
+                    LinkType::Dir,
+                )
                 .await?;
 
             if let Some(split) = result.split {
@@ -517,7 +575,7 @@ impl<S: Store> BTree<S> {
                         &[],
                         &escape_key(&split.left_first_key),
                         &split.left,
-                        0,
+                        split.left_count,
                         LinkType::Dir,
                     )
                     .await?;
@@ -528,7 +586,7 @@ impl<S: Store> BTree<S> {
                         &[],
                         &escape_key(&split.right_first_key),
                         &split.right,
-                        0,
+                        split.right_count,
                         LinkType::Dir,
                     )
                     .await?;
@@ -538,12 +596,14 @@ impl<S: Store> BTree<S> {
             if new_entries.len() > self.max_keys {
                 return Ok(InsertResult {
                     cid: new_node,
+                    count: count_link_entries_or_subtrees(self, &new_entries).await?,
                     split: Some(self.split_internal(new_entries).await?),
                 });
             }
 
             Ok(InsertResult {
                 cid: new_node,
+                count: count_link_entries_or_subtrees(self, &new_entries).await?,
                 split: None,
             })
         })
@@ -563,6 +623,8 @@ impl<S: Store> BTree<S> {
             right,
             left_first_key: unescape_key(&left_entries[0].name),
             right_first_key: unescape_key(&right_entries[0].name),
+            left_count: count_link_entries(left_entries),
+            right_count: count_link_entries(right_entries),
         })
     }
 
@@ -580,6 +642,8 @@ impl<S: Store> BTree<S> {
             right,
             left_first_key: unescape_key(&left_entries[0].name),
             right_first_key: unescape_key(&right_entries[0].name),
+            left_count: count_link_entries_or_subtrees(self, left_entries).await?,
+            right_count: count_link_entries_or_subtrees(self, right_entries).await?,
         })
     }
 
@@ -611,6 +675,7 @@ impl<S: Store> BTree<S> {
             .iter()
             .map(|child| {
                 DirEntry::from_cid(escape_key(&child.first_key), &child.cid)
+                    .with_size(child.count)
                     .with_link_type(LinkType::Dir)
             })
             .collect();
@@ -621,12 +686,18 @@ impl<S: Store> BTree<S> {
         &self,
         left_key: &str,
         left: &Cid,
+        left_count: u64,
         right_key: &str,
         right: &Cid,
+        right_count: u64,
     ) -> Result<Cid, BTreeError> {
         let entries = vec![
-            DirEntry::from_cid(escape_key(left_key), left).with_link_type(LinkType::Dir),
-            DirEntry::from_cid(escape_key(right_key), right).with_link_type(LinkType::Dir),
+            DirEntry::from_cid(escape_key(left_key), left)
+                .with_size(left_count)
+                .with_link_type(LinkType::Dir),
+            DirEntry::from_cid(escape_key(right_key), right)
+                .with_size(right_count)
+                .with_link_type(LinkType::Dir),
         ];
         Ok(self.tree.put_directory(entries).await?)
     }
@@ -679,7 +750,18 @@ impl<S: Store> BTree<S> {
 
             let updated = self
                 .tree
-                .set_entry(&root, &[], &child_name, &new_child, 0, LinkType::Dir)
+                .set_entry(
+                    &root,
+                    &[],
+                    &child_name,
+                    &new_child,
+                    count_link_entries_or_subtrees(
+                        self,
+                        &self.tree.list_directory(&new_child).await?,
+                    )
+                    .await?,
+                    LinkType::Dir,
+                )
                 .await?;
             Ok(Some(updated))
         })
@@ -911,11 +993,19 @@ impl<S: Store> BTree<S> {
             Ok(out)
         })
     }
+
+    fn count_links_recursive<'a>(&'a self, node: Cid) -> BTreeFuture<'a, u64> {
+        Box::pin(async move {
+            let entries = self.tree.list_directory(&node).await?;
+            count_link_entries_or_subtrees(self, &entries).await
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 struct InsertResult {
     cid: Cid,
+    count: u64,
     split: Option<SplitResult>,
 }
 
@@ -990,4 +1080,36 @@ fn tree_entry_to_dir_entry(entry: TreeEntry) -> DirEntry {
         out = out.with_meta(meta);
     }
     out
+}
+
+fn count_link_entries(entries: &[TreeEntry]) -> u64 {
+    entries
+        .iter()
+        .filter(|entry| entry.link_type == LinkType::File)
+        .count() as u64
+}
+
+fn stored_link_subtree_count(entry: &TreeEntry) -> Option<u64> {
+    if entry.link_type != LinkType::Dir || entry.size == 0 {
+        return None;
+    }
+    Some(entry.size)
+}
+
+async fn count_link_entries_or_subtrees<S: Store>(
+    btree: &BTree<S>,
+    entries: &[TreeEntry],
+) -> Result<u64, BTreeError> {
+    if is_leaf_node(entries) {
+        return Ok(count_link_entries(entries));
+    }
+
+    let mut count = 0;
+    for entry in entries {
+        count += match stored_link_subtree_count(entry) {
+            Some(child_count) => child_count,
+            None => btree.count_links_recursive(entry_cid(entry)).await?,
+        };
+    }
+    Ok(count)
 }

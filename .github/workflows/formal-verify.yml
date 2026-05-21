@@ -178,8 +178,8 @@ jobs:
           path: rust/target/debug/deps/
           retention-days: 7
 
-  webrtc-formal:
-    name: WebRTC Formal
+  mesh-formal:
+    name: Mesh Formal
     runs-on: ubuntu-latest
     continue-on-error: true
     defaults:
@@ -201,67 +201,28 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/target/
-          key: ${{ runner.os }}-webrtc-formal-${{ hashFiles('rust/Cargo.lock') }}
+          key: ${{ runner.os }}-mesh-formal-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-webrtc-formal-
+            ${{ runner.os }}-mesh-formal-
 
-      - name: Run webrtc formal integration tests
-        run: cargo test -p hashtree-network --test formal_webrtc_props -- --nocapture
+      - name: Run mesh formal integration tests
+        run: cargo test -p hashtree-network --test formal_mesh_props -- --nocapture
 
-      - name: Run webrtc fragment reassembly tests
-        run: cargo test -p hashtree-network fragment_reassembly -- --nocapture
+      - name: Run mesh validation tests
+        run: |
+          cargo test -p hashtree-network test_mesh_frame -- --nocapture
+          cargo test -p hashtree-network test_timed_seen_set -- --nocapture
 
-      - name: Upload webrtc formal artifacts
+      - name: Upload mesh formal artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: webrtc-formal-artifacts
+          name: mesh-formal-artifacts
           path: rust/target/debug/deps/
           retention-days: 7
 
-  webrtc-cli-formal:
-    name: WebRTC CLI Formal
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-webrtc-cli-formal-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-webrtc-cli-formal-
-
-      - name: Run hashtree-cli formal unit tests
-        run: cargo test -p hashtree-cli test_formal_ -- --nocapture
-
-      - name: Run relayless chain integration proof
-        run: cargo test -p hashtree-cli --test two_instances test_three_peers_chain_bootstrap_then_ac_connect_without_relay -- --nocapture
-
-      - name: Upload webrtc cli formal artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: webrtc-cli-formal-artifacts
-          path: rust/target/debug/deps/
-          retention-days: 7
-
-  ts-webrtc-formal:
-    name: TS WebRTC Formal
+  ts-mesh-formal:
+    name: TS Mesh Formal
     runs-on: ubuntu-latest
     continue-on-error: true
     defaults:

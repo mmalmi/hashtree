@@ -1,7 +1,7 @@
 # hashtree-network
 
 Shared mesh networking primitives for hashtree: routing, signaling, negotiated
-peer links, and routed store logic.
+peer links, routed store logic, and simulation support.
 
 The core is transport-generic:
 
@@ -10,9 +10,9 @@ The core is transport-generic:
 - `MeshRouter` coordinates peer discovery plus negotiated link setup
 - `MeshStoreCore` runs routed retrieval over any local `Store`
 
-The default production composition uses Nostr relays for signaling and WebRTC
-data channels for direct links, but the same router/store core also powers
-simulation and can support nearby transports such as Bluetooth.
+Production transport crates compose this core with their own peerfinding and
+byte links. The same router/store core powers simulation and can support FIPS,
+local mocks, nearby transports, or any other `PeerLinkFactory`.
 
 ## Architecture
 
@@ -22,6 +22,5 @@ simulation and can support nearby transports such as Bluetooth.
 
 ## Usage
 
-`hashtree-cli` and simulation both build on this crate. The production
-`MeshStore` wrapper is intentionally thin and just wires the default Nostr +
-WebRTC transport pair into the shared core.
+Simulation builds on this crate directly. Native production networking should
+compose the shared core from a transport crate such as `hashtree-fips-transport`.

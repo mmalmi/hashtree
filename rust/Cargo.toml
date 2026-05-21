@@ -4,7 +4,7 @@ exclude = ["vendor/fuser"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.50"
+version = "0.2.54"
 edition = "2021"
 license = "MIT"
 repository = "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree"
@@ -22,8 +22,7 @@ async-trait = "0.1"
 thiserror = "1.0"
 semver = "1"
 
-# WebRTC transport
-webrtc = "0.11"
+# P2P/discovery support
 nostr-sdk = { version = "0.35", default-features = false, features = ["nip44", "nip59"] }
 tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
 futures = "0.3"
@@ -35,13 +34,14 @@ hashtree-index = { version = "0.2.43", path = "crates/hashtree-index" }
 hashtree-collection = { version = "0.2.43", path = "crates/hashtree-collection" }
 hashtree-lmdb = { version = "0.2.47", path = "crates/hashtree-lmdb" }
 hashtree-s3 = { version = "0.2.43", path = "crates/hashtree-s3" }
-hashtree-blossom = { version = "0.2.43", path = "crates/hashtree-blossom" }
+hashtree-blossom = { version = "0.2.54", path = "crates/hashtree-blossom" }
 hashtree-sim = { version = "0.2.43", path = "crates/hashtree-sim" }
 hashtree-resolver = { version = "0.2.43", path = "crates/hashtree-resolver" }
 hashtree-config = { version = "0.2.43", path = "crates/hashtree-config" }
 hashtree-fs = { version = "0.2.43", path = "crates/hashtree-fs" }
 hashtree-nostr = { version = "0.2.43", path = "crates/hashtree-nostr" }
 hashtree-network = { version = "0.2.50", path = "crates/hashtree-network" }
+hashtree-fips-transport = { version = "0.2.54", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.2.47", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.2.43", path = "crates/cashu-service", default-features = false }
 

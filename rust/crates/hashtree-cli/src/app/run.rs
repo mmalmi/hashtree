@@ -296,7 +296,7 @@ pub(crate) async fn run() -> Result<()> {
         } => {
             if daemon && std::env::var_os("HTREE_DAEMONIZED").is_none() {
                 spawn_daemon(
-                    &addr,
+                    addr.as_deref(),
                     relays_override.as_deref(),
                     mode_override.map(Into::into),
                     cli.data_dir.clone(),
@@ -321,7 +321,14 @@ pub(crate) async fn run() -> Result<()> {
                 config.server.mode = mode.into();
                 println!("Using mode from CLI: {}", config.server.mode.as_str());
             }
-            config.server.bind_address = addr.clone();
+            if let Some(addr) = addr.as_deref() {
+                config.server.bind_address = addr.to_string();
+                println!(
+                    "Using bind address from CLI: {}",
+                    config.server.bind_address
+                );
+            }
+            let bind_address = config.server.bind_address.clone();
 
             // Use CLI data_dir if provided, otherwise use config's data_dir
             let data_dir = cli
@@ -590,12 +597,19 @@ pub(crate) async fn run() -> Result<()> {
             let upstream_blossom = config.blossom.all_read_servers();
             let active_nostr_relays = config.nostr.active_relays();
             let active_nostr_relay_count = active_nostr_relays.len();
+            let fips_handle = hashtree_cli::fips_transport::start_daemon_fips_transport(
+                &config,
+                &keys,
+                Arc::clone(&store),
+            )
+            .await?;
 
             // Set up server with allowed pubkeys for blossom write access
-            let mut server = HashtreeServer::new(Arc::clone(&store), addr.clone())
+            let mut server = HashtreeServer::new(Arc::clone(&store), bind_address.clone())
                 .with_server_mode(config.server.mode)
                 .with_hash_get_enabled(config.server.mode.hash_get_enabled())
                 .with_http_webrtc_fetch(config.server.http_webrtc_fetch)
+                .with_fetch_from_fips_peers(config.server.fetch_from_fips_peers)
                 .with_allowed_pubkeys(allowed_pubkeys.clone())
                 .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
                 .with_public_writes(config.server.public_writes)
@@ -621,6 +635,9 @@ pub(crate) async fn run() -> Result<()> {
             if let Some(ref webrtc_state) = webrtc_state {
                 server = server.with_webrtc_peers(webrtc_state.clone());
             }
+            if let Some(ref fips_handle) = fips_handle {
+                server = server.with_fips_transport(fips_handle.transport.clone());
+            }
 
             let background_services_controller = Arc::new(
                 hashtree_cli::daemon::EmbeddedBackgroundServicesController::new(
@@ -635,7 +652,7 @@ pub(crate) async fn run() -> Result<()> {
             );
 
             // Print startup info
-            println!("Starting hashtree daemon on {}", addr);
+            println!("Starting hashtree daemon on {}", bind_address);
             println!("Data directory: {}", data_dir.display());
             if was_generated {
                 println!("Identity: {} (new)", npub);
@@ -661,7 +678,26 @@ pub(crate) async fn run() -> Result<()> {
                 println!("Public writes: enabled");
             }
             println!("Relays: {} configured", active_nostr_relay_count);
-            println!("Git remote: http://{}/git/<pubkey>/<repo>", addr);
+            if let Some(ref fips_handle) = fips_handle {
+                println!(
+                    "FIPS: enabled (scope {}, endpoint {}, UDP {}, WebRTC {})",
+                    fips_handle.discovery_scope,
+                    fips_handle.endpoint_npub,
+                    if config.server.enable_fips_udp {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    if config.server.enable_fips_webrtc {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            } else if config.server.enable_fips {
+                println!("FIPS: disabled in this server mode");
+            }
+            println!("Git remote: http://{}/git/<pubkey>/<repo>", bind_address);
             #[cfg(feature = "p2p")]
             if let Some(ref handle) = stun_handle {
                 println!("STUN server: {}", handle.addr);
@@ -716,16 +752,16 @@ pub(crate) async fn run() -> Result<()> {
             if config.server.enable_auth {
                 let (username, password) = ensure_auth_cookie()?;
                 println!();
-                println!("Web UI: http://{}/#{}:{}", addr, username, password);
+                println!("Web UI: http://{}/#{}:{}", bind_address, username, password);
                 server = server.with_auth(username, password);
             } else {
-                println!("Web UI: http://{}", addr);
+                println!("Web UI: http://{}", bind_address);
                 println!("Auth: disabled");
             }
 
-            let listener = tokio::net::TcpListener::bind(&addr)
+            let listener = tokio::net::TcpListener::bind(&bind_address)
                 .await
-                .with_context(|| format!("Failed to bind daemon listener {}", addr))?;
+                .with_context(|| format!("Failed to bind daemon listener {}", bind_address))?;
             let server_handle =
                 tokio::spawn(async move { server.run_with_listener(listener).await });
 
@@ -750,6 +786,10 @@ pub(crate) async fn run() -> Result<()> {
             // Shutdown social graph crawler
             // Shutdown background eviction
             eviction_handle.abort();
+
+            if let Some(ref fips_handle) = fips_handle {
+                fips_handle.shutdown();
+            }
 
             background_services_controller.shutdown().await;
 
@@ -1252,20 +1292,31 @@ pub(crate) async fn run() -> Result<()> {
                 tree_name,
                 version_path,
                 cid,
+                draft,
                 local,
             } => {
-                let published =
-                    publish_release_version(&data_dir, &tree_name, &version_path, &cid, local)
-                        .await?;
+                let published = publish_release_version(
+                    &data_dir,
+                    &tree_name,
+                    &version_path,
+                    &cid,
+                    local,
+                    draft,
+                )
+                .await?;
 
                 println!(
                     "Published release: htree://{}/{}/{}",
                     published.npub, published.tree_name, published.version_path
                 );
-                println!(
-                    "Latest release:    htree://{}/{}/{}",
-                    published.npub, published.tree_name, published.latest_path
-                );
+                if let Some(latest_path) = published.latest_path {
+                    println!(
+                        "Latest release:    htree://{}/{}/{}",
+                        published.npub, published.tree_name, latest_path
+                    );
+                } else {
+                    println!("Draft release:     latest unchanged");
+                }
             }
         },
         Commands::Install {

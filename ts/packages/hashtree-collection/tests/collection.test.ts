@@ -103,7 +103,7 @@ describe('@hashtree/collection', () => {
     expect((await source.queryById()).map((result) => result.key)).toEqual(['song-a', 'song-b']);
     expect((await source.search('songs', 'midnight')).map((result) => result.id)).toEqual(['song-a']);
     expect((await source.queryIndex('artist', { prefix: 'artist:ada' })).map((result) => result.key)).toEqual(['artist:ada']);
-    expect(source.manifest.itemCount).toBe(2);
+    expect('itemCount' in source.manifest).toBe(false);
 
     await writer.delete(songA);
     source = new CollectionSource(store, writer.manifest());
@@ -113,10 +113,10 @@ describe('@hashtree/collection', () => {
     expect((await source.queryById()).map((result) => result.key)).toEqual(['song-b']);
     expect(await source.search('songs', 'midnight')).toEqual([]);
     expect(await source.queryIndex('artist', { prefix: 'artist:ada' })).toEqual([]);
-    expect(source.manifest.itemCount).toBe(1);
+    expect('itemCount' in source.manifest).toBe(false);
   });
 
-  it('samples by id using manifest item counts', async () => {
+  it('samples by id from the by-id index', async () => {
     const store = new MemoryStore();
     const writer = new CollectionWriter(store, songDefinition);
 
@@ -131,19 +131,17 @@ describe('@hashtree/collection', () => {
     ]);
   });
 
-  it('uses the published manifest item count as the fast default count', async () => {
+  it('reports counts from B-tree metadata', async () => {
     const store = new MemoryStore();
     const writer = new CollectionWriter(store, songDefinition);
 
     await writer.put({ id: 'song-a', title: 'Midnight Orchard', artist: 'Ada' }, cidFromSeed(90));
     await writer.put({ id: 'song-b', title: 'Sun Clock', artist: 'Bea' }, cidFromSeed(91));
 
-    const source = new CollectionSource(store, {
-      ...writer.manifest(),
-      itemCount: 7,
-    });
+    const source = new CollectionSource(store, writer.manifest());
 
-    expect(await source.count()).toBe(7);
+    expect(await source.count()).toBe(2);
+    expect(await source.countReported()).toBe(2);
     expect(await source.exactCount()).toBe(2);
   });
 
@@ -516,7 +514,6 @@ describe('@hashtree/collection', () => {
       sourceId: 'npub1test/audio',
       schemaVersion: 2,
       updatedAt: 0,
-      itemCount: 1,
       byIdRoot: null,
       indexes: {},
       publishedSchema: {

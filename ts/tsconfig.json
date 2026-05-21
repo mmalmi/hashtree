@@ -11,6 +11,8 @@
     "jsx": "react-jsx"
   },
   "references": [
-    { "path": "./packages/hashtree" }
+    { "path": "./packages/hashtree" },
+    { "path": "./packages/hashtree-mesh" },
+    { "path": "./packages/hashtree-fips-transport" }
   ]
 }

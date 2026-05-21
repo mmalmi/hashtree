@@ -1,5 +1,100 @@
 # Changelog
 
+## 0.2.54 - 2026-05-21
+
+Changes since the `0.2.53` release.
+
+### Changed
+
+- Kept the daemon FIPS endpoint enabled by default in normal mode, including
+  ordinary UDP and FIPS WebRTC endpoint transports, so HTTP blob misses can be
+  satisfied through verified FIPS peer responses.
+- Renamed the daemon FIPS miss-fetch setting to `fetch_from_fips_peers` while
+  keeping `http_fips_fetch` as a legacy config alias.
+- Updated the FIPS dependency to 0.3.16 so Linux musl release builds do not
+  pull in gateway-only nftables bindings.
+- Increased the CLI metadata LMDB map sizing from tiny fixed defaults to a
+  storage-budget-derived allocation, avoiding map-full failures on larger
+  stores while keeping same-process reopens stable.
+- Moved blob access-time metadata writes off the foreground read path and
+  bounded each background update batch.
+- Added timeouts around synchronous S3 bridge operations so foreground storage
+  calls do not hang indefinitely behind a degraded S3/R2 backend.
+- Extended the TypeScript Blossom store with configurable read timeouts and an
+  option to skip pre-upload existence checks when write endpoints handle
+  duplicates.
+
+## 0.2.53 - 2026-05-20
+
+Changes since the `0.2.52` release.
+
+### Changed
+
+- Changed `git-remote-htree` repo-tree construction to emit live progress
+  phases and counters while pushes build objects, refs, index entries, and
+  working-tree files, so slow cached-root retries no longer appear stuck at
+  `Building repo tree...`.
+- Replaced the legacy Hashtree WebRTC adapter path with the FIPS transport
+  direction and removed the old WebRTC stack from the Rust/TypeScript surface.
+
+## 0.2.52 - 2026-05-20
+
+Changes since the `0.2.51` release.
+
+### Added
+
+- Added `htree release publish --draft` for publishing versioned release
+  entries without repointing the sibling `latest` pointer.
+
+### Changed
+
+- Changed `git-remote-htree` pushes so configured write servers act as
+  best-effort replicas; a complete local publish can still succeed when remote
+  Blossom replication is degraded.
+- Changed Rust CID-link B-trees to store subtree link counts on internal
+  directory entries, matching the TypeScript counted B-tree root format.
+- Added Rust `BTree::count_stored_links(...)` for no-scan stored counts and
+  `BTree::scan_links(...)` for explicit full scans. `BTree::count_links(...)`
+  remains the compatibility scanning count.
+
+## 0.2.51 - 2026-05-19
+
+Changes since the `0.2.50` release.
+
+### Added
+
+- Added daemon and HTTP status metrics for Blossom upload queues, blob-read
+  backpressure, and peer/router bandwidth so production storage pressure is
+  visible without digging through logs.
+- Added targeted R2 blob-import helpers plus resumable/import comparison paths
+  that can stream through local storage instead of loading whole scans into
+  memory.
+- Added raw block storage APIs to the TypeScript worker so apps can store
+  already-addressed blocks, optionally upload them to Blossom, and safely serve
+  published raw blocks to peers.
+
+### Changed
+
+- Changed Blossom upload admission so optimistic uploads enter the bounded byte
+  queue before the LMDB existence preflight, reducing push-visible latency while
+  keeping the origin as the backpressure point.
+- Changed Blossom and blob read paths to coalesce duplicate reads, bound
+  blocking storage work, serve raw blob ranges efficiently, and cache immutable
+  misses/hot reads at the edge.
+- Reduced origin read/upload pressure with throttled Blossom HEAD/origin reads,
+  transient R2 read retries, and cheaper duplicate optimistic upload handling.
+
+### Fixed
+
+- Fixed repeated no-op `git-remote-htree` pushes so exact fast-forward no-ops
+  skip local repo-tree rebuilds instead of rewalking unchanged refs and tags.
+- Fixed stalled Blossom uploads and TypeScript Blossom writes to abort rather
+  than hang indefinitely.
+- Fixed public Blossom ingest so signed Nostr snapshots and hashtree metadata
+  pass the untrusted ingest filter while non-canonical import keys are skipped.
+- Fixed WebRTC peer fetches so local HTTP peer discovery no longer stalls the
+  worker path.
+
 ## 0.2.50 - 2026-05-14
 
 ### Added

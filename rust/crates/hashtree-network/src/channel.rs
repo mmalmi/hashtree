@@ -2,7 +2,7 @@
 //!
 //! Trait for sending/receiving bytes to/from peers.
 //! Implementations:
-//! - WebRTC data channels (production)
+//! - transport-owned direct links
 //! - MockChannel (testing/simulation)
 
 use async_trait::async_trait;
@@ -23,7 +23,7 @@ pub enum ChannelError {
 /// A channel to a single peer for sending/receiving bytes
 ///
 /// This is the core abstraction that allows the same P2P logic to work with:
-/// - Real WebRTC data channels (production)
+/// - transport-owned direct links
 /// - Mock in-memory channels (simulation/testing)
 #[async_trait]
 pub trait PeerChannel: Send + Sync {

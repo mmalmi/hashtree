@@ -235,16 +235,20 @@ fn test_diff_based_push() {
         "No-change optimization used: {} (minimal_upload: {})",
         no_changes, minimal_upload
     );
-    let third_listed_objects =
-        parse_last_listed_object_count(&stderr3).expect("third push should list objects");
-    println!("Third push listed objects: {}", third_listed_objects);
-    let repaired_missing_ref_objects = stderr3.contains("Built repo tree is missing ref object(s)");
+    let third_listed_objects = parse_last_listed_object_count(&stderr3);
+    let skipped_noop_before_listing =
+        third_listed_objects.is_none() && !stderr3.contains("Uploading:");
+    if let Some(third_listed_objects) = third_listed_objects {
+        println!("Third push listed objects: {}", third_listed_objects);
+        let repaired_missing_ref_objects =
+            stderr3.contains("Built repo tree is missing ref object(s)");
+        assert!(
+            third_listed_objects <= second_listed_objects || repaired_missing_ref_objects,
+            "Third push should not walk more git objects than the second push unless it is repairing a missing-ref-object root"
+        );
+    }
     assert!(
-        third_listed_objects <= second_listed_objects || repaired_missing_ref_objects,
-        "Third push should not walk more git objects than the second push unless it is repairing a missing-ref-object root"
-    );
-    assert!(
-        no_changes || minimal_upload,
+        no_changes || minimal_upload || skipped_noop_before_listing,
         "Third push should detect no changes or upload minimal blobs"
     );
 

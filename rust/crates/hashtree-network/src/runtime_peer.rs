@@ -13,14 +13,14 @@ pub type PeerClassifier = Arc<dyn Fn(&str) -> PeerPool + Send + Sync>;
 /// Active data transport used for a peer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PeerTransport {
-    WebRtc,
+    Direct,
     Bluetooth,
 }
 
 impl PeerTransport {
     pub const fn as_str(self) -> &'static str {
         match self {
-            PeerTransport::WebRtc => "webrtc",
+            PeerTransport::Direct => "direct",
             PeerTransport::Bluetooth => "bluetooth",
         }
     }
@@ -514,7 +514,7 @@ mod tests {
                 last_seen: Instant::now(),
                 peer: None,
                 pool: PeerPool::Other,
-                transport: PeerTransport::WebRtc,
+                transport: PeerTransport::Direct,
                 signal_paths: BTreeSet::from([PeerSignalPath::WifiAware]),
                 bytes_sent: 0,
                 bytes_received: 0,

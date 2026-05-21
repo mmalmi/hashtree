@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 pub(crate) mod blob_cache;
 pub mod blossom_push;
 pub mod bootstrap;
@@ -11,6 +13,7 @@ pub mod daemon;
 pub mod diagnostics;
 pub mod eviction;
 pub mod fetch;
+pub mod fips_transport;
 pub mod ignore_rules;
 pub mod nostr_mirror;
 pub mod nostr_relay;
@@ -19,16 +22,10 @@ pub mod server;
 pub mod storage;
 pub mod sync;
 
-#[cfg(feature = "p2p")]
-pub mod webrtc;
-#[cfg(feature = "p2p")]
-pub mod webrtc_store;
-#[cfg(not(feature = "p2p"))]
 pub mod webrtc_stub;
-#[cfg(not(feature = "p2p"))]
 pub use webrtc_stub as webrtc;
-#[cfg(feature = "p2p")]
-pub mod p2p_common;
+pub mod p2p_common_stub;
+pub use p2p_common_stub as p2p_common;
 
 pub mod socialgraph;
 
@@ -48,10 +45,4 @@ pub use storage::{
     PRIORITY_OWN,
 };
 pub use sync::{BackgroundSync, SyncConfig, SyncPriority, SyncStatus, SyncTask};
-#[cfg(feature = "p2p")]
-pub use webrtc::{
-    BluetoothBackendState, BluetoothConfig, ContentStore, DataMessage, LocalNostrBus,
-    PeerClassifier, PeerId, PeerPool, PoolConfig, PoolSettings, SharedLocalNostrBus, WebRTCConfig,
-    WebRTCManager,
-};
 pub use webrtc::{ConnectionState, WebRTCState};

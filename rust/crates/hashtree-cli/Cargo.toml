@@ -20,7 +20,7 @@ required-features = ["git-remote-wrapper"]
 
 [dependencies]
 # Git remote helper
-git-remote-htree = { version = "0.2.44", path = "../git-remote-htree" }
+git-remote-htree = { version = "0.2.54", path = "../git-remote-htree" }
 
 # Core hashtree crates
 hashtree-core.workspace = true
@@ -30,10 +30,10 @@ hashtree-lmdb = { workspace = true, optional = true }
 hashtree-blossom.workspace = true
 hashtree-config.workspace = true
 hashtree-nostr.workspace = true
+hashtree-fips-transport = { workspace = true, features = ["webrtc"] }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-updater.workspace = true
 hashtree-index.workspace = true
-hashtree-network = { workspace = true, optional = true }
 cashu-service = { workspace = true, default-features = false }
 
 # AWS S3 (optional)
@@ -56,10 +56,6 @@ nostr.workspace = true
 nostr-sdk.workspace = true
 nostr-social-graph.workspace = true
 nostr-social-graph-heed.workspace = true
-
-# WebRTC (optional, for P2P)
-webrtc = { version = "0.11", optional = true }
-webrtc-stun = { version = "0.1", optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -106,10 +102,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", features = ["ring"] }
 
 [features]
-default = ["p2p", "lmdb"]
+default = ["lmdb"]
 cashu = ["cashu-service/wallet"]
-p2p = ["dep:hashtree-network", "dep:webrtc"]
-stun = ["p2p", "dep:webrtc-stun"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 lmdb = ["dep:hashtree-lmdb"]
 fuse = ["dep:hashtree-fuse", "dep:fuser"]
@@ -121,6 +115,3 @@ walkdir = "2"
 nostr.workspace = true
 serde_json.workspace = true
 http-body-util = "0.1"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-btleplug = "0.11"

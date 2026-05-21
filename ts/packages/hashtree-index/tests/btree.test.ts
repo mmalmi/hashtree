@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { BTree, escapeKey, unescapeKey } from '../src/btree.js';
-import { MemoryStore, HashTree, type CID } from '@hashtree/core';
+import { MemoryStore, HashTree, LinkType, type CID } from '@hashtree/core';
 
 function sequenceRandom(sequence: number[]): () => number {
   let index = 0;
@@ -272,6 +272,82 @@ describe('BTree', () => {
         }
         expect(hits).toEqual([key]);
       }
+    });
+
+    it('should store subtree counts on bulk-built link internal nodes', async () => {
+      const entries: Array<[string, CID]> = [];
+      for (let index = 0; index < 12; index += 1) {
+        const key = `song-${String(index).padStart(2, '0')}`;
+        const { cid } = await tree.putFile(new TextEncoder().encode(key));
+        entries.push([key, cid]);
+      }
+
+      const root = await btree.buildLinks(entries);
+      expect(root).not.toBeNull();
+      const rootEntries = await tree.listDirectory(root!);
+
+      expect(rootEntries.every((entry) => entry.type === LinkType.Dir && entry.size > 0)).toBe(true);
+      expect(rootEntries.reduce((sum, entry) => sum + entry.size, 0)).toBe(entries.length);
+      expect(await btree.countStoredLinks(root)).toBe(entries.length);
+      expect(await btree.countReportedLinks(root)).toBe(entries.length);
+      expect(await btree.countLinks(root)).toBe(entries.length);
+      expect(await btree.scanLinkCount(root)).toBe(entries.length);
+      expect(await btree.getLinkEntryAt(root, 11)).toEqual(['song-11', entries[11][1]]);
+    });
+
+    it('keeps stored counts separate from scan counts for legacy link roots', async () => {
+      const entries: Array<[string, CID]> = [];
+      for (let index = 0; index < 12; index += 1) {
+        const key = `legacy-${String(index).padStart(2, '0')}`;
+        const { cid } = await tree.putFile(new TextEncoder().encode(key));
+        entries.push([key, cid]);
+      }
+
+      const leafA = (await tree.putDirectory(entries.slice(0, 6).map(([key, cid]) => ({
+        name: key,
+        cid,
+        size: 0,
+        type: LinkType.File,
+      })))).cid;
+      const leafB = (await tree.putDirectory(entries.slice(6).map(([key, cid]) => ({
+        name: key,
+        cid,
+        size: 0,
+        type: LinkType.File,
+      })))).cid;
+      const root = (await tree.putDirectory([
+        { name: 'legacy-00', cid: leafA, size: 0, type: LinkType.Dir },
+        { name: 'legacy-06', cid: leafB, size: 0, type: LinkType.Dir },
+      ])).cid;
+
+      expect(await btree.countStoredLinks(root)).toBeNull();
+      expect(await btree.scanLinks(root)).toBe(entries.length);
+      expect(await btree.countLinks(root)).toBe(entries.length);
+    });
+
+    it('verified link iteration rejects partial counted link roots', async () => {
+      const { cid } = await tree.putFile(new TextEncoder().encode('song-00'));
+      const goodLeaf = (await tree.putDirectory([
+        {
+          name: 'song-00',
+          cid,
+          size: 0,
+          type: LinkType.File,
+        },
+      ])).cid;
+      const emptyLeaf = (await tree.putDirectory([])).cid;
+      const root = (await tree.putDirectory([
+        { name: 'song-00', cid: goodLeaf, size: 1, type: LinkType.Dir },
+        { name: 'song-01', cid: emptyLeaf, size: 1, type: LinkType.Dir },
+      ])).cid;
+      const entries: Array<[string, CID]> = [];
+
+      await expect((async () => {
+        for await (const entry of btree.linksEntries(root, { verifyCount: true })) {
+          entries.push(entry);
+        }
+      })()).rejects.toThrow(/expected 1/);
+      expect(entries).toEqual([['song-00', cid]]);
     });
   });
 
@@ -560,6 +636,23 @@ describe('BTree', () => {
       expect(await btree.getLinkEntryAt(root, 3)).toEqual(['d', entries.find(([key]) => key === 'd')![1]]);
       expect(await btree.getLinkEntryAt(root, 4)).toEqual(['e', entries.find(([key]) => key === 'e')![1]]);
       expect(await btree.getLinkEntryAt(root, 5)).toBeNull();
+    });
+
+    it('should maintain subtree counts while inserting CID links', async () => {
+      let root: CID | null = null;
+      const entries: Array<[string, CID]> = [];
+      for (let index = 0; index < 10; index += 1) {
+        const key = `video:${String(index).padStart(3, '0')}`;
+        const { cid } = await tree.putFile(new TextEncoder().encode(key));
+        entries.push([key, cid]);
+        root = await btree.insertLink(root, key, cid);
+      }
+
+      expect(root).not.toBeNull();
+      const rootEntries = await tree.listDirectory(root!);
+      expect(rootEntries.every((entry) => entry.type === LinkType.Dir && entry.size > 0)).toBe(true);
+      expect(rootEntries.reduce((sum, entry) => sum + entry.size, 0)).toBe(entries.length);
+      expect(await btree.getLinkEntryAt(root, 9)).toEqual(entries[9]);
     });
 
     it('should sample CID links without flattening callers into a full list', async () => {

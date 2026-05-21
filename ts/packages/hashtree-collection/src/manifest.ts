@@ -49,7 +49,7 @@ export function collectionStateFromManifest<T>(
     byIdRoot: deserializeCid(manifest.byIdRoot),
     keyRoots,
     searchRoots,
-    itemCount: Math.max(0, Number(manifest.itemCount) || 0),
+    itemCount: 0,
     updatedAt: Number(manifest.updatedAt) || 0,
   };
 }
@@ -82,7 +82,6 @@ export function collectionManifestFromState<T>(
     sourceId: definition.sourceId,
     schemaVersion: getSchemaVersion(definition),
     updatedAt: state.updatedAt,
-    itemCount: state.itemCount,
     byIdRoot: serializeCid(state.byIdRoot),
     indexes,
     publishedSchema: definition.publishedSchema,

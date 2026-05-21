@@ -37,7 +37,7 @@ mod nostr_p2p {
     }
 
     #[tokio::test]
-    async fn webrtc_signaling_over_nostr_mesh_reaches_target() {
+    async fn mesh_signaling_over_nostr_mesh_reaches_target() {
         let mut mesh = NostrMesh::new();
         let a_pub = mesh.add_node("a");
         mesh.add_node("b");
@@ -71,7 +71,7 @@ mod nostr_p2p {
     }
 
     #[tokio::test]
-    async fn webrtc_signaling_mesh_frame_dedupes_replayed_frame_id() {
+    async fn mesh_signaling_frame_dedupes_replayed_frame_id() {
         let mut mesh = NostrMesh::new();
         let a_pub = mesh.add_node("a");
         mesh.add_node("b");

@@ -23,6 +23,7 @@ struct CountingBlossomState {
     blobs: HashMap<String, Vec<u8>>,
     get_requests: usize,
     head_requests: usize,
+    fail_uploads: bool,
 }
 
 struct CountingBlossomServer {
@@ -34,7 +35,18 @@ struct CountingBlossomServer {
 
 impl CountingBlossomServer {
     fn new() -> Self {
-        let state = Arc::new(Mutex::new(CountingBlossomState::default()));
+        Self::with_upload_failures(false)
+    }
+
+    fn failing_uploads() -> Self {
+        Self::with_upload_failures(true)
+    }
+
+    fn with_upload_failures(fail_uploads: bool) -> Self {
+        let state = Arc::new(Mutex::new(CountingBlossomState {
+            fail_uploads,
+            ..CountingBlossomState::default()
+        }));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake blossom");
         let port = listener.local_addr().expect("fake blossom addr").port();
         listener
@@ -95,6 +107,15 @@ impl CountingBlossomServer {
     fn get_head_request_count(&self) -> usize {
         self.state.lock().expect("state lock").head_requests
     }
+
+    fn has_blob(&self, hash: &[u8; 32]) -> bool {
+        let hash = hex::encode(hash);
+        self.state
+            .lock()
+            .expect("state lock")
+            .blobs
+            .contains_key(&hash)
+    }
 }
 
 impl Drop for CountingBlossomServer {
@@ -122,6 +143,10 @@ async fn upload_blob(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
+    if state.lock().expect("state lock").fail_uploads {
+        return StatusCode::FORBIDDEN;
+    }
+
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let computed_hash = hex::encode(hasher.finalize());
@@ -330,8 +355,21 @@ fn test_cached_fetch_tree_reuses_open_git_storage_store() {
 }
 
 fn write_test_config(home: &std::path::Path, blossom_url: &str, force_upload: bool) {
+    write_test_config_for_servers(home, &[blossom_url], force_upload);
+}
+
+fn write_test_config_for_servers(
+    home: &std::path::Path,
+    blossom_urls: &[&str],
+    force_upload: bool,
+) {
     let config_dir = home.join(".hashtree");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let servers = blossom_urls
+        .iter()
+        .map(|url| format!("\"{url}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     let config = format!(
         r#"
 [server]
@@ -343,8 +381,8 @@ relays = []
 social_graph_crawl_depth = 0
 
 [blossom]
-read_servers = ["{blossom_url}"]
-write_servers = ["{blossom_url}"]
+read_servers = [{servers}]
+write_servers = [{servers}]
 force_upload = {force_upload}
 "#
     );
@@ -777,6 +815,37 @@ fn test_import_preserved_remote_objects_from_local_git_uses_exclusive_history() 
 }
 
 #[test]
+fn test_push_objects_skips_exact_remote_tip_without_local_tree_rebuild() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, _base_sha, master_sha, _dev_sha) = create_repo_with_diverged_master_and_dev();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let mut helper = create_test_helper().expect("helper");
+    helper
+        .storage
+        .import_ref("refs/tags/v0.1.0", &master_sha)
+        .expect("import preserved tag ref");
+
+    helper
+        .push_objects(&master_sha, "refs/heads/master", false, Some(&master_sha))
+        .expect("exact no-op push should succeed");
+
+    assert_eq!(
+        helper.storage.object_count().expect("object count"),
+        0,
+        "no-op push should not import local git objects just to rebuild an unchanged tree"
+    );
+    assert!(
+        !helper
+            .storage
+            .has_ref("refs/heads/master")
+            .expect("branch ref presence"),
+        "no-op push should leave the in-memory tree untouched"
+    );
+}
+
+#[test]
 fn test_push_to_file_servers_with_diff_does_not_fetch_old_tree_from_blossom() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
@@ -930,10 +999,190 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
         "push diff should not need GET requests when old tree is already local"
     );
     assert!(
-        fake_blossom.get_head_request_count() <= old_hash_count.min(SERVER_COVERAGE_SAMPLE_SIZE),
-        "expected only sampled HEAD probes, got {} for {} old hashes",
+        fake_blossom.get_head_request_count() <= old_hash_count.min(32),
+        "expected only sampled HEAD probes for a single write server, got {} for {} old hashes",
         fake_blossom.get_head_request_count(),
         old_hash_count
+    );
+}
+
+#[test]
+fn test_push_to_file_servers_with_diff_force_upload_skips_old_tree_probes() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::new();
+    write_test_config(home.path(), fake_blossom.base_url(), true);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.force_upload = true;
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (old_cid, new_cid) = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+
+        let (old_file_cid, old_file_size) = tree
+            .put_file(b"old file kept in the new tree")
+            .await
+            .expect("write old file");
+        let old_entries =
+            vec![DirEntry::from_cid("shared.txt", &old_file_cid).with_size(old_file_size)];
+        let old_cid = tree
+            .put_directory(old_entries.clone())
+            .await
+            .expect("write old directory");
+
+        let (new_file_cid, new_file_size) =
+            tree.put_file(b"new file").await.expect("write new file");
+        let mut new_entries = old_entries;
+        new_entries.push(DirEntry::from_cid("new.txt", &new_file_cid).with_size(new_file_size));
+        let new_cid = tree
+            .put_directory(new_entries)
+            .await
+            .expect("write new directory");
+
+        (old_cid, new_cid)
+    });
+
+    let result = helper.push_to_file_servers_with_diff(
+        &hex::encode(new_cid.hash),
+        None,
+        Some(&hex::encode(old_cid.hash)),
+        None,
+        true,
+    );
+
+    assert!(
+        result.failed.is_empty(),
+        "force upload should succeed without old-tree probes: {:?}",
+        result.failed
+    );
+    assert_eq!(
+        fake_blossom.get_head_request_count(),
+        0,
+        "force upload should upload the new tree directly instead of probing every old hash"
+    );
+}
+
+#[test]
+fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_any_write_server() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let server_a = CountingBlossomServer::new();
+    let server_b = CountingBlossomServer::new();
+    write_test_config_for_servers(
+        home.path(),
+        &[server_a.base_url(), server_b.base_url()],
+        false,
+    );
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![
+        server_a.base_url().to_string(),
+        server_b.base_url().to_string(),
+    ];
+    config.blossom.write_servers = vec![
+        server_a.base_url().to_string(),
+        server_b.base_url().to_string(),
+    ];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let root_cid = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        tree.put(b"new root must land on at least one write server")
+            .await
+            .expect("write root")
+            .0
+    });
+
+    let result =
+        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+
+    assert!(
+        result.failed.is_empty(),
+        "push upload should succeed when at least one write server accepts it: {:?}",
+        result.failed
+    );
+    assert!(
+        server_a.has_blob(&root_cid.hash) || server_b.has_blob(&root_cid.hash),
+        "at least one write server should have the new root"
+    );
+}
+
+#[test]
+fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let failing_server_a = CountingBlossomServer::failing_uploads();
+    let failing_server_b = CountingBlossomServer::failing_uploads();
+    write_test_config_for_servers(
+        home.path(),
+        &[failing_server_a.base_url(), failing_server_b.base_url()],
+        false,
+    );
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![
+        failing_server_a.base_url().to_string(),
+        failing_server_b.base_url().to_string(),
+    ];
+    config.blossom.write_servers = vec![
+        failing_server_a.base_url().to_string(),
+        failing_server_b.base_url().to_string(),
+    ];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let root_cid = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        tree.put(b"new root can publish from local store only")
+            .await
+            .expect("write root")
+            .0
+    });
+
+    let result =
+        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+
+    assert!(
+        result.local_complete,
+        "local store should still be a complete availability source"
+    );
+    assert!(
+        result.degraded,
+        "all write server failures should be reported as degraded replication"
+    );
+    assert!(
+        !result.failed.is_empty(),
+        "write server failures should be reported"
+    );
+    assert!(
+        !failing_server_a.has_blob(&root_cid.hash) && !failing_server_b.has_blob(&root_cid.hash),
+        "failing servers should not receive the blob"
     );
 }
 

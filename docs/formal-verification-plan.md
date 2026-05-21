@@ -2,7 +2,7 @@
 
 ## Summary
 This plan establishes formal-style correctness guarantees for hashtree using Rust-native methods first: property-based testing, state-machine testing, and bounded model checks where practical.
-Execution starts with **Resolver + Core** (highest consensus and data-integrity risk), then extends to **git-remote** and **WebRTC**.
+Execution starts with **Resolver + Core** (highest consensus and data-integrity risk), then extends to **git-remote** and **mesh transport**.
 CI rollout is **advisory first**, then promoted to hard gate after stability criteria are met.
 
 Primary correctness targets in current code:
@@ -15,7 +15,7 @@ In scope:
 - Resolver determinism and spec conformance.
 - Core codec/tree/diff safety properties.
 - Formal verification artifact structure and CI.
-- Subsequent wave specifications for git-remote and WebRTC.
+- Subsequent wave specifications for git-remote and mesh transport.
 
 Out of scope in first wave:
 - Heavy theorem-prover-first adoption (Prusti/Creusot-first workflow).
@@ -138,13 +138,12 @@ Out of scope in first wave:
 - Add `formal_git_props.rs` integration test suite.
 - Roll into same advisory->hard-gate flow after stabilization.
 
-## Step 10: Third wave spec and implementation (WebRTC)
-- Add `docs/formal_webrtc_invariants.md`.
+## Step 10: Third wave spec and implementation (mesh transport)
+- Add `docs/formal_mesh_invariants.md`.
 - Build deterministic simulation/property tests for:
-  HTL monotonicity and forwarding stop at zero from `rust/crates/hashtree-webrtc/src/types.rs`.
-  Fragment reassembly completeness/safety in `rust/crates/hashtree-webrtc/src/peer.rs`.
-  Peer selector fairness/backoff ordering in `rust/crates/hashtree-webrtc/src/peer_selector.rs`.
-- Add explicit timeout cleanup invariants for pending reassemblies.
+  HTL monotonicity and forwarding stop at zero from `rust/crates/hashtree-network/src/types.rs`.
+  Peer selector fairness/backoff ordering in `rust/crates/hashtree-network/src/peer_selector.rs`.
+  Mesh frame validation and seen-set dedupe in `rust/crates/hashtree-network/src/types.rs`.
 - Integrate into formal workflow after pass stability.
 
 ## Test Cases and Scenarios (Acceptance Matrix)

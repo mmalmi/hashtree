@@ -2,7 +2,7 @@
 
 Modular browser worker for hashtree blob caching and Blossom connectivity.
 
-Runs hashtree storage operations in a Web Worker to keep the main thread free. Handles IndexedDB caching, Blossom server uploads/downloads, connectivity probing, and WebRTC P2P data exchange.
+Runs hashtree storage operations in a Web Worker to keep the main thread free. Handles IndexedDB caching, Blossom server uploads/downloads, connectivity probing, and P2P data exchange.
 
 ## Install
 

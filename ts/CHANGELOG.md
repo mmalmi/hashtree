@@ -1,16 +1,60 @@
 # Changelog
 
-## Unreleased
+## 0.2.12 - 2026-05-20
 
-### Added
-
-- Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps can coalesce same-coordinate replaceable publishes, sign at send time, and avoid app-side future `created_at` drift.
-- Added optional `watch(hash, callback)` to the `Store` interface so the tree layer can react to block arrivals without polling. `MemoryStore` implements it; existing stores remain compatible because the method is optional.
-- Added `loadBlock(store, hash, signal?)` (re-exported from `@hashtree/core`). Resolves once data for `hash` is available, using `watch` when present and falling back to polling otherwise.
+Changes since the previous npm package publish.
 
 ### Changed
 
-- Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` / `HashTree.resolvePath` to wait for the directory block to load instead of returning `[]` / `null` when the data isn't local yet — a not-yet-synced block is a transient state, not a final answer. They now accept an optional `signal: AbortSignal` for callers that want a bounded wait. `[]` from `listDirectory` and `null` from `resolvePath` again mean "the directory loaded and the entry isn't there", which lets callers drop ad-hoc grace timers around `'not found'` UI.
+- Prepared `@hashtree/index@0.1.9` and `@hashtree/collection@0.2.5` for npm
+  publication.
+- Added tracked build output for the package versions used by Iris Audio so
+  they can be consumed directly from pinned Git subdirectory dependencies when
+  npm publication is blocked.
+- Added `BTree.countStoredLinks(...)` for no-scan stored link counts and
+  `BTree.scanLinks(...)` for explicit full scans. `BTree.countLinks(...)`
+  remains the backwards-compatible scanning count.
+- Changed `@hashtree/collection` to depend on the counted B-tree writer so
+  rebuilt collection indexes store subtree sizes for ordinal reads and random
+  sampling.
+
+## 0.2.11 - 2026-05-19
+
+Changes since the previous npm package publish.
+
+### Added
+
+- Published `@hashtree/core@0.1.7`, `@hashtree/nostr@0.1.14`, and
+  `@hashtree/worker@0.2.16`.
+- Added `putBlock(...)` and `putBlocks(...)` to `@hashtree/worker/client` so
+  callers can store raw content-addressed blocks, optionally upload them to
+  Blossom, and share published raw blocks with peers.
+- Added `createReplaceablePublishQueue()` to `@hashtree/nostr` so consumer apps
+  can coalesce same-coordinate replaceable publishes, sign at send time, and
+  avoid app-side future `created_at` drift.
+- Added optional `watch(hash, callback)` to the `Store` interface so the tree
+  layer can react to block arrivals without polling. `MemoryStore` implements
+  it; existing stores remain compatible because the method is optional.
+- Added `loadBlock(store, hash, signal?)` (re-exported from `@hashtree/core`).
+  Resolves once data for `hash` is available, using `watch` when present and
+  falling back to polling otherwise.
+
+### Changed
+
+- Changed `@hashtree/index` CID-link B-trees to store subtree link counts in
+  internal directory entry sizes during `buildLinks(...)` and `insertLink(...)`,
+  so `countLinks(...)`, `getLinkEntryAt(...)`, and `sampleLinks(...)` can avoid
+  recursively counting every child on counted trees while still falling back for
+  legacy roots.
+- Changed `@hashtree/core` Blossom uploads to abort stalled `PUT /upload`
+  requests instead of waiting indefinitely.
+- Changed `listDirectory`, `resolvePath`, and `HashTree.listDirectory` /
+  `HashTree.resolvePath` to wait for the directory block to load instead of
+  returning `[]` / `null` when the data isn't local yet. They now accept an
+  optional `signal: AbortSignal` for callers that want a bounded wait. `[]` from
+  `listDirectory` and `null` from `resolvePath` again mean "the directory loaded
+  and the entry isn't there", which lets callers drop ad-hoc grace timers around
+  `'not found'` UI.
 
 ## 0.2.10 - 2026-05-06
 

@@ -96,6 +96,37 @@ pub struct ServerConfig {
     /// Enable WebRTC P2P connections
     #[serde(default = "default_enable_webrtc")]
     pub enable_webrtc: bool,
+    /// Enable FIPS-backed Hashtree blob exchange.
+    #[serde(default = "default_enable_fips")]
+    pub enable_fips: bool,
+    /// FIPS discovery/signaling scope for Hashtree peers.
+    #[serde(default = "default_fips_discovery_scope")]
+    pub fips_discovery_scope: String,
+    /// FIPS Nostr relays used for discovery adverts and encrypted signaling.
+    /// Empty means use active [nostr].relays, then FIPS built-in defaults.
+    #[serde(default)]
+    pub fips_relays: Vec<String>,
+    /// Enable ordinary FIPS UDP endpoint transport.
+    #[serde(default = "default_enable_fips_udp")]
+    pub enable_fips_udp: bool,
+    /// FIPS UDP bind address. Empty/default lets the kernel pick an ephemeral port.
+    #[serde(default)]
+    pub fips_udp_bind_addr: Option<String>,
+    /// Advertise the FIPS UDP endpoint as directly reachable.
+    #[serde(default)]
+    pub fips_udp_public: bool,
+    /// Explicit FIPS UDP address to advertise when `fips_udp_public` is true.
+    #[serde(default)]
+    pub fips_udp_external_addr: Option<String>,
+    /// Enable FIPS WebRTC endpoint transport.
+    #[serde(default = "default_enable_fips_webrtc")]
+    pub enable_fips_webrtc: bool,
+    /// Allow daemon cache misses to fetch blobs from FIPS peers.
+    #[serde(default = "default_fetch_from_fips_peers", alias = "http_fips_fetch")]
+    pub fetch_from_fips_peers: bool,
+    /// How long one FIPS blob request waits for a valid response.
+    #[serde(default = "default_fips_request_timeout_ms")]
+    pub fips_request_timeout_ms: u64,
     /// Allow HTTP misses to fetch blobs from connected WebRTC peers.
     #[serde(default = "default_http_webrtc_fetch")]
     pub http_webrtc_fetch: bool,
@@ -145,6 +176,16 @@ fn default_public_writes() -> bool {
 
 fn default_socialgraph_snapshot_public() -> bool {
     false
+}
+
+impl ServerConfig {
+    pub fn resolved_fips_relays(&self, active_nostr_relays: &[String]) -> Vec<String> {
+        if self.fips_relays.is_empty() {
+            active_nostr_relays.to_vec()
+        } else {
+            self.fips_relays.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -566,6 +607,30 @@ fn default_enable_webrtc() -> bool {
     true
 }
 
+fn default_enable_fips() -> bool {
+    true
+}
+
+fn default_fips_discovery_scope() -> String {
+    "hashtree-v1".to_string()
+}
+
+fn default_enable_fips_udp() -> bool {
+    true
+}
+
+fn default_enable_fips_webrtc() -> bool {
+    true
+}
+
+fn default_fetch_from_fips_peers() -> bool {
+    true
+}
+
+fn default_fips_request_timeout_ms() -> u64 {
+    5_500
+}
+
 fn default_http_webrtc_fetch() -> bool {
     true
 }
@@ -625,6 +690,16 @@ impl Default for ServerConfig {
             enable_auth: default_enable_auth(),
             stun_port: default_stun_port(),
             enable_webrtc: default_enable_webrtc(),
+            enable_fips: default_enable_fips(),
+            fips_discovery_scope: default_fips_discovery_scope(),
+            fips_relays: Vec::new(),
+            enable_fips_udp: default_enable_fips_udp(),
+            fips_udp_bind_addr: None,
+            fips_udp_public: false,
+            fips_udp_external_addr: None,
+            enable_fips_webrtc: default_enable_fips_webrtc(),
+            fetch_from_fips_peers: default_fetch_from_fips_peers(),
+            fips_request_timeout_ms: default_fips_request_timeout_ms(),
             http_webrtc_fetch: default_http_webrtc_fetch(),
             peer_signal_urls: Vec::new(),
             enable_multicast: default_enable_multicast(),
@@ -1273,5 +1348,85 @@ chunk_target_bytes = 65536
         };
         assert!(blossom.all_read_servers().is_empty());
         assert!(blossom.all_write_servers().is_empty());
+    }
+
+    #[test]
+    fn server_defaults_enable_fips_udp_and_webrtc() {
+        let server = ServerConfig::default();
+
+        assert!(server.enable_fips);
+        assert!(server.enable_fips_udp);
+        assert!(server.fips_udp_bind_addr.is_none());
+        assert!(!server.fips_udp_public);
+        assert!(server.fips_udp_external_addr.is_none());
+        assert!(server.enable_fips_webrtc);
+        assert!(server.fetch_from_fips_peers);
+        assert!(server.fips_relays.is_empty());
+        assert_eq!(server.fips_discovery_scope, "hashtree-v1");
+        assert_eq!(server.fips_request_timeout_ms, 5_500);
+    }
+
+    #[test]
+    fn server_config_reads_fips_overrides() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+enable_fips = true
+fips_discovery_scope = "test-hashtree"
+fips_relays = ["wss://fips.example"]
+enable_fips_udp = false
+fips_udp_bind_addr = "0.0.0.0:2121"
+fips_udp_public = true
+fips_udp_external_addr = "198.19.77.10:2121"
+enable_fips_webrtc = true
+fetch_from_fips_peers = false
+fips_request_timeout_ms = 42
+"#,
+        )
+        .unwrap();
+
+        assert!(config.server.enable_fips);
+        assert_eq!(config.server.fips_discovery_scope, "test-hashtree");
+        assert_eq!(config.server.fips_relays, ["wss://fips.example"]);
+        assert!(!config.server.enable_fips_udp);
+        assert_eq!(
+            config.server.fips_udp_bind_addr.as_deref(),
+            Some("0.0.0.0:2121")
+        );
+        assert!(config.server.fips_udp_public);
+        assert_eq!(
+            config.server.fips_udp_external_addr.as_deref(),
+            Some("198.19.77.10:2121")
+        );
+        assert!(config.server.enable_fips_webrtc);
+        assert!(!config.server.fetch_from_fips_peers);
+        assert_eq!(config.server.fips_request_timeout_ms, 42);
+    }
+
+    #[test]
+    fn server_config_accepts_legacy_http_fips_fetch_name() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+http_fips_fetch = false
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.server.fetch_from_fips_peers);
+    }
+
+    #[test]
+    fn fips_relay_resolution_prefers_fips_relays_then_nostr() {
+        let active_nostr = vec!["wss://nostr.example".to_string()];
+        let mut server = ServerConfig::default();
+
+        assert_eq!(server.resolved_fips_relays(&active_nostr), active_nostr);
+
+        server.fips_relays = vec!["wss://fips.example".to_string()];
+        assert_eq!(
+            server.resolved_fips_relays(&["wss://ignored.example".to_string()]),
+            ["wss://fips.example"]
+        );
     }
 }
