@@ -418,14 +418,8 @@ impl HashtreeServer {
             app = app.layer(cors);
         }
 
-        let make_service =
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-        serve_with_connection_limits(
-            listener,
-            make_service,
-            shutdown,
-        )
-        .await?;
+        let make_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        serve_with_connection_limits(listener, make_service, shutdown).await?;
 
         Ok(local_addr.port())
     }
