@@ -193,11 +193,11 @@ pub(super) async fn get_blob_size_without_blocking_runtime(
 
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.blob_size(&hash).map_err(|e| e.to_string())
-    });
-    match tokio::time::timeout(blob_read_timeout(), read).await {
+    let read =
+        tokio::task::spawn_blocking(move || store.blob_size(&hash).map_err(|e| e.to_string()));
+    let result = tokio::time::timeout(blob_read_timeout(), read).await;
+    drop(permit);
+    match result {
         Ok(Ok(result)) => {
             if let Ok(size) = &result {
                 state.blob_cache.put_size(hash_hex, *size);
@@ -218,12 +218,13 @@ pub(super) async fn get_blob_range_without_blocking_runtime(
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
     let read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
         store
             .get_blob_range(&hash, start, end_inclusive)
             .map_err(|e| e.to_string())
     });
-    match tokio::time::timeout(blob_read_timeout(), read).await {
+    let result = tokio::time::timeout(blob_read_timeout(), read).await;
+    drop(permit);
+    match result {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => Err(format!("blob range read task failed: {}", err)),
         Err(_) => Err("blob range read timed out".to_string()),
@@ -236,11 +237,11 @@ async fn get_blob_once_without_blocking_runtime(
 ) -> Result<Option<Vec<u8>>, String> {
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        store.get_blob(&hash).map_err(|e| e.to_string())
-    });
-    match tokio::time::timeout(blob_read_timeout(), read).await {
+    let read =
+        tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()));
+    let result = tokio::time::timeout(blob_read_timeout(), read).await;
+    drop(permit);
+    match result {
         Ok(Ok(result)) => {
             if let Ok(data) = &result {
                 match data {

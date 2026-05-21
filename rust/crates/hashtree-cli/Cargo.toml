@@ -46,6 +46,8 @@ tempfile.workspace = true
 
 # HTTP/Web
 axum.workspace = true
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 tower.workspace = true
 tower-http.workspace = true
 

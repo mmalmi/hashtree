@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,6 +26,11 @@ mod upload;
 
 mod maintenance;
 mod retention;
+
+#[cfg(feature = "s3")]
+const DEFAULT_S3_SYNC_TIMEOUT_MS: u64 = 5_000;
+#[cfg(feature = "s3")]
+const S3_SYNC_TIMEOUT_MS_ENV: &str = "HTREE_S3_SYNC_TIMEOUT_MS";
 
 pub use maintenance::{
     compact_lmdb_environments_under, CompactResult, R2ImportOptions, R2ImportResult, VerifyResult,
@@ -36,11 +42,15 @@ pub const PRIORITY_OTHER: u8 = 64;
 pub const PRIORITY_FOLLOWED: u8 = 128;
 pub const PRIORITY_OWN: u8 = 255;
 const LMDB_MAX_READERS: u32 = 1024;
-const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 1024 * 1024;
+const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const LMDB_METADATA_MAX_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const LMDB_METADATA_STORAGE_RATIO_DIVISOR: u64 = 1024;
+const LMDB_METADATA_REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(feature = "lmdb")]
 const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
+const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 1024;
 
 fn unix_timestamp_now() -> u64 {
     SystemTime::now()
@@ -124,11 +134,32 @@ fn is_fs_blob_shard_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn lmdb_map_size_for_existing_env(path: &Path, minimum_bytes: u64) -> Result<usize> {
+fn lmdb_metadata_map_size_for_storage_budget(max_size_bytes: u64) -> u64 {
+    if max_size_bytes == 0 {
+        return LMDB_METADATA_MAX_MAP_SIZE_BYTES;
+    }
+
+    max_size_bytes
+        .saturating_div(LMDB_METADATA_STORAGE_RATIO_DIVISOR)
+        .clamp(
+            LMDB_METADATA_MIN_MAP_SIZE_BYTES,
+            LMDB_METADATA_MAX_MAP_SIZE_BYTES,
+        )
+}
+
+fn lmdb_map_size_for_existing_env(path: &Path, requested_bytes: u64) -> Result<usize> {
     let existing_bytes = std::fs::metadata(path.join("data.mdb"))
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let requested = align_lmdb_map_size(minimum_bytes.max(existing_bytes));
+    let existing_headroom = if existing_bytes == 0 {
+        0
+    } else {
+        existing_bytes
+            .saturating_div(10)
+            .max(LMDB_METADATA_REOPEN_HEADROOM_BYTES)
+    };
+    let requested =
+        align_lmdb_map_size(requested_bytes.max(existing_bytes.saturating_add(existing_headroom)));
     usize::try_from(requested).context("LMDB map size exceeds usize")
 }
 
@@ -433,11 +464,30 @@ pub struct StorageRouter {
 
 impl StorageRouter {
     #[cfg(feature = "s3")]
+    fn s3_sync_timeout() -> std::time::Duration {
+        let millis = std::env::var(S3_SYNC_TIMEOUT_MS_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_S3_SYNC_TIMEOUT_MS);
+        std::time::Duration::from_millis(millis)
+    }
+
+    #[cfg(feature = "s3")]
+    fn s3_sync_timeout_error(timeout: std::time::Duration) -> StoreError {
+        StoreError::Other(format!(
+            "S3 sync operation timed out after {}ms",
+            timeout.as_millis()
+        ))
+    }
+
+    #[cfg(feature = "s3")]
     fn run_s3_future_sync<F, T>(future: F) -> Result<T, StoreError>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        let timeout = Self::s3_sync_timeout();
         if tokio::runtime::Handle::try_current().is_ok() {
             return std::thread::Builder::new()
                 .name("storage-s3-sync".to_string())
@@ -448,7 +498,11 @@ impl StorageRouter {
                         .map_err(|err| {
                             StoreError::Other(format!("build storage s3 sync runtime: {err}"))
                         })?;
-                    Ok(runtime.block_on(future))
+                    runtime.block_on(async move {
+                        tokio::time::timeout(timeout, future)
+                            .await
+                            .map_err(|_| Self::s3_sync_timeout_error(timeout))
+                    })
                 })
                 .map_err(|err| StoreError::Other(format!("spawn S3 sync helper thread: {err}")))?
                 .join()
@@ -459,7 +513,11 @@ impl StorageRouter {
             .enable_all()
             .build()
             .map_err(|err| StoreError::Other(format!("build storage s3 sync runtime: {err}")))?;
-        Ok(runtime.block_on(future))
+        runtime.block_on(async move {
+            tokio::time::timeout(timeout, future)
+                .await
+                .map_err(|_| Self::s3_sync_timeout_error(timeout))
+        })
     }
 
     /// Create router with local storage only
@@ -945,6 +1003,8 @@ pub struct HashtreeStore {
     evict_orphans: bool,
     /// Best-effort in-memory throttle for blob access metadata writes.
     blob_access_update_gate: BlobAccessUpdateGate,
+    /// Keeps access-time maintenance out of foreground blob reads.
+    blob_access_update_inflight: Arc<AtomicBool>,
 }
 
 impl HashtreeStore {
@@ -1018,8 +1078,10 @@ impl HashtreeStore {
     ) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
-        let metadata_map_size =
-            lmdb_map_size_for_existing_env(path, LMDB_METADATA_MIN_MAP_SIZE_BYTES)?;
+        let metadata_map_size = lmdb_map_size_for_existing_env(
+            path,
+            lmdb_metadata_map_size_for_storage_budget(max_size_bytes),
+        )?;
 
         let env = unsafe {
             EnvOpenOptions::new()
@@ -1029,6 +1091,9 @@ impl HashtreeStore {
                 .open(path)?
         };
         let _ = env.clear_stale_readers();
+        if env.info().map_size < metadata_map_size {
+            unsafe { env.resize(metadata_map_size) }?;
+        }
 
         let mut wtxn = env.write_txn()?;
         let pins = env.create_database(&mut wtxn, Some("pins"))?;
@@ -1115,6 +1180,7 @@ impl HashtreeStore {
             max_size_bytes,
             evict_orphans,
             blob_access_update_gate: BlobAccessUpdateGate::default(),
+            blob_access_update_inflight: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1144,13 +1210,37 @@ impl HashtreeStore {
         I: IntoIterator<Item = Hash>,
     {
         let now = unix_timestamp_now();
-        let due_hashes = self.blob_access_update_gate.due_hashes(hashes, now);
+        let mut due_hashes = self.blob_access_update_gate.due_hashes(hashes, now);
         if due_hashes.is_empty() {
             return;
         }
 
-        if let Err(err) = self.router.touch_many_accessed_sync(&due_hashes, now) {
-            tracing::debug!("Failed to update blob access metadata: {}", err);
+        if self
+            .blob_access_update_inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        if due_hashes.len() > ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT {
+            due_hashes.truncate(ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT);
+        }
+
+        let router = Arc::clone(&self.router);
+        let inflight = Arc::clone(&self.blob_access_update_inflight);
+        let spawn_result = std::thread::Builder::new()
+            .name("blob-access-update".to_string())
+            .spawn(move || {
+                if let Err(err) = router.touch_many_accessed_sync(&due_hashes, now) {
+                    tracing::debug!("Failed to update blob access metadata: {}", err);
+                }
+                inflight.store(false, Ordering::Release);
+            });
+        if let Err(err) = spawn_result {
+            self.blob_access_update_inflight
+                .store(false, Ordering::Release);
+            tracing::debug!("Failed to spawn blob access metadata updater: {}", err);
         }
     }
 
@@ -2164,6 +2254,30 @@ mod tests {
         assert!(
             map_size >= requested,
             "expected blob LMDB map to grow to at least {requested} bytes, got {map_size}"
+        );
+
+        drop(store);
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn hashtree_store_expands_metadata_lmdb_map_size_to_storage_budget() -> Result<()> {
+        let temp = TempDir::new()?;
+        let storage_budget = 256 * 1024 * 1024 * 1024u64;
+        let expected = lmdb_metadata_map_size_for_storage_budget(storage_budget);
+        let store = HashtreeStore::with_options_and_backend(
+            temp.path(),
+            None,
+            storage_budget,
+            true,
+            &StorageBackend::Lmdb,
+        )?;
+
+        let map_size = store.env.info().map_size as u64;
+        assert!(
+            map_size >= expected,
+            "expected metadata LMDB map to grow to at least {expected} bytes, got {map_size}"
         );
 
         drop(store);

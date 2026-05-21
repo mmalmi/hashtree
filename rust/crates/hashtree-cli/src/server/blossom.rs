@@ -452,11 +452,10 @@ pub async fn head_blob(
             }
         };
         let store = state.store.clone();
-        let size_read = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            store.blob_size(&sha256_bytes)
-        });
-        let result = match tokio::time::timeout(blob_read_timeout(), size_read).await {
+        let size_read = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes));
+        let timed = tokio::time::timeout(blob_read_timeout(), size_read).await;
+        drop(permit);
+        let result = match timed {
             Ok(result) => result.map_err(|_| ()),
             Err(_) => Err(()),
         };
@@ -629,13 +628,14 @@ async fn uploaded_blob_already_exists(
     let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
     let size_read = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
         store
             .blob_size(&sha256_hash)
             .map_err(|error| error.to_string())
     });
 
-    match tokio::time::timeout(blob_read_timeout(), size_read).await {
+    let result = tokio::time::timeout(blob_read_timeout(), size_read).await;
+    drop(permit);
+    match result {
         Ok(Ok(Ok(size))) => {
             state.blob_cache.put_size(sha256_hex.to_string(), size);
             Ok(size.is_some())
