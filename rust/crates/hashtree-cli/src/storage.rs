@@ -45,6 +45,7 @@ const LMDB_MAX_READERS: u32 = 1024;
 const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const LMDB_METADATA_MAX_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const LMDB_METADATA_STORAGE_RATIO_DIVISOR: u64 = 1024;
+const LMDB_METADATA_REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(feature = "lmdb")]
 const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
@@ -150,7 +151,15 @@ fn lmdb_map_size_for_existing_env(path: &Path, requested_bytes: u64) -> Result<u
     let existing_bytes = std::fs::metadata(path.join("data.mdb"))
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let requested = align_lmdb_map_size(requested_bytes.max(existing_bytes));
+    let existing_headroom = if existing_bytes == 0 {
+        0
+    } else {
+        existing_bytes
+            .saturating_div(10)
+            .max(LMDB_METADATA_REOPEN_HEADROOM_BYTES)
+    };
+    let requested =
+        align_lmdb_map_size(requested_bytes.max(existing_bytes.saturating_add(existing_headroom)));
     usize::try_from(requested).context("LMDB map size exceeds usize")
 }
 

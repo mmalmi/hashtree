@@ -19,20 +19,47 @@ use crate::storage::HashtreeStore;
 use crate::webrtc::WebRTCState;
 use anyhow::Result;
 use axum::{
+    body::Body,
     extract::DefaultBodyLimit,
+    http::Request,
     middleware,
+    response::Response,
     routing::{get, post, put},
     Router,
 };
+use futures::{future::poll_fn, pin_mut, FutureExt};
+use hyper::body::Incoming;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+    server::conn::auto::Builder as HyperBuilder,
+    service::TowerToHyperService,
+};
+use socket2::{SockRef, TcpKeepalive};
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::future;
+use std::io;
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
+use tokio::sync::watch;
+use tower::{Service, ServiceExt as _};
 use tower_http::cors::CorsLayer;
+use tracing::{debug, error, trace};
 
 pub use auth::{new_lookup_cache, AppState, AuthCredentials, CachedTreeRootEntry};
 
 static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 512 * 1024 * 1024;
+
+#[cfg(not(test))]
+const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_millis(200);
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(60);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 fn virtual_tree_hosts() -> &'static RwLock<HashMap<String, String>> {
     VIRTUAL_TREE_HOSTS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -391,11 +418,13 @@ impl HashtreeServer {
             app = app.layer(cors);
         }
 
-        axum::serve(
+        let make_service =
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        serve_with_connection_limits(
             listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            make_service,
+            shutdown,
         )
-        .with_graceful_shutdown(shutdown)
         .await?;
 
         Ok(local_addr.port())
@@ -404,6 +433,143 @@ impl HashtreeServer {
     pub fn addr(&self) -> &str {
         &self.addr
     }
+}
+
+async fn serve_with_connection_limits<M, S, F>(
+    listener: tokio::net::TcpListener,
+    mut make_service: M,
+    shutdown: F,
+) -> io::Result<()>
+where
+    M: Service<SocketAddr, Error = Infallible, Response = S> + Send + 'static,
+    M::Future: Send,
+    S: Service<Request<Body>, Response = Response, Error = Infallible> + Clone + Send + 'static,
+    S::Future: Send,
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (signal_tx, signal_rx) = watch::channel(());
+    let signal_tx = Arc::new(signal_tx);
+    tokio::spawn(async move {
+        shutdown.await;
+        trace!("received graceful shutdown signal; stopping daemon listener");
+        drop(signal_rx);
+    });
+
+    let (close_tx, close_rx) = watch::channel(());
+
+    loop {
+        let (tcp_stream, remote_addr) = tokio::select! {
+            accepted = accept_tcp(&listener) => {
+                match accepted {
+                    Some(connection) => connection,
+                    None => continue,
+                }
+            }
+            _ = signal_tx.closed() => {
+                trace!("shutdown signal received; no longer accepting daemon connections");
+                break;
+            }
+        };
+
+        configure_tcp_stream(&tcp_stream);
+        let tcp_stream = TokioIo::new(tcp_stream);
+
+        poll_fn(|cx| make_service.poll_ready(cx))
+            .await
+            .unwrap_or_else(|err| match err {});
+
+        let tower_service = make_service
+            .call(remote_addr)
+            .await
+            .unwrap_or_else(|err| match err {})
+            .map_request(|req: Request<Incoming>| req.map(Body::new));
+        let hyper_service = TowerToHyperService::new(tower_service);
+
+        let signal_tx = Arc::clone(&signal_tx);
+        let close_rx = close_rx.clone();
+
+        tokio::spawn(async move {
+            let mut builder = HyperBuilder::new(TokioExecutor::new());
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HTTP1_HEADER_READ_TIMEOUT);
+            builder
+                .http2()
+                .timer(TokioTimer::new())
+                .keep_alive_interval(Some(HTTP2_KEEPALIVE_INTERVAL))
+                .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT);
+
+            let conn = builder.serve_connection_with_upgrades(tcp_stream, hyper_service);
+            pin_mut!(conn);
+
+            let signal_closed = signal_tx.closed().fuse();
+            pin_mut!(signal_closed);
+
+            loop {
+                tokio::select! {
+                    result = conn.as_mut() => {
+                        if let Err(err) = result {
+                            trace!("daemon connection closed with error: {err:#}");
+                        }
+                        break;
+                    }
+                    _ = &mut signal_closed => {
+                        trace!("shutdown signal received by connection task");
+                        conn.as_mut().graceful_shutdown();
+                    }
+                }
+            }
+
+            drop(close_rx);
+        });
+    }
+
+    drop(close_rx);
+    drop(listener);
+    close_tx.closed().await;
+
+    Ok(())
+}
+
+fn configure_tcp_stream(tcp_stream: &tokio::net::TcpStream) {
+    if let Err(err) = tcp_stream.set_nodelay(true) {
+        debug!("failed to set TCP_NODELAY on daemon connection: {err:#}");
+    }
+
+    let socket = SockRef::from(tcp_stream);
+    if let Err(err) = socket.set_tcp_keepalive(
+        &TcpKeepalive::new()
+            .with_time(TCP_KEEPALIVE_TIME)
+            .with_interval(TCP_KEEPALIVE_INTERVAL),
+    ) {
+        debug!("failed to set TCP keepalive on daemon connection: {err:#}");
+    }
+}
+
+async fn accept_tcp(
+    listener: &tokio::net::TcpListener,
+) -> Option<(tokio::net::TcpStream, SocketAddr)> {
+    match listener.accept().await {
+        Ok(connection) => Some(connection),
+        Err(err) => {
+            if is_connection_error(&err) {
+                return None;
+            }
+            error!("daemon accept error: {err}");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            None
+        }
+    }
+}
+
+fn is_connection_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
 }
 
 fn current_unix_secs() -> u64 {
@@ -422,6 +588,7 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use serde_json::json;
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn test_server_serve_file() -> Result<()> {
