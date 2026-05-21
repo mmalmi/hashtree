@@ -138,7 +138,7 @@ platform="$(docker_platform_for_target "$TARGET")"
 read -r -d '' build_command <<EOF || true
 set -euo pipefail
 export PATH="\${CARGO_HOME:-/usr/local/cargo}/bin:\$PATH"
-apk add --no-cache build-base clang lld musl-dev linux-headers pkgconf fuse3-dev cmake perl git >/dev/null
+apk add --no-cache build-base clang clang-dev lld musl-dev linux-headers pkgconf fuse3-dev cmake perl git >/dev/null
 apk add --no-cache fuse3-static >/dev/null
 mkdir -p /target-dir/release /target-dir/${TARGET}/release
 locked_flag=""
