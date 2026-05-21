@@ -2,7 +2,7 @@ import { MemoryStore, sha256, toHex, } from '@hashtree/core';
 import { createRequest, createResponse, createFragmentResponse, encodeRequest, encodeResponse, hashToKey, isFragmented, MAX_HTL, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE, parseMessage, verifyHash, } from '@hashtree/mesh';
 export const DEFAULT_FIPS_DISCOVERY_APP = 'hashtree-v1';
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
-export const FIPS_RESPONSE_FRAGMENT_SIZE = 768;
+export const FIPS_RESPONSE_FRAGMENT_SIZE = 32 * 1024;
 const DYNAMIC_PEER_POLL_INTERVAL_MS = 100;
 const MAX_RESPONSE_FRAGMENTS = 16_384;
 function copyBytes(data) {
