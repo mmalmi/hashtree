@@ -11,6 +11,8 @@ Changes since the `0.2.53` release.
   satisfied through verified FIPS peer responses.
 - Renamed the daemon FIPS miss-fetch setting to `fetch_from_fips_peers` while
   keeping `http_fips_fetch` as a legacy config alias.
+- Updated the FIPS dependency to 0.3.16 so Linux musl release builds do not
+  pull in gateway-only nftables bindings.
 - Increased the CLI metadata LMDB map sizing from tiny fixed defaults to a
   storage-budget-derived allocation, avoiding map-full failures on larger
   stores while keeping same-process reopens stable.
