@@ -11,6 +11,7 @@ workflow for the supported local targets, then writes them into a release direct
 Options:
   --version <version>                 Release version label, for example: v0.2.3
   --repo-dir <dir>                   Repository root to build/package from (default: current checkout)
+  --fips-dir <dir>                   FIPS repository root for Docker Linux builds (default: sibling ../fips)
   --output-dir <dir>                 Output directory (default: rust/dist/hashtree-<version>)
   --target-dir <dir>                 Cargo target dir to read/write (default: rust/target)
   --targets <csv>                    Comma-separated targets to package
@@ -40,6 +41,7 @@ REPO_DIR="${DEFAULT_REPO_DIR}"
 RUST_DIR="${DEFAULT_RUST_DIR}"
 OUTPUT_DIR=""
 TARGET_DIR=""
+FIPS_DIR="${FIPS_DIR:-}"
 TARGETS_CSV=""
 WINDOWS_ARTIFACTS_DIR=""
 PACKAGE_ONLY=0
@@ -129,6 +131,9 @@ build_linux_target_with_docker() {
 
     if [ -n "$DOCKER_RUST_IMAGE" ]; then
         args+=(--docker-rust-image "$DOCKER_RUST_IMAGE")
+    fi
+    if [ -n "$FIPS_DIR" ]; then
+        args+=(--fips-dir "$FIPS_DIR")
     fi
 
     echo "Building ${target} with Docker-native musl toolchain"
@@ -443,6 +448,10 @@ while [ $# -gt 0 ]; do
             ;;
         --repo-dir)
             REPO_DIR="${2:-}"
+            shift 2
+            ;;
+        --fips-dir)
+            FIPS_DIR="${2:-}"
             shift 2
             ;;
         --output-dir)
