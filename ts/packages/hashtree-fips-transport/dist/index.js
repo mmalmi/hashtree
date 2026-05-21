@@ -1,8 +1,10 @@
 import { MemoryStore, sha256, toHex, } from '@hashtree/core';
-import { createRequest, createResponse, encodeRequest, encodeResponse, hashToKey, MAX_HTL, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE, parseMessage, verifyHash, } from '@hashtree/mesh';
+import { createRequest, createResponse, createFragmentResponse, encodeRequest, encodeResponse, hashToKey, isFragmented, MAX_HTL, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE, parseMessage, verifyHash, } from '@hashtree/mesh';
 export const DEFAULT_FIPS_DISCOVERY_APP = 'hashtree-v1';
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
+export const FIPS_RESPONSE_FRAGMENT_SIZE = 768;
 const DYNAMIC_PEER_POLL_INTERVAL_MS = 100;
+const MAX_RESPONSE_FRAGMENTS = 16_384;
 function copyBytes(data) {
     return data.slice();
 }
@@ -103,6 +105,7 @@ export class HashtreeFipsTransport {
     requestHtl;
     cacheResponses;
     pending = new Map();
+    responseFragments = new Map();
     unsubscribe = null;
     constructor(options) {
         this.endpoint = options.endpoint;
@@ -126,6 +129,7 @@ export class HashtreeFipsTransport {
             }
         }
         this.pending.clear();
+        this.responseFragments.clear();
     }
     setPeers(peers) {
         this.peers = peers;
@@ -173,23 +177,82 @@ export class HashtreeFipsTransport {
         const data = await verifiedLocalGet(this.localStore, req.h);
         if (!data)
             return;
-        await this.endpoint.send(peerId, new Uint8Array(encodeResponse(createResponse(req.h, data))));
+        await this.sendResponse(peerId, req.h, data);
     }
     async handleResponse(resp) {
-        if (!await verifyHash(resp.d, resp.h))
-            return;
         const hashKey = hashToKey(resp.h);
         const pending = this.pending.get(hashKey);
         if (!pending)
             return;
+        const data = isFragmented(resp)
+            ? this.handleResponseFragment(hashKey, resp)
+            : copyBytes(resp.d);
+        if (!data)
+            return;
+        if (!await verifyHash(data, resp.h))
+            return;
         this.pending.delete(hashKey);
+        this.responseFragments.delete(hashKey);
         if (this.cacheResponses) {
-            await this.localStore.put(resp.h, copyBytes(resp.d)).catch(() => false);
+            await this.localStore.put(resp.h, copyBytes(data)).catch(() => false);
         }
         for (const request of pending) {
             clearTimeout(request.timer);
-            request.resolve(copyBytes(resp.d));
+            request.resolve(copyBytes(data));
         }
+    }
+    async sendResponse(peerId, hash, data) {
+        if (data.byteLength <= FIPS_RESPONSE_FRAGMENT_SIZE) {
+            await this.endpoint.send(peerId, new Uint8Array(encodeResponse(createResponse(hash, data))));
+            return;
+        }
+        const total = Math.ceil(data.byteLength / FIPS_RESPONSE_FRAGMENT_SIZE);
+        for (let index = 0; index < total; index += 1) {
+            const start = index * FIPS_RESPONSE_FRAGMENT_SIZE;
+            const end = Math.min(start + FIPS_RESPONSE_FRAGMENT_SIZE, data.byteLength);
+            const fragment = data.slice(start, end);
+            const response = createFragmentResponse(hash, fragment, index, total);
+            await this.endpoint.send(peerId, new Uint8Array(encodeResponse(response)));
+        }
+    }
+    handleResponseFragment(hashKey, resp) {
+        const index = resp.i ?? -1;
+        const total = resp.n ?? 0;
+        if (!Number.isInteger(index)
+            || !Number.isInteger(total)
+            || index < 0
+            || total <= 0
+            || total > MAX_RESPONSE_FRAGMENTS
+            || index >= total) {
+            return null;
+        }
+        let reassembly = this.responseFragments.get(hashKey);
+        if (!reassembly || reassembly.total !== total) {
+            reassembly = {
+                total,
+                fragments: new Map(),
+                receivedBytes: 0,
+            };
+            this.responseFragments.set(hashKey, reassembly);
+        }
+        if (!reassembly.fragments.has(index)) {
+            const fragment = copyBytes(resp.d);
+            reassembly.fragments.set(index, fragment);
+            reassembly.receivedBytes += fragment.byteLength;
+        }
+        if (reassembly.fragments.size !== reassembly.total) {
+            return null;
+        }
+        const assembled = new Uint8Array(reassembly.receivedBytes);
+        let offset = 0;
+        for (let fragmentIndex = 0; fragmentIndex < reassembly.total; fragmentIndex += 1) {
+            const fragment = reassembly.fragments.get(fragmentIndex);
+            if (!fragment)
+                return null;
+            assembled.set(fragment, offset);
+            offset += fragment.byteLength;
+        }
+        return assembled;
     }
     async requestFromPeers(hash, peers) {
         const hashKey = hashToKey(hash);
@@ -257,6 +320,7 @@ export class HashtreeFipsTransport {
         }
         else {
             this.pending.delete(hashKey);
+            this.responseFragments.delete(hashKey);
         }
     }
     async sendRequestToPeers(payload, peers) {
@@ -268,6 +332,7 @@ export class HashtreeFipsTransport {
         if (!pending)
             return;
         this.pending.delete(hashKey);
+        this.responseFragments.delete(hashKey);
         for (const request of pending) {
             clearTimeout(request.timer);
             request.resolve(null);

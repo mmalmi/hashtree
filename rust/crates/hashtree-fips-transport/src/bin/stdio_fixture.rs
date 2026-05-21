@@ -13,6 +13,7 @@ use tokio::time::Duration;
 const LOCAL_PEER_ID: &str = "rust";
 const REMOTE_PEER_ID: &str = "ts";
 const RUST_BLOB: &[u8] = b"rust hashtree fips transport fixture blob";
+const LARGE_BLOB_LEN: usize = 2_777;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -29,6 +30,10 @@ enum OutputMessage<'a> {
         peer_id: &'a str,
         hash: String,
         data: String,
+        #[serde(rename = "largeHash")]
+        large_hash: String,
+        #[serde(rename = "largeData")]
+        large_data: String,
     },
     Frame {
         #[serde(rename = "peerId")]
@@ -91,7 +96,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     let store = Arc::new(MemoryStore::new());
     let rust_hash = hash(RUST_BLOB);
+    let rust_large_blob = large_blob();
+    let rust_large_hash = hash(&rust_large_blob);
     store.put(rust_hash, RUST_BLOB.to_vec()).await?;
+    store.put(rust_large_hash, rust_large_blob.clone()).await?;
 
     let transport = Arc::new(
         HashtreeFipsTransport::new(endpoint.clone(), store)
@@ -104,6 +112,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         peer_id: LOCAL_PEER_ID,
         hash: hex::encode(rust_hash),
         data: hex::encode(RUST_BLOB),
+        large_hash: hex::encode(rust_large_hash),
+        large_data: hex::encode(&rust_large_blob),
     })?;
 
     let mut lines = spawn_stdin_reader();
@@ -179,6 +189,12 @@ fn hash(data: &[u8]) -> Hash {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+fn large_blob() -> Vec<u8> {
+    (0..LARGE_BLOB_LEN)
+        .map(|index| (index % 251) as u8)
+        .collect()
 }
 
 fn parse_hash(hex_hash: &str) -> Option<Hash> {

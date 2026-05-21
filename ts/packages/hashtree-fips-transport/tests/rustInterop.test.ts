@@ -15,6 +15,8 @@ interface ReadyMessage {
   peerId: string;
   hash: string;
   data: string;
+  largeHash: string;
+  largeData: string;
 }
 
 interface FrameMessage {
@@ -207,7 +209,10 @@ describe('Rust hashtree FIPS transport interop', () => {
     const tsStore = new MemoryStore();
     const tsData = new TextEncoder().encode('typescript hashtree fips transport fixture blob');
     const tsHash = await sha256(tsData);
+    const tsLargeData = largeBlob(3_013);
+    const tsLargeHash = await sha256(tsLargeData);
     await tsStore.put(tsHash, tsData);
+    await tsStore.put(tsLargeHash, tsLargeData);
 
     const transport = new HashtreeFipsTransport({
       endpoint: fixture.endpoint,
@@ -220,7 +225,11 @@ describe('Rust hashtree FIPS transport interop', () => {
       await expect(transport.get(fromHex(fixture.ready.hash as never))).resolves.toEqual(
         fromHex(fixture.ready.data as never),
       );
+      await expect(transport.get(fromHex(fixture.ready.largeHash as never))).resolves.toEqual(
+        fromHex(fixture.ready.largeData as never),
+      );
       await expect(fixture.fetch(tsHash)).resolves.toBe(toHex(tsData as Hash));
+      await expect(fixture.fetch(tsLargeHash)).resolves.toBe(toHex(tsLargeData as Hash));
     } finally {
       transport.close();
       await fixture.close();
@@ -246,6 +255,14 @@ function parseFixtureMessage(line: string): FixtureMessage | null {
     return null;
   }
   return null;
+}
+
+function largeBlob(length: number): Uint8Array {
+  const data = new Uint8Array(length);
+  for (let i = 0; i < data.byteLength; i += 1) {
+    data[i] = i % 251;
+  }
+  return data;
 }
 
 async function stopProcess(proc: ChildProcessWithoutNullStreams): Promise<void> {

@@ -1,6 +1,7 @@
 import { type Hash, type Store } from '@hashtree/core';
 export declare const DEFAULT_FIPS_DISCOVERY_APP = "hashtree-v1";
 export declare const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5500;
+export declare const FIPS_RESPONSE_FRAGMENT_SIZE = 768;
 export interface FipsEndpointMessage {
     peerId: string;
     data: Uint8Array;
@@ -58,6 +59,7 @@ export declare class HashtreeFipsTransport {
     private readonly requestHtl;
     private readonly cacheResponses;
     private readonly pending;
+    private readonly responseFragments;
     private unsubscribe;
     constructor(options: HashtreeFipsTransportOptions);
     close(): void;
@@ -68,6 +70,8 @@ export declare class HashtreeFipsTransport {
     createReadSource(id?: string): FipsReadSource;
     private handleRequest;
     private handleResponse;
+    private sendResponse;
+    private handleResponseFragment;
     private requestFromPeers;
     private requestFromDynamicPeers;
     private createPendingRequest;

@@ -18,10 +18,12 @@ use tokio::time::{timeout, Duration};
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
+pub const FIPS_RESPONSE_FRAGMENT_SIZE: usize = 768;
 pub const MAX_HTL: u8 = 10;
 
 const MSG_TYPE_REQUEST: u8 = 0x00;
 const MSG_TYPE_RESPONSE: u8 = 0x01;
+const MAX_RESPONSE_FRAGMENTS: u32 = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FipsEndpointPacket {
@@ -213,6 +215,10 @@ struct DataResponse {
     h: Vec<u8>,
     #[serde(with = "serde_bytes")]
     d: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    i: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n: Option<u32>,
 }
 
 enum Message {
@@ -262,6 +268,27 @@ fn encode_response(hash: &Hash, data: &[u8]) -> Result<Vec<u8>, FipsTransportErr
     let body = rmp_serde::to_vec_named(&DataResponse {
         h: hash.to_vec(),
         d: data.to_vec(),
+        i: None,
+        n: None,
+    })
+    .map_err(|err| FipsTransportError::Wire(err.to_string()))?;
+    let mut out = Vec::with_capacity(1 + body.len());
+    out.push(MSG_TYPE_RESPONSE);
+    out.extend(body);
+    Ok(out)
+}
+
+fn encode_fragment_response(
+    hash: &Hash,
+    data: &[u8],
+    index: u32,
+    total: u32,
+) -> Result<Vec<u8>, FipsTransportError> {
+    let body = rmp_serde::to_vec_named(&DataResponse {
+        h: hash.to_vec(),
+        d: data.to_vec(),
+        i: Some(index),
+        n: Some(total),
     })
     .map_err(|err| FipsTransportError::Wire(err.to_string()))?;
     let mut out = Vec::with_capacity(1 + body.len());
@@ -289,11 +316,18 @@ struct PendingRequest {
     resolve: oneshot::Sender<Option<Vec<u8>>>,
 }
 
+struct ResponseReassembly {
+    total: u32,
+    fragments: HashMap<u32, Vec<u8>>,
+    received_bytes: usize,
+}
+
 pub struct HashtreeFipsTransport<S: Store + Send + Sync + 'static = MemoryStore> {
     endpoint: Arc<dyn FipsEndpointIo>,
     local_store: Arc<S>,
     peers: Arc<RwLock<Vec<String>>>,
     pending: Arc<Mutex<HashMap<String, Vec<PendingRequest>>>>,
+    response_fragments: Arc<Mutex<HashMap<String, ResponseReassembly>>>,
     request_timeout: Duration,
     request_htl: u8,
     cache_responses: bool,
@@ -312,6 +346,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             local_store,
             peers: Arc::new(RwLock::new(Vec::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            response_fragments: Arc::new(Mutex::new(HashMap::new())),
             request_timeout: DEFAULT_FIPS_REQUEST_TIMEOUT,
             request_htl: MAX_HTL,
             cache_responses: true,
@@ -427,27 +462,117 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
                 if !verify_hash(&data, &hash) {
                     return Ok(());
                 }
-                self.endpoint
-                    .send(&packet.peer_id, encode_response(&hash, &data)?)
-                    .await?;
+                self.send_response(&packet.peer_id, &hash, &data).await?;
             }
             Message::Response(resp) => {
                 let Some(hash) = bytes_to_hash(&resp.h) else {
                     return Ok(());
                 };
-                if !verify_hash(&resp.d, &hash) {
+                let key = hash_key(&hash);
+                if !self.pending.lock().await.contains_key(&key) {
+                    return Ok(());
+                }
+                let Some(data) = self.response_data_from_message(&key, resp).await else {
+                    return Ok(());
+                };
+                if !verify_hash(&data, &hash) {
                     return Ok(());
                 }
                 if self.cache_responses {
-                    let _ = self.local_store.put(hash, resp.d.clone()).await;
+                    let _ = self.local_store.put(hash, data.clone()).await;
                 }
-                self.resolve_pending(&hash_key(&hash), Some(resp.d)).await;
+                self.resolve_pending(&key, Some(data)).await;
             }
         }
         Ok(())
     }
 
+    async fn send_response(
+        &self,
+        peer_id: &str,
+        hash: &Hash,
+        data: &[u8],
+    ) -> Result<(), FipsTransportError> {
+        if data.len() <= FIPS_RESPONSE_FRAGMENT_SIZE {
+            self.endpoint
+                .send(peer_id, encode_response(hash, data)?)
+                .await?;
+            return Ok(());
+        }
+
+        let total =
+            ((data.len() + FIPS_RESPONSE_FRAGMENT_SIZE - 1) / FIPS_RESPONSE_FRAGMENT_SIZE) as u32;
+        for index in 0..total {
+            let start = index as usize * FIPS_RESPONSE_FRAGMENT_SIZE;
+            let end = (start + FIPS_RESPONSE_FRAGMENT_SIZE).min(data.len());
+            self.endpoint
+                .send(
+                    peer_id,
+                    encode_fragment_response(hash, &data[start..end], index, total)?,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn response_data_from_message(&self, key: &str, resp: DataResponse) -> Option<Vec<u8>> {
+        match (resp.i, resp.n) {
+            (Some(index), Some(total)) => {
+                self.reassemble_response_fragment(key, resp.d, index, total)
+                    .await
+            }
+            (None, None) => Some(resp.d),
+            _ => None,
+        }
+    }
+
+    async fn reassemble_response_fragment(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        index: u32,
+        total: u32,
+    ) -> Option<Vec<u8>> {
+        if total == 0 || total > MAX_RESPONSE_FRAGMENTS || index >= total {
+            return None;
+        }
+
+        let mut fragments = self.response_fragments.lock().await;
+        let entry = fragments
+            .entry(key.to_string())
+            .or_insert_with(|| ResponseReassembly {
+                total,
+                fragments: HashMap::new(),
+                received_bytes: 0,
+            });
+        if entry.total != total {
+            *entry = ResponseReassembly {
+                total,
+                fragments: HashMap::new(),
+                received_bytes: 0,
+            };
+        }
+
+        if let std::collections::hash_map::Entry::Vacant(slot) = entry.fragments.entry(index) {
+            entry.received_bytes += data.len();
+            slot.insert(data);
+        }
+
+        if entry.fragments.len() != entry.total as usize {
+            return None;
+        }
+
+        let mut assembled = Vec::with_capacity(entry.received_bytes);
+        for fragment_index in 0..entry.total {
+            let fragment = entry.fragments.get(&fragment_index)?;
+            assembled.extend_from_slice(fragment);
+        }
+        fragments.remove(key);
+        Some(assembled)
+    }
+
     async fn resolve_pending(&self, key: &str, data: Option<Vec<u8>>) {
+        self.response_fragments.lock().await.remove(key);
         let pending = self.pending.lock().await.remove(key);
         if let Some(pending) = pending {
             for request in pending {
@@ -457,12 +582,22 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
     }
 
     async fn remove_pending_sender(&self, key: &str) {
-        let mut pending = self.pending.lock().await;
-        if let Some(requests) = pending.get_mut(key) {
-            requests.retain(|request| request.resolve.is_closed());
-            if requests.is_empty() {
-                pending.remove(key);
+        let remove_fragments = {
+            let mut pending = self.pending.lock().await;
+            if let Some(requests) = pending.get_mut(key) {
+                requests.retain(|request| request.resolve.is_closed());
+                if requests.is_empty() {
+                    pending.remove(key);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if remove_fragments {
+            self.response_fragments.lock().await.remove(key);
         }
     }
 }
@@ -569,6 +704,32 @@ mod tests {
         let endpoint_a = FakeEndpoint::new("a", network.clone()).await;
         let endpoint_b = FakeEndpoint::new("b", network).await;
         let data = b"hashtree over fips".to_vec();
+        let hash = hash(&data);
+        let store_a = Arc::new(MemoryStore::new());
+        let store_b = Arc::new(MemoryStore::new());
+        store_a.put(hash, data.clone()).await.unwrap();
+
+        let transport_a = Arc::new(HashtreeFipsTransport::new(endpoint_a, store_a));
+        let transport_b = Arc::new(
+            HashtreeFipsTransport::new(endpoint_b, store_b.clone())
+                .with_request_timeout(Duration::from_millis(100)),
+        );
+        transport_a.start();
+        transport_b.start();
+        transport_b.set_peers(vec!["a".to_string()]).await;
+
+        assert_eq!(transport_b.get(&hash).await.unwrap(), Some(data.clone()));
+        assert_eq!(store_b.get(&hash).await.unwrap(), Some(data));
+    }
+
+    #[tokio::test]
+    async fn fetches_fragmented_blob_over_fips_endpoint_bytes() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_a = FakeEndpoint::new("a", network.clone()).await;
+        let endpoint_b = FakeEndpoint::new("b", network).await;
+        let data = (0..(FIPS_RESPONSE_FRAGMENT_SIZE * 2 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
         let hash = hash(&data);
         let store_a = Arc::new(MemoryStore::new());
         let store_b = Arc::new(MemoryStore::new());

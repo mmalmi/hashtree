@@ -6,6 +6,7 @@ import {
 } from '@hashtree/mesh';
 import {
   DEFAULT_FIPS_DISCOVERY_APP,
+  FIPS_RESPONSE_FRAGMENT_SIZE,
   FipsTransportStore,
   HashtreeFipsTransport,
   createFipsNodeEndpoint,
@@ -152,6 +153,38 @@ describe('@hashtree/fips-transport', () => {
     await expect(bTransport.get(hash)).resolves.toEqual(data);
     await expect(bStore.get(hash)).resolves.toEqual(data);
     expect(bEndpoint.sent).toHaveLength(1);
+
+    aTransport.close();
+    bTransport.close();
+  });
+
+  it('fragments and reassembles responses that exceed the FIPS endpoint payload budget', async () => {
+    const network = new Map<string, FakeFipsEndpoint>();
+    const aEndpoint = new FakeFipsEndpoint('a', network);
+    const bEndpoint = new FakeFipsEndpoint('b', network);
+    const data = new Uint8Array(FIPS_RESPONSE_FRAGMENT_SIZE * 2 + 17);
+    for (let i = 0; i < data.byteLength; i += 1) {
+      data[i] = i % 251;
+    }
+    const hash = await sha256(data) as Hash;
+    const aStore = new MemoryStore();
+    const bStore = new MemoryStore();
+    await aStore.put(hash, data);
+
+    const aTransport = new HashtreeFipsTransport({
+      endpoint: aEndpoint,
+      localStore: aStore,
+    });
+    const bTransport = new HashtreeFipsTransport({
+      endpoint: bEndpoint,
+      localStore: bStore,
+      peers: ['a'],
+      requestTimeoutMs: 100,
+    });
+
+    await expect(bTransport.get(hash)).resolves.toEqual(data);
+    await expect(bStore.get(hash)).resolves.toEqual(data);
+    expect(aEndpoint.sent.length).toBeGreaterThan(1);
 
     aTransport.close();
     bTransport.close();
