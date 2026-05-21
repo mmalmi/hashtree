@@ -399,7 +399,7 @@ describe('worker peer blob sharing', () => {
     });
   });
 
-  it('keeps the generic p2p fetch path available when the peer list is stale', async () => {
+  it('keeps the generic p2p fetch path available while no peers are listed yet', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -407,7 +407,7 @@ describe('worker peer blob sharing', () => {
     const hashHex = '34'.repeat(32);
     const blobData = new Uint8Array([6, 7, 8, 9]);
     const requestedPeerIds: Array<string | null> = [];
-    peerListResponder.peerIds = ['stale-peer'];
+    peerListResponder.peerIds = [];
     peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
       expect(requestedHashHex).toBe(hashHex);
       requestedPeerIds.push(peerId ?? null);
@@ -496,6 +496,14 @@ describe('worker peer blob sharing', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      postMessageMock.mock.calls.some(
+        ([message]) => (
+          (message as { type?: string; peerId?: string }).type === 'p2pFetch'
+          && !('peerId' in (message as { peerId?: string }))
+        ),
+      ),
+    ).toBe(false);
   });
 
   it('stores raw blocks locally, uploads them through Blossom, and serves them to peers', async () => {

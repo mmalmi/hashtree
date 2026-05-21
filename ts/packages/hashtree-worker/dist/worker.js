@@ -555,6 +555,21 @@ function createStorageStore() {
     };
 }
 function createMeshStore() {
+    const p2pSources = () => {
+        const peerSources = p2pPeerIds.map((peerId) => ({
+            id: `peer:${peerId}`,
+            groupId: 'p2p',
+            get: async (hash) => requestP2PBlob(toHex(hash), peerId),
+        }));
+        if (peerSources.length > 0) {
+            return peerSources;
+        }
+        return [{
+                id: 'p2p',
+                groupId: 'p2p',
+                get: async (hash) => requestP2PBlob(toHex(hash)),
+            }];
+    };
     return new MeshRouterStore({
         primary: createStorageStore(),
         primarySourceId: 'idb',
@@ -566,19 +581,8 @@ function createMeshStore() {
             maxFanout: 2,
             hedgeIntervalMs: REMOTE_HEDGE_INTERVAL_MS,
         },
-        sources: [
-            {
-                id: 'p2p',
-                groupId: 'p2p',
-                get: async (hash) => requestP2PBlob(toHex(hash)),
-            },
-        ],
         sourceProviders: [
-            () => p2pPeerIds.map((peerId) => ({
-                id: `peer:${peerId}`,
-                groupId: 'p2p',
-                get: async (hash) => requestP2PBlob(toHex(hash), peerId),
-            })),
+            p2pSources,
             () => blossom
                 ? blossom.getReadServers().map((server) => ({
                     id: `blossom:${server.url}`,

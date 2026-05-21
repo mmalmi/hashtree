@@ -26,7 +26,7 @@ import type {
 import { IdbBlobStorage } from './capabilities/idbStorage.js';
 import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blossomTransport.js';
 import { probeConnectivity } from './capabilities/connectivity.js';
-import { MeshRouterStore, type MeshRouterGetOptions } from './capabilities/meshRouterStore.js';
+import { MeshRouterStore, type MeshReadSource, type MeshRouterGetOptions } from './capabilities/meshRouterStore.js';
 import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
@@ -737,6 +737,22 @@ function createStorageStore(): Store {
 }
 
 function createMeshStore(): MeshRouterStore {
+  const p2pSources = (): MeshReadSource[] => {
+    const peerSources = p2pPeerIds.map((peerId) => ({
+      id: `peer:${peerId}`,
+      groupId: 'p2p',
+      get: async (hash: Hash) => requestP2PBlob(toHex(hash), peerId),
+    }));
+    if (peerSources.length > 0) {
+      return peerSources;
+    }
+    return [{
+      id: 'p2p',
+      groupId: 'p2p',
+      get: async (hash: Hash) => requestP2PBlob(toHex(hash)),
+    }];
+  };
+
   return new MeshRouterStore({
     primary: createStorageStore(),
     primarySourceId: 'idb',
@@ -748,19 +764,8 @@ function createMeshStore(): MeshRouterStore {
       maxFanout: 2,
       hedgeIntervalMs: REMOTE_HEDGE_INTERVAL_MS,
     },
-    sources: [
-      {
-        id: 'p2p',
-        groupId: 'p2p',
-        get: async (hash) => requestP2PBlob(toHex(hash)),
-      },
-    ],
     sourceProviders: [
-      () => p2pPeerIds.map((peerId) => ({
-        id: `peer:${peerId}`,
-        groupId: 'p2p',
-        get: async (hash: Hash) => requestP2PBlob(toHex(hash), peerId),
-      })),
+      p2pSources,
       () => blossom
         ? blossom.getReadServers().map((server) => ({
           id: `blossom:${server.url}`,
