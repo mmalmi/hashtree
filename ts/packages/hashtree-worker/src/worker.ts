@@ -38,6 +38,7 @@ const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_SLOW_LOG_MS = 15_000;
 const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
+const P2P_PEER_LIST_CACHE_MS = 1_500;
 // Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
 // keeps the local read alive after this delay instead of treating it as a miss.
 const PRIMARY_READ_TIMEOUT_MS = 300;
@@ -72,6 +73,7 @@ const pendingP2PFetches = new Map<
 const pendingP2PPeerLists = new Map<string, { resolve: (peerIds: string[]) => void }>();
 let inflightP2PPeerList: Promise<string[]> | null = null;
 let p2pPeerIds: string[] = [];
+let p2pPeerIdsRefreshedAt = 0;
 const peerShareableEncryptedHashes = new Set<string>();
 const peerShareablePublishedHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
@@ -580,11 +582,17 @@ async function requestP2PPeerIds(): Promise<string[]> {
 }
 
 async function refreshP2PPeerIds(): Promise<void> {
+  if (Date.now() - p2pPeerIdsRefreshedAt < P2P_PEER_LIST_CACHE_MS) {
+    return;
+  }
+
   try {
     const peerIds = await requestP2PPeerIds();
     p2pPeerIds = Array.from(new Set(peerIds.filter((peerId) => `${peerId}`.length > 0))).sort();
+    p2pPeerIdsRefreshedAt = Date.now();
   } catch {
     p2pPeerIds = [];
+    p2pPeerIdsRefreshedAt = Date.now();
   }
 }
 
