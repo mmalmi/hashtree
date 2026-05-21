@@ -1,7 +1,7 @@
 import { type Hash, type Store } from '@hashtree/core';
 export declare const DEFAULT_FIPS_DISCOVERY_APP = "hashtree-v1";
 export declare const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5500;
-export declare const FIPS_RESPONSE_FRAGMENT_SIZE: number;
+export declare const FIPS_RESPONSE_FRAGMENT_SIZE = 1024;
 export interface FipsEndpointMessage {
     peerId: string;
     data: Uint8Array;

@@ -18,7 +18,7 @@ use tokio::time::{timeout, Duration};
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
-pub const FIPS_RESPONSE_FRAGMENT_SIZE: usize = 32 * 1024;
+pub const FIPS_RESPONSE_FRAGMENT_SIZE: usize = 1024;
 pub const MAX_HTL: u8 = 10;
 
 const MSG_TYPE_REQUEST: u8 = 0x00;
