@@ -1,0 +1,1 @@
+{"version":3,"file":"publicAssetUrl.d.ts","sourceRoot":"","sources":["../../src/relay/publicAssetUrl.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,kCAAkC;IACjD,aAAa,EAAE,MAAM,CAAC;IACtB,MAAM,EAAE,MAAM,CAAC;CAChB;AAED,wBAAgB,2BAA2B,CACzC,OAAO,EAAE,MAAM,GAAG,SAAS,EAC3B,SAAS,EAAE,MAAM,EACjB,OAAO,EAAE,kCAAkC,GAC1C,MAAM,CAeR"}
