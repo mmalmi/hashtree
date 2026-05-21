@@ -22,6 +22,7 @@ import {
 
 export const DEFAULT_FIPS_DISCOVERY_APP = 'hashtree-v1';
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
+const DYNAMIC_PEER_POLL_INTERVAL_MS = 100;
 
 export interface FipsEndpointMessage {
   peerId: string;
@@ -86,6 +87,11 @@ interface PendingBlobRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingBlobRequestHandle {
+  promise: Promise<Uint8Array | null>;
+  isSettled: () => boolean;
+}
+
 function copyBytes(data: Uint8Array): Uint8Array {
   return data.slice();
 }
@@ -104,6 +110,10 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
 function normalizePeers(peers: readonly string[], localPeerId?: string): string[] {
@@ -226,7 +236,12 @@ export class HashtreeFipsTransport {
     const local = await verifiedLocalGet(this.localStore, hash);
     if (local) return local;
 
-    const peerIds = await resolvePeerSource(this.endpoint, peers ?? this.peers);
+    const peerSource = peers ?? this.peers;
+    if (typeof peerSource === 'function') {
+      return this.requestFromDynamicPeers(hash, peerSource);
+    }
+
+    const peerIds = await resolvePeerSource(this.endpoint, peerSource);
     if (peerIds.length === 0) return null;
 
     return this.requestFromPeers(hash, peerIds);
@@ -286,31 +301,83 @@ export class HashtreeFipsTransport {
 
   private async requestFromPeers(hash: Hash, peers: readonly string[]): Promise<Uint8Array | null> {
     const hashKey = hashToKey(hash);
-    const pendingResult = new Promise<Uint8Array | null>((resolve) => {
-      const timer = setTimeout(() => {
-        const pending = this.pending.get(hashKey) ?? [];
-        const remaining = pending.filter((request) => request.resolve !== resolve);
-        if (remaining.length > 0) {
-          this.pending.set(hashKey, remaining);
-        } else {
-          this.pending.delete(hashKey);
-        }
-        resolve(null);
-      }, this.requestTimeoutMs);
-      const pending = this.pending.get(hashKey) ?? [];
-      pending.push({ hash, resolve, timer });
-      this.pending.set(hashKey, pending);
-    });
-
+    const pending = this.createPendingRequest(hashKey, hash);
     const payload = new Uint8Array(encodeRequest(createRequest(hash, this.requestHtl)));
-    const sends = await Promise.allSettled(
-      peers.map((peerId) => this.endpoint.send(peerId, copyBytes(payload))),
-    );
-    if (sends.every((result) => result.status === 'rejected')) {
+    const sent = await this.sendRequestToPeers(payload, peers);
+    if (sent === 0) {
       this.resolvePendingMiss(hashKey);
     }
 
-    return pendingResult;
+    return pending.promise;
+  }
+
+  private async requestFromDynamicPeers(hash: Hash, peers: () => readonly string[] | Promise<readonly string[]>): Promise<Uint8Array | null> {
+    const hashKey = hashToKey(hash);
+    const pending = this.createPendingRequest(hashKey, hash);
+    const payload = new Uint8Array(encodeRequest(createRequest(hash, this.requestHtl)));
+    const attempted = new Set<string>();
+    const deadline = Date.now() + this.requestTimeoutMs;
+
+    while (!pending.isSettled()) {
+      const peerIds = await resolvePeerSource(this.endpoint, peers).catch(() => []);
+      const newPeers = peerIds.filter((peerId) => !attempted.has(peerId));
+      for (const peerId of newPeers) {
+        attempted.add(peerId);
+      }
+      if (newPeers.length > 0) {
+        void this.sendRequestToPeers(payload, newPeers);
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+      await Promise.race([
+        pending.promise.then(() => undefined),
+        sleep(Math.min(DYNAMIC_PEER_POLL_INTERVAL_MS, remainingMs)),
+      ]);
+    }
+
+    return pending.promise;
+  }
+
+  private createPendingRequest(hashKey: string, hash: Hash): PendingBlobRequestHandle {
+    let settled = false;
+    const promise = new Promise<Uint8Array | null>((resolve) => {
+      const finish = (data: Uint8Array | null): void => {
+        if (settled) return;
+        settled = true;
+        resolve(data);
+      };
+      const timer = setTimeout(() => {
+        this.removePendingRequest(hashKey, finish);
+        finish(null);
+      }, this.requestTimeoutMs);
+      const pending = this.pending.get(hashKey) ?? [];
+      pending.push({ hash, resolve: finish, timer });
+      this.pending.set(hashKey, pending);
+    });
+    return {
+      promise,
+      isSettled: () => settled,
+    };
+  }
+
+  private removePendingRequest(hashKey: string, resolve: (data: Uint8Array | null) => void): void {
+    const pending = this.pending.get(hashKey) ?? [];
+    const remaining = pending.filter((request) => request.resolve !== resolve);
+    if (remaining.length > 0) {
+      this.pending.set(hashKey, remaining);
+    } else {
+      this.pending.delete(hashKey);
+    }
+  }
+
+  private async sendRequestToPeers(payload: Uint8Array, peers: readonly string[]): Promise<number> {
+    const sends = await Promise.allSettled(
+      peers.map((peerId) => this.endpoint.send(peerId, copyBytes(payload))),
+    );
+    return sends.filter((result) => result.status === 'fulfilled').length;
   }
 
   private resolvePendingMiss(hashKey: string): void {

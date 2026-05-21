@@ -69,6 +69,10 @@ export declare class HashtreeFipsTransport {
     private handleRequest;
     private handleResponse;
     private requestFromPeers;
+    private requestFromDynamicPeers;
+    private createPendingRequest;
+    private removePendingRequest;
+    private sendRequestToPeers;
     private resolvePendingMiss;
 }
 export interface FipsTransportStoreOptions extends HashtreeFipsTransportOptions {

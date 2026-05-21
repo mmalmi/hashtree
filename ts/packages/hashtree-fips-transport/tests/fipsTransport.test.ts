@@ -184,6 +184,42 @@ describe('@hashtree/fips-transport', () => {
     vi.useRealTimers();
   });
 
+  it('sends an in-flight request to peers that appear from a dynamic source', async () => {
+    vi.useFakeTimers();
+    const network = new Map<string, FakeFipsEndpoint>();
+    const aEndpoint = new FakeFipsEndpoint('a', network);
+    const bEndpoint = new FakeFipsEndpoint('b', network);
+    const data = new TextEncoder().encode('late peer');
+    const hash = await sha256(data) as Hash;
+    const aStore = new MemoryStore();
+    await aStore.put(hash, data);
+    let peers: string[] = [];
+    const aTransport = new HashtreeFipsTransport({
+      endpoint: aEndpoint,
+      localStore: aStore,
+    });
+    const bTransport = new HashtreeFipsTransport({
+      endpoint: bEndpoint,
+      localStore: new MemoryStore(),
+      peers: () => peers,
+      requestTimeoutMs: 300,
+    });
+
+    const pending = bTransport.get(hash);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(bEndpoint.sent).toHaveLength(0);
+
+    peers = ['a'];
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(pending).resolves.toEqual(data);
+    expect(bEndpoint.sent).toHaveLength(1);
+
+    aTransport.close();
+    bTransport.close();
+    vi.useRealTimers();
+  });
+
   it('ignores poisoned responses and waits for another valid source', async () => {
     vi.useFakeTimers();
     const network = new Map<string, FakeFipsEndpoint>();
