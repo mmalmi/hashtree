@@ -399,6 +399,53 @@ describe('worker peer blob sharing', () => {
     });
   });
 
+  it('keeps the generic p2p fetch path available when the peer list is stale', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    const hashHex = '34'.repeat(32);
+    const blobData = new Uint8Array([6, 7, 8, 9]);
+    const requestedPeerIds: Array<string | null> = [];
+    peerListResponder.peerIds = ['stale-peer'];
+    peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
+      expect(requestedHashHex).toBe(hashHex);
+      requestedPeerIds.push(peerId ?? null);
+      queueMicrotask(() => {
+        target.dispatch({
+          type: 'p2pFetchResult',
+          id: `peer-${peerId ?? 'generic'}-${requestId}`,
+          requestId,
+          data: peerId ? undefined : blobData,
+        });
+      });
+    };
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-3b',
+      config: {
+        relays: [],
+        blossomServers: [],
+      },
+    });
+    await flush();
+
+    ctx.dispatch({
+      type: 'getBlob',
+      id: 'blob-3b',
+      hashHex,
+    });
+
+    expect(await waitForBlobResponse('blob-3b')).toEqual({
+      type: 'blob',
+      id: 'blob-3b',
+      data: blobData,
+      source: 'p2p',
+    });
+    expect(requestedPeerIds[0]).toBeNull();
+  });
+
   it('targets specific p2p peer endpoints when the client exposes them', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
@@ -409,13 +456,12 @@ describe('worker peer blob sharing', () => {
     peerListResponder.peerIds = ['peer-a'];
     peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
       expect(requestedHashHex).toBe(hashHex);
-      expect(peerId).toBe('peer-a');
       queueMicrotask(() => {
         target.dispatch({
           type: 'p2pFetchResult',
           id: `peer-hit-${requestId}`,
           requestId,
-          data: blobData,
+          data: peerId === 'peer-a' ? blobData : undefined,
         });
       });
     };

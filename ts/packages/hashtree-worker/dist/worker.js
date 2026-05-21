@@ -570,7 +570,6 @@ function createMeshStore() {
             {
                 id: 'p2p',
                 groupId: 'p2p',
-                isAvailable: () => p2pPeerIds.length === 0,
                 get: async (hash) => requestP2PBlob(toHex(hash)),
             },
         ],
