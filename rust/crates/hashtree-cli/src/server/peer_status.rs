@@ -243,14 +243,16 @@ pub(super) async fn daemon_status(
         let peers = transport.peer_ids().await;
         json!({
             "enabled": true,
-            "http_fetch": state.http_fips_fetch,
+            "fetch_from_peers": state.fetch_from_fips_peers,
+            "http_fetch": state.fetch_from_fips_peers,
             "total_peers": peers.len(),
             "peers": peers,
         })
     } else {
         json!({
             "enabled": false,
-            "http_fetch": state.http_fips_fetch,
+            "fetch_from_peers": state.fetch_from_fips_peers,
+            "http_fetch": state.fetch_from_fips_peers,
         })
     };
     let (relay_bytes_sent, relay_bytes_received) = state.ws_relay.upstream_relay_bandwidth();
@@ -300,7 +302,8 @@ pub(super) async fn daemon_status(
         "capabilities": {
             "hash_get": state.hash_get_enabled,
             "http_webrtc_fetch": state.http_webrtc_fetch,
-            "http_fips_fetch": state.http_fips_fetch,
+            "fetch_from_fips_peers": state.fetch_from_fips_peers,
+            "http_fips_fetch": state.fetch_from_fips_peers,
             "fips": state.fips_transport.is_some(),
         },
         "fips": fips,

@@ -158,7 +158,7 @@ fips_udp_bind_addr = "0.0.0.0:2121"
 fips_udp_public = true
 fips_udp_external_addr = "${external_addr}:2121"
 enable_fips_webrtc = false
-http_fips_fetch = true
+fetch_from_fips_peers = true
 fips_request_timeout_ms = 20000
 
 [storage]

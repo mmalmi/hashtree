@@ -208,7 +208,7 @@ pub struct AppState {
     pub webrtc_peers: Option<Arc<WebRTCState>>,
     /// FIPS-backed Hashtree blob transport for peer fetches and responses.
     pub fips_transport: Option<Arc<DaemonFipsTransport>>,
-    pub http_fips_fetch: bool,
+    pub fetch_from_fips_peers: bool,
     /// WebSocket relay state for /ws clients
     pub ws_relay: Arc<WsRelayState>,
     /// Maximum upload size in bytes for Blossom uploads (default: 5 MB)

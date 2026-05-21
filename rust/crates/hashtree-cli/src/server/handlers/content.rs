@@ -46,7 +46,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
         }
     }
 
-    if state.hash_get_enabled && state.http_fips_fetch {
+    if state.hash_get_enabled && state.fetch_from_fips_peers {
         if let Some(ref fips_transport) = state.fips_transport {
             tracing::info!(
                 "[htree-fetch] Querying FIPS peers for {}",

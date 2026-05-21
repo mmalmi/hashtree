@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.54 - 2026-05-21
+
+Changes since the `0.2.53` release.
+
+### Changed
+
+- Kept the daemon FIPS endpoint enabled by default in normal mode, including
+  ordinary UDP and FIPS WebRTC endpoint transports, so HTTP blob misses can be
+  satisfied through verified FIPS peer responses.
+- Renamed the daemon FIPS miss-fetch setting to `fetch_from_fips_peers` while
+  keeping `http_fips_fetch` as a legacy config alias.
+- Increased the CLI metadata LMDB map sizing from tiny fixed defaults to a
+  storage-budget-derived allocation, avoiding map-full failures on larger
+  stores while keeping same-process reopens stable.
+- Moved blob access-time metadata writes off the foreground read path and
+  bounded each background update batch.
+- Added timeouts around synchronous S3 bridge operations so foreground storage
+  calls do not hang indefinitely behind a degraded S3/R2 backend.
+- Extended the TypeScript Blossom store with configurable read timeouts and an
+  option to skip pre-upload existence checks when write endpoints handle
+  duplicates.
+
 ## 0.2.53 - 2026-05-20
 
 Changes since the `0.2.52` release.

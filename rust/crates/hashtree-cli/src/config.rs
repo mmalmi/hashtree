@@ -121,9 +121,9 @@ pub struct ServerConfig {
     /// Enable FIPS WebRTC endpoint transport.
     #[serde(default = "default_enable_fips_webrtc")]
     pub enable_fips_webrtc: bool,
-    /// Allow HTTP misses to fetch blobs from FIPS peers.
-    #[serde(default = "default_http_fips_fetch")]
-    pub http_fips_fetch: bool,
+    /// Allow daemon cache misses to fetch blobs from FIPS peers.
+    #[serde(default = "default_fetch_from_fips_peers", alias = "http_fips_fetch")]
+    pub fetch_from_fips_peers: bool,
     /// How long one FIPS blob request waits for a valid response.
     #[serde(default = "default_fips_request_timeout_ms")]
     pub fips_request_timeout_ms: u64,
@@ -623,7 +623,7 @@ fn default_enable_fips_webrtc() -> bool {
     true
 }
 
-fn default_http_fips_fetch() -> bool {
+fn default_fetch_from_fips_peers() -> bool {
     true
 }
 
@@ -698,7 +698,7 @@ impl Default for ServerConfig {
             fips_udp_public: false,
             fips_udp_external_addr: None,
             enable_fips_webrtc: default_enable_fips_webrtc(),
-            http_fips_fetch: default_http_fips_fetch(),
+            fetch_from_fips_peers: default_fetch_from_fips_peers(),
             fips_request_timeout_ms: default_fips_request_timeout_ms(),
             http_webrtc_fetch: default_http_webrtc_fetch(),
             peer_signal_urls: Vec::new(),
@@ -1360,7 +1360,7 @@ chunk_target_bytes = 65536
         assert!(!server.fips_udp_public);
         assert!(server.fips_udp_external_addr.is_none());
         assert!(server.enable_fips_webrtc);
-        assert!(server.http_fips_fetch);
+        assert!(server.fetch_from_fips_peers);
         assert!(server.fips_relays.is_empty());
         assert_eq!(server.fips_discovery_scope, "hashtree-v1");
         assert_eq!(server.fips_request_timeout_ms, 5_500);
@@ -1379,7 +1379,7 @@ fips_udp_bind_addr = "0.0.0.0:2121"
 fips_udp_public = true
 fips_udp_external_addr = "198.19.77.10:2121"
 enable_fips_webrtc = true
-http_fips_fetch = false
+fetch_from_fips_peers = false
 fips_request_timeout_ms = 42
 "#,
         )
@@ -1399,8 +1399,21 @@ fips_request_timeout_ms = 42
             Some("198.19.77.10:2121")
         );
         assert!(config.server.enable_fips_webrtc);
-        assert!(!config.server.http_fips_fetch);
+        assert!(!config.server.fetch_from_fips_peers);
         assert_eq!(config.server.fips_request_timeout_ms, 42);
+    }
+
+    #[test]
+    fn server_config_accepts_legacy_http_fips_fetch_name() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+http_fips_fetch = false
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.server.fetch_from_fips_peers);
     }
 
     #[test]

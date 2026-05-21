@@ -66,8 +66,12 @@ export interface BlossomStoreConfig {
   logger?: BlossomLogger;
   /** Optional callback for upload progress (per-server, per-chunk) */
   onUploadProgress?: BlossomUploadCallback;
+  /** Timeout for a single Blossom read request (defaults to 60 seconds) */
+  getTimeoutMs?: number;
   /** Timeout for a single Blossom upload request (defaults to 120 seconds) */
   putTimeoutMs?: number;
+  /** Skip pre-upload HEAD probes; useful when the write endpoint handles duplicates. */
+  skipExistenceCheck?: boolean;
 }
 
 /** Server health tracking for backoff */
@@ -104,7 +108,7 @@ const EXISTENCE_CHECK_THRESHOLD = 256 * 1024;
 
 /** Timeout for HEAD requests (5 seconds) */
 const HEAD_TIMEOUT_MS = 15_000;
-const GET_TIMEOUT_MS = 15_000;
+const DEFAULT_GET_TIMEOUT_MS = 60_000;
 const PUT_TIMEOUT_MS = 120_000;
 const GET_HEDGE_INTERVAL_MS = 75;
 const READ_SCORE_TIE_DELTA = 0.12;
@@ -132,7 +136,9 @@ export class BlossomStore implements StoreWithMeta {
   private signer?: BlossomSigner;
   private logger?: BlossomLogger;
   private onUploadProgress?: BlossomUploadCallback;
+  private getTimeoutMs: number;
   private putTimeoutMs: number;
+  private skipExistenceCheck: boolean;
   private serverHealth: Map<string, ServerHealth> = new Map();
   private readStats: Map<string, ReadServerStats> = new Map();
   private hashAttempts: Map<string, HashAttempts> = new Map();
@@ -145,7 +151,9 @@ export class BlossomStore implements StoreWithMeta {
     this.signer = config.signer;
     this.logger = config.logger;
     this.onUploadProgress = config.onUploadProgress;
+    this.getTimeoutMs = config.getTimeoutMs ?? DEFAULT_GET_TIMEOUT_MS;
     this.putTimeoutMs = config.putTimeoutMs ?? PUT_TIMEOUT_MS;
+    this.skipExistenceCheck = config.skipExistenceCheck === true;
   }
 
   /** Get list of write-enabled server URLs */
@@ -330,7 +338,7 @@ export class BlossomStore implements StoreWithMeta {
       server,
       settled: false,
       promise: fetch(`${server.url}/${hashHex}.bin`, {
-        signal: AbortSignal.timeout(GET_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.getTimeoutMs),
       })
         .then(async (response) => {
           const elapsedMs = Math.max(1, Date.now() - startedAt);
@@ -498,7 +506,7 @@ export class BlossomStore implements StoreWithMeta {
 
     // For large blobs, check if they already exist on write servers before uploading
     // Only check write servers - we want to ensure data is on servers we control
-    if (data.length >= EXISTENCE_CHECK_THRESHOLD) {
+    if (!this.skipExistenceCheck && data.length >= EXISTENCE_CHECK_THRESHOLD) {
       const existsOnWriteServer = await this.hasOnWriteServers(hash);
       if (existsOnWriteServer) {
         this.log({ operation: 'put', server: 'all', hash: hashHex, success: true, bytes: 0 });

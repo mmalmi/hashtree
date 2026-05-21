@@ -609,7 +609,7 @@ pub(crate) async fn run() -> Result<()> {
                 .with_server_mode(config.server.mode)
                 .with_hash_get_enabled(config.server.mode.hash_get_enabled())
                 .with_http_webrtc_fetch(config.server.http_webrtc_fetch)
-                .with_http_fips_fetch(config.server.http_fips_fetch)
+                .with_fetch_from_fips_peers(config.server.fetch_from_fips_peers)
                 .with_allowed_pubkeys(allowed_pubkeys.clone())
                 .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
                 .with_public_writes(config.server.public_writes)
