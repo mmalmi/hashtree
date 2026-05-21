@@ -107,7 +107,6 @@ export function createNostrEventCollectionDefinition(
 export function nostrEventManifestToCollectionManifest(
   manifest: NostrEventManifest,
   sourceId: string = DEFAULT_NOSTR_EVENT_COLLECTION_SOURCE_ID,
-  itemCount = 0,
 ): CollectionManifest {
   const indexes: Record<string, CollectionManifestIndex> = {
     [MANIFEST_BY_AUTHOR_TIME]: { kind: 'key', root: serializeCid(manifest.byAuthorTime) },
@@ -128,7 +127,6 @@ export function nostrEventManifestToCollectionManifest(
     sourceId,
     schemaVersion: 1,
     updatedAt: 0,
-    itemCount,
     byIdRoot: serializeCid(manifest.byId),
     indexes,
     publishedSchema: NOSTR_EVENT_PUBLISHED_SCHEMA,
@@ -164,11 +162,7 @@ export async function createNostrEventCollectionSource(
   sourceId: string = DEFAULT_NOSTR_EVENT_COLLECTION_SOURCE_ID,
 ): Promise<CollectionSource> {
   const collectionManifest = nostrEventManifestToCollectionManifest(manifest, sourceId);
-  const source = new CollectionSource(store, collectionManifest);
-  return new CollectionSource(store, {
-    ...collectionManifest,
-    itemCount: await source.count(),
-  });
+  return new CollectionSource(store, collectionManifest);
 }
 
 export function createNostrEventCollectionWriter(

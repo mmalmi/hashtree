@@ -6,6 +6,14 @@
  * @hashtree/fips-transport so FIPS owns peer discovery and WebRTC/UDP links.
  */
 
+export const DEFAULT_RELAYS: string[] = [
+  'wss://relay.damus.io',
+  'wss://relay.primal.net',
+  'wss://relay.nostr.band',
+  'wss://temp.iris.to',
+  'wss://relay.snort.social',
+];
+
 export * from '@hashtree/mesh';
 
 // Ref resolvers
