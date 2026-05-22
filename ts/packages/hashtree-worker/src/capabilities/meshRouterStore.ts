@@ -357,27 +357,64 @@ export class MeshRouterStore implements Store {
       promise: Promise.resolve({ sourceId: source.id, data: null }),
     };
 
-    task.promise = source.get(hash)
-      .then(async (data) => {
-        const elapsedMs = Math.max(1, Date.now() - startedAt);
-        if (data) {
-          const stableData = data.slice();
-          this.recordSuccess(source.id, elapsedMs);
-          await this.primary.put(hash, stableData).catch(() => false);
-          return { sourceId: source.id, data: stableData };
+    task.promise = new Promise<{ sourceId: string; data: Uint8Array | null }>((resolve) => {
+      let completed = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      const finish = (data: Uint8Array | null): void => {
+        if (completed) {
+          return;
         }
+        completed = true;
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+        resolve({ sourceId: source.id, data });
+      };
 
-        if (!task.timeoutRecorded) {
-          this.recordMiss(source.id);
-        }
-        return { sourceId: source.id, data: null };
-      })
-      .catch(() => {
-        if (!task.timeoutRecorded) {
-          this.recordFailure(source.id);
-        }
-        return { sourceId: source.id, data: null };
-      });
+      if (Number.isFinite(this.requestTimeoutMs) && this.requestTimeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          if (completed) {
+            return;
+          }
+          task.timeoutRecorded = true;
+          this.recordTimeout(source.id);
+          finish(null);
+        }, this.requestTimeoutMs);
+      }
+
+      void source.get(hash)
+        .then(async (data) => {
+          if (completed) {
+            return;
+          }
+          const elapsedMs = Math.max(1, Date.now() - startedAt);
+          if (data) {
+            const stableData = data.slice();
+            completed = true;
+            if (timeoutId !== null) {
+              clearTimeout(timeoutId);
+            }
+            this.recordSuccess(source.id, elapsedMs);
+            await this.primary.put(hash, stableData).catch(() => false);
+            resolve({ sourceId: source.id, data: stableData });
+            return;
+          }
+
+          if (!task.timeoutRecorded) {
+            this.recordMiss(source.id);
+          }
+          finish(null);
+        })
+        .catch(() => {
+          if (completed) {
+            return;
+          }
+          if (!task.timeoutRecorded) {
+            this.recordFailure(source.id);
+          }
+          finish(null);
+        });
+    });
 
     return task;
   }

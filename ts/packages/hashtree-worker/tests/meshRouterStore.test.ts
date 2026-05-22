@@ -153,6 +153,46 @@ describe('MeshRouterStore', () => {
     await expect(pending).resolves.toEqual({ data: remoteData, sourceId: 'blossom' });
   });
 
+  it('bounds a single unresolved remote source by requestTimeoutMs', async () => {
+    vi.useFakeTimers();
+    const primary = new MemoryStore();
+    let resolveSource: ((data: Uint8Array | null) => void) | null = null;
+    const router = new MeshRouterStore({
+      primary,
+      primarySourceId: 'idb',
+      primaryReadTimeoutMs: 0,
+      requestTimeoutMs: 120,
+      sources: [
+        {
+          id: 'p2p',
+          get: () => new Promise<Uint8Array | null>((resolve) => {
+            resolveSource = resolve;
+          }),
+        },
+      ],
+    });
+
+    const pending = router.getDetailed(HASH_A);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(119);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBeNull();
+    expect(router.getSourceStats().p2p?.timeouts).toBe(1);
+
+    resolveSource?.(new Uint8Array([99]));
+    await Promise.resolve();
+    await expect(primary.get(HASH_A)).resolves.toBeNull();
+  });
+
   it('keeps a slow primary read alive after hedging and prefers its eventual local hit', async () => {
     vi.useFakeTimers();
     const localData = new Uint8Array([6, 7, 8]);
