@@ -502,11 +502,8 @@ impl NostrClient {
             return Ok((refs.clone(), root, key));
         }
 
-        // Query relays for kind 30078 events
-        // Create a new multi-threaded runtime for nostr-sdk which spawns background tasks
-        let (refs, root_hash, encryption_key) =
-            block_on_result(self.fetch_refs_async_with_timeout(repo_name, timeout_secs))?;
-        self.cached_refs.insert(repo_name.to_string(), refs.clone());
+        let (root_hash, encryption_key) =
+            block_on_result(self.resolve_root_async_with_timeout(repo_name, timeout_secs))?;
         if let Some(ref root) = root_hash {
             self.cached_root_hash
                 .insert(repo_name.to_string(), root.clone());
@@ -515,6 +512,13 @@ impl NostrClient {
             self.cached_encryption_key
                 .insert(repo_name.to_string(), key);
         }
+
+        let refs = if let Some(ref root) = root_hash {
+            block_on_result(self.fetch_refs_from_hashtree(root, encryption_key.as_ref()))?
+        } else {
+            HashMap::new()
+        };
+        self.cached_refs.insert(repo_name.to_string(), refs.clone());
         Ok((refs, root_hash, encryption_key))
     }
 
@@ -633,11 +637,11 @@ impl NostrClient {
         Some(parsed)
     }
 
-    async fn fetch_refs_async_with_timeout(
+    async fn resolve_root_async_with_timeout(
         &self,
         repo_name: &str,
         timeout_secs: u64,
-    ) -> Result<(HashMap<String, String>, Option<String>, Option<[u8; 32]>)> {
+    ) -> Result<(Option<String>, Option<[u8; 32]>)> {
         // Create nostr-sdk client
         let client = Client::default();
 
@@ -780,7 +784,7 @@ impl NostrClient {
 
         if root_hash.is_empty() {
             debug!("Empty root hash in event");
-            return Ok((HashMap::new(), None, None));
+            return Ok((None, None));
         }
 
         let encryption_key = root_data.encryption_key;
@@ -868,11 +872,7 @@ impl NostrClient {
             self.url_secret.is_some()
         );
 
-        // Fetch refs from hashtree structure at root_hash
-        let refs = self
-            .fetch_refs_from_hashtree(&root_hash, unmasked_key.as_ref())
-            .await?;
-        Ok((refs, Some(root_hash), unmasked_key))
+        Ok((Some(root_hash), unmasked_key))
     }
 
     /// Decrypt data if encryption key is provided, then decode as tree node

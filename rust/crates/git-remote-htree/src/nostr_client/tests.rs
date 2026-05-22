@@ -335,6 +335,50 @@ async fn test_fetch_root_from_local_daemon_parses_response() {
 }
 
 #[test]
+fn test_fetch_refs_caches_root_when_tree_download_fails() {
+    use std::io::{Read, Write};
+
+    let root_hash = "ab".repeat(32);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_root_hash = root_hash.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request);
+        let body = serde_json::json!({
+            "hash": server_root_hash,
+            "source": "test",
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let mut config = test_config();
+    config.nostr.relays.clear();
+    let mut client = NostrClient::new(TEST_PUBKEY, None, None, false, &config).unwrap();
+    client.relays.clear();
+    client.local_daemon_url = Some(format!("http://{}", addr));
+    client.blossom = client.blossom.clone().with_read_servers(Vec::new());
+
+    let err = client.fetch_refs_with_root("repo").unwrap_err();
+    server.join().unwrap();
+
+    assert!(
+        err.to_string().contains("Failed to download root hash")
+            || err.to_string().contains("No servers")
+    );
+    assert_eq!(client.get_cached_root_hash("repo"), Some(&root_hash));
+    assert!(client.cached_refs.get("repo").is_none());
+}
+
+#[test]
 fn test_stored_key_from_hex() {
     let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let key = StoredKey::from_secret_hex(secret, Some("test".to_string())).unwrap();
