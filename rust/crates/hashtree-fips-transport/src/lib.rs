@@ -433,6 +433,14 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
         }
     }
 
+    pub async fn configured_peer_ids(&self) -> Vec<String> {
+        self.peers.read().await.clone()
+    }
+
+    pub async fn connected_peer_ids(&self) -> Vec<String> {
+        self.endpoint.peer_ids().await
+    }
+
     pub fn start(self: &Arc<Self>) -> JoinHandle<()> {
         let this = self.clone();
         tokio::spawn(async move {
