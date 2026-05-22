@@ -19,6 +19,7 @@ import {
 class FakeFipsEndpoint implements FipsEndpoint {
   readonly sent: Array<{ peerId: string; data: Uint8Array }> = [];
   private readonly handlers = new Set<(message: FipsEndpointMessage) => void | Promise<void>>();
+  private dropNextSendCount = 0;
 
   constructor(
     private readonly id: string,
@@ -37,11 +38,19 @@ class FakeFipsEndpoint implements FipsEndpoint {
 
   async send(peerId: string, data: Uint8Array): Promise<void> {
     this.sent.push({ peerId, data: data.slice() });
+    if (this.dropNextSendCount > 0) {
+      this.dropNextSendCount -= 1;
+      return;
+    }
     const remote = this.network.get(peerId);
     if (!remote) {
       throw new Error(`unknown peer ${peerId}`);
     }
     await remote.deliver({ peerId: this.id, data: data.slice() });
+  }
+
+  dropNextSends(count: number): void {
+    this.dropNextSendCount = Math.max(0, count);
   }
 
   onMessage(handler: (message: FipsEndpointMessage) => void | Promise<void>): () => void {
@@ -190,7 +199,7 @@ describe('@hashtree/fips-transport', () => {
     bTransport.close();
   });
 
-  it('treats silence as unknown without retrying the same peer', async () => {
+  it('treats silence as unknown when the retry interval exceeds the request timeout', async () => {
     vi.useFakeTimers();
     const network = new Map<string, FakeFipsEndpoint>();
     const aEndpoint = new FakeFipsEndpoint('a', network);
@@ -211,6 +220,39 @@ describe('@hashtree/fips-transport', () => {
     await vi.advanceTimersByTimeAsync(30);
     await expect(pending).resolves.toBeNull();
     expect(bEndpoint.sent).toHaveLength(1);
+
+    aTransport.close();
+    bTransport.close();
+    vi.useRealTimers();
+  });
+
+  it('retries a dropped request to the same peer', async () => {
+    vi.useFakeTimers();
+    const network = new Map<string, FakeFipsEndpoint>();
+    const aEndpoint = new FakeFipsEndpoint('a', network);
+    const bEndpoint = new FakeFipsEndpoint('b', network);
+    const data = new TextEncoder().encode('retried request');
+    const hash = await sha256(data) as Hash;
+    const aStore = new MemoryStore();
+    await aStore.put(hash, data);
+    bEndpoint.dropNextSends(1);
+    const aTransport = new HashtreeFipsTransport({
+      endpoint: aEndpoint,
+      localStore: aStore,
+    });
+    const bTransport = new HashtreeFipsTransport({
+      endpoint: bEndpoint,
+      localStore: new MemoryStore(),
+      peers: ['a'],
+      requestTimeoutMs: 300,
+      requestRetryIntervalMs: 50,
+    });
+
+    const pending = bTransport.get(hash);
+    await vi.advanceTimersByTimeAsync(60);
+
+    await expect(pending).resolves.toEqual(data);
+    expect(bEndpoint.sent).toHaveLength(2);
 
     aTransport.close();
     bTransport.close();

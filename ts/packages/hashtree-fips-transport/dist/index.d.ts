@@ -1,6 +1,8 @@
 import { type Hash, type Store } from '@hashtree/core';
 export declare const DEFAULT_FIPS_DISCOVERY_APP = "hashtree-v1";
 export declare const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5500;
+export declare const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS = 750;
+export declare const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS = 4;
 export declare const FIPS_RESPONSE_FRAGMENT_SIZE = 1024;
 export interface FipsEndpointMessage {
     peerId: string;
@@ -42,6 +44,8 @@ export interface HashtreeFipsTransportOptions {
     localStore?: Store;
     peers?: FipsPeerSource;
     requestTimeoutMs?: number;
+    requestRetryIntervalMs?: number;
+    requestMaxAttempts?: number;
     requestHtl?: number;
     cacheResponses?: boolean;
 }
@@ -56,6 +60,8 @@ export declare class HashtreeFipsTransport {
     private readonly localStore;
     private peers?;
     private readonly requestTimeoutMs;
+    private readonly requestRetryIntervalMs;
+    private readonly requestMaxAttempts;
     private readonly requestHtl;
     private readonly cacheResponses;
     private readonly pending;
@@ -74,6 +80,8 @@ export declare class HashtreeFipsTransport {
     private handleResponseFragment;
     private requestFromPeers;
     private requestFromDynamicPeers;
+    private sendRequestAttempts;
+    private waitForNextAttempt;
     private createPendingRequest;
     private removePendingRequest;
     private sendRequestToPeers;

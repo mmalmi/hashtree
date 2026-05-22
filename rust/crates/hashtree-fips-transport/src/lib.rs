@@ -18,6 +18,8 @@ use tokio::time::{timeout, Duration};
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
+pub const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL: Duration = Duration::from_millis(750);
+pub const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS: usize = 4;
 pub const FIPS_RESPONSE_FRAGMENT_SIZE: usize = 1024;
 pub const MAX_HTL: u8 = 10;
 pub const DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS: usize = 512;
@@ -68,6 +70,7 @@ pub struct FipsEndpointOptions {
     pub udp_external_addr: Option<String>,
     pub webrtc_auto_connect: bool,
     pub webrtc_max_connections: usize,
+    pub open_discovery_max_pending: usize,
     pub packet_channel_capacity: usize,
 }
 
@@ -84,6 +87,7 @@ impl FipsEndpointOptions {
             udp_external_addr: None,
             webrtc_auto_connect: false,
             webrtc_max_connections: DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS,
+            open_discovery_max_pending: 0,
             packet_channel_capacity: 1024,
         }
     }
@@ -121,7 +125,12 @@ pub async fn bind_fips_endpoint(
     config.node.discovery.lan.scope = Some(discovery_scope.clone());
     config.node.discovery.nostr.enabled = true;
     config.node.discovery.nostr.advertise = true;
-    config.node.discovery.nostr.policy = NostrDiscoveryPolicy::Open;
+    config.node.discovery.nostr.policy = if options.open_discovery_max_pending == 0 {
+        NostrDiscoveryPolicy::ConfiguredOnly
+    } else {
+        NostrDiscoveryPolicy::Open
+    };
+    config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = true;
     config.node.discovery.nostr.app = discovery_scope.clone();
     if !options.relays.is_empty() {
@@ -258,6 +267,12 @@ fn verify_hash(data: &[u8], hash: &Hash) -> bool {
     digest.as_slice() == hash
 }
 
+fn remaining_until(deadline: tokio::time::Instant) -> Duration {
+    deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .unwrap_or_default()
+}
+
 fn encode_request(hash: &Hash, htl: u8) -> Result<Vec<u8>, FipsTransportError> {
     let body = rmp_serde::to_vec_named(&DataRequest {
         h: hash.to_vec(),
@@ -335,6 +350,8 @@ pub struct HashtreeFipsTransport<S: Store + Send + Sync + 'static = MemoryStore>
     pending: Arc<Mutex<HashMap<String, Vec<PendingRequest>>>>,
     response_fragments: Arc<Mutex<HashMap<String, ResponseReassembly>>>,
     request_timeout: Duration,
+    request_retry_interval: Duration,
+    request_max_attempts: usize,
     request_htl: u8,
     cache_responses: bool,
 }
@@ -354,6 +371,8 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             pending: Arc::new(Mutex::new(HashMap::new())),
             response_fragments: Arc::new(Mutex::new(HashMap::new())),
             request_timeout: DEFAULT_FIPS_REQUEST_TIMEOUT,
+            request_retry_interval: DEFAULT_FIPS_REQUEST_RETRY_INTERVAL,
+            request_max_attempts: DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS,
             request_htl: MAX_HTL,
             cache_responses: true,
         }
@@ -361,6 +380,20 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
 
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    pub fn with_request_retry_interval(mut self, interval: Duration) -> Self {
+        self.request_retry_interval = if interval.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            interval
+        };
+        self
+    }
+
+    pub fn with_request_max_attempts(mut self, attempts: usize) -> Self {
+        self.request_max_attempts = attempts.max(1);
         self
     }
 
@@ -433,24 +466,52 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             .push(PendingRequest { resolve: tx });
 
         let payload = encode_request(hash, self.request_htl)?;
-        let mut sent = 0usize;
-        for peer in peers {
-            if self.endpoint.send(peer, payload.clone()).await.is_ok() {
-                sent += 1;
+        let deadline = tokio::time::Instant::now() + self.request_timeout;
+        let mut rx = rx;
+        for attempt in 0..self.request_max_attempts {
+            if attempt > 0 && remaining_until(deadline).is_zero() {
+                break;
+            }
+            let sent = self.send_request_to_peers(peers, &payload).await;
+            if sent == 0 && attempt == 0 {
+                self.resolve_pending(&key, None).await;
+                return Ok(None);
+            }
+            if attempt + 1 >= self.request_max_attempts {
+                break;
+            }
+            let remaining = remaining_until(deadline);
+            if remaining.is_zero() {
+                break;
+            }
+            match timeout(self.request_retry_interval.min(remaining), &mut rx).await {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(_)) => return Ok(None),
+                Err(_) => {
+                    if remaining_until(deadline).is_zero() {
+                        break;
+                    }
+                }
             }
         }
-        if sent == 0 {
-            self.resolve_pending(&key, None).await;
-            return Ok(None);
-        }
 
-        match timeout(self.request_timeout, rx).await {
+        match timeout(remaining_until(deadline), rx).await {
             Ok(Ok(result)) => Ok(result),
             _ => {
                 self.remove_pending_sender(&key).await;
                 Ok(None)
             }
         }
+    }
+
+    async fn send_request_to_peers(&self, peers: &[String], payload: &[u8]) -> usize {
+        let mut sent = 0usize;
+        for peer in peers {
+            if self.endpoint.send(peer, payload.to_vec()).await.is_ok() {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     async fn handle_packet(&self, packet: FipsEndpointPacket) -> Result<(), FipsTransportError> {
@@ -638,12 +699,15 @@ impl<S: Store + Send + Sync + 'static> Store for HashtreeFipsTransport<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
     struct FakeEndpoint {
         id: String,
         network: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<FipsEndpointPacket>>>>,
         rx: Mutex<mpsc::UnboundedReceiver<FipsEndpointPacket>>,
+        sent: AtomicUsize,
+        drop_next: AtomicUsize,
     }
 
     impl FakeEndpoint {
@@ -657,13 +721,37 @@ mod tests {
                 id: id.to_string(),
                 network,
                 rx: Mutex::new(rx),
+                sent: AtomicUsize::new(0),
+                drop_next: AtomicUsize::new(0),
             })
+        }
+
+        fn sent_count(&self) -> usize {
+            self.sent.load(Ordering::Relaxed)
+        }
+
+        fn drop_next_sends(&self, count: usize) {
+            self.drop_next.store(count, Ordering::Relaxed);
         }
     }
 
     #[async_trait]
     impl FipsEndpointIo for FakeEndpoint {
         async fn send(&self, peer_id: &str, data: Vec<u8>) -> Result<(), FipsTransportError> {
+            self.sent.fetch_add(1, Ordering::Relaxed);
+            if self
+                .drop_next
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    if value > 0 {
+                        Some(value - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Ok(());
+            }
             let tx = self
                 .network
                 .lock()
@@ -765,7 +853,7 @@ mod tests {
             Arc::new(MemoryStore::new()),
         ));
         let transport_b = Arc::new(
-            HashtreeFipsTransport::new(endpoint_b, Arc::new(MemoryStore::new()))
+            HashtreeFipsTransport::new(endpoint_b.clone(), Arc::new(MemoryStore::new()))
                 .with_request_timeout(Duration::from_millis(25)),
         );
         transport_a.start();
@@ -776,5 +864,33 @@ mod tests {
         tokio::time::advance(Duration::from_millis(30)).await;
 
         assert_eq!(pending.await.unwrap(), None);
+        assert_eq!(endpoint_b.sent_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_dropped_request_to_same_peer() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_a = FakeEndpoint::new("a", network.clone()).await;
+        let endpoint_b = FakeEndpoint::new("b", network).await;
+        let data = b"retried request".to_vec();
+        let hash = hash(&data);
+        let store_a = Arc::new(MemoryStore::new());
+        store_a.put(hash, data.clone()).await.unwrap();
+        endpoint_b.drop_next_sends(1);
+        let transport_a = Arc::new(HashtreeFipsTransport::new(endpoint_a, store_a));
+        let transport_b = Arc::new(
+            HashtreeFipsTransport::new(endpoint_b.clone(), Arc::new(MemoryStore::new()))
+                .with_request_timeout(Duration::from_millis(300))
+                .with_request_retry_interval(Duration::from_millis(50)),
+        );
+        transport_a.start();
+        transport_b.start();
+        transport_b.set_peers(vec!["a".to_string()]).await;
+
+        let pending = transport_b.get(&hash);
+        tokio::time::advance(Duration::from_millis(60)).await;
+
+        assert_eq!(pending.await.unwrap(), Some(data));
+        assert_eq!(endpoint_b.sent_count(), 2);
     }
 }

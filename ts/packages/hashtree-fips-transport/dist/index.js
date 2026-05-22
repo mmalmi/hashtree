@@ -2,6 +2,8 @@ import { MemoryStore, sha256, toHex, } from '@hashtree/core';
 import { createRequest, createResponse, createFragmentResponse, encodeRequest, encodeResponse, hashToKey, isFragmented, MAX_HTL, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE, parseMessage, verifyHash, } from '@hashtree/mesh';
 export const DEFAULT_FIPS_DISCOVERY_APP = 'hashtree-v1';
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
+export const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS = 750;
+export const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS = 4;
 export const FIPS_RESPONSE_FRAGMENT_SIZE = 1024;
 const DYNAMIC_PEER_POLL_INTERVAL_MS = 100;
 const MAX_RESPONSE_FRAGMENTS = 16_384;
@@ -102,6 +104,8 @@ export class HashtreeFipsTransport {
     localStore;
     peers;
     requestTimeoutMs;
+    requestRetryIntervalMs;
+    requestMaxAttempts;
     requestHtl;
     cacheResponses;
     pending = new Map();
@@ -112,6 +116,8 @@ export class HashtreeFipsTransport {
         this.localStore = options.localStore ?? new MemoryStore();
         this.peers = options.peers;
         this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_FIPS_REQUEST_TIMEOUT_MS;
+        this.requestRetryIntervalMs = Math.max(1, options.requestRetryIntervalMs ?? DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS);
+        this.requestMaxAttempts = Math.max(1, Math.floor(options.requestMaxAttempts ?? DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS));
         this.requestHtl = options.requestHtl ?? MAX_HTL;
         this.cacheResponses = options.cacheResponses ?? true;
         this.unsubscribe = this.endpoint.onMessage((message) => {
@@ -258,37 +264,54 @@ export class HashtreeFipsTransport {
         const hashKey = hashToKey(hash);
         const pending = this.createPendingRequest(hashKey, hash);
         const payload = new Uint8Array(encodeRequest(createRequest(hash, this.requestHtl)));
-        const sent = await this.sendRequestToPeers(payload, peers);
-        if (sent === 0) {
-            this.resolvePendingMiss(hashKey);
-        }
+        void this.sendRequestAttempts(hashKey, payload, pending, () => peers, false)
+            .catch(() => this.resolvePendingMiss(hashKey));
         return pending.promise;
     }
     async requestFromDynamicPeers(hash, peers) {
         const hashKey = hashToKey(hash);
         const pending = this.createPendingRequest(hashKey, hash);
         const payload = new Uint8Array(encodeRequest(createRequest(hash, this.requestHtl)));
-        const attempted = new Set();
+        void this.sendRequestAttempts(hashKey, payload, pending, peers, true)
+            .catch(() => undefined);
+        return pending.promise;
+    }
+    async sendRequestAttempts(hashKey, payload, pending, peers, dynamicPeers) {
         const deadline = Date.now() + this.requestTimeoutMs;
-        while (!pending.isSettled()) {
+        let attempts = 0;
+        while (!pending.isSettled() && attempts < this.requestMaxAttempts) {
             const peerIds = await resolvePeerSource(this.endpoint, peers).catch(() => []);
-            const newPeers = peerIds.filter((peerId) => !attempted.has(peerId));
-            for (const peerId of newPeers) {
-                attempted.add(peerId);
+            if (peerIds.length === 0) {
+                if (!dynamicPeers) {
+                    this.resolvePendingMiss(hashKey);
+                    return;
+                }
+                await this.waitForNextAttempt(pending, Math.min(DYNAMIC_PEER_POLL_INTERVAL_MS, deadline - Date.now()));
+                continue;
             }
-            if (newPeers.length > 0) {
-                void this.sendRequestToPeers(payload, newPeers);
+            attempts += 1;
+            const sent = await this.sendRequestToPeers(payload, peerIds);
+            if (sent === 0 && !dynamicPeers && attempts === 1) {
+                this.resolvePendingMiss(hashKey);
+                return;
+            }
+            if (pending.isSettled() || attempts >= this.requestMaxAttempts) {
+                return;
             }
             const remainingMs = deadline - Date.now();
             if (remainingMs <= 0) {
-                break;
+                return;
             }
-            await Promise.race([
-                pending.promise.then(() => undefined),
-                sleep(Math.min(DYNAMIC_PEER_POLL_INTERVAL_MS, remainingMs)),
-            ]);
+            await this.waitForNextAttempt(pending, Math.min(this.requestRetryIntervalMs, remainingMs));
         }
-        return pending.promise;
+    }
+    async waitForNextAttempt(pending, delayMs) {
+        if (delayMs <= 0 || pending.isSettled())
+            return;
+        await Promise.race([
+            pending.promise.then(() => undefined),
+            sleep(delayMs),
+        ]);
     }
     createPendingRequest(hashKey, hash) {
         let settled = false;
