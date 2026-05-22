@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
 use super::blob_read::{acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY};
@@ -40,6 +40,14 @@ pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
 const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+const SLOW_BATCH_UPLOAD_LOG_MS_ENV: &str = "HTREE_SLOW_BATCH_UPLOAD_LOG_MS";
+
+fn slow_batch_upload_log_ms() -> Option<u128> {
+    std::env::var(SLOW_BATCH_UPLOAD_LOG_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u128>().ok())
+        .filter(|value| *value > 0)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OptimisticUploadQueueSnapshot {
@@ -904,6 +912,9 @@ pub async fn upload_blob_batch(
     headers: HeaderMap,
     Json(payload): Json<BatchUploadRequest>,
 ) -> impl IntoResponse {
+    let started_at = Instant::now();
+    let slow_log_ms = slow_batch_upload_log_ms();
+    let payload_blobs = payload.blobs.len();
     if payload.blobs.is_empty() {
         return blossom_json_error(StatusCode::BAD_REQUEST, "Batch is empty");
     }
@@ -923,6 +934,7 @@ pub async fn upload_blob_batch(
                 .unwrap();
         }
     };
+    let auth_ms = started_at.elapsed().as_millis();
 
     let is_allowed_author = is_allowed_write_author(&state, &auth.pubkey);
     let can_upload = can_accept_upload_author(&state, &auth.pubkey);
@@ -943,8 +955,11 @@ pub async fn upload_blob_batch(
     let mut total_bytes = 0usize;
     let mut items = Vec::with_capacity(payload.blobs.len());
     let mut descriptors = Vec::with_capacity(payload.blobs.len());
+    let mut decode_hash_ms = 0u128;
+    let mut validate_ms = 0u128;
 
     for blob in payload.blobs {
+        let decode_started = Instant::now();
         let sha256_hex = blob.sha256.to_lowercase();
         let expected_hash: [u8; 32] = match from_hex(&sha256_hex) {
             Ok(hash) => hash,
@@ -972,7 +987,9 @@ pub async fn upload_blob_batch(
         if actual_hash != expected_hash {
             return blossom_json_error(StatusCode::FORBIDDEN, "Hash mismatch");
         }
+        decode_hash_ms += decode_started.elapsed().as_millis();
 
+        let validate_started = Instant::now();
         let content_type = blob
             .content_type
             .as_deref()
@@ -986,6 +1003,7 @@ pub async fn upload_blob_batch(
         ) {
             return blossom_json_error(status, reason);
         }
+        validate_ms += validate_started.elapsed().as_millis();
 
         let ext = mime_to_extension(&content_type);
         descriptors.push(BlobDescriptor {
@@ -997,8 +1015,10 @@ pub async fn upload_blob_batch(
         });
         items.push((actual_hash, data));
     }
+    let prepare_ms = started_at.elapsed().as_millis();
 
     let store = state.store.clone();
+    let store_started = Instant::now();
     let stored = tokio::task::spawn_blocking(move || {
         if is_allowed_author {
             store.put_owned_blobs(&items, &pubkey_bytes)
@@ -1013,20 +1033,39 @@ pub async fn upload_blob_batch(
     })
     .await
     .map_err(|error| anyhow::anyhow!("blob batch write task failed: {}", error));
+    let store_ms = store_started.elapsed().as_millis();
+    let total_ms = started_at.elapsed().as_millis();
 
     match stored {
-        Ok(Ok(uploaded)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                serde_json::to_string(&BatchUploadResponse {
+        Ok(Ok(uploaded)) => {
+            if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
+                tracing::warn!(
+                    blobs = payload_blobs,
                     uploaded,
-                    blobs: descriptors,
-                })
-                .unwrap(),
-            ))
-            .unwrap(),
+                    total_bytes,
+                    total_ms,
+                    auth_ms,
+                    prepare_ms,
+                    decode_hash_ms,
+                    validate_ms,
+                    store_ms,
+                    allowed_author = is_allowed_author,
+                    "slow Blossom batch upload"
+                );
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&BatchUploadResponse {
+                        uploaded,
+                        blobs: descriptors,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap()
+        }
         Ok(Err(error)) | Err(error) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")

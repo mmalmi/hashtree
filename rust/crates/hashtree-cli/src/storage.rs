@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod upload;
 
@@ -51,6 +51,14 @@ const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 1024;
+const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
+
+fn slow_owned_blob_batch_log_ms() -> Option<u128> {
+    std::env::var(SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u128>().ok())
+        .filter(|value| *value > 0)
+}
 
 fn unix_timestamp_now() -> u64 {
     SystemTime::now()
@@ -1315,22 +1323,30 @@ impl HashtreeStore {
 
     /// Store multiple owned Blossom blobs, batching raw blob and owner-index writes.
     pub fn put_owned_blobs(&self, items: &[(Hash, Vec<u8>)], pubkey: &[u8; 32]) -> Result<usize> {
+        let started_at = Instant::now();
+        let slow_log_ms = slow_owned_blob_batch_log_ms();
         if items.is_empty() {
             return Ok(0);
         }
         let incoming_bytes = items
             .iter()
             .fold(0u64, |total, (_, data)| total.saturating_add(data.len() as u64));
+        let count = items.len();
+        let room_started = Instant::now();
         self.make_room_for_durable_blob(incoming_bytes)?;
+        let make_room_ms = room_started.elapsed().as_millis();
+        let raw_started = Instant::now();
         let inserted = self
             .router
             .put_many_sync(items)
             .map_err(|e| anyhow::anyhow!("Failed to store blob batch: {}", e))?;
+        let raw_write_ms = raw_started.elapsed().as_millis();
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let owner_started = Instant::now();
         let mut wtxn = self.env.write_txn()?;
         for (hash, data) in items {
             let owner_key = Self::blob_owner_key(hash, pubkey);
@@ -1349,6 +1365,20 @@ impl HashtreeStore {
             }
         }
         wtxn.commit()?;
+        let owner_index_ms = owner_started.elapsed().as_millis();
+        let total_ms = started_at.elapsed().as_millis();
+        if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
+            tracing::warn!(
+                blobs = count,
+                inserted,
+                incoming_bytes,
+                total_ms,
+                make_room_ms,
+                raw_write_ms,
+                owner_index_ms,
+                "slow owned Blossom blob batch write"
+            );
+        }
         Ok(inserted)
     }
 
