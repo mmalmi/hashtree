@@ -159,7 +159,7 @@ pub struct BlobDescriptor {
 #[derive(Debug, Deserialize)]
 pub struct BatchUploadBlob {
     pub sha256: String,
-    #[serde(default)]
+    #[serde(default, alias = "contentType")]
     pub content_type: Option<String>,
     pub data: String,
 }

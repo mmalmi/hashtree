@@ -9,6 +9,9 @@ Changes since the `0.2.54` release.
 - Changed Blossom owner listings to use a per-owner blob index for new writes,
   avoiding full owner-list rewrites on duplicate uploads while preserving
   compatibility with existing list records.
+- Added a Blossom `POST /upload/batch` path that stores multiple uploaded blobs
+  with one auth event and one owner-index batch write, including support for
+  camelCase `contentType` payloads.
 
 ### Fixed
 
