@@ -108,12 +108,11 @@ pub async fn bind_fips_endpoint(
         ));
     }
 
-    let discovery_scope = options
-        .discovery_scope
-        .trim()
-        .is_empty()
-        .then(|| DEFAULT_FIPS_DISCOVERY_SCOPE.to_string())
-        .unwrap_or_else(|| options.discovery_scope.trim().to_string());
+    let discovery_scope = if options.discovery_scope.trim().is_empty() {
+        DEFAULT_FIPS_DISCOVERY_SCOPE.to_string()
+    } else {
+        options.discovery_scope.trim().to_string()
+    };
     let mut config = fips_core::Config::new();
     config.node.identity = fips_core::IdentityConfig {
         nsec: Some(options.identity_nsec),
@@ -575,8 +574,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             return Ok(());
         }
 
-        let total =
-            ((data.len() + FIPS_RESPONSE_FRAGMENT_SIZE - 1) / FIPS_RESPONSE_FRAGMENT_SIZE) as u32;
+        let total = data.len().div_ceil(FIPS_RESPONSE_FRAGMENT_SIZE) as u32;
         for index in 0..total {
             let start = index as usize * FIPS_RESPONSE_FRAGMENT_SIZE;
             let end = (start + FIPS_RESPONSE_FRAGMENT_SIZE).min(data.len());
@@ -660,7 +658,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
         let remove_fragments = {
             let mut pending = self.pending.lock().await;
             if let Some(requests) = pending.get_mut(key) {
-                requests.retain(|request| request.resolve.is_closed());
+                requests.retain(|request| !request.resolve.is_closed());
                 if requests.is_empty() {
                     pending.remove(key);
                     true
@@ -873,6 +871,10 @@ mod tests {
 
         assert_eq!(pending.await.unwrap(), None);
         assert_eq!(endpoint_b.sent_count(), 1);
+        assert!(
+            transport_b.pending.lock().await.is_empty(),
+            "timed-out requests should not leave stale pending senders"
+        );
     }
 
     #[tokio::test(start_paused = true)]

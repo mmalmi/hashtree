@@ -45,6 +45,11 @@ struct BrowserSettings {
     enable_webrtc: Option<bool>,
     enable_multicast: Option<bool>,
     max_multicast_peers: Option<usize>,
+    enable_fips: Option<bool>,
+    enable_fips_udp: Option<bool>,
+    enable_fips_webrtc: Option<bool>,
+    fetch_from_fips_peers: Option<bool>,
+    social_graph_crawl_depth: Option<u32>,
     sync_enabled: Option<bool>,
     sync_own: Option<bool>,
     sync_followed: Option<bool>,
@@ -178,6 +183,22 @@ fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
         config.server.max_multicast_peers = max_multicast_peers;
     }
 
+    if let Some(enable_fips) = settings.enable_fips {
+        config.server.enable_fips = enable_fips;
+    }
+    if let Some(enable_fips_udp) = settings.enable_fips_udp {
+        config.server.enable_fips_udp = enable_fips_udp;
+    }
+    if let Some(enable_fips_webrtc) = settings.enable_fips_webrtc {
+        config.server.enable_fips_webrtc = enable_fips_webrtc;
+    }
+    if let Some(fetch_from_fips_peers) = settings.fetch_from_fips_peers {
+        config.server.fetch_from_fips_peers = fetch_from_fips_peers;
+    }
+    if let Some(social_graph_crawl_depth) = settings.social_graph_crawl_depth {
+        config.nostr.social_graph_crawl_depth = social_graph_crawl_depth;
+    }
+
     config.sync.enabled = settings.sync_enabled.unwrap_or(false);
     if let Some(sync_own) = settings.sync_own {
         config.sync.sync_own = sync_own;
@@ -222,6 +243,11 @@ fn default_browser_settings() -> BrowserSettings {
         enable_webrtc: Some(false),
         enable_multicast: Some(false),
         max_multicast_peers: None,
+        enable_fips: None,
+        enable_fips_udp: None,
+        enable_fips_webrtc: None,
+        fetch_from_fips_peers: None,
+        social_graph_crawl_depth: None,
         sync_enabled: Some(false),
         sync_own: Some(true),
         sync_followed: Some(true),
@@ -372,7 +398,15 @@ mod tests {
                 "blossomWriteServers": [
                     "https://upload.example"
                 ],
-                "enableWebrtc": true
+                "enableWebrtc": true,
+                "enableFips": false,
+                "enableFipsUdp": false,
+                "enableFipsWebrtc": false,
+                "fetchFromFipsPeers": false,
+                "socialGraphCrawlDepth": 0,
+                "syncEnabled": false,
+                "syncOwn": false,
+                "syncFollowed": false
             }))
             .expect("serialize browser settings"),
         )
@@ -392,7 +426,35 @@ mod tests {
 
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(2));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
-        assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(true));
+        assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn browser_config_applies_background_service_overrides() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("browser_settings.json"),
+            serde_json::to_vec_pretty(&json!({
+                "enableFips": false,
+                "enableFipsUdp": false,
+                "enableFipsWebrtc": false,
+                "fetchFromFipsPeers": false,
+                "socialGraphCrawlDepth": 0
+            }))
+            .expect("serialize browser settings"),
+        )
+        .expect("write browser settings");
+
+        let config = browser_config(&data_dir, &config_dir);
+
+        assert!(!config.server.enable_fips);
+        assert!(!config.server.enable_fips_udp);
+        assert!(!config.server.enable_fips_webrtc);
+        assert!(!config.server.fetch_from_fips_peers);
+        assert_eq!(config.nostr.social_graph_crawl_depth, 0);
     }
 
     #[test]
