@@ -5,7 +5,6 @@ use hashtree_core::store::{Store, StoreError, StoreStats};
 use hashtree_core::types::Hash;
 use heed::types::*;
 use heed::{Database, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
-use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -333,26 +332,12 @@ impl LmdbBlobStore {
             return Ok(());
         }
 
-        let first = sorted_hashes[0].as_slice();
-        let last = sorted_hashes[sorted_hashes.len() - 1].as_slice();
-        let range = (Bound::Included(first), Bound::Included(last));
-        let mut candidate_index = 0usize;
-
-        for item in db.range(rtxn, &range).map_err(map_heed_error)? {
-            let (stored_hash, _) = item.map_err(map_heed_error)?;
-            while candidate_index < sorted_hashes.len()
-                && sorted_hashes[candidate_index].as_slice() < stored_hash
-            {
-                candidate_index += 1;
+        for (index, hash) in sorted_hashes.iter().enumerate() {
+            if existing[index] {
+                continue;
             }
-            while candidate_index < sorted_hashes.len()
-                && sorted_hashes[candidate_index].as_slice() == stored_hash
-            {
-                existing[candidate_index] = true;
-                candidate_index += 1;
-            }
-            if candidate_index >= sorted_hashes.len() {
-                break;
+            if db.get(rtxn, hash).map_err(map_heed_error)?.is_some() {
+                existing[index] = true;
             }
         }
 
