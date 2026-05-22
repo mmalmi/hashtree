@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.55 - 2026-05-22
+
+Changes since the `0.2.54` release.
+
+### Changed
+
+- Changed Blossom owner listings to use a per-owner blob index for new writes,
+  avoiding full owner-list rewrites on duplicate uploads while preserving
+  compatibility with existing list records.
+
+### Fixed
+
+- Fixed `git-remote-htree` pushes when the previously published root is missing
+  from configured file servers: the helper now preserves root metadata before
+  ref hydration and probes existing remote blocks instead of blindly reuploading
+  large histories.
+
 ## 0.2.54 - 2026-05-21
 
 Changes since the `0.2.53` release.

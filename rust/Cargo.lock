@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "cashu-service"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3473,7 +3473,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-blossom"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "clap",
@@ -3810,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3874,7 +3874,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-collection"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-config"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3920,7 +3920,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3935,14 +3935,14 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded-ffi"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "hashtree-embedded",
 ]
 
 [[package]]
 name = "hashtree-ffi"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "axum",
  "futures",
@@ -3958,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "fips-core",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fs"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3990,7 +3990,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fuse"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "fuser",
  "futures",
@@ -4002,7 +4002,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -4012,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -4024,11 +4024,11 @@ dependencies = [
 
 [[package]]
 name = "hashtree-merge"
-version = "0.2.54"
+version = "0.2.55"
 
 [[package]]
 name = "hashtree-network"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4057,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "futures",
  "hashtree-collection",
@@ -4078,7 +4078,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "futures",
@@ -4092,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-s3"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -4106,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-sim"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4125,7 +4125,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.54"
+version = "0.2.55"
 dependencies = [
  "async-trait",
  "flate2",
