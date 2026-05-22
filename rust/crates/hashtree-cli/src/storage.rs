@@ -50,7 +50,8 @@ const LMDB_METADATA_REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
-const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 1024;
+const DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 64;
+const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT_ENV: &str = "HTREE_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT";
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
 const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
 
@@ -66,6 +67,14 @@ fn slow_cached_blob_batch_log_ms() -> Option<u128> {
         .ok()
         .and_then(|value| value.parse::<u128>().ok())
         .filter(|value| *value > 0)
+}
+
+fn access_update_background_batch_limit() -> usize {
+    std::env::var(ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT)
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -1243,8 +1252,9 @@ impl HashtreeStore {
             return;
         }
 
-        if due_hashes.len() > ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT {
-            due_hashes.truncate(ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT);
+        let access_update_batch_limit = access_update_background_batch_limit();
+        if due_hashes.len() > access_update_batch_limit {
+            due_hashes.truncate(access_update_batch_limit);
         }
 
         let router = Arc::clone(&self.router);
