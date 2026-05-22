@@ -1023,12 +1023,7 @@ pub async fn upload_blob_batch(
         if is_allowed_author {
             store.put_owned_blobs(&items, &pubkey_bytes)
         } else {
-            let mut inserted = 0usize;
-            for (_, data) in &items {
-                store.put_cached_blob(data)?;
-                inserted += 1;
-            }
-            Ok(inserted)
+            store.put_cached_blobs(&items)
         }
     })
     .await

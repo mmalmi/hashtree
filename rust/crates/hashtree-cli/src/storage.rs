@@ -52,9 +52,17 @@ const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 1024;
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
+const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
 
 fn slow_owned_blob_batch_log_ms() -> Option<u128> {
     std::env::var(SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u128>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn slow_cached_blob_batch_log_ms() -> Option<u128> {
+    std::env::var(SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV)
         .ok()
         .and_then(|value| value.parse::<u128>().ok())
         .filter(|value| *value > 0)
@@ -1417,6 +1425,55 @@ impl HashtreeStore {
         }
     }
 
+    /// Store multiple opportunistically cached blobs in one raw storage batch.
+    pub fn put_cached_blobs(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize> {
+        let started_at = Instant::now();
+        let slow_log_ms = slow_cached_blob_batch_log_ms();
+        if items.is_empty() {
+            return Ok(0);
+        }
+
+        let incoming_bytes = items
+            .iter()
+            .fold(0u64, |total, (_, data)| total.saturating_add(data.len() as u64));
+        let room_started = Instant::now();
+        let _ = self.make_room_for_cached_blob(incoming_bytes);
+        let make_room_ms = room_started.elapsed().as_millis();
+
+        let mut retried_after_cleanup = false;
+        loop {
+            let raw_started = Instant::now();
+            match self.router.put_many_sync(items) {
+                Ok(inserted) => {
+                    let raw_write_ms = raw_started.elapsed().as_millis();
+                    let total_ms = started_at.elapsed().as_millis();
+                    if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
+                        tracing::warn!(
+                            blobs = items.len(),
+                            inserted,
+                            incoming_bytes,
+                            total_ms,
+                            make_room_ms,
+                            raw_write_ms,
+                            "slow cached Blossom blob batch write"
+                        );
+                    }
+                    return Ok(inserted);
+                }
+                Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
+                    let freed = self.relieve_cached_blob_write_pressure(incoming_bytes)?;
+                    if freed == 0 {
+                        return Err(anyhow::anyhow!("Failed to store cached blob batch: {}", err));
+                    }
+                    retried_after_cleanup = true;
+                }
+                Err(err) => {
+                    return Err(anyhow::anyhow!("Failed to store cached blob batch: {}", err));
+                }
+            }
+        }
+    }
+
     /// Get a raw blob by SHA256 hash (raw bytes).
     pub fn get_blob(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         let data = self
@@ -2441,6 +2498,23 @@ mod tests {
         store.router.touch_accessed_sync(&hash, 1)?;
         store.put_cached_blob(data)?;
         assert!(store.blob_last_accessed_at(&hash)?.unwrap_or(0) > 1);
+
+        let cached_batch = [
+            (
+                sha256(b"cached blossom batch 1"),
+                b"cached blossom batch 1".to_vec(),
+            ),
+            (
+                sha256(b"cached blossom batch 2"),
+                b"cached blossom batch 2".to_vec(),
+            ),
+        ];
+        assert_eq!(store.put_cached_blobs(&cached_batch)?, 2);
+        assert_eq!(store.put_cached_blobs(&cached_batch)?, 0);
+        assert_eq!(
+            store.get_blob(&cached_batch[0].0)?.as_deref(),
+            Some(cached_batch[0].1.as_slice())
+        );
 
         let owned = b"owned blossom duplicate";
         let owned_hash = sha256(owned);
