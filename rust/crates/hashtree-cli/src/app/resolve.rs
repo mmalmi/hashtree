@@ -261,8 +261,8 @@ mod tests {
                 visibility: "public".to_string(),
             }),
         )
-            .unwrap()
-            .expect("cached root");
+        .unwrap()
+        .expect("cached root");
 
         assert_eq!(hashtree_core::to_hex(&resolved.cid.hash), hash);
         assert_eq!(resolved.cid.key.map(hex::encode), Some(key));
