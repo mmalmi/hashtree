@@ -180,12 +180,31 @@ fn default_socialgraph_snapshot_public() -> bool {
 
 impl ServerConfig {
     pub fn resolved_fips_relays(&self, active_nostr_relays: &[String]) -> Vec<String> {
-        if self.fips_relays.is_empty() {
-            active_nostr_relays.to_vec()
+        let configured = if self.fips_relays.is_empty() {
+            active_nostr_relays
         } else {
-            self.fips_relays.clone()
-        }
+            &self.fips_relays
+        };
+        merge_fips_signal_relays(configured)
     }
+}
+
+const DEFAULT_FIPS_SIGNAL_RELAYS: [&str; 2] = ["wss://temp.iris.to", "wss://relay.primal.net"];
+
+fn merge_fips_signal_relays(configured: &[String]) -> Vec<String> {
+    let mut relays = Vec::new();
+    for relay in configured
+        .iter()
+        .map(String::as_str)
+        .chain(DEFAULT_FIPS_SIGNAL_RELAYS)
+    {
+        let normalized = relay.trim().trim_end_matches('/').to_string();
+        if normalized.is_empty() || relays.contains(&normalized) {
+            continue;
+        }
+        relays.push(normalized);
+    }
+    relays
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1421,12 +1440,42 @@ http_fips_fetch = false
         let active_nostr = vec!["wss://nostr.example".to_string()];
         let mut server = ServerConfig::default();
 
-        assert_eq!(server.resolved_fips_relays(&active_nostr), active_nostr);
+        assert_eq!(
+            server.resolved_fips_relays(&active_nostr),
+            [
+                "wss://nostr.example",
+                "wss://temp.iris.to",
+                "wss://relay.primal.net"
+            ]
+        );
 
         server.fips_relays = vec!["wss://fips.example".to_string()];
         assert_eq!(
             server.resolved_fips_relays(&["wss://ignored.example".to_string()]),
-            ["wss://fips.example"]
+            [
+                "wss://fips.example",
+                "wss://temp.iris.to",
+                "wss://relay.primal.net"
+            ]
+        );
+    }
+
+    #[test]
+    fn fips_relay_resolution_dedupes_bootstrap_relays() {
+        let mut server = ServerConfig::default();
+        server.fips_relays = vec![
+            "wss://temp.iris.to/".to_string(),
+            " wss://relay.primal.net ".to_string(),
+            "wss://extra.example".to_string(),
+        ];
+
+        assert_eq!(
+            server.resolved_fips_relays(&[]),
+            [
+                "wss://temp.iris.to",
+                "wss://relay.primal.net",
+                "wss://extra.example"
+            ]
         );
     }
 }

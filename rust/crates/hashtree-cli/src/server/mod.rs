@@ -582,7 +582,6 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use serde_json::json;
     use tempfile::TempDir;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn test_server_serve_file() -> Result<()> {
