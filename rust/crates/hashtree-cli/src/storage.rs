@@ -987,6 +987,8 @@ pub struct HashtreeStore {
     blob_owners: Database<Bytes, Unit>,
     /// Maps pubkey (32 bytes) -> blob metadata JSON (for blossom list)
     pubkey_blobs: Database<Bytes, Bytes>,
+    /// Pubkey listing index: pubkey (32 bytes) ++ sha256 (32 bytes) -> BlobMetadata JSON
+    pubkey_blob_index: Database<Bytes, Bytes>,
     /// Tree metadata for eviction: tree_root_hash (32 bytes) -> TreeMeta (msgpack)
     tree_meta: Database<Bytes, Bytes>,
     /// Blob-to-tree mapping: blob_hash ++ tree_hash (64 bytes) -> ()
@@ -1086,7 +1088,7 @@ impl HashtreeStore {
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(metadata_map_size)
-                .max_dbs(10) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, tree_meta, blob_trees, tree_refs, cached_roots, blobs
+                .max_dbs(11) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, pubkey_blob_index, tree_meta, blob_trees, tree_refs, cached_roots, blobs
                 .max_readers(LMDB_MAX_READERS)
                 .open(path)?
         };
@@ -1101,6 +1103,7 @@ impl HashtreeStore {
         let tracked_authors = env.create_database(&mut wtxn, Some("tracked_authors"))?;
         let blob_owners = env.create_database(&mut wtxn, Some("blob_owners"))?;
         let pubkey_blobs = env.create_database(&mut wtxn, Some("pubkey_blobs"))?;
+        let pubkey_blob_index = env.create_database(&mut wtxn, Some("pubkey_blob_index"))?;
         let tree_meta = env.create_database(&mut wtxn, Some("tree_meta"))?;
         let blob_trees = env.create_database(&mut wtxn, Some("blob_trees"))?;
         let tree_refs = env.create_database(&mut wtxn, Some("tree_refs"))?;
@@ -1172,6 +1175,7 @@ impl HashtreeStore {
             tracked_authors,
             blob_owners,
             pubkey_blobs,
+            pubkey_blob_index,
             tree_meta,
             blob_trees,
             tree_refs,
@@ -1305,7 +1309,7 @@ impl HashtreeStore {
         } else {
             self.record_blob_access_now(&hash);
         }
-        self.set_blob_owner(&hash, pubkey)?;
+        self.set_blob_owner_with_size(&hash, pubkey, data.len() as u64)?;
         Ok(to_hex(&hash))
     }
 
@@ -1397,49 +1401,50 @@ impl HashtreeStore {
         key
     }
 
+    fn pubkey_blob_key(pubkey: &[u8; 32], sha256: &[u8; 32]) -> [u8; 64] {
+        let mut key = [0u8; 64];
+        key[..32].copy_from_slice(pubkey);
+        key[32..].copy_from_slice(sha256);
+        key
+    }
+
     /// Add an owner (pubkey) to a blob for Blossom protocol
     /// Multiple users can own the same blob - it's only deleted when all owners remove it
     pub fn set_blob_owner(&self, sha256: &[u8; 32], pubkey: &[u8; 32]) -> Result<()> {
+        let size = self
+            .router
+            .blob_size_sync(sha256)
+            .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
+            .unwrap_or(0);
+        self.set_blob_owner_with_size(sha256, pubkey, size)
+    }
+
+    fn set_blob_owner_with_size(
+        &self,
+        sha256: &[u8; 32],
+        pubkey: &[u8; 32],
+        size: u64,
+    ) -> Result<()> {
         let key = Self::blob_owner_key(sha256, pubkey);
+        let index_key = Self::pubkey_blob_key(pubkey, sha256);
         let mut wtxn = self.env.write_txn()?;
 
         // Add ownership entry (idempotent - put overwrites)
         self.blob_owners.put(&mut wtxn, &key[..], &())?;
 
-        // Convert sha256 to hex for BlobMetadata (which stores sha256 as hex string)
-        let sha256_hex = to_hex(sha256);
-
-        // Get existing blobs for this pubkey (for /list endpoint)
-        let mut blobs: Vec<BlobMetadata> = self
-            .pubkey_blobs
-            .get(&wtxn, pubkey)?
-            .and_then(|b| serde_json::from_slice(b).ok())
-            .unwrap_or_default();
-
-        // Check if blob already exists for this pubkey
-        if !blobs.iter().any(|b| b.sha256 == sha256_hex) {
+        if self.pubkey_blob_index.get(&wtxn, &index_key[..])?.is_none() {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-
-            // Only metadata is needed here. Reading the full blob body makes
-            // duplicate Blossom uploads compete with normal content serving.
-            let size = self
-                .router
-                .blob_size_sync(sha256)
-                .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
-                .unwrap_or(0);
-
-            blobs.push(BlobMetadata {
-                sha256: sha256_hex,
+            let metadata = BlobMetadata {
+                sha256: to_hex(sha256),
                 size,
                 mime_type: "application/octet-stream".to_string(),
                 uploaded: now,
-            });
-
-            let blobs_json = serde_json::to_vec(&blobs)?;
-            self.pubkey_blobs.put(&mut wtxn, pubkey, &blobs_json)?;
+            };
+            self.pubkey_blob_index
+                .put(&mut wtxn, &index_key[..], &serde_json::to_vec(&metadata)?)?;
         }
 
         wtxn.commit()?;
@@ -1497,6 +1502,8 @@ impl HashtreeStore {
 
         // Remove this pubkey's ownership entry
         self.blob_owners.delete(&mut wtxn, &key[..])?;
+        self.pubkey_blob_index
+            .delete(&mut wtxn, &Self::pubkey_blob_key(pubkey, sha256)[..])?;
 
         // Hex strings for logging and BlobMetadata (which stores sha256 as hex string)
         let sha256_hex = to_hex(sha256);
@@ -1549,11 +1556,23 @@ impl HashtreeStore {
     ) -> Result<Vec<crate::server::blossom::BlobDescriptor>> {
         let rtxn = self.env.read_txn()?;
 
-        let blobs: Vec<BlobMetadata> = self
+        let mut blobs: Vec<BlobMetadata> = self
             .pubkey_blobs
             .get(&rtxn, pubkey)?
             .and_then(|b| serde_json::from_slice(b).ok())
             .unwrap_or_default();
+        let mut seen: HashSet<String> = blobs.iter().map(|blob| blob.sha256.clone()).collect();
+
+        for item in self.pubkey_blob_index.prefix_iter(&rtxn, pubkey)? {
+            let (_, metadata_bytes) = item?;
+            let metadata: BlobMetadata = match serde_json::from_slice(metadata_bytes) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if seen.insert(metadata.sha256.clone()) {
+                blobs.push(metadata);
+            }
+        }
 
         Ok(blobs
             .into_iter()
@@ -2361,6 +2380,9 @@ mod tests {
         store.router.touch_accessed_sync(&owned_hash, 1)?;
         store.put_owned_blob(owned, &owner)?;
         assert!(store.blob_last_accessed_at(&owned_hash)?.unwrap_or(0) > 1);
+        let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
+        assert_eq!(owned_blobs.len(), 1);
+        assert_eq!(owned_blobs[0].sha256, to_hex(&owned_hash));
 
         Ok(())
     }
