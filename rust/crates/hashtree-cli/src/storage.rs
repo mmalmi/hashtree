@@ -1313,6 +1313,45 @@ impl HashtreeStore {
         Ok(to_hex(&hash))
     }
 
+    /// Store multiple owned Blossom blobs, batching raw blob and owner-index writes.
+    pub fn put_owned_blobs(&self, items: &[(Hash, Vec<u8>)], pubkey: &[u8; 32]) -> Result<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let incoming_bytes = items
+            .iter()
+            .fold(0u64, |total, (_, data)| total.saturating_add(data.len() as u64));
+        self.make_room_for_durable_blob(incoming_bytes)?;
+        let inserted = self
+            .router
+            .put_many_sync(items)
+            .map_err(|e| anyhow::anyhow!("Failed to store blob batch: {}", e))?;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut wtxn = self.env.write_txn()?;
+        for (hash, data) in items {
+            let owner_key = Self::blob_owner_key(hash, pubkey);
+            self.blob_owners.put(&mut wtxn, &owner_key[..], &())?;
+
+            let index_key = Self::pubkey_blob_key(pubkey, hash);
+            if self.pubkey_blob_index.get(&wtxn, &index_key[..])?.is_none() {
+                let metadata = BlobMetadata {
+                    sha256: to_hex(hash),
+                    size: data.len() as u64,
+                    mime_type: "application/octet-stream".to_string(),
+                    uploaded: now,
+                };
+                self.pubkey_blob_index
+                    .put(&mut wtxn, &index_key[..], &serde_json::to_vec(&metadata)?)?;
+            }
+        }
+        wtxn.commit()?;
+        Ok(inserted)
+    }
+
     /// Store an opportunistically cached blob.
     ///
     /// Unlike durable `put_blob` writes, this path may evict disposable orphaned
@@ -2383,6 +2422,14 @@ mod tests {
         let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
         assert_eq!(owned_blobs.len(), 1);
         assert_eq!(owned_blobs[0].sha256, to_hex(&owned_hash));
+
+        let batch = [
+            (sha256(b"owned blossom batch 1"), b"owned blossom batch 1".to_vec()),
+            (sha256(b"owned blossom batch 2"), b"owned blossom batch 2".to_vec()),
+        ];
+        store.put_owned_blobs(&batch, &owner)?;
+        let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
+        assert_eq!(owned_blobs.len(), 3);
 
         Ok(())
     }

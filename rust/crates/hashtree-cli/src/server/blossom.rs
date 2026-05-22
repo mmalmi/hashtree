@@ -8,6 +8,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use base64::Engine;
 use hashtree_core::from_hex;
@@ -37,6 +38,8 @@ const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS: u64 = 15_000;
 /// Default maximum upload size in bytes (5 MB)
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
+const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
+const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OptimisticUploadQueueSnapshot {
@@ -151,6 +154,25 @@ pub struct BlobDescriptor {
     #[serde(rename = "type")]
     pub mime_type: String,
     pub uploaded: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchUploadBlob {
+    pub sha256: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    pub data: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchUploadRequest {
+    pub blobs: Vec<BatchUploadBlob>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchUploadResponse {
+    pub uploaded: usize,
+    pub blobs: Vec<BlobDescriptor>,
 }
 
 /// Query parameters for list endpoint
@@ -872,6 +894,145 @@ pub async fn upload_blob(
             .header("X-Reason", "Storage error")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(format!(r#"{{"error":"{}"}}"#, e)))
+            .unwrap(),
+    }
+}
+
+/// POST /upload/batch - Upload multiple blobs with one auth event and one storage batch.
+pub async fn upload_blob_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BatchUploadRequest>,
+) -> impl IntoResponse {
+    if payload.blobs.is_empty() {
+        return blossom_json_error(StatusCode::BAD_REQUEST, "Batch is empty");
+    }
+    if payload.blobs.len() > MAX_BATCH_UPLOAD_BLOBS {
+        return blossom_json_error(StatusCode::PAYLOAD_TOO_LARGE, "Batch contains too many blobs");
+    }
+
+    let auth = match verify_blossom_auth(&headers, "upload", None) {
+        Ok(a) => a,
+        Err((status, reason)) => {
+            return Response::builder()
+                .status(status)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", reason)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
+                .unwrap();
+        }
+    };
+
+    let is_allowed_author = is_allowed_write_author(&state, &auth.pubkey);
+    let can_upload = can_accept_upload_author(&state, &auth.pubkey);
+    if !can_upload {
+        let _ = check_write_access(&state, &auth.pubkey);
+        return blossom_json_error(StatusCode::FORBIDDEN, "Write access denied");
+    }
+
+    let pubkey_bytes = match from_hex(&auth.pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid pubkey format"),
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut total_bytes = 0usize;
+    let mut items = Vec::with_capacity(payload.blobs.len());
+    let mut descriptors = Vec::with_capacity(payload.blobs.len());
+
+    for blob in payload.blobs {
+        let sha256_hex = blob.sha256.to_lowercase();
+        let expected_hash: [u8; 32] = match from_hex(&sha256_hex) {
+            Ok(hash) => hash,
+            Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob hash"),
+        };
+        if !auth.blob_hashes.is_empty() && !auth.blob_hashes.contains(&sha256_hex) {
+            return blossom_json_error(StatusCode::FORBIDDEN, "Uploaded blob hash does not match authorized hash");
+        }
+
+        let data = match base64::engine::general_purpose::STANDARD.decode(blob.data.as_bytes()) {
+            Ok(data) => data,
+            Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob data"),
+        };
+        if data.len() > state.max_upload_bytes {
+            return blossom_json_error(StatusCode::PAYLOAD_TOO_LARGE, "Blob exceeds maximum upload size");
+        }
+        total_bytes = total_bytes.saturating_add(data.len());
+        if total_bytes > MAX_BATCH_UPLOAD_BYTES {
+            return blossom_json_error(StatusCode::PAYLOAD_TOO_LARGE, "Batch exceeds maximum upload size");
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let actual_hash: [u8; 32] = hasher.finalize().into();
+        if actual_hash != expected_hash {
+            return blossom_json_error(StatusCode::FORBIDDEN, "Hash mismatch");
+        }
+
+        let content_type = blob
+            .content_type
+            .as_deref()
+            .map(content_type_base)
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        if let Err((status, reason)) = validate_upload_payload(
+            &data,
+            &content_type,
+            can_upload,
+            state.require_random_untrusted_ingest,
+        ) {
+            return blossom_json_error(status, reason);
+        }
+
+        let ext = mime_to_extension(&content_type);
+        descriptors.push(BlobDescriptor {
+            url: format!("/{}{}", sha256_hex, ext),
+            sha256: sha256_hex,
+            size: data.len() as u64,
+            mime_type: content_type,
+            uploaded: now,
+        });
+        items.push((actual_hash, data));
+    }
+
+    let store = state.store.clone();
+    let stored = tokio::task::spawn_blocking(move || {
+        if is_allowed_author {
+            store.put_owned_blobs(&items, &pubkey_bytes)
+        } else {
+            let mut inserted = 0usize;
+            for (_, data) in &items {
+                store.put_cached_blob(data)?;
+                inserted += 1;
+            }
+            Ok(inserted)
+        }
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("blob batch write task failed: {}", error));
+
+    match stored {
+        Ok(Ok(uploaded)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_string(&BatchUploadResponse {
+                    uploaded,
+                    blobs: descriptors,
+                })
+                .unwrap(),
+            ))
+            .unwrap(),
+        Ok(Err(error)) | Err(error) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header("X-Reason", "Storage error")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
             .unwrap(),
     }
 }
