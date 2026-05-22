@@ -912,6 +912,15 @@ impl StorageRouter {
         self.local.list()
     }
 
+    /// Mark which sorted candidate hashes already exist in local storage.
+    pub fn existing_local_hashes_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        self.local
+            .existing_hashes_in_sorted_candidates(sorted_hashes)
+    }
+
     /// Get the underlying local store for HashTree operations
     pub fn local_store(&self) -> Arc<LocalStore> {
         Arc::clone(&self.local)
@@ -1443,7 +1452,35 @@ impl HashtreeStore {
             return Ok(0);
         }
 
-        let incoming_bytes = items
+        let mut sorted_hashes: Vec<Hash> = items.iter().map(|(hash, _)| *hash).collect();
+        sorted_hashes.sort_unstable();
+        sorted_hashes.dedup();
+        let existing = self
+            .router
+            .existing_local_hashes_in_sorted_candidates(&sorted_hashes)
+            .map_err(|e| anyhow::anyhow!("Failed to check cached blob batch: {}", e))?;
+        let existing_hashes: HashSet<Hash> = sorted_hashes
+            .into_iter()
+            .zip(existing)
+            .filter_map(|(hash, exists)| exists.then_some(hash))
+            .collect();
+
+        let missing_items;
+        let write_items: &[(Hash, Vec<u8>)] = if existing_hashes.is_empty() {
+            items
+        } else {
+            missing_items = items
+                .iter()
+                .filter(|(hash, _)| !existing_hashes.contains(hash))
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing_items.is_empty() {
+                return Ok(0);
+            }
+            missing_items.as_slice()
+        };
+
+        let incoming_bytes = write_items
             .iter()
             .fold(0u64, |total, (_, data)| total.saturating_add(data.len() as u64));
         let room_started = Instant::now();
@@ -1453,13 +1490,13 @@ impl HashtreeStore {
         let mut retried_after_cleanup = false;
         loop {
             let raw_started = Instant::now();
-            match self.router.put_many_sync(items) {
+            match self.router.put_many_sync(write_items) {
                 Ok(inserted) => {
                     let raw_write_ms = raw_started.elapsed().as_millis();
                     let total_ms = started_at.elapsed().as_millis();
                     if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
                         tracing::warn!(
-                            blobs = items.len(),
+                            blobs = write_items.len(),
                             inserted,
                             incoming_bytes,
                             total_ms,
