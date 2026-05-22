@@ -39,6 +39,7 @@ export {
 export type {
   ManagedWebRTCMeshHostOptions,
   ManagedWebRTCMeshSessionConfig,
+  ManagedWebRTCMeshWorkerProviderOptions,
   WebRTCMeshPoolConfig,
 } from './managedMeshHost.js';
 

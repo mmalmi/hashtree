@@ -1,6 +1,6 @@
 import type { Store } from '@hashtree/core';
 import type { SignalingMessage } from '@hashtree/mesh';
-import type { HashtreeWorkerClient } from '../client.js';
+import type { HashtreeWorkerClient, WorkerP2PProvider } from '../client.js';
 import { createWebRTCWorkerP2PProvider } from './clientBridge.js';
 import type { WebRTCEvent } from './protocol.js';
 import { createSignalingFilters, decodeSignalingEvent, type GiftSeal, type SignalingEventLike } from './signaling.js';
@@ -42,6 +42,10 @@ export interface ManagedWebRTCMeshHostOptions {
     onEvent: (event: WebRTCEvent) => void,
     maxUploadBytesPerSecond: number | null,
   ) => WebRTCProxy;
+}
+
+export interface ManagedWebRTCMeshWorkerProviderOptions {
+  canFetch?: () => boolean | Promise<boolean>;
 }
 
 type ActiveMesh = {
@@ -95,20 +99,26 @@ export class ManagedWebRTCMeshHost {
 
   attachWorkerClient(
     client: HashtreeWorkerClient,
-    options: { canFetch?: () => boolean | Promise<boolean> } = {},
+    options: ManagedWebRTCMeshWorkerProviderOptions = {},
   ): void {
     if (this.workerClient && this.workerClient !== client) {
       this.workerClient.setP2PProvider(null);
     }
     this.workerClient = client;
-    client.setP2PProvider(createWebRTCWorkerP2PProvider({
+    client.setP2PProvider(this.createWorkerP2PProvider(options));
+  }
+
+  createWorkerP2PProvider(
+    options: ManagedWebRTCMeshWorkerProviderOptions = {},
+  ): WorkerP2PProvider {
+    return createWebRTCWorkerP2PProvider({
       getController: () => this.active?.controller ?? null,
       ensureController: async () => {
         await this.ensureStarted();
         return this.active?.controller ?? null;
       },
       canFetch: options.canFetch,
-    }));
+    });
   }
 
   async setSession(

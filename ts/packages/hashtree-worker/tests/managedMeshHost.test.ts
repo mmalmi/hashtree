@@ -216,6 +216,36 @@ describe('ManagedWebRTCMeshHost', () => {
     await host.close();
   });
 
+  it('creates a standalone worker provider for composed clients', async () => {
+    const signalPool = new FakeSignalPool();
+    const proxy = new FakeProxy();
+    const controller = new FakeController();
+    const host = new ManagedWebRTCMeshHost({
+      createSignalPool: () => signalPool as unknown as any,
+      createProxy: (_onEvent, uploadLimit) => {
+        proxy.setUploadLimitBytesPerSecond(uploadLimit);
+        return proxy as unknown as any;
+      },
+      createController: () => controller as unknown as any,
+    });
+
+    await host.setSession({
+      signature: 'session-a',
+      pubkey: 'pubkey-a',
+      relayUrls: ['wss://relay.example'],
+      localStore: {} as any,
+      sendSignaling: async () => undefined,
+      unwrapGift: async () => null,
+    });
+
+    const provider = host.createWorkerP2PProvider();
+    await expect(provider.listPeerIds()).resolves.toEqual(['peer-a']);
+    await expect(provider.fetch('11'.repeat(32), 'peer-a')).resolves.toEqual(new Uint8Array([4, 5, 6]));
+    await expect(provider.fetch('22'.repeat(32))).resolves.toEqual(new Uint8Array([1, 2, 3]));
+
+    await host.close();
+  });
+
   it('replaces active sessions cleanly when the signature changes', async () => {
     const signalPools: FakeSignalPool[] = [];
     const proxies: FakeProxy[] = [];

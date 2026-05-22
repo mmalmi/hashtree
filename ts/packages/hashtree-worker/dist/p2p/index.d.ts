@@ -5,7 +5,7 @@ export { WebRTCProxy, initWebRTCProxy, getWebRTCProxy, closeWebRTCProxy, } from 
 export { createWebRTCWorkerP2PProvider, } from './clientBridge.js';
 export type { WebRTCWorkerP2PProviderOptions, } from './clientBridge.js';
 export { ManagedWebRTCMeshHost, } from './managedMeshHost.js';
-export type { ManagedWebRTCMeshHostOptions, ManagedWebRTCMeshSessionConfig, WebRTCMeshPoolConfig, } from './managedMeshHost.js';
+export type { ManagedWebRTCMeshHostOptions, ManagedWebRTCMeshSessionConfig, ManagedWebRTCMeshWorkerProviderOptions, WebRTCMeshPoolConfig, } from './managedMeshHost.js';
 export type { WebRTCCommand, WebRTCEvent, } from './protocol.js';
 export { SIGNALING_KIND, HELLO_TAG, MAX_EVENT_AGE_SEC, createAuthenticatedNip44GiftWrap, createDecryptingGiftUnwrapper, createNip44GiftWrap, createSecretKeyNip44GiftWrap, createSecretKeyEventSigner, createSecretKeyGiftUnwrapper, createSignalingFilters, createSimplePoolSignalingSender, sendSignalingMessage, decodeSignalingEvent, } from './signaling.js';
 export type { CreateAuthenticatedNip44GiftWrapOptions, CreateNip44GiftWrapOptions, GiftCiphertextDecryptor, CreateSimplePoolSignalingSenderOptions, SimplePoolPublishMode, SignalingEventLike, GiftSeal, SignalingTemplate, SignalingInnerEvent, SignalingFilters, DecodedSignalingEvent, } from './signaling.js';

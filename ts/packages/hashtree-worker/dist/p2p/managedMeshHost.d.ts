@@ -1,6 +1,6 @@
 import type { Store } from '@hashtree/core';
 import type { SignalingMessage } from '@hashtree/mesh';
-import type { HashtreeWorkerClient } from '../client.js';
+import type { HashtreeWorkerClient, WorkerP2PProvider } from '../client.js';
 import type { WebRTCEvent } from './protocol.js';
 import { type GiftSeal, type SignalingEventLike } from './signaling.js';
 import { SimplePool } from 'nostr-tools/pool';
@@ -42,6 +42,9 @@ export interface ManagedWebRTCMeshHostOptions {
     createController?: (config: WebRTCControllerConfig) => WebRTCController;
     createProxy?: (onEvent: (event: WebRTCEvent) => void, maxUploadBytesPerSecond: number | null) => WebRTCProxy;
 }
+export interface ManagedWebRTCMeshWorkerProviderOptions {
+    canFetch?: () => boolean | Promise<boolean>;
+}
 export declare class ManagedWebRTCMeshHost {
     private readonly healthCheckIntervalMs;
     private readonly reannounceIntervalMs;
@@ -61,9 +64,8 @@ export declare class ManagedWebRTCMeshHost {
     private lastHelloAt;
     private lastRestartAt;
     constructor(options?: ManagedWebRTCMeshHostOptions);
-    attachWorkerClient(client: HashtreeWorkerClient, options?: {
-        canFetch?: () => boolean | Promise<boolean>;
-    }): void;
+    attachWorkerClient(client: HashtreeWorkerClient, options?: ManagedWebRTCMeshWorkerProviderOptions): void;
+    createWorkerP2PProvider(options?: ManagedWebRTCMeshWorkerProviderOptions): WorkerP2PProvider;
     setSession(session: ManagedWebRTCMeshSessionConfig | null, force?: boolean): Promise<void>;
     setUploadLimitBytesPerSecond(maxUploadBytesPerSecond?: number | null): void;
     setPoolConfig(config: WebRTCMeshPoolConfig | null): void;

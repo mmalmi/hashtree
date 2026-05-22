@@ -37,14 +37,17 @@ export class ManagedWebRTCMeshHost {
             this.workerClient.setP2PProvider(null);
         }
         this.workerClient = client;
-        client.setP2PProvider(createWebRTCWorkerP2PProvider({
+        client.setP2PProvider(this.createWorkerP2PProvider(options));
+    }
+    createWorkerP2PProvider(options = {}) {
+        return createWebRTCWorkerP2PProvider({
             getController: () => this.active?.controller ?? null,
             ensureController: async () => {
                 await this.ensureStarted();
                 return this.active?.controller ?? null;
             },
             canFetch: options.canFetch,
-        }));
+        });
     }
     async setSession(session, force = false) {
         this.desiredSession = session;
