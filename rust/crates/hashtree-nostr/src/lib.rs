@@ -30,9 +30,21 @@ use hashtree_core::{
     sha256, BufferedStore, Cid, HashTree, HashTreeConfig, HashTreeError, Store, TreeVisibility,
 };
 use hashtree_index::{BTree, BTreeError, BTreeOptions};
+use nostr_sdk::nips::nip44::{self, Version as Nip44Version};
+use nostr_sdk::{
+    Alphabet, Event, EventBuilder, Keys, Kind, PublicKey, SingleLetterTag, Tag, TagKind,
+};
 use serde::{Deserialize, Serialize};
 
 pub const NOSTR_EVENT_ENVELOPE_VERSION: u8 = 1;
+pub const HASHTREE_ROOT_KIND: u32 = 30078;
+pub const HASHTREE_LABEL: &str = "hashtree";
+pub const TAG_HASH: &str = "hash";
+pub const TAG_KEY: &str = "key";
+pub const TAG_ENCRYPTED_KEY: &str = "encryptedKey";
+pub const TAG_KEY_ID: &str = "keyId";
+pub const TAG_SELF_ENCRYPTED_KEY: &str = "selfEncryptedKey";
+pub const TAG_SELF_ENCRYPTED_LINK_KEY: &str = "selfEncryptedLinkKey";
 const MANIFEST_BY_AUTHOR_TIME: &str = "by-author-time";
 const MANIFEST_BY_AUTHOR_KIND_TIME: &str = "by-author-kind-time";
 const MANIFEST_BY_KIND_TIME: &str = "by-kind-time";
@@ -312,11 +324,27 @@ pub async fn read_signed_event_snapshot<S: Store>(
     decode_signed_event_json(&data)
 }
 
+pub fn stored_event_from_nostr_sdk_event(event: &Event) -> StoredNostrEvent {
+    StoredNostrEvent {
+        id: event.id.to_hex(),
+        pubkey: event.pubkey.to_hex(),
+        created_at: event.created_at.as_u64(),
+        kind: u32::from(event.kind.as_u16()),
+        tags: event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: event.content.clone(),
+        sig: event.sig.to_string(),
+    }
+}
+
 pub fn parse_hashtree_root_event(
     event: &StoredNostrEvent,
 ) -> Result<Option<ParsedHashtreeRootEvent>, NostrEventStoreError> {
     let normalized = normalize_signed_event(event.clone())?;
-    if normalized.kind != 30078 {
+    if normalized.kind != HASHTREE_ROOT_KIND {
         return Ok(None);
     }
 
@@ -329,14 +357,14 @@ pub fn parse_hashtree_root_event(
     let hash_hex = normalized
         .tags
         .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("hash"))
+        .find(|tag| tag.first().map(String::as_str) == Some(TAG_HASH))
         .and_then(|tag| tag.get(1))
         .cloned();
     let (Some(tree_name), Some(hash_hex)) = (tree_name, hash_hex) else {
         return Ok(None);
     };
 
-    if has_any_label(&normalized) && !has_label(&normalized, "hashtree") {
+    if has_any_label(&normalized) && !has_label(&normalized, HASHTREE_LABEL) {
         return Ok(None);
     }
 
@@ -351,31 +379,31 @@ pub fn parse_hashtree_root_event(
     let key_hex = normalized
         .tags
         .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("key"))
+        .find(|tag| tag.first().map(String::as_str) == Some(TAG_KEY))
         .and_then(|tag| tag.get(1))
         .cloned();
     let encrypted_key = normalized
         .tags
         .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("encryptedKey"))
+        .find(|tag| tag.first().map(String::as_str) == Some(TAG_ENCRYPTED_KEY))
         .and_then(|tag| tag.get(1))
         .cloned();
     let key_id = normalized
         .tags
         .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("keyId"))
+        .find(|tag| tag.first().map(String::as_str) == Some(TAG_KEY_ID))
         .and_then(|tag| tag.get(1))
         .cloned();
     let self_encrypted_key = normalized
         .tags
         .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("selfEncryptedKey"))
+        .find(|tag| tag.first().map(String::as_str) == Some(TAG_SELF_ENCRYPTED_KEY))
         .and_then(|tag| tag.get(1))
         .cloned();
     let self_encrypted_link_key = normalized
         .tags
         .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("selfEncryptedLinkKey"))
+        .find(|tag| tag.first().map(String::as_str) == Some(TAG_SELF_ENCRYPTED_LINK_KEY))
         .and_then(|tag| tag.get(1))
         .cloned();
 
@@ -414,6 +442,100 @@ pub fn parse_hashtree_root_event(
         self_encrypted_key,
         self_encrypted_link_key,
     }))
+}
+
+pub fn parse_verified_hashtree_root_event(
+    event: &Event,
+) -> Result<Option<ParsedHashtreeRootEvent>, NostrEventStoreError> {
+    event.verify().map_err(|err| {
+        NostrEventStoreError::Validation(format!("signature verification failed: {err}"))
+    })?;
+    parse_hashtree_root_event(&stored_event_from_nostr_sdk_event(event))
+}
+
+pub fn resolve_self_encrypted_root_cid(
+    parsed: &ParsedHashtreeRootEvent,
+    owner_keys: &Keys,
+) -> Result<Cid, NostrEventStoreError> {
+    if parsed.root_cid.key.is_some() {
+        return Ok(parsed.root_cid.clone());
+    }
+
+    let ciphertext = parsed.self_encrypted_key.as_ref().ok_or_else(|| {
+        NostrEventStoreError::Validation("hashtree root key is unavailable".to_string())
+    })?;
+    let author = PublicKey::from_hex(&parsed.event.pubkey).map_err(|err| {
+        NostrEventStoreError::Validation(format!("invalid root event pubkey: {err}"))
+    })?;
+    if owner_keys.public_key() != author {
+        return Err(NostrEventStoreError::Validation(format!(
+            "owner key {} does not match root event author {}",
+            owner_keys.public_key().to_hex(),
+            parsed.event.pubkey
+        )));
+    }
+    let key_hex = nip44::decrypt(owner_keys.secret_key(), &author, ciphertext).map_err(|_| {
+        NostrEventStoreError::Validation("hashtree root key is unavailable".to_string())
+    })?;
+    let key = hashtree_core::from_hex(&key_hex).map_err(|_| {
+        NostrEventStoreError::Validation(
+            "root key must be a lowercase 64-character hex string".to_string(),
+        )
+    })?;
+    Ok(Cid {
+        hash: parsed.root_cid.hash,
+        key: Some(key),
+    })
+}
+
+pub fn build_private_hashtree_root_event(
+    owner_keys: &Keys,
+    tree_name: &str,
+    root_cid: &Cid,
+    created_at: Option<u64>,
+) -> Result<Event, NostrEventStoreError> {
+    let Some(root_key) = root_cid.key else {
+        return Err(NostrEventStoreError::Validation(
+            "private hashtree root requires an encrypted CID".to_string(),
+        ));
+    };
+    let root_key_hex = hex::encode(root_key);
+    let self_encrypted_key = nip44::encrypt(
+        owner_keys.secret_key(),
+        &owner_keys.public_key(),
+        root_key_hex,
+        Nip44Version::V2,
+    )
+    .map_err(|err| {
+        NostrEventStoreError::Validation(format!("self-encrypted root key failed: {err}"))
+    })?;
+    let builder = EventBuilder::new(
+        Kind::from(HASHTREE_ROOT_KIND as u16),
+        "",
+        [
+            Tag::identifier(tree_name.to_string()),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                vec![HASHTREE_LABEL],
+            ),
+            Tag::custom(
+                TagKind::Custom(TAG_HASH.into()),
+                vec![hex::encode(root_cid.hash)],
+            ),
+            Tag::custom(
+                TagKind::Custom(TAG_SELF_ENCRYPTED_KEY.into()),
+                vec![self_encrypted_key],
+            ),
+        ],
+    );
+    let builder = if let Some(created_at) = created_at {
+        builder.custom_created_at(nostr_sdk::Timestamp::from(created_at))
+    } else {
+        builder
+    };
+    builder.to_event(owner_keys).map_err(|err| {
+        NostrEventStoreError::Validation(format!("build hashtree root event failed: {err}"))
+    })
 }
 
 #[derive(Debug, Clone, Default)]

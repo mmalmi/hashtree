@@ -6,10 +6,13 @@ use hashtree_core::{
 };
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
-    decode_signed_event_json, decode_stored_event_msgpack, encode_signed_event_json,
-    encode_stored_event_msgpack, parse_hashtree_root_event, read_signed_event_snapshot,
-    store_signed_event_snapshot, ListEventsOptions, NostrEventStore, StoredNostrEvent,
+    build_private_hashtree_root_event, decode_signed_event_json, decode_stored_event_msgpack,
+    encode_signed_event_json, encode_stored_event_msgpack, parse_hashtree_root_event,
+    parse_verified_hashtree_root_event, read_signed_event_snapshot,
+    resolve_self_encrypted_root_cid, store_signed_event_snapshot, ListEventsOptions,
+    NostrEventStore, StoredNostrEvent,
 };
+use nostr_sdk::{JsonUtil, Keys};
 
 fn event(
     id: &str,
@@ -564,6 +567,43 @@ fn parses_hashtree_root_events_from_signed_snapshots() {
     assert_eq!(parsed.labels, vec!["hashtree".to_string()]);
     assert_eq!(parsed.encrypted_key, Some("6".repeat(64)));
     assert_eq!(parsed.key_id, Some("7".repeat(64)));
+}
+
+#[test]
+fn builds_and_resolves_private_hashtree_root_events() {
+    let owner = Keys::generate();
+    let root_hash = [0x31; 32];
+    let root_key = [0x42; 32];
+    let root_cid = Cid::encrypted(root_hash, root_key);
+
+    let event = build_private_hashtree_root_event(&owner, "main", &root_cid, Some(1_700_000_000))
+        .expect("build private root event");
+    let parsed = parse_verified_hashtree_root_event(&event)
+        .expect("parse event")
+        .expect("hashtree root");
+    let resolved = resolve_self_encrypted_root_cid(&parsed, &owner).expect("resolve private key");
+
+    assert_eq!(event.kind.as_u16(), 30078);
+    assert_eq!(parsed.tree_name, "main");
+    assert_eq!(parsed.visibility, TreeVisibility::Private);
+    assert_eq!(parsed.root_cid.key, None);
+    assert_eq!(resolved, root_cid);
+    assert!(!event.as_json().contains(&hex::encode(root_key)));
+}
+
+#[test]
+fn resolving_private_hashtree_root_requires_matching_owner_key() {
+    let owner = Keys::generate();
+    let other = Keys::generate();
+    let root_cid = Cid::encrypted([0x32; 32], [0x43; 32]);
+
+    let event = build_private_hashtree_root_event(&owner, "main", &root_cid, None)
+        .expect("build private root event");
+    let parsed = parse_verified_hashtree_root_event(&event)
+        .expect("parse event")
+        .expect("hashtree root");
+
+    assert!(resolve_self_encrypted_root_cid(&parsed, &other).is_err());
 }
 
 #[test]

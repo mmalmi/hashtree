@@ -8,7 +8,8 @@ use futures::{SinkExt, StreamExt};
 use hashtree_core::{MemoryStore, Store};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
-    CrawlConfig, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode, StoredNostrEvent,
+    CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
+    StoredNostrEvent,
 };
 use negentropy::{Id, Negentropy, NegentropyStorageVector};
 use nostr::prelude::{
@@ -1409,7 +1410,7 @@ async fn reports_global_recent_progress() -> io::Result<()> {
         .take(progress.len() - 1)
         .all(|item| item.events_seen > 0));
     assert!(report.root.is_some());
-    assert_eq!(progress.last(), Some(&report));
+    assert_progress_matches_report_without_applied_events(progress.last(), &report);
 
     Ok(())
 }
@@ -1910,9 +1911,22 @@ async fn reports_author_batch_progress() -> io::Result<()> {
     assert_eq!(progress[1].authors_processed, 2);
     assert_eq!(progress[2].authors_processed, 3);
     assert!(progress.iter().skip(1).all(|item| item.root.is_some()));
-    assert_eq!(progress.last(), Some(&report));
+    assert_progress_matches_report_without_applied_events(progress.last(), &report);
 
     Ok(())
+}
+
+fn assert_progress_matches_report_without_applied_events(
+    progress: Option<&CrawlReport>,
+    report: &CrawlReport,
+) {
+    let mut actual = progress.cloned();
+    if let Some(actual) = actual.as_mut() {
+        actual.applied_events.clear();
+    }
+    let mut expected = report.clone();
+    expected.applied_events.clear();
+    assert_eq!(actual, Some(expected));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
