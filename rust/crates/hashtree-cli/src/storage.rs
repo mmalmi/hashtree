@@ -52,6 +52,7 @@ const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 const DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 64;
 const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT_ENV: &str = "HTREE_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT";
+const CACHED_BLOB_BATCH_EXISTING_PRECHECK_ENV: &str = "HTREE_CACHED_BLOB_BATCH_EXISTING_PRECHECK";
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
 const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
 
@@ -75,6 +76,11 @@ fn access_update_background_batch_limit() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT)
+}
+
+fn cached_blob_batch_existing_precheck() -> bool {
+    std::env::var(CACHED_BLOB_BATCH_EXISTING_PRECHECK_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -1452,23 +1458,20 @@ impl HashtreeStore {
             return Ok(0);
         }
 
-        let mut sorted_hashes: Vec<Hash> = items.iter().map(|(hash, _)| *hash).collect();
-        sorted_hashes.sort_unstable();
-        sorted_hashes.dedup();
-        let existing = self
-            .router
-            .existing_local_hashes_in_sorted_candidates(&sorted_hashes)
-            .map_err(|e| anyhow::anyhow!("Failed to check cached blob batch: {}", e))?;
-        let existing_hashes: HashSet<Hash> = sorted_hashes
-            .into_iter()
-            .zip(existing)
-            .filter_map(|(hash, exists)| exists.then_some(hash))
-            .collect();
-
         let missing_items;
-        let write_items: &[(Hash, Vec<u8>)] = if existing_hashes.is_empty() {
-            items
-        } else {
+        let write_items: &[(Hash, Vec<u8>)] = if cached_blob_batch_existing_precheck() {
+            let mut sorted_hashes: Vec<Hash> = items.iter().map(|(hash, _)| *hash).collect();
+            sorted_hashes.sort_unstable();
+            sorted_hashes.dedup();
+            let existing = self
+                .router
+                .existing_local_hashes_in_sorted_candidates(&sorted_hashes)
+                .map_err(|e| anyhow::anyhow!("Failed to check cached blob batch: {}", e))?;
+            let existing_hashes: HashSet<Hash> = sorted_hashes
+                .into_iter()
+                .zip(existing)
+                .filter_map(|(hash, exists)| exists.then_some(hash))
+                .collect();
             missing_items = items
                 .iter()
                 .filter(|(hash, _)| !existing_hashes.contains(hash))
@@ -1478,6 +1481,8 @@ impl HashtreeStore {
                 return Ok(0);
             }
             missing_items.as_slice()
+        } else {
+            items
         };
 
         let incoming_bytes = write_items
