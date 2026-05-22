@@ -74,7 +74,6 @@ fn access_update_background_batch_limit() -> usize {
     std::env::var(ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT_ENV)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT)
 }
 
@@ -1253,6 +1252,11 @@ impl HashtreeStore {
     where
         I: IntoIterator<Item = Hash>,
     {
+        let access_update_batch_limit = access_update_background_batch_limit();
+        if access_update_batch_limit == 0 {
+            return;
+        }
+
         let now = unix_timestamp_now();
         let mut due_hashes = self.blob_access_update_gate.due_hashes(hashes, now);
         if due_hashes.is_empty() {
@@ -1267,7 +1271,6 @@ impl HashtreeStore {
             return;
         }
 
-        let access_update_batch_limit = access_update_background_batch_limit();
         if due_hashes.len() > access_update_batch_limit {
             due_hashes.truncate(access_update_batch_limit);
         }
