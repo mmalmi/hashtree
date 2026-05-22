@@ -399,6 +399,70 @@ describe('worker peer blob sharing', () => {
     });
   });
 
+  it('expires unanswered p2p fetches at the mesh read timeout', async () => {
+    vi.useFakeTimers();
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    const hashHex = '35'.repeat(32);
+    let capturedRequestId = '';
+    let requestObservedAt = 0;
+    peerFetchResponder.handle = (_target, requestId) => {
+      capturedRequestId = requestId;
+      requestObservedAt = Date.now();
+    };
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-3c',
+      config: {
+        relays: [],
+        blossomServers: [],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    ctx.dispatch({
+      type: 'getBlob',
+      id: 'blob-3c',
+      hashHex,
+    });
+    for (let attempt = 0; attempt < 20 && !capturedRequestId; attempt += 1) {
+      await vi.advanceTimersByTimeAsync(50);
+      await Promise.resolve();
+    }
+    expect(capturedRequestId).toBeTruthy();
+
+    const beforeTimeoutDelay = Math.max(0, requestObservedAt + 19_999 - Date.now());
+    await vi.advanceTimersByTimeAsync(beforeTimeoutDelay);
+    await Promise.resolve();
+    expect(readBlobResponse('blob-3c')).toBeUndefined();
+
+    const timeoutDelay = Math.max(1, requestObservedAt + 20_000 - Date.now());
+    await vi.advanceTimersByTimeAsync(timeoutDelay);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readBlobResponse('blob-3c')).toEqual({
+      type: 'blob',
+      id: 'blob-3c',
+      error: 'Blob not found',
+    });
+
+    ctx.dispatch({
+      type: 'p2pFetchResult',
+      id: `late-${capturedRequestId}`,
+      requestId: capturedRequestId,
+      data: new Uint8Array([9, 9, 9]),
+    });
+    await Promise.resolve();
+    expect(readBlobResponse('blob-3c')).toEqual({
+      type: 'blob',
+      id: 'blob-3c',
+      error: 'Blob not found',
+    });
+  });
+
   it('keeps the generic p2p fetch path available while no peers are listed yet', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;

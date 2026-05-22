@@ -13,6 +13,7 @@ const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_SLOW_LOG_MS = 15_000;
+const P2P_FETCH_TIMEOUT_MS = 20_000;
 const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
 const P2P_PEER_LIST_CACHE_MS = 1_500;
 // Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
@@ -96,7 +97,7 @@ const STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES = 256 * 1024;
 // offset and expect a substantially larger contiguous window than startup.
 const SEEK_OPEN_ENDED_RANGE_WINDOW_BYTES = 8 * 1024 * 1024;
 const MEDIA_STREAM_PREFETCH = 4;
-const MESH_READ_TIMEOUT_MS = 20_000;
+const MESH_READ_TIMEOUT_MS = P2P_FETCH_TIMEOUT_MS;
 const MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS = [100, 300, 900];
 const STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS = [250, 1_000, 2_500, 5_000];
 const PEER_SHARED_READ_SOURCE_IDS = ['blossom'];
@@ -326,6 +327,9 @@ function resetState() {
         if (pending.slowLogId) {
             clearTimeout(pending.slowLogId);
         }
+        if (pending.timeoutId) {
+            clearTimeout(pending.timeoutId);
+        }
     }
     pendingP2PFetches.clear();
     pendingP2PPeerLists.clear();
@@ -395,7 +399,25 @@ async function requestP2PBlob(hashHex, peerId) {
                 elapsedMs: Date.now() - startedAt,
             });
         }, P2P_FETCH_SLOW_LOG_MS);
-        pendingP2PFetches.set(requestId, { resolve, slowLogId, startedAt });
+        const timeoutId = setTimeout(() => {
+            const pending = pendingP2PFetches.get(requestId);
+            if (!pending) {
+                return;
+            }
+            pendingP2PFetches.delete(requestId);
+            if (pending.slowLogId) {
+                clearTimeout(pending.slowLogId);
+            }
+            emitDiagnostic('warn', 'mesh', 'p2p-fetch-timeout', 'P2P blob request timed out', {
+                requestId,
+                hashHex: hashHex.slice(0, 16),
+                peerId: peerId ?? null,
+                elapsedMs: Date.now() - startedAt,
+                timeoutMs: P2P_FETCH_TIMEOUT_MS,
+            });
+            pending.resolve(null);
+        }, P2P_FETCH_TIMEOUT_MS);
+        pendingP2PFetches.set(requestId, { resolve, slowLogId, timeoutId, startedAt });
         respond({ type: 'p2pFetch', requestId, hashHex, peerId });
     });
     return data;
@@ -437,6 +459,9 @@ function resolveP2PFetch(requestId, data, error) {
         return;
     if (pending.slowLogId) {
         clearTimeout(pending.slowLogId);
+    }
+    if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
     }
     pendingP2PFetches.delete(requestId);
     if (error || !data) {
