@@ -115,6 +115,62 @@ pub(super) fn queue_links_for_diff_upload(
     }
 }
 
+async fn collect_complete_hashes<S: Store>(
+    tree: &HashTree<S>,
+    root: &hashtree_core::Cid,
+    concurrency: usize,
+) -> Result<HashSet<[u8; 32]>, hashtree_core::HashTreeError> {
+    let hashes = hashtree_core::collect_hashes(tree, root, concurrency).await?;
+    let store = tree.get_store();
+    for hash in &hashes {
+        match store.has(hash).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(hashtree_core::HashTreeError::MissingChunk(hex::encode(
+                    hash,
+                )));
+            }
+            Err(err) => {
+                return Err(hashtree_core::HashTreeError::Store(err.to_string()));
+            }
+        }
+    }
+    Ok(hashes)
+}
+
+async fn upload_block_to_file_servers(
+    blossom: &hashtree_blossom::BlossomClient,
+    data: &[u8],
+    from_old_tree: bool,
+    force_all_servers: bool,
+    servers_needing_full: &[String],
+) -> std::result::Result<(String, bool), hashtree_blossom::BlossomError> {
+    let write_server_count = blossom.write_servers().len();
+    if force_all_servers || (!from_old_tree && write_server_count > 1) {
+        if write_server_count <= 1 {
+            blossom.upload_if_missing(data).await
+        } else {
+            blossom
+                .upload_to_any_selected_server(data, blossom.write_servers())
+                .await
+        }
+    } else if from_old_tree && !servers_needing_full.is_empty() {
+        if servers_needing_full.len() == 1 {
+            blossom
+                .clone()
+                .with_write_servers(servers_needing_full.to_vec())
+                .upload_if_missing(data)
+                .await
+        } else {
+            blossom
+                .upload_to_any_selected_server(data, servers_needing_full)
+                .await
+        }
+    } else {
+        blossom.upload_if_missing(data).await
+    }
+}
+
 impl RemoteHelper {
     fn upload_concurrency(&self, server_count: usize) -> usize {
         effective_upload_concurrency(server_count, self.config.blossom.upload_concurrency)
@@ -1016,7 +1072,7 @@ impl RemoteHelper {
         let verbose = self.is_slow();
         let trust_server_old_tree_coverage = trust_server_old_tree_coverage && !force_upload;
         let (local_complete, degraded_replication) = rt.block_on(async {
-            use hashtree_core::{collect_hashes, Cid, HashTree, HashTreeConfig};
+            use hashtree_core::{Cid, HashTree, HashTreeConfig};
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::sync::Arc;
             use tokio::sync::mpsc;
@@ -1049,7 +1105,7 @@ impl RemoteHelper {
                     key: old_encryption_key.copied(),
                 };
 
-                match collect_hashes(&tree, &old_cid, 32).await {
+                match collect_complete_hashes(&tree, &old_cid, 32).await {
                     Ok(hashes) => {
                         if verbose {
                             eprintln!(" {} hashes in old tree", hashes.len());
@@ -1058,7 +1114,7 @@ impl RemoteHelper {
                     }
                     Err(local_err) => {
                         match self.build_cached_fetch_tree() {
-                            Ok((cached_tree, _)) => match collect_hashes(&cached_tree, &old_cid, 32).await {
+                            Ok((cached_tree, _)) => match collect_complete_hashes(&cached_tree, &old_cid, 32).await {
                                 Ok(hashes) => {
                                     if verbose {
                                         eprintln!(
@@ -1094,6 +1150,7 @@ impl RemoteHelper {
             };
 
             let has_old_tree = !old_hashes.is_empty();
+            let old_tree_unavailable = old_root_bytes.is_some() && !has_old_tree;
             let all_servers: Vec<String> = blossom.write_servers().to_vec();
             let servers_needing_full: Arc<Vec<String>> =
                 if has_old_tree && all_servers.len() == 1 {
@@ -1155,7 +1212,7 @@ impl RemoteHelper {
 
             const CHANNEL_SIZE: usize = 100;
             let upload_concurrency = self.upload_concurrency(all_servers.len());
-            let (tx, rx) = mpsc::channel::<(Vec<u8>, bool, bool)>(CHANNEL_SIZE);
+            let (tx, rx) = mpsc::channel::<([u8; 32], Vec<u8>, bool, bool)>(CHANNEL_SIZE);
 
             let upload_handle = {
                 let blossom = blossom.clone();
@@ -1174,7 +1231,7 @@ impl RemoteHelper {
 
                     let stream = ReceiverStream::new(rx);
                     stream
-                        .map(|(data, from_old_tree, force_all_servers)| {
+                        .map(|(hash, data, from_old_tree, force_all_servers)| {
                             let blossom = blossom.clone();
                             let uploaded = Arc::clone(&uploaded);
                             let skipped_server = Arc::clone(&skipped_server);
@@ -1185,37 +1242,29 @@ impl RemoteHelper {
                             let discovery_complete = Arc::clone(&discovery_complete);
                             let servers_needing_full = Arc::clone(&servers_needing_full);
                             async move {
-                                let write_server_count = blossom.write_servers().len();
-                                let result = if force_all_servers
-                                    || (!from_old_tree && write_server_count > 1)
-                                {
-                                    if write_server_count <= 1 {
-                                        blossom.upload_if_missing(&data).await
+                                let result = if old_tree_unavailable {
+                                    let hash_hex = hex::encode(hash);
+                                    if blossom.exists(&hash_hex).await {
+                                        Ok((hash_hex, false))
                                     } else {
-                                        blossom
-                                            .upload_to_any_selected_server(
-                                                &data,
-                                                blossom.write_servers(),
-                                            )
-                                            .await
-                                    }
-                                } else if from_old_tree && !servers_needing_full.is_empty() {
-                                    if servers_needing_full.len() == 1 {
-                                        blossom
-                                            .clone()
-                                            .with_write_servers(servers_needing_full.as_ref().clone())
-                                            .upload_if_missing(&data)
-                                            .await
-                                    } else {
-                                        blossom
-                                            .upload_to_any_selected_server(
-                                                &data,
-                                                servers_needing_full.as_ref().as_slice(),
-                                            )
-                                            .await
+                                        upload_block_to_file_servers(
+                                            &blossom,
+                                            &data,
+                                            from_old_tree,
+                                            force_all_servers,
+                                            servers_needing_full.as_ref().as_slice(),
+                                        )
+                                        .await
                                     }
                                 } else {
-                                    blossom.upload_if_missing(&data).await
+                                    upload_block_to_file_servers(
+                                        &blossom,
+                                        &data,
+                                        from_old_tree,
+                                        force_all_servers,
+                                        servers_needing_full.as_ref().as_slice(),
+                                    )
+                                    .await
                                 };
                                 match result {
                                     Ok((_, true)) => {
@@ -1394,7 +1443,7 @@ impl RemoteHelper {
                 }
 
                 if tx
-                    .send((data, from_old_tree, force_all_servers_for_hash))
+                    .send((hash, data, from_old_tree, force_all_servers_for_hash))
                     .await
                     .is_err()
                 {

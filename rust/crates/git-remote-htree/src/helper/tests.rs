@@ -23,6 +23,7 @@ struct CountingBlossomState {
     blobs: HashMap<String, Vec<u8>>,
     get_requests: usize,
     head_requests: usize,
+    upload_requests: usize,
     fail_uploads: bool,
 }
 
@@ -108,6 +109,10 @@ impl CountingBlossomServer {
         self.state.lock().expect("state lock").head_requests
     }
 
+    fn get_upload_request_count(&self) -> usize {
+        self.state.lock().expect("state lock").upload_requests
+    }
+
     fn has_blob(&self, hash: &[u8; 32]) -> bool {
         let hash = hex::encode(hash);
         self.state
@@ -115,6 +120,18 @@ impl CountingBlossomServer {
             .expect("state lock")
             .blobs
             .contains_key(&hash)
+    }
+
+    fn insert_blob(&self, data: Vec<u8>) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let hash = hex::encode(hasher.finalize());
+        self.state
+            .lock()
+            .expect("state lock")
+            .blobs
+            .insert(hash.clone(), data);
+        hash
     }
 }
 
@@ -143,8 +160,12 @@ async fn upload_blob(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    if state.lock().expect("state lock").fail_uploads {
-        return StatusCode::FORBIDDEN;
+    {
+        let mut state = state.lock().expect("state lock");
+        state.upload_requests += 1;
+        if state.fail_uploads {
+            return StatusCode::FORBIDDEN;
+        }
     }
 
     let mut hasher = Sha256::new();
@@ -911,6 +932,88 @@ fn test_push_to_file_servers_with_diff_does_not_fetch_old_tree_from_blossom() {
         fake_blossom.get_request_count(),
         0,
         "diff collection should not fetch the old tree from Blossom when it is missing locally"
+    );
+}
+
+#[test]
+fn test_push_to_file_servers_with_unavailable_old_root_probes_before_reupload() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::new();
+    write_test_config(home.path(), fake_blossom.base_url(), true);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (old_cid, new_cid, new_hash_count) = rt.block_on(async {
+        let old_store = Arc::new(MemoryStore::new());
+        let old_tree = HashTree::new(HashTreeConfig::new(old_store).public());
+        let (old_cid, _) = old_tree
+            .put(b"old root is not in the local cache or file server")
+            .await
+            .expect("build old tree");
+
+        let new_store = helper.storage.store().clone();
+        let new_tree = HashTree::new(HashTreeConfig::new(new_store.clone()).public());
+        let mut entries = Vec::new();
+        for idx in 0..48 {
+            let body = format!("unchanged small blob {idx:02}\n{}", "x".repeat(128));
+            let (cid, size) = new_tree
+                .put_file(body.as_bytes())
+                .await
+                .expect("write new file");
+            entries.push(DirEntry::from_cid(format!("file-{idx:02}.txt"), &cid).with_size(size));
+        }
+        let new_cid = new_tree
+            .put_directory(entries)
+            .await
+            .expect("write new directory");
+        let new_hashes = collect_hashes(&new_tree, &new_cid, 32)
+            .await
+            .expect("collect new hashes");
+
+        for hash in &new_hashes {
+            let data = new_store
+                .get(hash)
+                .await
+                .expect("read new blob")
+                .expect("new blob exists");
+            fake_blossom.insert_blob(data);
+        }
+
+        (old_cid, new_cid, new_hashes.len())
+    });
+
+    let result = helper.push_to_file_servers_with_diff(
+        &hex::encode(new_cid.hash),
+        new_cid.key.as_ref(),
+        Some(&hex::encode(old_cid.hash)),
+        old_cid.key.as_ref(),
+        true,
+    );
+
+    assert!(
+        result.failed.is_empty(),
+        "push should succeed even when old root is unavailable: {:?}",
+        result.failed
+    );
+    assert!(
+        fake_blossom.get_head_request_count() >= new_hash_count,
+        "fallback should probe server state before uploading existing blobs"
+    );
+    assert_eq!(
+        fake_blossom.get_upload_request_count(),
+        0,
+        "existing small blobs should be skipped by HEAD instead of re-sent as upload bodies"
     );
 }
 
