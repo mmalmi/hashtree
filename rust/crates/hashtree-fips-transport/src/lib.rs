@@ -20,6 +20,7 @@ pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
 pub const FIPS_RESPONSE_FRAGMENT_SIZE: usize = 1024;
 pub const MAX_HTL: u8 = 10;
+pub const DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS: usize = 512;
 
 const MSG_TYPE_REQUEST: u8 = 0x00;
 const MSG_TYPE_RESPONSE: u8 = 0x01;
@@ -65,6 +66,8 @@ pub struct FipsEndpointOptions {
     pub udp_bind_addr: Option<String>,
     pub udp_public: bool,
     pub udp_external_addr: Option<String>,
+    pub webrtc_auto_connect: bool,
+    pub webrtc_max_connections: usize,
     pub packet_channel_capacity: usize,
 }
 
@@ -79,6 +82,8 @@ impl FipsEndpointOptions {
             udp_bind_addr: None,
             udp_public: false,
             udp_external_addr: None,
+            webrtc_auto_connect: false,
+            webrtc_max_connections: DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS,
             packet_channel_capacity: 1024,
         }
     }
@@ -146,8 +151,9 @@ pub async fn bind_fips_endpoint(
     if options.enable_webrtc {
         config.transports.webrtc = TransportInstances::Single(fips_core::WebRtcConfig {
             advertise_on_nostr: Some(true),
-            auto_connect: Some(true),
+            auto_connect: Some(options.webrtc_auto_connect),
             accept_connections: Some(true),
+            max_connections: Some(options.webrtc_max_connections.max(1)),
             ..Default::default()
         });
     }

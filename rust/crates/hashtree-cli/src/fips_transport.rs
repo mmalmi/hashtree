@@ -54,6 +54,8 @@ pub async fn start_daemon_fips_transport(
         udp_bind_addr: config.server.fips_udp_bind_addr.clone(),
         udp_public: config.server.fips_udp_public,
         udp_external_addr: config.server.fips_udp_external_addr.clone(),
+        webrtc_auto_connect: false,
+        webrtc_max_connections: hashtree_fips_transport::DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS,
         packet_channel_capacity: 1024,
     })
     .await
