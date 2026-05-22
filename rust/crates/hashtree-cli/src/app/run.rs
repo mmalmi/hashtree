@@ -10,7 +10,7 @@ use hashtree_cli::{
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, NostrToBech32, RootResolver,
     BACKGROUND_EVICTION_INTERVAL, PRIORITY_OTHER,
 };
-use hashtree_core::{Cid, HashTree, HashTreeConfig, NHashData};
+use hashtree_core::{from_hex, Cid, HashTree, HashTreeConfig, HashTreeError, NHashData};
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
@@ -1858,23 +1858,26 @@ pub(crate) async fn resolve_load_target_cid(
     progress: Option<&FetchProgress>,
 ) -> Result<Cid> {
     let cid = resolved.cid.clone();
-    fetcher
-        .fetch_cid_tree_with_progress(store, None, &cid, progress)
-        .await?;
-
-    let listing = store.get_directory_listing_by_cid(&cid)?;
     if let Some(path) = resolved.path.as_deref() {
-        if listing.is_some() {
-            let resolved_cid = store
-                .resolve_path(&cid, path)?
+        if cid_is_directory_with_fetch(fetcher, store, &cid).await? {
+            let resolved_cid = resolve_path_with_fetch(fetcher, store, &cid, path)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Path not found in directory: {}", path))?;
             fetcher
                 .fetch_cid_tree_with_progress(store, None, &resolved_cid, progress)
                 .await?;
             return Ok(resolved_cid);
         }
+
+        fetcher
+            .fetch_cid_tree_with_progress(store, None, &cid, progress)
+            .await?;
+        return Ok(cid);
     }
 
+    fetcher
+        .fetch_cid_tree_with_progress(store, None, &cid, progress)
+        .await?;
     Ok(cid)
 }
 
@@ -1884,25 +1887,24 @@ pub(crate) async fn resolve_cat_target_cid(
     resolved: &ResolvedCid,
 ) -> Result<Cid> {
     let cid = resolved.cid.clone();
-    fetcher.fetch_cid_tree(store, None, &cid).await?;
-
-    let listing = store.get_directory_listing_by_cid(&cid)?;
     if let Some(path) = resolved.path.as_deref() {
-        if listing.is_some() {
-            let resolved_cid = store
-                .resolve_path(&cid, path)?
+        if cid_is_directory_with_fetch(fetcher, store, &cid).await? {
+            let resolved_cid = resolve_path_with_fetch(fetcher, store, &cid, path)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Path not found in directory: {}", path))?;
             fetcher.fetch_cid_tree(store, None, &resolved_cid).await?;
             return Ok(resolved_cid);
         }
 
+        fetcher.fetch_cid_tree(store, None, &cid).await?;
         return Ok(cid);
     }
 
-    if listing.is_some() {
+    if cid_is_directory_with_fetch(fetcher, store, &cid).await? {
         anyhow::bail!("Cannot cat a directory; specify a file path or use `htree get`");
     }
 
+    fetcher.fetch_cid_tree(store, None, &cid).await?;
     Ok(cid)
 }
 
@@ -1913,28 +1915,102 @@ fn ensure_loaded_target_present(store: &HashtreeStore, cid: &Cid) -> Result<()> 
     anyhow::bail!("Hash not found: {}", format_cid_for_display(cid));
 }
 
-async fn resolve_info_target(
+pub(crate) async fn resolve_info_target(
     store: &Arc<HashtreeStore>,
     fetcher: &Fetcher,
     root_cid: &Cid,
     path: Option<&str>,
 ) -> Result<Cid> {
-    fetcher.fetch_cid_tree(store, None, root_cid).await?;
-
     let Some(path) = path else {
+        ensure_root_chunk_loaded(fetcher, store, root_cid).await?;
         return Ok(root_cid.clone());
     };
 
-    if store.get_chunk(&root_cid.hash)?.is_none() {
+    if !cid_is_directory_with_fetch(fetcher, store, root_cid).await? {
         return Ok(root_cid.clone());
     }
 
-    let target_cid = store
-        .resolve_path(root_cid, path)?
+    let target_cid = resolve_path_with_fetch(fetcher, store, root_cid, path)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Path not found in directory: {}", path))?;
 
-    fetcher.fetch_cid_tree(store, None, &target_cid).await?;
+    ensure_root_chunk_loaded(fetcher, store, &target_cid).await?;
     Ok(target_cid)
+}
+
+async fn ensure_root_chunk_loaded(
+    fetcher: &Fetcher,
+    store: &Arc<HashtreeStore>,
+    cid: &Cid,
+) -> Result<()> {
+    fetcher
+        .fetch_chunk_with_store(store, None, &cid.hash)
+        .await
+        .with_context(|| format!("Failed to fetch {}", format_cid_for_display(cid)))?;
+    Ok(())
+}
+
+async fn fetch_missing_chunk(
+    fetcher: &Fetcher,
+    store: &Arc<HashtreeStore>,
+    missing: &str,
+    seen_missing: &mut HashSet<String>,
+) -> Result<()> {
+    if !seen_missing.insert(missing.to_string()) {
+        anyhow::bail!("Repeated missing chunk {}", missing);
+    }
+    let hash =
+        from_hex(missing).with_context(|| format!("Invalid missing chunk hash {}", missing))?;
+    fetcher
+        .fetch_chunk_with_store(store, None, &hash)
+        .await
+        .with_context(|| format!("Failed to fetch missing chunk {}", missing))?;
+    Ok(())
+}
+
+async fn cid_is_directory_with_fetch(
+    fetcher: &Fetcher,
+    store: &Arc<HashtreeStore>,
+    cid: &Cid,
+) -> Result<bool> {
+    ensure_root_chunk_loaded(fetcher, store, cid).await?;
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let mut seen_missing = HashSet::new();
+
+    loop {
+        match tree.is_dir(cid).await {
+            Ok(is_directory) => return Ok(is_directory),
+            Err(HashTreeError::MissingChunk(missing)) => {
+                fetch_missing_chunk(fetcher, store, &missing, &mut seen_missing).await?;
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!("Failed to inspect directory: {}", error));
+            }
+        }
+    }
+}
+
+async fn resolve_path_with_fetch(
+    fetcher: &Fetcher,
+    store: &Arc<HashtreeStore>,
+    cid: &Cid,
+    path: &str,
+) -> Result<Option<Cid>> {
+    ensure_root_chunk_loaded(fetcher, store, cid).await?;
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let mut seen_missing = HashSet::new();
+
+    loop {
+        match tree.resolve_path(cid, path).await {
+            Ok(resolved) => return Ok(resolved),
+            Err(HashTreeError::MissingChunk(missing)) => {
+                fetch_missing_chunk(fetcher, store, &missing, &mut seen_missing).await?;
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!("Failed to resolve path: {}", error));
+            }
+        }
+    }
 }
 
 async fn run_with_fetch_progress<T, F>(

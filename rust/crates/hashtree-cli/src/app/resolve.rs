@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use hashtree_cli::config::parse_npub;
+use hashtree_cli::storage::CachedRoot;
 use hashtree_cli::{
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, RootResolver,
 };
@@ -201,10 +202,19 @@ fn resolve_cached_published_target(
 
     let pubkey_hex = hex::encode(parse_npub(&parsed_target.npub)?);
     let store = HashtreeStore::new(data_dir)?;
-    let Some(cached) = store.get_cached_root(&pubkey_hex, &parsed_target.tree_name)? else {
+    resolve_cached_published_target_from_cache(
+        parsed_target,
+        store.get_cached_root(&pubkey_hex, &parsed_target.tree_name)?,
+    )
+}
+
+fn resolve_cached_published_target_from_cache(
+    parsed_target: &ParsedPublishedTarget,
+    cached: Option<CachedRoot>,
+) -> Result<Option<ResolvedCid>> {
+    let Some(cached) = cached else {
         return Ok(None);
     };
-
     let cid = Cid {
         hash: hashtree_core::from_hex(&cached.hash)
             .map_err(|e| anyhow::anyhow!("Invalid cached root hash: {}", e))?,
@@ -231,28 +241,26 @@ mod tests {
 
     #[test]
     fn resolve_cached_published_target_returns_cached_cid() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let store = HashtreeStore::new(temp_dir.path()).unwrap();
         let keys = Keys::generate();
         let npub = NostrToBech32::to_bech32(&keys.public_key()).unwrap();
-        let pubkey_hex = hex::encode(keys.public_key().to_bytes());
         let hash = "11".repeat(32);
         let key = "22".repeat(32);
-        store
-            .set_cached_root(&pubkey_hex, "mount-test", &hash, Some(&key), "public", 123)
-            .unwrap();
 
         let parsed_target = ParsedPublishedTarget {
             npub,
             tree_name: "mount-test".to_string(),
             path: Some("nested/file.txt".to_string()),
         };
-        let opts = ResolveOptions {
-            data_dir: Some(temp_dir.path().to_path_buf()),
-            ..ResolveOptions::default()
-        };
 
-        let resolved = resolve_cached_published_target(&parsed_target, &opts)
+        let resolved = resolve_cached_published_target_from_cache(
+            &parsed_target,
+            Some(CachedRoot {
+                hash: hash.clone(),
+                key: Some(key.clone()),
+                updated_at: 123,
+                visibility: "public".to_string(),
+            }),
+        )
             .unwrap()
             .expect("cached root");
 

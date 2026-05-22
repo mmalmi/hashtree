@@ -23,8 +23,8 @@ use super::run::{
     find_existing_active_mount, is_stale_mount_io_error, should_warn_for_temporary_mountpoint,
 };
 use super::run::{
-    format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_load_target_cid,
-    stored_published_pin_hash, warn_if_stun_unavailable,
+    format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_info_target,
+    resolve_load_target_cid, stored_published_pin_hash, warn_if_stun_unavailable,
 };
 use super::storage_stats::{
     classify_storage_bucket, render_storage_inventory, AuthorSummary, PinnedDetail, StorageBucket,
@@ -1176,6 +1176,38 @@ async fn test_resolve_load_target_cid_keeps_file_root_when_input_has_display_pat
         .expect("resolve file-root load target");
 
     assert_eq!(target, parsed);
+}
+
+#[tokio::test]
+async fn test_resolve_info_target_resolves_tree_paths_with_decryption_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(HashtreeStore::new(tmp.path().join("store")).unwrap());
+
+    let site_dir = tmp.path().join("site");
+    std::fs::create_dir_all(&site_dir).unwrap();
+    let expected = br#"{"songs":9529}"#;
+    std::fs::write(site_dir.join("root.json"), expected).unwrap();
+
+    let root = store
+        .upload_dir_encrypted_with_options(&site_dir, true)
+        .expect("upload encrypted dir");
+    let root_cid = Cid::parse(&root).expect("parse encrypted root cid");
+
+    let fetcher = Fetcher::new(FetchConfig::default());
+    let target = resolve_info_target(&store, &fetcher, &root_cid, Some("root.json"))
+        .await
+        .expect("resolve info target");
+
+    assert!(
+        target.key.is_some(),
+        "resolved file cid should preserve decrypt key"
+    );
+
+    let mut output = Vec::new();
+    store
+        .write_file_by_cid_to_writer(&target, &mut output)
+        .expect("stream decrypted file");
+    assert_eq!(output, expected);
 }
 
 #[tokio::test]
