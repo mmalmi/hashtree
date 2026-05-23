@@ -86,7 +86,7 @@ struct ResolvedEntry {
     size: u64,
 }
 
-pub struct HashtreeFuse<S: Store> {
+pub struct HashtreeFuseInner<S: Store> {
     tree: HashTree<S>,
     root: RwLock<Cid>,
     paths: RwLock<HashMap<u64, Vec<String>>>,
@@ -95,6 +95,26 @@ pub struct HashtreeFuse<S: Store> {
     next_inode: AtomicU64,
     publisher: Option<Arc<dyn RootPublisher>>,
     modify_lock: Mutex<()>,
+}
+
+pub struct HashtreeFuse<S: Store> {
+    inner: Arc<HashtreeFuseInner<S>>,
+}
+
+impl<S: Store> Clone for HashtreeFuse<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<S: Store> std::ops::Deref for HashtreeFuse<S> {
+    type Target = HashtreeFuseInner<S>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl<S: Store> HashtreeFuse<S> {
@@ -124,19 +144,43 @@ impl<S: Store> HashtreeFuse<S> {
         parents.insert(ROOT_INODE, ROOT_INODE);
 
         Ok(Self {
-            tree,
-            root: RwLock::new(root),
-            paths: RwLock::new(paths),
-            children: RwLock::new(HashMap::new()),
-            parents: RwLock::new(parents),
-            next_inode: AtomicU64::new(ROOT_INODE + 1),
-            publisher,
-            modify_lock: Mutex::new(()),
+            inner: Arc::new(HashtreeFuseInner {
+                tree,
+                root: RwLock::new(root),
+                paths: RwLock::new(paths),
+                children: RwLock::new(HashMap::new()),
+                parents: RwLock::new(parents),
+                next_inode: AtomicU64::new(ROOT_INODE + 1),
+                publisher,
+                modify_lock: Mutex::new(()),
+            }),
         })
     }
 
     pub fn current_root(&self) -> Cid {
         self.root.read().unwrap().clone()
+    }
+
+    pub fn replace_root(&self, root: Cid) -> Result<(), FsError> {
+        let _guard = self.modify_lock.lock().unwrap();
+        let is_dir = block_on(self.tree.get_directory_node(&root))?.is_some();
+        if !is_dir {
+            return Err(FsError::InvalidRoot);
+        }
+
+        *self.root.write().unwrap() = root;
+
+        let mut paths = HashMap::new();
+        paths.insert(ROOT_INODE, Vec::new());
+        *self.paths.write().unwrap() = paths;
+
+        self.children.write().unwrap().clear();
+
+        let mut parents = HashMap::new();
+        parents.insert(ROOT_INODE, ROOT_INODE);
+        *self.parents.write().unwrap() = parents;
+
+        Ok(())
     }
 
     pub fn lookup_child(&self, parent: u64, name: &str) -> Result<EntryAttr, FsError> {
@@ -1216,6 +1260,40 @@ mod tests {
         let updates = publisher.updates();
         assert!(!updates.is_empty());
         assert_eq!(updates.last().unwrap(), &fs.current_root());
+    }
+
+    #[tokio::test]
+    async fn test_replace_root_refreshes_visible_tree_without_publishing() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let root = empty_root(store.clone()).await;
+        let publisher = Arc::new(RecordingPublisher::new());
+        let fs = HashtreeFuse::new_with_publisher(store, root, Some(publisher.clone())).unwrap();
+
+        let old_file = fs.create_file(ROOT_INODE, "old.txt").unwrap();
+        fs.write_file(old_file.inode, 0, b"old").unwrap();
+        assert!(!publisher.updates().is_empty());
+        publisher.updates.lock().unwrap().clear();
+
+        let (new_blob, new_size) = tree.put(b"new").await.unwrap();
+        let new_root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "new.txt", &new_blob,
+            )
+            .with_size(new_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+
+        let old_lookup = fs.lookup_child(ROOT_INODE, "old.txt").unwrap();
+        fs.replace_root(new_root.clone()).unwrap();
+
+        assert_eq!(fs.current_root(), new_root);
+        assert!(fs.lookup_child(ROOT_INODE, "old.txt").is_err());
+        let new_lookup = fs.lookup_child(ROOT_INODE, "new.txt").unwrap();
+        assert_ne!(old_lookup.inode, new_lookup.inode);
+        assert_eq!(fs.read_file(new_lookup.inode, 0, 3).unwrap(), b"new");
+        assert!(publisher.updates().is_empty());
     }
 
     #[cfg(feature = "fuse")]
