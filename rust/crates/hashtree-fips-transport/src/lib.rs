@@ -9,19 +9,19 @@ use fips_core::config::{NostrDiscoveryPolicy, TransportInstances};
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 pub use hashtree_network::PubsubPublishStats;
 use hashtree_network::{
-    transport::{PeerLink, PeerLinkFactory, SignalingTransport, TransportError},
     MeshRouter, MeshRoutingConfig, MeshStoreCore, PoolSettings, PubsubDeliveryMode,
     SignalingMessage,
+    transport::{PeerLink, PeerLinkFactory, SignalingTransport, TransportError},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
@@ -70,6 +70,9 @@ pub struct FipsAppMessage {
 pub trait FipsEndpointIo: Send + Sync {
     async fn send(&self, peer_id: &str, data: Vec<u8>) -> Result<(), FipsTransportError>;
     async fn recv(&self) -> Option<FipsEndpointPacket>;
+    async fn set_peer_ids(&self, _peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
+        Ok(())
+    }
     async fn peer_ids(&self) -> Vec<String> {
         Vec::new()
     }
@@ -228,6 +231,20 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
             Ok(peers) => peers.into_iter().map(|peer| peer.npub).collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    async fn set_peer_ids(&self, peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
+        let peers = peer_ids
+            .into_iter()
+            .map(|npub| fips_core::config::PeerConfig {
+                npub,
+                ..Default::default()
+            })
+            .collect();
+        self.update_peers(peers)
+            .await
+            .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
+        Ok(())
     }
 
     fn local_peer_id(&self) -> Option<String> {
@@ -530,6 +547,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             }
             out.push(peer);
         }
+        let _ = self.endpoint.set_peer_ids(out.clone()).await;
         *self.peers.write().await = out;
     }
 
@@ -1316,6 +1334,7 @@ mod tests {
         id: String,
         network: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<FipsEndpointPacket>>>>,
         rx: Mutex<mpsc::UnboundedReceiver<FipsEndpointPacket>>,
+        configured_peers: Mutex<Vec<String>>,
         sent: AtomicUsize,
         drop_next: AtomicUsize,
     }
@@ -1331,6 +1350,7 @@ mod tests {
                 id: id.to_string(),
                 network,
                 rx: Mutex::new(rx),
+                configured_peers: Mutex::new(Vec::new()),
                 sent: AtomicUsize::new(0),
                 drop_next: AtomicUsize::new(0),
             })
@@ -1352,11 +1372,7 @@ mod tests {
             if self
                 .drop_next
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    if value > 0 {
-                        Some(value - 1)
-                    } else {
-                        None
-                    }
+                    if value > 0 { Some(value - 1) } else { None }
                 })
                 .is_ok()
             {
@@ -1380,7 +1396,16 @@ mod tests {
             self.rx.lock().await.recv().await
         }
 
+        async fn set_peer_ids(&self, peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
+            *self.configured_peers.lock().await = peer_ids;
+            Ok(())
+        }
+
         async fn peer_ids(&self) -> Vec<String> {
+            let configured = self.configured_peers.lock().await.clone();
+            if !configured.is_empty() {
+                return configured;
+            }
             self.network
                 .lock()
                 .await
@@ -1400,6 +1425,28 @@ mod tests {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&digest);
         hash
+    }
+
+    #[tokio::test]
+    async fn set_peers_configures_underlying_fips_endpoint() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        let transport = HashtreeFipsTransport::new(endpoint.clone(), Arc::new(MemoryStore::new()));
+
+        transport
+            .set_peers(vec![
+                "remote".to_string(),
+                "local".to_string(),
+                "remote".to_string(),
+                "  ".to_string(),
+            ])
+            .await;
+
+        assert_eq!(
+            endpoint.configured_peers.lock().await.as_slice(),
+            &["remote".to_string()]
+        );
+        assert_eq!(transport.configured_peer_ids().await, vec!["remote"]);
     }
 
     #[tokio::test]
