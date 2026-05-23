@@ -417,10 +417,7 @@ impl BlossomClient {
             .map(|h| self.check_on_server(h, server))
             .collect();
         let results = join_all(checks).await;
-        if results
-            .iter()
-            .any(|result| *result == BlobAvailability::Missing)
-        {
+        if results.contains(&BlobAvailability::Missing) {
             BlobAvailability::Missing
         } else if results
             .iter()

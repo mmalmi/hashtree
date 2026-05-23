@@ -218,12 +218,14 @@ impl MulticastNostrBus {
                                 QUERY_SETTLE_GRACE_MS,
                             ))));
                         }
-                        RelayMessage::EndOfStoredEvents(sid) if sid.to_string() == subscription_id => {
-                            if !events.is_empty() && settle_deadline.is_none() {
-                                settle_deadline = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                                    QUERY_SETTLE_GRACE_MS,
-                                ))));
-                            }
+                        RelayMessage::EndOfStoredEvents(sid)
+                            if sid.to_string() == subscription_id
+                                && !events.is_empty()
+                                && settle_deadline.is_none() =>
+                        {
+                            settle_deadline = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                                QUERY_SETTLE_GRACE_MS,
+                            ))));
                         }
                         _ => {}
                     }

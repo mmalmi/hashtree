@@ -3963,6 +3963,7 @@ dependencies = [
  "async-trait",
  "fips-core",
  "hashtree-core",
+ "hashtree-network",
  "hex",
  "rmp-serde",
  "serde",

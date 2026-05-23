@@ -349,7 +349,7 @@ impl<S: Store> TreeBuilder<S> {
         // Build sub-tree for each group
         let mut sub_dirs: Vec<DirEntry> = Vec::new();
         let mut sorted_groups: Vec<_> = groups.into_iter().collect();
-        sorted_groups.sort_by(|a, b| a.0.cmp(&b.0));
+        sorted_groups.sort_by_key(|group| group.0);
 
         for (key, group_links) in sorted_groups {
             let group_size: u64 = group_links.iter().map(|l| l.size).sum();

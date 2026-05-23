@@ -313,18 +313,13 @@ pub struct PubsubPublishStats {
 }
 
 /// Production pubsub delivery strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PubsubDeliveryMode {
     /// Push full frames only along advertised interest routes.
     InterestPush,
     /// Flood small inventories by HTL and pull payloads back along want paths.
+    #[default]
     HtlInvWant,
-}
-
-impl Default for PubsubDeliveryMode {
-    fn default() -> Self {
-        Self::HtlInvWant
-    }
 }
 
 /// Request dispatch strategy for peer queries.
