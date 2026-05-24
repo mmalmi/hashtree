@@ -852,7 +852,7 @@ pub(crate) enum ReleaseCommands {
         version_path: String,
         /// CID or nhash for the release directory to publish
         cid: String,
-        /// Publish the version without repointing latest
+        /// Publish the version and repoint the sibling draft pointer instead of latest
         #[arg(long)]
         draft: bool,
         /// Don't push the updated release root to file servers

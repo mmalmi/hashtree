@@ -17,6 +17,7 @@ pub(crate) struct PublishedRelease {
     pub(crate) tree_name: String,
     pub(crate) version_path: String,
     pub(crate) latest_path: Option<String>,
+    pub(crate) draft_path: Option<String>,
 }
 
 fn parse_release_path(path: &str) -> Result<Vec<String>> {
@@ -35,19 +36,30 @@ fn parse_release_path(path: &str) -> Result<Vec<String>> {
         bail!("Version path must not contain empty segments");
     }
 
-    if segments.last().map(String::as_str) == Some("latest") {
-        bail!("Version path must not end with 'latest'");
+    if matches!(
+        segments.last().map(String::as_str),
+        Some("latest" | "draft")
+    ) {
+        bail!("Version path must not end with 'latest' or 'draft'");
     }
 
     Ok(segments)
 }
 
-fn latest_path_for(version_segments: &[String]) -> String {
-    let mut latest_segments = version_segments.to_vec();
-    *latest_segments
+fn sibling_path_for(version_segments: &[String], sibling_name: &str) -> String {
+    let mut sibling_segments = version_segments.to_vec();
+    *sibling_segments
         .last_mut()
-        .expect("version segments validated as non-empty") = "latest".to_string();
-    latest_segments.join("/")
+        .expect("version segments validated as non-empty") = sibling_name.to_string();
+    sibling_segments.join("/")
+}
+
+fn latest_path_for(version_segments: &[String]) -> String {
+    sibling_path_for(version_segments, "latest")
+}
+
+fn draft_path_for(version_segments: &[String]) -> String {
+    sibling_path_for(version_segments, "draft")
 }
 
 async fn ensure_directory_path<S: Store>(
@@ -147,7 +159,7 @@ async fn publish_release_root<S: Store>(
     current_root: Option<Cid>,
     version_path: &str,
     release_cid: &Cid,
-    update_latest: bool,
+    publish_as_draft: bool,
 ) -> Result<Cid> {
     let version_segments = parse_release_path(version_path)?;
     let version_name = version_segments
@@ -181,12 +193,18 @@ async fn publish_release_root<S: Store>(
         .await
         .with_context(|| format!("Failed to publish release {}", version_path))?;
 
-    if update_latest {
-        root = tree
-            .set_entry(&root, &parent_path, "latest", release_cid, 0, LinkType::Dir)
-            .await
-            .context("Failed to update latest release pointer")?;
-    }
+    let pointer_name = if publish_as_draft { "draft" } else { "latest" };
+    root = tree
+        .set_entry(
+            &root,
+            &parent_path,
+            pointer_name,
+            release_cid,
+            0,
+            LinkType::Dir,
+        )
+        .await
+        .with_context(|| format!("Failed to update {} release pointer", pointer_name))?;
 
     Ok(root)
 }
@@ -204,12 +222,8 @@ pub(crate) async fn publish_release_version(
     }
 
     let version_segments = parse_release_path(version_path)?;
-    let update_latest = !draft;
-    let latest_path = if update_latest {
-        Some(latest_path_for(&version_segments))
-    } else {
-        None
-    };
+    let latest_path = (!draft).then(|| latest_path_for(&version_segments));
+    let draft_path = draft.then(|| draft_path_for(&version_segments));
 
     let resolved = resolve_cid_input(cid_input).await?;
     if resolved.path.is_some() {
@@ -274,7 +288,7 @@ pub(crate) async fn publish_release_version(
         current_root.clone(),
         version_path,
         &release_cid,
-        update_latest,
+        draft,
     )
     .await?;
 
@@ -307,12 +321,13 @@ pub(crate) async fn publish_release_version(
         tree_name: tree_name.to_string(),
         version_path: version_path.to_string(),
         latest_path,
+        draft_path,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{latest_path_for, parse_release_path, publish_release_root};
+    use super::{draft_path_for, latest_path_for, parse_release_path, publish_release_root};
     use hashtree_core::{DirEntry, HashTree, HashTreeConfig, LinkType, MemoryStore};
     use std::sync::Arc;
 
@@ -335,9 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_release_path_rejects_latest_leaf() {
+    fn parse_release_path_rejects_pointer_leaves() {
         let err = parse_release_path("releases/latest").expect_err("latest leaf should fail");
-        assert!(err.to_string().contains("must not end with 'latest'"));
+        assert!(err
+            .to_string()
+            .contains("must not end with 'latest' or 'draft'"));
+
+        let err = parse_release_path("releases/draft").expect_err("draft leaf should fail");
+        assert!(err
+            .to_string()
+            .contains("must not end with 'latest' or 'draft'"));
     }
 
     #[test]
@@ -352,12 +374,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn draft_path_tracks_version_parent_directory() {
+        assert_eq!(
+            draft_path_for(&parse_release_path("v0.2.4-rc.1").unwrap()),
+            "draft"
+        );
+        assert_eq!(
+            draft_path_for(&parse_release_path("releases/v0.2.4-rc.1").unwrap()),
+            "releases/draft"
+        );
+    }
+
     #[tokio::test]
     async fn publish_release_root_creates_initial_latest_and_version_entries() {
         let (_store, tree) = make_tree();
         let release_cid = make_release_dir(&tree, b"release-one").await;
 
-        let root = publish_release_root(&tree, None, "v0.2.3", &release_cid, true)
+        let root = publish_release_root(&tree, None, "v0.2.3", &release_cid, false)
             .await
             .expect("publish root");
 
@@ -382,10 +416,10 @@ mod tests {
         let release_v1 = make_release_dir(&tree, b"release-one").await;
         let release_v2 = make_release_dir(&tree, b"release-two").await;
 
-        let root = publish_release_root(&tree, None, "v0.2.2", &release_v1, true)
+        let root = publish_release_root(&tree, None, "v0.2.2", &release_v1, false)
             .await
             .expect("publish first release");
-        let root = publish_release_root(&tree, Some(root), "v0.2.3", &release_v2, true)
+        let root = publish_release_root(&tree, Some(root), "v0.2.3", &release_v2, false)
             .await
             .expect("publish second release");
 
@@ -415,7 +449,7 @@ mod tests {
         let (_store, tree) = make_tree();
         let release_cid = make_release_dir(&tree, b"release-three").await;
 
-        let root = publish_release_root(&tree, None, "releases/v0.2.3", &release_cid, true)
+        let root = publish_release_root(&tree, None, "releases/v0.2.3", &release_cid, false)
             .await
             .expect("publish nested release");
 
@@ -435,15 +469,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_release_root_draft_does_not_repoint_latest() {
+    async fn publish_release_root_draft_repoints_draft_not_latest() {
         let (_store, tree) = make_tree();
         let stable_release = make_release_dir(&tree, b"stable-release").await;
         let draft_release = make_release_dir(&tree, b"draft-release").await;
 
-        let root = publish_release_root(&tree, None, "v0.2.3", &stable_release, true)
+        let root = publish_release_root(&tree, None, "v0.2.3", &stable_release, false)
             .await
             .expect("publish stable release");
-        let root = publish_release_root(&tree, Some(root), "v0.2.4-rc.1", &draft_release, false)
+        let root = publish_release_root(&tree, Some(root), "v0.2.4-rc.1", &draft_release, true)
             .await
             .expect("publish draft release");
 
@@ -457,8 +491,14 @@ mod tests {
             .await
             .expect("resolve latest")
             .expect("latest present");
+        let draft_pointer = tree
+            .resolve_path(&root, "draft")
+            .await
+            .expect("resolve draft pointer")
+            .expect("draft pointer present");
 
         assert_eq!(draft, draft_release);
+        assert_eq!(draft_pointer, draft_release);
         assert_eq!(latest, stable_release);
     }
 }

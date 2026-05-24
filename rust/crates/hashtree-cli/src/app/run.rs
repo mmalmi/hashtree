@@ -1314,8 +1314,12 @@ pub(crate) async fn run() -> Result<()> {
                         "Latest release:    htree://{}/{}/{}",
                         published.npub, published.tree_name, latest_path
                     );
-                } else {
-                    println!("Draft release:     latest unchanged");
+                }
+                if let Some(draft_path) = published.draft_path {
+                    println!(
+                        "Draft release:     htree://{}/{}/{}",
+                        published.npub, published.tree_name, draft_path
+                    );
                 }
             }
         },

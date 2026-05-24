@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Changed `htree release publish --draft` to update the sibling `draft`
+  pointer while leaving the stable `latest` pointer unchanged.
+
 ## 0.2.55 - 2026-05-22
 
 Changes since the `0.2.54` release.
