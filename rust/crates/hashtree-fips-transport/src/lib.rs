@@ -9,19 +9,19 @@ use fips_core::config::{NostrDiscoveryPolicy, RoutingMode, TransportInstances};
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 pub use hashtree_network::PubsubPublishStats;
 use hashtree_network::{
+    transport::{PeerLink, PeerLinkFactory, SignalingTransport, TransportError},
     MeshRouter, MeshRoutingConfig, MeshStoreCore, PoolSettings, PubsubDeliveryMode,
     SignalingMessage,
-    transport::{PeerLink, PeerLinkFactory, SignalingTransport, TransportError},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
@@ -66,10 +66,32 @@ pub struct FipsAppMessage {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FipsPeerConfig {
+    pub npub: String,
+    pub udp_addresses: Vec<String>,
+}
+
+impl FipsPeerConfig {
+    pub fn new(npub: impl Into<String>) -> Self {
+        Self {
+            npub: npub.into(),
+            udp_addresses: Vec::new(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait FipsEndpointIo: Send + Sync {
     async fn send(&self, peer_id: &str, data: Vec<u8>) -> Result<(), FipsTransportError>;
     async fn recv(&self) -> Option<FipsEndpointPacket>;
+    async fn set_peer_configs(
+        &self,
+        peer_configs: Vec<FipsPeerConfig>,
+    ) -> Result<(), FipsTransportError> {
+        self.set_peer_ids(peer_configs.into_iter().map(|peer| peer.npub).collect())
+            .await
+    }
     async fn set_peer_ids(&self, _peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
         Ok(())
     }
@@ -242,10 +264,28 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
     }
 
     async fn set_peer_ids(&self, peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
-        let peers = peer_ids
+        self.set_peer_configs(
+            peer_ids
+                .into_iter()
+                .map(FipsPeerConfig::new)
+                .collect::<Vec<_>>(),
+        )
+        .await
+    }
+
+    async fn set_peer_configs(
+        &self,
+        peer_configs: Vec<FipsPeerConfig>,
+    ) -> Result<(), FipsTransportError> {
+        let peers = peer_configs
             .into_iter()
-            .map(|npub| fips_core::config::PeerConfig {
-                npub,
+            .map(|peer| fips_core::config::PeerConfig {
+                npub: peer.npub,
+                addresses: peer
+                    .udp_addresses
+                    .into_iter()
+                    .map(|addr| fips_core::config::PeerAddress::new("udp", addr))
+                    .collect(),
                 ..Default::default()
             })
             .collect();
@@ -542,21 +582,35 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
     }
 
     pub async fn set_peers(&self, peers: Vec<String>) {
+        self.set_peer_configs(peers.into_iter().map(FipsPeerConfig::new).collect())
+            .await;
+    }
+
+    pub async fn set_peer_configs(&self, peers: Vec<FipsPeerConfig>) {
         let local = self.endpoint.local_peer_id();
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for peer in peers {
-            let peer = peer.trim().to_string();
-            if peer.is_empty()
-                || Some(peer.as_str()) == local.as_deref()
-                || !seen.insert(peer.clone())
+            let npub = peer.npub.trim().to_string();
+            if npub.is_empty()
+                || Some(npub.as_str()) == local.as_deref()
+                || !seen.insert(npub.clone())
             {
                 continue;
             }
-            out.push(peer);
+            let udp_addresses = peer
+                .udp_addresses
+                .into_iter()
+                .map(|addr| addr.trim().to_string())
+                .filter(|addr| !addr.is_empty())
+                .collect();
+            out.push(FipsPeerConfig {
+                npub,
+                udp_addresses,
+            });
         }
-        let _ = self.endpoint.set_peer_ids(out.clone()).await;
-        *self.peers.write().await = out;
+        let _ = self.endpoint.set_peer_configs(out.clone()).await;
+        *self.peers.write().await = out.into_iter().map(|peer| peer.npub).collect();
     }
 
     pub async fn peer_ids(&self) -> Vec<String> {
@@ -1348,6 +1402,7 @@ mod tests {
         network: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<FipsEndpointPacket>>>>,
         rx: Mutex<mpsc::UnboundedReceiver<FipsEndpointPacket>>,
         configured_peers: Mutex<Vec<String>>,
+        configured_peer_configs: Mutex<Vec<FipsPeerConfig>>,
         sent: AtomicUsize,
         drop_next: AtomicUsize,
     }
@@ -1364,6 +1419,7 @@ mod tests {
                 network,
                 rx: Mutex::new(rx),
                 configured_peers: Mutex::new(Vec::new()),
+                configured_peer_configs: Mutex::new(Vec::new()),
                 sent: AtomicUsize::new(0),
                 drop_next: AtomicUsize::new(0),
             })
@@ -1385,7 +1441,11 @@ mod tests {
             if self
                 .drop_next
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    if value > 0 { Some(value - 1) } else { None }
+                    if value > 0 {
+                        Some(value - 1)
+                    } else {
+                        None
+                    }
                 })
                 .is_ok()
             {
@@ -1411,6 +1471,16 @@ mod tests {
 
         async fn set_peer_ids(&self, peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
             *self.configured_peers.lock().await = peer_ids;
+            Ok(())
+        }
+
+        async fn set_peer_configs(
+            &self,
+            peer_configs: Vec<FipsPeerConfig>,
+        ) -> Result<(), FipsTransportError> {
+            *self.configured_peers.lock().await =
+                peer_configs.iter().map(|peer| peer.npub.clone()).collect();
+            *self.configured_peer_configs.lock().await = peer_configs;
             Ok(())
         }
 
@@ -1465,6 +1535,35 @@ mod tests {
         assert_eq!(
             endpoint.configured_peers.lock().await.as_slice(),
             &["remote".to_string()]
+        );
+        assert_eq!(transport.configured_peer_ids().await, vec!["remote"]);
+    }
+
+    #[tokio::test]
+    async fn set_peer_configs_preserves_static_udp_addresses() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        let transport = HashtreeFipsTransport::new(endpoint.clone(), Arc::new(MemoryStore::new()));
+
+        transport
+            .set_peer_configs(vec![
+                FipsPeerConfig {
+                    npub: " remote ".to_string(),
+                    udp_addresses: vec![" 10.44.1.2:22121 ".to_string(), " ".to_string()],
+                },
+                FipsPeerConfig {
+                    npub: "local".to_string(),
+                    udp_addresses: vec!["10.44.1.1:22121".to_string()],
+                },
+            ])
+            .await;
+
+        assert_eq!(
+            endpoint.configured_peer_configs.lock().await.as_slice(),
+            &[FipsPeerConfig {
+                npub: "remote".to_string(),
+                udp_addresses: vec!["10.44.1.2:22121".to_string()],
+            }]
         );
         assert_eq!(transport.configured_peer_ids().await, vec!["remote"]);
     }
