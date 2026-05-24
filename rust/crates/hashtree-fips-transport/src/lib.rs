@@ -47,6 +47,12 @@ pub struct FipsEndpointPacket {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FipsRelayStatus {
+    pub url: String,
+    pub status: String,
+}
+
 #[derive(Debug, Error)]
 pub enum FipsTransportError {
     #[error("endpoint failed: {0}")]
@@ -96,6 +102,9 @@ pub trait FipsEndpointIo: Send + Sync {
         Ok(())
     }
     async fn peer_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn relay_statuses(&self) -> Vec<FipsRelayStatus> {
         Vec::new()
     }
     fn local_peer_id(&self) -> Option<String> {
@@ -310,6 +319,19 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
     async fn peer_ids(&self) -> Vec<String> {
         match self.peers().await {
             Ok(peers) => peers.into_iter().map(|peer| peer.npub).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    async fn relay_statuses(&self) -> Vec<FipsRelayStatus> {
+        match fips_core::FipsEndpoint::relay_statuses(self).await {
+            Ok(statuses) => statuses
+                .into_iter()
+                .map(|status| FipsRelayStatus {
+                    url: status.url,
+                    status: status.status,
+                })
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -719,18 +741,11 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
     }
 
     pub async fn connected_peer_ids(&self) -> Vec<String> {
-        let connected = self.endpoint.peer_ids().await;
-        let configured = self.peers.read().await.clone();
-        if configured.is_empty() && !*self.peer_filter_configured.read().await {
-            return connected;
-        }
-        let configured = configured
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        connected
-            .into_iter()
-            .filter(|peer| configured.contains(peer))
-            .collect()
+        self.endpoint.peer_ids().await
+    }
+
+    pub async fn relay_statuses(&self) -> Vec<FipsRelayStatus> {
+        self.endpoint.relay_statuses().await
     }
 
     pub fn subscribe_app_messages(&self) -> broadcast::Receiver<FipsAppMessage> {
@@ -1758,7 +1773,7 @@ mod tests {
         );
         assert!(transport.configured_peer_ids().await.is_empty());
         assert!(transport.peer_ids().await.is_empty());
-        assert!(transport.connected_peer_ids().await.is_empty());
+        assert_eq!(transport.connected_peer_ids().await, vec!["bootstrap"]);
     }
 
     #[tokio::test]
