@@ -277,7 +277,7 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
         &self,
         peer_configs: Vec<FipsPeerConfig>,
     ) -> Result<(), FipsTransportError> {
-        let peers = peer_configs
+        let peers: Vec<fips_core::config::PeerConfig> = peer_configs
             .into_iter()
             .map(|peer| fips_core::config::PeerConfig {
                 npub: peer.npub,
@@ -289,10 +289,28 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
                 ..Default::default()
             })
             .collect();
-        self.update_peers(peers)
-            .await
-            .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
-        Ok(())
+        let peer_count = peers.len();
+        match self.update_peers(peers).await {
+            Ok(outcome) => {
+                tracing::info!(
+                    peer_count,
+                    added = outcome.added,
+                    removed = outcome.removed,
+                    updated = outcome.updated,
+                    unchanged = outcome.unchanged,
+                    "updated FIPS endpoint peer configs"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    peer_count,
+                    error = %err,
+                    "failed to update FIPS endpoint peer configs"
+                );
+                Err(FipsTransportError::Endpoint(err.to_string()))
+            }
+        }
     }
 
     fn local_peer_id(&self) -> Option<String> {
@@ -609,8 +627,26 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
                 udp_addresses,
             });
         }
-        let _ = self.endpoint.set_peer_configs(out.clone()).await;
-        *self.peers.write().await = out.into_iter().map(|peer| peer.npub).collect();
+        let configured_count = out.len();
+        let udp_hint_count: usize = out.iter().map(|peer| peer.udp_addresses.len()).sum();
+        match self.endpoint.set_peer_configs(out.clone()).await {
+            Ok(()) => {
+                tracing::info!(
+                    configured_count,
+                    udp_hint_count,
+                    "configured Hashtree FIPS peers"
+                );
+                *self.peers.write().await = out.into_iter().map(|peer| peer.npub).collect();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    configured_count,
+                    udp_hint_count,
+                    error = %error,
+                    "failed to configure Hashtree FIPS peers"
+                );
+            }
+        }
     }
 
     pub async fn peer_ids(&self) -> Vec<String> {
