@@ -5,7 +5,7 @@
 //! app-owned endpoint bytes.
 
 use async_trait::async_trait;
-use fips_core::config::{NostrDiscoveryPolicy, TransportInstances};
+use fips_core::config::{NostrDiscoveryPolicy, RoutingMode, TransportInstances};
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 pub use hashtree_network::PubsubPublishStats;
 use hashtree_network::{
@@ -136,15 +136,37 @@ pub async fn bind_fips_endpoint(
     } else {
         options.discovery_scope.trim().to_string()
     };
+    let packet_channel_capacity = options.packet_channel_capacity;
+    let config = fips_endpoint_config(options, &discovery_scope);
+
+    let endpoint = fips_core::FipsEndpoint::builder()
+        .config(config)
+        .discovery_scope(discovery_scope.clone())
+        .without_system_tun()
+        .packet_channel_capacity(packet_channel_capacity)
+        .bind()
+        .await
+        .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
+    let local_peer_id = endpoint.npub().to_string();
+
+    Ok(BoundFipsEndpoint {
+        endpoint: Arc::new(endpoint),
+        local_peer_id,
+        discovery_scope,
+    })
+}
+
+fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> fips_core::Config {
     let mut config = fips_core::Config::new();
     config.node.identity = fips_core::IdentityConfig {
         nsec: Some(options.identity_nsec),
         persistent: false,
     };
+    config.node.routing.mode = RoutingMode::ReplyLearned;
     config.tun.enabled = false;
     config.dns.enabled = false;
     config.node.system_files_enabled = false;
-    config.node.discovery.lan.scope = Some(discovery_scope.clone());
+    config.node.discovery.lan.scope = Some(discovery_scope.to_string());
     config.node.discovery.nostr.enabled = true;
     config.node.discovery.nostr.advertise = true;
     config.node.discovery.nostr.policy = if options.open_discovery_max_pending == 0 {
@@ -154,7 +176,7 @@ pub async fn bind_fips_endpoint(
     };
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = true;
-    config.node.discovery.nostr.app = discovery_scope.clone();
+    config.node.discovery.nostr.app = discovery_scope.to_string();
     if !options.relays.is_empty() {
         config.node.discovery.nostr.advert_relays = options.relays.clone();
         config.node.discovery.nostr.dm_relays = options.relays;
@@ -189,21 +211,7 @@ pub async fn bind_fips_endpoint(
         });
     }
 
-    let endpoint = fips_core::FipsEndpoint::builder()
-        .config(config)
-        .discovery_scope(discovery_scope.clone())
-        .without_system_tun()
-        .packet_channel_capacity(options.packet_channel_capacity)
-        .bind()
-        .await
-        .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
-    let local_peer_id = endpoint.npub().to_string();
-
-    Ok(BoundFipsEndpoint {
-        endpoint: Arc::new(endpoint),
-        local_peer_id,
-        discovery_scope,
-    })
+    config
 }
 
 #[async_trait]
@@ -977,6 +985,11 @@ impl<S: Store + Send + Sync + 'static> FipsMeshPubsub<S> {
     pub async fn peer_count(&self) -> usize {
         self.store.peer_count().await
     }
+
+    /// Current mesh peer IDs known to the shared mesh core.
+    pub async fn peer_ids(&self) -> Vec<String> {
+        self.store.peer_ids().await
+    }
 }
 
 impl<S: Store + Send + Sync + 'static> Drop for FipsMeshPubsub<S> {
@@ -1427,6 +1440,13 @@ mod tests {
         hash
     }
 
+    #[test]
+    fn endpoint_config_uses_reply_learned_routing_for_mesh_fallback() {
+        let config = fips_endpoint_config(FipsEndpointOptions::new("nsec1example"), "test-scope");
+
+        assert_eq!(config.node.routing.mode, RoutingMode::ReplyLearned);
+    }
+
     #[tokio::test]
     async fn set_peers_configures_underlying_fips_endpoint() {
         let network = Arc::new(Mutex::new(HashMap::new()));
@@ -1579,6 +1599,8 @@ mod tests {
         assert_eq!(delivered.stream_id, "iris-drive/root-events/test");
         assert_eq!(delivered.origin_peer_id, "a");
         assert_eq!(delivered.payload, payload);
+        assert_eq!(mesh_a.peer_ids().await, vec!["b"]);
+        assert_eq!(mesh_b.peer_ids().await, vec!["a"]);
     }
 
     #[tokio::test(start_paused = true)]

@@ -2183,6 +2183,11 @@ where
         self.signaling.peer_count().await
     }
 
+    /// Get connected mesh peer IDs.
+    pub async fn peer_ids(&self) -> Vec<String> {
+        self.signaling.peer_ids().await
+    }
+
     /// Check if we need more peers
     pub async fn needs_peers(&self) -> bool {
         self.signaling.needs_peers().await
