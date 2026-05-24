@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as StdHash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -84,6 +84,22 @@ struct ResolvedEntry {
     cid: Cid,
     link_type: LinkType,
     size: u64,
+}
+
+#[cfg(feature = "fuse")]
+enum FuseInvalidation {
+    Inode {
+        inode: u64,
+    },
+    Entry {
+        parent: u64,
+        name: String,
+    },
+    Delete {
+        parent: u64,
+        child: u64,
+        name: String,
+    },
 }
 
 pub struct HashtreeFuseInner<S: Store> {
@@ -173,19 +189,14 @@ impl<S: Store> HashtreeFuse<S> {
         }
 
         #[cfg(feature = "fuse")]
-        self.notify_known_caches_invalidated();
+        let invalidations = self.changed_known_entries_for_root(&root);
 
         *self.root.write().unwrap() = root;
 
-        let mut paths = HashMap::new();
-        paths.insert(ROOT_INODE, Vec::new());
-        *self.paths.write().unwrap() = paths;
+        self.retain_existing_paths_after_root_update()?;
 
-        self.children.write().unwrap().clear();
-
-        let mut parents = HashMap::new();
-        parents.insert(ROOT_INODE, ROOT_INODE);
-        *self.parents.write().unwrap() = parents;
+        #[cfg(feature = "fuse")]
+        self.notify_entries_invalidated(&invalidations);
 
         Ok(())
     }
@@ -201,25 +212,83 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     #[cfg(feature = "fuse")]
-    fn notify_known_caches_invalidated(&self) {
-        let inodes: Vec<u64> = self.paths.read().unwrap().keys().copied().collect();
-        let entries: Vec<(u64, String)> = self
-            .children
-            .read()
-            .unwrap()
-            .keys()
-            .map(|key| (key.parent, key.name.clone()))
-            .collect();
+    fn notify_entries_invalidated(&self, invalidations: &[FuseInvalidation]) {
         let guard = self.notifier.lock().unwrap();
         let Some(notifier) = guard.as_ref() else {
             return;
         };
-        for inode in inodes {
-            let _ = notifier.inval_inode(inode, 0, 0);
+        for invalidation in invalidations {
+            match invalidation {
+                FuseInvalidation::Inode { inode } => {
+                    let _ = notifier.inval_inode(*inode, 0, 0);
+                }
+                FuseInvalidation::Entry { parent, name } => {
+                    let _ = notifier.inval_entry(*parent, std::ffi::OsStr::new(name));
+                }
+                FuseInvalidation::Delete {
+                    parent,
+                    child,
+                    name,
+                } => {
+                    let _ = notifier.delete(*parent, *child, std::ffi::OsStr::new(name));
+                }
+            }
         }
-        for (parent, name) in entries {
-            let _ = notifier.inval_entry(parent, std::ffi::OsStr::new(&name));
+    }
+
+    #[cfg(feature = "fuse")]
+    fn changed_known_entries_for_root(&self, new_root: &Cid) -> Vec<FuseInvalidation> {
+        let old_root = self.current_root();
+        let paths = self.paths.read().unwrap().clone();
+        let children = self.children.read().unwrap().clone();
+        let mut invalidations = Vec::new();
+
+        for (inode, path) in paths {
+            let old_entries = self.directory_entry_names_at_root(&old_root, &path);
+            let new_entries = self.directory_entry_names_at_root(new_root, &path);
+            if old_entries.is_none() && new_entries.is_none() {
+                continue;
+            }
+
+            invalidations.push(FuseInvalidation::Inode { inode });
+
+            let old_entries = old_entries.unwrap_or_default();
+            let new_entries = new_entries.unwrap_or_default();
+            for removed in old_entries.difference(&new_entries) {
+                if let Some(child) = children
+                    .get(&ChildKey {
+                        parent: inode,
+                        name: removed.clone(),
+                    })
+                    .copied()
+                {
+                    invalidations.push(FuseInvalidation::Delete {
+                        parent: inode,
+                        child,
+                        name: removed.clone(),
+                    });
+                } else {
+                    invalidations.push(FuseInvalidation::Entry {
+                        parent: inode,
+                        name: removed.clone(),
+                    });
+                }
+            }
+            for added in new_entries.difference(&old_entries) {
+                invalidations.push(FuseInvalidation::Entry {
+                    parent: inode,
+                    name: added.clone(),
+                });
+            }
+            for retained in new_entries.intersection(&old_entries) {
+                invalidations.push(FuseInvalidation::Entry {
+                    parent: inode,
+                    name: retained.clone(),
+                });
+            }
         }
+
+        invalidations
     }
 
     pub fn lookup_child(&self, parent: u64, name: &str) -> Result<EntryAttr, FsError> {
@@ -540,16 +609,20 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     fn resolve_entry(&self, path: &[String]) -> Result<ResolvedEntry, FsError> {
+        self.resolve_entry_at_root(&self.current_root(), path)
+    }
+
+    fn resolve_entry_at_root(&self, root: &Cid, path: &[String]) -> Result<ResolvedEntry, FsError> {
         if path.is_empty() {
             return Ok(ResolvedEntry {
-                cid: self.current_root(),
+                cid: root.clone(),
                 link_type: LinkType::Dir,
                 size: 0,
             });
         }
 
         let (parent_path, name) = path.split_at(path.len() - 1);
-        let parent_cid = self.resolve_dir_cid(parent_path)?;
+        let parent_cid = self.resolve_dir_cid_at_root(root, parent_path)?;
         let entries = block_on(self.tree.list_directory(&parent_cid))?;
         let entry = entries
             .into_iter()
@@ -567,13 +640,16 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     fn resolve_dir_cid(&self, path: &[String]) -> Result<Cid, FsError> {
+        self.resolve_dir_cid_at_root(&self.current_root(), path)
+    }
+
+    fn resolve_dir_cid_at_root(&self, root: &Cid, path: &[String]) -> Result<Cid, FsError> {
         if path.is_empty() {
-            return Ok(self.current_root());
+            return Ok(root.clone());
         }
 
-        let root = self.current_root();
         let path_str = path.join("/");
-        let cid = block_on(self.tree.resolve(&root, &path_str))?.ok_or(FsError::NotFound)?;
+        let cid = block_on(self.tree.resolve(root, &path_str))?.ok_or(FsError::NotFound)?;
 
         let is_dir = block_on(self.tree.is_dir(&cid))?;
         if !is_dir {
@@ -581,6 +657,56 @@ impl<S: Store> HashtreeFuse<S> {
         }
 
         Ok(cid)
+    }
+
+    #[cfg(feature = "fuse")]
+    fn directory_entry_names_at_root(
+        &self,
+        root: &Cid,
+        path: &[String],
+    ) -> Option<HashSet<String>> {
+        let dir_cid = self.resolve_dir_cid_at_root(root, path).ok()?;
+        let entries = block_on(self.tree.list_directory(&dir_cid)).ok()?;
+        Some(entries.into_iter().map(|entry| entry.name).collect())
+    }
+
+    fn retain_existing_paths_after_root_update(&self) -> Result<(), FsError> {
+        let known: Vec<(u64, Vec<String>)> = self
+            .paths
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(inode, path)| (*inode, path.clone()))
+            .collect();
+        let mut keep = HashSet::new();
+        keep.insert(ROOT_INODE);
+
+        for (inode, path) in known {
+            if inode == ROOT_INODE {
+                continue;
+            }
+            match self.resolve_entry(&path) {
+                Ok(_) => {
+                    keep.insert(inode);
+                }
+                Err(FsError::NotFound) | Err(FsError::NotDir) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        self.paths
+            .write()
+            .unwrap()
+            .retain(|inode, _| keep.contains(inode));
+        self.parents
+            .write()
+            .unwrap()
+            .retain(|inode, parent| keep.contains(inode) && keep.contains(parent));
+        self.children
+            .write()
+            .unwrap()
+            .retain(|key, inode| keep.contains(&key.parent) && keep.contains(inode));
+        Ok(())
     }
 
     fn entry_attr_from_resolved(
@@ -1337,6 +1463,48 @@ mod tests {
         assert_ne!(old_lookup.inode, new_lookup.inode);
         assert_eq!(fs.read_file(new_lookup.inode, 0, 3).unwrap(), b"new");
         assert!(publisher.updates().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_replace_root_preserves_existing_directory_inodes() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let root = empty_root(store.clone()).await;
+        let fs = HashtreeFuse::new(store, root).unwrap();
+
+        let docs = fs.mkdir(ROOT_INODE, "docs").unwrap();
+        let old_file = fs.create_file(docs.inode, "old.txt").unwrap();
+        fs.write_file(old_file.inode, 0, b"old").unwrap();
+        let old_entries = fs.read_dir(docs.inode).unwrap();
+        assert!(old_entries.iter().any(|entry| entry.name == "old.txt"));
+
+        let (new_blob, new_size) = tree.put(b"new").await.unwrap();
+        let new_docs = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "new.txt", &new_blob,
+            )
+            .with_size(new_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+        let new_root = tree
+            .put_directory(vec![
+                hashtree_core::DirEntry::from_cid("docs", &new_docs).with_link_type(LinkType::Dir)
+            ])
+            .await
+            .unwrap();
+
+        fs.replace_root(new_root).unwrap();
+
+        assert_eq!(
+            fs.lookup_child(ROOT_INODE, "docs").unwrap().inode,
+            docs.inode
+        );
+        assert_eq!(fs.get_attr(docs.inode).unwrap().kind, EntryKind::Directory);
+        let new_entries = fs.read_dir(docs.inode).unwrap();
+        let names: Vec<String> = new_entries.into_iter().map(|entry| entry.name).collect();
+        assert!(names.contains(&"new.txt".to_string()));
+        assert!(!names.contains(&"old.txt".to_string()));
     }
 
     #[cfg(feature = "fuse")]
