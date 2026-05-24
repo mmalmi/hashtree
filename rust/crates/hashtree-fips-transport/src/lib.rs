@@ -5,7 +5,7 @@
 //! app-owned endpoint bytes.
 
 use async_trait::async_trait;
-use fips_core::config::{NostrDiscoveryPolicy, RoutingMode, TransportInstances};
+use fips_core::config::{NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances};
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 pub use hashtree_network::PubsubPublishStats;
 use hashtree_network::{
@@ -198,7 +198,10 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     };
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = true;
-    config.node.discovery.nostr.app = discovery_scope.to_string();
+    // Keep the public relay discovery app at fips-core's shared default
+    // ("fips-overlay-v1"). The private discovery scope still feeds the
+    // endpoint/LAN scope; putting it in the public Nostr app would prevent
+    // clients from finding common FIPS bootstrap/transit peers.
     if !options.relays.is_empty() {
         config.node.discovery.nostr.advert_relays = options.relays.clone();
         config.node.discovery.nostr.dm_relays = options.relays;
@@ -233,7 +236,55 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
         });
     }
 
+    // Some shared bootstrap peers expose tcp:443 for UDP-hostile networks.
+    // Binding stays disabled by default, so this is outbound-only.
+    config.transports.tcp = TransportInstances::Single(Default::default());
+
     config
+}
+
+fn peer_address_from_configured_addr(raw: &str) -> Option<PeerAddress> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (transport, addr) = split_configured_transport_addr(trimmed);
+    Some(PeerAddress::new(transport, addr))
+}
+
+fn split_configured_transport_addr(value: &str) -> (&str, &str) {
+    let Some((transport, addr)) = value.split_once(':') else {
+        return ("udp", value);
+    };
+    match transport.to_ascii_lowercase().as_str() {
+        "udp" | "tcp" | "webrtc" | "tor" | "ethernet" | "ble" => (transport, addr),
+        _ => ("udp", value),
+    }
+}
+
+fn sanitize_peer_configs(
+    local: Option<&str>,
+    peers: Vec<FipsPeerConfig>,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<FipsPeerConfig> {
+    let mut out = Vec::new();
+    for peer in peers {
+        let npub = peer.npub.trim().to_string();
+        if npub.is_empty() || Some(npub.as_str()) == local || !seen.insert(npub.clone()) {
+            continue;
+        }
+        let udp_addresses = peer
+            .udp_addresses
+            .into_iter()
+            .map(|addr| addr.trim().to_string())
+            .filter(|addr| !addr.is_empty())
+            .collect();
+        out.push(FipsPeerConfig {
+            npub,
+            udp_addresses,
+        });
+    }
+    out
 }
 
 #[async_trait]
@@ -284,7 +335,7 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
                 addresses: peer
                     .udp_addresses
                     .into_iter()
-                    .map(|addr| fips_core::config::PeerAddress::new("udp", addr))
+                    .filter_map(|addr| peer_address_from_configured_addr(&addr))
                     .collect(),
                 ..Default::default()
             })
@@ -534,6 +585,7 @@ pub struct HashtreeFipsTransport<S: Store + Send + Sync + 'static = MemoryStore>
     endpoint: Arc<dyn FipsEndpointIo>,
     local_store: Arc<S>,
     peers: Arc<RwLock<Vec<String>>>,
+    peer_filter_configured: Arc<RwLock<bool>>,
     pending: Arc<Mutex<HashMap<String, Vec<PendingRequest>>>>,
     response_fragments: Arc<Mutex<HashMap<String, ResponseReassembly>>>,
     app_fragments: Arc<Mutex<HashMap<String, AppReassembly>>>,
@@ -558,6 +610,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             endpoint,
             local_store,
             peers: Arc::new(RwLock::new(Vec::new())),
+            peer_filter_configured: Arc::new(RwLock::new(false)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             response_fragments: Arc::new(Mutex::new(HashMap::new())),
             app_fragments: Arc::new(Mutex::new(HashMap::new())),
@@ -605,42 +658,45 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
     }
 
     pub async fn set_peer_configs(&self, peers: Vec<FipsPeerConfig>) {
+        self.set_peer_configs_with_routing_peers(peers, Vec::new())
+            .await;
+    }
+
+    pub async fn set_peer_configs_with_routing_peers(
+        &self,
+        application_peers: Vec<FipsPeerConfig>,
+        routing_peers: Vec<FipsPeerConfig>,
+    ) {
         let local = self.endpoint.local_peer_id();
         let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for peer in peers {
-            let npub = peer.npub.trim().to_string();
-            if npub.is_empty()
-                || Some(npub.as_str()) == local.as_deref()
-                || !seen.insert(npub.clone())
-            {
-                continue;
-            }
-            let udp_addresses = peer
-                .udp_addresses
-                .into_iter()
-                .map(|addr| addr.trim().to_string())
-                .filter(|addr| !addr.is_empty())
-                .collect();
-            out.push(FipsPeerConfig {
-                npub,
-                udp_addresses,
-            });
-        }
-        let configured_count = out.len();
-        let udp_hint_count: usize = out.iter().map(|peer| peer.udp_addresses.len()).sum();
-        match self.endpoint.set_peer_configs(out.clone()).await {
+        let app_out = sanitize_peer_configs(local.as_deref(), application_peers, &mut seen);
+        let routing_out = sanitize_peer_configs(local.as_deref(), routing_peers, &mut seen);
+        let mut endpoint_out = app_out.clone();
+        endpoint_out.extend(routing_out.clone());
+        let configured_count = endpoint_out.len();
+        let application_count = app_out.len();
+        let routing_only_count = routing_out.len();
+        let udp_hint_count: usize = endpoint_out
+            .iter()
+            .map(|peer| peer.udp_addresses.len())
+            .sum();
+        match self.endpoint.set_peer_configs(endpoint_out.clone()).await {
             Ok(()) => {
                 tracing::info!(
                     configured_count,
+                    application_count,
+                    routing_only_count,
                     udp_hint_count,
                     "configured Hashtree FIPS peers"
                 );
-                *self.peers.write().await = out.into_iter().map(|peer| peer.npub).collect();
+                *self.peers.write().await = app_out.into_iter().map(|peer| peer.npub).collect();
+                *self.peer_filter_configured.write().await = true;
             }
             Err(error) => {
                 tracing::warn!(
                     configured_count,
+                    application_count,
+                    routing_only_count,
                     udp_hint_count,
                     error = %error,
                     "failed to configure Hashtree FIPS peers"
@@ -651,7 +707,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
 
     pub async fn peer_ids(&self) -> Vec<String> {
         let configured = self.peers.read().await.clone();
-        if configured.is_empty() {
+        if configured.is_empty() && !*self.peer_filter_configured.read().await {
             self.endpoint.peer_ids().await
         } else {
             configured
@@ -663,7 +719,18 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
     }
 
     pub async fn connected_peer_ids(&self) -> Vec<String> {
-        self.endpoint.peer_ids().await
+        let connected = self.endpoint.peer_ids().await;
+        let configured = self.peers.read().await.clone();
+        if configured.is_empty() && !*self.peer_filter_configured.read().await {
+            return connected;
+        }
+        let configured = configured
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        connected
+            .into_iter()
+            .filter(|peer| configured.contains(peer))
+            .collect()
     }
 
     pub fn subscribe_app_messages(&self) -> broadcast::Receiver<FipsAppMessage> {
@@ -789,6 +856,9 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
         let Some(message) = parse_message(&packet.data)? else {
             return Ok(());
         };
+        if !self.is_application_peer(&packet.peer_id).await {
+            return Ok(());
+        }
         match message {
             Message::Request(req) => {
                 let Some(hash) = bytes_to_hash(&req.h) else {
@@ -836,6 +906,14 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             }
         }
         Ok(())
+    }
+
+    async fn is_application_peer(&self, peer_id: &str) -> bool {
+        let peers = self.peers.read().await;
+        if peers.is_empty() && !*self.peer_filter_configured.read().await {
+            return true;
+        }
+        peers.iter().any(|peer| peer == peer_id)
     }
 
     async fn send_response(
@@ -1553,6 +1631,33 @@ mod tests {
         assert_eq!(config.node.routing.mode, RoutingMode::ReplyLearned);
     }
 
+    #[test]
+    fn endpoint_config_keeps_shared_fips_nostr_discovery_app() {
+        let config = fips_endpoint_config(
+            FipsEndpointOptions::new("nsec1example"),
+            "iris-drive-v1:private-owner",
+        );
+
+        assert_eq!(
+            config.node.discovery.nostr.app,
+            fips_core::Config::new().node.discovery.nostr.app
+        );
+    }
+
+    #[test]
+    fn transport_tagged_peer_addresses_are_preserved_for_fips() {
+        let udp = peer_address_from_configured_addr(" udp:10.44.1.2:22121 ").unwrap();
+        let tcp = peer_address_from_configured_addr("tcp:203.0.113.9:443").unwrap();
+        let bare = peer_address_from_configured_addr("10.44.1.3:22121").unwrap();
+
+        assert_eq!(udp.transport, "udp");
+        assert_eq!(udp.addr, "10.44.1.2:22121");
+        assert_eq!(tcp.transport, "tcp");
+        assert_eq!(tcp.addr, "203.0.113.9:443");
+        assert_eq!(bare.transport, "udp");
+        assert_eq!(bare.addr, "10.44.1.3:22121");
+    }
+
     #[tokio::test]
     async fn set_peers_configures_underlying_fips_endpoint() {
         let network = Arc::new(Mutex::new(HashMap::new()));
@@ -1602,6 +1707,58 @@ mod tests {
             }]
         );
         assert_eq!(transport.configured_peer_ids().await, vec!["remote"]);
+    }
+
+    #[tokio::test]
+    async fn routing_only_peers_are_configured_but_not_application_peers() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        let transport = HashtreeFipsTransport::new(endpoint.clone(), Arc::new(MemoryStore::new()));
+
+        transport
+            .set_peer_configs_with_routing_peers(
+                vec![FipsPeerConfig {
+                    npub: "device".to_string(),
+                    udp_addresses: vec!["10.44.1.2:22121".to_string()],
+                }],
+                vec![FipsPeerConfig {
+                    npub: "bootstrap".to_string(),
+                    udp_addresses: vec!["udp:203.0.113.7:2121".to_string()],
+                }],
+            )
+            .await;
+
+        assert_eq!(
+            endpoint.configured_peers.lock().await.as_slice(),
+            &["device".to_string(), "bootstrap".to_string()]
+        );
+        assert_eq!(transport.configured_peer_ids().await, vec!["device"]);
+        assert_eq!(transport.peer_ids().await, vec!["device"]);
+    }
+
+    #[tokio::test]
+    async fn empty_application_peer_set_does_not_fall_back_to_routing_peers() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        let transport = HashtreeFipsTransport::new(endpoint.clone(), Arc::new(MemoryStore::new()));
+
+        transport
+            .set_peer_configs_with_routing_peers(
+                Vec::new(),
+                vec![FipsPeerConfig {
+                    npub: "bootstrap".to_string(),
+                    udp_addresses: vec!["udp:203.0.113.7:2121".to_string()],
+                }],
+            )
+            .await;
+
+        assert_eq!(
+            endpoint.configured_peers.lock().await.as_slice(),
+            &["bootstrap".to_string()]
+        );
+        assert!(transport.configured_peer_ids().await.is_empty());
+        assert!(transport.peer_ids().await.is_empty());
+        assert!(transport.connected_peer_ids().await.is_empty());
     }
 
     #[tokio::test]
