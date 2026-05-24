@@ -20,6 +20,7 @@ fuse = ["dep:fuser", "dep:libc"]
 [dependencies.fuser]
 version = "0.14"
 optional = true
+features = ["abi-7-12"]
 
 [dependencies.libc]
 version = "0.2"

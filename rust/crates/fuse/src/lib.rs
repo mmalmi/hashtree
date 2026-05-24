@@ -95,6 +95,8 @@ pub struct HashtreeFuseInner<S: Store> {
     next_inode: AtomicU64,
     publisher: Option<Arc<dyn RootPublisher>>,
     modify_lock: Mutex<()>,
+    #[cfg(feature = "fuse")]
+    notifier: Mutex<Option<fuser::Notifier>>,
 }
 
 pub struct HashtreeFuse<S: Store> {
@@ -153,6 +155,8 @@ impl<S: Store> HashtreeFuse<S> {
                 next_inode: AtomicU64::new(ROOT_INODE + 1),
                 publisher,
                 modify_lock: Mutex::new(()),
+                #[cfg(feature = "fuse")]
+                notifier: Mutex::new(None),
             }),
         })
     }
@@ -168,6 +172,9 @@ impl<S: Store> HashtreeFuse<S> {
             return Err(FsError::InvalidRoot);
         }
 
+        #[cfg(feature = "fuse")]
+        self.notify_known_caches_invalidated();
+
         *self.root.write().unwrap() = root;
 
         let mut paths = HashMap::new();
@@ -181,6 +188,38 @@ impl<S: Store> HashtreeFuse<S> {
         *self.parents.write().unwrap() = parents;
 
         Ok(())
+    }
+
+    #[cfg(feature = "fuse")]
+    fn set_notifier(&self, notifier: fuser::Notifier) {
+        *self.notifier.lock().unwrap() = Some(notifier);
+    }
+
+    #[cfg(feature = "fuse")]
+    fn clear_notifier(&self) {
+        *self.notifier.lock().unwrap() = None;
+    }
+
+    #[cfg(feature = "fuse")]
+    fn notify_known_caches_invalidated(&self) {
+        let inodes: Vec<u64> = self.paths.read().unwrap().keys().copied().collect();
+        let entries: Vec<(u64, String)> = self
+            .children
+            .read()
+            .unwrap()
+            .keys()
+            .map(|key| (key.parent, key.name.clone()))
+            .collect();
+        let guard = self.notifier.lock().unwrap();
+        let Some(notifier) = guard.as_ref() else {
+            return;
+        };
+        for inode in inodes {
+            let _ = notifier.inval_inode(inode, 0, 0);
+        }
+        for (parent, name) in entries {
+            let _ = notifier.inval_entry(parent, std::ffi::OsStr::new(&name));
+        }
     }
 
     pub fn lookup_child(&self, parent: u64, name: &str) -> Result<EntryAttr, FsError> {
@@ -865,7 +904,11 @@ mod fuse_impl {
             mountpoint: impl AsRef<Path>,
             options: &[MountOption],
         ) -> std::io::Result<()> {
-            fuser::mount2(self, mountpoint, options)
+            let mut session = fuser::Session::new(self.clone(), mountpoint.as_ref(), options)?;
+            self.set_notifier(session.notifier());
+            let result = session.run();
+            self.clear_notifier();
+            result
         }
 
         fn file_attr(&self, attr: &EntryAttr) -> FileAttr {
