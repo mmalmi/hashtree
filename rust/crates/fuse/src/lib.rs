@@ -87,19 +87,10 @@ struct ResolvedEntry {
 }
 
 #[cfg(feature = "fuse")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FuseInvalidation {
-    Inode {
-        inode: u64,
-    },
-    Entry {
-        parent: u64,
-        name: String,
-    },
-    Delete {
-        parent: u64,
-        child: u64,
-        name: String,
-    },
+    Inode { inode: u64 },
+    Entry { parent: u64, name: String },
 }
 
 pub struct HashtreeFuseInner<S: Store> {
@@ -225,13 +216,6 @@ impl<S: Store> HashtreeFuse<S> {
                 FuseInvalidation::Entry { parent, name } => {
                     let _ = notifier.inval_entry(*parent, std::ffi::OsStr::new(name));
                 }
-                FuseInvalidation::Delete {
-                    parent,
-                    child,
-                    name,
-                } => {
-                    let _ = notifier.delete(*parent, *child, std::ffi::OsStr::new(name));
-                }
             }
         }
     }
@@ -262,17 +246,12 @@ impl<S: Store> HashtreeFuse<S> {
                     })
                     .copied()
                 {
-                    invalidations.push(FuseInvalidation::Delete {
-                        parent: inode,
-                        child,
-                        name: removed.clone(),
-                    });
-                } else {
-                    invalidations.push(FuseInvalidation::Entry {
-                        parent: inode,
-                        name: removed.clone(),
-                    });
+                    invalidations.push(FuseInvalidation::Inode { inode: child });
                 }
+                invalidations.push(FuseInvalidation::Entry {
+                    parent: inode,
+                    name: removed.clone(),
+                });
             }
             for added in new_entries.difference(&old_entries) {
                 invalidations.push(FuseInvalidation::Entry {
@@ -1463,6 +1442,29 @@ mod tests {
         assert_ne!(old_lookup.inode, new_lookup.inode);
         assert_eq!(fs.read_file(new_lookup.inode, 0, 3).unwrap(), b"new");
         assert!(publisher.updates().is_empty());
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn test_replace_root_uses_non_delete_invalidation_for_removed_entries() {
+        let store = Arc::new(MemoryStore::new());
+        let root = empty_root(store.clone()).await;
+        let fs = HashtreeFuse::new(store.clone(), root).unwrap();
+
+        let old_file = fs.create_file(ROOT_INODE, "old.txt").unwrap();
+        fs.write_file(old_file.inode, 0, b"old").unwrap();
+        let new_root = empty_root(store).await;
+
+        let invalidations = fs.changed_known_entries_for_root(&new_root);
+
+        assert!(invalidations.contains(&FuseInvalidation::Inode { inode: ROOT_INODE }));
+        assert!(invalidations.contains(&FuseInvalidation::Inode {
+            inode: old_file.inode
+        }));
+        assert!(invalidations.contains(&FuseInvalidation::Entry {
+            parent: ROOT_INODE,
+            name: "old.txt".to_string()
+        }));
     }
 
     #[tokio::test]
