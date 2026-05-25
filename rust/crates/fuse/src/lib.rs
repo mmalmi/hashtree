@@ -90,6 +90,7 @@ struct ResolvedEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FuseInvalidation {
     Inode { inode: u64 },
+    Entry { parent: u64, name: String },
 }
 
 pub struct HashtreeFuseInner<S: Store> {
@@ -212,6 +213,9 @@ impl<S: Store> HashtreeFuse<S> {
                 FuseInvalidation::Inode { inode } => {
                     let _ = notifier.inval_inode(*inode, 0, 0);
                 }
+                FuseInvalidation::Entry { parent, name } => {
+                    let _ = notifier.inval_entry(*parent, std::ffi::OsStr::new(name));
+                }
             }
         }
     }
@@ -244,6 +248,12 @@ impl<S: Store> HashtreeFuse<S> {
                 {
                     invalidations.push(FuseInvalidation::Inode { inode: child });
                 }
+            }
+            for added in new_entries.difference(&old_entries) {
+                invalidations.push(FuseInvalidation::Entry {
+                    parent: inode,
+                    name: added.clone(),
+                });
             }
         }
 
@@ -1442,6 +1452,33 @@ mod tests {
             inode: old_file.inode
         }));
         assert_eq!(invalidations.len(), 2);
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn test_replace_root_invalidates_added_entries_by_name() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let root = empty_root(store.clone()).await;
+        let fs = HashtreeFuse::new(store, root).unwrap();
+
+        let (new_blob, new_size) = tree.put(b"new").await.unwrap();
+        let new_root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "new.txt", &new_blob,
+            )
+            .with_size(new_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+
+        let invalidations = fs.changed_known_entries_for_root(&new_root);
+
+        assert!(invalidations.contains(&FuseInvalidation::Inode { inode: ROOT_INODE }));
+        assert!(invalidations.contains(&FuseInvalidation::Entry {
+            parent: ROOT_INODE,
+            name: "new.txt".to_string(),
+        }));
     }
 
     #[tokio::test]
