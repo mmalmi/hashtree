@@ -8,6 +8,8 @@ use hashtree_core::{Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Stor
 use thiserror::Error;
 
 pub const ROOT_INODE: u64 = 1;
+// Hidden virtual entry used only to wake Linux directory monitors after remote root updates.
+pub const DIRECTORY_REFRESH_SENTINEL_NAME: &str = ".iris-drive-refresh";
 
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -271,6 +273,13 @@ impl<S: Store> HashtreeFuse<S> {
             let parent_inode = self.parent_inode(parent);
             return self.get_attr(parent_inode);
         }
+        if Self::is_directory_refresh_sentinel(name) {
+            if self.get_attr(parent)?.kind != EntryKind::Directory {
+                return Err(FsError::NotDir);
+            }
+            let inode = self.get_or_create_child_inode(parent, name)?;
+            return Ok(Self::directory_refresh_sentinel_attr(inode));
+        }
 
         let child_inode = self.get_or_create_child_inode(parent, name)?;
         let path = self.path_for_inode(child_inode)?;
@@ -295,12 +304,20 @@ impl<S: Store> HashtreeFuse<S> {
         }
 
         let path = self.path_for_inode(inode)?;
+        if Self::is_directory_refresh_sentinel_path(&path) {
+            let parent_path = &path[..path.len() - 1];
+            self.resolve_dir_cid(parent_path)?;
+            return Ok(Self::directory_refresh_sentinel_attr(inode));
+        }
         let entry = self.resolve_entry(&path)?;
         self.entry_attr_from_resolved(inode, entry)
     }
 
     pub fn read_file(&self, inode: u64, offset: u64, size: u32) -> Result<Vec<u8>, FsError> {
         let path = self.path_for_inode(inode)?;
+        if Self::is_directory_refresh_sentinel_path(&path) {
+            return Ok(Vec::new());
+        }
         let entry = self.resolve_entry(&path)?;
         if entry.link_type == LinkType::Dir {
             return Err(FsError::IsDir);
@@ -346,6 +363,9 @@ impl<S: Store> HashtreeFuse<S> {
         let mut out = Vec::with_capacity(entries.len());
 
         for entry in entries {
+            if Self::is_directory_refresh_sentinel(&entry.name) {
+                continue;
+            }
             let child_inode = self.get_or_create_child_inode(inode, &entry.name)?;
             out.push(DirEntry {
                 inode: child_inode,
@@ -441,6 +461,9 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     pub fn unlink(&self, parent: u64, name: &str) -> Result<(), FsError> {
+        if Self::is_directory_refresh_sentinel(name) {
+            return Ok(());
+        }
         self.ensure_valid_name(name)?;
         let _guard = self.modify_lock.lock().unwrap();
 
@@ -562,10 +585,27 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     fn ensure_valid_name(&self, name: &str) -> Result<(), FsError> {
-        if name.is_empty() || name.contains('/') {
+        if name.is_empty() || name.contains('/') || Self::is_directory_refresh_sentinel(name) {
             return Err(FsError::InvalidName);
         }
         Ok(())
+    }
+
+    fn is_directory_refresh_sentinel(name: &str) -> bool {
+        name == DIRECTORY_REFRESH_SENTINEL_NAME
+    }
+
+    fn is_directory_refresh_sentinel_path(path: &[String]) -> bool {
+        path.last()
+            .is_some_and(|name| Self::is_directory_refresh_sentinel(name))
+    }
+
+    fn directory_refresh_sentinel_attr(inode: u64) -> EntryAttr {
+        EntryAttr {
+            inode,
+            size: 0,
+            kind: EntryKind::File,
+        }
     }
 
     fn path_for_inode(&self, inode: u64) -> Result<Vec<String>, FsError> {
@@ -636,7 +676,13 @@ impl<S: Store> HashtreeFuse<S> {
     ) -> Option<HashSet<String>> {
         let dir_cid = self.resolve_dir_cid_at_root(root, path).ok()?;
         let entries = block_on(self.tree.list_directory(&dir_cid)).ok()?;
-        Some(entries.into_iter().map(|entry| entry.name).collect())
+        Some(
+            entries
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| !Self::is_directory_refresh_sentinel(name))
+                .collect(),
+        )
     }
 
     fn retain_existing_paths_after_root_update(&self) -> Result<(), FsError> {
@@ -652,6 +698,12 @@ impl<S: Store> HashtreeFuse<S> {
 
         for (inode, path) in known {
             if inode == ROOT_INODE {
+                continue;
+            }
+            if Self::is_directory_refresh_sentinel_path(&path) {
+                if self.resolve_dir_cid(&path[..path.len() - 1]).is_ok() {
+                    keep.insert(inode);
+                }
                 continue;
             }
             match self.resolve_entry(&path) {
@@ -1383,6 +1435,29 @@ mod tests {
         fs.truncate_file(file.inode, 3).unwrap();
         let read = fs.read_file(file.inode, 0, 10).unwrap();
         assert_eq!(read, b"abc");
+    }
+
+    #[tokio::test]
+    async fn test_directory_refresh_sentinel_is_virtual() {
+        let store = Arc::new(MemoryStore::new());
+        let root = empty_root(store.clone()).await;
+        let fs = HashtreeFuse::new(store, root.clone()).unwrap();
+
+        let entries = fs.read_dir(ROOT_INODE).unwrap();
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.name == DIRECTORY_REFRESH_SENTINEL_NAME));
+        let sentinel = fs
+            .lookup_child(ROOT_INODE, DIRECTORY_REFRESH_SENTINEL_NAME)
+            .unwrap();
+        assert_eq!(sentinel.kind, EntryKind::File);
+        assert!(fs.read_file(sentinel.inode, 0, 10).unwrap().is_empty());
+        assert!(fs
+            .create_file(ROOT_INODE, DIRECTORY_REFRESH_SENTINEL_NAME)
+            .is_err());
+        fs.unlink(ROOT_INODE, DIRECTORY_REFRESH_SENTINEL_NAME)
+            .unwrap();
+        assert_eq!(fs.current_root(), root);
     }
 
     #[tokio::test]
