@@ -90,7 +90,6 @@ struct ResolvedEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FuseInvalidation {
     Inode { inode: u64 },
-    Entry { parent: u64, name: String },
 }
 
 pub struct HashtreeFuseInner<S: Store> {
@@ -213,9 +212,6 @@ impl<S: Store> HashtreeFuse<S> {
                 FuseInvalidation::Inode { inode } => {
                     let _ = notifier.inval_inode(*inode, 0, 0);
                 }
-                FuseInvalidation::Entry { parent, name } => {
-                    let _ = notifier.inval_entry(*parent, std::ffi::OsStr::new(name));
-                }
             }
         }
     }
@@ -248,22 +244,6 @@ impl<S: Store> HashtreeFuse<S> {
                 {
                     invalidations.push(FuseInvalidation::Inode { inode: child });
                 }
-                invalidations.push(FuseInvalidation::Entry {
-                    parent: inode,
-                    name: removed.clone(),
-                });
-            }
-            for added in new_entries.difference(&old_entries) {
-                invalidations.push(FuseInvalidation::Entry {
-                    parent: inode,
-                    name: added.clone(),
-                });
-            }
-            for retained in new_entries.intersection(&old_entries) {
-                invalidations.push(FuseInvalidation::Entry {
-                    parent: inode,
-                    name: retained.clone(),
-                });
             }
         }
 
@@ -929,7 +909,7 @@ mod fuse_impl {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    const TTL: Duration = Duration::from_secs(1);
+    const TTL: Duration = Duration::ZERO;
     const FALLBACK_BLOCK_SIZE: u32 = 4096;
     const FALLBACK_TOTAL_BYTES: u64 = 1 << 40;
     const FALLBACK_FREE_BYTES: u64 = 1 << 39;
@@ -1446,7 +1426,7 @@ mod tests {
 
     #[cfg(feature = "fuse")]
     #[tokio::test]
-    async fn test_replace_root_uses_non_delete_invalidation_for_removed_entries() {
+    async fn test_replace_root_uses_inode_invalidation_for_removed_entries() {
         let store = Arc::new(MemoryStore::new());
         let root = empty_root(store.clone()).await;
         let fs = HashtreeFuse::new(store.clone(), root).unwrap();
@@ -1461,10 +1441,7 @@ mod tests {
         assert!(invalidations.contains(&FuseInvalidation::Inode {
             inode: old_file.inode
         }));
-        assert!(invalidations.contains(&FuseInvalidation::Entry {
-            parent: ROOT_INODE,
-            name: "old.txt".to_string()
-        }));
+        assert_eq!(invalidations.len(), 2);
     }
 
     #[tokio::test]
