@@ -8,8 +8,8 @@ use hashtree_core::{Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Stor
 use thiserror::Error;
 
 pub const ROOT_INODE: u64 = 1;
-// Hidden virtual entry used only to wake Linux directory monitors after remote root updates.
-pub const DIRECTORY_REFRESH_SENTINEL_NAME: &str = ".iris-drive-refresh";
+// Virtual entry used only to wake Linux directory monitors after remote root updates.
+pub const DIRECTORY_REFRESH_SENTINEL_NAME: &str = "iris-drive-refresh";
 
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -82,6 +82,7 @@ impl StdHash for ChildKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 struct ResolvedEntry {
     cid: Cid,
     link_type: LinkType,
@@ -286,6 +287,10 @@ impl<S: Store> HashtreeFuse<S> {
             let old_entries = old_entries.unwrap_or_default();
             let new_entries = new_entries.unwrap_or_default();
             for removed in old_entries.difference(&new_entries) {
+                invalidations.push(FuseInvalidation::Entry {
+                    parent: inode,
+                    name: removed.clone(),
+                });
                 if let Some(child) = children
                     .get(&ChildKey {
                         parent: inode,
@@ -302,6 +307,24 @@ impl<S: Store> HashtreeFuse<S> {
                 }
             }
 
+            for retained in old_entries.intersection(&new_entries) {
+                if self.entry_changed_between_roots(&old_root, new_root, &path, retained) {
+                    invalidations.push(FuseInvalidation::Entry {
+                        parent: inode,
+                        name: retained.clone(),
+                    });
+                    if let Some(child) = children
+                        .get(&ChildKey {
+                            parent: inode,
+                            name: retained.clone(),
+                        })
+                        .copied()
+                    {
+                        invalidations.push(FuseInvalidation::Inode { inode: child });
+                    }
+                }
+            }
+
             invalidations.push(FuseInvalidation::Inode { inode });
 
             for added in new_entries.difference(&old_entries) {
@@ -313,6 +336,26 @@ impl<S: Store> HashtreeFuse<S> {
         }
 
         invalidations
+    }
+
+    #[cfg(feature = "fuse")]
+    fn entry_changed_between_roots(
+        &self,
+        old_root: &Cid,
+        new_root: &Cid,
+        parent_path: &[String],
+        name: &str,
+    ) -> bool {
+        let mut child_path = parent_path.to_vec();
+        child_path.push(name.to_string());
+        match (
+            self.resolve_entry_at_root(old_root, &child_path),
+            self.resolve_entry_at_root(new_root, &child_path),
+        ) {
+            (Ok(old), Ok(new)) => old != new,
+            (Err(_), Err(_)) => false,
+            _ => true,
+        }
     }
 
     pub fn lookup_child(&self, parent: u64, name: &str) -> Result<EntryAttr, FsError> {
@@ -1526,6 +1569,11 @@ mod tests {
         assert_eq!(fs.current_root(), root);
     }
 
+    #[test]
+    fn test_directory_refresh_sentinel_is_not_hidden() {
+        assert!(!DIRECTORY_REFRESH_SENTINEL_NAME.starts_with('.'));
+    }
+
     #[tokio::test]
     async fn test_publisher_invoked() {
         let store = Arc::new(MemoryStore::new());
@@ -1589,10 +1637,14 @@ mod tests {
         let invalidations = fs.changed_known_entries_for_root(&new_root);
 
         assert!(invalidations.contains(&FuseInvalidation::Inode { inode: ROOT_INODE }));
+        assert!(invalidations.contains(&FuseInvalidation::Entry {
+            parent: ROOT_INODE,
+            name: "old.txt".to_string(),
+        }));
         assert!(invalidations.contains(&FuseInvalidation::Inode {
             inode: old_file.inode
         }));
-        assert_eq!(invalidations.len(), 3);
+        assert_eq!(invalidations.len(), 4);
     }
 
     #[cfg(feature = "fuse")]
@@ -1630,6 +1682,69 @@ mod tests {
             })
             .unwrap();
         assert!(delete_index < parent_index);
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn test_replace_root_invalidates_changed_known_entry_by_name_and_inode() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let (old_blob, old_size) = tree.put(b"old").await.unwrap();
+        let root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "note.txt", &old_blob,
+            )
+            .with_size(old_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+        let fs = HashtreeFuse::new(store, root).unwrap();
+        let old_file = fs.lookup_child(ROOT_INODE, "note.txt").unwrap();
+
+        let (new_blob, new_size) = tree.put(b"new").await.unwrap();
+        let new_root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "note.txt", &new_blob,
+            )
+            .with_size(new_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+
+        let invalidations = fs.changed_known_entries_for_root(&new_root);
+
+        assert!(invalidations.contains(&FuseInvalidation::Entry {
+            parent: ROOT_INODE,
+            name: "note.txt".to_string(),
+        }));
+        assert!(invalidations.contains(&FuseInvalidation::Inode {
+            inode: old_file.inode,
+        }));
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn test_replace_root_invalidates_removed_name_without_known_child_inode() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let (old_blob, old_size) = tree.put(b"old").await.unwrap();
+        let root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "old.txt", &old_blob,
+            )
+            .with_size(old_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+        let fs = HashtreeFuse::new(store.clone(), root).unwrap();
+        let new_root = empty_root(store).await;
+
+        let invalidations = fs.changed_known_entries_for_root(&new_root);
+
+        assert!(invalidations.contains(&FuseInvalidation::Entry {
+            parent: ROOT_INODE,
+            name: "old.txt".to_string(),
+        }));
     }
 
     #[tokio::test]
