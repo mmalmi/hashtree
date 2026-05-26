@@ -91,8 +91,18 @@ struct ResolvedEntry {
 #[cfg(feature = "fuse")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FuseInvalidation {
-    Inode { inode: u64 },
-    Entry { parent: u64, name: String },
+    Inode {
+        inode: u64,
+    },
+    Entry {
+        parent: u64,
+        name: String,
+    },
+    Delete {
+        parent: u64,
+        child: u64,
+        name: String,
+    },
 }
 
 pub struct HashtreeFuseInner<S: Store> {
@@ -103,6 +113,7 @@ pub struct HashtreeFuseInner<S: Store> {
     parents: RwLock<HashMap<u64, u64>>,
     next_inode: AtomicU64,
     publisher: Option<Arc<dyn RootPublisher>>,
+    refresh_unlinks: Mutex<HashSet<Vec<String>>>,
     modify_lock: Mutex<()>,
     #[cfg(feature = "fuse")]
     notifier: Mutex<Option<fuser::Notifier>>,
@@ -163,6 +174,7 @@ impl<S: Store> HashtreeFuse<S> {
                 parents: RwLock::new(parents),
                 next_inode: AtomicU64::new(ROOT_INODE + 1),
                 publisher,
+                refresh_unlinks: Mutex::new(HashSet::new()),
                 modify_lock: Mutex::new(()),
                 #[cfg(feature = "fuse")]
                 notifier: Mutex::new(None),
@@ -195,6 +207,34 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     #[cfg(feature = "fuse")]
+    pub fn removed_known_entry_paths_for_root(&self, root: &Cid) -> Vec<Vec<String>> {
+        self.changed_known_entries_for_root(root)
+            .into_iter()
+            .filter_map(|invalidation| match invalidation {
+                FuseInvalidation::Delete { parent, name, .. } => {
+                    let mut path = self.path_for_inode(parent).ok()?;
+                    path.push(name);
+                    Some(path)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(not(feature = "fuse"))]
+    pub fn removed_known_entry_paths_for_root(&self, _root: &Cid) -> Vec<Vec<String>> {
+        Vec::new()
+    }
+
+    pub fn begin_refresh_unlinks(&self, paths: impl IntoIterator<Item = Vec<String>>) {
+        self.refresh_unlinks.lock().unwrap().extend(paths);
+    }
+
+    pub fn clear_refresh_unlinks(&self) {
+        self.refresh_unlinks.lock().unwrap().clear();
+    }
+
+    #[cfg(feature = "fuse")]
     fn set_notifier(&self, notifier: fuser::Notifier) {
         *self.notifier.lock().unwrap() = Some(notifier);
     }
@@ -218,6 +258,13 @@ impl<S: Store> HashtreeFuse<S> {
                 FuseInvalidation::Entry { parent, name } => {
                     let _ = notifier.inval_entry(*parent, std::ffi::OsStr::new(name));
                 }
+                FuseInvalidation::Delete {
+                    parent,
+                    child,
+                    name,
+                } => {
+                    let _ = notifier.delete(*parent, *child, std::ffi::OsStr::new(name));
+                }
             }
         }
     }
@@ -236,8 +283,6 @@ impl<S: Store> HashtreeFuse<S> {
                 continue;
             }
 
-            invalidations.push(FuseInvalidation::Inode { inode });
-
             let old_entries = old_entries.unwrap_or_default();
             let new_entries = new_entries.unwrap_or_default();
             for removed in old_entries.difference(&new_entries) {
@@ -248,9 +293,17 @@ impl<S: Store> HashtreeFuse<S> {
                     })
                     .copied()
                 {
+                    invalidations.push(FuseInvalidation::Delete {
+                        parent: inode,
+                        child,
+                        name: removed.clone(),
+                    });
                     invalidations.push(FuseInvalidation::Inode { inode: child });
                 }
             }
+
+            invalidations.push(FuseInvalidation::Inode { inode });
+
             for added in new_entries.difference(&old_entries) {
                 invalidations.push(FuseInvalidation::Entry {
                     parent: inode,
@@ -464,6 +517,9 @@ impl<S: Store> HashtreeFuse<S> {
         if Self::is_directory_refresh_sentinel(name) {
             return Ok(());
         }
+        if self.take_refresh_unlink(parent, name)? {
+            return Ok(());
+        }
         self.ensure_valid_name(name)?;
         let _guard = self.modify_lock.lock().unwrap();
 
@@ -492,6 +548,9 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     pub fn rmdir(&self, parent: u64, name: &str) -> Result<(), FsError> {
+        if self.take_refresh_unlink(parent, name)? {
+            return Ok(());
+        }
         self.ensure_valid_name(name)?;
         let _guard = self.modify_lock.lock().unwrap();
 
@@ -615,6 +674,13 @@ impl<S: Store> HashtreeFuse<S> {
             .get(&inode)
             .cloned()
             .ok_or(FsError::NotFound)
+    }
+
+    fn take_refresh_unlink(&self, parent: u64, name: &str) -> Result<bool, FsError> {
+        let parent_path = self.path_for_inode(parent)?;
+        let mut child_path = parent_path;
+        child_path.push(name.to_string());
+        Ok(self.refresh_unlinks.lock().unwrap().remove(&child_path))
     }
 
     fn resolve_entry(&self, path: &[String]) -> Result<ResolvedEntry, FsError> {
@@ -1526,7 +1592,64 @@ mod tests {
         assert!(invalidations.contains(&FuseInvalidation::Inode {
             inode: old_file.inode
         }));
-        assert_eq!(invalidations.len(), 2);
+        assert_eq!(invalidations.len(), 3);
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn test_replace_root_emits_delete_invalidation_for_removed_entries() {
+        let store = Arc::new(MemoryStore::new());
+        let root = empty_root(store.clone()).await;
+        let fs = HashtreeFuse::new(store.clone(), root).unwrap();
+
+        let old_file = fs.create_file(ROOT_INODE, "old.txt").unwrap();
+        fs.write_file(old_file.inode, 0, b"old").unwrap();
+        let new_root = empty_root(store).await;
+
+        let invalidations = fs.changed_known_entries_for_root(&new_root);
+
+        assert!(invalidations.contains(&FuseInvalidation::Delete {
+            parent: ROOT_INODE,
+            child: old_file.inode,
+            name: "old.txt".to_string(),
+        }));
+        assert_eq!(
+            fs.removed_known_entry_paths_for_root(&new_root),
+            vec![vec!["old.txt".to_string()]]
+        );
+        let delete_index = invalidations
+            .iter()
+            .position(|invalidation| {
+                matches!(invalidation, FuseInvalidation::Delete { name, .. } if name == "old.txt")
+            })
+            .unwrap();
+        let parent_index = invalidations
+            .iter()
+            .position(|invalidation| {
+                matches!(invalidation, FuseInvalidation::Inode { inode } if *inode == ROOT_INODE)
+            })
+            .unwrap();
+        assert!(delete_index < parent_index);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_unlink_does_not_publish_or_change_root() {
+        let store = Arc::new(MemoryStore::new());
+        let root = empty_root(store.clone()).await;
+        let publisher = Arc::new(RecordingPublisher::new());
+        let fs = HashtreeFuse::new_with_publisher(store, root, Some(publisher.clone())).unwrap();
+
+        let old_file = fs.create_file(ROOT_INODE, "old.txt").unwrap();
+        fs.write_file(old_file.inode, 0, b"old").unwrap();
+        let old_root = fs.current_root();
+        publisher.updates.lock().unwrap().clear();
+
+        fs.begin_refresh_unlinks(vec![vec!["old.txt".to_string()]]);
+        fs.unlink(ROOT_INODE, "old.txt").unwrap();
+
+        assert_eq!(fs.current_root(), old_root);
+        assert!(publisher.updates().is_empty());
+        assert!(fs.lookup_child(ROOT_INODE, "old.txt").is_ok());
     }
 
     #[cfg(feature = "fuse")]
