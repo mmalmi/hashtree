@@ -1175,6 +1175,25 @@ impl<S: Store + Send + Sync + 'static> FipsMeshPubsub<S> {
     }
 }
 
+#[async_trait]
+impl<S: Store + Send + Sync + 'static> Store for FipsMeshPubsub<S> {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.store.put(hash, data).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store.get(hash).await
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.store.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.store.delete(hash).await
+    }
+}
+
 impl<S: Store + Send + Sync + 'static> Drop for FipsMeshPubsub<S> {
     fn drop(&mut self) {
         self.demux_task.abort();
