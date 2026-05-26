@@ -207,10 +207,7 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     };
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = true;
-    // Keep the public relay discovery app at fips-core's shared default
-    // ("fips-overlay-v1"). The private discovery scope still feeds the
-    // endpoint/LAN scope; putting it in the public Nostr app would prevent
-    // clients from finding common FIPS bootstrap/transit peers.
+    config.node.discovery.nostr.app = discovery_scope.to_string();
     if !options.relays.is_empty() {
         config.node.discovery.nostr.advert_relays = options.relays.clone();
         config.node.discovery.nostr.dm_relays = options.relays;
@@ -1666,16 +1663,13 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_config_keeps_shared_fips_nostr_discovery_app() {
+    fn endpoint_config_scopes_nostr_discovery_app() {
         let config = fips_endpoint_config(
             FipsEndpointOptions::new("nsec1example"),
             "iris-drive-v1:private-owner",
         );
 
-        assert_eq!(
-            config.node.discovery.nostr.app,
-            fips_core::Config::new().node.discovery.nostr.app
-        );
+        assert_eq!(config.node.discovery.nostr.app, "iris-drive-v1:private-owner");
     }
 
     #[test]
