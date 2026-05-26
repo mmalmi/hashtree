@@ -194,6 +194,10 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
         persistent: false,
     };
     config.node.routing.mode = RoutingMode::ReplyLearned;
+    config.node.limits.max_peers = options.webrtc_max_connections.max(1);
+    config.node.limits.max_links = options.webrtc_max_connections.saturating_mul(2).max(1);
+    config.node.limits.max_connections = options.webrtc_max_connections.saturating_mul(2).max(1);
+    config.node.limits.max_pending_inbound = options.webrtc_max_connections.saturating_mul(4).max(1);
     config.tun.enabled = false;
     config.dns.enabled = false;
     config.node.system_files_enabled = false;
@@ -1670,6 +1674,18 @@ mod tests {
         );
 
         assert_eq!(config.node.discovery.nostr.app, "iris-drive-v1:private-owner");
+    }
+
+    #[test]
+    fn endpoint_config_caps_total_peer_fanout() {
+        let mut options = FipsEndpointOptions::new("nsec1example");
+        options.webrtc_max_connections = 9;
+        let config = fips_endpoint_config(options, "test-scope");
+
+        assert_eq!(config.node.limits.max_peers, 9);
+        assert_eq!(config.node.limits.max_links, 18);
+        assert_eq!(config.node.limits.max_connections, 18);
+        assert_eq!(config.node.limits.max_pending_inbound, 36);
     }
 
     #[test]
