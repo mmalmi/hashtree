@@ -92,9 +92,6 @@ struct ResolvedEntry {
 #[cfg(feature = "fuse")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FuseInvalidation {
-    Inode {
-        inode: u64,
-    },
     Entry {
         parent: u64,
         name: String,
@@ -196,10 +193,14 @@ impl<S: Store> HashtreeFuse<S> {
 
         #[cfg(feature = "fuse")]
         let invalidations = self.changed_known_entries_for_root(&root);
+        #[cfg(feature = "fuse")]
+        let paths_needing_new_inode = self.changed_known_paths_requiring_new_inode_for_root(&root);
 
         *self.root.write().unwrap() = root;
 
         self.retain_existing_paths_after_root_update()?;
+        #[cfg(feature = "fuse")]
+        self.drop_paths(paths_needing_new_inode);
 
         #[cfg(feature = "fuse")]
         self.notify_entries_invalidated(&invalidations);
@@ -253,9 +254,6 @@ impl<S: Store> HashtreeFuse<S> {
         };
         for invalidation in invalidations {
             match invalidation {
-                FuseInvalidation::Inode { inode } => {
-                    let _ = notifier.inval_inode(*inode, 0, 0);
-                }
                 FuseInvalidation::Entry { parent, name } => {
                     let _ = notifier.inval_entry(*parent, std::ffi::OsStr::new(name));
                 }
@@ -303,7 +301,6 @@ impl<S: Store> HashtreeFuse<S> {
                         child,
                         name: removed.clone(),
                     });
-                    invalidations.push(FuseInvalidation::Inode { inode: child });
                 }
             }
 
@@ -313,19 +310,8 @@ impl<S: Store> HashtreeFuse<S> {
                         parent: inode,
                         name: retained.clone(),
                     });
-                    if let Some(child) = children
-                        .get(&ChildKey {
-                            parent: inode,
-                            name: retained.clone(),
-                        })
-                        .copied()
-                    {
-                        invalidations.push(FuseInvalidation::Inode { inode: child });
-                    }
                 }
             }
-
-            invalidations.push(FuseInvalidation::Inode { inode });
 
             for added in new_entries.difference(&old_entries) {
                 invalidations.push(FuseInvalidation::Entry {
@@ -336,6 +322,55 @@ impl<S: Store> HashtreeFuse<S> {
         }
 
         invalidations
+    }
+
+    #[cfg(feature = "fuse")]
+    fn changed_known_paths_requiring_new_inode_for_root(&self, new_root: &Cid) -> Vec<Vec<String>> {
+        let old_root = self.current_root();
+        let paths: Vec<Vec<String>> = self.paths.read().unwrap().values().cloned().collect();
+
+        paths
+            .into_iter()
+            .filter(|path| {
+                !path.is_empty()
+                    && !Self::is_directory_refresh_sentinel_path(path)
+                    && self.entry_path_changed_between_roots(&old_root, new_root, path)
+                    && self.changed_entry_should_get_new_inode(&old_root, new_root, path)
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "fuse")]
+    fn changed_entry_should_get_new_inode(
+        &self,
+        old_root: &Cid,
+        new_root: &Cid,
+        path: &[String],
+    ) -> bool {
+        match (
+            self.resolve_entry_at_root(old_root, path),
+            self.resolve_entry_at_root(new_root, path),
+        ) {
+            (Ok(old), Ok(new)) => old.link_type != LinkType::Dir || new.link_type != LinkType::Dir,
+            _ => true,
+        }
+    }
+
+    #[cfg(feature = "fuse")]
+    fn entry_path_changed_between_roots(
+        &self,
+        old_root: &Cid,
+        new_root: &Cid,
+        path: &[String],
+    ) -> bool {
+        match (
+            self.resolve_entry_at_root(old_root, path),
+            self.resolve_entry_at_root(new_root, path),
+        ) {
+            (Ok(old), Ok(new)) => old != new,
+            (Err(_), Err(_)) => false,
+            _ => true,
+        }
     }
 
     #[cfg(feature = "fuse")]
@@ -998,6 +1033,15 @@ impl<S: Store> HashtreeFuse<S> {
             .retain(|_, inode| !remove_set.contains(inode));
     }
 
+    #[cfg(feature = "fuse")]
+    fn drop_paths(&self, paths: impl IntoIterator<Item = Vec<String>>) {
+        for path in paths {
+            if let Some(inode) = self.find_inode_by_path(&path) {
+                self.drop_inode(inode);
+            }
+        }
+    }
+
     fn drop_inode(&self, inode: u64) {
         if inode == ROOT_INODE {
             return;
@@ -1625,7 +1669,7 @@ mod tests {
 
     #[cfg(feature = "fuse")]
     #[tokio::test]
-    async fn test_replace_root_uses_inode_invalidation_for_removed_entries() {
+    async fn test_replace_root_invalidates_removed_entries_without_inode_notification() {
         let store = Arc::new(MemoryStore::new());
         let root = empty_root(store.clone()).await;
         let fs = HashtreeFuse::new(store.clone(), root).unwrap();
@@ -1636,15 +1680,11 @@ mod tests {
 
         let invalidations = fs.changed_known_entries_for_root(&new_root);
 
-        assert!(invalidations.contains(&FuseInvalidation::Inode { inode: ROOT_INODE }));
         assert!(invalidations.contains(&FuseInvalidation::Entry {
             parent: ROOT_INODE,
             name: "old.txt".to_string(),
         }));
-        assert!(invalidations.contains(&FuseInvalidation::Inode {
-            inode: old_file.inode
-        }));
-        assert_eq!(invalidations.len(), 4);
+        assert_eq!(invalidations.len(), 2);
     }
 
     #[cfg(feature = "fuse")]
@@ -1675,18 +1715,18 @@ mod tests {
                 matches!(invalidation, FuseInvalidation::Delete { name, .. } if name == "old.txt")
             })
             .unwrap();
-        let parent_index = invalidations
+        let entry_index = invalidations
             .iter()
             .position(|invalidation| {
-                matches!(invalidation, FuseInvalidation::Inode { inode } if *inode == ROOT_INODE)
+                matches!(invalidation, FuseInvalidation::Entry { name, .. } if name == "old.txt")
             })
             .unwrap();
-        assert!(delete_index < parent_index);
+        assert!(entry_index < delete_index);
     }
 
     #[cfg(feature = "fuse")]
     #[tokio::test]
-    async fn test_replace_root_invalidates_changed_known_entry_by_name_and_inode() {
+    async fn test_replace_root_invalidates_changed_known_entry_by_name_and_new_inode() {
         let store = Arc::new(MemoryStore::new());
         let tree = HashTree::new(HashTreeConfig::new(store.clone()));
         let (old_blob, old_size) = tree.put(b"old").await.unwrap();
@@ -1717,9 +1757,12 @@ mod tests {
             parent: ROOT_INODE,
             name: "note.txt".to_string(),
         }));
-        assert!(invalidations.contains(&FuseInvalidation::Inode {
-            inode: old_file.inode,
-        }));
+        assert_eq!(invalidations.len(), 1);
+
+        fs.replace_root(new_root).unwrap();
+        let new_file = fs.lookup_child(ROOT_INODE, "note.txt").unwrap();
+        assert_ne!(old_file.inode, new_file.inode);
+        assert_eq!(fs.read_file(new_file.inode, 0, 3).unwrap(), b"new");
     }
 
     #[cfg(feature = "fuse")]
@@ -1787,7 +1830,6 @@ mod tests {
 
         let invalidations = fs.changed_known_entries_for_root(&new_root);
 
-        assert!(invalidations.contains(&FuseInvalidation::Inode { inode: ROOT_INODE }));
         assert!(invalidations.contains(&FuseInvalidation::Entry {
             parent: ROOT_INODE,
             name: "new.txt".to_string(),
