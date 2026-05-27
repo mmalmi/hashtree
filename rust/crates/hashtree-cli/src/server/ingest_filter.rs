@@ -65,6 +65,13 @@ pub fn looks_random(data: &[u8]) -> (bool, usize, usize) {
 }
 
 pub fn validate_untrusted_blob(data: &[u8], require_random: bool) -> Result<(), IngestRejection> {
+    if data.len() < MIN_CHK_SIZE {
+        return Err(IngestRejection {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            reason: "Blob too small".to_string(),
+        });
+    }
+
     if !require_random {
         return Ok(());
     }
@@ -76,13 +83,6 @@ pub fn validate_untrusted_blob(data: &[u8], require_random: bool) -> Result<(), 
     let (is_random, unique, threshold) = looks_random(data);
     if is_random {
         return Ok(());
-    }
-
-    if data.len() < MIN_CHK_SIZE {
-        return Err(IngestRejection {
-            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            reason: "Blob too small".to_string(),
-        });
     }
 
     Err(IngestRejection {
@@ -167,5 +167,12 @@ mod tests {
     #[test]
     fn accepts_when_filter_disabled() {
         assert!(validate_untrusted_blob(&[0u8; 256], false).is_ok());
+    }
+
+    #[test]
+    fn disabled_filter_still_rejects_too_small_blobs() {
+        let err = validate_untrusted_blob(&[0u8; 12], false).expect_err("rejected");
+        assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(err.reason, "Blob too small");
     }
 }

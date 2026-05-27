@@ -106,12 +106,12 @@ fn can_accept_upload_author(state: &AppState, pubkey: &str) -> bool {
 fn validate_upload_payload(
     body: &[u8],
     content_type: &str,
-    is_allowed_writer: bool,
+    can_upload_author: bool,
     require_random_untrusted_ingest: bool,
 ) -> Result<(), (StatusCode, String)> {
     let is_chk_upload = is_chk_content_type(content_type);
 
-    if !is_chk_upload && !is_allowed_writer {
+    if !is_chk_upload && !can_upload_author {
         return Err((
             StatusCode::FORBIDDEN,
             "Raw media uploads require write access".to_string(),
@@ -119,7 +119,8 @@ fn validate_upload_payload(
     }
 
     if is_chk_upload {
-        validate_untrusted_blob(body, require_random_untrusted_ingest)
+        let require_random = require_random_untrusted_ingest && !can_upload_author;
+        validate_untrusted_blob(body, require_random)
             .map_err(|IngestRejection { status, reason }| (status, reason))?;
     }
 
@@ -919,7 +920,10 @@ pub async fn upload_blob_batch(
         return blossom_json_error(StatusCode::BAD_REQUEST, "Batch is empty");
     }
     if payload.blobs.len() > MAX_BATCH_UPLOAD_BLOBS {
-        return blossom_json_error(StatusCode::PAYLOAD_TOO_LARGE, "Batch contains too many blobs");
+        return blossom_json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Batch contains too many blobs",
+        );
     }
 
     let auth = match verify_blossom_auth(&headers, "upload", None) {
@@ -966,7 +970,10 @@ pub async fn upload_blob_batch(
             Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob hash"),
         };
         if !auth.blob_hashes.is_empty() && !auth.blob_hashes.contains(&sha256_hex) {
-            return blossom_json_error(StatusCode::FORBIDDEN, "Uploaded blob hash does not match authorized hash");
+            return blossom_json_error(
+                StatusCode::FORBIDDEN,
+                "Uploaded blob hash does not match authorized hash",
+            );
         }
 
         let data = match base64::engine::general_purpose::STANDARD.decode(blob.data.as_bytes()) {
@@ -974,11 +981,17 @@ pub async fn upload_blob_batch(
             Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob data"),
         };
         if data.len() > state.max_upload_bytes {
-            return blossom_json_error(StatusCode::PAYLOAD_TOO_LARGE, "Blob exceeds maximum upload size");
+            return blossom_json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Blob exceeds maximum upload size",
+            );
         }
         total_bytes = total_bytes.saturating_add(data.len());
         if total_bytes > MAX_BATCH_UPLOAD_BYTES {
-            return blossom_json_error(StatusCode::PAYLOAD_TOO_LARGE, "Batch exceeds maximum upload size");
+            return blossom_json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Batch exceeds maximum upload size",
+            );
         }
 
         let mut hasher = Sha256::new();
@@ -1670,6 +1683,24 @@ mod tests {
             Err((
                 StatusCode::FORBIDDEN,
                 "Raw media uploads require write access".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn authenticated_chk_uploads_skip_entropy_heuristic() {
+        let low_unique_block: Vec<u8> = (0..256).map(|i| (i % 139) as u8).collect();
+
+        assert_eq!(
+            validate_upload_payload(&low_unique_block, "application/octet-stream", true, true,),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_upload_payload(&low_unique_block, "application/octet-stream", false, true,),
+            Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Data not encrypted. Unique: 139 (min: 140)".to_string(),
             ))
         );
     }
