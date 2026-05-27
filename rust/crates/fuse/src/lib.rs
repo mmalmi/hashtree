@@ -186,6 +186,23 @@ impl<S: Store> HashtreeFuse<S> {
 
     pub fn replace_root(&self, root: Cid) -> Result<(), FsError> {
         let _guard = self.modify_lock.lock().unwrap();
+        self.replace_root_locked(root)
+    }
+
+    pub fn replace_root_if_current(
+        &self,
+        expected_current: &Cid,
+        root: Cid,
+    ) -> Result<bool, FsError> {
+        let _guard = self.modify_lock.lock().unwrap();
+        if self.current_root() != *expected_current {
+            return Ok(false);
+        }
+        self.replace_root_locked(root)?;
+        Ok(true)
+    }
+
+    fn replace_root_locked(&self, root: Cid) -> Result<(), FsError> {
         let is_dir = block_on(self.tree.get_directory_node(&root))?.is_some();
         if !is_dir {
             return Err(FsError::InvalidRoot);
@@ -1665,6 +1682,44 @@ mod tests {
         assert_ne!(old_lookup.inode, new_lookup.inode);
         assert_eq!(fs.read_file(new_lookup.inode, 0, 3).unwrap(), b"new");
         assert!(publisher.updates().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_replace_root_if_current_preserves_dirty_root() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let root = empty_root(store.clone()).await;
+        let fs = HashtreeFuse::new(store, root.clone()).unwrap();
+
+        let local = fs.create_file(ROOT_INODE, "local.txt").unwrap();
+        fs.write_file(local.inode, 0, b"local").unwrap();
+        let dirty_root = fs.current_root();
+
+        let (remote_blob, remote_size) = tree.put(b"remote").await.unwrap();
+        let remote_root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid(
+                "remote.txt",
+                &remote_blob,
+            )
+            .with_size(remote_size)
+            .with_link_type(LinkType::Blob)])
+            .await
+            .unwrap();
+
+        let replaced = fs
+            .replace_root_if_current(&root, remote_root.clone())
+            .unwrap();
+
+        assert!(!replaced);
+        assert_eq!(fs.current_root(), dirty_root);
+        assert!(fs.lookup_child(ROOT_INODE, "local.txt").is_ok());
+        assert!(fs.lookup_child(ROOT_INODE, "remote.txt").is_err());
+
+        let replaced = fs
+            .replace_root_if_current(&dirty_root, remote_root.clone())
+            .unwrap();
+        assert!(replaced);
+        assert_eq!(fs.current_root(), remote_root);
     }
 
     #[cfg(feature = "fuse")]
