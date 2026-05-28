@@ -93,6 +93,7 @@ fn event_identifier(event: &Event) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn pick_latest_event<'a, I>(events: I) -> Option<&'a Event>
 where
     I: IntoIterator<Item = &'a Event>,
@@ -131,6 +132,70 @@ fn publish_succeeded(success_count: usize) -> bool {
     success_count > 0
 }
 
+/// A Nostr event whose id and Schnorr signature have been checked locally.
+#[derive(Debug, Clone)]
+pub struct VerifiedEvent(Event);
+
+impl VerifiedEvent {
+    pub fn as_event(&self) -> &Event {
+        &self.0
+    }
+
+    pub fn into_event(self) -> Event {
+        self.0
+    }
+
+    fn id(&self) -> EventId {
+        self.0.id
+    }
+
+    fn created_at(&self) -> Timestamp {
+        self.0.created_at
+    }
+}
+
+impl TryFrom<Event> for VerifiedEvent {
+    type Error = String;
+
+    fn try_from(event: Event) -> Result<Self, Self::Error> {
+        event
+            .verify()
+            .map_err(|err| format!("Nostr event verification failed: {err}"))?;
+        Ok(Self(event))
+    }
+}
+
+impl AsRef<Event> for VerifiedEvent {
+    fn as_ref(&self) -> &Event {
+        self.as_event()
+    }
+}
+
+fn verify_events<I>(events: I) -> Vec<VerifiedEvent>
+where
+    I: IntoIterator<Item = Event>,
+{
+    events
+        .into_iter()
+        .filter_map(|event| VerifiedEvent::try_from(event).ok())
+        .collect()
+}
+
+fn pick_latest_verified_event<'a, I>(events: I) -> Option<&'a VerifiedEvent>
+where
+    I: IntoIterator<Item = &'a VerifiedEvent>,
+{
+    // NIP-16/NIP-33 ordering: newest created_at, then larger event id.
+    events
+        .into_iter()
+        .max_by_key(|event| (event.created_at(), event.id()))
+}
+
+fn is_matching_tree_event(event: &VerifiedEvent, tree_name: &str) -> bool {
+    let event = event.as_event();
+    event_identifier(event).as_deref() == Some(tree_name) && is_hashtree_event(event)
+}
+
 async fn await_publish_result<F, T, E>(future: F) -> Result<T, ResolverError>
 where
     F: Future<Output = Result<T, E>> + Send + 'static,
@@ -151,13 +216,18 @@ where
     }
 }
 
-fn upsert_latest_by_d_tag<'a>(entries_by_d_tag: &mut HashMap<String, &'a Event>, event: &'a Event) {
-    let Some(d_tag) = event_identifier(event) else {
+fn upsert_latest_by_d_tag<'a>(
+    entries_by_d_tag: &mut HashMap<String, &'a VerifiedEvent>,
+    event: &'a VerifiedEvent,
+) {
+    let Some(d_tag) = event_identifier(event.as_event()) else {
         return;
     };
 
     let should_replace = match entries_by_d_tag.get(&d_tag) {
-        Some(existing) => is_newer_event(event, existing.created_at, Some(existing.id)),
+        Some(existing) => {
+            is_newer_event(event.as_event(), existing.created_at(), Some(existing.id()))
+        }
         None => true,
     };
 
@@ -269,7 +339,10 @@ impl NostrRootResolver {
         Self::cid_from_event_with_keys(event, self.config.secret_key.as_ref())
     }
 
-    async fn fetch_events_from_relays(&self, filter: Filter) -> Result<Vec<Event>, ResolverError> {
+    async fn fetch_verified_events_from_relays(
+        &self,
+        filter: Filter,
+    ) -> Result<Vec<VerifiedEvent>, ResolverError> {
         if self.config.relays.is_empty() {
             return Ok(Vec::new());
         }
@@ -293,7 +366,7 @@ impl NostrRootResolver {
             });
         }
 
-        let mut events_by_id: HashMap<EventId, Event> = HashMap::new();
+        let mut events_by_id: HashMap<EventId, VerifiedEvent> = HashMap::new();
         let mut successful_relays = 0usize;
         let mut errors = Vec::new();
         let mut soft_timeout_elapsed = false;
@@ -309,8 +382,8 @@ impl NostrRootResolver {
                     match joined {
                         Ok((relay, Ok(events))) => {
                             successful_relays += 1;
-                            for event in events {
-                                events_by_id.entry(event.id).or_insert(event);
+                            for event in verify_events(events) {
+                                events_by_id.entry(event.id()).or_insert(event);
                             }
                             let _ = relay;
                         }
@@ -358,12 +431,14 @@ impl NostrRootResolver {
         tree_name: &str,
     ) -> Result<Option<Timestamp>, ResolverError> {
         let events = self
-            .fetch_events_from_relays(Self::build_tree_filter(pubkey, tree_name))
+            .fetch_verified_events_from_relays(Self::build_tree_filter(pubkey, tree_name))
             .await?;
-        Ok(pick_latest_event(events.iter().filter(|event| {
-            event_identifier(event).as_deref() == Some(tree_name) && is_hashtree_event(event)
-        }))
-        .map(|event| event.created_at))
+        Ok(pick_latest_verified_event(
+            events
+                .iter()
+                .filter(|event| is_matching_tree_event(event, tree_name)),
+        )
+        .map(|event| event.created_at()))
     }
 
     fn cid_from_event_with_keys(event: &Event, keys: Option<&Keys>) -> Option<Cid> {
@@ -597,15 +672,17 @@ impl RootResolver for NostrRootResolver {
         let filter = Self::build_tree_filter(pubkey, &tree_name);
 
         // Fetch events from relays
-        let events = self.fetch_events_from_relays(filter).await?;
+        let events = self.fetch_verified_events_from_relays(filter).await?;
 
-        let latest_event = pick_latest_event(events.iter().filter(|event| {
-            event_identifier(event).as_deref() == Some(&tree_name) && is_hashtree_event(event)
-        }));
+        let latest_event = pick_latest_verified_event(
+            events
+                .iter()
+                .filter(|event| is_matching_tree_event(event, &tree_name)),
+        );
 
         // Extract Cid from event tags
         match latest_event {
-            Some(event) => Ok(self.cid_from_event(event)),
+            Some(event) => Ok(self.cid_from_event(event.as_event())),
             None => Ok(None),
         }
     }
@@ -619,14 +696,16 @@ impl RootResolver for NostrRootResolver {
 
         let filter = Self::build_tree_filter(pubkey, &tree_name);
 
-        let events = self.fetch_events_from_relays(filter).await?;
+        let events = self.fetch_verified_events_from_relays(filter).await?;
 
-        let latest_event = pick_latest_event(events.iter().filter(|event| {
-            event_identifier(event).as_deref() == Some(&tree_name) && is_hashtree_event(event)
-        }));
+        let latest_event = pick_latest_verified_event(
+            events
+                .iter()
+                .filter(|event| is_matching_tree_event(event, &tree_name)),
+        );
 
         match latest_event {
-            Some(event) => Ok(Self::cid_from_event_shared(event, share_secret)),
+            Some(event) => Ok(Self::cid_from_event_shared(event.as_event(), share_secret)),
             None => Ok(None),
         }
     }
@@ -684,23 +763,27 @@ impl RootResolver for NostrRootResolver {
 
             while let Ok(notification) = notifications.recv().await {
                 if let RelayPoolNotification::Event { event, .. } = notification {
-                    if event_identifier(&event).as_deref() != Some(&tree_name_clone) {
+                    let Ok(event) = VerifiedEvent::try_from(*event) else {
                         continue;
-                    }
+                    };
 
-                    if !is_hashtree_event(&event) {
+                    if !is_matching_tree_event(&event, &tree_name_clone) {
                         continue;
                     }
 
                     let mut subs = subscriptions.write().await;
                     if let Some(sub) = subs.get_mut(&key_clone) {
                         let new_cid = NostrRootResolver::cid_from_event_with_keys(
-                            &event,
+                            event.as_event(),
                             secret_key.as_ref(),
                         );
-                        if is_newer_event(&event, sub.latest_created_at, sub.latest_event_id) {
-                            sub.latest_created_at = event.created_at;
-                            sub.latest_event_id = Some(event.id);
+                        if is_newer_event(
+                            event.as_event(),
+                            sub.latest_created_at,
+                            sub.latest_event_id,
+                        ) {
+                            sub.latest_created_at = event.created_at();
+                            sub.latest_event_id = Some(event.id());
 
                             if new_cid != sub.current_cid {
                                 sub.current_cid = new_cid.clone();
@@ -866,13 +949,13 @@ impl RootResolver for NostrRootResolver {
                 vec![HASHTREE_LABEL],
             );
 
-        let events = self.fetch_events_from_relays(filter).await?;
+        let events = self.fetch_verified_events_from_relays(filter).await?;
 
         // Deduplicate by d-tag, keeping latest event
-        let mut entries_by_d_tag: HashMap<String, &Event> = HashMap::new();
+        let mut entries_by_d_tag: HashMap<String, &VerifiedEvent> = HashMap::new();
 
         for event in events.iter() {
-            if !is_hashtree_event(event) {
+            if !is_hashtree_event(event.as_event()) {
                 continue;
             }
             upsert_latest_by_d_tag(&mut entries_by_d_tag, event);
@@ -881,7 +964,7 @@ impl RootResolver for NostrRootResolver {
         // Convert to entries
         let mut result = Vec::new();
         for (d_tag, event) in entries_by_d_tag {
-            if let Some(cid) = self.cid_from_event(event) {
+            if let Some(cid) = self.cid_from_event(event.as_event()) {
                 result.push(ResolverEntry {
                     key: format!("{}/{}", npub_str, d_tag),
                     cid,
@@ -921,12 +1004,17 @@ mod tests {
         }
 
         fn with_events_and_delay(events: Vec<Event>, response_delay: Duration) -> Self {
-            let stored_events = Arc::new(Mutex::new(
+            Self::with_event_values_and_delay(
                 events
                     .into_iter()
                     .map(|event| serde_json::to_value(event).expect("event to value"))
-                    .collect::<Vec<_>>(),
-            ));
+                    .collect(),
+                response_delay,
+            )
+        }
+
+        fn with_event_values_and_delay(events: Vec<Value>, response_delay: Duration) -> Self {
+            let stored_events = Arc::new(Mutex::new(events));
             let (shutdown, _) = broadcast::channel(1);
 
             let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind relay listener");
@@ -1217,6 +1305,24 @@ mod tests {
             .unwrap()
     }
 
+    fn tamper_event_hash(event: &Event, hash: &str) -> Event {
+        let mut value = serde_json::to_value(event).expect("event to value");
+        let tags = value
+            .get_mut("tags")
+            .and_then(Value::as_array_mut)
+            .expect("event tags");
+        for tag in tags {
+            let Some(tag) = tag.as_array_mut() else {
+                continue;
+            };
+            if tag.first().and_then(Value::as_str) == Some(TAG_HASH) {
+                tag[1] = Value::String(hash.to_string());
+                break;
+            }
+        }
+        serde_json::from_value(value).expect("tampered event from value")
+    }
+
     #[test]
     fn test_parse_key_valid() {
         // Generate a valid npub for testing
@@ -1344,17 +1450,73 @@ mod tests {
             "second",
         );
 
-        let mut by_tag: HashMap<String, &Event> = HashMap::new();
+        let first = VerifiedEvent::try_from(first).expect("first event is valid");
+        let second = VerifiedEvent::try_from(second).expect("second event is valid");
+        let mut by_tag: HashMap<String, &VerifiedEvent> = HashMap::new();
         upsert_latest_by_d_tag(&mut by_tag, &first);
         upsert_latest_by_d_tag(&mut by_tag, &second);
 
         let selected = by_tag.get("videos").unwrap();
-        let expected = if first.id > second.id {
-            first.id
+        let expected = if first.id() > second.id() {
+            first.id()
         } else {
-            second.id
+            second.id()
         };
-        assert_eq!(selected.id, expected);
+        assert_eq!(selected.id(), expected);
+    }
+
+    #[test]
+    fn test_verified_event_rejects_tampered_signature() {
+        let keys = Keys::generate();
+        let event = build_hashtree_event(
+            &keys,
+            "videos",
+            1_700_000_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+        );
+        let tampered = tamper_event_hash(
+            &event,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+
+        assert!(VerifiedEvent::try_from(event).is_ok());
+        assert!(VerifiedEvent::try_from(tampered).is_err());
+    }
+
+    #[test]
+    fn test_root_selection_ignores_invalid_newer_event() {
+        let keys = Keys::generate();
+        let valid_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let signed_newer = build_hashtree_event(
+            &keys,
+            "videos",
+            1_700_000_010,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "",
+        );
+        let invalid_newer = tamper_event_hash(
+            &signed_newer,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        );
+        let valid_older = build_hashtree_event(&keys, "videos", 1_700_000_000, valid_hash, "");
+
+        let verified = verify_events(vec![invalid_newer, valid_older.clone()]);
+        let selected = pick_latest_verified_event(
+            verified
+                .iter()
+                .filter(|event| is_matching_tree_event(event, "videos")),
+        )
+        .expect("valid older event should remain selectable");
+
+        assert_eq!(selected.id(), valid_older.id);
+        assert_eq!(
+            NostrRootResolver::cid_from_event_with_keys(selected.as_event(), None),
+            Some(Cid {
+                hash: from_hex(valid_hash).unwrap(),
+                key: None,
+            })
+        );
     }
 
     #[test]

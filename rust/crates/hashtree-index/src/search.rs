@@ -169,12 +169,16 @@ impl<S: hashtree_core::Store> SearchIndex<S> {
             } else {
                 format!("{prefix}{keyword}")
             };
-            let mut count = 0usize;
-            for (key, value) in self.btree.prefix(root, &search_prefix).await? {
+            for (count, (key, value)) in self
+                .btree
+                .prefix(root, &search_prefix)
+                .await?
+                .into_iter()
+                .enumerate()
+            {
                 if count >= limit.saturating_mul(2) {
                     break;
                 }
-                count += 1;
 
                 let Some((term, id)) = decode_search_key(prefix, &key) else {
                     continue;
@@ -313,12 +317,16 @@ impl<S: hashtree_core::Store> SearchIndex<S> {
             } else {
                 format!("{prefix}{keyword}")
             };
-            let mut count = 0usize;
-            for (key, cid) in self.btree.prefix_links(root, &search_prefix).await? {
+            for (count, (key, cid)) in self
+                .btree
+                .prefix_links(root, &search_prefix)
+                .await?
+                .into_iter()
+                .enumerate()
+            {
                 if count >= limit.saturating_mul(2) {
                     break;
                 }
-                count += 1;
 
                 let Some((term, id)) = decode_search_key(prefix, &key) else {
                     continue;

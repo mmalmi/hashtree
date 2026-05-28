@@ -69,6 +69,78 @@ pub struct StoredNostrEvent {
     pub sig: String,
 }
 
+/// A Nostr SDK event whose id and Schnorr signature have been checked locally.
+#[derive(Debug, Clone)]
+pub struct VerifiedEvent(Event);
+
+impl VerifiedEvent {
+    pub fn as_event(&self) -> &Event {
+        &self.0
+    }
+
+    pub fn into_event(self) -> Event {
+        self.0
+    }
+
+    pub fn to_stored_event(&self) -> VerifiedStoredNostrEvent {
+        VerifiedStoredNostrEvent {
+            event: stored_event_from_nostr_sdk_event(&self.0),
+        }
+    }
+}
+
+impl TryFrom<Event> for VerifiedEvent {
+    type Error = NostrEventStoreError;
+
+    fn try_from(event: Event) -> Result<Self, Self::Error> {
+        verify_nostr_sdk_event(&event)?;
+        Ok(Self(event))
+    }
+}
+
+impl AsRef<Event> for VerifiedEvent {
+    fn as_ref(&self) -> &Event {
+        self.as_event()
+    }
+}
+
+/// A stored Nostr event whose serialized event has been locally verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedStoredNostrEvent {
+    event: StoredNostrEvent,
+}
+
+impl VerifiedStoredNostrEvent {
+    pub fn as_stored(&self) -> &StoredNostrEvent {
+        &self.event
+    }
+
+    pub fn into_stored(self) -> StoredNostrEvent {
+        self.event
+    }
+
+    pub fn to_nostr_sdk_event(&self) -> Result<VerifiedEvent, NostrEventStoreError> {
+        VerifiedEvent::try_from(nostr_sdk_event_from_stored_event(&self.event)?)
+    }
+}
+
+impl TryFrom<StoredNostrEvent> for VerifiedStoredNostrEvent {
+    type Error = NostrEventStoreError;
+
+    fn try_from(event: StoredNostrEvent) -> Result<Self, Self::Error> {
+        let event = normalize_signed_event(event)?;
+        let sdk_event = nostr_sdk_event_from_stored_event(&event)?;
+        verify_nostr_sdk_event(&sdk_event)?;
+        Ok(Self { event })
+    }
+}
+
+impl AsRef<StoredNostrEvent> for VerifiedStoredNostrEvent {
+    fn as_ref(&self) -> &StoredNostrEvent {
+        self.as_stored()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedHashtreeRootEvent {
     pub event: StoredNostrEvent,
@@ -340,6 +412,19 @@ pub fn stored_event_from_nostr_sdk_event(event: &Event) -> StoredNostrEvent {
     }
 }
 
+fn nostr_sdk_event_from_stored_event(
+    event: &StoredNostrEvent,
+) -> Result<Event, NostrEventStoreError> {
+    let bytes = serde_json::to_vec(event)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn verify_nostr_sdk_event(event: &Event) -> Result<(), NostrEventStoreError> {
+    event.verify().map_err(|err| {
+        NostrEventStoreError::Validation(format!("signature verification failed: {err}"))
+    })
+}
+
 pub fn parse_hashtree_root_event(
     event: &StoredNostrEvent,
 ) -> Result<Option<ParsedHashtreeRootEvent>, NostrEventStoreError> {
@@ -447,10 +532,8 @@ pub fn parse_hashtree_root_event(
 pub fn parse_verified_hashtree_root_event(
     event: &Event,
 ) -> Result<Option<ParsedHashtreeRootEvent>, NostrEventStoreError> {
-    event.verify().map_err(|err| {
-        NostrEventStoreError::Validation(format!("signature verification failed: {err}"))
-    })?;
-    parse_hashtree_root_event(&stored_event_from_nostr_sdk_event(event))
+    let verified = VerifiedEvent::try_from(event.clone())?;
+    parse_hashtree_root_event(verified.to_stored_event().as_stored())
 }
 
 pub fn resolve_self_encrypted_root_cid(
@@ -561,7 +644,7 @@ fn nostr_collection_definition() -> CollectionDefinition<StoredNostrEvent> {
             vec![kind_time_author_key(event)]
         })
         .with_key_index(MANIFEST_BY_TIME, |event| vec![time_key(event)])
-        .with_key_index(MANIFEST_BY_TAG, |event| tag_keys(event))
+        .with_key_index(MANIFEST_BY_TAG, tag_keys)
         .with_key_index(MANIFEST_REPLACEABLE, |event| {
             if is_replaceable_kind(event.kind) {
                 vec![replaceable_key(&event.pubkey, event.kind)]
@@ -662,6 +745,13 @@ impl<S: Store> NostrEventStore<S> {
 
     pub fn decode_event(&self, data: &[u8]) -> Result<StoredNostrEvent, NostrEventStoreError> {
         self.validate_event_shape(decode_stored_event_msgpack(data)?)
+    }
+
+    pub fn decode_verified_event(
+        &self,
+        data: &[u8],
+    ) -> Result<VerifiedStoredNostrEvent, NostrEventStoreError> {
+        VerifiedStoredNostrEvent::try_from(self.decode_event(data)?)
     }
 
     pub async fn validate_index_root(
@@ -883,6 +973,17 @@ impl<S: Store> NostrEventStore<S> {
             Err(err) if is_missing_stored_event_error(&err) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    pub async fn get_verified_by_id(
+        &self,
+        root: Option<&Cid>,
+        event_id: &str,
+    ) -> Result<Option<VerifiedStoredNostrEvent>, NostrEventStoreError> {
+        self.get_by_id(root, event_id)
+            .await?
+            .map(VerifiedStoredNostrEvent::try_from)
+            .transpose()
     }
 
     pub async fn list_by_author(

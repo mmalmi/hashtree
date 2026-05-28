@@ -1364,9 +1364,9 @@ impl HashtreeStore {
         if items.is_empty() {
             return Ok(0);
         }
-        let incoming_bytes = items
-            .iter()
-            .fold(0u64, |total, (_, data)| total.saturating_add(data.len() as u64));
+        let incoming_bytes = items.iter().fold(0u64, |total, (_, data)| {
+            total.saturating_add(data.len() as u64)
+        });
         let count = items.len();
         let room_started = Instant::now();
         self.make_room_for_durable_blob(incoming_bytes)?;
@@ -1396,8 +1396,11 @@ impl HashtreeStore {
                     mime_type: "application/octet-stream".to_string(),
                     uploaded: now,
                 };
-                self.pubkey_blob_index
-                    .put(&mut wtxn, &index_key[..], &serde_json::to_vec(&metadata)?)?;
+                self.pubkey_blob_index.put(
+                    &mut wtxn,
+                    &index_key[..],
+                    &serde_json::to_vec(&metadata)?,
+                )?;
             }
         }
         wtxn.commit()?;
@@ -1488,9 +1491,9 @@ impl HashtreeStore {
             items
         };
 
-        let incoming_bytes = write_items
-            .iter()
-            .fold(0u64, |total, (_, data)| total.saturating_add(data.len() as u64));
+        let incoming_bytes = write_items.iter().fold(0u64, |total, (_, data)| {
+            total.saturating_add(data.len() as u64)
+        });
         let room_started = Instant::now();
         let _ = self.make_room_for_cached_blob(incoming_bytes);
         let make_room_ms = room_started.elapsed().as_millis();
@@ -1518,12 +1521,18 @@ impl HashtreeStore {
                 Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
                     let freed = self.relieve_cached_blob_write_pressure(incoming_bytes)?;
                     if freed == 0 {
-                        return Err(anyhow::anyhow!("Failed to store cached blob batch: {}", err));
+                        return Err(anyhow::anyhow!(
+                            "Failed to store cached blob batch: {}",
+                            err
+                        ));
                     }
                     retried_after_cleanup = true;
                 }
                 Err(err) => {
-                    return Err(anyhow::anyhow!("Failed to store cached blob batch: {}", err));
+                    return Err(anyhow::anyhow!(
+                        "Failed to store cached blob batch: {}",
+                        err
+                    ));
                 }
             }
         }
@@ -1624,8 +1633,11 @@ impl HashtreeStore {
                 mime_type: "application/octet-stream".to_string(),
                 uploaded: now,
             };
-            self.pubkey_blob_index
-                .put(&mut wtxn, &index_key[..], &serde_json::to_vec(&metadata)?)?;
+            self.pubkey_blob_index.put(
+                &mut wtxn,
+                &index_key[..],
+                &serde_json::to_vec(&metadata)?,
+            )?;
         }
 
         wtxn.commit()?;
@@ -2583,8 +2595,14 @@ mod tests {
         assert_eq!(owned_blobs[0].sha256, to_hex(&owned_hash));
 
         let batch = [
-            (sha256(b"owned blossom batch 1"), b"owned blossom batch 1".to_vec()),
-            (sha256(b"owned blossom batch 2"), b"owned blossom batch 2".to_vec()),
+            (
+                sha256(b"owned blossom batch 1"),
+                b"owned blossom batch 1".to_vec(),
+            ),
+            (
+                sha256(b"owned blossom batch 2"),
+                b"owned blossom batch 2".to_vec(),
+            ),
         ];
         store.put_owned_blobs(&batch, &owner)?;
         let owned_blobs = store.list_blobs_by_pubkey(&owner)?;

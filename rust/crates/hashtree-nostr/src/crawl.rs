@@ -664,6 +664,7 @@ impl<S: Store> NostrBridge<S> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn crawl_full_author_history_batch(
         &self,
         client: &Client,
@@ -1102,6 +1103,7 @@ impl<S: Store> NostrBridge<S> {
         Ok(pending_apply)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn hydrate_global_recent_profiles(
         &self,
         client: &Client,

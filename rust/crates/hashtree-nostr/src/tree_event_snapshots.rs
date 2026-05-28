@@ -159,9 +159,7 @@ fn extract_permalink_candidate(input: &str) -> String {
 
     if let Some(scheme_index) = trimmed.find("://") {
         let rest = &trimmed[scheme_index + 3..];
-        let host_end = rest
-            .find(|ch| matches!(ch, '/' | '?' | '#'))
-            .unwrap_or(rest.len());
+        let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let host = &rest[..host_end];
         if host.is_empty() {
             return String::new();
@@ -297,7 +295,6 @@ pub fn parse_tree_event_snapshot_permalink(input: &str) -> Option<TreeEventSnaps
 
     let (path_part, query_part) = candidate
         .split_once('?')
-        .map(|(path, query)| (path, query))
         .unwrap_or((candidate.as_str(), ""));
     let mut parts = path_part
         .trim_start_matches('/')

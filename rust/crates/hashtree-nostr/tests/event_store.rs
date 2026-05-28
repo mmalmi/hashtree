@@ -9,10 +9,11 @@ use hashtree_nostr::{
     build_private_hashtree_root_event, decode_signed_event_json, decode_stored_event_msgpack,
     encode_signed_event_json, encode_stored_event_msgpack, parse_hashtree_root_event,
     parse_verified_hashtree_root_event, read_signed_event_snapshot,
-    resolve_self_encrypted_root_cid, store_signed_event_snapshot, ListEventsOptions,
-    NostrEventStore, StoredNostrEvent,
+    resolve_self_encrypted_root_cid, store_signed_event_snapshot,
+    stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventStore, StoredNostrEvent,
+    VerifiedEvent, VerifiedStoredNostrEvent,
 };
-use nostr_sdk::{JsonUtil, Keys};
+use nostr_sdk::{EventBuilder, JsonUtil, Keys, Kind};
 
 fn event(
     id: &str,
@@ -604,6 +605,39 @@ fn resolving_private_hashtree_root_requires_matching_owner_key() {
         .expect("hashtree root");
 
     assert!(resolve_self_encrypted_root_cid(&parsed, &other).is_err());
+}
+
+#[test]
+fn verified_event_types_reject_tampered_signatures() {
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "release root", vec![])
+        .to_event(&keys)
+        .expect("signed event");
+    let mut tampered = event.clone();
+    tampered.content = "tampered release root".to_string();
+
+    assert!(VerifiedEvent::try_from(event.clone()).is_ok());
+    assert!(VerifiedEvent::try_from(tampered.clone()).is_err());
+
+    let stored = stored_event_from_nostr_sdk_event(&tampered);
+    assert!(VerifiedStoredNostrEvent::try_from(stored).is_err());
+}
+
+#[test]
+fn event_store_can_decode_verified_events_from_storage_bytes() {
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "stored event", vec![])
+        .to_event(&keys)
+        .expect("signed event");
+    let stored = stored_event_from_nostr_sdk_event(&event);
+    let encoded = encode_stored_event_msgpack(&stored).expect("encode event");
+    let store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+
+    let verified = store
+        .decode_verified_event(&encoded)
+        .expect("decode verified event");
+
+    assert_eq!(verified.as_stored(), &stored);
 }
 
 #[test]

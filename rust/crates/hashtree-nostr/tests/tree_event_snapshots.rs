@@ -48,7 +48,7 @@ fn snapshot(overrides: impl FnOnce(&mut TreeEventSnapshotInfo)) -> TreeEventSnap
             key: None,
         },
         snapshot_nhash: nhash_encode(&snapshot_hash).expect("snapshot nhash"),
-        npub: PublicKey::from_hex(&"2".repeat(64))
+        npub: PublicKey::from_hex("2".repeat(64))
             .expect("pubkey")
             .to_bech32()
             .expect("npub"),
