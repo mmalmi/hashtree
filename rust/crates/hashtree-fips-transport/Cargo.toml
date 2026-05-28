@@ -15,7 +15,7 @@ webrtc = ["fips-core/webrtc-transport"]
 
 [dependencies]
 async-trait.workspace = true
-fips-core = { version = "0.3.18", path = "../../../../fips/crates/fips-core" }
+fips-core = { version = "0.3.22", path = "../../../../fips/crates/fips-core" }
 hashtree-core.workspace = true
 hashtree-network.workspace = true
 hex.workspace = true
