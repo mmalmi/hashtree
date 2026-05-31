@@ -53,6 +53,18 @@ pub struct FipsRelayStatus {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FipsPeerStatus {
+    pub npub: String,
+    pub transport_addr: Option<String>,
+    pub transport_type: Option<String>,
+    pub srtt_ms: Option<u64>,
+    pub packets_sent: u64,
+    pub packets_recv: u64,
+    pub bytes_sent: u64,
+    pub bytes_recv: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum FipsTransportError {
     #[error("endpoint failed: {0}")]
@@ -102,6 +114,9 @@ pub trait FipsEndpointIo: Send + Sync {
         Ok(())
     }
     async fn peer_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn peer_statuses(&self) -> Vec<FipsPeerStatus> {
         Vec::new()
     }
     async fn relay_statuses(&self) -> Vec<FipsRelayStatus> {
@@ -321,6 +336,25 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
     async fn peer_ids(&self) -> Vec<String> {
         match self.peers().await {
             Ok(peers) => peers.into_iter().map(|peer| peer.npub).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    async fn peer_statuses(&self) -> Vec<FipsPeerStatus> {
+        match self.peers().await {
+            Ok(peers) => peers
+                .into_iter()
+                .map(|peer| FipsPeerStatus {
+                    npub: peer.npub,
+                    transport_addr: peer.transport_addr,
+                    transport_type: peer.transport_type,
+                    srtt_ms: peer.srtt_ms,
+                    packets_sent: peer.packets_sent,
+                    packets_recv: peer.packets_recv,
+                    bytes_sent: peer.bytes_sent,
+                    bytes_recv: peer.bytes_recv,
+                })
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -755,6 +789,10 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
 
     pub async fn connected_peer_ids(&self) -> Vec<String> {
         self.endpoint.peer_ids().await
+    }
+
+    pub async fn peer_statuses(&self) -> Vec<FipsPeerStatus> {
+        self.endpoint.peer_statuses().await
     }
 
     pub async fn relay_statuses(&self) -> Vec<FipsRelayStatus> {
@@ -1572,6 +1610,7 @@ mod tests {
         rx: Mutex<mpsc::UnboundedReceiver<FipsEndpointPacket>>,
         configured_peers: Mutex<Vec<String>>,
         configured_peer_configs: Mutex<Vec<FipsPeerConfig>>,
+        peer_statuses: Mutex<Vec<FipsPeerStatus>>,
         sent: AtomicUsize,
         drop_next: AtomicUsize,
     }
@@ -1589,6 +1628,7 @@ mod tests {
                 rx: Mutex::new(rx),
                 configured_peers: Mutex::new(Vec::new()),
                 configured_peer_configs: Mutex::new(Vec::new()),
+                peer_statuses: Mutex::new(Vec::new()),
                 sent: AtomicUsize::new(0),
                 drop_next: AtomicUsize::new(0),
             })
@@ -1665,6 +1705,10 @@ mod tests {
                 .filter(|id| *id != &self.id)
                 .cloned()
                 .collect()
+        }
+
+        async fn peer_statuses(&self) -> Vec<FipsPeerStatus> {
+            self.peer_statuses.lock().await.clone()
         }
 
         fn local_peer_id(&self) -> Option<String> {
@@ -1826,6 +1870,37 @@ mod tests {
         assert!(transport.configured_peer_ids().await.is_empty());
         assert!(transport.peer_ids().await.is_empty());
         assert_eq!(transport.connected_peer_ids().await, vec!["bootstrap"]);
+    }
+
+    #[tokio::test]
+    async fn peer_statuses_expose_fips_endpoint_latency_snapshot() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        *endpoint.peer_statuses.lock().await = vec![FipsPeerStatus {
+            npub: "remote".to_string(),
+            transport_addr: Some("udp:10.44.1.2:2121".to_string()),
+            transport_type: Some("udp".to_string()),
+            srtt_ms: Some(23),
+            packets_sent: 5,
+            packets_recv: 7,
+            bytes_sent: 512,
+            bytes_recv: 1024,
+        }];
+        let transport = HashtreeFipsTransport::new(endpoint, Arc::new(MemoryStore::new()));
+
+        assert_eq!(
+            transport.peer_statuses().await,
+            vec![FipsPeerStatus {
+                npub: "remote".to_string(),
+                transport_addr: Some("udp:10.44.1.2:2121".to_string()),
+                transport_type: Some("udp".to_string()),
+                srtt_ms: Some(23),
+                packets_sent: 5,
+                packets_recv: 7,
+                bytes_sent: 512,
+                bytes_recv: 1024,
+            }]
+        );
     }
 
     #[tokio::test]

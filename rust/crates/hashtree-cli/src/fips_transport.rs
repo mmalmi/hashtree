@@ -45,22 +45,21 @@ pub async fn start_daemon_fips_transport(
         .secret_key()
         .to_bech32()
         .context("Failed to encode daemon identity for FIPS endpoint")?;
-    let endpoint = bind_fips_endpoint(FipsEndpointOptions {
-        identity_nsec,
-        discovery_scope: discovery_scope.clone(),
-        relays,
-        enable_udp: config.server.enable_fips_udp,
-        enable_webrtc: config.server.enable_fips_webrtc,
-        udp_bind_addr: config.server.fips_udp_bind_addr.clone(),
-        udp_public: config.server.fips_udp_public,
-        udp_external_addr: config.server.fips_udp_external_addr.clone(),
-        webrtc_auto_connect: false,
-        webrtc_max_connections: hashtree_fips_transport::DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS,
-        open_discovery_max_pending: 0,
-        packet_channel_capacity: 1024,
-    })
-    .await
-    .context("Failed to start FIPS endpoint")?;
+    let mut options = FipsEndpointOptions::new(identity_nsec);
+    options.discovery_scope = discovery_scope.clone();
+    options.relays = relays;
+    options.enable_udp = config.server.enable_fips_udp;
+    options.enable_webrtc = config.server.enable_fips_webrtc;
+    options.udp_bind_addr = config.server.fips_udp_bind_addr.clone();
+    options.udp_public = config.server.fips_udp_public;
+    options.udp_external_addr = config.server.fips_udp_external_addr.clone();
+    options.webrtc_auto_connect = false;
+    options.webrtc_max_connections = hashtree_fips_transport::DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS;
+    options.open_discovery_max_pending = 0;
+    options.packet_channel_capacity = 1024;
+    let endpoint = bind_fips_endpoint(options)
+        .await
+        .context("Failed to start FIPS endpoint")?;
 
     let request_timeout = Duration::from_millis(config.server.fips_request_timeout_ms.max(1));
     let transport = Arc::new(
