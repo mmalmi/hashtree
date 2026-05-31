@@ -12,6 +12,7 @@ description = "FUSE filesystem mount for hashtree content-addressed trees"
 hashtree-core.workspace = true
 thiserror.workspace = true
 futures.workspace = true
+serde_json.workspace = true
 
 [features]
 default = []

@@ -1332,6 +1332,22 @@ impl<S: Store> HashTree<S> {
         size: u64,
         link_type: LinkType,
     ) -> Result<Cid, HashTreeError> {
+        self.set_entry_with_meta(root, path, name, entry_cid, size, link_type, None)
+            .await
+    }
+
+    /// Add or update an entry in a directory with optional link metadata.
+    /// Returns new root Cid (immutable operation)
+    pub async fn set_entry_with_meta(
+        &self,
+        root: &Cid,
+        path: &[&str],
+        name: &str,
+        entry_cid: &Cid,
+        size: u64,
+        link_type: LinkType,
+        meta: Option<std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Result<Cid, HashTreeError> {
         let dir_cid = self.resolve_path_array(root, path).await?;
         let dir_cid = dir_cid.ok_or_else(|| HashTreeError::PathNotFound(path.join("/")))?;
 
@@ -1355,7 +1371,7 @@ impl<S: Store> HashTree<S> {
             size,
             key: entry_cid.key,
             link_type,
-            meta: None,
+            meta,
         });
 
         let new_dir_cid = self.put_directory(new_entries).await?;

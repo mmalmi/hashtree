@@ -4,12 +4,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::executor::block_on;
-use hashtree_core::{Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Store};
+use hashtree_core::{
+    sha256, to_hex, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Store,
+};
 use thiserror::Error;
 
 pub const ROOT_INODE: u64 = 1;
 // Virtual entry used only to wake Linux directory monitors after remote root updates.
 pub const DIRECTORY_REFRESH_SENTINEL_NAME: &str = "iris-drive-refresh";
+const WHOLE_FILE_HASH_META_KEY: &str = "whole_file_hash";
 
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -87,6 +90,7 @@ struct ResolvedEntry {
     cid: Cid,
     link_type: LinkType,
     size: u64,
+    meta: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[cfg(feature = "fuse")]
@@ -539,13 +543,15 @@ impl<S: Store> HashtreeFuse<S> {
 
         let (cid, size) = block_on(self.tree.put(&[]))?;
         let link_type = self.link_type_for_size(size);
-        let new_root = block_on(self.tree.set_entry(
+        let meta = Self::file_entry_meta(&[]);
+        let new_root = block_on(self.tree.set_entry_with_meta(
             &self.current_root(),
             &self.path_refs(&parent_path),
             name,
             &cid,
             size,
             link_type,
+            Some(meta),
         ))?;
 
         self.apply_root_update(new_root)?;
@@ -700,13 +706,14 @@ impl<S: Store> HashtreeFuse<S> {
         old_path.push(name.to_string());
         let entry = self.resolve_entry(&old_path)?;
 
-        let new_root = block_on(self.tree.set_entry(
+        let new_root = block_on(self.tree.set_entry_with_meta(
             &self.current_root(),
             &self.path_refs(&new_parent_path),
             new_name,
             &entry.cid,
             entry.size,
             entry.link_type,
+            entry.meta.clone(),
         ))?;
         let new_root = block_on(self.tree.remove_entry(
             &new_root,
@@ -788,6 +795,7 @@ impl<S: Store> HashtreeFuse<S> {
                 cid: root.clone(),
                 link_type: LinkType::Dir,
                 size: 0,
+                meta: None,
             });
         }
 
@@ -806,6 +814,7 @@ impl<S: Store> HashtreeFuse<S> {
             },
             link_type: entry.link_type,
             size: entry.size,
+            meta: entry.meta,
         })
     }
 
@@ -931,17 +940,26 @@ impl<S: Store> HashtreeFuse<S> {
         let (parent_path, name) = path.split_at(path.len() - 1);
         let (cid, size) = block_on(self.tree.put(&data))?;
         let link_type = self.link_type_for_size(size);
+        let meta = Self::file_entry_meta(&data);
 
-        let new_root = block_on(self.tree.set_entry(
+        let new_root = block_on(self.tree.set_entry_with_meta(
             &self.current_root(),
             &self.path_refs(parent_path),
             name[0].as_str(),
             &cid,
             size,
             link_type,
+            Some(meta),
         ))?;
 
         self.apply_root_update(new_root)
+    }
+
+    fn file_entry_meta(data: &[u8]) -> HashMap<String, serde_json::Value> {
+        HashMap::from([(
+            WHOLE_FILE_HASH_META_KEY.to_string(),
+            serde_json::Value::String(to_hex(&sha256(data))),
+        )])
     }
 
     fn apply_root_update(&self, new_root: Cid) -> Result<(), FsError> {
@@ -1566,7 +1584,7 @@ mod tests {
     async fn test_create_write_read_file() {
         let store = Arc::new(MemoryStore::new());
         let root = empty_root(store.clone()).await;
-        let fs = HashtreeFuse::new(store, root).unwrap();
+        let fs = HashtreeFuse::new(store.clone(), root).unwrap();
 
         let attr = fs.create_file(ROOT_INODE, "hello.txt").unwrap();
         assert_eq!(attr.kind, EntryKind::File);
@@ -1574,13 +1592,27 @@ mod tests {
         fs.write_file(attr.inode, 0, b"hello").unwrap();
         let read = fs.read_file(attr.inode, 0, 5).unwrap();
         assert_eq!(read, b"hello");
+
+        let tree = HashTree::new(HashTreeConfig::new(store));
+        let entries = tree.list_directory(&fs.current_root()).await.unwrap();
+        let file = entries
+            .iter()
+            .find(|entry| entry.name == "hello.txt")
+            .unwrap();
+        assert_eq!(
+            file.meta
+                .as_ref()
+                .and_then(|meta| meta.get("whole_file_hash"))
+                .and_then(serde_json::Value::as_str),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
     }
 
     #[tokio::test]
     async fn test_mkdir_and_rename() {
         let store = Arc::new(MemoryStore::new());
         let root = empty_root(store.clone()).await;
-        let fs = HashtreeFuse::new(store, root).unwrap();
+        let fs = HashtreeFuse::new(store.clone(), root).unwrap();
 
         let dir = fs.mkdir(ROOT_INODE, "docs").unwrap();
         let file = fs.create_file(dir.inode, "draft.txt").unwrap();
@@ -1592,6 +1624,26 @@ mod tests {
         let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
         assert!(names.contains(&"final.txt".to_string()));
         assert!(!names.contains(&"draft.txt".to_string()));
+
+        let tree = HashTree::new(HashTreeConfig::new(store));
+        let docs = tree
+            .resolve(&fs.current_root(), "docs")
+            .await
+            .unwrap()
+            .unwrap();
+        let entries = tree.list_directory(&docs).await.unwrap();
+        let file = entries
+            .iter()
+            .find(|entry| entry.name == "final.txt")
+            .unwrap();
+        let expected_hash = to_hex(&sha256(b"data"));
+        assert_eq!(
+            file.meta
+                .as_ref()
+                .and_then(|meta| meta.get("whole_file_hash"))
+                .and_then(serde_json::Value::as_str),
+            Some(expected_hash.as_str())
+        );
     }
 
     #[tokio::test]
