@@ -610,6 +610,7 @@ pub struct HashtreeFipsTransport<S: Store + Send + Sync + 'static = MemoryStore>
     local_store: Arc<S>,
     peers: Arc<RwLock<Vec<String>>>,
     peer_filter_configured: Arc<RwLock<bool>>,
+    unconfigured_app_message_topics: Vec<String>,
     pending: Arc<Mutex<HashMap<String, Vec<PendingRequest>>>>,
     response_fragments: Arc<Mutex<HashMap<String, ResponseReassembly>>>,
     app_fragments: Arc<Mutex<HashMap<String, AppReassembly>>>,
@@ -635,6 +636,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             local_store,
             peers: Arc::new(RwLock::new(Vec::new())),
             peer_filter_configured: Arc::new(RwLock::new(false)),
+            unconfigured_app_message_topics: Vec::new(),
             pending: Arc::new(Mutex::new(HashMap::new())),
             response_fragments: Arc::new(Mutex::new(HashMap::new())),
             app_fragments: Arc::new(Mutex::new(HashMap::new())),
@@ -673,6 +675,15 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
 
     pub fn with_cache_responses(mut self, cache_responses: bool) -> Self {
         self.cache_responses = cache_responses;
+        self
+    }
+
+    pub fn with_unconfigured_app_message_topics<T, I>(mut self, topics: I) -> Self
+    where
+        T: Into<String>,
+        I: IntoIterator<Item = T>,
+    {
+        self.unconfigured_app_message_topics = topics.into_iter().map(Into::into).collect();
         self
     }
 
@@ -873,7 +884,15 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
         let Some(message) = parse_message(&packet.data)? else {
             return Ok(());
         };
-        if !self.is_application_peer(&packet.peer_id).await {
+        let unconfigured_app_message_allowed = match &message {
+            Message::App(app) => self
+                .unconfigured_app_message_topics
+                .iter()
+                .any(|topic| topic == &app.t),
+            _ => false,
+        };
+        let is_application_peer = self.is_application_peer(&packet.peer_id).await;
+        if !is_application_peer && !unconfigured_app_message_allowed {
             return Ok(());
         }
         match message {
@@ -1892,6 +1911,52 @@ mod tests {
         assert_eq!(message.topic, "iris-drive/root/frame/v1");
         assert_eq!(message.data, data);
         assert!(endpoint_a.sent_count() > 1);
+    }
+
+    #[tokio::test]
+    async fn can_deliver_unconfigured_app_messages_without_serving_blocks() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint_a = FakeEndpoint::new("a", network.clone()).await;
+        let endpoint_b = FakeEndpoint::new("b", network).await;
+        let data = b"app-only peer".to_vec();
+        let hash = hash(&data);
+        let store_a = Arc::new(MemoryStore::new());
+        let store_b = Arc::new(MemoryStore::new());
+        store_b.put(hash, data.clone()).await.unwrap();
+        let transport_a = Arc::new(
+            HashtreeFipsTransport::new(endpoint_a, store_a)
+                .with_request_timeout(Duration::from_millis(50)),
+        );
+        let transport_b = Arc::new(
+            HashtreeFipsTransport::new(endpoint_b, store_b)
+                .with_unconfigured_app_message_topics(["iris-drive/device-link/v1/request"]),
+        );
+        let mut app_messages = transport_b.subscribe_app_messages();
+        transport_a.start();
+        transport_b.start();
+        transport_b
+            .set_peers(vec!["configured-peer".to_string()])
+            .await;
+
+        transport_a
+            .send_app_message("b", "iris-drive/device-link/v1/request", b"join".to_vec())
+            .await
+            .unwrap();
+
+        let message = timeout(Duration::from_millis(100), app_messages.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.peer_id, "a");
+        assert_eq!(message.topic, "iris-drive/device-link/v1/request");
+        assert_eq!(message.data, b"join");
+        assert_eq!(
+            transport_a
+                .get_from_peers(&hash, &["b".to_string()])
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
