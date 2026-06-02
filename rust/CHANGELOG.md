@@ -6,6 +6,9 @@
 
 - Changed `htree release publish --draft` to update the sibling `draft`
   pointer while leaving the stable `latest` pointer unchanged.
+- Changed `git-remote-htree` fast-forward pushes to merge deltas with the
+  cached remote root directly, so normal pushes no longer report a
+  cached-root repair before uploading the new tree.
 
 ## 0.2.55 - 2026-05-22
 

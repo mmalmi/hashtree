@@ -200,6 +200,100 @@ impl RemoteHelper {
         Ok(result?)
     }
 
+    fn build_tree_with_cached_remote_root(
+        &self,
+        label: &str,
+        delta_base: Option<&str>,
+    ) -> Result<Option<hashtree_core::Cid>> {
+        let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() else {
+            return Ok(None);
+        };
+
+        if self.is_slow() {
+            eprintln!("  {label}...");
+        }
+
+        let encryption_key = self
+            .nostr
+            .get_cached_encryption_key(&self.repo_name)
+            .copied();
+        let (cached_tree, _) = self.build_cached_fetch_tree()?;
+        let root_bytes = hex::decode(&root_hash).context("Invalid cached root hash hex")?;
+        let root_arr: [u8; 32] = root_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Cached root hash must be 32 bytes"))?;
+        let cached_root_cid = hashtree_core::Cid {
+            hash: root_arr,
+            key: encryption_key,
+        };
+
+        self.build_tree_with_base_progress(
+            label,
+            Some(&cached_tree),
+            Some(&cached_root_cid),
+            delta_base,
+        )
+        .map(Some)
+    }
+
+    fn repair_delta_tree_build(
+        &mut self,
+        sha: &str,
+        dst_ref: &str,
+        base: &str,
+        reason_label: &str,
+        reason: String,
+    ) -> Result<hashtree_core::Cid> {
+        eprintln!(
+            "  {reason_label} ({}); hydrating existing remote objects from cached root",
+            reason
+        );
+        debug!(
+            "{} for {} via {}: {}. Hydrating cached remote objects before full local import.",
+            reason_label, dst_ref, base, reason
+        );
+
+        if let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() {
+            let existing_objects = self.fetch_all_git_objects(&root_hash)?;
+            eprintln!(
+                "  Importing {} cached remote object(s)",
+                existing_objects.len()
+            );
+            for (oid, content) in existing_objects {
+                self.storage.import_compressed_object(&oid, content)?;
+            }
+        }
+
+        match self.build_tree_with_progress("Retrying repo tree after cached-object hydration") {
+            Ok(root_cid) => Ok(root_cid),
+            Err(post_hydration_err) => {
+                eprintln!(
+                    "  Cached-root hydration still incomplete ({}); falling back to full local import",
+                    post_hydration_err
+                );
+                debug!(
+                    "Cached remote hydration still incomplete for {} via {}: {}. Falling back to full local import.",
+                    dst_ref, base, post_hydration_err
+                );
+
+                eprint!("  Listing objects...");
+                let _ = std::io::stderr().flush();
+                let objects = self.list_objects_to_push(sha, &[])?;
+                eprintln!(" {} objects", objects.len());
+
+                let objects_with_content = self.read_git_objects_batch(&objects)?;
+                eprintln!();
+
+                eprint!("  Writing to local store...");
+                let _ = std::io::stderr().flush();
+                Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+                eprintln!();
+
+                self.build_tree_with_progress("Building repo tree from repaired local store")
+            }
+        }
+    }
+
     /// Queue a push operation
     pub(super) fn queue_push(&mut self, arg: &str) -> Result<()> {
         // Format: [+]<src>:<dst>
@@ -571,7 +665,7 @@ impl RemoteHelper {
             .then(|| remote_tip_sha)
             .flatten()
             .map(str::to_string);
-        let mut objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
+        let objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
         if let Some(base) = delta_base.as_deref() {
             eprintln!(
                 " {} objects (delta from {})",
@@ -609,144 +703,32 @@ impl RemoteHelper {
             );
         }
 
-        let mut root_cid = match self.build_tree_with_progress("Building repo tree") {
-            Ok(root_cid) => root_cid,
-            Err(err) if delta_base.is_some() => {
-                let base = delta_base.as_deref().unwrap_or_default();
-                eprintln!(
-                    "  Delta object set incomplete ({}); retrying against cached remote root",
-                    err
-                );
-                if self.is_slow() {
-                    eprintln!("  Reusing unchanged paths from cached remote root...");
-                }
-                debug!(
-                    "Delta object set for {} via {} was incomplete: {}. Retrying build against cached remote root.",
-                    dst_ref, base, err
-                );
-
-                let mut retried_with_cached_root = false;
-                let mut cached_root_error: Option<String> = None;
-                let cached_retry = if let Some(root_hash) =
-                    self.nostr.get_cached_root_hash(&self.repo_name).cloned()
-                {
-                    let encryption_key = self
-                        .nostr
-                        .get_cached_encryption_key(&self.repo_name)
-                        .copied();
-                    match self.build_cached_fetch_tree() {
-                        Ok((cached_tree, _)) => {
-                            let root_bytes =
-                                hex::decode(&root_hash).context("Invalid cached root hash hex")?;
-                            let root_arr: [u8; 32] = root_bytes.try_into().map_err(|_| {
-                                anyhow::anyhow!("Cached root hash must be 32 bytes")
-                            })?;
-                            let cached_root_cid = hashtree_core::Cid {
-                                hash: root_arr,
-                                key: encryption_key,
-                            };
-                            retried_with_cached_root = true;
-                            Some(self.build_tree_with_base_progress(
-                                "Retrying repo tree against cached remote root",
-                                Some(&cached_tree),
-                                Some(&cached_root_cid),
-                                delta_base.as_deref(),
-                            ))
-                        }
-                        Err(build_err) => {
-                            cached_root_error =
-                                Some(format!("build cached fetch tree: {}", build_err));
-                            None
-                        }
-                    }
-                } else {
-                    cached_root_error = Some("no cached remote root".to_string());
-                    None
-                };
-
-                match cached_retry
-                    .unwrap_or_else(|| self.build_tree_with_progress("Retrying repo tree"))
-                {
+        let mut root_cid = if let Some(base) = delta_base.as_deref() {
+            match self.build_tree_with_cached_remote_root(
+                "Merging delta with cached remote root",
+                Some(base),
+            ) {
+                Ok(Some(root_cid)) => root_cid,
+                Ok(None) => match self.build_tree_with_progress("Building repo tree") {
                     Ok(root_cid) => root_cid,
-                    Err(retry_err) => {
-                        if retried_with_cached_root {
-                            eprintln!(
-                                "  Cached-root retry still incomplete ({}); hydrating existing remote objects from cached root",
-                                retry_err
-                            );
-                            debug!(
-                                "Cached remote retry did not complete {} via {}: {}. Hydrating cached remote objects before full local import.",
-                                dst_ref, base, retry_err
-                            );
-                        } else {
-                            eprintln!(
-                                "  Cached remote retry unavailable ({}); hydrating existing remote objects from cached root",
-                                cached_root_error
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown cached-root error".to_string())
-                            );
-                            debug!(
-                                "Cached remote retry unavailable for {} via {}: {}. Hydrating cached remote objects before full local import.",
-                                dst_ref,
-                                base,
-                                cached_root_error
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown cached-root error".to_string())
-                            );
-                        }
-
-                        if let Some(root_hash) =
-                            self.nostr.get_cached_root_hash(&self.repo_name).cloned()
-                        {
-                            let existing_objects = self.fetch_all_git_objects(&root_hash)?;
-                            eprintln!(
-                                "  Importing {} cached remote object(s)",
-                                existing_objects.len()
-                            );
-                            for (oid, content) in existing_objects {
-                                self.storage.import_compressed_object(&oid, content)?;
-                            }
-                        }
-
-                        match self.build_tree_with_progress(
-                            "Retrying repo tree after cached-object hydration",
-                        ) {
-                            Ok(root_cid) => root_cid,
-                            Err(post_hydration_err) => {
-                                eprintln!(
-                                    "  Cached-root hydration still incomplete ({}); falling back to full local import",
-                                    post_hydration_err
-                                );
-                                debug!(
-                                    "Cached remote hydration still incomplete for {} via {}: {}. Falling back to full local import.",
-                                    dst_ref, base, post_hydration_err
-                                );
-
-                                eprint!("  Listing objects...");
-                                let _ = std::io::stderr().flush();
-                                objects = self.list_objects_to_push(sha, &[])?;
-                                eprintln!(" {} objects", objects.len());
-
-                                let objects_with_content = self.read_git_objects_batch(&objects)?;
-                                eprintln!();
-
-                                eprint!("  Writing to local store...");
-                                let _ = std::io::stderr().flush();
-                                Self::write_objects_to_local_store(
-                                    &self.storage,
-                                    objects_with_content,
-                                )?;
-                                eprintln!();
-
-                                self.build_tree_with_progress(
-                                    "Building repo tree from repaired local store",
-                                )?
-                            }
-                        }
-                    }
-                }
+                    Err(err) => self.repair_delta_tree_build(
+                        sha,
+                        dst_ref,
+                        base,
+                        "Cached remote root unavailable",
+                        err.to_string(),
+                    )?,
+                },
+                Err(err) => self.repair_delta_tree_build(
+                    sha,
+                    dst_ref,
+                    base,
+                    "Cached-root merge incomplete",
+                    err.to_string(),
+                )?,
             }
-            Err(err) => return Err(err.into()),
+        } else {
+            self.build_tree_with_progress("Building repo tree")?
         };
         if let Err(validation_err) = self.storage.validate_root_contains_direct_refs(&root_cid) {
             eprintln!(

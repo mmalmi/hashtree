@@ -167,8 +167,13 @@ fn test_diff_based_push() {
         stderr2
     );
     assert!(
-        stderr2.contains("Reusing unchanged paths from cached remote root"),
-        "second push should explain the cached-root merge phase:\n{}",
+        !stderr2.contains("Delta object set incomplete"),
+        "second push should use cached-root reuse without presenting normal deltas as repair:\n{}",
+        stderr2
+    );
+    assert!(
+        stderr2.contains("Merging delta with cached remote root"),
+        "second push should explain the cached-root merge phase without repair wording:\n{}",
         stderr2
     );
 
@@ -183,9 +188,10 @@ fn test_diff_based_push() {
         "Object walk reduced: first={} second={}",
         first_listed_objects, second_listed_objects
     );
-    let delta_fell_back_to_full_local_import = stderr2.contains("Delta object set incomplete");
+    let delta_repaired_from_full_local_import =
+        stderr2.contains("Cached-root hydration still incomplete");
     assert!(
-        second_listed_objects < first_listed_objects || delta_fell_back_to_full_local_import,
+        second_listed_objects < first_listed_objects || delta_repaired_from_full_local_import,
         "Second push should either walk fewer git objects than the first push or explicitly fall back to a full local import"
     );
 
@@ -361,6 +367,11 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
     assert!(
         !stderr2.contains("existing objects from cached root"),
         "follow-up push should not import the full cached remote root anymore:\n{}",
+        stderr2
+    );
+    assert!(
+        !stderr2.contains("Delta object set incomplete"),
+        "follow-up push should use cached-root reuse without presenting normal deltas as repair:\n{}",
         stderr2
     );
     assert!(

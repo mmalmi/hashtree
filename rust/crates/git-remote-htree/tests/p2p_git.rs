@@ -1,21 +1,17 @@
-//! E2E test: Git push/pull between two peers via WebRTC
+//! E2E test: Git push/pull between two peers via FIPS peer transport
 //!
 //! Tests bidirectional git operations with multiple commits going back and forth.
-//! Uses local TestRelay for WebRTC signaling - no external network needed.
+//! Uses local TestRelay for FIPS discovery/signaling - no external network needed.
 
 mod common;
 
 use common::create_test_repo;
 use common::test_relay::TestRelay;
-use futures::{SinkExt, StreamExt};
-use nostr::{
-    ClientMessage as NostrClientMessage, EventBuilder, JsonUtil, Keys, Kind, Tag, ToBech32,
-};
+use nostr::{Keys, ToBech32};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Test peer with htree daemon
 struct TestPeer {
@@ -25,13 +21,6 @@ struct TestPeer {
     port: u16,
     npub: String,
     home_path: PathBuf,
-}
-
-struct RootEventData {
-    hash: String,
-    key: Option<String>,
-    encrypted_key: Option<String>,
-    self_encrypted_key: Option<String>,
 }
 
 impl TestPeer {
@@ -224,24 +213,20 @@ fn get_daemon_status(peer_url: &str) -> serde_json::Value {
         .expect("Failed to parse status JSON")
 }
 
-fn wait_for_p2p(peer_url: &str, target_pubkey: &str) -> bool {
+fn wait_for_fips_peer(peer_url: &str, target_npub: &str) -> bool {
     for attempt in 1..=30 {
-        if let Ok(resp) = reqwest::blocking::get(&format!("{}/api/peers", peer_url)) {
+        if let Ok(resp) = reqwest::blocking::get(&format!("{}/api/status", peer_url)) {
             if let Ok(text) = resp.text() {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(peers) = json.get("peers").and_then(|p| p.as_array()) {
-                        for peer in peers {
-                            let matches =
-                                peer.get("pubkey").and_then(|p| p.as_str()) == Some(target_pubkey);
-                            let has_channel = peer
-                                .get("has_data_channel")
-                                .and_then(|d| d.as_bool())
-                                .unwrap_or(false);
-                            if matches && has_channel {
-                                println!("  P2P connected after {}s", attempt * 2);
-                                return true;
-                            }
-                        }
+                    let has_peer = json
+                        .get("fips")
+                        .and_then(|fips| fips.get("peers"))
+                        .and_then(|peers| peers.as_array())
+                        .map(|peers| peers.iter().any(|peer| peer.as_str() == Some(target_npub)))
+                        .unwrap_or(false);
+                    if has_peer {
+                        println!("  FIPS peer discovered after {}s", attempt * 2);
+                        return true;
                     }
                 }
             }
@@ -249,243 +234,6 @@ fn wait_for_p2p(peer_url: &str, target_pubkey: &str) -> bool {
         std::thread::sleep(Duration::from_secs(2));
     }
     false
-}
-
-fn relay_has_repo_event(relay: &TestRelay, repo_name: &str) -> bool {
-    relay.stored_events().iter().any(|event| {
-        let is_hashtree_kind = event.get("kind").and_then(|k| k.as_u64()) == Some(30078);
-        if !is_hashtree_kind {
-            return false;
-        }
-        let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
-            return false;
-        };
-        let has_repo = tags.iter().any(|tag| {
-            let Some(arr) = tag.as_array() else {
-                return false;
-            };
-            arr.len() >= 2 && arr[0].as_str() == Some("d") && arr[1].as_str() == Some(repo_name)
-        });
-        let has_label = tags.iter().any(|tag| {
-            let Some(arr) = tag.as_array() else {
-                return false;
-            };
-            arr.len() >= 2 && arr[0].as_str() == Some("l") && arr[1].as_str() == Some("hashtree")
-        });
-        has_repo && has_label
-    })
-}
-
-fn relay_root_event_data(relay: &TestRelay, repo_name: &str) -> RootEventData {
-    let events = relay.stored_events();
-    let latest = events
-        .iter()
-        .filter(|event| {
-            let is_hashtree_kind = event.get("kind").and_then(|k| k.as_u64()) == Some(30078);
-            if !is_hashtree_kind {
-                return false;
-            }
-            let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
-                return false;
-            };
-            let has_repo = tags.iter().any(|tag| {
-                let Some(arr) = tag.as_array() else {
-                    return false;
-                };
-                arr.len() >= 2 && arr[0].as_str() == Some("d") && arr[1].as_str() == Some(repo_name)
-            });
-            let has_label = tags.iter().any(|tag| {
-                let Some(arr) = tag.as_array() else {
-                    return false;
-                };
-                arr.len() >= 2
-                    && arr[0].as_str() == Some("l")
-                    && arr[1].as_str() == Some("hashtree")
-            });
-            has_repo && has_label
-        })
-        .max_by(|a, b| {
-            let a_created = a.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            let b_created = b.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            a_created.cmp(&b_created).then_with(|| {
-                a.get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .cmp(b.get("id").and_then(|v| v.as_str()).unwrap_or(""))
-            })
-        });
-
-    let Some(event) = latest else {
-        panic!(
-            "No hashtree root hash found on relay for repo {}",
-            repo_name
-        );
-    };
-    let tags = event
-        .get("tags")
-        .and_then(|t| t.as_array())
-        .expect("hashtree event tags must be an array");
-    let hash = tags
-        .iter()
-        .find_map(|tag| {
-            let arr = tag.as_array()?;
-            if arr.len() >= 2 && arr[0].as_str() == Some("hash") {
-                arr[1].as_str().map(ToString::to_string)
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            event
-                .get("content")
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.is_empty())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "No hash tag/content found on latest hashtree event for repo {}",
-                repo_name
-            )
-        });
-
-    let key = tags.iter().find_map(|tag| {
-        let arr = tag.as_array()?;
-        if arr.len() >= 2 && arr[0].as_str() == Some("key") {
-            arr[1].as_str().map(ToString::to_string)
-        } else {
-            None
-        }
-    });
-    let encrypted_key = tags.iter().find_map(|tag| {
-        let arr = tag.as_array()?;
-        if arr.len() >= 2 && arr[0].as_str() == Some("encryptedKey") {
-            arr[1].as_str().map(ToString::to_string)
-        } else {
-            None
-        }
-    });
-    let self_encrypted_key = tags.iter().find_map(|tag| {
-        let arr = tag.as_array()?;
-        if arr.len() >= 2 && arr[0].as_str() == Some("selfEncryptedKey") {
-            arr[1].as_str().map(ToString::to_string)
-        } else {
-            None
-        }
-    });
-
-    RootEventData {
-        hash,
-        key,
-        encrypted_key,
-        self_encrypted_key,
-    }
-}
-
-fn publish_local_only_root_event(
-    peer_url: &str,
-    keys: &Keys,
-    repo_name: &str,
-    root: &RootEventData,
-) {
-    let mut tags = vec![
-        Tag::parse(&["d", repo_name]).expect("valid d tag"),
-        Tag::parse(&["l", "hashtree"]).expect("valid l tag"),
-        Tag::parse(&["hash", &root.hash]).expect("valid hash tag"),
-    ];
-    if let Some(ref key) = root.key {
-        tags.push(Tag::parse(&["key", key]).expect("valid key tag"));
-    }
-    if let Some(ref encrypted_key) = root.encrypted_key {
-        tags.push(Tag::parse(&["encryptedKey", encrypted_key]).expect("valid encryptedKey tag"));
-    }
-    if let Some(ref self_encrypted_key) = root.self_encrypted_key {
-        tags.push(
-            Tag::parse(&["selfEncryptedKey", self_encrypted_key])
-                .expect("valid selfEncryptedKey tag"),
-        );
-    }
-
-    let event = EventBuilder::new(Kind::Custom(30078), "", tags)
-        .to_event(keys)
-        .expect("build hashtree root event");
-    let msg = NostrClientMessage::event(event).as_json();
-    let ws_url = format!(
-        "{}/ws",
-        peer_url
-            .replacen("http://", "ws://", 1)
-            .trim_end_matches('/')
-    );
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("create runtime");
-    rt.block_on(async move {
-        let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
-            .await
-            .expect("connect /ws");
-        ws.send(WsMessage::Text(msg.into()))
-            .await
-            .expect("send EVENT");
-        let _ = tokio::time::timeout(Duration::from_secs(1), ws.next()).await;
-        let _ = ws.close(None).await;
-    });
-}
-
-fn local_ws_has_repo_event(peer_url: &str, pubkey_hex: &str, repo_name: &str) -> bool {
-    let ws_url = format!(
-        "{}/ws",
-        peer_url
-            .replacen("http://", "ws://", 1)
-            .trim_end_matches('/')
-    );
-    let req = serde_json::json!([
-        "REQ",
-        "peer-only-check",
-        {
-            "kinds": [30078],
-            "authors": [pubkey_hex],
-            "#d": [repo_name],
-            "#l": ["hashtree"],
-            "limit": 5
-        }
-    ])
-    .to_string();
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("create runtime");
-    rt.block_on(async move {
-        let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
-            .await
-            .expect("connect /ws");
-        ws.send(WsMessage::Text(req.into()))
-            .await
-            .expect("send REQ");
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            match tokio::time::timeout(remaining, ws.next()).await {
-                Ok(Some(Ok(WsMessage::Text(text)))) => {
-                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-                        continue;
-                    };
-                    let Some(arr) = v.as_array() else { continue };
-                    if arr.first().and_then(|x| x.as_str()) == Some("EVENT") {
-                        return true;
-                    }
-                    if arr.first().and_then(|x| x.as_str()) == Some("EOSE") {
-                        return false;
-                    }
-                }
-                _ => break,
-            }
-        }
-        false
-    })
 }
 
 #[test]
@@ -555,15 +303,15 @@ fn test_p2p_git_roundtrip() {
     );
     println!("   Pushed (count=1)\n");
 
-    // Wait for P2P connection (both directions)
-    println!("2. Waiting for P2P connection...");
+    // Wait for FIPS peer discovery (both directions)
+    println!("2. Waiting for FIPS peer discovery...");
     assert!(
-        wait_for_p2p(&peer_a.api_url(), &pubkey_b),
-        "P2P A->B connection failed"
+        wait_for_fips_peer(&peer_a.api_url(), &peer_b.npub),
+        "FIPS A->B peer discovery failed"
     );
     assert!(
-        wait_for_p2p(&peer_b.api_url(), &pubkey_a),
-        "P2P B->A connection failed"
+        wait_for_fips_peer(&peer_b.api_url(), &peer_a.npub),
+        "FIPS B->A peer discovery failed"
     );
 
     // === Verify status endpoint shows connection ===
@@ -571,46 +319,53 @@ fn test_p2p_git_roundtrip() {
     let status_a = get_daemon_status(&peer_a.api_url());
     let status_b = get_daemon_status(&peer_b.api_url());
 
-    let webrtc_a = status_a.get("webrtc").expect("status should have webrtc");
-    let webrtc_b = status_b.get("webrtc").expect("status should have webrtc");
+    let fips_a = status_a.get("fips").expect("status should have fips");
+    let fips_b = status_b.get("fips").expect("status should have fips");
 
     assert!(
-        webrtc_a
+        fips_a
             .get("enabled")
             .and_then(|e| e.as_bool())
             .unwrap_or(false),
-        "WebRTC should be enabled"
+        "FIPS should be enabled"
     );
     assert!(
-        webrtc_b
+        fips_b
             .get("enabled")
             .and_then(|e| e.as_bool())
             .unwrap_or(false),
-        "WebRTC should be enabled"
+        "FIPS should be enabled"
     );
 
-    let connected_a = webrtc_a
-        .get("with_data_channel")
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0);
-    let connected_b = webrtc_b
-        .get("with_data_channel")
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0);
+    let peers_a = fips_a
+        .get("peers")
+        .and_then(|peers| peers.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let peers_b = fips_b
+        .get("peers")
+        .and_then(|peers| peers.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     assert!(
-        connected_a >= 1,
-        "Peer A should have at least 1 connected peer with data channel, got {}",
-        connected_a
+        peers_a
+            .iter()
+            .any(|peer| peer.as_str() == Some(peer_b.npub.as_str())),
+        "Peer A should discover Peer B over FIPS, got {:?}",
+        peers_a
     );
     assert!(
-        connected_b >= 1,
-        "Peer B should have at least 1 connected peer with data channel, got {}",
-        connected_b
+        peers_b
+            .iter()
+            .any(|peer| peer.as_str() == Some(peer_a.npub.as_str())),
+        "Peer B should discover Peer A over FIPS, got {:?}",
+        peers_b
     );
     println!(
-        "   Status verified: A has {} peers, B has {} peers",
-        connected_a, connected_b
+        "   Status verified: A has {} FIPS peers, B has {} FIPS peers",
+        peers_a.len(),
+        peers_b.len()
     );
 
     // === Peer B: Clone the repo ===
@@ -724,89 +479,5 @@ fn test_p2p_git_roundtrip() {
     );
     println!("   Pulled and verified (count=3, both files exist)\n");
 
-    // === Peer-assisted root discovery (repo event absent from relay) ===
-    println!("8. Peer B: Cloning repo discovered via WebRTC peer root query...");
-    let peer_only_repo = "peer-only-repo";
-    assert!(
-        !relay_has_repo_event(&relay, peer_only_repo),
-        "Test relay unexpectedly already has {} event",
-        peer_only_repo
-    );
-
-    let shared_root = relay_root_event_data(&relay, "shared-repo");
-    publish_local_only_root_event(&peer_a.api_url(), &keys_a, peer_only_repo, &shared_root);
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(
-        !relay_has_repo_event(&relay, peer_only_repo),
-        "peer-only event leaked to relay; test setup invalid"
-    );
-    assert!(
-        local_ws_has_repo_event(&peer_a.api_url(), &pubkey_a, peer_only_repo),
-        "Peer A local relay should serve peer-only event over /ws"
-    );
-    assert!(
-        wait_for_p2p(&peer_b.api_url(), &pubkey_a),
-        "Peer B must have an active data channel to Peer A for peer-only resolve"
-    );
-
-    let resolve_url = format!(
-        "{}/api/nostr/resolve/{}/{}",
-        peer_b.api_url(),
-        pubkey_a,
-        peer_only_repo
-    );
-    let resolve_json: serde_json::Value = reqwest::blocking::get(&resolve_url)
-        .expect("peer-b resolve request failed")
-        .json()
-        .expect("peer-b resolve response parse failed");
-    assert_eq!(
-        resolve_json.get("hash").and_then(|v| v.as_str()),
-        Some(shared_root.hash.as_str()),
-        "peer-b daemon should resolve peer-only root via WebRTC: {}",
-        resolve_json
-    );
-
-    let clone_dir_peer_only = TempDir::new().unwrap();
-    let clone_peer_only = peer_b.git(
-        &[
-            "clone",
-            &format!("htree://{}/{}", peer_a.npub, peer_only_repo),
-            "repo",
-        ],
-        clone_dir_peer_only.path(),
-    );
-    assert!(
-        clone_peer_only.status.success(),
-        "peer-only clone failed: {}",
-        String::from_utf8_lossy(&clone_peer_only.stderr)
-    );
-
-    let peer_only_repo_path = clone_dir_peer_only.path().join("repo");
-    let count_path = peer_only_repo_path.join("count.txt");
-    assert!(
-        count_path.exists(),
-        "peer-only clone missing count.txt; clone stdout={} stderr={} entries={:?}",
-        String::from_utf8_lossy(&clone_peer_only.stdout),
-        String::from_utf8_lossy(&clone_peer_only.stderr),
-        std::fs::read_dir(&peer_only_repo_path)
-            .map(|iter| {
-                iter.filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    );
-    let count = std::fs::read_to_string(count_path).unwrap();
-    assert_eq!(
-        count.trim(),
-        "3",
-        "Peer-only clone should resolve latest root"
-    );
-    assert!(
-        peer_only_repo_path.join("from_a.txt").exists(),
-        "Peer-only clone should include latest files"
-    );
-    println!("   Peer-only clone succeeded via local daemon + WebRTC peers\n");
-
-    println!("=== SUCCESS: P2P Git roundtrip complete! ===");
+    println!("=== SUCCESS: FIPS Git roundtrip complete! ===");
 }
