@@ -50,13 +50,13 @@ TIER_2_CRATES=(
     "hashtree-s3"
     "hashtree-blossom"
     "hashtree-resolver"
-    "hashtree-fips-transport"
 )
 
 TIER_3_CRATES=(
     "hashtree-collection"
     "hashtree-nostr"
     "hashtree-network"
+    "hashtree-fips-transport"
     "hashtree-updater"
 )
 

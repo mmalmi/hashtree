@@ -29,21 +29,21 @@ futures = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 
 # Internal (path for local dev, version for publishing)
-hashtree-core = { version = "0.2.43", path = "crates/hashtree-core" }
-hashtree-index = { version = "0.2.43", path = "crates/hashtree-index" }
-hashtree-collection = { version = "0.2.43", path = "crates/hashtree-collection" }
-hashtree-lmdb = { version = "0.2.47", path = "crates/hashtree-lmdb" }
-hashtree-s3 = { version = "0.2.43", path = "crates/hashtree-s3" }
-hashtree-blossom = { version = "0.2.54", path = "crates/hashtree-blossom" }
-hashtree-sim = { version = "0.2.43", path = "crates/hashtree-sim" }
+hashtree-core = { version = "0.2.56", path = "crates/hashtree-core" }
+hashtree-index = { version = "0.2.56", path = "crates/hashtree-index" }
+hashtree-collection = { version = "0.2.56", path = "crates/hashtree-collection" }
+hashtree-lmdb = { version = "0.2.56", path = "crates/hashtree-lmdb" }
+hashtree-s3 = { version = "0.2.56", path = "crates/hashtree-s3" }
+hashtree-blossom = { version = "0.2.56", path = "crates/hashtree-blossom" }
+hashtree-sim = { version = "0.2.56", path = "crates/hashtree-sim" }
 hashtree-resolver = { version = "0.2.56", path = "crates/hashtree-resolver" }
-hashtree-config = { version = "0.2.43", path = "crates/hashtree-config" }
-hashtree-fs = { version = "0.2.43", path = "crates/hashtree-fs" }
+hashtree-config = { version = "0.2.56", path = "crates/hashtree-config" }
+hashtree-fs = { version = "0.2.56", path = "crates/hashtree-fs" }
 hashtree-nostr = { version = "0.2.56", path = "crates/hashtree-nostr" }
-hashtree-network = { version = "0.2.50", path = "crates/hashtree-network" }
-hashtree-fips-transport = { version = "0.2.54", path = "crates/hashtree-fips-transport" }
+hashtree-network = { version = "0.2.56", path = "crates/hashtree-network" }
+hashtree-fips-transport = { version = "0.2.56", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.2.56", path = "crates/hashtree-updater" }
-cashu-service = { version = "0.2.43", path = "crates/cashu-service", default-features = false }
+cashu-service = { version = "0.2.56", path = "crates/cashu-service", default-features = false }
 
 # AWS S3
 aws-sdk-s3 = "1"
