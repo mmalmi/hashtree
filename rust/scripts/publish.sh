@@ -39,7 +39,6 @@ TIER_1_CRATES=(
     "hashtree-core"
     "hashtree-config"
     "hashtree-merge"
-    "cashu-service"
 )
 
 TIER_2_CRATES=(

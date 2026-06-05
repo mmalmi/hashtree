@@ -43,7 +43,7 @@ hashtree-nostr = { version = "0.2.56", path = "crates/hashtree-nostr" }
 hashtree-network = { version = "0.2.56", path = "crates/hashtree-network" }
 hashtree-fips-transport = { version = "0.2.56", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.2.56", path = "crates/hashtree-updater" }
-cashu-service = { version = "0.2.56", path = "crates/cashu-service", default-features = false }
+cashu-service = { version = "0.2.56", path = "../../cashu-service/crates/cashu-service", default-features = false }
 
 # AWS S3
 aws-sdk-s3 = "1"

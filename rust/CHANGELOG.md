@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Moved the reusable `cashu-service` crate out of the Hashtree workspace while
+  keeping Hashtree's `htree-cashu` helper crate in the publish plan.
 - Changed `htree release publish --draft` to update the sibling `draft`
   pointer while leaving the stable `latest` pointer unchanged.
 - Changed `git-remote-htree` fast-forward pushes to merge deltas with the
