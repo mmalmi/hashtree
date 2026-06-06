@@ -2,6 +2,11 @@
 
 Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots can be published to get mutable `npub/tree/path` addresses. Data is chunked, CHK-encrypted by default, and can be fetched from Blossom-compatible storage, FIPS peers, or a local daemon.
 
+## Repositories
+
+- [`git.iris.to`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree)
+- [`GitHub`](https://github.com/mmalmi/hashtree)
+
 ## Installation
 
 ### Quick install (prebuilt binaries, macOS/Linux)
@@ -67,7 +72,7 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
 
 ### Packaging status
 
-- `./publish_release.sh --version v<version>` is the primary release entrypoint. It publishes the canonical hashtree release, updates the Homebrew tap when the full macOS/Linux CLI set is present, and mirrors the same staged files to GitHub.
+- `./publish_release.sh --version v<version>` is the primary release entrypoint. It publishes the hashtree release, updates the Homebrew tap when the full macOS/Linux CLI set is present, and updates GitHub with the same staged files.
 - CLI release artifacts are assembled under `rust/dist/` by `rust/scripts/release_to_htree.sh`, which `./publish_release.sh` wraps.
 - Linux package-manager installs beyond Homebrew are not shipped yet.
 
@@ -86,14 +91,6 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
   - [`iris-browser`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser) - Native desktop shell built with Tauri.
   - [`iris-apps`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-apps) - Portable Iris web apps and the isolated site runtime.
   - [`hashtree-cc`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree-cc) - Landing page and file sharing app.
-
-## Canonical remote
-
-Hashtree is the canonical remote for this repository:
-
-- `origin = htree://self/hashtree`
-- Add mirrors on separate remotes only when you need them.
-- Each pusher should use their own identity-specific htree remote instead of sharing one private key, because out-of-sync pushes from the same identity can overwrite published refs.
 
 ## Design highlights
 
