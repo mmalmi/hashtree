@@ -37,6 +37,30 @@ fn test_new_client_uses_local_read_server_as_daemon_fallback() {
 }
 
 #[test]
+fn test_new_client_uses_passed_blossom_config() {
+    let mut config = test_config();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.blossom.servers.clear();
+    config.blossom.read_servers = vec!["https://read.example".to_string()];
+    config.blossom.write_servers = vec!["https://write.example".to_string()];
+
+    let client = NostrClient::new(TEST_PUBKEY, None, None, false, &config).unwrap();
+
+    assert!(client
+        .blossom
+        .read_servers()
+        .contains(&"https://read.example".to_string()));
+    assert!(client
+        .blossom
+        .read_servers()
+        .contains(&"https://write.example".to_string()));
+    assert_eq!(
+        client.blossom.write_servers(),
+        &["https://write.example".to_string()]
+    );
+}
+
+#[test]
 fn test_fetch_refs_empty() {
     let config = test_config();
     let client = NostrClient::new(TEST_PUBKEY, None, None, false, &config).unwrap();
@@ -261,6 +285,7 @@ fn test_list_git_repo_announcements_filters_dedupes_and_sorts() {
 fn test_parse_daemon_response_to_root_data_encrypted_key() {
     let payload = DaemonResolveResponse {
         hash: Some("ab".repeat(32)),
+        cid: None,
         key: None,
         encrypted_key: Some("11".repeat(32)),
         self_encrypted_key: None,
@@ -278,6 +303,7 @@ fn test_parse_daemon_response_to_root_data_encrypted_key() {
 fn test_parse_daemon_response_to_root_data_self_encrypted() {
     let payload = DaemonResolveResponse {
         hash: Some("cd".repeat(32)),
+        cid: None,
         key: None,
         encrypted_key: None,
         self_encrypted_key: Some("ciphertext".to_string()),
@@ -292,6 +318,23 @@ fn test_parse_daemon_response_to_root_data_self_encrypted() {
         Some("ciphertext")
     );
     assert!(parsed.encryption_key.is_none());
+}
+
+#[test]
+fn test_parse_daemon_response_to_root_data_cid_key() {
+    let payload = DaemonResolveResponse {
+        hash: None,
+        cid: Some(format!("{}:{}", "ab".repeat(32), "33".repeat(32))),
+        key: None,
+        encrypted_key: None,
+        self_encrypted_key: None,
+        source: Some("nostr".to_string()),
+    };
+
+    let parsed = NostrClient::parse_daemon_response_to_root_data(payload).unwrap();
+    assert_eq!(parsed.root_hash, "ab".repeat(32));
+    assert_eq!(parsed.key_tag_name, None);
+    assert_eq!(parsed.encryption_key, Some([0x33; 32]));
 }
 
 #[tokio::test]

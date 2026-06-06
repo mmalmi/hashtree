@@ -8,10 +8,12 @@ use crate::runtime::block_on_result;
 use anyhow::{bail, Context, Result};
 use hashtree_core::{Cid, Store};
 use std::collections::HashMap;
-use std::io::Write;
-use std::time::{Duration, Instant};
 #[cfg(test)]
-use std::{collections::HashSet, process::Command};
+use std::collections::HashSet;
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 mod cached_store;
@@ -27,6 +29,8 @@ use storage_support::{build_repo_viewer_url, queue_hash_if_new};
 
 /// Threshold for showing detailed progress (3 seconds)
 const VERBOSE_THRESHOLD: Duration = Duration::from_secs(3);
+const DEFAULT_GIT_TREE_WALK_CONCURRENCY: usize = 4;
+const MAX_GIT_TREE_WALK_CONCURRENCY: usize = 32;
 
 use crate::nostr_client::NostrClient;
 use hashtree_config::Config;
@@ -51,6 +55,15 @@ fn upload_progress(
         failed,
         has_old_tree,
     }
+}
+
+fn git_tree_walk_concurrency() -> usize {
+    std::env::var("HTREE_GIT_TREE_WALK_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_GIT_TREE_WALK_CONCURRENCY))
+        .unwrap_or(DEFAULT_GIT_TREE_WALK_CONCURRENCY)
 }
 
 /// Git remote helper state machine
@@ -97,6 +110,16 @@ struct GitObjectLocation {
     cid: Cid,
 }
 
+#[derive(Debug, Clone)]
+struct GitPackLocation {
+    pack_name: String,
+    pack_cid: Cid,
+    pack_size: u64,
+    idx_name: String,
+    idx_cid: Option<Cid>,
+    idx_size: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct GitFetchStats {
     enumerated: usize,
@@ -117,7 +140,72 @@ enum AncestorCheck {
     Unknown(String),
 }
 
+fn is_safe_git_pack_name(name: &str) -> bool {
+    name.len() == "pack-".len() + 40 + ".pack".len()
+        && name.starts_with("pack-")
+        && name.ends_with(".pack")
+        && name["pack-".len()..name.len() - ".pack".len()]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
 impl RemoteHelper {
+    async fn with_git_pack_progress<T>(
+        label: String,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+
+        let done = StdArc::new(AtomicBool::new(false));
+        let done_for_task = StdArc::clone(&done);
+        let label_for_task = label.clone();
+        eprint!("\r  {}...", label);
+        let _ = std::io::stderr().flush();
+        let progress_task = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
+                if done_for_task.load(Ordering::Relaxed) {
+                    break;
+                }
+                eprint!(
+                    "\r  {}... {:.1}s",
+                    label_for_task,
+                    start.elapsed().as_secs_f32()
+                );
+                let _ = std::io::stderr().flush();
+            }
+        });
+
+        let result = future.await;
+        done.store(true, Ordering::Relaxed);
+        let _ = progress_task.await;
+        result
+    }
+
+    fn format_transfer_bytes(bytes: u64) -> String {
+        const KIB: f64 = 1024.0;
+        const MIB: f64 = KIB * 1024.0;
+        const GIB: f64 = MIB * 1024.0;
+
+        let bytes = bytes as f64;
+        if bytes >= GIB {
+            format!("{:.1} GiB", bytes / GIB)
+        } else if bytes >= MIB {
+            format!("{:.1} MiB", bytes / MIB)
+        } else if bytes >= KIB {
+            format!("{:.1} KiB", bytes / KIB)
+        } else {
+            format!("{bytes:.0} B")
+        }
+    }
+
+    fn is_repo_not_found_error(err: &anyhow::Error) -> bool {
+        let message = err.to_string();
+        message.starts_with("Repository '") && message.contains("' not found")
+    }
+
     pub fn new(
         pubkey: &str,
         repo_name: &str,
@@ -251,18 +339,22 @@ impl RemoteHelper {
 
     /// List refs available on remote
     fn list_refs(&mut self, for_push: bool) -> Result<Option<Vec<String>>> {
-        // For push, always return empty refs to force re-push
-        // This ensures content is always re-uploaded to blossom servers
-        // and we regenerate the index file each time
-        if for_push {
-            debug!("Returning empty refs for push to force re-upload");
+        if for_push && self.config.blossom.force_upload {
+            debug!("Returning empty refs for push because force_upload is enabled");
             self.remote_refs.clear();
             return Ok(Some(vec![String::new()]));
         }
 
-        // For clone/pull, fetch actual refs from nostr
+        // Advertise refs for clone/pull and for ordinary pushes so Git can skip true no-ops.
         self.remote_refs.clear();
-        let refs = self.nostr.fetch_refs(&self.repo_name)?;
+        let refs = match self.nostr.fetch_refs(&self.repo_name) {
+            Ok(refs) => refs,
+            Err(err) if for_push && Self::is_repo_not_found_error(&err) => {
+                debug!("Repository not found during push ref advertisement; treating as empty");
+                HashMap::new()
+            }
+            Err(err) => return Err(err),
+        };
 
         let mut lines = Vec::new();
 
@@ -408,6 +500,7 @@ impl RemoteHelper {
     ) -> Result<(
         hashtree_core::HashTree<cached_store::CachedStore>,
         Vec<GitObjectLocation>,
+        Vec<GitPackLocation>,
         std::sync::Arc<dyn Store + Send + Sync>,
     )> {
         let (tree, local_store_for_eviction) = self.build_cached_fetch_tree()?;
@@ -426,15 +519,18 @@ impl RemoteHelper {
             Ok(Some(cid)) => cid,
             Ok(None) => {
                 warn!("No .git/objects directory found");
-                return Ok((tree, Vec::new(), local_store_for_eviction));
+                return Ok((tree, Vec::new(), Vec::new(), local_store_for_eviction));
             }
             Err(e) => {
                 warn!("Failed to resolve .git/objects: {}", e);
-                return Ok((tree, Vec::new(), local_store_for_eviction));
+                return Ok((tree, Vec::new(), Vec::new(), local_store_for_eviction));
             }
         };
 
         info!("Resolved .git/objects: {}", hex::encode(objects_cid.hash));
+        let pack_locations = self
+            .collect_git_pack_locations_async(&tree, &objects_cid)
+            .await?;
 
         use hashtree_core::LinkType;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -461,9 +557,13 @@ impl RemoteHelper {
             }
         });
 
-        const WALK_CONCURRENCY: usize = 32;
         let walk_entries = match tree
-            .walk_parallel_with_progress(&objects_cid, "", WALK_CONCURRENCY, Some(&progress))
+            .walk_parallel_with_progress(
+                &objects_cid,
+                "",
+                git_tree_walk_concurrency(),
+                Some(&progress),
+            )
             .await
         {
             Ok(entries) => entries,
@@ -472,7 +572,7 @@ impl RemoteHelper {
                 let _ = progress_task.await;
                 eprintln!("\r  Loading objects tree... failed: {}", e);
                 warn!("Failed to walk objects directory: {}", e);
-                return Ok((tree, Vec::new(), local_store_for_eviction));
+                return Ok((tree, Vec::new(), pack_locations, local_store_for_eviction));
             }
         };
         done.store(true, Ordering::Relaxed);
@@ -515,7 +615,278 @@ impl RemoteHelper {
             }
         }
 
-        Ok((tree, fetch_tasks, local_store_for_eviction))
+        Ok((tree, fetch_tasks, pack_locations, local_store_for_eviction))
+    }
+
+    async fn collect_git_pack_locations_async<S: Store>(
+        &self,
+        tree: &hashtree_core::HashTree<S>,
+        objects_cid: &Cid,
+    ) -> Result<Vec<GitPackLocation>> {
+        let Some(info_packs_cid) = tree
+            .resolve_path(objects_cid, "info/packs")
+            .await
+            .context("resolve .git/objects/info/packs")?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let Some(info_packs_bytes) = tree
+            .get(&info_packs_cid, None)
+            .await
+            .context("read .git/objects/info/packs")?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let Some(pack_dir_cid) = tree
+            .resolve_path(objects_cid, "pack")
+            .await
+            .context("resolve .git/objects/pack")?
+        else {
+            return Ok(Vec::new());
+        };
+        let pack_entries: HashMap<_, _> = tree
+            .list_directory(&pack_dir_cid)
+            .await
+            .context("list .git/objects/pack")?
+            .into_iter()
+            .map(|entry| (entry.name.clone(), entry))
+            .collect();
+
+        let info_packs = String::from_utf8_lossy(&info_packs_bytes);
+        let mut packs = Vec::new();
+        for line in info_packs.lines().map(str::trim) {
+            let Some(pack_name) = line.strip_prefix("P ") else {
+                continue;
+            };
+            if !is_safe_git_pack_name(pack_name) {
+                continue;
+            }
+
+            let Some(pack_entry) = pack_entries.get(pack_name) else {
+                continue;
+            };
+            let pack_cid = Cid {
+                hash: pack_entry.hash,
+                key: pack_entry.key,
+            };
+
+            let idx_name = format!("{}.idx", pack_name.trim_end_matches(".pack"));
+            let idx_entry = pack_entries.get(&idx_name);
+            let idx_cid = idx_entry.map(|entry| Cid {
+                hash: entry.hash,
+                key: entry.key,
+            });
+
+            packs.push(GitPackLocation {
+                pack_name: pack_name.to_string(),
+                pack_cid,
+                pack_size: pack_entry.size,
+                idx_name,
+                idx_cid,
+                idx_size: idx_entry.map(|entry| entry.size),
+            });
+        }
+
+        Ok(packs)
+    }
+
+    async fn stream_git_pack_file<S: Store>(
+        tree: &hashtree_core::HashTree<S>,
+        cid: &Cid,
+        destination: &Path,
+        label: String,
+        expected_size: Option<u64>,
+    ) -> Result<u64> {
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+
+        let temp_name = format!(
+            ".{}.{}.tmp",
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("pack"),
+            std::process::id()
+        );
+        let temp_path = destination.with_file_name(temp_name);
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        let mut file = tokio::fs::File::create(&temp_path)
+            .await
+            .with_context(|| format!("create {}", temp_path.display()))?;
+        let mut stream = tree.get_stream(cid);
+        let mut written = 0u64;
+        let mut saw_chunk = false;
+        let mut last_progress = Instant::now() - Duration::from_secs(1);
+
+        eprint!("\r  {}... 0 B", label);
+        let _ = std::io::stderr().flush();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("stream {}", destination.display()))?;
+            saw_chunk = true;
+            file.write_all(&chunk)
+                .await
+                .with_context(|| format!("write {}", temp_path.display()))?;
+            written += chunk.len() as u64;
+
+            if last_progress.elapsed() >= Duration::from_millis(250) {
+                Self::print_pack_byte_progress(&label, written, expected_size);
+                last_progress = Instant::now();
+            }
+        }
+
+        if !saw_chunk {
+            drop(file);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            bail!("{} was not found", label);
+        }
+
+        file.flush()
+            .await
+            .with_context(|| format!("flush {}", temp_path.display()))?;
+        drop(file);
+
+        if let Some(expected) = expected_size {
+            if expected != written {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                bail!(
+                    "{} size mismatch: expected {}, wrote {}",
+                    label,
+                    expected,
+                    written
+                );
+            }
+        }
+
+        tokio::fs::rename(&temp_path, destination)
+            .await
+            .with_context(|| {
+                format!(
+                    "rename {} to {}",
+                    temp_path.display(),
+                    destination.display()
+                )
+            })?;
+        Self::print_pack_byte_progress(&label, written, expected_size);
+        Ok(written)
+    }
+
+    fn print_pack_byte_progress(label: &str, written: u64, expected_size: Option<u64>) {
+        if let Some(expected) = expected_size {
+            eprint!(
+                "\r  {}... {}/{}",
+                label,
+                Self::format_transfer_bytes(written),
+                Self::format_transfer_bytes(expected)
+            );
+        } else {
+            eprint!("\r  {}... {}", label, Self::format_transfer_bytes(written));
+        }
+        let _ = std::io::stderr().flush();
+    }
+
+    async fn install_git_pack_files_async<S: Store>(
+        &self,
+        tree: &hashtree_core::HashTree<S>,
+        pack_locations: &[GitPackLocation],
+    ) -> Result<usize> {
+        if pack_locations.is_empty() {
+            return Ok(0);
+        }
+
+        let git_pack_dir = Self::git_dir_path().join("objects").join("pack");
+        std::fs::create_dir_all(&git_pack_dir)
+            .with_context(|| format!("create {}", git_pack_dir.display()))?;
+        let mut installed = 0usize;
+        for (index, location) in pack_locations.iter().enumerate() {
+            let pack_path = git_pack_dir.join(&location.pack_name);
+            let idx_path = git_pack_dir.join(&location.idx_name);
+            if pack_path.exists() && idx_path.exists() {
+                continue;
+            }
+
+            let pack_size = if pack_path.exists() {
+                std::fs::metadata(&pack_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(location.pack_size)
+            } else {
+                let pack_label = format!(
+                    "Downloading git pack {}/{} {}",
+                    index + 1,
+                    pack_locations.len(),
+                    location.pack_name
+                );
+                Self::stream_git_pack_file(
+                    tree,
+                    &location.pack_cid,
+                    &pack_path,
+                    pack_label,
+                    Some(location.pack_size),
+                )
+                .await
+                .with_context(|| format!("read {}", location.pack_name))?
+            };
+
+            if let Some(idx_cid) = &location.idx_cid {
+                let idx_label = format!(
+                    "Downloading git pack index {}/{} {}",
+                    index + 1,
+                    pack_locations.len(),
+                    location.idx_name
+                );
+                if !idx_path.exists() {
+                    Self::stream_git_pack_file(
+                        tree,
+                        idx_cid,
+                        &idx_path,
+                        idx_label,
+                        location.idx_size,
+                    )
+                    .await
+                    .with_context(|| format!("read {}", location.idx_name))?;
+                }
+            }
+
+            if !idx_path.exists() {
+                let index_label = format!(
+                    "Indexing git pack {}/{} {}",
+                    index + 1,
+                    pack_locations.len(),
+                    location.pack_name
+                );
+                let status = Self::with_git_pack_progress(index_label, async {
+                    Command::new("git")
+                        .arg("index-pack")
+                        .arg(&pack_path)
+                        .status()
+                })
+                .await
+                .context("run git index-pack")?;
+                if !status.success() {
+                    bail!("git index-pack failed for {}", pack_path.display());
+                }
+            }
+
+            eprintln!(
+                "\r  Installed git pack {}/{} {} ({})        ",
+                index + 1,
+                pack_locations.len(),
+                location.pack_name,
+                Self::format_transfer_bytes(pack_size)
+            );
+            installed += 1;
+        }
+
+        Ok(installed)
     }
 
     /// Async implementation of git object fetching using HashTree helpers
@@ -525,7 +896,7 @@ impl RemoteHelper {
         encryption_key: Option<&[u8; 32]>,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let mut objects = Vec::new();
-        let (tree, fetch_tasks, local_store_for_eviction) = self
+        let (tree, fetch_tasks, _pack_locations, local_store_for_eviction) = self
             .collect_git_object_locations_async(root_hash, encryption_key)
             .await?;
         use futures::stream::{self, StreamExt};
@@ -665,7 +1036,7 @@ impl RemoteHelper {
         use tokio::sync::mpsc;
 
         let enumerate_start = std::time::Instant::now();
-        let (tree, fetch_tasks, local_store_for_eviction) = self
+        let (tree, fetch_tasks, pack_locations, local_store_for_eviction) = self
             .collect_git_object_locations_async(root_hash, encryption_key)
             .await?;
         let enumerate_elapsed = enumerate_start.elapsed();
@@ -676,6 +1047,29 @@ impl RemoteHelper {
                 "  Prepared {} objects in {:?}",
                 total_objects, enumerate_elapsed
             );
+        }
+
+        if !pack_locations.is_empty() {
+            let pack_start = std::time::Instant::now();
+            match self
+                .install_git_pack_files_async(&tree, &pack_locations)
+                .await
+            {
+                Ok(installed) if installed > 0 => {
+                    eprintln!(
+                        "  Installed {} git pack(s) in {:?}",
+                        installed,
+                        pack_start.elapsed()
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Failed to install git pack checkpoint: {}", err);
+                    if self.is_slow() {
+                        eprintln!("  Warning: git pack checkpoint install failed: {}", err);
+                    }
+                }
+            }
         }
 
         let local_check_start = std::time::Instant::now();

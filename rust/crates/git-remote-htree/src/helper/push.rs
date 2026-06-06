@@ -7,11 +7,11 @@ use crate::nostr_client::{BlossomResult, PullRequestStateFilter};
 use crate::runtime::new_multi_thread_runtime;
 use anyhow::{bail, Context, Result};
 use hashtree_core::{HashTree, Store};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread;
@@ -19,6 +19,35 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
+const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
+const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
+const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
+
+struct ServerUploadPresence {
+    present: HashSet<[u8; 32]>,
+    complete: bool,
+}
+
+struct PendingUpload {
+    hash: [u8; 32],
+    data: Vec<u8>,
+    from_old_tree: bool,
+    force_all_servers: bool,
+}
+
+struct UploadCounters {
+    uploaded: Arc<AtomicUsize>,
+    skipped_diff: Arc<AtomicUsize>,
+    skipped_server: Arc<AtomicUsize>,
+    failed: Arc<AtomicUsize>,
+    completed: Arc<AtomicUsize>,
+    discovered_total: Arc<AtomicUsize>,
+}
+
+struct GitPackCheckpointPlan {
+    tip: String,
+    covered_objects: HashSet<String>,
+}
 
 struct RepoTreeProgressReporter {
     stop: Arc<AtomicBool>,
@@ -95,6 +124,21 @@ fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize
     }
 }
 
+fn git_pack_checkpoint_min_objects() -> usize {
+    std::env::var(GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS)
+}
+
+fn unique_git_pack_temp_dir() -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("htree-git-pack-{}-{}", std::process::id(), nanos))
+}
+
 pub(super) fn queue_links_for_diff_upload(
     queue: &mut Vec<([u8; 32], Option<[u8; 32]>)>,
     queued: &mut HashSet<[u8; 32]>,
@@ -136,6 +180,280 @@ async fn collect_complete_hashes<S: Store>(
         }
     }
     Ok(hashes)
+}
+
+async fn check_upload_presence_on_servers(
+    blossom: &hashtree_blossom::BlossomClient,
+    servers: &[String],
+    hashes: &HashSet<[u8; 32]>,
+) -> Option<ServerUploadPresence> {
+    if servers.is_empty() || hashes.is_empty() {
+        return None;
+    }
+
+    let mut sorted_hashes: Vec<[u8; 32]> = hashes.iter().copied().collect();
+    sorted_hashes.sort_unstable();
+    let hash_hexes: Vec<String> = sorted_hashes.iter().map(hex::encode).collect();
+    let mut present = HashSet::new();
+    let mut checked_servers = 0usize;
+
+    for server in servers {
+        let Some(server_present) = blossom.check_uploads_on_server(&hash_hexes, server).await
+        else {
+            debug!("Blossom upload check unavailable for {}", server);
+            continue;
+        };
+        checked_servers += 1;
+        for hash_hex in server_present {
+            let Ok(bytes) = hex::decode(&hash_hex) else {
+                continue;
+            };
+            if bytes.len() != 32 {
+                continue;
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bytes);
+            present.insert(hash);
+        }
+    }
+
+    (checked_servers > 0).then_some(ServerUploadPresence {
+        present,
+        complete: checked_servers == servers.len(),
+    })
+}
+
+fn record_skipped_candidate(counters: &UploadCounters, from_old_tree: bool, has_old_tree: bool) {
+    if from_old_tree {
+        counters.skipped_diff.fetch_add(1, Ordering::Relaxed);
+    } else {
+        counters.skipped_server.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let count = counters.completed.fetch_add(1, Ordering::Relaxed) + 1;
+    if count == 1 || count.is_multiple_of(10) {
+        let discovered = counters.discovered_total.load(Ordering::Relaxed);
+        emit_upload_progress(upload_progress(
+            count,
+            discovered,
+            None,
+            counters.uploaded.load(Ordering::Relaxed),
+            counters.skipped_diff.load(Ordering::Relaxed),
+            counters.skipped_server.load(Ordering::Relaxed),
+            counters.failed.load(Ordering::Relaxed),
+            has_old_tree,
+        ));
+    }
+}
+
+fn record_batch_upload_result(
+    counters: &UploadCounters,
+    attempted: usize,
+    uploaded: usize,
+    has_old_tree: bool,
+) {
+    let uploaded = uploaded.min(attempted);
+    let existing = attempted.saturating_sub(uploaded);
+    counters.uploaded.fetch_add(uploaded, Ordering::Relaxed);
+    counters
+        .skipped_server
+        .fetch_add(existing, Ordering::Relaxed);
+
+    let count = counters.completed.fetch_add(attempted, Ordering::Relaxed) + attempted;
+    emit_upload_progress(upload_progress(
+        count,
+        counters.discovered_total.load(Ordering::Relaxed),
+        None,
+        counters.uploaded.load(Ordering::Relaxed),
+        counters.skipped_diff.load(Ordering::Relaxed),
+        counters.skipped_server.load(Ordering::Relaxed),
+        counters.failed.load(Ordering::Relaxed),
+        has_old_tree,
+    ));
+}
+
+async fn enqueue_pending_upload(
+    tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
+    item: PendingUpload,
+    head_fallback: bool,
+) -> bool {
+    tx.send((
+        item.hash,
+        item.data,
+        item.from_old_tree,
+        item.force_all_servers,
+        head_fallback,
+    ))
+    .await
+    .is_ok()
+}
+
+async fn upload_one_pending_batch_to_server(
+    batch: &[PendingUpload],
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+    has_old_tree: bool,
+) -> Result<bool> {
+    let items: Vec<_> = batch
+        .iter()
+        .map(|item| {
+            hashtree_blossom::BatchUploadItem::new(hex::encode(item.hash), item.data.clone())
+        })
+        .collect();
+    match blossom.upload_batch_to_server(server, &items).await {
+        Ok(Some(result)) => {
+            record_batch_upload_result(counters, batch.len(), result.uploaded, has_old_tree);
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(err) => {
+            debug!("Blossom batch upload failed on {}: {}", server, err);
+            Ok(false)
+        }
+    }
+}
+
+async fn upload_pending_with_single_server_batches(
+    items: Vec<PendingUpload>,
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+    has_old_tree: bool,
+) -> Vec<PendingUpload> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let mut fallback = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut batch_supported = true;
+
+    for item in items {
+        if !batch_supported {
+            fallback.push(item);
+            continue;
+        }
+
+        let item_len = item.data.len();
+        let would_overflow = !batch.is_empty()
+            && (batch.len() >= hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS
+                || batch_bytes.saturating_add(item_len) > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES);
+        if would_overflow {
+            match upload_one_pending_batch_to_server(
+                &batch,
+                blossom,
+                server,
+                counters,
+                has_old_tree,
+            )
+            .await
+            {
+                Ok(true) => {
+                    batch.clear();
+                    batch_bytes = 0;
+                }
+                Ok(false) | Err(_) => {
+                    fallback.append(&mut batch);
+                    batch_bytes = 0;
+                    batch_supported = false;
+                    fallback.push(item);
+                    continue;
+                }
+            }
+        }
+
+        batch_bytes = batch_bytes.saturating_add(item_len);
+        batch.push(item);
+    }
+
+    if batch_supported && !batch.is_empty() {
+        match upload_one_pending_batch_to_server(&batch, blossom, server, counters, has_old_tree)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                fallback.append(&mut batch);
+            }
+        }
+    } else {
+        fallback.append(&mut batch);
+    }
+
+    fallback
+}
+
+async fn flush_pending_uploads(
+    pending: &mut Vec<PendingUpload>,
+    blossom: &hashtree_blossom::BlossomClient,
+    all_servers: &[String],
+    use_upload_check: bool,
+    upload_check_supported: &mut bool,
+    tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
+    counters: &UploadCounters,
+    has_old_tree: bool,
+) -> bool {
+    if pending.is_empty() {
+        return true;
+    }
+
+    let mut present = HashSet::new();
+    let mut checked_all_servers = false;
+    if use_upload_check && *upload_check_supported {
+        let hashes: HashSet<[u8; 32]> = pending.iter().map(|item| item.hash).collect();
+        match check_upload_presence_on_servers(blossom, all_servers, &hashes).await {
+            Some(presence) => {
+                checked_all_servers = presence.complete;
+                present = presence.present;
+            }
+            None => {
+                *upload_check_supported = false;
+            }
+        }
+    }
+
+    let head_fallback = use_upload_check && !checked_all_servers;
+    let mut to_upload = Vec::new();
+    for item in pending.drain(..) {
+        if present.contains(&item.hash) {
+            record_skipped_candidate(counters, item.from_old_tree, has_old_tree);
+            continue;
+        }
+
+        to_upload.push(item);
+    }
+
+    if all_servers.len() == 1 && !to_upload.is_empty() {
+        let server = &all_servers[0];
+        let mut batchable = Vec::new();
+        for item in to_upload {
+            if item.data.len() > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES {
+                if !enqueue_pending_upload(tx, item, head_fallback).await {
+                    return false;
+                }
+            } else {
+                batchable.push(item);
+            }
+        }
+
+        to_upload = upload_pending_with_single_server_batches(
+            batchable,
+            blossom,
+            server,
+            counters,
+            has_old_tree,
+        )
+        .await;
+    }
+
+    for item in to_upload {
+        if !enqueue_pending_upload(tx, item, head_fallback).await {
+            return false;
+        }
+    }
+
+    true
 }
 
 async fn upload_block_to_file_servers(
@@ -678,14 +996,6 @@ impl RemoteHelper {
 
         info!("Pushing {} objects for {}", objects.len(), sha);
 
-        let objects_with_content = self.read_git_objects_batch(&objects)?;
-        eprintln!();
-
-        eprint!("  Writing to local store...");
-        let _ = std::io::stderr().flush();
-        Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-        eprintln!();
-
         let oid = crate::git::object::ObjectId::from_hex(sha)
             .ok_or_else(|| anyhow::anyhow!("Invalid object id: {}", sha))?;
         self.storage.write_ref(dst_ref, &Ref::Direct(oid))?;
@@ -695,6 +1005,39 @@ impl RemoteHelper {
                 .write_ref("HEAD", &Ref::Symbolic(dst_ref.to_string()))?;
             debug!("Set HEAD -> {}", dst_ref);
         }
+
+        let checkpoint_covered =
+            match self.prepare_git_pack_checkpoint(sha, objects.len(), delta_base.as_deref()) {
+                Ok(Some(covered)) => covered,
+                Ok(None) => HashSet::new(),
+                Err(err) => {
+                    warn!("Git pack checkpoint skipped: {}", err);
+                    if self.is_slow() {
+                        eprintln!("  Warning: git pack checkpoint skipped: {}", err);
+                    }
+                    HashSet::new()
+                }
+            };
+
+        let objects_to_import =
+            self.select_objects_to_import_for_push(sha, &objects, &checkpoint_covered)?;
+        if checkpoint_covered.is_empty() {
+            eprint!("  Reading objects...");
+        } else {
+            eprint!(
+                "  Reading needed objects... {}/{} objects",
+                objects_to_import.len(),
+                objects.len()
+            );
+        }
+        let _ = std::io::stderr().flush();
+        let objects_with_content = self.read_git_objects_batch(&objects_to_import)?;
+        eprintln!();
+
+        eprint!("  Writing to local store...");
+        let _ = std::io::stderr().flush();
+        Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+        eprintln!();
 
         if !self.nostr.can_sign() {
             anyhow::bail!(
@@ -864,6 +1207,308 @@ impl RemoteHelper {
             }
         }
         Ok(())
+    }
+
+    fn prepare_git_pack_checkpoint(
+        &self,
+        sha: &str,
+        object_count: usize,
+        delta_base: Option<&str>,
+    ) -> Result<Option<HashSet<String>>> {
+        self.storage
+            .set_pack_checkpoint_files(BTreeMap::new(), HashSet::new())?;
+        let min_objects = git_pack_checkpoint_min_objects();
+        if min_objects == 0 {
+            return Ok(None);
+        }
+
+        let Some(plan) =
+            Self::plan_git_pack_checkpoint(sha, object_count, delta_base, min_objects)?
+        else {
+            return Ok(None);
+        };
+
+        if self.is_slow() {
+            eprint!("  Building git pack checkpoint...");
+            let _ = std::io::stderr().flush();
+        }
+        let pack_files = Self::generate_git_pack_checkpoint(std::slice::from_ref(&plan.tip))?;
+        let total_bytes: usize = pack_files.values().map(Vec::len).sum();
+        let file_count = pack_files.len();
+        let covered_objects = plan.covered_objects;
+        let returned_covered_objects = covered_objects.clone();
+        self.storage
+            .set_pack_checkpoint_files(pack_files, covered_objects)?;
+        if self.is_slow() {
+            eprintln!(" {} files, {} bytes", file_count, total_bytes);
+        }
+        Ok(Some(returned_covered_objects))
+    }
+
+    fn plan_git_pack_checkpoint(
+        sha: &str,
+        object_count: usize,
+        delta_base: Option<&str>,
+        interval_objects: usize,
+    ) -> Result<Option<GitPackCheckpointPlan>> {
+        let total_objects = if delta_base.is_none() {
+            object_count
+        } else {
+            Self::reachable_git_object_count(sha)?
+        };
+        if total_objects < interval_objects {
+            return Ok(None);
+        }
+
+        let bucket = total_objects / interval_objects;
+        if let Some(base) = delta_base {
+            let base_objects = Self::reachable_git_object_count(base).unwrap_or(0);
+            if bucket <= base_objects / interval_objects {
+                return Ok(None);
+            }
+        }
+
+        let target_objects = bucket * interval_objects;
+        let tip = Self::find_git_pack_checkpoint_tip(sha, target_objects)?;
+        let covered_objects = Self::reachable_git_object_ids(&tip)?;
+        Ok(Some(GitPackCheckpointPlan {
+            tip,
+            covered_objects,
+        }))
+    }
+
+    fn reachable_git_object_count(sha: &str) -> Result<usize> {
+        Ok(Self::reachable_git_object_ids(sha)?.len())
+    }
+
+    fn reachable_git_object_ids(sha: &str) -> Result<HashSet<String>> {
+        let output = Command::new("git")
+            .args(["rev-list", "--objects", "--no-object-names", sha])
+            .output()
+            .context("run git rev-list for checkpoint interval")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git rev-list failed while checking checkpoint interval{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn rev_list_first_parent_commits(sha: &str) -> Result<Vec<String>> {
+        let output = Command::new("git")
+            .args(["rev-list", "--first-parent", "--reverse", sha])
+            .output()
+            .context("run git rev-list for checkpoint commits")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git rev-list failed while choosing checkpoint commit{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn find_git_pack_checkpoint_tip(sha: &str, target_objects: usize) -> Result<String> {
+        let commits = Self::rev_list_first_parent_commits(sha)?;
+        if commits.is_empty() {
+            return Ok(sha.to_string());
+        }
+
+        let first_count = Self::reachable_git_object_count(&commits[0])?;
+        if first_count >= target_objects {
+            return Ok(commits[0].clone());
+        }
+
+        let mut lo = 0usize;
+        let mut hi = commits.len() - 1;
+        let mut best = 0usize;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let count = Self::reachable_git_object_count(&commits[mid])?;
+            if count <= target_objects {
+                best = mid;
+                lo = mid.saturating_add(1);
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
+        }
+
+        Ok(commits[best].clone())
+    }
+
+    pub(super) fn generate_git_pack_checkpoint(
+        tips: &[String],
+    ) -> Result<BTreeMap<String, Vec<u8>>> {
+        let temp_dir = unique_git_pack_temp_dir();
+        std::fs::create_dir_all(&temp_dir)
+            .with_context(|| format!("create {}", temp_dir.display()))?;
+        let pack_prefix = temp_dir.join("pack");
+        let pack_prefix_str = pack_prefix
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("temporary pack path is not valid UTF-8"))?;
+
+        let mut child = Command::new("git")
+            .args(["pack-objects", "--threads=1", "--revs", pack_prefix_str])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn git pack-objects")?;
+
+        {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .context("open git pack-objects stdin")?;
+            for tip in tips {
+                writeln!(stdin, "{}", tip)?;
+            }
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("wait for git pack-objects")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            bail!(
+                "git pack-objects failed{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        let pack_hash = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .map(str::trim)
+            .filter(|line| line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| anyhow::anyhow!("git pack-objects did not print a pack hash"))?
+            .to_string();
+
+        let pack_name = format!("pack-{}.pack", pack_hash);
+        let idx_name = format!("pack-{}.idx", pack_hash);
+        let pack_path = temp_dir.join(&pack_name);
+        let idx_path = temp_dir.join(&idx_name);
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            pack_name,
+            std::fs::read(&pack_path).with_context(|| format!("read {}", pack_path.display()))?,
+        );
+        files.insert(
+            idx_name,
+            std::fs::read(&idx_path).with_context(|| format!("read {}", idx_path.display()))?,
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(files)
+    }
+
+    fn is_hex_object_id(value: &str) -> bool {
+        value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    pub(super) fn current_tree_object_ids(sha: &str) -> Result<HashSet<String>> {
+        let mut ids = HashSet::new();
+        if Self::is_hex_object_id(sha) {
+            ids.insert(sha.to_string());
+        }
+
+        let treeish = format!("{sha}^{{tree}}");
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", &treeish])
+            .output()
+            .context("run git rev-parse for current tree")?;
+        if !output.status.success() {
+            return Ok(ids);
+        }
+
+        let root_tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !Self::is_hex_object_id(&root_tree) {
+            return Ok(ids);
+        }
+        ids.insert(root_tree.clone());
+
+        let output = Command::new("git")
+            .args(["ls-tree", "-r", "-t", "--full-tree", &root_tree])
+            .output()
+            .context("run git ls-tree for current tree")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git ls-tree failed while selecting current tree objects{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut parts = line.split_whitespace();
+            let _mode = parts.next();
+            let object_type = parts.next();
+            let oid = parts.next();
+            match (object_type, oid) {
+                (Some("blob" | "tree"), Some(oid)) if Self::is_hex_object_id(oid) => {
+                    ids.insert(oid.to_string());
+                }
+                _ => {}
+            }
+        }
+
+        Ok(ids)
+    }
+
+    pub(super) fn select_objects_to_import_for_push(
+        &self,
+        sha: &str,
+        listed_objects: &[String],
+        checkpoint_covered: &HashSet<String>,
+    ) -> Result<Vec<String>> {
+        let mut selected = HashSet::new();
+        for oid in listed_objects {
+            if checkpoint_covered.is_empty() || !checkpoint_covered.contains(oid) {
+                selected.insert(oid.clone());
+            }
+        }
+
+        if !checkpoint_covered.is_empty() {
+            selected.extend(Self::current_tree_object_ids(sha)?);
+        }
+
+        let mut selected: Vec<String> = selected.into_iter().collect();
+        selected.sort();
+        Ok(selected)
     }
 
     fn import_full_local_revision(&mut self, sha: &str) -> Result<()> {
@@ -1067,6 +1712,14 @@ impl RemoteHelper {
             let completed = Arc::new(AtomicUsize::new(0));
             let discovered_total = Arc::new(AtomicUsize::new(1));
             let discovery_complete = Arc::new(AtomicBool::new(false));
+            let counters = UploadCounters {
+                uploaded: Arc::clone(&uploaded),
+                skipped_diff: Arc::clone(&skipped_diff),
+                skipped_server: Arc::clone(&skipped_server),
+                failed: Arc::clone(&failed),
+                completed: Arc::clone(&completed),
+                discovered_total: Arc::clone(&discovered_total),
+            };
 
             let old_hashes: HashSet<[u8; 32]> = if let Some(old_root) = old_root_bytes {
                 if old_root == root_bytes {
@@ -1191,10 +1844,15 @@ impl RemoteHelper {
                 };
             let prune_known_subtrees =
                 has_old_tree && trust_server_old_tree_coverage && servers_needing_full.is_empty();
+            let use_upload_check =
+                !force_upload && (old_tree_unavailable || !prune_known_subtrees);
+            if verbose && use_upload_check {
+                eprintln!("  Checking server blob inventory in upload batches");
+            }
 
             const CHANNEL_SIZE: usize = 100;
             let upload_concurrency = self.upload_concurrency(all_servers.len());
-            let (tx, rx) = mpsc::channel::<([u8; 32], Vec<u8>, bool, bool)>(CHANNEL_SIZE);
+            let (tx, rx) = mpsc::channel::<([u8; 32], Vec<u8>, bool, bool, bool)>(CHANNEL_SIZE);
 
             let upload_handle = {
                 let blossom = blossom.clone();
@@ -1213,7 +1871,7 @@ impl RemoteHelper {
 
                     let stream = ReceiverStream::new(rx);
                     stream
-                        .map(|(hash, data, from_old_tree, force_all_servers)| {
+                        .map(|(hash, data, from_old_tree, force_all_servers, head_fallback)| {
                             let blossom = blossom.clone();
                             let uploaded = Arc::clone(&uploaded);
                             let skipped_server = Arc::clone(&skipped_server);
@@ -1224,7 +1882,7 @@ impl RemoteHelper {
                             let discovery_complete = Arc::clone(&discovery_complete);
                             let servers_needing_full = Arc::clone(&servers_needing_full);
                             async move {
-                                let result = if old_tree_unavailable {
+                                let result = if head_fallback {
                                     let hash_hex = hex::encode(hash);
                                     if blossom.exists(&hash_hex).await {
                                         Ok((hash_hex, false))
@@ -1288,6 +1946,8 @@ impl RemoteHelper {
             let mut visited: HashSet<[u8; 32]> = HashSet::new();
             let mut queued: HashSet<[u8; 32]> = HashSet::new();
             let mut queue: Vec<([u8; 32], Option<[u8; 32]>)> = Vec::new();
+            let mut pending_uploads = Vec::with_capacity(UPLOAD_CHECK_BATCH_SIZE.min(1024));
+            let mut upload_check_supported = true;
             let _ = queue_hash_if_new(&mut queue, &mut queued, root_bytes, encryption_key.copied());
 
             eprint!(
@@ -1333,31 +1993,6 @@ impl RemoteHelper {
                         }
                         continue;
                     } else {
-                        let hash_hex = hex::encode(hash);
-                        let mut present_on_any_server = false;
-                        for server in blossom.write_servers() {
-                            if blossom.exists_on_server(&hash_hex, server).await {
-                                present_on_any_server = true;
-                                break;
-                            }
-                        }
-                        if present_on_any_server {
-                            skipped_diff.fetch_add(1, Ordering::Relaxed);
-                            let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                            if count == 1 || count.is_multiple_of(10) {
-                                emit_upload_progress(upload_progress(
-                                    count,
-                                    discovered,
-                                    None,
-                                    uploaded.load(Ordering::Relaxed),
-                                    skipped_diff.load(Ordering::Relaxed),
-                                    skipped_server.load(Ordering::Relaxed),
-                                    failed.load(Ordering::Relaxed),
-                                    has_old_tree,
-                                ));
-                            }
-                            continue;
-                        }
                         force_all_servers_for_hash = true;
                     }
                 }
@@ -1424,10 +2059,24 @@ impl RemoteHelper {
                     );
                 }
 
-                if tx
-                    .send((hash, data, from_old_tree, force_all_servers_for_hash))
+                pending_uploads.push(PendingUpload {
+                    hash,
+                    data,
+                    from_old_tree,
+                    force_all_servers: force_all_servers_for_hash,
+                });
+                if pending_uploads.len() >= UPLOAD_CHECK_BATCH_SIZE
+                    && !flush_pending_uploads(
+                        &mut pending_uploads,
+                        &blossom,
+                        &all_servers,
+                        use_upload_check,
+                        &mut upload_check_supported,
+                        &tx,
+                        &counters,
+                        has_old_tree,
+                    )
                     .await
-                    .is_err()
                 {
                     break;
                 }
@@ -1445,6 +2094,18 @@ impl RemoteHelper {
                     ));
                 }
             }
+
+            let _ = flush_pending_uploads(
+                &mut pending_uploads,
+                &blossom,
+                &all_servers,
+                use_upload_check,
+                &mut upload_check_supported,
+                &tx,
+                &counters,
+                has_old_tree,
+            )
+            .await;
 
             discovery_complete.store(true, Ordering::Relaxed);
 

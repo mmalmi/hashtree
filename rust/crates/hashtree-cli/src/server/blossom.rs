@@ -40,6 +40,7 @@ pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
 const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_UPLOAD_CHECK_HASHES: usize = 10_000;
 const SLOW_BATCH_UPLOAD_LOG_MS_ENV: &str = "HTREE_SLOW_BATCH_UPLOAD_LOG_MS";
 
 fn slow_batch_upload_log_ms() -> Option<u128> {
@@ -182,6 +183,17 @@ pub struct BatchUploadRequest {
 pub struct BatchUploadResponse {
     pub uploaded: usize,
     pub blobs: Vec<BlobDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UploadCheckRequest {
+    pub hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadCheckResponse {
+    pub count: usize,
+    pub present: String,
 }
 
 /// Query parameters for list endpoint
@@ -423,11 +435,117 @@ pub async fn cors_preflight(headers: HeaderMap) -> impl IntoResponse {
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
             header::ACCESS_CONTROL_ALLOW_METHODS,
-            "GET, HEAD, PUT, DELETE, OPTIONS",
+            "GET, HEAD, POST, PUT, DELETE, OPTIONS",
         )
         .header(header::ACCESS_CONTROL_ALLOW_HEADERS, full_allowed)
         .header(header::ACCESS_CONTROL_MAX_AGE, "86400")
         .body(Body::empty())
+        .unwrap()
+}
+
+fn encode_upload_check_bitset(bits: &[bool]) -> String {
+    let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+    for (index, present) in bits.iter().enumerate() {
+        if *present {
+            bytes[index / 8] |= 1 << (index % 8);
+        }
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// POST /upload/check - Batch-check blob presence for upload planning.
+pub async fn upload_check(
+    State(state): State<AppState>,
+    Json(payload): Json<UploadCheckRequest>,
+) -> impl IntoResponse {
+    if payload.hashes.len() > MAX_UPLOAD_CHECK_HASHES {
+        return blossom_json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("Too many hashes; maximum is {}", MAX_UPLOAD_CHECK_HASHES),
+        );
+    }
+
+    let mut requested = Vec::with_capacity(payload.hashes.len());
+    let mut unique = Vec::new();
+    for hash in payload.hashes {
+        let hash = hash.trim().to_ascii_lowercase();
+        if !is_valid_sha256(&hash) {
+            return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid SHA256 hash");
+        }
+        let bytes: [u8; 32] = match from_hex(&hash) {
+            Ok(bytes) => bytes,
+            Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid SHA256 hash"),
+        };
+        requested.push(bytes);
+        unique.push(bytes);
+    }
+
+    unique.sort_unstable();
+    unique.dedup();
+
+    let existing = if unique.is_empty() {
+        Vec::new()
+    } else {
+        let permit = match acquire_blob_read().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return blossom_retryable_json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    BLOB_READ_BUSY,
+                    1,
+                );
+            }
+        };
+        let store = state.store.clone();
+        let lookup_hashes = unique.clone();
+        let lookup = tokio::task::spawn_blocking(move || {
+            store
+                .router()
+                .existing_local_hashes_in_sorted_candidates(&lookup_hashes)
+        });
+        let result = tokio::time::timeout(blob_read_timeout(), lookup).await;
+        drop(permit);
+        match result {
+            Ok(Ok(Ok(existing))) => existing,
+            Ok(Ok(Err(error))) => {
+                tracing::debug!("Blossom upload check failed: {}", error);
+                return blossom_json_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage error");
+            }
+            Ok(Err(error)) => {
+                tracing::debug!("Blossom upload check task failed: {}", error);
+                return blossom_json_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage error");
+            }
+            Err(_) => {
+                return blossom_retryable_json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Blob check timed out",
+                    1,
+                );
+            }
+        }
+    };
+
+    let present_unique: HashSet<[u8; 32]> = unique
+        .into_iter()
+        .zip(existing)
+        .filter_map(|(hash, present)| present.then_some(hash))
+        .collect();
+    let present_bits: Vec<bool> = requested
+        .iter()
+        .map(|hash| present_unique.contains(hash))
+        .collect();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_string(&UploadCheckResponse {
+                count: present_bits.len(),
+                present: encode_upload_check_bitset(&present_bits),
+            })
+            .unwrap(),
+        ))
         .unwrap()
 }
 
@@ -458,7 +576,7 @@ pub async fn head_blob(
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .header("X-Reason", "Invalid SHA256 format")
                 .body(Body::empty())
-                .unwrap()
+                .unwrap();
         }
     };
 
@@ -479,7 +597,7 @@ pub async fn head_blob(
                     .header("Retry-After", "1")
                     .header("X-Reason", BLOB_READ_BUSY)
                     .body(Body::empty())
-                    .unwrap()
+                    .unwrap();
             }
         };
         let store = state.store.clone();
@@ -1240,7 +1358,7 @@ pub async fn list_blobs(
                 .header("X-Reason", "Invalid pubkey format")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from("[]"))
-                .unwrap()
+                .unwrap();
         }
     };
 
@@ -1441,6 +1559,15 @@ mod tests {
         )
     }
 
+    fn upload_check_bits(response: UploadCheckResponse) -> Vec<bool> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(response.present)
+            .expect("decode upload check bitset");
+        (0..response.count)
+            .map(|index| bytes[index / 8] & (1 << (index % 8)) != 0)
+            .collect()
+    }
+
     #[test]
     fn test_is_valid_sha256() {
         assert!(is_valid_sha256(
@@ -1486,6 +1613,80 @@ mod tests {
         assert_eq!(mime_to_extension("video/mp4"), ".mp4");
         assert_eq!(mime_to_extension("application/octet-stream"), "");
         assert_eq!(mime_to_extension("unknown/type"), "");
+    }
+
+    #[tokio::test]
+    async fn upload_check_reports_present_hashes_in_request_order() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+
+        let present = b"present blob";
+        let missing = b"missing blob";
+        let present_hash = sha256(present);
+        let missing_hash = sha256(missing);
+        store.put_cached_blob(present).expect("seed blob");
+
+        let state = test_app_state(store);
+        let response = upload_check(
+            State(state),
+            Json(UploadCheckRequest {
+                hashes: vec![
+                    hex::encode(missing_hash),
+                    hex::encode(present_hash),
+                    hex::encode(present_hash),
+                ],
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let parsed: UploadCheckResponse =
+            serde_json::from_slice(&body).expect("parse upload check response");
+        assert_eq!(upload_check_bits(parsed), vec![false, true, true]);
+    }
+
+    #[tokio::test]
+    async fn upload_check_rejects_invalid_hash() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(store);
+        let response = upload_check(
+            State(state),
+            Json(UploadCheckRequest {
+                hashes: vec!["not-a-sha256".to_string()],
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn upload_check_rejects_too_many_hashes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(store);
+        let response = upload_check(
+            State(state),
+            Json(UploadCheckRequest {
+                hashes: vec!["00".repeat(32); MAX_UPLOAD_CHECK_HASHES + 1],
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

@@ -289,6 +289,35 @@ impl Drop for CwdGuard {
     }
 }
 
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_deref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 fn git(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new("git")
         .args(args)
@@ -479,7 +508,9 @@ fn test_handle_list_command() {
 
 #[test]
 fn test_handle_list_for_push_command() {
-    let Some(mut helper) = create_test_helper() else {
+    let mut config = Config::default();
+    config.blossom.force_upload = true;
+    let Some(mut helper) = create_test_helper_with_config(config) else {
         return;
     };
 
@@ -863,6 +894,115 @@ fn test_push_objects_skips_exact_remote_tip_without_local_tree_rebuild() {
             .has_ref("refs/heads/master")
             .expect("branch ref presence"),
         "no-op push should leave the in-memory tree untouched"
+    );
+}
+
+#[test]
+fn test_checkpoint_push_import_selection_keeps_current_tree_but_skips_old_history() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, base_sha, master_sha, _dev_sha) = create_repo_with_diverged_master_and_dev();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let helper = create_test_helper().expect("helper");
+    let full = helper
+        .list_objects_for_shas(std::slice::from_ref(&master_sha), &[])
+        .expect("list full objects");
+    let checkpoint_covered: HashSet<String> = full.iter().cloned().collect();
+    let current_tree =
+        RemoteHelper::current_tree_object_ids(&master_sha).expect("current tree object ids");
+
+    let selected = helper
+        .select_objects_to_import_for_push(&master_sha, &full, &checkpoint_covered)
+        .expect("select import objects");
+    let selected: HashSet<String> = selected.into_iter().collect();
+
+    assert!(
+        current_tree.iter().all(|oid| selected.contains(oid)),
+        "current checkout tree objects are needed to build the hashtree view"
+    );
+    assert!(
+        !selected.contains(&base_sha),
+        "old history covered by the checkpoint pack should not be imported as loose helper state"
+    );
+    assert!(
+        selected.len() < full.len(),
+        "checkpoint import should be smaller than the full history"
+    );
+}
+
+#[test]
+fn test_git_pack_checkpoint_generation_is_deterministic() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (_home, repo, base_sha, _master_sha, _dev_sha) = create_repo_with_diverged_master_and_dev();
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let first = RemoteHelper::generate_git_pack_checkpoint(std::slice::from_ref(&base_sha))
+        .expect("generate first checkpoint pack");
+    let second = RemoteHelper::generate_git_pack_checkpoint(std::slice::from_ref(&base_sha))
+        .expect("generate second checkpoint pack");
+
+    assert_eq!(
+        first.keys().collect::<Vec<_>>(),
+        second.keys().collect::<Vec<_>>(),
+        "checkpoint pack filenames should converge for the same tip"
+    );
+    assert_eq!(
+        first, second,
+        "checkpoint pack bytes should converge for the same tip"
+    );
+}
+
+#[test]
+fn test_git_pack_install_streams_pack_and_index_files() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let repo = TempDir::new().expect("temp repo");
+    assert!(git(repo.path(), &["init", "-b", "master"]).status.success());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let pack_bytes = (0..5000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let idx_bytes = b"synthetic index bytes".to_vec();
+    let store = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(HashTreeConfig::new(store).public().with_chunk_size(97));
+    let (pack_cid, pack_size) = rt
+        .block_on(tree.put(&pack_bytes))
+        .expect("write test pack to tree");
+    let (idx_cid, idx_size) = rt
+        .block_on(tree.put(&idx_bytes))
+        .expect("write test idx to tree");
+
+    let pack_hash = "0123456789abcdef0123456789abcdef01234567";
+    let pack_name = format!("pack-{pack_hash}.pack");
+    let idx_name = format!("pack-{pack_hash}.idx");
+    let locations = vec![GitPackLocation {
+        pack_name: pack_name.clone(),
+        pack_cid,
+        pack_size,
+        idx_name: idx_name.clone(),
+        idx_cid: Some(idx_cid),
+        idx_size: Some(idx_size),
+    }];
+
+    let installed = rt
+        .block_on(helper.install_git_pack_files_async(&tree, &locations))
+        .expect("install git pack files");
+
+    assert_eq!(installed, 1);
+    assert_eq!(
+        std::fs::read(repo.path().join(".git/objects/pack").join(pack_name)).unwrap(),
+        pack_bytes
+    );
+    assert_eq!(
+        std::fs::read(repo.path().join(".git/objects/pack").join(idx_name)).unwrap(),
+        idx_bytes
     );
 }
 
@@ -1315,4 +1455,33 @@ fn test_queue_links_for_diff_upload_prunes_known_subtrees() {
         1,
         "only the new child should count as discovered work"
     );
+}
+
+#[test]
+fn test_repo_not_found_error_classifier() {
+    let missing = anyhow::anyhow!(
+        "Repository 'bench' not found (no hashtree event published by npub1example)"
+    );
+    assert!(RemoteHelper::is_repo_not_found_error(&missing));
+
+    let timeout = anyhow::anyhow!("relay query timed out");
+    assert!(!RemoteHelper::is_repo_not_found_error(&timeout));
+}
+
+#[test]
+fn test_git_tree_walk_concurrency_defaults_and_caps_env() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _clear = EnvGuard::clear("HTREE_GIT_TREE_WALK_CONCURRENCY");
+    assert_eq!(
+        git_tree_walk_concurrency(),
+        DEFAULT_GIT_TREE_WALK_CONCURRENCY
+    );
+
+    {
+        let _set = EnvGuard::set("HTREE_GIT_TREE_WALK_CONCURRENCY", "12");
+        assert_eq!(git_tree_walk_concurrency(), 12);
+    }
+
+    let _set = EnvGuard::set("HTREE_GIT_TREE_WALK_CONCURRENCY", "999");
+    assert_eq!(git_tree_walk_concurrency(), MAX_GIT_TREE_WALK_CONCURRENCY);
 }

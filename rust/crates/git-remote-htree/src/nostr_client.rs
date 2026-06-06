@@ -50,7 +50,7 @@ use crate::runtime::block_on_result;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use hashtree_blossom::BlossomClient;
-use hashtree_core::{decode_tree_node, decrypt_chk, LinkType};
+use hashtree_core::{decode_tree_node, decrypt_chk, Cid, LinkType};
 use nostr_sdk::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -316,6 +316,8 @@ struct RootEventData {
 #[derive(Debug, Deserialize)]
 struct DaemonResolveResponse {
     hash: Option<String>,
+    #[serde(default)]
+    cid: Option<String>,
     #[serde(default, rename = "key_tag")]
     key: Option<String>,
     #[serde(default, rename = "encryptedKey")]
@@ -351,10 +353,21 @@ impl NostrClient {
             None
         };
 
-        // Create BlossomClient (needs keys for upload auth)
-        // BlossomClient auto-loads servers from config
+        // Create BlossomClient (needs keys for upload auth) from the resolved
+        // config passed by the helper instead of reloading defaults from disk.
         let blossom_keys = keys.clone().unwrap_or_else(Keys::generate);
-        let blossom = BlossomClient::new(blossom_keys).with_timeout(Duration::from_secs(30));
+        let mut read_servers = config.blossom.all_read_servers();
+        if let Some(local_url) =
+            hashtree_config::detect_local_daemon_url(Some(config.server.bind_address.as_str()))
+        {
+            if !read_servers.iter().any(|server| server == &local_url) {
+                read_servers.insert(0, local_url);
+            }
+        }
+        let blossom = BlossomClient::new_empty(blossom_keys)
+            .with_read_servers(read_servers)
+            .with_write_servers(config.blossom.all_write_servers())
+            .with_timeout(Duration::from_secs(30));
 
         tracing::info!(
             "BlossomClient created with read_servers: {:?}, write_servers: {:?}",
@@ -399,6 +412,10 @@ impl NostrClient {
             .ok()
             .and_then(|pk| pk.to_bech32().ok())
             .unwrap_or_else(|| pubkey_hex.to_string())
+    }
+
+    fn daemon_pubkey_identifier(&self) -> String {
+        Self::format_repo_author(&self.pubkey)
     }
 
     /// Check if we can sign (have secret key for this pubkey)
@@ -567,14 +584,17 @@ impl NostrClient {
     fn parse_daemon_response_to_root_data(
         response: DaemonResolveResponse,
     ) -> Option<RootEventData> {
-        let root_hash = response.hash?;
+        let parsed_cid = response.cid.as_deref().and_then(|cid| Cid::parse(cid).ok());
+        let root_hash = response
+            .hash
+            .or_else(|| parsed_cid.as_ref().map(|cid| hex::encode(cid.hash)))?;
         if root_hash.is_empty() {
             return None;
         }
 
         let mut data = RootEventData {
             root_hash,
-            encryption_key: None,
+            encryption_key: parsed_cid.and_then(|cid| cid.key),
             key_tag_name: None,
             self_encrypted_ciphertext: None,
         };
@@ -611,10 +631,11 @@ impl NostrClient {
         timeout: Duration,
     ) -> Option<RootEventData> {
         let base = self.local_daemon_url.as_ref()?;
+        let pubkey = self.daemon_pubkey_identifier();
         let url = format!(
             "{}/api/nostr/resolve/{}/{}",
             base.trim_end_matches('/'),
-            self.pubkey,
+            pubkey,
             repo_name
         );
 
@@ -635,6 +656,60 @@ impl NostrClient {
             repo_name, source
         );
         Some(parsed)
+    }
+
+    async fn cache_public_root_in_local_daemon(
+        &self,
+        repo_name: &str,
+        root_hash: &str,
+        encryption_key: Option<(&[u8; 32], bool, bool)>,
+    ) {
+        let Some(base) = self.local_daemon_url.as_ref() else {
+            return;
+        };
+
+        let key = match encryption_key {
+            Some((key, false, false)) => Some(hex::encode(key)),
+            Some((_key, _is_link_visible, _is_self_private)) => return,
+            None => None,
+        };
+
+        let url = format!("{}/api/cache-tree-root", base.trim_end_matches('/'));
+        let pubkey = self.daemon_pubkey_identifier();
+        let payload = serde_json::json!({
+            "npub": pubkey,
+            "treeName": repo_name,
+            "hash": root_hash,
+            "key": key,
+            "visibility": "public",
+        });
+
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                debug!("Could not build local daemon cache client: {}", err);
+                return;
+            }
+        };
+
+        match client.post(url).json(&payload).send().await {
+            Ok(response) if response.status().is_success() => {
+                debug!("Cached repo root for {} in local daemon", repo_name);
+            }
+            Ok(response) => {
+                debug!(
+                    "Local daemon root cache returned status {} for {}",
+                    response.status(),
+                    repo_name
+                );
+            }
+            Err(err) => {
+                debug!("Could not cache repo root in local daemon: {}", err);
+            }
+        }
     }
 
     async fn resolve_root_async_with_timeout(
@@ -673,6 +748,14 @@ impl NostrClient {
 
         let mut root_data = None;
         for attempt in 1..=max_attempts {
+            if let Some(data) = self
+                .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
+                .await
+            {
+                root_data = Some(data);
+                break;
+            }
+
             // Wait for at least one relay to connect (quick timeout - break immediately when one
             // connects). We retry once because relays and the local daemon can both lag briefly.
             let connect_start = std::time::Instant::now();
@@ -746,14 +829,6 @@ impl NostrClient {
                     &event.content[..12.min(event.content.len())]
                 );
                 root_data = Some(Self::parse_root_event_data_from_event(event));
-                break;
-            }
-
-            if let Some(data) = self
-                .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
-                .await
-            {
-                root_data = Some(data);
                 break;
             }
 
@@ -1352,6 +1427,9 @@ impl NostrClient {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         relay_validation?;
+
+        self.cache_public_root_in_local_daemon(repo_name, root_hash, encryption_key)
+            .await;
 
         Ok((
             npub_url,

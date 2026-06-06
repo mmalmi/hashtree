@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.2.57 - 2026-06-07
+
+### Added
+
+- Added Git pack checkpoints to `git-remote-htree` pushes and clone fetches so
+  large repositories can install ordinary Git pack files instead of fetching
+  every historical object as loose helper state.
+- Added Blossom upload-check support and git push batching, reducing request
+  count when many blobs are missing.
+
+### Changed
+
+- Made Git pack checkpoint generation deterministic so repeated pushes at the
+  same checkpoint tip converge on the same pack blobs.
+- Changed `git-remote-htree` same-tip pushes to advertise existing refs for
+  `list for-push`, allowing Git to return `Everything up-to-date` without
+  rechecking already-present Blossom blobs.
+- Reduced clone-side tree-walk concurrency and retried transient Blossom cache
+  misses so sparse LMDB-backed servers are not overwhelmed by many concurrent
+  clone clients.
+- Streamed Git pack checkpoint downloads directly into `.git/objects/pack` with
+  byte-level progress before indexing.
+
+### Fixed
+
+- Fixed local daemon root cache lookups for git repos by using the `npub`
+  identifier expected by the HTTP resolver, preserving the root decryption key
+  after daemon restarts.
+- Fixed `git-remote-htree` Blossom client setup to use the resolved helper
+  config instead of reloading default write servers.
+
 ## 0.2.56 - 2026-06-06
 
 Changes since the `0.2.54` release.

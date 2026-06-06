@@ -7,7 +7,7 @@
 //!       refs/heads/main -> <commit-sha1>
 //!       info/refs -> dumb-HTTP ref advertisement
 //!       objects/XX/YYYY... -> zlib-compressed loose object (standard git layout)
-//!       objects/info/packs -> dumb-HTTP pack advertisement
+//!       objects/info/packs -> standard Git pack list
 //!
 //! The root hash (SHA-256) is the content-addressed identifier for the entire repo state.
 
@@ -22,7 +22,7 @@ use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::LmdbBlobStore;
 use sha1::{Digest, Sha1};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -294,6 +294,8 @@ pub struct GitStorage {
     /// In-memory state for the current session
     objects: std::sync::RwLock<HashMap<String, Vec<u8>>>,
     refs: std::sync::RwLock<HashMap<String, String>>,
+    pack_files: std::sync::RwLock<BTreeMap<String, Vec<u8>>>,
+    packed_object_ids: std::sync::RwLock<HashSet<String>>,
     /// Cached root CID (hash + encryption key)
     root_cid: std::sync::RwLock<Option<Cid>>,
 }
@@ -344,6 +346,8 @@ impl GitStorage {
             runtime,
             objects: std::sync::RwLock::new(HashMap::new()),
             refs: std::sync::RwLock::new(HashMap::new()),
+            pack_files: std::sync::RwLock::new(BTreeMap::new()),
+            packed_object_ids: std::sync::RwLock::new(HashSet::new()),
             root_cid: std::sync::RwLock::new(None),
         })
     }
@@ -501,6 +505,33 @@ impl GitStorage {
         refs.insert(name.to_string(), value.to_string());
 
         // Invalidate cached root
+        if let Ok(mut root) = self.root_cid.write() {
+            *root = None;
+        }
+
+        Ok(())
+    }
+
+    pub fn set_pack_files(&self, files: BTreeMap<String, Vec<u8>>) -> Result<()> {
+        self.set_pack_checkpoint_files(files, HashSet::new())
+    }
+
+    pub fn set_pack_checkpoint_files(
+        &self,
+        files: BTreeMap<String, Vec<u8>>,
+        covered_objects: HashSet<String>,
+    ) -> Result<()> {
+        let mut pack_files = self
+            .pack_files
+            .write()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+        *pack_files = files;
+        let mut packed_object_ids = self
+            .packed_object_ids
+            .write()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+        *packed_object_ids = covered_objects;
+
         if let Ok(mut root) = self.root_cid.write() {
             *root = None;
         }
@@ -810,6 +841,62 @@ impl GitStorage {
         self.build_tree_with_base_objects_internal::<LocalStore>(None, None, None, Some(progress))
     }
 
+    fn is_safe_pack_name(name: &str) -> bool {
+        name.len() == "pack-".len() + 40 + ".pack".len()
+            && name.starts_with("pack-")
+            && name.ends_with(".pack")
+            && name["pack-".len()..name.len() - ".pack".len()]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    fn root_has_git_pack_checkpoint(&self, root_cid: &Cid) -> Result<bool> {
+        let Some(info_packs_cid) = self
+            .runtime
+            .block_on(self.tree.resolve_path(root_cid, ".git/objects/info/packs"))
+            .map_err(|e| Error::StorageError(format!("resolve .git/objects/info/packs: {}", e)))?
+        else {
+            return Ok(false);
+        };
+
+        let Some(info_packs_bytes) = self
+            .runtime
+            .block_on(self.tree.get(&info_packs_cid, None))
+            .map_err(|e| Error::StorageError(format!("read .git/objects/info/packs: {}", e)))?
+        else {
+            return Ok(false);
+        };
+
+        let info_packs = String::from_utf8_lossy(&info_packs_bytes);
+        for line in info_packs.lines().map(str::trim) {
+            let Some(pack_name) = line.strip_prefix("P ") else {
+                continue;
+            };
+            if !Self::is_safe_pack_name(pack_name) {
+                continue;
+            }
+
+            let idx_name = format!("{}.idx", pack_name.trim_end_matches(".pack"));
+            let pack_path = format!(".git/objects/pack/{pack_name}");
+            let idx_path = format!(".git/objects/pack/{idx_name}");
+            let pack_exists = self
+                .runtime
+                .block_on(self.tree.resolve_path(root_cid, &pack_path))
+                .map_err(|e| Error::StorageError(format!("resolve {}: {}", pack_path, e)))?
+                .is_some();
+            let idx_exists = self
+                .runtime
+                .block_on(self.tree.resolve_path(root_cid, &idx_path))
+                .map_err(|e| Error::StorageError(format!("resolve {}: {}", idx_path, e)))?
+                .is_some();
+            if pack_exists && idx_exists {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     pub fn validate_root_contains_direct_refs(&self, root_cid: &Cid) -> Result<()> {
         let direct_refs: Vec<String> = {
             let refs = self
@@ -840,13 +927,14 @@ impl GitStorage {
             ));
         }
 
+        let pack_checkpoint_available = self.root_has_git_pack_checkpoint(root_cid)?;
         for oid in direct_refs {
             let object_path = format!(".git/objects/{}/{}", &oid[..2], &oid[2..]);
             let object_cid = self
                 .runtime
                 .block_on(self.tree.resolve_path(root_cid, &object_path))
                 .map_err(|e| Error::StorageError(format!("resolve {}: {}", object_path, e)))?;
-            if object_cid.is_none() {
+            if object_cid.is_none() && !pack_checkpoint_available {
                 return Err(Error::ObjectNotFound(oid));
             }
         }
@@ -1506,8 +1594,22 @@ impl GitStorage {
             progress.start_phase(RepoTreeBuildPhase::Objects, Some(objects.len()));
         }
 
+        let pack_files = self
+            .pack_files
+            .read()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?
+            .clone();
+        let packed_object_ids = self
+            .packed_object_ids
+            .read()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?
+            .clone();
+        let packs_replace_loose_objects = !packed_object_ids.is_empty() && !pack_files.is_empty();
         let mut buckets: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
         for (oid, data) in objects {
+            if packs_replace_loose_objects && packed_object_ids.contains(oid) {
+                continue;
+            }
             let prefix = &oid[..2];
             let suffix = &oid[2..];
             buckets
@@ -1518,6 +1620,8 @@ impl GitStorage {
 
         let mut top_entries: BTreeMap<String, DirEntry> = BTreeMap::new();
         let mut merged_prefixes = std::collections::HashSet::new();
+        let mut inherited_pack_entries: BTreeMap<String, DirEntry> = BTreeMap::new();
+        let empty_objects: Vec<(String, Vec<u8>)> = Vec::new();
 
         if let (Some(base_tree), Some(base_objects_cid)) = (base_tree, base_objects_cid) {
             for entry in base_tree
@@ -1525,13 +1629,78 @@ impl GitStorage {
                 .await
                 .map_err(|e| Error::StorageError(format!("list base objects dir: {}", e)))?
             {
-                if entry.name == "info" {
-                    top_entries.insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
+                if entry.name == "info" || entry.name == "pack" {
+                    if pack_files.is_empty() {
+                        top_entries
+                            .insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
+                    } else if entry.name == "pack" && entry.link_type == LinkType::Dir {
+                        let pack_cid = Cid {
+                            hash: entry.hash,
+                            key: entry.key,
+                        };
+                        for pack_entry in
+                            base_tree.list_directory(&pack_cid).await.map_err(|e| {
+                                Error::StorageError(format!("list base objects/pack dir: {}", e))
+                            })?
+                        {
+                            inherited_pack_entries.insert(
+                                pack_entry.name.clone(),
+                                Self::tree_entry_to_dir_entry(&pack_entry),
+                            );
+                        }
+                    }
                     continue;
                 }
 
                 let Some(delta_objects) = buckets.get(&entry.name) else {
-                    top_entries.insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
+                    if !packs_replace_loose_objects {
+                        top_entries
+                            .insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
+                        continue;
+                    }
+
+                    if entry.link_type != LinkType::Dir || entry.name.len() != 2 {
+                        top_entries
+                            .insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
+                        continue;
+                    }
+
+                    let prefix_cid = Cid {
+                        hash: entry.hash,
+                        key: entry.key,
+                    };
+                    let old_prefix_entries = base_tree
+                        .list_directory(&prefix_cid)
+                        .await
+                        .map_err(|e| {
+                            Error::StorageError(format!(
+                                "list base objects/{} dir: {}",
+                                entry.name, e
+                            ))
+                        })?
+                        .into_iter()
+                        .filter(|old_entry| {
+                            !packed_object_ids
+                                .contains(&format!("{}{}", entry.name, old_entry.name))
+                        })
+                        .collect::<Vec<_>>();
+                    if old_prefix_entries.is_empty() {
+                        continue;
+                    }
+
+                    let merged_cid = self
+                        .build_objects_prefix_dir(
+                            &entry.name,
+                            Some(old_prefix_entries),
+                            &empty_objects,
+                            progress,
+                        )
+                        .await?;
+                    top_entries.insert(
+                        entry.name.clone(),
+                        DirEntry::from_cid(&entry.name, &merged_cid).with_link_type(LinkType::Dir),
+                    );
+                    merged_prefixes.insert(entry.name);
                     continue;
                 };
 
@@ -1540,9 +1709,16 @@ impl GitStorage {
                     key: entry.key,
                 };
                 let old_prefix_entries = if entry.link_type == LinkType::Dir {
-                    Some(base_tree.list_directory(&prefix_cid).await.map_err(|e| {
+                    let mut entries = base_tree.list_directory(&prefix_cid).await.map_err(|e| {
                         Error::StorageError(format!("list base objects/{} dir: {}", entry.name, e))
-                    })?)
+                    })?;
+                    if packs_replace_loose_objects {
+                        entries.retain(|old_entry| {
+                            !packed_object_ids
+                                .contains(&format!("{}{}", entry.name, old_entry.name))
+                        });
+                    }
+                    Some(entries)
                 } else {
                     None
                 };
@@ -1572,6 +1748,56 @@ impl GitStorage {
             top_entries.insert(
                 prefix.clone(),
                 DirEntry::from_cid(prefix, &sub_cid).with_link_type(LinkType::Dir),
+            );
+        }
+
+        if !pack_files.is_empty() {
+            let mut pack_entries_by_name = inherited_pack_entries;
+            for (name, data) in pack_files {
+                let (cid, size) = self.tree.put(&data).await.map_err(|e| {
+                    Error::StorageError(format!("put objects/pack/{}: {}", name, e))
+                })?;
+                pack_entries_by_name.insert(
+                    name.clone(),
+                    DirEntry::from_cid(&name, &cid).with_size(size),
+                );
+            }
+            let mut pack_names_for_info_packs = pack_entries_by_name
+                .keys()
+                .filter(|name| name.ends_with(".pack"))
+                .cloned()
+                .collect::<Vec<_>>();
+            pack_names_for_info_packs.sort();
+
+            let pack_dir_cid = self
+                .tree
+                .put_directory(pack_entries_by_name.into_values().collect())
+                .await
+                .map_err(|e| Error::StorageError(format!("put objects/pack: {}", e)))?;
+            top_entries.insert(
+                "pack".to_string(),
+                DirEntry::from_cid("pack", &pack_dir_cid).with_link_type(LinkType::Dir),
+            );
+
+            let packs_content = pack_names_for_info_packs
+                .iter()
+                .map(|name| format!("P {}\n", name))
+                .collect::<String>();
+            let (packs_cid, packs_size) = self
+                .tree
+                .put(packs_content.as_bytes())
+                .await
+                .map_err(|e| Error::StorageError(format!("put objects/info/packs: {}", e)))?;
+            let info_cid = self
+                .tree
+                .put_directory(vec![
+                    DirEntry::from_cid("packs", &packs_cid).with_size(packs_size)
+                ])
+                .await
+                .map_err(|e| Error::StorageError(format!("put objects/info: {}", e)))?;
+            top_entries.insert(
+                "info".to_string(),
+                DirEntry::from_cid("info", &info_cid).with_link_type(LinkType::Dir),
             );
         }
 
@@ -2608,6 +2834,124 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(packs.is_empty(), "objects/info/packs should be empty");
+    }
+
+    #[test]
+    fn test_build_tree_writes_git_objects_info_packs_for_pack_files() {
+        let (storage, _temp) = create_test_storage();
+        let commit_oid = write_test_commit(&storage);
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(commit_oid))
+            .unwrap();
+        storage
+            .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+            .unwrap();
+
+        let pack_hash = "0123456789abcdef0123456789abcdef01234567";
+        let pack_name = format!("pack-{pack_hash}.pack");
+        let idx_name = format!("pack-{pack_hash}.idx");
+        let mut pack_files = BTreeMap::new();
+        pack_files.insert(pack_name.clone(), b"pack bytes".to_vec());
+        pack_files.insert(idx_name.clone(), b"idx bytes".to_vec());
+        storage.set_pack_files(pack_files).unwrap();
+
+        let root_cid = storage.build_tree().unwrap();
+
+        let packs_cid = storage
+            .runtime
+            .block_on(
+                storage
+                    .tree
+                    .resolve_path(&root_cid, ".git/objects/info/packs"),
+            )
+            .unwrap()
+            .expect("objects/info/packs exists");
+        let packs = storage
+            .runtime
+            .block_on(storage.tree.get(&packs_cid, None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(packs).unwrap(),
+            format!("P {pack_name}\n")
+        );
+
+        for path in [
+            format!(".git/objects/pack/{pack_name}"),
+            format!(".git/objects/pack/{idx_name}"),
+        ] {
+            let cid = storage
+                .runtime
+                .block_on(storage.tree.resolve_path(&root_cid, &path))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{path} should exist"));
+            let content = storage
+                .runtime
+                .block_on(storage.tree.get(&cid, None))
+                .unwrap()
+                .unwrap();
+            assert!(!content.is_empty(), "{path} should have content");
+        }
+    }
+
+    #[test]
+    fn test_pack_checkpoint_can_replace_loose_git_objects() {
+        let (storage, _temp) = create_test_storage();
+        let commit_oid = write_test_commit(&storage);
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(commit_oid))
+            .unwrap();
+        storage
+            .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+            .unwrap();
+
+        let pack_hash = "0123456789abcdef0123456789abcdef01234567";
+        let pack_name = format!("pack-{pack_hash}.pack");
+        let idx_name = format!("pack-{pack_hash}.idx");
+        let mut pack_files = BTreeMap::new();
+        pack_files.insert(pack_name.clone(), b"pack bytes".to_vec());
+        pack_files.insert(idx_name, b"idx bytes".to_vec());
+        storage
+            .set_pack_checkpoint_files(pack_files, HashSet::from([commit_oid.to_hex()]))
+            .unwrap();
+
+        let root_cid = storage.build_tree().unwrap();
+        let loose_path = format!(
+            ".git/objects/{}/{}",
+            &commit_oid.to_hex()[..2],
+            &commit_oid.to_hex()[2..]
+        );
+        let loose_cid = storage
+            .runtime
+            .block_on(storage.tree.resolve_path(&root_cid, &loose_path))
+            .unwrap();
+        assert!(
+            loose_cid.is_none(),
+            "pack checkpoint should omit duplicated loose objects"
+        );
+
+        storage
+            .validate_root_contains_direct_refs(&root_cid)
+            .expect("pack checkpoint should satisfy ref validation");
+
+        let packs_cid = storage
+            .runtime
+            .block_on(
+                storage
+                    .tree
+                    .resolve_path(&root_cid, ".git/objects/info/packs"),
+            )
+            .unwrap()
+            .expect("objects/info/packs exists");
+        let packs = storage
+            .runtime
+            .block_on(storage.tree.get(&packs_cid, None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(packs).unwrap(),
+            format!("P {pack_name}\n")
+        );
     }
 
     #[test]

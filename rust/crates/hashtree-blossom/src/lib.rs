@@ -29,10 +29,16 @@
 use base64::Engine;
 use nostr::prelude::*;
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, warn};
+
+const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
+pub const BATCH_UPLOAD_MAX_BLOBS: usize = 1024;
+pub const BATCH_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Error, Debug)]
 pub enum BlossomError {
@@ -91,6 +97,64 @@ impl UploadOutcome {
 struct UploadAttemptError {
     detail: String,
     retryable: bool,
+}
+
+#[derive(Serialize)]
+struct UploadCheckRequest<'a> {
+    hashes: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct UploadCheckResponse {
+    count: usize,
+    present: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchUploadItem {
+    pub hash: String,
+    pub data: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
+impl BatchUploadItem {
+    pub fn new(hash: String, data: Vec<u8>) -> Self {
+        Self {
+            hash,
+            data,
+            content_type: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchUploadResult {
+    pub accepted: usize,
+    pub uploaded: usize,
+}
+
+#[derive(Serialize)]
+struct BatchUploadRequest {
+    blobs: Vec<BatchUploadBlobRequest>,
+}
+
+#[derive(Serialize)]
+struct BatchUploadBlobRequest {
+    sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "contentType")]
+    content_type: Option<String>,
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct BatchUploadResponse {
+    uploaded: usize,
+    blobs: Vec<BatchUploadDescriptor>,
+}
+
+#[derive(Deserialize)]
+struct BatchUploadDescriptor {
+    sha256: String,
 }
 
 impl UploadAttemptError {
@@ -343,6 +407,199 @@ impl BlossomClient {
     /// Check if a blob exists on a specific server
     pub async fn exists_on_server(&self, hash: &str, server: &str) -> bool {
         self.check_on_server(hash, server).await == BlobAvailability::Present
+    }
+
+    /// Batch-check upload targets on one server. Returns `None` when the server
+    /// does not support the endpoint or the response is inconclusive.
+    pub async fn check_uploads_on_server(
+        &self,
+        hashes: &[String],
+        server: &str,
+    ) -> Option<HashSet<String>> {
+        if hashes.is_empty() {
+            return Some(HashSet::new());
+        }
+
+        let mut present = HashSet::new();
+        for chunk in hashes.chunks(UPLOAD_CHECK_BATCH_SIZE) {
+            let chunk_present = self.check_uploads_on_server_chunk(chunk, server).await?;
+            present.extend(chunk_present);
+        }
+        Some(present)
+    }
+
+    async fn check_uploads_on_server_chunk(
+        &self,
+        hashes: &[String],
+        server: &str,
+    ) -> Option<HashSet<String>> {
+        let url = format!("{}/upload/check", server.trim_end_matches('/'));
+        let body = match serde_json::to_vec(&UploadCheckRequest { hashes }) {
+            Ok(body) => body,
+            Err(err) => {
+                debug!("Could not encode upload check request: {}", err);
+                return None;
+            }
+        };
+
+        let resp = match self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                debug!("Upload check request to {} failed: {}", server, err);
+                return None;
+            }
+        };
+
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND
+            || status == StatusCode::METHOD_NOT_ALLOWED
+            || status == StatusCode::NOT_IMPLEMENTED
+            || status == StatusCode::TOO_MANY_REQUESTS
+        {
+            return None;
+        }
+        if !status.is_success() {
+            debug!("Upload check request to {} returned {}", server, status);
+            return None;
+        }
+
+        let parsed: UploadCheckResponse = match resp.json().await {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                debug!(
+                    "Could not parse upload check response from {}: {}",
+                    server, err
+                );
+                return None;
+            }
+        };
+        if parsed.count != hashes.len() {
+            debug!(
+                "Upload check response from {} had count {}, expected {}",
+                server,
+                parsed.count,
+                hashes.len()
+            );
+            return None;
+        }
+
+        let present_bits = match decode_upload_check_bitset(&parsed.present, parsed.count) {
+            Some(bits) => bits,
+            None => {
+                debug!("Upload check response from {} had invalid bitset", server);
+                return None;
+            }
+        };
+
+        Some(
+            hashes
+                .iter()
+                .zip(present_bits)
+                .filter_map(|(hash, present)| present.then_some(hash.clone()))
+                .collect(),
+        )
+    }
+
+    /// Upload a bounded batch to one server. Returns `Ok(None)` when the server
+    /// does not support the hashtree batch extension.
+    pub async fn upload_batch_to_server(
+        &self,
+        server: &str,
+        items: &[BatchUploadItem],
+    ) -> Result<Option<BatchUploadResult>, BlossomError> {
+        if items.is_empty() {
+            return Ok(Some(BatchUploadResult {
+                accepted: 0,
+                uploaded: 0,
+            }));
+        }
+        if items.len() > BATCH_UPLOAD_MAX_BLOBS {
+            return Err(BlossomError::UploadFailed(format!(
+                "batch contains {} blobs, maximum is {}",
+                items.len(),
+                BATCH_UPLOAD_MAX_BLOBS
+            )));
+        }
+
+        let total_bytes = items.iter().try_fold(0usize, |total, item| {
+            total
+                .checked_add(item.data.len())
+                .filter(|value| *value <= BATCH_UPLOAD_MAX_BYTES)
+        });
+        if total_bytes.is_none() {
+            return Err(BlossomError::UploadFailed(format!(
+                "batch exceeds maximum size of {} bytes",
+                BATCH_UPLOAD_MAX_BYTES
+            )));
+        }
+
+        let auth_header = self
+            .create_upload_auth_for_hashes(items.iter().map(|item| item.hash.as_str()))
+            .await?;
+        let blobs = items
+            .iter()
+            .map(|item| BatchUploadBlobRequest {
+                sha256: item.hash.clone(),
+                content_type: item.content_type.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(&item.data),
+            })
+            .collect();
+        let body = serde_json::to_vec(&BatchUploadRequest { blobs })
+            .map_err(|err| BlossomError::UploadFailed(err.to_string()))?;
+        let url = format!("{}/upload/batch", server.trim_end_matches('/'));
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", auth_header)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND
+            || status == StatusCode::METHOD_NOT_ALLOWED
+            || status == StatusCode::NOT_IMPLEMENTED
+        {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(BlossomError::UploadFailed(format!("{}: {}", status, text)));
+        }
+
+        let parsed: BatchUploadResponse = resp.json().await?;
+        if parsed.blobs.len() != items.len() {
+            return Err(BlossomError::UploadFailed(format!(
+                "batch response contained {} blobs, expected {}",
+                parsed.blobs.len(),
+                items.len()
+            )));
+        }
+
+        let requested: HashSet<&str> = items.iter().map(|item| item.hash.as_str()).collect();
+        if parsed
+            .blobs
+            .iter()
+            .any(|blob| !requested.contains(blob.sha256.as_str()))
+        {
+            return Err(BlossomError::UploadFailed(
+                "batch response contained unexpected blob hash".to_string(),
+            ));
+        }
+
+        Ok(Some(BatchUploadResult {
+            accepted: parsed.blobs.len(),
+            uploaded: parsed.uploaded,
+        }))
     }
 
     /// Probe a blob on a specific server, distinguishing explicit misses from
@@ -619,8 +876,13 @@ impl BlossomClient {
                                 }
                                 return Ok(bytes.to_vec());
                             } else {
-                                last_error = format!("hash mismatch from {}: expected {}, got {} ({} bytes received)",
-                                    server, hash, computed, bytes.len());
+                                last_error = format!(
+                                    "hash mismatch from {}: expected {}, got {} ({} bytes received)",
+                                    server,
+                                    hash,
+                                    computed,
+                                    bytes.len()
+                                );
                                 warn!(
                                     "Hash mismatch downloading {} from {}: got {} ({} bytes)",
                                     hash,
@@ -718,17 +980,33 @@ impl BlossomClient {
     }
 
     async fn create_upload_auth(&self, hash: &str) -> Result<String, BlossomError> {
+        self.create_upload_auth_for_hashes(std::iter::once(hash))
+            .await
+    }
+
+    async fn create_upload_auth_for_hashes<'a, I>(&self, hashes: I) -> Result<String, BlossomError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let expiration = now + 300; // 5 minutes
 
-        let tags = vec![
-            Tag::custom(TagKind::custom("t"), vec!["upload".to_string()]),
-            Tag::custom(TagKind::custom("x"), vec![hash.to_string()]),
-            Tag::custom(TagKind::custom("expiration"), vec![expiration.to_string()]),
-        ];
+        let mut tags = vec![Tag::custom(
+            TagKind::custom("t"),
+            vec!["upload".to_string()],
+        )];
+        tags.extend(
+            hashes
+                .into_iter()
+                .map(|hash| Tag::custom(TagKind::custom("x"), vec![hash.to_string()])),
+        );
+        tags.push(Tag::custom(
+            TagKind::custom("expiration"),
+            vec![expiration.to_string()],
+        ));
         let event = EventBuilder::new(Kind::Custom(24242), "Upload", tags)
             .to_event(&self.keys)
             .map_err(|e| BlossomError::Signing(e.to_string()))?;
@@ -737,6 +1015,20 @@ impl BlossomClient {
         let encoded = base64::engine::general_purpose::STANDARD.encode(json);
         Ok(format!("Nostr {}", encoded))
     }
+}
+
+fn decode_upload_check_bitset(encoded: &str, count: usize) -> Option<Vec<bool>> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    if bytes.len() < count.div_ceil(8) {
+        return None;
+    }
+    Some(
+        (0..count)
+            .map(|index| bytes[index / 8] & (1 << (index % 8)) != 0)
+            .collect(),
+    )
 }
 
 /// Compute SHA256 hash of data, returning hex string
@@ -862,6 +1154,11 @@ mod tests {
         done: Option<tokio::sync::oneshot::Receiver<()>>,
     }
 
+    struct TestBodyServer {
+        url: String,
+        done: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
     impl TestUploadServer {
         fn new(statuses: Vec<u16>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
@@ -952,6 +1249,94 @@ mod tests {
         }
     }
 
+    impl TestBodyServer {
+        fn new<T>(responses: Vec<(u16, T)>) -> Self
+        where
+            T: Into<String>,
+        {
+            let responses: Vec<(u16, String)> = responses
+                .into_iter()
+                .map(|(status, body)| (status, body.into()))
+                .collect();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+            thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                for (status, body) in responses {
+                    let (mut stream, _) = listener.accept().expect("accept request");
+                    drain_http_request(&mut stream, &mut buffer);
+                    let reason = match status {
+                        200 => "OK",
+                        404 => "Not Found",
+                        405 => "Method Not Allowed",
+                        429 => "Too Many Requests",
+                        500 => "Internal Server Error",
+                        _ => "Test Status",
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("write response");
+                    stream.flush().expect("flush response");
+                }
+
+                let _ = done_tx.send(());
+            });
+
+            Self {
+                url: format!("http://{}", addr),
+                done: Some(done_rx),
+            }
+        }
+
+        async fn wait_for_requests(&mut self) {
+            if let Some(done) = self.done.take() {
+                let _ = done.await;
+            }
+        }
+    }
+
+    fn drain_http_request(stream: &mut std::net::TcpStream, buffer: &mut [u8; 8192]) {
+        let mut request = Vec::new();
+        let header_end = loop {
+            let bytes = stream.read(buffer).expect("read request");
+            if bytes == 0 {
+                break None;
+            }
+            request.extend_from_slice(&buffer[..bytes]);
+            if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break Some(pos + 4);
+            }
+        };
+
+        if let Some(header_end) = header_end {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            });
+            if let Some(content_length) = content_length {
+                let mut remaining =
+                    content_length.saturating_sub(request.len().saturating_sub(header_end));
+                while remaining > 0 {
+                    let bytes = stream.read(buffer).expect("drain body");
+                    if bytes == 0 {
+                        break;
+                    }
+                    remaining = remaining.saturating_sub(bytes);
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_compute_sha256() {
         let hash = compute_sha256(b"hello world");
@@ -1001,6 +1386,82 @@ mod tests {
 
         missing_server.wait_for_requests().await;
         unknown_server.wait_for_requests().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_uploads_on_server_decodes_present_hashes() {
+        let mut server = TestBodyServer::new(vec![(200, r#"{"count":3,"present":"Ag=="}"#)]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let hashes = vec!["00".repeat(32), "11".repeat(32), "22".repeat(32)];
+
+        let present = client
+            .check_uploads_on_server(&hashes, &server.url)
+            .await
+            .expect("upload check response");
+
+        assert_eq!(present.len(), 1);
+        assert!(present.contains(&hashes[1]));
+        server.wait_for_requests().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_uploads_on_server_returns_none_when_unsupported() {
+        let mut server = TestBodyServer::new(vec![(404, r#"{"error":"not found"}"#)]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let hashes = vec!["00".repeat(32)];
+
+        assert!(client
+            .check_uploads_on_server(&hashes, &server.url)
+            .await
+            .is_none());
+        server.wait_for_requests().await;
+    }
+
+    #[tokio::test]
+    async fn test_upload_batch_to_server_accepts_batch_response() {
+        let first = b"first batch blob".to_vec();
+        let second = b"second batch blob".to_vec();
+        let first_hash = compute_sha256(&first);
+        let second_hash = compute_sha256(&second);
+        let response = format!(
+            r#"{{"uploaded":2,"blobs":[{{"sha256":"{}"}},{{"sha256":"{}"}}]}}"#,
+            first_hash, second_hash
+        );
+        let mut server = TestBodyServer::new(vec![(200, response)]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let items = vec![
+            BatchUploadItem::new(first_hash, first),
+            BatchUploadItem::new(second_hash, second),
+        ];
+
+        let result = client
+            .upload_batch_to_server(&server.url, &items)
+            .await
+            .expect("batch upload")
+            .expect("batch endpoint supported");
+
+        assert_eq!(result.accepted, 2);
+        assert_eq!(result.uploaded, 2);
+        server.wait_for_requests().await;
+    }
+
+    #[tokio::test]
+    async fn test_upload_batch_to_server_returns_none_when_unsupported() {
+        let mut server = TestBodyServer::new(vec![(404, r#"{"error":"not found"}"#)]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let data = b"batch blob".to_vec();
+        let hash = compute_sha256(&data);
+
+        assert!(client
+            .upload_batch_to_server(&server.url, &[BatchUploadItem::new(hash, data)])
+            .await
+            .expect("unsupported batch probe")
+            .is_none());
+        server.wait_for_requests().await;
     }
 
     #[tokio::test]

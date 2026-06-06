@@ -24,11 +24,34 @@ impl Store for CachedStore {
             return Ok(Some(data));
         }
 
-        let result = self.blossom.get(hash).await;
-        if let Ok(Some(ref data)) = result {
-            let _ = self.local.put(*hash, data.clone()).await;
+        let mut last_result = Ok(None);
+        for attempt in 0..4 {
+            let result = self.blossom.get(hash).await;
+            match result {
+                Ok(Some(data)) => {
+                    let _ = self.local.put(*hash, data.clone()).await;
+                    return Ok(Some(data));
+                }
+                Ok(None) if attempt < 3 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
+                    last_result = Ok(None);
+                }
+                Ok(None) => return Ok(None),
+                Err(err) if attempt < 3 => {
+                    last_result = Err(err);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err),
+            }
         }
-        result
+
+        last_result
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
