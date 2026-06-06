@@ -1388,6 +1388,7 @@ mod tests {
             ws_relay: Arc::new(WsRelayState::new()),
             max_upload_bytes: 5 * 1024 * 1024,
             public_writes: true,
+            public_plaintext_reads: true,
             require_random_untrusted_ingest: true,
             optimistic_blossom_uploads: false,
             optimistic_upload_queue_bytes: 512 * 1024 * 1024,

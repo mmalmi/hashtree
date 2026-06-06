@@ -216,6 +216,9 @@ pub struct AppState {
     /// Allow anyone with valid Nostr auth to write (default: true)
     /// When false, only allowed_pubkeys can write
     pub public_writes: bool,
+    /// Allow public plaintext reads from mutable npub routes (default: true)
+    /// When false, only allowed_pubkeys or social graph approved pubkeys can read.
+    pub public_plaintext_reads: bool,
     /// Require untrusted cached blob ingress to look like encrypted CHK blobs.
     pub require_random_untrusted_ingest: bool,
     /// Return from Blossom upload after validation while storage writes finish in

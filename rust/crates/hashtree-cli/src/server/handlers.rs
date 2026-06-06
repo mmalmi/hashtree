@@ -316,6 +316,41 @@ fn parse_nostr_pubkey(input: &str) -> Result<PublicKey, &'static str> {
         .map_err(|_| "Invalid pubkey")
 }
 
+fn is_allowed_plaintext_read_author(state: &AppState, pubkey: &str) -> bool {
+    if state.public_plaintext_reads {
+        return true;
+    }
+
+    let Ok(author) = parse_nostr_pubkey(pubkey) else {
+        return false;
+    };
+    let author_hex = author.to_hex();
+    if state.allowed_pubkeys.contains(&author_hex) {
+        return true;
+    }
+
+    state
+        .social_graph
+        .as_ref()
+        .map(|sg| sg.check_write_access(&author_hex))
+        .unwrap_or(false)
+}
+
+fn plaintext_read_forbidden_response(pubkey: &str) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::from(
+            json!({
+                "error": "Plaintext read access denied. Pubkey is not approved.",
+                "pubkey": pubkey,
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
 pub async fn nostr_profile(
     State(state): State<AppState>,
     Path(pubkey): Path<String>,
@@ -616,6 +651,10 @@ async fn htree_npub_impl(
 ) -> Response<Body> {
     let is_localhost = connect_info.0.ip().is_loopback();
     let key = format!("{}/{}", npub, treename);
+    if !is_allowed_plaintext_read_author(&state, &npub) {
+        return plaintext_read_forbidden_response(&npub);
+    }
+
     let link_key = parse_hex_key(params.get("k"));
     let resolved =
         if let Some(resolved) = resolve_root_offline(&state, &npub, &treename, link_key).await {
@@ -1337,18 +1376,31 @@ pub async fn serve_content_or_blob(
 pub async fn serve_npub(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
-    Path(rest): Path<String>,
+    Path(params): Path<HashMap<String, String>>,
+    Query(query): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
+    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
     // Reconstruct full key: "npub1" + rest (e.g., "abc.../mydata")
     let parsed = parse_bare_npub_request_path(uri.path());
-    let key = parsed
-        .as_ref()
-        .map(|entry| format!("{}/{}", entry.npub, entry.treename))
-        .unwrap_or_else(|| format!("npub1{}", rest));
+    let (npub, treename, path) = if let Some(entry) = parsed {
+        (entry.npub, entry.treename, entry.path)
+    } else {
+        let rest = params.get("rest").cloned().unwrap_or_default();
+        let key = format!("npub1{}", rest);
+        let Some((npub, treename)) = key.split_once('/') else {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from("Missing ref name: use /npub1.../ref_name"))
+                .unwrap()
+                .into_response();
+        };
+        (npub.to_string(), treename.to_string(), None)
+    };
 
     // Validate format: must have a / for ref name
-    if !key.contains('/') {
+    if treename.is_empty() {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -1357,45 +1409,17 @@ pub async fn serve_npub(
             .into_response();
     }
 
-    let resolver = match NostrRootResolver::new(resolver_config(&state)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from(format!("Failed to create resolver: {}", e)))
-                .unwrap()
-                .into_response();
-        }
-    };
-
-    // npub routes are mutable - the reference can change over time
-    match tokio::time::timeout(HTTP_RESOLVER_TIMEOUT, resolver.resolve_wait(&key)).await {
-        Ok(Ok(cid)) => {
-            let cache_entry = parsed
-                .as_ref()
-                .map(|entry| (entry.npub.as_str(), entry.treename.as_str()))
-                .or_else(|| key.split_once('/'));
-            if let Some((pubkey, treename)) = cache_entry {
-                cache_public_tree_root(&state, pubkey, treename, &cid);
-            }
-            let _ = resolver.stop().await;
-            serve_content_internal(&state, &cid.hash, headers, false, false).await
-        }
-        Ok(Err(e)) => {
-            let _ = resolver.stop().await;
-            not_found_response(format!("Resolution failed: {}", e)).into_response()
-        }
-        Err(_) => {
-            let _ = resolver.stop().await;
-            Response::builder()
-                .status(StatusCode::GATEWAY_TIMEOUT)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from("Resolution timeout"))
-                .unwrap()
-                .into_response()
-        }
-    }
+    htree_npub_impl(
+        State(state),
+        npub,
+        treename,
+        path,
+        Query(query),
+        headers,
+        connect_info,
+    )
+    .await
+    .into_response()
 }
 
 pub async fn upload_file(
@@ -1758,6 +1782,9 @@ pub async fn resolve_and_serve(
         .map(|entry| entry.treename.clone())
         .unwrap_or(fallback_treename);
     let key = format!("{}/{}", pubkey, treename);
+    if !is_allowed_plaintext_read_author(&state, &pubkey) {
+        return plaintext_read_forbidden_response(&pubkey).into_response();
+    }
 
     if let Some(resolved) = resolve_root_offline(&state, &pubkey, &treename, None).await {
         return serve_content_internal(&state, &resolved.cid.hash, headers, false, false).await;

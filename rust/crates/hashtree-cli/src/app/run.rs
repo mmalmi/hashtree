@@ -613,6 +613,7 @@ pub(crate) async fn run() -> Result<()> {
                 .with_allowed_pubkeys(allowed_pubkeys.clone())
                 .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
                 .with_public_writes(config.server.public_writes)
+                .with_public_plaintext_reads(config.server.public_plaintext_reads)
                 .with_require_random_untrusted_ingest(
                     config.blossom.require_random_untrusted_ingest,
                 )
@@ -676,6 +677,9 @@ pub(crate) async fn run() -> Result<()> {
             }
             if config.server.public_writes {
                 println!("Public writes: enabled");
+            }
+            if !config.server.public_plaintext_reads {
+                println!("Public plaintext reads: allowlist only");
             }
             println!("Relays: {} configured", active_nostr_relay_count);
             if let Some(ref fips_handle) = fips_handle {

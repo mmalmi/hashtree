@@ -34,6 +34,7 @@ use std::{
 use tempfile::TempDir;
 use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
+use tower::ServiceExt;
 
 #[derive(Clone)]
 struct UpstreamBlobTestState {
@@ -112,6 +113,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
         max_upload_bytes: 5 * 1024 * 1024,
         public_writes: true,
+        public_plaintext_reads: true,
         require_random_untrusted_ingest: false,
         optimistic_blossom_uploads: false,
         optimistic_upload_queue_bytes: 512 * 1024 * 1024,
@@ -133,6 +135,12 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         thumbnail_path_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
         cid_size_cache: Arc::new(std::sync::Mutex::new(crate::server::new_lookup_cache())),
     }
+}
+
+fn allow_plaintext_read_author(state: &mut AppState, keys: &Keys) -> String {
+    let npub = keys.public_key().to_bech32().unwrap();
+    state.allowed_pubkeys.insert(keys.public_key().to_hex());
+    npub
 }
 
 struct FakeFipsEndpoint {
@@ -1188,13 +1196,15 @@ async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
     copy_blob_between_stores(&source_store, &local_store, &root_cid.hash);
     copy_blob_between_stores(&source_store, &local_store, &child_dir_cid.hash);
 
-    let state = test_app_state(
+    let keys = Keys::generate();
+    let mut state = test_app_state(
         local_store.clone(),
         vec![format!("http://{}", upstream_addr)],
     );
+    let npub = allow_plaintext_read_author(&mut state, &keys);
     put_cached_tree_root(
         &state,
-        tree_root_cache_key("npub1example", "videos/Music", None),
+        tree_root_cache_key(&npub, "videos/Music", None),
         root_cid.clone(),
         "cache",
         None,
@@ -1208,7 +1218,7 @@ async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
 
     let response = htree_npub_impl(
         State(state),
-        "npub1example".to_string(),
+        npub,
         "videos/Music".to_string(),
         Some("video_1767136282070/video.mp4".to_string()),
         Query(HashMap::new()),
@@ -1265,13 +1275,15 @@ async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream(
     copy_blob_between_stores(&source_store, &local_store, &child_dir_cid.hash);
     copy_blob_between_stores(&source_store, &local_store, &video_cid.hash);
 
-    let state = test_app_state(
+    let keys = Keys::generate();
+    let mut state = test_app_state(
         local_store.clone(),
         vec![format!("http://{}", upstream_addr)],
     );
+    let npub = allow_plaintext_read_author(&mut state, &keys);
     put_cached_tree_root(
         &state,
-        tree_root_cache_key("npub1example", "videos/Music", None),
+        tree_root_cache_key(&npub, "videos/Music", None),
         root_cid.clone(),
         "cache",
         None,
@@ -1285,7 +1297,7 @@ async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream(
 
     let response = htree_npub_impl(
         State(state),
-        "npub1example".to_string(),
+        npub,
         "videos/Music".to_string(),
         Some("video_1767136255334/video.mp4".to_string()),
         Query(HashMap::new()),
@@ -1330,37 +1342,180 @@ async fn htree_npub_path_uses_original_uri_for_encoded_tree_names() {
         .await
         .unwrap();
 
-    let state = test_app_state(store, Vec::new());
+    let keys = Keys::generate();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    let npub = allow_plaintext_read_author(&mut state, &keys);
     put_cached_tree_root(
         &state,
-        tree_root_cache_key("npub1example", "releases/nostr-vpn", None),
+        tree_root_cache_key(&npub, "releases/nostr-vpn", None),
         root_cid.clone(),
         "cache",
         None,
     );
 
     let response = htree_npub_path(
-            State(state),
-            OriginalUri(
-                "/htree/npub1example/releases%2Fnostr-vpn/v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip"
-                    .parse()
-                    .unwrap(),
-            ),
-            Path((
-                "example".to_string(),
-                "releases%2Fnostr-vpn".to_string(),
-                "v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip".to_string(),
-            )),
-            Query(HashMap::new()),
-            axum::http::HeaderMap::new(),
-            axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        )
-        .await
-        .into_response();
+        State(state),
+        OriginalUri(
+            format!(
+                "/htree/{npub}/releases%2Fnostr-vpn/v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip"
+            )
+            .parse()
+            .unwrap(),
+        ),
+        Path((
+            npub.strip_prefix("npub1").unwrap_or(&npub).to_string(),
+            "releases%2Fnostr-vpn".to_string(),
+            "v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip".to_string(),
+        )),
+        Query(HashMap::new()),
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), asset_bytes.as_slice());
+}
+
+#[tokio::test]
+async fn bare_npub_route_serves_encoded_tree_name_suffix_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    let install_bytes = b"#!/bin/sh\necho install\n".to_vec();
+    let (install_cid, _) = tree.put(&install_bytes).await.unwrap();
+    let latest_dir = tree
+        .put_directory(vec![
+            DirEntry::from_cid("install.sh", &install_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+    let root_cid = tree
+        .put_directory(vec![
+            DirEntry::from_cid("latest", &latest_dir).with_link_type(LinkType::Dir)
+        ])
+        .await
+        .unwrap();
+
+    let keys = Keys::generate();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    let npub = allow_plaintext_read_author(&mut state, &keys);
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, "releases/hashtree", None),
+        root_cid,
+        "cache",
+        None,
+    );
+
+    let app = Router::new()
+        .route("/npub1:rest", get(serve_npub))
+        .route("/npub1:rest/*path", get(serve_npub))
+        .with_state(state);
+
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/{npub}/releases%2Fhashtree/latest/install.sh"))
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            43123,
+        ))));
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), install_bytes.as_slice());
+}
+
+#[tokio::test]
+async fn htree_npub_rejects_unapproved_plaintext_reads_when_public_reads_disabled() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    let secret_bytes = b"private-ish plaintext".to_vec();
+    let (secret_cid, _) = tree.put(&secret_bytes).await.unwrap();
+    let root_cid = tree
+        .put_directory(vec![
+            DirEntry::from_cid("secret.txt", &secret_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32().unwrap();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, "shared", None),
+        root_cid,
+        "cache",
+        None,
+    );
+
+    let response = htree_npub_impl(
+        State(state),
+        npub,
+        "shared".to_string(),
+        Some("secret.txt".to_string()),
+        Query(HashMap::new()),
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body
+        .windows(secret_bytes.len())
+        .any(|window| window == secret_bytes));
+}
+
+#[tokio::test]
+async fn resolve_and_serve_rejects_unapproved_plaintext_reads_when_public_reads_disabled() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    let secret_bytes = b"cached plaintext via n route".to_vec();
+    let (secret_cid, _) = tree.put(&secret_bytes).await.unwrap();
+
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32().unwrap();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, "shared", None),
+        secret_cid,
+        "cache",
+        None,
+    );
+
+    let response = resolve_and_serve(
+        State(state),
+        OriginalUri(format!("/n/{npub}/shared").parse().unwrap()),
+        Path((npub, "shared".to_string())),
+        axum::http::HeaderMap::new(),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body
+        .windows(secret_bytes.len())
+        .any(|window| window == secret_bytes));
 }
 
 #[tokio::test]

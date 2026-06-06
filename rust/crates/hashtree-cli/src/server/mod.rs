@@ -144,6 +144,7 @@ impl HashtreeServer {
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
                 public_writes: true,               // Allow anyone with valid Nostr auth by default
+                public_plaintext_reads: true,
                 require_random_untrusted_ingest: true,
                 optimistic_blossom_uploads: false,
                 optimistic_upload_queue_bytes: DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES,
@@ -187,6 +188,12 @@ impl HashtreeServer {
     /// When false, only social graph members can write
     pub fn with_public_writes(mut self, public: bool) -> Self {
         self.state.public_writes = public;
+        self
+    }
+
+    /// Set whether mutable npub routes serve plaintext for unapproved pubkeys
+    pub fn with_public_plaintext_reads(mut self, public: bool) -> Self {
+        self.state.public_plaintext_reads = public;
         self
     }
 
@@ -342,6 +349,7 @@ impl HashtreeServer {
             .route("/n/:pubkey/:treename", get(handlers::resolve_and_serve))
             // Direct npub route (clients should parse nhash and request by hex hash)
             .route("/npub1:rest", get(handlers::serve_npub))
+            .route("/npub1:rest/*path", get(handlers::serve_npub))
             // Blossom endpoints (BUD-01, BUD-02)
             .route(
                 "/:id",

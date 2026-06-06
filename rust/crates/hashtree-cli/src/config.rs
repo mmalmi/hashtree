@@ -165,12 +165,20 @@ pub struct ServerConfig {
     /// When false, only social graph members can write
     #[serde(default = "default_public_writes")]
     pub public_writes: bool,
+    /// Allow public plaintext reads from mutable npub routes (default: true)
+    /// When false, only configured or social graph approved npubs are served.
+    #[serde(default = "default_public_plaintext_reads")]
+    pub public_plaintext_reads: bool,
     /// Allow public access to social graph snapshot endpoint (default: false)
     #[serde(default = "default_socialgraph_snapshot_public")]
     pub socialgraph_snapshot_public: bool,
 }
 
 fn default_public_writes() -> bool {
+    true
+}
+
+fn default_public_plaintext_reads() -> bool {
     true
 }
 
@@ -730,6 +738,7 @@ impl Default for ServerConfig {
             enable_bluetooth: default_enable_bluetooth(),
             max_bluetooth_peers: default_max_bluetooth_peers(),
             public_writes: default_public_writes(),
+            public_plaintext_reads: default_public_plaintext_reads(),
             socialgraph_snapshot_public: default_socialgraph_snapshot_public(),
         }
     }
@@ -1069,6 +1078,7 @@ mod tests {
         assert_eq!(config.server.max_wifi_aware_peers, 0);
         assert!(!config.server.enable_bluetooth);
         assert_eq!(config.server.max_bluetooth_peers, 0);
+        assert!(config.server.public_plaintext_reads);
         assert_eq!(config.storage.max_size_gb, 10);
         assert!(config.storage.evict_orphans);
         assert!(config.nostr.enabled);
@@ -1123,6 +1133,17 @@ optimistic_uploads = true
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.blossom.optimistic_uploads);
         assert!(config.blossom.require_random_untrusted_ingest);
+    }
+
+    #[test]
+    fn test_server_public_plaintext_reads_deserialize() {
+        let toml_str = r#"
+[server]
+public_plaintext_reads = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.server.public_plaintext_reads);
+        assert!(config.server.public_writes);
     }
 
     #[test]
