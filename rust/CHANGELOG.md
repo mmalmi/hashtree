@@ -2,8 +2,26 @@
 
 ## Unreleased
 
+## 0.2.56 - 2026-06-06
+
+Changes since the `0.2.54` release.
+
+### Added
+
+- Added a Blossom `POST /upload/batch` path that stores multiple uploaded blobs
+  with one auth event and one owner-index batch write, including support for
+  camelCase `contentType` payloads.
+
 ### Changed
 
+- Changed Hashtree release publishing to require the complete macOS, Linux,
+  and Windows CLI asset set for normal releases.
+- Changed Hashtree release publishing to verify live versioned and `latest`
+  URLs for every staged release file before continuing past the release gate.
+- Changed post-publish install matrix failures to stop the release instead of
+  only warning after publishing broken artifacts.
+- Changed the install matrix smoke runner to use explicit non-login shells so
+  the just-installed binaries and git helper are the ones being tested.
 - Moved the reusable `cashu-service` crate out of the Hashtree workspace while
   keeping Hashtree's `htree-cashu` helper crate in the publish plan.
 - Changed `htree release publish --draft` to update the sibling `draft`
@@ -11,22 +29,15 @@
 - Changed `git-remote-htree` fast-forward pushes to merge deltas with the
   cached remote root directly, so normal pushes no longer report a
   cached-root repair before uploading the new tree.
-
-## 0.2.55 - 2026-05-22
-
-Changes since the `0.2.54` release.
-
-### Changed
-
 - Changed Blossom owner listings to use a per-owner blob index for new writes,
   avoiding full owner-list rewrites on duplicate uploads while preserving
   compatibility with existing list records.
-- Added a Blossom `POST /upload/batch` path that stores multiple uploaded blobs
-  with one auth event and one owner-index batch write, including support for
-  camelCase `contentType` payloads.
 
 ### Fixed
 
+- Fixed the release path so `latest/install.sh` and platform asset 404s are
+  caught immediately after publishing rather than surviving into the advertised
+  quick-install command.
 - Fixed `git-remote-htree` pushes when the previously published root is missing
   from configured file servers: the helper now preserves root metadata before
   ref hydration and probes existing remote blocks instead of blindly reuploading
