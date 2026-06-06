@@ -134,6 +134,18 @@ if [ -z "$DOCKER_RUST_IMAGE" ]; then
 fi
 
 platform="$(docker_platform_for_target "$TARGET")"
+docker_mounts=(
+    -v "${REPO_DIR}:/work"
+    -v "${FIPS_DIR}:/fips:ro"
+    -v "${TARGET_DIR}:/target-dir"
+)
+for sibling in cashu-service cashu_spilman_channels; do
+    sibling_dir="${REPO_DIR}/../${sibling}"
+    if [ -d "$sibling_dir" ]; then
+        sibling_dir="$(cd "$sibling_dir" && pwd)"
+        docker_mounts+=(-v "${sibling_dir}:/${sibling}:ro")
+    fi
+done
 
 read -r -d '' build_command <<EOF || true
 set -euo pipefail
@@ -155,9 +167,7 @@ cargo build --release --target ${TARGET} --target-dir /target-dir \\
 EOF
 
 "$DOCKER_BIN" run --rm --platform "$platform" \
-    -v "${REPO_DIR}:/work" \
-    -v "${FIPS_DIR}:/fips:ro" \
-    -v "${TARGET_DIR}:/target-dir" \
+    "${docker_mounts[@]}" \
     -w /work/rust \
     "$DOCKER_RUST_IMAGE" \
     sh -lc "$build_command"
