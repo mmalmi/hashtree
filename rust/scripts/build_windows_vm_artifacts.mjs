@@ -12,6 +12,27 @@ const rustDir = dirname(scriptDir)
 const repoDir = dirname(rustDir)
 const sourceRootDir = dirname(repoDir)
 export const requiredSiblingSourceDirs = ['cashu-service', 'cashu_spilman_channels', 'fips']
+const siblingSourceCopies = [
+  {
+    name: 'cashu-service',
+    paths: ['cashu-service'],
+    excludes: ['cashu-service/.git', 'cashu-service/target', 'cashu-service/dist'],
+  },
+  {
+    name: 'cashu_spilman_channels',
+    paths: ['cashu_spilman_channels'],
+    excludes: [
+      'cashu_spilman_channels/.git',
+      'cashu_spilman_channels/target',
+      'cashu_spilman_channels/dist',
+    ],
+  },
+  {
+    name: 'fips',
+    paths: ['fips/Cargo.toml', 'fips/Cargo.lock', 'fips/crates'],
+    excludes: [],
+  },
+]
 
 function usage() {
   return `Usage: node rust/scripts/build_windows_vm_artifacts.mjs --output-dir <dir> [options]
@@ -138,7 +159,7 @@ export function windowsBuildScriptLines({ guestRepoPath }) {
     'if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }',
     "foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips')) {",
     '  $siblingPath = Join-Path $guestParent $sibling',
-    '  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath }',
+    '  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath -ErrorAction SilentlyContinue }',
     '}',
     'New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null',
     '$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\\Installer\\vswhere.exe"',
@@ -194,7 +215,7 @@ New-Item -ItemType Directory -Force -Path $guestParent | Out-Null
 if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }
 foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips')) {
   $siblingPath = Join-Path $guestParent $sibling
-  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath }
+  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath -ErrorAction SilentlyContinue }
 }
 New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null
 `,
@@ -205,12 +226,11 @@ New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null
     `tar --exclude=./rust/target --exclude=./rust/dist -cf - -C ${shQuote(repoDir)} rust ` +
       `| ssh ${shQuote(host)} tar -xf - -C ${shQuote(guestRepoForward)}`,
   )
-  for (const name of requiredSiblingSourceDirs) {
+  for (const copy of siblingSourceCopies) {
+    const excludeArgs = copy.excludes.map((exclude) => `--exclude=${shQuote(exclude)}`).join(' ')
+    const sourceArgs = copy.paths.map((sourcePath) => shQuote(sourcePath)).join(' ')
     runShellPipe(
-      `tar --exclude=${shQuote(`${name}/.git`)} ` +
-        `--exclude=${shQuote(`${name}/target`)} ` +
-        `--exclude=${shQuote(`${name}/dist`)} ` +
-        `-cf - -C ${shQuote(sourceRootDir)} ${shQuote(name)} ` +
+      `tar ${excludeArgs} -cf - -C ${shQuote(sourceRootDir)} ${sourceArgs} ` +
         `| ssh ${shQuote(host)} tar -xf - -C ${shQuote(guestParentForward)}`,
     )
   }
