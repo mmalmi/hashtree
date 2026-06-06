@@ -16,9 +16,12 @@ import { encryptChk, decryptChk, type EncryptionKey } from './crypto.js';
 import { compareNames } from './compare.js';
 import { loadBlock } from './tree/loadBlock.js';
 
+const DEFAULT_MAX_LINKS = 174;
+
 export interface EncryptedTreeConfig {
   store: Store;
   chunkSize: number;
+  maxLinks?: number;
 }
 
 export interface ReadEncryptedOptions {
@@ -560,7 +563,7 @@ export interface EncryptedDirEntry {
  * Store a directory with CHK encryption
  *
  * The directory node itself is encrypted. Child entries already have their own keys.
- * Large directories are chunked by bytes like files using putFileEncrypted.
+ * Large directories are split into canonical _chunk_<start> fanout directory nodes.
  *
  * @param config - Tree configuration
  * @param entries - Directory entries (with keys for encrypted children)
@@ -570,19 +573,29 @@ export async function putDirectoryEncrypted(
   config: EncryptedTreeConfig,
   entries: EncryptedDirEntry[]
 ): Promise<EncryptedPutResult> {
-  const { store, chunkSize } = config;
   const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
 
   const links: Link[] = sorted.map(e => ({
     hash: e.hash,
     name: e.name,
-    size: e.size,
+    size: e.size ?? 0,
     key: e.key,
-    type: e.type,
+    type: e.type ?? LinkType.Blob,
     meta: e.meta,
   }));
 
-  const totalSize = links.reduce((sum, l) => sum + l.size, 0);
+  if (links.length <= getMaxLinks(config)) {
+    return putEncryptedDirectoryNode(config, links);
+  }
+
+  return buildEncryptedDirectoryByChunks(config, links);
+}
+
+async function putEncryptedDirectoryNode(
+  config: EncryptedTreeConfig,
+  links: Link[]
+): Promise<EncryptedPutResult> {
+  const totalSize = links.reduce((sum, l) => sum + (l.size ?? 0), 0);
 
   const node: TreeNode = {
     type: LinkType.Dir,
@@ -590,23 +603,62 @@ export async function putDirectoryEncrypted(
   };
   const { data } = await encodeAndHash(node);
 
-  // Small directory - encrypt and store directly
-  if (data.length <= chunkSize) {
-    const { ciphertext, key } = await encryptChk(data);
-    const hash = await sha256(ciphertext);
-    await store.put(hash, ciphertext);
-    return { hash, size: totalSize, key };
+  const { ciphertext, key } = await encryptChk(data);
+  const hash = await sha256(ciphertext);
+  await config.store.put(hash, ciphertext);
+  return { hash, size: totalSize, key };
+}
+
+type IndexedEncryptedLink = {
+  start: number;
+  link: Link;
+};
+
+async function buildEncryptedDirectoryByChunks(
+  config: EncryptedTreeConfig,
+  links: Link[]
+): Promise<EncryptedPutResult> {
+  const indexedLinks = links.map((link, start) => ({ start, link }));
+  return buildIndexedEncryptedDirectoryChunks(config, indexedLinks);
+}
+
+async function buildIndexedEncryptedDirectoryChunks(
+  config: EncryptedTreeConfig,
+  links: IndexedEncryptedLink[]
+): Promise<EncryptedPutResult> {
+  const maxLinks = getMaxLinks(config);
+  const subTrees: IndexedEncryptedLink[] = [];
+
+  for (let offset = 0; offset < links.length; offset += maxLinks) {
+    const batch = links.slice(offset, offset + maxLinks);
+    const start = batch[0]?.start ?? offset;
+    const batchLinks = batch.map(({ link }) => link);
+    const child = await putEncryptedDirectoryNode(config, batchLinks);
+
+    subTrees.push({
+      start,
+      link: {
+        hash: child.hash,
+        name: `_chunk_${start}`,
+        size: child.size,
+        key: child.key,
+        type: LinkType.Dir,
+      },
+    });
   }
 
-  // Large directory - reuse putFileEncrypted for chunking
-  return putFileEncrypted(config, data);
+  if (subTrees.length <= maxLinks) {
+    return putEncryptedDirectoryNode(config, subTrees.map(({ link }) => link));
+  }
+
+  return buildIndexedEncryptedDirectoryChunks(config, subTrees);
 }
 
 /**
  * List directory entries from an encrypted directory
  *
- * Handles both small directories (single node) and large directories
- * (chunked by bytes like files).
+ * Handles regular directories, canonical fanout directories, and historical
+ * byte-chunked directory blobs.
  *
  * @param store - Storage backend
  * @param hash - Hash of encrypted directory
@@ -622,19 +674,27 @@ export async function listDirectoryEncrypted(
   const node = await getEncryptedDirectoryNode(store, hash, key, signal);
   if (!node) return [];
 
-  // Extract directory entries from the node
+  const usesFanout = nodeUsesDirectoryFanout(node);
   const entries: EncryptedDirEntry[] = [];
   for (const link of node.links) {
-    if (link.name) {
-      entries.push({
-        name: link.name,
-        hash: link.hash,
-        size: link.size,
-        key: link.key,
-        type: link.type,
-        meta: link.meta,
-      });
+    if (isInternalDirectoryLinkWithFanout(link, usesFanout)) {
+      if (!link.key) {
+        throw new Error(`Missing decryption key for directory fanout: ${toHex(link.hash)}`);
+      }
+      entries.push(...await listDirectoryEncrypted(store, link.hash, link.key, signal));
+      continue;
     }
+
+    if (link.name === undefined) continue;
+
+    entries.push({
+      name: link.name,
+      hash: link.hash,
+      size: link.size,
+      key: link.key,
+      type: link.type,
+      meta: link.meta,
+    });
   }
 
   return entries;
@@ -656,4 +716,38 @@ export async function getTreeNodeEncrypted(
   const decrypted = await getRootNodeOrBlob(store, hash, key);
   if (!decrypted) return null;
   return tryDecodeTreeNode(decrypted);
+}
+
+function getMaxLinks(config: EncryptedTreeConfig): number {
+  const maxLinks = config.maxLinks ?? DEFAULT_MAX_LINKS;
+  if (!Number.isInteger(maxLinks) || maxLinks < 1) {
+    throw new Error(`Invalid maxLinks: ${config.maxLinks}`);
+  }
+  return maxLinks;
+}
+
+function internalChunkStart(name: string): number | null {
+  const prefix = '_chunk_';
+  if (!name.startsWith(prefix)) return null;
+
+  const suffix = name.slice(prefix.length);
+  if (suffix.length === 0 || !/^[0-9]+$/.test(suffix)) return null;
+
+  const start = Number(suffix);
+  return Number.isSafeInteger(start) ? start : null;
+}
+
+function nodeUsesDirectoryFanout(node: TreeNode): boolean {
+  return node.links.length > 0 && node.links.every((link) => (
+    link.type === LinkType.Dir
+      && link.name !== undefined
+      && internalChunkStart(link.name) !== null
+  ));
+}
+
+function isInternalDirectoryLinkWithFanout(link: Link, usesFanout: boolean): boolean {
+  return usesFanout
+    && link.type === LinkType.Dir
+    && link.name !== undefined
+    && internalChunkStart(link.name) !== null;
 }

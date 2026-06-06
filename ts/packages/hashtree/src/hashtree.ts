@@ -31,10 +31,13 @@ import * as writeAtOps from './tree/writeAt.js';
 
 /** Default chunk size: 2MB (optimized for blossom uploads) */
 export const DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024;
+/** Default maximum links per tree node */
+export const DEFAULT_MAX_LINKS = 174;
 
 export interface HashTreeConfig {
   store: Store;
   chunkSize?: number;
+  maxLinks?: number;
 }
 
 export interface TreeEntry {
@@ -64,14 +67,19 @@ export interface ReadOptions {
 export class HashTree {
   private store: Store;
   private chunkSize: number;
+  private maxLinks: number;
 
   constructor(config: HashTreeConfig) {
     this.store = config.store;
     this.chunkSize = config.chunkSize ?? DEFAULT_CHUNK_SIZE;
+    this.maxLinks = config.maxLinks ?? DEFAULT_MAX_LINKS;
+    if (!Number.isInteger(this.maxLinks) || this.maxLinks < 1) {
+      throw new Error(`Invalid maxLinks: ${config.maxLinks}`);
+    }
   }
 
   private get config(): create.CreateConfig {
-    return { store: this.store, chunkSize: this.chunkSize };
+    return { store: this.store, chunkSize: this.chunkSize, maxLinks: this.maxLinks };
   }
 
   // Create (encrypted by default)
@@ -108,13 +116,13 @@ export class HashTree {
     entries: DirEntry[],
     options?: { unencrypted?: boolean }
   ): Promise<{ cid: CID; size: number }> {
-    const size = entries.reduce((sum, e) => sum + e.size, 0);
+    const size = entries.reduce((sum, e) => sum + (e.size ?? 0), 0);
     if (options?.unencrypted) {
       const dirEntries: create.DirEntry[] = entries.map(e => ({
         name: e.name,
         cid: e.cid,
         size: e.size,
-        type: e.type,
+        type: e.type ?? LinkType.Blob,
         meta: e.meta,
       }));
       const hash = await create.putDirectory(this.config, dirEntries);
@@ -126,7 +134,7 @@ export class HashTree {
       hash: e.cid.hash,
       size: e.size,
       key: e.cid.key,
-      type: e.type,
+      type: e.type ?? LinkType.Blob,
       meta: e.meta,
     }));
     const result = await putDirectoryEncrypted(this.config, encryptedEntries);
@@ -162,10 +170,7 @@ export class HashTree {
         // Try to get the tree node (will decrypt and validate)
         const node = await getTreeNodeEncrypted(this.store, id.hash, id.key);
         if (!node) return false;
-        // Empty directory is still a directory
-        if (node.links.length === 0) return true;
-        // Check if it's a directory (has named entries) vs chunked file (no names)
-        return node.links.some(l => l.name !== undefined && !l.name.startsWith('_'));
+        return node.type === LinkType.Dir;
       } catch {
         return false;
       }

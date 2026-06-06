@@ -309,12 +309,10 @@ impl<S: Store> HashTree<S> {
 
                         // Create stack with children to process
                         let mut stack: Vec<WalkStackItem> = Vec::new();
-                        let uses_legacy_fanout = Self::node_uses_legacy_directory_fanout(&node);
+                        let uses_fanout = Self::node_uses_directory_fanout(&node);
                         for link in node.links.into_iter().rev() {
-                            let is_internal = Self::is_internal_directory_link_with_legacy_fanout(
-                                &link,
-                                uses_legacy_fanout,
-                            );
+                            let is_internal =
+                                Self::is_internal_directory_link_with_fanout(&link, uses_fanout);
                             let child_path = match &link.name {
                                 Some(name) if !is_internal => {
                                     if path.is_empty() {
@@ -391,10 +389,9 @@ impl<S: Store> HashTree<S> {
             };
 
             // Push children to stack
-            let uses_legacy_fanout = Self::node_uses_legacy_directory_fanout(&node);
+            let uses_fanout = Self::node_uses_directory_fanout(&node);
             for link in node.links.into_iter().rev() {
-                let is_internal =
-                    Self::is_internal_directory_link_with_legacy_fanout(&link, uses_legacy_fanout);
+                let is_internal = Self::is_internal_directory_link_with_fanout(&link, uses_fanout);
                 let child_path = match &link.name {
                     Some(name) if !is_internal => {
                         if item.path.is_empty() {

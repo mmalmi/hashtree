@@ -5,7 +5,6 @@
 //! - Supports streaming appends
 //! - Encryption enabled by default (CHK - Content Hash Key)
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::codec::encode_and_hash;
@@ -310,8 +309,6 @@ impl<S: Store> TreeBuilder<S> {
             })
             .collect();
 
-        let total_size: u64 = links.iter().map(|l| l.size).sum();
-
         // Fits in one node
         if links.len() <= self.max_links {
             let node = TreeNode {
@@ -326,85 +323,31 @@ impl<S: Store> TreeBuilder<S> {
             return Ok(hash);
         }
 
-        // Large directory - create sub-trees
-        // Group by first character for balanced distribution
-        let mut groups: HashMap<char, Vec<Link>> = HashMap::new();
-
-        for link in &links {
-            let key = link
-                .name
-                .as_ref()
-                .and_then(|n| n.chars().next())
-                .map(|c| c.to_ascii_lowercase())
-                .unwrap_or('\0');
-            groups.entry(key).or_default().push(link.clone());
-        }
-
-        // If groups are still too large, split numerically
-        let max_group_size = groups.values().map(|g| g.len()).max().unwrap_or(0);
-        if groups.len() == 1 || max_group_size > self.max_links {
-            return self.build_directory_by_chunks(links, total_size).await;
-        }
-
-        // Build sub-tree for each group
-        let mut sub_dirs: Vec<DirEntry> = Vec::new();
-        let mut sorted_groups: Vec<_> = groups.into_iter().collect();
-        sorted_groups.sort_by_key(|group| group.0);
-
-        for (key, group_links) in sorted_groups {
-            let group_size: u64 = group_links.iter().map(|l| l.size).sum();
-
-            if group_links.len() <= self.max_links {
-                let node = TreeNode {
-                    node_type: LinkType::Dir,
-                    links: group_links,
-                };
-                let (data, hash) = encode_and_hash(&node)?;
-                self.store
-                    .put(hash, data)
-                    .await
-                    .map_err(|e| BuilderError::Store(e.to_string()))?;
-                sub_dirs.push(DirEntry {
-                    name: format!("_{}", key),
-                    hash,
-                    size: group_size,
-                    key: None,
-                    link_type: LinkType::Dir, // Internal chunk node
-                    meta: None,
-                });
-            } else {
-                // Recursively split this group
-                let hash = self
-                    .build_directory_by_chunks(group_links, group_size)
-                    .await?;
-                sub_dirs.push(DirEntry {
-                    name: format!("_{}", key),
-                    hash,
-                    size: group_size,
-                    key: None,
-                    link_type: LinkType::Dir, // Internal chunk node
-                    meta: None,
-                });
-            }
-        }
-
-        Box::pin(self.put_directory(sub_dirs)).await
+        self.build_directory_by_chunks(links).await
     }
 
-    /// Split directory into numeric chunks when grouping doesn't help
-    async fn build_directory_by_chunks(
+    /// Split directories into canonical BUD-17 `_chunk_<start>` fanout nodes.
+    async fn build_directory_by_chunks(&self, links: Vec<Link>) -> Result<Hash, BuilderError> {
+        let indexed_links: Vec<(usize, Link)> = links.into_iter().enumerate().collect();
+        self.build_indexed_directory_chunks(indexed_links).await
+    }
+
+    async fn build_indexed_directory_chunks(
         &self,
-        links: Vec<Link>,
-        total_size: u64,
+        links: Vec<(usize, Link)>,
     ) -> Result<Hash, BuilderError> {
-        let mut sub_trees: Vec<Link> = Vec::new();
+        let mut sub_trees: Vec<(usize, Link)> = Vec::new();
 
         for (i, batch) in links.chunks(self.max_links).enumerate() {
-            let batch_size: u64 = batch.iter().map(|l| l.size).sum();
+            let start = batch
+                .first()
+                .map(|(start, _)| *start)
+                .unwrap_or(i * self.max_links);
+            let batch_size: u64 = batch.iter().map(|(_, link)| link.size).sum();
 
             let node = TreeNode {
                 node_type: LinkType::Dir,
-                links: batch.to_vec(),
+                links: batch.iter().map(|(_, link)| link.clone()).collect(),
             };
             let (data, hash) = encode_and_hash(&node)?;
             self.store
@@ -412,20 +355,23 @@ impl<S: Store> TreeBuilder<S> {
                 .await
                 .map_err(|e| BuilderError::Store(e.to_string()))?;
 
-            sub_trees.push(Link {
-                hash,
-                name: Some(format!("_chunk_{}", i * self.max_links)),
-                size: batch_size,
-                key: None,
-                link_type: LinkType::Dir, // Internal chunk node
-                meta: None,
-            });
+            sub_trees.push((
+                start,
+                Link {
+                    hash,
+                    name: Some(format!("_chunk_{start}")),
+                    size: batch_size,
+                    key: None,
+                    link_type: LinkType::Dir,
+                    meta: None,
+                },
+            ));
         }
 
         if sub_trees.len() <= self.max_links {
             let node = TreeNode {
                 node_type: LinkType::Dir,
-                links: sub_trees,
+                links: sub_trees.into_iter().map(|(_, link)| link).collect(),
             };
             let (data, hash) = encode_and_hash(&node)?;
             self.store
@@ -436,7 +382,7 @@ impl<S: Store> TreeBuilder<S> {
         }
 
         // Recursively build more levels
-        Box::pin(self.build_directory_by_chunks(sub_trees, total_size)).await
+        Box::pin(self.build_indexed_directory_chunks(sub_trees)).await
     }
 
     /// Create a tree node
@@ -666,6 +612,7 @@ mod tests {
     use super::*;
     use crate::store::MemoryStore;
     use crate::types::to_hex;
+    use std::collections::HashMap;
 
     fn make_store() -> Arc<MemoryStore> {
         Arc::new(MemoryStore::new())

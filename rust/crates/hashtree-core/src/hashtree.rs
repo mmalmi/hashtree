@@ -116,42 +116,37 @@ pub struct HashTree<S: Store> {
 }
 
 impl<S: Store> HashTree<S> {
-    fn is_legacy_internal_group_name(name: &str) -> bool {
-        name.starts_with('_') && !name.starts_with("_chunk_") && name.chars().count() == 2
+    fn internal_chunk_start(name: &str) -> Option<usize> {
+        let suffix = name.strip_prefix("_chunk_")?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        suffix.parse().ok()
     }
 
-    fn node_uses_legacy_directory_fanout(node: &TreeNode) -> bool {
+    fn node_uses_directory_fanout(node: &TreeNode) -> bool {
         !node.links.is_empty()
             && node.links.iter().all(|link| {
                 let Some(name) = link.name.as_deref() else {
                     return false;
                 };
-                Self::is_legacy_internal_group_name(name) && link.link_type == LinkType::Dir
+                Self::internal_chunk_start(name).is_some() && link.link_type == LinkType::Dir
             })
     }
 
-    fn is_internal_directory_link_with_legacy_fanout(
-        link: &Link,
-        uses_legacy_fanout: bool,
-    ) -> bool {
+    fn is_internal_directory_link_with_fanout(link: &Link, uses_fanout: bool) -> bool {
+        if !uses_fanout || link.link_type != LinkType::Dir {
+            return false;
+        }
+
         let Some(name) = link.name.as_deref() else {
             return false;
         };
-
-        if name.starts_with("_chunk_") {
-            return true;
-        }
-
-        uses_legacy_fanout
-            && Self::is_legacy_internal_group_name(name)
-            && link.link_type == LinkType::Dir
+        Self::internal_chunk_start(name).is_some()
     }
 
     fn is_internal_directory_link(node: &TreeNode, link: &Link) -> bool {
-        Self::is_internal_directory_link_with_legacy_fanout(
-            link,
-            Self::node_uses_legacy_directory_fanout(node),
-        )
+        Self::is_internal_directory_link_with_fanout(link, Self::node_uses_directory_fanout(node))
     }
 
     pub fn new(config: HashTreeConfig<S>) -> Self {
@@ -555,8 +550,7 @@ impl<S: Store> HashTree<S> {
     /// Build a directory from entries
     /// Returns Cid with key if encrypted
     ///
-    /// For large directories, the messagepack-encoded TreeNode is stored via put()
-    /// which automatically chunks the data. The reader uses read_file() to reassemble.
+    /// Large directories are split into BUD-17 `_chunk_<start>` fanout nodes.
     pub async fn put_directory(&self, entries: Vec<DirEntry>) -> Result<Cid, HashTreeError> {
         // Sort entries by name for deterministic hashing
         let mut sorted = entries;
@@ -574,19 +568,84 @@ impl<S: Store> HashTree<S> {
             })
             .collect();
 
-        // Create the directory node with all entries
+        if links.len() <= self.max_links {
+            return self.put_directory_node(links).await;
+        }
+
+        self.build_directory_by_chunks(links).await
+    }
+
+    async fn put_directory_node(&self, links: Vec<Link>) -> Result<Cid, HashTreeError> {
         let node = TreeNode {
             node_type: LinkType::Dir,
             links,
         };
-        let (data, _plain_hash) = encode_and_hash(&node)?;
+        let (data, plain_hash) = encode_and_hash(&node)?;
 
-        // Store directory data via put() - handles both small and large directories
-        // For small dirs, stores as single chunk
-        // For large dirs, chunks transparently via build_tree()
-        // Reader uses read_file() to reassemble before decoding
-        let (cid, _size) = self.put(&data).await?;
-        Ok(cid)
+        if self.encrypted {
+            let (encrypted, key) =
+                encrypt_chk(&data).map_err(|e| HashTreeError::Encryption(e.to_string()))?;
+            let hash = sha256(&encrypted);
+            self.store
+                .put(hash, encrypted)
+                .await
+                .map_err(|e| HashTreeError::Store(e.to_string()))?;
+            return Ok(Cid {
+                hash,
+                key: Some(key),
+            });
+        }
+
+        self.store
+            .put(plain_hash, data)
+            .await
+            .map_err(|e| HashTreeError::Store(e.to_string()))?;
+        Ok(Cid {
+            hash: plain_hash,
+            key: None,
+        })
+    }
+
+    async fn build_directory_by_chunks(&self, links: Vec<Link>) -> Result<Cid, HashTreeError> {
+        let indexed_links: Vec<(usize, Link)> = links.into_iter().enumerate().collect();
+        self.build_indexed_directory_chunks(indexed_links).await
+    }
+
+    async fn build_indexed_directory_chunks(
+        &self,
+        links: Vec<(usize, Link)>,
+    ) -> Result<Cid, HashTreeError> {
+        let mut sub_trees: Vec<(usize, Link)> = Vec::new();
+
+        for (i, batch) in links.chunks(self.max_links).enumerate() {
+            let start = batch
+                .first()
+                .map(|(start, _)| *start)
+                .unwrap_or(i * self.max_links);
+            let batch_size: u64 = batch.iter().map(|(_, link)| link.size).sum();
+            let child_links = batch.iter().map(|(_, link)| link.clone()).collect();
+            let child_cid = self.put_directory_node(child_links).await?;
+
+            sub_trees.push((
+                start,
+                Link {
+                    hash: child_cid.hash,
+                    name: Some(format!("_chunk_{start}")),
+                    size: batch_size,
+                    key: child_cid.key,
+                    link_type: LinkType::Dir,
+                    meta: None,
+                },
+            ));
+        }
+
+        if sub_trees.len() <= self.max_links {
+            return self
+                .put_directory_node(sub_trees.into_iter().map(|(_, link)| link).collect())
+                .await;
+        }
+
+        Box::pin(self.build_indexed_directory_chunks(sub_trees)).await
     }
 
     /// Create a tree node with custom links
@@ -683,7 +742,7 @@ impl<S: Store> HashTree<S> {
         Ok(Some(node))
     }
 
-    /// Get directory node, handling chunked directory data
+    /// Get directory node, handling historical byte-chunked directory data.
     /// Use this when you know the target is a directory (from parent link_type)
     pub async fn get_directory_node(&self, cid: &Cid) -> Result<Option<TreeNode>, HashTreeError> {
         let decrypted = match self.get_cid_root_bytes(cid).await? {
@@ -1150,8 +1209,8 @@ impl<S: Store> HashTree<S> {
         Ok(entries)
     }
 
-    /// List directory entries using Cid (with decryption if key present)
-    /// Handles both regular and chunked directory data
+    /// List directory entries using Cid (with decryption if key present).
+    /// Handles both regular and fanout directory data.
     pub async fn list_directory(&self, cid: &Cid) -> Result<Vec<TreeEntry>, HashTreeError> {
         // Use get_directory_node which handles chunked directory data
         let node = match self.get_directory_node(cid).await? {
@@ -1162,12 +1221,11 @@ impl<S: Store> HashTree<S> {
         let mut entries = Vec::new();
 
         for link in &node.links {
-            // Skip internal chunk nodes (backwards compat with old _chunk_ format)
+            // Skip internal fanout nodes.
             if Self::is_internal_directory_link(&node, link) {
-                // Internal nodes inherit parent's key for decryption
                 let sub_cid = Cid {
                     hash: link.hash,
-                    key: cid.key,
+                    key: link.key,
                 };
                 let sub_entries = Box::pin(self.list_directory(&sub_cid)).await?;
                 entries.extend(sub_entries);

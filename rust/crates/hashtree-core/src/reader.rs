@@ -44,32 +44,33 @@ pub struct TreeReader<S: Store> {
 }
 
 impl<S: Store> TreeReader<S> {
-    fn is_legacy_internal_group_name(name: &str) -> bool {
-        name.starts_with('_') && !name.starts_with("_chunk_") && name.chars().count() == 2
+    fn internal_chunk_start(name: &str) -> Option<usize> {
+        let suffix = name.strip_prefix("_chunk_")?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        suffix.parse().ok()
     }
 
-    fn node_uses_legacy_directory_fanout(node: &TreeNode) -> bool {
+    fn node_uses_directory_fanout(node: &TreeNode) -> bool {
         !node.links.is_empty()
             && node.links.iter().all(|link| {
                 let Some(name) = link.name.as_deref() else {
                     return false;
                 };
-                Self::is_legacy_internal_group_name(name) && link.link_type == LinkType::Dir
+                Self::internal_chunk_start(name).is_some() && link.link_type == LinkType::Dir
             })
     }
 
     fn is_internal_directory_link(node: &TreeNode, link: &Link) -> bool {
+        if !Self::node_uses_directory_fanout(node) || link.link_type != LinkType::Dir {
+            return false;
+        }
+
         let Some(name) = link.name.as_deref() else {
             return false;
         };
-
-        if name.starts_with("_chunk_") {
-            return true;
-        }
-
-        Self::node_uses_legacy_directory_fanout(node)
-            && Self::is_legacy_internal_group_name(name)
-            && link.link_type == LinkType::Dir
+        Self::internal_chunk_start(name).is_some()
     }
 
     pub fn new(store: Arc<S>) -> Self {

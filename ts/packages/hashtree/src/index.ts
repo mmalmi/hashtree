@@ -86,6 +86,7 @@ export {
   StreamWriter,
   verifyTree,
   DEFAULT_CHUNK_SIZE,
+  DEFAULT_MAX_LINKS,
   type HashTreeConfig,
   type TreeEntry,
   type DirEntry,

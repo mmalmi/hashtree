@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { HashTree, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_LINKS } from '../src/index.js';
+import { HashTree } from '../src/index.js';
 import { MemoryStore } from '../src/store/memory.js';
 import { toHex, cid, LinkType } from '../src/types.js';
 import { sha256 } from '../src/hash.js';
@@ -175,9 +175,79 @@ describe('HashTree write operations', () => {
 
       const { cid: dirCid } = await smallTree.putDirectory(entries, { unencrypted: true });
 
+      const root = await smallTree.getTreeNode(dirCid);
+      expect(root!.type).toBe(LinkType.Dir);
+      expect(root!.links.map(l => l.name)).toEqual(['_chunk_0', '_chunk_4', '_chunk_8']);
+      expect(root!.links.every(l => l.type === LinkType.Dir)).toBe(true);
+
+      const firstChunkData = await store.get(root!.links[0].hash);
+      const firstChunk = decodeTreeNode(firstChunkData!);
+      expect(firstChunk.type).toBe(LinkType.Dir);
+      expect(firstChunk.links.map(l => l.name)).toEqual([
+        'file00.txt',
+        'file01.txt',
+        'file02.txt',
+        'file03.txt',
+      ]);
+
       // Should be able to list all entries even though dir is split
       const listed = await tree.listDirectory(dirCid);
       expect(listed.length).toBe(10);
+
+      const resolved = await tree.resolvePath(dirCid, 'file05.txt');
+      expect(resolved).not.toBeNull();
+      expect(toHex(resolved!.cid.hash)).toBe(toHex(entries[5].cid.hash));
+    });
+
+    it('should keep non-canonical underscore directory names visible', async () => {
+      const fileHash = await tree.putBlob(new Uint8Array([1]));
+      const { cid: subDirCid } = await tree.putDirectory([
+        { name: 'apple.txt', cid: cid(fileHash), size: 1, type: LinkType.Blob },
+      ], { unencrypted: true });
+
+      const { cid: rootCid } = await tree.putDirectory([
+        { name: '_a', cid: subDirCid, size: 1, type: LinkType.Dir },
+      ], { unencrypted: true });
+
+      const entries = await tree.listDirectory(rootCid);
+      expect(entries.map(e => e.name)).toEqual(['_a']);
+      expect(await tree.resolvePath(rootCid, 'apple.txt')).toBeNull();
+
+      const resolved = await tree.resolvePath(rootCid, '_a/apple.txt');
+      expect(resolved).not.toBeNull();
+      expect(toHex(resolved!.cid.hash)).toBe(toHex(fileHash));
+    });
+
+    it('should split large encrypted directories', async () => {
+      const maxLinks = 3;
+      const smallTree = new HashTree({ store, maxLinks });
+
+      const entries = [];
+      for (let i = 0; i < 8; i++) {
+        const data = new TextEncoder().encode(`encrypted-${i}`);
+        const { cid: fileCid, size } = await smallTree.putFile(data);
+        entries.push({
+          name: `file${i}.txt`,
+          cid: fileCid,
+          size,
+          type: LinkType.Blob,
+        });
+      }
+
+      const { cid: dirCid } = await smallTree.putDirectory(entries);
+
+      const root = await smallTree.getTreeNode(dirCid);
+      expect(root!.type).toBe(LinkType.Dir);
+      expect(root!.links.map(l => l.name)).toEqual(['_chunk_0', '_chunk_3', '_chunk_6']);
+      expect(root!.links.every(l => l.type === LinkType.Dir && l.key)).toBe(true);
+
+      const listed = await smallTree.listDirectory(dirCid);
+      expect(listed.map(e => e.name)).toEqual(entries.map(e => e.name));
+
+      const resolved = await smallTree.resolvePath(dirCid, 'file4.txt');
+      expect(resolved).not.toBeNull();
+      const data = await smallTree.readFile(resolved!.cid);
+      expect(new TextDecoder().decode(data!)).toBe('encrypted-4');
     });
   });
 });

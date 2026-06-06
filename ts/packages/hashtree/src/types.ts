@@ -98,7 +98,7 @@ export interface PutResult {
  * Options for building trees
  */
 export interface TreeOptions {
-  /** Max links per tree node before splitting (default: 256) */
+  /** Max links per tree node before splitting (default: 174) */
   fanout?: number;
   /** Max blob size before chunking (default: 2MB) */
   chunkSize?: number;

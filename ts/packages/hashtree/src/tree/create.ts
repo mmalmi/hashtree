@@ -7,9 +7,12 @@ import { sha256 } from '../hash.js';
 import { encodeAndHash } from '../codec.js';
 import { compareNames } from '../compare.js';
 
+const DEFAULT_MAX_LINKS = 174;
+
 export interface CreateConfig {
   store: Store;
   chunkSize: number;
+  maxLinks?: number;
 }
 
 export interface DirEntry {
@@ -68,40 +71,87 @@ export async function putFile(
 /**
  * Build a directory from entries
  *
- * Directories are encoded as MessagePack blobs. If the encoded blob exceeds
- * chunkSize, it's chunked by bytes like files using putFile.
+ * Directories with more than maxLinks entries are split into canonical
+ * _chunk_<start> fanout directory nodes.
  */
 export async function putDirectory(
   config: CreateConfig,
   entries: DirEntry[]
 ): Promise<Hash> {
-  const { store, chunkSize } = config;
   const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
 
   const links: Link[] = sorted.map(e => ({
     hash: e.cid.hash,
     key: e.cid.key,
     name: e.name,
-    size: e.size,
-    type: e.type,
+    size: e.size ?? 0,
+    type: e.type ?? LinkType.Blob,
     meta: e.meta,
   }));
 
+  if (links.length <= getMaxLinks(config)) {
+    return putDirectoryNode(config, links);
+  }
+
+  return buildDirectoryByChunks(config, links);
+}
+
+async function putDirectoryNode(
+  config: CreateConfig,
+  links: Link[]
+): Promise<Hash> {
   const node: TreeNode = {
     type: LinkType.Dir,
     links,
   };
   const { data, hash } = await encodeAndHash(node);
+  await config.store.put(hash, data);
+  return hash;
+}
 
-  // Small directory - store directly
-  if (data.length <= chunkSize) {
-    await store.put(hash, data);
-    return hash;
+type IndexedLink = {
+  start: number;
+  link: Link;
+};
+
+async function buildDirectoryByChunks(
+  config: CreateConfig,
+  links: Link[]
+): Promise<Hash> {
+  const indexedLinks = links.map((link, start) => ({ start, link }));
+  return buildIndexedDirectoryChunks(config, indexedLinks);
+}
+
+async function buildIndexedDirectoryChunks(
+  config: CreateConfig,
+  links: IndexedLink[]
+): Promise<Hash> {
+  const maxLinks = getMaxLinks(config);
+  const subTrees: IndexedLink[] = [];
+
+  for (let offset = 0; offset < links.length; offset += maxLinks) {
+    const batch = links.slice(offset, offset + maxLinks);
+    const start = batch[0]?.start ?? offset;
+    const batchLinks = batch.map(({ link }) => link);
+    const batchSize = batchLinks.reduce((sum, link) => sum + (link.size ?? 0), 0);
+    const hash = await putDirectoryNode(config, batchLinks);
+
+    subTrees.push({
+      start,
+      link: {
+        hash,
+        name: `_chunk_${start}`,
+        size: batchSize,
+        type: LinkType.Dir,
+      },
+    });
   }
 
-  // Large directory - reuse putFile for chunking
-  const { hash: rootHash } = await putFile(config, data);
-  return rootHash;
+  if (subTrees.length <= maxLinks) {
+    return putDirectoryNode(config, subTrees.map(({ link }) => link));
+  }
+
+  return buildIndexedDirectoryChunks(config, subTrees);
 }
 
 export async function buildTree(
@@ -124,4 +174,12 @@ export async function buildTree(
   const { data, hash } = await encodeAndHash(node);
   await store.put(hash, data);
   return hash;
+}
+
+function getMaxLinks(config: CreateConfig): number {
+  const maxLinks = config.maxLinks ?? DEFAULT_MAX_LINKS;
+  if (!Number.isInteger(maxLinks) || maxLinks < 1) {
+    throw new Error(`Invalid maxLinks: ${config.maxLinks}`);
+  }
+  return maxLinks;
 }

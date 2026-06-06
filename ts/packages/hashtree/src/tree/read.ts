@@ -2,7 +2,7 @@
  * Tree reading operations
  */
 
-import { Store, Hash, TreeNode, LinkType, toHex, CID, cid } from '../types.js';
+import { Store, Hash, TreeNode, Link, LinkType, toHex, CID, cid } from '../types.js';
 import { decodeTreeNode, tryDecodeTreeNode, getNodeType } from '../codec.js';
 import { loadBlock } from './loadBlock.js';
 
@@ -373,10 +373,11 @@ async function readRangeFromNode(
 }
 
 /**
- * Get directory node, handling chunked directories.
+ * Get directory node, handling historical byte-chunked directories.
  *
- * For chunked directories (encoded blob > chunkSize), the chunks are assembled
- * first, then decoded as a TreeNode.
+ * Historical large directories were encoded as one directory blob and then
+ * chunked as a file. Those chunks are assembled first, then decoded as a
+ * TreeNode.
  *
  * Waits for the directory block to become available — never returns null
  * because data isn't local yet. Returns null only when the block has loaded
@@ -414,8 +415,8 @@ async function getDirectoryNode(
 /**
  * List directory entries.
  *
- * Handles both small directories (single node) and large directories
- * (chunked by bytes like files - reassembled then decoded).
+ * Handles regular directories, canonical fanout directories, and historical
+ * byte-chunked directory blobs.
  *
  * Waits for the directory block to load. Returns `[]` only for a genuinely
  * empty directory (or when the loaded block isn't a directory). Pass a
@@ -430,9 +431,15 @@ export async function listDirectory(
   if (!node) return [];
 
   const entries: TreeEntry[] = [];
+  const usesFanout = nodeUsesDirectoryFanout(node);
 
   for (const link of node.links) {
-    if (!link.name) continue; // Skip unnamed links (shouldn't happen in directories)
+    if (isInternalDirectoryLinkWithFanout(link, usesFanout)) {
+      entries.push(...await listDirectory(store, link.hash, signal));
+      continue;
+    }
+
+    if (link.name === undefined) continue; // Skip unnamed links (shouldn't happen in directories)
 
     entries.push({
       name: link.name,
@@ -449,7 +456,7 @@ export async function listDirectory(
 /**
  * Resolve a path within a tree.
  *
- * Handles chunked directories (reassembles bytes to get the full TreeNode).
+ * Handles canonical fanout directories and historical byte-chunked directories.
  *
  * Waits for each directory block in the path to load. Returns null only
  * when an entry is missing from a successfully-loaded directory listing —
@@ -466,13 +473,11 @@ export async function resolvePath(
   let currentHash = rootHash;
 
   for (const part of parts) {
-    const node = await getDirectoryNode(store, currentHash, signal);
-    if (!node) return null;
+    const entries = await listDirectory(store, currentHash, signal);
+    const entry = entries.find(e => e.name === part);
+    if (!entry) return null;
 
-    const link = node.links.find(l => l.name === part);
-    if (!link) return null;
-
-    currentHash = link.hash;
+    currentHash = entry.cid.hash;
   }
 
   return currentHash;
@@ -500,7 +505,7 @@ export async function getSize(store: Store, hash: Hash): Promise<number> {
 /**
  * Walk entire tree depth-first
  *
- * Handles chunked directories (reassembles bytes to get the full TreeNode).
+ * Handles canonical fanout directories and historical byte-chunked directories.
  */
 export async function* walk(
   store: Store,
@@ -513,14 +518,13 @@ export async function* walk(
   // Check if it's a directory
   const dirNode = await getDirectoryNode(store, hash);
   if (dirNode) {
-    const dirSize = dirNode.links.reduce((sum, l) => sum + l.size, 0);
+    const entries = await listDirectory(store, hash);
+    const dirSize = entries.reduce((sum, entry) => sum + entry.size, 0);
     yield { path, hash, type: LinkType.Dir, size: dirSize };
 
-    for (const link of dirNode.links) {
-      if (!link.name) continue;
-
-      const childPath = path ? `${path}/${link.name}` : link.name;
-      yield* walk(store, link.hash, childPath);
+    for (const entry of entries) {
+      const childPath = path ? `${path}/${entry.name}` : entry.name;
+      yield* walk(store, entry.cid.hash, childPath);
     }
     return;
   }
@@ -536,4 +540,30 @@ export async function* walk(
   // Chunked file - sum link sizes
   const fileSize = node.links.reduce((sum, l) => sum + l.size, 0);
   yield { path, hash, type: LinkType.File, size: fileSize };
+}
+
+function internalChunkStart(name: string): number | null {
+  const prefix = '_chunk_';
+  if (!name.startsWith(prefix)) return null;
+
+  const suffix = name.slice(prefix.length);
+  if (suffix.length === 0 || !/^[0-9]+$/.test(suffix)) return null;
+
+  const start = Number(suffix);
+  return Number.isSafeInteger(start) ? start : null;
+}
+
+function nodeUsesDirectoryFanout(node: TreeNode): boolean {
+  return node.links.length > 0 && node.links.every((link) => (
+    link.type === LinkType.Dir
+      && link.name !== undefined
+      && internalChunkStart(link.name) !== null
+  ));
+}
+
+function isInternalDirectoryLinkWithFanout(link: Link, usesFanout: boolean): boolean {
+  return usesFanout
+    && link.type === LinkType.Dir
+    && link.name !== undefined
+    && internalChunkStart(link.name) !== null;
 }

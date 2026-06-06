@@ -15,6 +15,7 @@ import { compareNames } from './compare.js';
  * Default chunk size: 2MB (optimized for blossom uploads)
  */
 export const DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024;
+export const DEFAULT_MAX_LINKS = 174;
 
 /**
  * Chunker function: returns chunk size for a given chunk index
@@ -46,6 +47,8 @@ export interface BuilderConfig {
   store: Store;
   /** Chunk size for splitting blobs (ignored if chunker is provided) */
   chunkSize?: number;
+  /** Max links per directory fanout node */
+  maxLinks?: number;
   /** Custom chunker function for variable chunk sizes */
   chunker?: Chunker;
   /** Hash chunks in parallel (default: true) */
@@ -71,11 +74,16 @@ export interface DirEntry {
 export class TreeBuilder {
   private store: Store;
   private chunker: Chunker;
+  private maxLinks: number;
   private parallel: boolean;
 
   constructor(config: BuilderConfig) {
     this.store = config.store;
     this.chunker = config.chunker ?? fixedChunker(config.chunkSize ?? DEFAULT_CHUNK_SIZE);
+    this.maxLinks = config.maxLinks ?? DEFAULT_MAX_LINKS;
+    if (!Number.isInteger(this.maxLinks) || this.maxLinks < 1) {
+      throw new Error(`Invalid maxLinks: ${config.maxLinks}`);
+    }
     this.parallel = config.parallel ?? true;
   }
 
@@ -163,8 +171,8 @@ export class TreeBuilder {
    * Build a directory from entries
    * Entries can be files or subdirectories
    *
-   * Directories are encoded as MessagePack blobs. If the encoded blob exceeds
-   * chunkSize, it's chunked by bytes like files using putFile.
+   * Directories with more than maxLinks entries are split into canonical
+   * _chunk_<start> fanout directory nodes.
    *
    * @param entries Directory entries
    */
@@ -175,26 +183,61 @@ export class TreeBuilder {
     const links: Link[] = sorted.map(e => ({
       hash: e.hash,
       name: e.name,
-      size: e.size,
-      type: e.type,
+      size: e.size ?? 0,
+      type: e.type ?? LinkType.Blob,
       meta: e.meta,
     }));
 
+    if (links.length <= this.maxLinks) {
+      return this.putDirectoryNode(links);
+    }
+
+    return this.buildDirectoryByChunks(links);
+  }
+
+  private async putDirectoryNode(links: Link[]): Promise<Hash> {
     const node: TreeNode = {
       type: LinkType.Dir,
       links,
     };
     const { data, hash } = await encodeAndHash(node);
+    await this.store.put(hash, data);
+    return hash;
+  }
 
-    // Small directory - store directly
-    if (data.length <= this.chunker(0)) {
-      await this.store.put(hash, data);
-      return hash;
+  private async buildDirectoryByChunks(links: Link[]): Promise<Hash> {
+    const indexedLinks = links.map((link, start) => ({ start, link }));
+    return this.buildIndexedDirectoryChunks(indexedLinks);
+  }
+
+  private async buildIndexedDirectoryChunks(
+    links: Array<{ start: number; link: Link }>
+  ): Promise<Hash> {
+    const subTrees: Array<{ start: number; link: Link }> = [];
+
+    for (let offset = 0; offset < links.length; offset += this.maxLinks) {
+      const batch = links.slice(offset, offset + this.maxLinks);
+      const start = batch[0]?.start ?? offset;
+      const batchLinks = batch.map(({ link }) => link);
+      const batchSize = batchLinks.reduce((sum, link) => sum + (link.size ?? 0), 0);
+      const hash = await this.putDirectoryNode(batchLinks);
+
+      subTrees.push({
+        start,
+        link: {
+          hash,
+          name: `_chunk_${start}`,
+          size: batchSize,
+          type: LinkType.Dir,
+        },
+      });
     }
 
-    // Large directory - reuse putFile for chunking
-    const { hash: rootHash } = await this.putFile(data);
-    return rootHash;
+    if (subTrees.length <= this.maxLinks) {
+      return this.putDirectoryNode(subTrees.map(({ link }) => link));
+    }
+
+    return this.buildIndexedDirectoryChunks(subTrees);
   }
 
   /**

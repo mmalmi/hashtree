@@ -44,6 +44,16 @@ fn make_encrypted_tree_with_chunk_size(
     (store, tree)
 }
 
+fn make_tree_with_max_links(max_links: usize) -> (Arc<MemoryStore>, HashTree<MemoryStore>) {
+    let store = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(
+        HashTreeConfig::new(store.clone())
+            .public()
+            .with_max_links(max_links),
+    );
+    (store, tree)
+}
+
 // ============ CREATE TESTS ============
 
 mod create {
@@ -431,7 +441,7 @@ mod read {
     }
 
     #[tokio::test]
-    async fn test_list_directory_preserves_legacy_internal_fanout_nodes() {
+    async fn test_underscore_group_directory_remains_visible() {
         let (_store, tree) = make_tree();
 
         let (file_cid, _) = tree.put_file(b"fanout").await.unwrap();
@@ -461,14 +471,84 @@ mod read {
         let root_cid = Cid::public(root_hash);
         let entries = tree.list_directory(&root_cid).await.unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "apple.txt");
+        assert_eq!(entries[0].name, "_a");
 
         let resolved = tree
+            .resolve_path(&root_cid, "_a/apple.txt")
+            .await
+            .unwrap()
+            .expect("resolve _a/apple.txt");
+        assert_eq!(resolved, file_cid);
+
+        assert!(tree
             .resolve_path(&root_cid, "apple.txt")
             .await
             .unwrap()
-            .expect("resolve apple.txt");
-        assert_eq!(resolved, file_cid);
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_large_directory_uses_chunk_fanout_nodes() {
+        let (_store, tree) = make_tree_with_max_links(2);
+
+        let mut entries = Vec::new();
+        for i in 0..5 {
+            let name = format!("file-{i}.txt");
+            let content = format!("content-{i}");
+            let (file_cid, size) = tree.put_file(content.as_bytes()).await.unwrap();
+            entries.push(
+                DirEntry::from_cid(name, &file_cid)
+                    .with_size(size)
+                    .with_link_type(LinkType::Blob),
+            );
+        }
+
+        let root_cid = tree.put_directory(entries).await.unwrap();
+        let root = tree
+            .get_node(&root_cid)
+            .await
+            .unwrap()
+            .expect("large directory root node");
+
+        let names: Vec<_> = root
+            .links
+            .iter()
+            .map(|link| link.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(names, vec!["_chunk_0", "_chunk_4"]);
+        assert!(root
+            .links
+            .iter()
+            .all(|link| link.link_type == LinkType::Dir));
+        assert!(root.links.len() <= 2);
+
+        let first_child = tree
+            .get_node(&Cid {
+                hash: root.links[0].hash,
+                key: root.links[0].key,
+            })
+            .await
+            .unwrap()
+            .expect("first fanout child");
+        let child_names: Vec<_> = first_child
+            .links
+            .iter()
+            .map(|link| link.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(child_names, vec!["_chunk_0", "_chunk_2"]);
+
+        let listed = tree.list_directory(&root_cid).await.unwrap();
+        assert_eq!(listed.len(), 5);
+        assert_eq!(listed[0].name, "file-0.txt");
+        assert_eq!(listed[4].name, "file-4.txt");
+
+        let resolved = tree
+            .resolve_path(&root_cid, "file-3.txt")
+            .await
+            .unwrap()
+            .expect("resolve fanout entry");
+        let data = tree.get(&resolved, None).await.unwrap().unwrap();
+        assert_eq!(data, b"content-3");
     }
 }
 
