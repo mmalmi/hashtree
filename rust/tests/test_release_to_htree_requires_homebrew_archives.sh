@@ -133,4 +133,81 @@ if [ -f "${TMPDIR}/logs/calls.log" ]; then
     fi
 fi
 
+cat >"${REPO_ROOT}/rust/scripts/build_release_artifacts.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+output_dir=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --output-dir)
+            output_dir="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+mkdir -p "$output_dir"
+make_unix_archive() {
+    local target="$1"
+    local stage_dir package_dir
+    stage_dir="$(mktemp -d)"
+    package_dir="${stage_dir}/hashtree"
+    mkdir -p "${package_dir}"
+
+    cat >"${package_dir}/install.sh" <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+install_dir="${1:-$HOME/.local/bin}"
+mkdir -p "$install_dir"
+install -m 755 htree htree-cashu git-remote-htree "$install_dir/"
+SCRIPT
+    chmod +x "${package_dir}/install.sh"
+
+    for binary in htree htree-cashu git-remote-htree; do
+        printf '#!/bin/sh\necho %s\n' "$binary" >"${package_dir}/${binary}"
+        chmod +x "${package_dir}/${binary}"
+    done
+
+    (
+        cd "$stage_dir"
+        tar -czf "${output_dir}/hashtree-${target}.tar.gz" hashtree
+    )
+    rm -rf "$stage_dir"
+}
+
+for target in \
+    aarch64-apple-darwin \
+    x86_64-apple-darwin \
+    aarch64-unknown-linux-musl \
+    x86_64-unknown-linux-musl
+do
+    make_unix_archive "$target"
+done
+EOF
+chmod +x "${REPO_ROOT}/rust/scripts/build_release_artifacts.sh"
+
+rm -rf "${TMPDIR}/out" "${TMPDIR}/logs/calls.log"
+STDOUT_FILE="${TMPDIR}/release_to_htree_no_windows.stdout"
+STDERR_FILE="${TMPDIR}/release_to_htree_no_windows.stderr"
+if PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
+    "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
+    --version v0.2.3 \
+    --output-dir "${TMPDIR}/out" >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
+then
+    echo "release_to_htree.sh should fail when the Windows archive is missing from a full release" >&2
+    exit 1
+fi
+
+grep -F "does not contain the Windows x64 archive required for a full-platform release" "${STDERR_FILE}" >/dev/null
+if [ -f "${TMPDIR}/logs/calls.log" ]; then
+    if grep -E '^(publish_release|publish_tap|htree_add):' "${TMPDIR}/logs/calls.log" >/dev/null; then
+        echo "release_to_htree.sh should not publish release data when the Windows archive is missing" >&2
+        exit 1
+    fi
+fi
+
 echo "test_release_to_htree_requires_homebrew_archives.sh passed"

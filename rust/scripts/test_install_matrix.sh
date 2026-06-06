@@ -328,9 +328,9 @@ run_unix_install_smoke() {
     local system_path="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
     mkdir -p "$home_dir"
-    env HOME="$home_dir" PATH="${system_path}:${PATH:-}" /bin/bash -lc "$install_cmd"
+    env HOME="$home_dir" PATH="${system_path}:${PATH:-}" /bin/bash -c "$install_cmd"
     env HOME="$home_dir" PATH="$home_dir/.local/bin:${system_path}:${PATH:-}" \
-        /bin/bash -lc '
+        /bin/bash -c '
             set -euo pipefail
             command -v htree >/dev/null || { echo "htree not found on PATH=$PATH" >&2; exit 1; }
             command -v htree-cashu >/dev/null || { echo "htree-cashu not found on PATH=$PATH" >&2; exit 1; }
@@ -400,8 +400,8 @@ run_docker_smoke() {
                 apt-get install -y --no-install-recommends bash curl ca-certificates git >/dev/null
                 export HOME=/tmp/hashtree-home
                 mkdir -p "$HOME"
-                /bin/bash -lc "$INSTALL_CMD"
-                PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" /bin/bash -lc '"'"'
+                /bin/bash -c "$INSTALL_CMD"
+                PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" /bin/bash -c '"'"'
                     set -euo pipefail
                     command -v htree >/dev/null || { echo "htree not found on PATH=$PATH" >&2; exit 1; }
                     command -v htree-cashu >/dev/null || { echo "htree-cashu not found on PATH=$PATH" >&2; exit 1; }

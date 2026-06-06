@@ -64,7 +64,16 @@ fi
 cat >/dev/null
 printf 'fetch\npush\noption\n\n'
 SCRIPT
-chmod +x "${HOME}/.local/bin/htree" "${HOME}/.local/bin/htree-cashu" "${HOME}/.local/bin/git-remote-htree"
+cat >"${HOME}/.local/bin/git" <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+if [ "${1:-}" = "ls-remote" ]; then
+    printf '0123456789abcdef0123456789abcdef01234567\tHEAD\n'
+    exit 0
+fi
+exit 1
+SCRIPT
+chmod +x "${HOME}/.local/bin/htree" "${HOME}/.local/bin/htree-cashu" "${HOME}/.local/bin/git-remote-htree" "${HOME}/.local/bin/git"
 EOF
 chmod +x "${BIN_DIR}/fake-install"
 
@@ -200,7 +209,7 @@ OUTPUT_FILE="${TMPDIR}/matrix.out"
 set +e
 PATH="${BIN_DIR}:/usr/bin:/bin" HOME="${TEST_HOME}" TEST_LOG_FILE="${LOG_FILE}" TEST_BREW_REPO="${TEST_BREW_REPO}" TEST_BREW_STATE="${TEST_BREW_STATE}" \
     "${RUN_SCRIPT}" \
-    --install-cmd "fake-install" \
+    --install-cmd "${BIN_DIR}/fake-install" \
     --windows-zip-url "https://example.test/hashtree.zip" \
     --brew-tap-name "sirius/hashtree" \
     --brew-tap-url "https://example.test/homebrew-hashtree.git" \

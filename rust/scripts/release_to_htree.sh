@@ -194,6 +194,11 @@ homebrew_archives_ready() {
     return 0
 }
 
+windows_archive_ready() {
+    local assets_dir="$1"
+    [ -f "${assets_dir}/hashtree-x86_64-pc-windows-msvc.zip" ]
+}
+
 require_homebrew_archives_for_release() {
     local assets_dir="$1"
     if [ "$SKIP_HOMEBREW_TAP" -eq 1 ]; then
@@ -206,6 +211,25 @@ require_homebrew_archives_for_release() {
     cat >&2 <<EOF
 Error: release directory ${assets_dir} does not contain the full macOS/Linux archive set required for the Homebrew tap.
 Re-run with the default targets (or explicit macOS and Linux musl targets), or pass --skip-homebrew-tap to publish a partial release intentionally.
+EOF
+    exit 1
+}
+
+require_full_platform_archives_for_release() {
+    local assets_dir="$1"
+
+    require_homebrew_archives_for_release "$assets_dir"
+
+    if [ "$SKIP_HOMEBREW_TAP" -eq 1 ]; then
+        return 0
+    fi
+    if windows_archive_ready "$assets_dir"; then
+        return 0
+    fi
+
+    cat >&2 <<EOF
+Error: release directory ${assets_dir} does not contain the Windows x64 archive required for a full-platform release.
+Ensure the Windows VM build produced hashtree-x86_64-pc-windows-msvc.zip, pass --windows-artifacts-dir, or pass --skip-homebrew-tap to publish a partial release intentionally.
 EOF
     exit 1
 }
@@ -260,7 +284,7 @@ auto_build_windows_vm_artifacts
 OUTPUT_DIR="$(value_from_build_args --output-dir "${RUST_DIR}/dist/hashtree-${VERSION}")"
 TARGET_DIR="$(value_from_build_args --target-dir "${RUST_DIR}/target")"
 BUILD_REPO_DIR="$(value_from_build_args --repo-dir "${REPO_DIR}")"
-require_homebrew_archives_for_release "$OUTPUT_DIR"
+require_full_platform_archives_for_release "$OUTPUT_DIR"
 npub="$(current_npub)"
 RELEASE_STAGE_SCRIPT="${REPO_DIR}/scripts/stage_repo_release.mjs"
 RELEASE_BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/write_release_bootstrap_installer.sh"
@@ -320,6 +344,70 @@ fi
 echo "Release CID: ${release_cid}"
 "${SCRIPT_DIR}/publish_release.sh" "$VERSION_PATH" "$release_cid" "$TREE_NAME"
 
+latest_path_for_version_path() {
+    local version_path="$1"
+    if [[ "$version_path" == */* ]]; then
+        printf '%s/latest\n' "${version_path%/*}"
+    else
+        printf 'latest\n'
+    fi
+}
+
+release_stage_file_paths() {
+    local stage_dir="$1"
+    (
+        cd "$stage_dir"
+        find . -type f | sed 's|^\./||' | LC_ALL=C sort
+    )
+}
+
+check_live_release_url() {
+    local url="$1"
+    local label="$2"
+    local attempt
+    local attempts="${RELEASE_URL_GATE_ATTEMPTS:-12}"
+    local delay="${RELEASE_URL_GATE_DELAY_SECONDS:-5}"
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if curl -fsSIL --max-time 30 "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            sleep "$delay"
+        fi
+    done
+
+    echo "Release gate failed: ${label} is not reachable: ${url}" >&2
+    return 1
+}
+
+run_post_publish_asset_url_gate() {
+    local latest_path version_base_url latest_base_url relative_path encoded_path
+
+    if [ "$SKIP_POST_PUBLISH_INSTALL_CHECKS" -eq 1 ]; then
+        return 0
+    fi
+    if [ -z "$npub" ]; then
+        echo "Release gate failed: could not determine current npub for live asset URL checks." >&2
+        exit 1
+    fi
+    require_command curl
+
+    latest_path="$(latest_path_for_version_path "$VERSION_PATH")"
+    version_base_url="$(gateway_release_base_url "$npub" "$TREE_NAME" "$VERSION_PATH")"
+    latest_base_url="$(gateway_release_base_url "$npub" "$TREE_NAME" "$latest_path")"
+
+    echo "Verifying live release URLs..."
+    while IFS= read -r relative_path; do
+        if [ -z "$relative_path" ]; then
+            continue
+        fi
+        encoded_path="$(urlencode_path "$relative_path")"
+        check_live_release_url "${version_base_url}/${encoded_path}" "${VERSION_PATH}/${relative_path}"
+        check_live_release_url "${latest_base_url}/${encoded_path}" "${latest_path}/${relative_path}"
+    done < <(release_stage_file_paths "$RELEASE_STAGE_DIR")
+}
+
 if [ "$SKIP_HOMEBREW_TAP" -eq 0 ]; then
     HOMEBREW_PUBLISH_SCRIPT="${REPO_DIR}/packaging/homebrew/publish_tap.sh"
     if [ ! -x "$HOMEBREW_PUBLISH_SCRIPT" ]; then
@@ -344,23 +432,38 @@ fi
 
 run_post_publish_install_checks() {
     local install_matrix_script
+    local latest_path latest_base_url
+    local matrix_args=()
 
     if [ "$SKIP_POST_PUBLISH_INSTALL_CHECKS" -eq 1 ]; then
         return 0
     fi
+    if [ -z "$npub" ]; then
+        echo "Release gate failed: could not determine current npub for live install checks." >&2
+        exit 1
+    fi
 
     install_matrix_script="${SCRIPT_DIR}/test_install_matrix.sh"
     if [ ! -x "$install_matrix_script" ]; then
-        echo "Warning: post-publish install matrix helper not found at ${install_matrix_script}; skipping live install checks." >&2
-        return 0
+        echo "Release gate failed: post-publish install matrix helper not found at ${install_matrix_script}." >&2
+        exit 1
     fi
 
+    latest_path="$(latest_path_for_version_path "$VERSION_PATH")"
+    latest_base_url="$(gateway_release_base_url "$npub" "$TREE_NAME" "$latest_path")"
+    matrix_args=(
+        --install-cmd "curl -fsSL ${latest_base_url}/install.sh | sh"
+        --windows-zip-url "${latest_base_url}/assets/hashtree-x86_64-pc-windows-msvc.zip"
+    )
+
     echo "Running post-publish install matrix against live artifacts..."
-    if ! "$install_matrix_script"; then
-        echo "Warning: post-publish install checks reported failures; release artifacts remain published." >&2
+    if ! "$install_matrix_script" "${matrix_args[@]}"; then
+        echo "Release gate failed: post-publish install checks reported failures." >&2
+        exit 1
     fi
 }
 
+run_post_publish_asset_url_gate
 run_post_publish_install_checks
 
 if [ "$CARGO_PUBLISH" -eq 1 ]; then

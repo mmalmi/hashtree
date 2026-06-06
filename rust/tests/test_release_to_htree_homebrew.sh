@@ -114,6 +114,7 @@ do
     make_unix_archive "$target"
     printf 'deadbeef  hashtree-%s.tar.gz\n' "$target" >"${output_dir}/hashtree-${target}.sha256"
 done
+printf 'windows zip\n' >"${output_dir}/hashtree-x86_64-pc-windows-msvc.zip"
 
 echo "build:$*" >>"${TEST_LOG_DIR}/calls.log"
 EOF
@@ -173,6 +174,18 @@ esac
 EOF
 chmod +x "${TMPDIR}/bin/htree"
 
+cat >"${TMPDIR}/bin/curl" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+echo "curl:$*" >>"${TEST_LOG_DIR}/calls.log"
+if [ "${FAIL_RELEASE_URL_GATE:-0}" = "1" ]; then
+    echo "forced release URL gate failure" >&2
+    exit 22
+fi
+exit 0
+EOF
+chmod +x "${TMPDIR}/bin/curl"
+
 PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
     "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
     --version v0.2.3 \
@@ -185,6 +198,7 @@ test -f "${TMPDIR}/release-stage/release.json"
 test -f "${TMPDIR}/release-stage/notes.md"
 test -f "${TMPDIR}/release-stage/install.sh"
 test -f "${TMPDIR}/release-stage/assets/hashtree-aarch64-apple-darwin.tar.gz"
+test -f "${TMPDIR}/release-stage/assets/hashtree-x86_64-pc-windows-msvc.zip"
 grep -F "\"commit\": \"${SOURCE_COMMIT}\"" "${TMPDIR}/release-stage/release.json" >/dev/null
 grep -F "## Changelog" "${TMPDIR}/release-stage/notes.md" >/dev/null
 grep -F "Added release changelog coverage to the staged repo notes." "${TMPDIR}/release-stage/notes.md" >/dev/null
@@ -192,6 +206,7 @@ grep -F "Added release changelog coverage to the staged repo notes." "${TMPDIR}/
 grep -F "publish_release:v0.2.3 nhash1release releases/hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "publish_tap:--version v0.2.3 --release-base-url https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3/assets --assets-dir ${TMPDIR}/out --tap-repo homebrew-hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "install_matrix:" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -F "curl:-fsSIL --max-time 30 https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/latest/install.sh" "${TMPDIR}/logs/calls.log" >/dev/null
 test -f "${TMPDIR}/out/install.sh"
 grep -F "BASE_URL=\"https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3\"" "${TMPDIR}/out/install.sh" >/dev/null
 grep -F 'ASSET_BASE_URL="${BASE_URL}/assets"' "${TMPDIR}/out/install.sh" >/dev/null
@@ -330,11 +345,33 @@ grep -F "Warning: Homebrew tap update failed; release artifacts are still publis
 rm -f "${TMPDIR}/logs/calls.log"
 STDOUT_FILE="${TMPDIR}/release_to_htree_install_checks.out"
 STDERR_FILE="${TMPDIR}/release_to_htree_install_checks.err"
-PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" FAIL_INSTALL_MATRIX=1 \
+if PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" FAIL_INSTALL_MATRIX=1 \
     "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
     --version v0.2.3 \
     --output-dir "${TMPDIR}/out" >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
+then
+    echo "release_to_htree should fail when post-publish install checks fail" >&2
+    exit 1
+fi
 
-grep -F "Warning: post-publish install checks reported failures; release artifacts remain published." "${STDERR_FILE}" >/dev/null
+grep -F "Release gate failed: post-publish install checks reported failures." "${STDERR_FILE}" >/dev/null
+
+rm -f "${TMPDIR}/logs/calls.log"
+STDOUT_FILE="${TMPDIR}/release_to_htree_url_gate.out"
+STDERR_FILE="${TMPDIR}/release_to_htree_url_gate.err"
+if PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" FAIL_RELEASE_URL_GATE=1 RELEASE_URL_GATE_ATTEMPTS=1 RELEASE_URL_GATE_DELAY_SECONDS=0 \
+    "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
+    --version v0.2.3 \
+    --output-dir "${TMPDIR}/out" >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
+then
+    echo "release_to_htree should fail when live release asset URLs are missing" >&2
+    exit 1
+fi
+
+grep -F "Release gate failed:" "${STDERR_FILE}" >/dev/null
+if grep -F "install_matrix:" "${TMPDIR}/logs/calls.log" >/dev/null; then
+    echo "install matrix should not run when live release asset URL gate fails" >&2
+    exit 1
+fi
 
 echo "test_release_to_htree_homebrew.sh passed"
