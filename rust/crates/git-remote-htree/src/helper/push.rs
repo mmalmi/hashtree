@@ -572,20 +572,20 @@ impl RemoteHelper {
             .map_err(Into::into)
     }
 
-    fn should_force_initial_git_pack_checkpoint(&self, delta_base: Option<&str>) -> bool {
+    fn cached_remote_root_pack_checkpoint_available(&self, delta_base: Option<&str>) -> bool {
         if delta_base.is_none() {
             return false;
         }
 
         match self.cached_remote_root_has_git_pack_checkpoint() {
-            Ok(Some(has_checkpoint)) => !has_checkpoint,
-            Ok(None) => true,
+            Ok(Some(has_checkpoint)) => has_checkpoint,
+            Ok(None) => false,
             Err(err) => {
                 warn!(
                     "Could not inspect cached remote git pack checkpoint; rebuilding checkpoint: {}",
                     err
                 );
-                true
+                false
             }
         }
     }
@@ -1042,8 +1042,9 @@ impl RemoteHelper {
             debug!("Set HEAD -> {}", dst_ref);
         }
 
-        let force_initial_checkpoint =
-            self.should_force_initial_git_pack_checkpoint(delta_base.as_deref());
+        let base_has_pack_checkpoint =
+            self.cached_remote_root_pack_checkpoint_available(delta_base.as_deref());
+        let force_initial_checkpoint = delta_base.is_some() && !base_has_pack_checkpoint;
         let checkpoint_covered = match self.prepare_git_pack_checkpoint(
             sha,
             objects.len(),
@@ -1061,8 +1062,12 @@ impl RemoteHelper {
             }
         };
 
-        let objects_to_import =
-            self.select_objects_to_import_for_push(sha, &objects, &checkpoint_covered)?;
+        let objects_to_import = self.select_objects_to_import_for_push(
+            sha,
+            &objects,
+            &checkpoint_covered,
+            base_has_pack_checkpoint,
+        )?;
         if checkpoint_covered.is_empty() {
             eprint!("  Reading objects...");
         } else {
@@ -1547,6 +1552,7 @@ impl RemoteHelper {
         sha: &str,
         listed_objects: &[String],
         checkpoint_covered: &HashSet<String>,
+        base_has_pack_checkpoint: bool,
     ) -> Result<Vec<String>> {
         let mut selected = HashSet::new();
         for oid in listed_objects {
@@ -1555,7 +1561,7 @@ impl RemoteHelper {
             }
         }
 
-        if !checkpoint_covered.is_empty() {
+        if !checkpoint_covered.is_empty() || base_has_pack_checkpoint {
             selected.extend(Self::current_tree_object_ids(sha)?);
         }
 

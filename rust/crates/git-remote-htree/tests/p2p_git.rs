@@ -37,6 +37,7 @@ impl TestPeer {
 
         let config_dir = home_path.join(".hashtree");
         std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
+        let fips_udp_port = port + 1000;
 
         let config_content = format!(
             r#"
@@ -45,6 +46,9 @@ bind_address = "127.0.0.1:{port}"
 enable_auth = false
 stun_port = 0
 enable_webrtc = true
+fips_udp_bind_addr = "127.0.0.1:{fips_udp_port}"
+fips_udp_public = true
+fips_udp_external_addr = "127.0.0.1:{fips_udp_port}"
 public_writes = true
 
 [nostr]
@@ -59,6 +63,7 @@ enabled = false
 "#,
             relay_url = relay_url,
             port = port,
+            fips_udp_port = fips_udp_port,
         );
         std::fs::write(config_dir.join("config.toml"), &config_content)
             .expect("Failed to write config");
@@ -119,7 +124,7 @@ enabled = false
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    fn git(&self, args: &[&str], cwd: &Path) -> std::process::Output {
+    fn git_command(&self, args: &[&str], cwd: &Path) -> Command {
         let bin_dir = find_bin_dir().expect("Binary dir not found");
         let mut cmd = Command::new("git");
         cmd.args(args)
@@ -136,7 +141,51 @@ enabled = false
         if let Ok(log_filter) = std::env::var("HTREE_TEST_GIT_RUST_LOG") {
             cmd.env("RUST_LOG", log_filter);
         }
-        cmd.output().expect("Failed to run git")
+        cmd
+    }
+
+    fn git(&self, args: &[&str], cwd: &Path) -> std::process::Output {
+        self.git_command(args, cwd)
+            .output()
+            .expect("Failed to run git")
+    }
+
+    fn git_with_timeout(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Result<std::process::Output, String> {
+        let mut child = self
+            .git_command(args, cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("Failed to start git {}: {err}", args.join(" ")))?;
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    return child
+                        .wait_with_output()
+                        .map_err(|err| format!("Failed to collect git output: {err}"));
+                }
+                Ok(None) if start.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|err| format!("Failed to collect timed-out git output: {err}"))?;
+                    return Err(format!(
+                        "git {} timed out after {:?}: {}",
+                        args.join(" "),
+                        timeout,
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(err) => return Err(format!("Failed to poll git {}: {err}", args.join(" "))),
+            }
+        }
     }
 
     fn git_ok(&self, args: &[&str], cwd: &Path) {
@@ -147,6 +196,30 @@ enabled = false
             args.join(" "),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    fn git_clone_ok_retry(&self, remote: &str, dest: &str, cwd: &Path) {
+        let dest_path = cwd.join(dest);
+        let mut last_stderr = String::new();
+        for attempt in 1..=10 {
+            if dest_path.exists() {
+                std::fs::remove_dir_all(&dest_path).expect("remove failed clone destination");
+            }
+            match self.git_with_timeout(&["clone", remote, dest], cwd, Duration::from_secs(30)) {
+                Ok(out) if out.status.success() => return,
+                Ok(out) => {
+                    last_stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                }
+                Err(err) => {
+                    last_stderr = err;
+                }
+            }
+            if attempt < 10 {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+
+        panic!("git clone {remote} {dest} failed after retries: {last_stderr}");
     }
 }
 
@@ -387,12 +460,9 @@ fn test_p2p_git_roundtrip() {
     println!("\n3. Peer B: Cloning repo...");
     let clone_dir_b = TempDir::new().unwrap();
     let repo_b_path = clone_dir_b.path().join("repo");
-    peer_b.git_ok(
-        &[
-            "clone",
-            &format!("htree://{}/shared-repo", peer_a.npub),
-            "repo",
-        ],
+    peer_b.git_clone_ok_retry(
+        &format!("htree://{}/shared-repo", peer_a.npub),
+        "repo",
         clone_dir_b.path(),
     );
 

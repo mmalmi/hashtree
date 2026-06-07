@@ -955,7 +955,7 @@ fn test_checkpoint_push_import_selection_keeps_current_tree_but_skips_old_histor
         RemoteHelper::current_tree_object_ids(&master_sha).expect("current tree object ids");
 
     let selected = helper
-        .select_objects_to_import_for_push(&master_sha, &full, &checkpoint_covered)
+        .select_objects_to_import_for_push(&master_sha, &full, &checkpoint_covered, false)
         .expect("select import objects");
     let selected: HashSet<String> = selected.into_iter().collect();
 
@@ -970,6 +970,46 @@ fn test_checkpoint_push_import_selection_keeps_current_tree_but_skips_old_histor
     assert!(
         selected.len() < full.len(),
         "checkpoint import should be smaller than the full history"
+    );
+}
+
+#[test]
+fn test_pack_backed_delta_import_keeps_current_tree_objects() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let helper = create_test_helper().expect("helper");
+    let delta = helper
+        .list_objects_for_shas(
+            std::slice::from_ref(&master_sha),
+            std::slice::from_ref(&base_sha),
+        )
+        .expect("list delta objects");
+    let current_tree =
+        RemoteHelper::current_tree_object_ids(&master_sha).expect("current tree object ids");
+
+    let selected_without_pack = helper
+        .select_objects_to_import_for_push(&master_sha, &delta, &HashSet::new(), false)
+        .expect("select delta import objects");
+    let selected_without_pack: HashSet<String> = selected_without_pack.into_iter().collect();
+    assert!(
+        !current_tree
+            .iter()
+            .all(|oid| selected_without_pack.contains(oid)),
+        "fixture should have current tree objects outside the commit delta"
+    );
+
+    let selected_with_pack = helper
+        .select_objects_to_import_for_push(&master_sha, &delta, &HashSet::new(), true)
+        .expect("select pack-backed import objects");
+    let selected_with_pack: HashSet<String> = selected_with_pack.into_iter().collect();
+    assert!(
+        current_tree
+            .iter()
+            .all(|oid| selected_with_pack.contains(oid)),
+        "pack-backed delta merge should import current tree objects for the browsable tree"
     );
 }
 
