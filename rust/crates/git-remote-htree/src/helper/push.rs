@@ -46,9 +46,9 @@ struct UploadCounters {
     discovered_total: Arc<AtomicUsize>,
 }
 
-struct GitPackCheckpointPlan {
-    tip: String,
-    covered_objects: HashSet<String>,
+pub(super) struct GitPackCheckpointPlan {
+    pub(super) tip: String,
+    pub(super) covered_objects: HashSet<String>,
 }
 
 struct RepoTreeProgressReporter {
@@ -548,6 +548,48 @@ impl RemoteHelper {
         .map(Some)
     }
 
+    fn cached_remote_root_has_git_pack_checkpoint(&self) -> Result<Option<bool>> {
+        let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() else {
+            return Ok(None);
+        };
+        let encryption_key = self
+            .nostr
+            .get_cached_encryption_key(&self.repo_name)
+            .copied();
+        let (cached_tree, _) = self.build_cached_fetch_tree()?;
+        let root_bytes = hex::decode(&root_hash).context("Invalid cached root hash hex")?;
+        let root_arr: [u8; 32] = root_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Cached root hash must be 32 bytes"))?;
+        let cached_root_cid = hashtree_core::Cid {
+            hash: root_arr,
+            key: encryption_key,
+        };
+
+        self.storage
+            .tree_root_has_git_pack_checkpoint(&cached_tree, &cached_root_cid)
+            .map(Some)
+            .map_err(Into::into)
+    }
+
+    fn should_force_initial_git_pack_checkpoint(&self, delta_base: Option<&str>) -> bool {
+        if delta_base.is_none() {
+            return false;
+        }
+
+        match self.cached_remote_root_has_git_pack_checkpoint() {
+            Ok(Some(has_checkpoint)) => !has_checkpoint,
+            Ok(None) => true,
+            Err(err) => {
+                warn!(
+                    "Could not inspect cached remote git pack checkpoint; rebuilding checkpoint: {}",
+                    err
+                );
+                true
+            }
+        }
+    }
+
     fn repair_delta_tree_build(
         &mut self,
         sha: &str,
@@ -1000,18 +1042,24 @@ impl RemoteHelper {
             debug!("Set HEAD -> {}", dst_ref);
         }
 
-        let checkpoint_covered =
-            match self.prepare_git_pack_checkpoint(sha, objects.len(), delta_base.as_deref()) {
-                Ok(Some(covered)) => covered,
-                Ok(None) => HashSet::new(),
-                Err(err) => {
-                    warn!("Git pack checkpoint skipped: {}", err);
-                    if self.is_slow() {
-                        eprintln!("  Warning: git pack checkpoint skipped: {}", err);
-                    }
-                    HashSet::new()
+        let force_initial_checkpoint =
+            self.should_force_initial_git_pack_checkpoint(delta_base.as_deref());
+        let checkpoint_covered = match self.prepare_git_pack_checkpoint(
+            sha,
+            objects.len(),
+            delta_base.as_deref(),
+            force_initial_checkpoint,
+        ) {
+            Ok(Some(covered)) => covered,
+            Ok(None) => HashSet::new(),
+            Err(err) => {
+                warn!("Git pack checkpoint skipped: {}", err);
+                if self.is_slow() {
+                    eprintln!("  Warning: git pack checkpoint skipped: {}", err);
                 }
-            };
+                HashSet::new()
+            }
+        };
 
         let objects_to_import =
             self.select_objects_to_import_for_push(sha, &objects, &checkpoint_covered)?;
@@ -1208,6 +1256,7 @@ impl RemoteHelper {
         sha: &str,
         object_count: usize,
         delta_base: Option<&str>,
+        force_initial_checkpoint: bool,
     ) -> Result<Option<HashSet<String>>> {
         self.storage
             .set_pack_checkpoint_files(BTreeMap::new(), HashSet::new())?;
@@ -1216,8 +1265,13 @@ impl RemoteHelper {
             return Ok(None);
         }
 
-        let Some(plan) =
-            Self::plan_git_pack_checkpoint(sha, object_count, delta_base, min_objects)?
+        let Some(plan) = Self::plan_git_pack_checkpoint(
+            sha,
+            object_count,
+            delta_base,
+            min_objects,
+            force_initial_checkpoint,
+        )?
         else {
             return Ok(None);
         };
@@ -1239,11 +1293,12 @@ impl RemoteHelper {
         Ok(Some(returned_covered_objects))
     }
 
-    fn plan_git_pack_checkpoint(
+    pub(super) fn plan_git_pack_checkpoint(
         sha: &str,
         object_count: usize,
         delta_base: Option<&str>,
         interval_objects: usize,
+        force_current_tip: bool,
     ) -> Result<Option<GitPackCheckpointPlan>> {
         let total_objects = if delta_base.is_none() {
             object_count
@@ -1255,15 +1310,19 @@ impl RemoteHelper {
         }
 
         let bucket = total_objects / interval_objects;
-        if let Some(base) = delta_base {
+        if let Some(base) = delta_base.filter(|_| !force_current_tip) {
             let base_objects = Self::reachable_git_object_count(base).unwrap_or(0);
             if bucket <= base_objects / interval_objects {
                 return Ok(None);
             }
         }
 
-        let target_objects = bucket * interval_objects;
-        let tip = Self::find_git_pack_checkpoint_tip(sha, target_objects)?;
+        let tip = if force_current_tip {
+            sha.to_string()
+        } else {
+            let target_objects = bucket * interval_objects;
+            Self::find_git_pack_checkpoint_tip(sha, target_objects)?
+        };
         let covered_objects = Self::reachable_git_object_ids(&tip)?;
         Ok(Some(GitPackCheckpointPlan {
             tip,
@@ -1271,7 +1330,7 @@ impl RemoteHelper {
         }))
     }
 
-    fn reachable_git_object_count(sha: &str) -> Result<usize> {
+    pub(super) fn reachable_git_object_count(sha: &str) -> Result<usize> {
         Ok(Self::reachable_git_object_ids(sha)?.len())
     }
 

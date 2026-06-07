@@ -377,6 +377,48 @@ fn create_repo_with_diverged_master_and_dev() -> (TempDir, TempDir, String, Stri
     (home, repo, base_sha, master_sha, dev_sha)
 }
 
+fn create_repo_with_large_base_and_small_increment() -> (TempDir, TempDir, String, String) {
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+
+    let repo = TempDir::new().expect("temp repo");
+    assert!(git(repo.path(), &["init", "-b", "master"]).status.success());
+    assert!(
+        git(repo.path(), &["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(repo.path(), &["config", "user.name", "Test User"])
+        .status
+        .success());
+
+    for index in 0..20 {
+        std::fs::write(
+            repo.path().join(format!("base-{index:02}.txt")),
+            format!("base file {index}\n"),
+        )
+        .unwrap();
+    }
+    assert!(git(repo.path(), &["add", "."]).status.success());
+    assert!(git(repo.path(), &["commit", "-m", "Large base"])
+        .status
+        .success());
+    let base_sha = String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    std::fs::write(repo.path().join("increment.txt"), "small increment\n").unwrap();
+    assert!(git(repo.path(), &["add", "increment.txt"]).status.success());
+    assert!(git(repo.path(), &["commit", "-m", "Small increment"])
+        .status
+        .success());
+    let master_sha = String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    (home, repo, base_sha, master_sha)
+}
+
 fn create_test_helper() -> Option<RemoteHelper> {
     let config = Config::default();
     RemoteHelper::new(TEST_PUBKEY, "test-repo", None, None, false, config).ok()
@@ -950,6 +992,114 @@ fn test_git_pack_checkpoint_generation_is_deterministic() {
     assert_eq!(
         first, second,
         "checkpoint pack bytes should converge for the same tip"
+    );
+}
+
+#[test]
+fn test_git_pack_checkpoint_forces_current_tip_when_base_root_has_no_pack() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (_home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let total_objects = RemoteHelper::reachable_git_object_count(&master_sha)
+        .expect("count current reachable objects");
+    let interval = 10;
+    assert!(
+        total_objects >= interval,
+        "fixture should exceed checkpoint threshold"
+    );
+
+    let skipped =
+        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, false)
+            .expect("plan checkpoint without force");
+    assert!(
+        skipped.is_none(),
+        "small increment in the same bucket should not normally rebuild a checkpoint"
+    );
+
+    let forced =
+        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, true)
+            .expect("plan forced checkpoint")
+            .expect("forced first checkpoint should be planned");
+    assert_eq!(
+        forced.tip, master_sha,
+        "initial missing checkpoint should pack the current tip"
+    );
+    assert!(
+        forced.covered_objects.contains(&master_sha),
+        "current commit should be covered by the forced checkpoint"
+    );
+}
+
+#[test]
+fn test_git_pack_checkpoint_ignores_untracked_gitignored_files() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let repo = TempDir::new().expect("temp repo");
+    assert!(git(repo.path(), &["init", "-b", "master"]).status.success());
+    assert!(
+        git(repo.path(), &["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(repo.path(), &["config", "user.name", "Test User"])
+        .status
+        .success());
+
+    std::fs::write(repo.path().join(".gitignore"), "ignored.txt\n").unwrap();
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\n").unwrap();
+    assert!(git(repo.path(), &["add", ".gitignore", "tracked.txt"])
+        .status
+        .success());
+    assert!(git(repo.path(), &["commit", "-m", "Tracked files"])
+        .status
+        .success());
+
+    std::fs::write(repo.path().join("ignored.txt"), "ignored and untracked\n").unwrap();
+    let status = git(repo.path(), &["status", "--ignored", "--short"]);
+    assert!(status.status.success());
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("!! ignored.txt"),
+        "fixture should have an ignored untracked file"
+    );
+
+    let ignored_oid_output = git(repo.path(), &["hash-object", "ignored.txt"]);
+    assert!(ignored_oid_output.status.success());
+    let ignored_oid = String::from_utf8_lossy(&ignored_oid_output.stdout)
+        .trim()
+        .to_string();
+    let head_sha = String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let pack_files = RemoteHelper::generate_git_pack_checkpoint(std::slice::from_ref(&head_sha))
+        .expect("generate checkpoint pack");
+    let pack_dir = TempDir::new().expect("temp pack dir");
+    let idx_name = pack_files
+        .keys()
+        .find(|name| name.ends_with(".idx"))
+        .cloned()
+        .expect("idx file");
+    for (name, bytes) in pack_files {
+        std::fs::write(pack_dir.path().join(name), bytes).expect("write pack file");
+    }
+
+    let idx_path = pack_dir.path().join(idx_name);
+    let verify = Command::new("git")
+        .args(["verify-pack", "-v"])
+        .arg(&idx_path)
+        .output()
+        .expect("run git verify-pack");
+    assert!(
+        verify.status.success(),
+        "git verify-pack failed: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&verify.stdout).contains(&ignored_oid),
+        "ignored untracked file blob should not be in checkpoint pack"
     );
 }
 

@@ -850,10 +850,14 @@ impl GitStorage {
                 .all(|byte| byte.is_ascii_hexdigit())
     }
 
-    fn root_has_git_pack_checkpoint(&self, root_cid: &Cid) -> Result<bool> {
+    pub fn tree_root_has_git_pack_checkpoint<S: Store>(
+        &self,
+        tree: &HashTree<S>,
+        root_cid: &Cid,
+    ) -> Result<bool> {
         let Some(info_packs_cid) = self
             .runtime
-            .block_on(self.tree.resolve_path(root_cid, ".git/objects/info/packs"))
+            .block_on(tree.resolve_path(root_cid, ".git/objects/info/packs"))
             .map_err(|e| Error::StorageError(format!("resolve .git/objects/info/packs: {}", e)))?
         else {
             return Ok(false);
@@ -861,7 +865,7 @@ impl GitStorage {
 
         let Some(info_packs_bytes) = self
             .runtime
-            .block_on(self.tree.get(&info_packs_cid, None))
+            .block_on(tree.get(&info_packs_cid, None))
             .map_err(|e| Error::StorageError(format!("read .git/objects/info/packs: {}", e)))?
         else {
             return Ok(false);
@@ -881,12 +885,12 @@ impl GitStorage {
             let idx_path = format!(".git/objects/pack/{idx_name}");
             let pack_exists = self
                 .runtime
-                .block_on(self.tree.resolve_path(root_cid, &pack_path))
+                .block_on(tree.resolve_path(root_cid, &pack_path))
                 .map_err(|e| Error::StorageError(format!("resolve {}: {}", pack_path, e)))?
                 .is_some();
             let idx_exists = self
                 .runtime
-                .block_on(self.tree.resolve_path(root_cid, &idx_path))
+                .block_on(tree.resolve_path(root_cid, &idx_path))
                 .map_err(|e| Error::StorageError(format!("resolve {}: {}", idx_path, e)))?
                 .is_some();
             if pack_exists && idx_exists {
@@ -895,6 +899,10 @@ impl GitStorage {
         }
 
         Ok(false)
+    }
+
+    fn root_has_git_pack_checkpoint(&self, root_cid: &Cid) -> Result<bool> {
+        self.tree_root_has_git_pack_checkpoint(&self.tree, root_cid)
     }
 
     pub fn validate_root_contains_direct_refs(&self, root_cid: &Cid) -> Result<()> {
