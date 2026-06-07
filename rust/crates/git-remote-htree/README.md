@@ -69,4 +69,14 @@ nsec1xyz789... work
 
 Use petnames in remote URLs: `htree://work/myproject`
 
+## Performance Tuning
+
+`git-remote-htree` fetches missing loose Git objects concurrently during clone/fetch. The default object download concurrency is 64, capped at 256. Override it for local experiments:
+
+```bash
+HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY=32 git clone htree://npub1.../repo
+```
+
+Tree enumeration is controlled separately by `HTREE_GIT_TREE_WALK_CONCURRENCY` and defaults to 4, capped at 32.
+
 Part of [hashtree-rs](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree).

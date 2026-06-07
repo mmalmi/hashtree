@@ -31,6 +31,8 @@ use storage_support::{build_repo_viewer_url, queue_hash_if_new};
 const VERBOSE_THRESHOLD: Duration = Duration::from_secs(3);
 const DEFAULT_GIT_TREE_WALK_CONCURRENCY: usize = 4;
 const MAX_GIT_TREE_WALK_CONCURRENCY: usize = 32;
+const DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 64;
+const MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 256;
 
 use crate::nostr_client::NostrClient;
 use hashtree_config::Config;
@@ -64,6 +66,15 @@ fn git_tree_walk_concurrency() -> usize {
         .filter(|value| *value > 0)
         .map(|value| value.min(MAX_GIT_TREE_WALK_CONCURRENCY))
         .unwrap_or(DEFAULT_GIT_TREE_WALK_CONCURRENCY)
+}
+
+fn git_object_download_concurrency() -> usize {
+    std::env::var("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY))
+        .unwrap_or(DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY)
 }
 
 /// Git remote helper state machine
@@ -926,7 +937,7 @@ impl RemoteHelper {
         });
 
         // Parallel fetch with concurrency limit
-        const CONCURRENCY: usize = 20;
+        let concurrency = git_object_download_concurrency();
         type FetchObjectResult = std::result::Result<(String, Vec<u8>), (String, Cid)>;
 
         // First pass: fetch all objects with normal timeout
@@ -944,7 +955,7 @@ impl RemoteHelper {
                     result
                 }
             })
-            .buffer_unordered(CONCURRENCY)
+            .buffer_unordered(concurrency)
             .collect()
             .await;
 
@@ -1113,7 +1124,7 @@ impl RemoteHelper {
         let mut queued_writes = 0usize;
         let mut failed: Vec<(String, Cid)> = Vec::new();
 
-        const CONCURRENCY: usize = 20;
+        let concurrency = git_object_download_concurrency();
         const WRITE_QUEUE_CAPACITY: usize = 256;
         let git_dir = Self::git_dir_path();
         let (write_tx, mut write_rx) = mpsc::channel::<(String, Vec<u8>)>(WRITE_QUEUE_CAPACITY);
@@ -1141,7 +1152,7 @@ impl RemoteHelper {
                 }
             }
         }))
-        .buffer_unordered(CONCURRENCY);
+        .buffer_unordered(concurrency);
 
         while let Some(result) = results.next().await {
             completed += 1;

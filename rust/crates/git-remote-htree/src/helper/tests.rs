@@ -1485,3 +1485,32 @@ fn test_git_tree_walk_concurrency_defaults_and_caps_env() {
     let _set = EnvGuard::set("HTREE_GIT_TREE_WALK_CONCURRENCY", "999");
     assert_eq!(git_tree_walk_concurrency(), MAX_GIT_TREE_WALK_CONCURRENCY);
 }
+
+#[test]
+fn test_git_object_download_concurrency_defaults_and_caps_env() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _clear = EnvGuard::clear("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY");
+    assert_eq!(
+        git_object_download_concurrency(),
+        DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+    );
+
+    {
+        let _set = EnvGuard::set("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY", "96");
+        assert_eq!(git_object_download_concurrency(), 96);
+    }
+
+    {
+        let _set = EnvGuard::set("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY", "0");
+        assert_eq!(
+            git_object_download_concurrency(),
+            DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+        );
+    }
+
+    let _set = EnvGuard::set("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY", "999");
+    assert_eq!(
+        git_object_download_concurrency(),
+        MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+    );
+}

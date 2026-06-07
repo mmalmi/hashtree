@@ -399,6 +399,9 @@ pub(crate) async fn run() -> Result<()> {
                 &keys,
             )
             .context("Failed to sync local social graph lists")?;
+            let fips_peer_ids = hashtree_cli::fips_transport::fips_peer_ids_from_pubkeys(
+                hashtree_cli::socialgraph::get_follows(graph_store.as_ref(), &pk_bytes),
+            );
             let social_graph_store: Arc<dyn hashtree_cli::socialgraph::SocialGraphBackend> =
                 graph_store.clone();
 
@@ -601,6 +604,7 @@ pub(crate) async fn run() -> Result<()> {
                 &config,
                 &keys,
                 Arc::clone(&store),
+                fips_peer_ids,
             )
             .await?;
 

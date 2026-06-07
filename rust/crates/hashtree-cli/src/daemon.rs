@@ -712,6 +712,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     socialgraph::set_social_graph_root(&graph_store, &social_graph_root_bytes);
     socialgraph::sync_local_list_files_force(graph_store.as_ref(), &opts.data_dir, &keys)
         .context("Failed to sync local social graph lists")?;
+    let fips_peer_ids = crate::fips_transport::fips_peer_ids_from_pubkeys(
+        socialgraph::get_follows(graph_store.as_ref(), &pk_bytes),
+    );
     let social_graph_store: Arc<dyn socialgraph::SocialGraphBackend> = graph_store.clone();
 
     let social_graph = Arc::new(socialgraph::SocialGraphAccessControl::new(
@@ -839,10 +842,14 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
 
     let upstream_blossom = config.blossom.all_read_servers();
     let active_nostr_relays = config.nostr.active_relays();
-    let fips_handle =
-        crate::fips_transport::start_daemon_fips_transport(&config, &keys, Arc::clone(&store))
-            .await?
-            .map(Arc::new);
+    let fips_handle = crate::fips_transport::start_daemon_fips_transport(
+        &config,
+        &keys,
+        Arc::clone(&store),
+        fips_peer_ids,
+    )
+    .await?
+    .map(Arc::new);
 
     let mut server = HashtreeServer::new(Arc::clone(&store), opts.bind_address.clone())
         .with_server_mode(config.server.mode)

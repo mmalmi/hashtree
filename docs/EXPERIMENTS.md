@@ -2,6 +2,39 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-07 - Git Clone Blossom Download Concurrency
+
+Question: does a larger `git-remote-htree` loose-object Blossom download concurrency make a clean-cache public clone faster through the Iris Blossom read path?
+
+Setup:
+- Each cold run used a fresh hashtree config directory, fresh LMDB data directory, and fresh Git clone destination.
+- Reads were pinned to the Iris CDN plus upload Blossom endpoints unless noted otherwise.
+- The remote was a public Git repository published through hashtree. Pubkey, exact repo name, raw object hashes, and temp paths are omitted.
+- The helper printed verbose fetch-stage timings. The published tree had no usable Git pack checkpoint, so clone fetched roughly 21k loose Git objects.
+
+Results:
+
+| Variant | Read path | Object download concurrency | Enumerate | Local check | Download + write | Wall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Before change | CDN + upload | 20 | 5.38 s | 0.52 s | 170.62 s | not captured |
+| Tuned low | CDN + upload | 32 | 4.35 s | 0.54 s | 138.68 s | 153.02 s |
+| Tuned default | CDN + upload | 64 | 7.21 s | 0.56 s | 131.76 s | 150.15 s |
+| Too high | CDN + upload | 128 | 25.48 s | 0.57 s | 131.21 s | 166.55 s |
+| Origin only | upload only | 64 | 5.13 s | 0.58 s | 164.98 s | 181.69 s |
+| Warm LMDB baseline | local cache | 20 | 0.79 s | 0.56 s | 30.41 s | 41.00 s |
+| Warm LMDB writer experiment | local cache | 64 downloads, 4 writers | 0.88 s | 0.52 s | 36.11 s | 48.16 s |
+
+Interpretation:
+- Raising loose-object download concurrency from 20 to 64 reduced the cold `download + write` stage by about 39 seconds, roughly 23%.
+- 128 concurrent object downloads did not improve the transfer stage and made the run slower overall, so the useful range on this path was around 32-64.
+- Upload-only reads were slower than the CDN plus upload path in this run, so the CDN leg was useful rather than an obvious miss penalty.
+- The warm-cache run shows a roughly 30 second floor from local LMDB reads plus writing many loose Git objects into `.git/objects`.
+- Parallelizing the local loose-object writer made the warm-cache case slower, so the single-writer path stayed in place.
+
+Follow-up:
+- A Git pack checkpoint would likely beat loose-object tuning for initial clone, because it would replace about 21k small object fetches and writes with a small number of large sequential artifacts.
+- If multi-server behavior becomes a bottleneck on less-cached content, test hedged per-object reads across read servers rather than sequential server fallback.
+
 ## 2026-05-18 - Blossom Upload Proxy Baseline
 
 Question: after moving the public upload path from direct Worker/R2 writes to a Worker proxying a self-hosted hashtree origin, how much latency is visible to push clients?

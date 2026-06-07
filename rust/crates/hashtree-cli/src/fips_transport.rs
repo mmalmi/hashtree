@@ -10,6 +10,7 @@ use hashtree_fips_transport::{
     bind_fips_endpoint, FipsEndpointOptions, HashtreeFipsTransport, DEFAULT_FIPS_DISCOVERY_SCOPE,
 };
 use nostr::nips::nip19::ToBech32;
+use nostr::PublicKey;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -33,6 +34,7 @@ pub async fn start_daemon_fips_transport(
     config: &Config,
     keys: &nostr::Keys,
     store: Arc<HashtreeStore>,
+    peer_ids: Vec<String>,
 ) -> Result<Option<DaemonFipsHandle>> {
     if !config.server.enable_fips || !config.server.mode.hash_get_enabled() {
         return Ok(None);
@@ -67,6 +69,9 @@ pub async fn start_daemon_fips_transport(
             .with_request_timeout(request_timeout)
             .with_cache_responses(false),
     );
+    if !peer_ids.is_empty() {
+        transport.set_peers(peer_ids).await;
+    }
     let receiver_task = transport.start();
 
     Ok(Some(DaemonFipsHandle {
@@ -75,6 +80,14 @@ pub async fn start_daemon_fips_transport(
         discovery_scope: endpoint.discovery_scope,
         receiver_task,
     }))
+}
+
+pub fn fips_peer_ids_from_pubkeys(pubkeys: Vec<[u8; 32]>) -> Vec<String> {
+    pubkeys
+        .into_iter()
+        .filter_map(|pubkey| PublicKey::from_slice(&pubkey).ok())
+        .filter_map(|pubkey| pubkey.to_bech32().ok())
+        .collect()
 }
 
 fn normalized_discovery_scope(scope: &str) -> String {
@@ -89,6 +102,17 @@ fn normalized_discovery_scope(scope: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fips_peer_ids_from_pubkeys_encodes_npbus() {
+        let keys = nostr::Keys::generate();
+        let expected = keys.public_key().to_bech32().unwrap();
+
+        assert_eq!(
+            fips_peer_ids_from_pubkeys(vec![keys.public_key().to_bytes()]),
+            vec![expected]
+        );
+    }
 
     #[test]
     fn empty_discovery_scope_uses_hashtree_default() {
