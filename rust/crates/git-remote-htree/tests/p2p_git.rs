@@ -160,13 +160,28 @@ impl Drop for TestPeer {
 }
 
 fn find_htree_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_htree") {
+        return Some(PathBuf::from(path));
+    }
+
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = PathBuf::from(manifest_dir)
         .parent()?
         .parent()?
         .to_path_buf();
-    let debug_bin = workspace_root.join("target/debug/htree");
-    let release_bin = workspace_root.join("target/release/htree");
+    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        }
+        None => workspace_root.join("target"),
+    };
+    let debug_bin = target_dir.join("debug/htree");
+    let release_bin = target_dir.join("release/htree");
     if debug_bin.exists() {
         Some(debug_bin)
     } else if release_bin.exists() {
