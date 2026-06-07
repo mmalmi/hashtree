@@ -7,8 +7,11 @@ use hashtree_resolver::nostr::{NostrResolverConfig, NostrRootResolver};
 use hashtree_resolver::{Keys, RootResolver, ToBech32};
 use hashtree_sim::WsRelay;
 use hashtree_updater::{
-    install, install_file, AssetKind, DownloadEvent, DownloadOptions, HashtreeUpdater,
-    InstallTarget, UpdateAsset, UpdateCheckOptions, UpdateManifest, UpdateRef, UpdateTarget,
+    archive_extension_for_target, current_archive_target, install, install_file,
+    platform_app_asset_suffixes, preferred_product_asset, safe_download_file_name, AssetKind,
+    DownloadEvent, DownloadOptions, HashtreeUpdater, InstallTarget, ProductAssetPolicy,
+    ProductUpdateMode, UpdateAsset, UpdateAutoCheckPolicy, UpdateCheckOptions, UpdateManifest,
+    UpdateRef, UpdateTarget,
 };
 
 async fn file_entry(tree: &HashTree<MemoryStore>, name: &str, bytes: &[u8]) -> DirEntry {
@@ -379,6 +382,93 @@ fn filename_inference_covers_common_release_artifacts() {
             "kind inference for {name}",
         );
     }
+}
+
+#[test]
+fn product_cli_asset_selection_ignores_app_packages_for_same_target() {
+    let target = current_archive_target();
+    let archive_ext = archive_extension_for_target(target);
+    let policy = ProductAssetPolicy::new("democtl", "Demo CLI", "Demo App")
+        .with_app_asset_suffixes(["-linux-x64.appimage", "-linux-x64.deb"]);
+    let manifest = UpdateManifest {
+        tag: Some("v1.2.3".to_string()),
+        assets: vec![
+            UpdateAsset {
+                name: "demo-v1.2.3-linux-x64.deb".to_string(),
+                path: "assets/demo.deb".to_string(),
+                ..UpdateAsset::default()
+            },
+            UpdateAsset {
+                name: format!("democtl-v1.2.3-{target}{archive_ext}"),
+                path: "assets/democtl.tar.gz".to_string(),
+                ..UpdateAsset::default()
+            },
+        ],
+        ..UpdateManifest::default()
+    };
+
+    let selected =
+        preferred_product_asset(&manifest, ProductUpdateMode::Cli, &policy).expect("CLI asset");
+
+    assert!(selected.name.starts_with("democtl-v1.2.3-"));
+}
+
+#[test]
+fn product_app_asset_selection_uses_platform_suffixes() {
+    let suffixes = platform_app_asset_suffixes();
+    if suffixes.is_empty() {
+        return;
+    }
+    let wanted = format!("demo-v1.2.3{}", suffixes[0]);
+    let policy = ProductAssetPolicy::new("democtl", "Demo CLI", "Demo App")
+        .with_app_asset_suffixes(suffixes.iter().copied());
+    let manifest = UpdateManifest {
+        tag: Some("v1.2.3".to_string()),
+        assets: vec![
+            UpdateAsset {
+                name: format!(
+                    "democtl-v1.2.3-{}{}",
+                    current_archive_target(),
+                    archive_extension_for_target(current_archive_target())
+                ),
+                path: "assets/democtl.tar.gz".to_string(),
+                ..UpdateAsset::default()
+            },
+            UpdateAsset {
+                name: wanted.clone(),
+                path: format!("assets/{wanted}"),
+                ..UpdateAsset::default()
+            },
+        ],
+        ..UpdateManifest::default()
+    };
+
+    let selected =
+        preferred_product_asset(&manifest, ProductUpdateMode::App, &policy).expect("app asset");
+
+    assert_eq!(selected.name, wanted);
+}
+
+#[test]
+fn product_download_file_name_is_sanitized() {
+    assert_eq!(
+        safe_download_file_name("../bad name.tar.gz", "fallback"),
+        ".._bad_name.tar.gz"
+    );
+    assert_eq!(safe_download_file_name("", "fallback"), "fallback");
+}
+
+#[test]
+fn update_auto_check_policy_handles_startup_interval_and_manual_reset() {
+    let start = std::time::Instant::now();
+    let mut policy = UpdateAutoCheckPolicy::new(std::time::Duration::from_secs(60));
+
+    assert!(policy.should_start_check(true, start));
+    assert!(!policy.should_start_check(true, start + std::time::Duration::from_secs(59)));
+    policy.note_manual_check_started(start + std::time::Duration::from_secs(50));
+    assert!(!policy.should_start_check(true, start + std::time::Duration::from_secs(100)));
+    assert!(policy.should_start_check(true, start + std::time::Duration::from_secs(110)));
+    assert!(!policy.should_start_check(false, start + std::time::Duration::from_secs(200)));
 }
 
 #[tokio::test]

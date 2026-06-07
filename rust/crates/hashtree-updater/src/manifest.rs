@@ -270,10 +270,19 @@ pub fn infer_target_from_name(name: &str) -> Option<String> {
         ("windows-x86_64", "windows-x86_64"),
         ("aarch64-apple-darwin", "aarch64-apple-darwin"),
         ("x86_64-apple-darwin", "x86_64-apple-darwin"),
+        ("aarch64-unknown-linux-musl", "aarch64-unknown-linux-musl"),
+        ("x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl"),
+        (
+            "arm-unknown-linux-musleabihf",
+            "arm-unknown-linux-musleabihf",
+        ),
         ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"),
         ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"),
         ("x86_64-pc-windows-msvc", "x86_64-pc-windows-msvc"),
         ("aarch64-pc-windows-msvc", "aarch64-pc-windows-msvc"),
+        ("android-arm64", "android-aarch64"),
+        ("android-aarch64", "android-aarch64"),
+        ("aarch64-linux-android", "aarch64-linux-android"),
     ];
     for (needle, target) in pairs {
         if lower.contains(needle) {

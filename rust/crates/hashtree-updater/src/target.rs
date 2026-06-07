@@ -78,6 +78,9 @@ fn aliases_for(target: &str) -> BTreeSet<String> {
             "linux-aarch64",
             "linux-arm64",
         ],
+        "arm-unknown-linux-musleabihf" | "linux-armv6" | "linux-armhf" => {
+            &["arm-unknown-linux-musleabihf", "linux-armv6", "linux-armhf"]
+        }
         "x86_64-pc-windows-msvc" | "windows-x86_64" | "windows-x64" => {
             &["x86_64-pc-windows-msvc", "windows-x86_64", "windows-x64"]
         }
@@ -86,6 +89,9 @@ fn aliases_for(target: &str) -> BTreeSet<String> {
             "windows-aarch64",
             "windows-arm64",
         ],
+        "aarch64-linux-android" | "android-aarch64" | "android-arm64" => {
+            &["aarch64-linux-android", "android-aarch64", "android-arm64"]
+        }
         _ => &[],
     };
 

@@ -4159,6 +4159,7 @@ version = "0.2.58"
 dependencies = [
  "async-trait",
  "flate2",
+ "hashtree-blossom",
  "hashtree-core",
  "hashtree-resolver",
  "hashtree-sim",

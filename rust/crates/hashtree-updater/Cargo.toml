@@ -8,7 +8,16 @@ homepage.workspace = true
 authors.workspace = true
 description = "Hashtree-based app update discovery, artifact selection, and install helpers"
 
+[features]
+default = []
+secure-nostr-blossom = [
+  "dep:hashtree-blossom",
+  "hashtree-blossom/store",
+  "hashtree-resolver/nostr",
+]
+
 [dependencies]
+hashtree-blossom = { workspace = true, optional = true }
 hashtree-core.workspace = true
 hashtree-resolver.workspace = true
 semver.workspace = true
