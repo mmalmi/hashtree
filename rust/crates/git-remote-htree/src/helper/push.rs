@@ -20,6 +20,7 @@ use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
+const UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
 const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
 
@@ -35,6 +36,7 @@ struct PendingUpload {
     force_all_servers: bool,
 }
 
+#[derive(Clone)]
 struct UploadCounters {
     uploaded: Arc<AtomicUsize>,
     skipped_diff: Arc<AtomicUsize>,
@@ -223,35 +225,17 @@ async fn check_upload_presence_on_servers(
     })
 }
 
-fn record_skipped_candidate(counters: &UploadCounters, from_old_tree: bool, has_old_tree: bool) {
+fn record_skipped_candidate(counters: &UploadCounters, from_old_tree: bool) {
     if from_old_tree {
         counters.skipped_diff.fetch_add(1, Ordering::Relaxed);
     } else {
         counters.skipped_server.fetch_add(1, Ordering::Relaxed);
     }
 
-    let count = counters.completed.fetch_add(1, Ordering::Relaxed) + 1;
-    if count == 1 || count.is_multiple_of(10) {
-        let discovered = counters.discovered_total.load(Ordering::Relaxed);
-        emit_upload_progress(upload_progress(
-            count,
-            discovered,
-            None,
-            counters.uploaded.load(Ordering::Relaxed),
-            counters.skipped_diff.load(Ordering::Relaxed),
-            counters.skipped_server.load(Ordering::Relaxed),
-            counters.failed.load(Ordering::Relaxed),
-            has_old_tree,
-        ));
-    }
+    counters.completed.fetch_add(1, Ordering::Relaxed);
 }
 
-fn record_batch_upload_result(
-    counters: &UploadCounters,
-    attempted: usize,
-    uploaded: usize,
-    has_old_tree: bool,
-) {
+fn record_batch_upload_result(counters: &UploadCounters, attempted: usize, uploaded: usize) {
     let uploaded = uploaded.min(attempted);
     let existing = attempted.saturating_sub(uploaded);
     counters.uploaded.fetch_add(uploaded, Ordering::Relaxed);
@@ -259,17 +243,53 @@ fn record_batch_upload_result(
         .skipped_server
         .fetch_add(existing, Ordering::Relaxed);
 
-    let count = counters.completed.fetch_add(attempted, Ordering::Relaxed) + attempted;
-    emit_upload_progress(upload_progress(
-        count,
-        counters.discovered_total.load(Ordering::Relaxed),
-        None,
+    counters.completed.fetch_add(attempted, Ordering::Relaxed);
+}
+
+fn upload_progress_from_counters(
+    counters: &UploadCounters,
+    discovery_complete: &AtomicBool,
+    has_old_tree: bool,
+) -> super::progress::UploadProgress {
+    let discovered = counters.discovered_total.load(Ordering::Relaxed);
+    upload_progress(
+        counters.completed.load(Ordering::Relaxed),
+        discovered,
+        discovery_complete
+            .load(Ordering::Relaxed)
+            .then_some(discovered),
         counters.uploaded.load(Ordering::Relaxed),
         counters.skipped_diff.load(Ordering::Relaxed),
         counters.skipped_server.load(Ordering::Relaxed),
         counters.failed.load(Ordering::Relaxed),
         has_old_tree,
-    ));
+    )
+}
+
+fn spawn_periodic_upload_progress(
+    counters: UploadCounters,
+    discovery_complete: Arc<AtomicBool>,
+    has_old_tree: bool,
+    mut done: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(UPLOAD_PROGRESS_INTERVAL) => {
+                    emit_upload_progress(upload_progress_from_counters(
+                        &counters,
+                        &discovery_complete,
+                        has_old_tree,
+                    ));
+                }
+                changed = done.changed() => {
+                    if changed.is_err() || *done.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
 }
 
 async fn enqueue_pending_upload(
@@ -293,7 +313,6 @@ async fn upload_one_pending_batch_to_server(
     blossom: &hashtree_blossom::BlossomClient,
     server: &str,
     counters: &UploadCounters,
-    has_old_tree: bool,
 ) -> Result<bool> {
     let items: Vec<_> = batch
         .iter()
@@ -303,7 +322,7 @@ async fn upload_one_pending_batch_to_server(
         .collect();
     match blossom.upload_batch_to_server(server, &items).await {
         Ok(Some(result)) => {
-            record_batch_upload_result(counters, batch.len(), result.uploaded, has_old_tree);
+            record_batch_upload_result(counters, batch.len(), result.uploaded);
             Ok(true)
         }
         Ok(None) => Ok(false),
@@ -319,7 +338,6 @@ async fn upload_pending_with_single_server_batches(
     blossom: &hashtree_blossom::BlossomClient,
     server: &str,
     counters: &UploadCounters,
-    has_old_tree: bool,
 ) -> Vec<PendingUpload> {
     if items.is_empty() {
         return Vec::new();
@@ -341,15 +359,7 @@ async fn upload_pending_with_single_server_batches(
             && (batch.len() >= hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS
                 || batch_bytes.saturating_add(item_len) > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES);
         if would_overflow {
-            match upload_one_pending_batch_to_server(
-                &batch,
-                blossom,
-                server,
-                counters,
-                has_old_tree,
-            )
-            .await
-            {
+            match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
                 Ok(true) => {
                     batch.clear();
                     batch_bytes = 0;
@@ -369,9 +379,7 @@ async fn upload_pending_with_single_server_batches(
     }
 
     if batch_supported && !batch.is_empty() {
-        match upload_one_pending_batch_to_server(&batch, blossom, server, counters, has_old_tree)
-            .await
-        {
+        match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
             Ok(true) => {}
             Ok(false) | Err(_) => {
                 fallback.append(&mut batch);
@@ -393,7 +401,6 @@ async fn flush_pending_uploads(
     upload_check_supported: &mut bool,
     tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
     counters: &UploadCounters,
-    has_old_tree: bool,
 ) -> bool {
     if pending.is_empty() {
         return true;
@@ -418,7 +425,7 @@ async fn flush_pending_uploads(
     let mut to_upload = Vec::new();
     for item in pending.drain(..) {
         if present.contains(&item.hash) {
-            record_skipped_candidate(counters, item.from_old_tree, has_old_tree);
+            record_skipped_candidate(counters, item.from_old_tree);
             continue;
         }
 
@@ -438,14 +445,8 @@ async fn flush_pending_uploads(
             }
         }
 
-        to_upload = upload_pending_with_single_server_batches(
-            batchable,
-            blossom,
-            server,
-            counters,
-            has_old_tree,
-        )
-        .await;
+        to_upload =
+            upload_pending_with_single_server_batches(batchable, blossom, server, counters).await;
     }
 
     for item in to_upload {
@@ -1853,9 +1854,6 @@ impl RemoteHelper {
                 let skipped_server = Arc::clone(&skipped_server);
                 let failed = Arc::clone(&failed);
                 let completed = Arc::clone(&completed);
-                let skipped_diff = Arc::clone(&skipped_diff);
-                let discovered_total = Arc::clone(&discovered_total);
-                let discovery_complete = Arc::clone(&discovery_complete);
                 let servers_needing_full = Arc::clone(&servers_needing_full);
 
                 tokio::spawn(async move {
@@ -1870,9 +1868,6 @@ impl RemoteHelper {
                             let skipped_server = Arc::clone(&skipped_server);
                             let failed = Arc::clone(&failed);
                             let completed = Arc::clone(&completed);
-                            let skipped_diff = Arc::clone(&skipped_diff);
-                            let discovered_total = Arc::clone(&discovered_total);
-                            let discovery_complete = Arc::clone(&discovery_complete);
                             let servers_needing_full = Arc::clone(&servers_needing_full);
                             async move {
                                 let result = if head_fallback {
@@ -1911,23 +1906,7 @@ impl RemoteHelper {
                                         eprintln!("\n  Upload failed ({} bytes): {}", data.len(), e);
                                     }
                                 }
-                                let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                                if count == 1 || count.is_multiple_of(10) {
-                                    let discovered = discovered_total.load(Ordering::Relaxed);
-                                    let total = discovery_complete
-                                        .load(Ordering::Relaxed)
-                                        .then_some(discovered);
-                                    emit_upload_progress(upload_progress(
-                                        count,
-                                        discovered,
-                                        total,
-                                        uploaded.load(Ordering::Relaxed),
-                                        skipped_diff.load(Ordering::Relaxed),
-                                        skipped_server.load(Ordering::Relaxed),
-                                        failed.load(Ordering::Relaxed),
-                                        has_old_tree,
-                                    ));
-                                }
+                                completed.fetch_add(1, Ordering::Relaxed);
                             }
                         })
                         .buffer_unordered(upload_concurrency)
@@ -1943,47 +1922,31 @@ impl RemoteHelper {
             let mut upload_check_supported = true;
             let _ = queue_hash_if_new(&mut queue, &mut queued, root_bytes, encryption_key.copied());
 
-            eprint!(
-                "{}",
-                upload_progress(
-                    0,
-                    discovered_total.load(Ordering::Relaxed),
-                    None,
-                    0,
-                    0,
-                    0,
-                    0,
-                    has_old_tree
-                )
-                .format()
+            let (progress_done_tx, progress_done_rx) = tokio::sync::watch::channel(false);
+            let progress_handle = spawn_periodic_upload_progress(
+                counters.clone(),
+                Arc::clone(&discovery_complete),
+                has_old_tree,
+                progress_done_rx,
             );
-            let _ = std::io::stderr().flush();
+            emit_upload_progress(upload_progress_from_counters(
+                &counters,
+                &discovery_complete,
+                has_old_tree,
+            ));
 
             while let Some((hash, key)) = queue.pop() {
                 if visited.contains(&hash) {
                     continue;
                 }
                 visited.insert(hash);
-                let discovered = discovered_total.load(Ordering::Relaxed);
                 let from_old_tree = old_hashes.contains(&hash);
 
                 let mut force_all_servers_for_hash = false;
                 if from_old_tree {
                     if prune_known_subtrees {
                         skipped_diff.fetch_add(1, Ordering::Relaxed);
-                        let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count == 1 || count.is_multiple_of(10) {
-                            emit_upload_progress(upload_progress(
-                                count,
-                                discovered,
-                                None,
-                                uploaded.load(Ordering::Relaxed),
-                                skipped_diff.load(Ordering::Relaxed),
-                                skipped_server.load(Ordering::Relaxed),
-                                failed.load(Ordering::Relaxed),
-                                has_old_tree,
-                            ));
-                        }
+                        completed.fetch_add(1, Ordering::Relaxed);
                         continue;
                     } else {
                         force_all_servers_for_hash = true;
@@ -1995,39 +1958,15 @@ impl RemoteHelper {
                     Ok(None) => {
                         failed.fetch_add(1, Ordering::Relaxed);
                         local_failed.fetch_add(1, Ordering::Relaxed);
-                        let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        completed.fetch_add(1, Ordering::Relaxed);
                         eprintln!("\n  Missing from local store: {}", hex::encode(hash));
-                        if count == 1 || count.is_multiple_of(10) {
-                            emit_upload_progress(upload_progress(
-                                count,
-                                discovered,
-                                None,
-                                uploaded.load(Ordering::Relaxed),
-                                skipped_diff.load(Ordering::Relaxed),
-                                skipped_server.load(Ordering::Relaxed),
-                                failed.load(Ordering::Relaxed),
-                                has_old_tree,
-                            ));
-                        }
                         continue;
                     }
                     Err(e) => {
                         failed.fetch_add(1, Ordering::Relaxed);
                         local_failed.fetch_add(1, Ordering::Relaxed);
-                        let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        completed.fetch_add(1, Ordering::Relaxed);
                         eprintln!("\n  Store read error for {}: {}", hex::encode(hash), e);
-                        if count == 1 || count.is_multiple_of(10) {
-                            emit_upload_progress(upload_progress(
-                                count,
-                                discovered,
-                                None,
-                                uploaded.load(Ordering::Relaxed),
-                                skipped_diff.load(Ordering::Relaxed),
-                                skipped_server.load(Ordering::Relaxed),
-                                failed.load(Ordering::Relaxed),
-                                has_old_tree,
-                            ));
-                        }
                         continue;
                     }
                 };
@@ -2068,24 +2007,10 @@ impl RemoteHelper {
                         &mut upload_check_supported,
                         &tx,
                         &counters,
-                        has_old_tree,
                     )
                     .await
                 {
                     break;
-                }
-                let discovered = discovered_total.load(Ordering::Relaxed);
-                if discovered.is_multiple_of(100) {
-                    emit_upload_progress(upload_progress(
-                        completed.load(Ordering::Relaxed),
-                        discovered,
-                        None,
-                        uploaded.load(Ordering::Relaxed),
-                        skipped_diff.load(Ordering::Relaxed),
-                        skipped_server.load(Ordering::Relaxed),
-                        failed.load(Ordering::Relaxed),
-                        has_old_tree,
-                    ));
                 }
             }
 
@@ -2098,7 +2023,6 @@ impl RemoteHelper {
                 &mut upload_check_supported,
                 &tx,
                 &counters,
-                has_old_tree,
             )
             .await;
 
@@ -2118,6 +2042,8 @@ impl RemoteHelper {
 
             drop(tx);
             let _ = upload_handle.await;
+            let _ = progress_done_tx.send(true);
+            let _ = progress_handle.await;
 
             let final_uploaded = uploaded.load(Ordering::Relaxed);
             let final_skipped_diff = skipped_diff.load(Ordering::Relaxed);
@@ -2222,7 +2148,11 @@ impl RemoteHelper {
 
 #[cfg(test)]
 mod tests {
-    use super::effective_upload_concurrency;
+    use super::{effective_upload_concurrency, upload_progress_from_counters, UploadCounters};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[test]
     fn upload_concurrency_uses_configured_parallelism_for_single_server() {
@@ -2233,5 +2163,30 @@ mod tests {
     fn upload_concurrency_clamps_zero_to_one() {
         assert_eq!(effective_upload_concurrency(1, 0), 1);
         assert_eq!(effective_upload_concurrency(0, 10), 1);
+    }
+
+    #[test]
+    fn upload_progress_snapshot_shows_known_total_after_discovery_completes() {
+        let counters = UploadCounters {
+            uploaded: Arc::new(AtomicUsize::new(2)),
+            skipped_diff: Arc::new(AtomicUsize::new(1)),
+            skipped_server: Arc::new(AtomicUsize::new(1)),
+            failed: Arc::new(AtomicUsize::new(0)),
+            completed: Arc::new(AtomicUsize::new(4)),
+            discovered_total: Arc::new(AtomicUsize::new(9)),
+        };
+        let discovery_complete = AtomicBool::new(false);
+
+        assert_eq!(
+            upload_progress_from_counters(&counters, &discovery_complete, true).format(),
+            "  Uploading: 4/? (9 discovered, 2 new, 1 unchanged, 1 exist)"
+        );
+
+        discovery_complete.store(true, Ordering::Relaxed);
+
+        assert_eq!(
+            upload_progress_from_counters(&counters, &discovery_complete, true).format(),
+            "  Uploading: 4/9 (2 new, 1 unchanged, 1 exist)"
+        );
     }
 }
