@@ -173,7 +173,7 @@ fn create_blossom_auth_for_action(keys: &Keys, action: &str) -> String {
     use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
 
     let now = Timestamp::now();
-    let expiration = Timestamp::from(now.as_u64() + 300); // 5 minutes
+    let expiration = Timestamp::from(now.as_secs() + 300); // 5 minutes
 
     // Create kind 24242 event with tags
     let tags = vec![
@@ -183,8 +183,9 @@ fn create_blossom_auth_for_action(keys: &Keys, action: &str) -> String {
             vec![expiration.to_string()],
         ),
     ];
-    let event = EventBuilder::new(Kind::Custom(24242), "", tags)
-        .to_event(keys)
+    let event = EventBuilder::new(Kind::Custom(24242), "")
+        .tags(tags)
+        .sign_with_keys(keys)
         .expect("Failed to sign event");
 
     let event_json = serde_json::to_string(&event).expect("Failed to serialize event");

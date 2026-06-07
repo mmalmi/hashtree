@@ -3,7 +3,7 @@ use git_remote_htree::nostr_client::resolve_identity;
 use nostr::{
     Alphabet, Event, EventId, Filter, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32,
 };
-use nostr_sdk::{Client, EventSource};
+use nostr_sdk::Client;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -55,16 +55,16 @@ async fn fetch_git_repos(author: PublicKey, relays: &[String]) -> Result<Vec<Str
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_APP_DATA))
         .author(author)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![LABEL_GIT])
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), LABEL_GIT)
         .limit(500);
 
     let events = match tokio::time::timeout(
         Duration::from_secs(3),
-        client.get_events_of(vec![filter], EventSource::relays(None)),
+        client.fetch_events(filter, Duration::from_secs(3)),
     )
     .await
     {
-        Ok(Ok(events)) => events,
+        Ok(Ok(events)) => events.to_vec(),
         Ok(Err(err)) => {
             let _ = client.disconnect().await;
             return Err(anyhow::anyhow!(
@@ -106,7 +106,7 @@ async fn wait_for_connected_relay(client: &Client) -> Result<()> {
     loop {
         let relays = client.relays().await;
         for relay in relays.values() {
-            if relay.is_connected().await {
+            if relay.is_connected() {
                 return Ok(());
             }
         }

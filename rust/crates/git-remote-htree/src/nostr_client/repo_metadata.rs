@@ -107,7 +107,7 @@ pub(super) fn build_git_repo_list_filter(author: PublicKey) -> Filter {
     Filter::new()
         .kind(Kind::Custom(KIND_APP_DATA))
         .author(author)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec![LABEL_GIT])
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), LABEL_GIT)
         .limit(500)
 }
 
@@ -115,11 +115,8 @@ pub(super) fn build_repo_event_filter(author: PublicKey, repo_name: &str) -> Fil
     Filter::new()
         .kind(Kind::Custom(KIND_APP_DATA))
         .author(author)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), vec![repo_name])
-        .custom_tag(
-            SingleLetterTag::lowercase(Alphabet::L),
-            vec![LABEL_HASHTREE],
-        )
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), repo_name)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), LABEL_HASHTREE)
         .limit(50)
 }
 
@@ -128,7 +125,7 @@ pub(super) fn next_replaceable_created_at(
     latest_existing: Option<Timestamp>,
 ) -> Timestamp {
     match latest_existing {
-        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_u64().saturating_add(1)),
+        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_secs().saturating_add(1)),
         _ => now,
     }
 }
@@ -140,10 +137,7 @@ pub(super) async fn latest_repo_event_created_at(
     timeout: Duration,
 ) -> Option<Timestamp> {
     let events = client
-        .get_events_of(
-            vec![build_repo_event_filter(author, repo_name)],
-            EventSource::relays(Some(timeout)),
-        )
+        .fetch_events(build_repo_event_filter(author, repo_name), timeout)
         .await
         .ok()?;
     pick_latest_repo_event(events.iter(), repo_name).map(|event| event.created_at)

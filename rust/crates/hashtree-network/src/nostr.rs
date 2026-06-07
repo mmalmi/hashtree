@@ -40,7 +40,7 @@ pub fn decode_signaling_event(
     }
 
     if event.kind != Kind::Custom(NOSTR_KIND_HASHTREE)
-        && event.kind != Kind::Ephemeral(NOSTR_KIND_HASHTREE)
+        && event.kind != Kind::from_u16(NOSTR_KIND_HASHTREE)
     {
         return None;
     }
@@ -107,7 +107,7 @@ fn decode_signed_inner_event(
 ) -> Option<SignalingMessage> {
     if inner_event.verify().is_err()
         || (inner_event.kind != Kind::Custom(NOSTR_KIND_HASHTREE)
-            && inner_event.kind != Kind::Ephemeral(NOSTR_KIND_HASHTREE))
+            && inner_event.kind != Kind::from_u16(NOSTR_KIND_HASHTREE))
     {
         return None;
     }
@@ -188,16 +188,22 @@ pub fn encode_signaling_event(
             .ok_or_else(|| {
                 TransportError::SendFailed("Invalid target peer ID format".to_string())
             })?;
-        let recipient_pk = PublicKey::from_hex(recipient_pubkey)
+        let recipient_pk = PublicKey::from_hex(&recipient_pubkey)
             .map_err(|e| TransportError::SendFailed(format!("Invalid recipient pubkey: {e}")))?;
 
         let expiration = Timestamp::now() + Duration::from_secs(5 * 60);
         let message_json =
             serde_json::to_string(msg).map_err(|e| TransportError::SendFailed(e.to_string()))?;
-        let rumor = EventBuilder::new(kind, message_json, []).to_unsigned_event(keys.public_key());
-        let seal_event = EventBuilder::seal(keys, &recipient_pk, rumor.clone())
-            .map_err(|e| TransportError::SendFailed(format!("Failed to build seal: {e}")))?
-            .to_event(keys)
+        let rumor = EventBuilder::new(kind, message_json).build(keys.public_key());
+        let seal_content = nip44::encrypt(
+            keys.secret_key(),
+            &recipient_pk,
+            rumor.as_json(),
+            nip44::Version::V2,
+        )
+        .map_err(|e| TransportError::SendFailed(format!("Failed to encrypt seal: {e}")))?;
+        let seal_event = EventBuilder::new(Kind::Seal, seal_content)
+            .sign_with_keys(keys)
             .map_err(|e| TransportError::SendFailed(format!("Failed to sign seal: {e}")))?;
         let seal = serde_json::json!({
             "pubkey": keys.public_key().to_hex(),
@@ -218,8 +224,9 @@ pub fn encode_signaling_event(
 
         let tags = vec![Tag::public_key(recipient_pk), Tag::expiration(expiration)];
 
-        return EventBuilder::new(kind, encrypted_content, tags)
-            .to_event(&ephemeral_keys)
+        return EventBuilder::new(kind, encrypted_content)
+            .tags(tags)
+            .sign_with_keys(&ephemeral_keys)
             .map_err(|e| TransportError::SendFailed(e.to_string()));
     }
 
@@ -246,8 +253,9 @@ pub fn encode_signaling_event(
         Tag::expiration(expiration),
     ];
 
-    EventBuilder::new(kind, "", tags)
-        .to_event(keys)
+    EventBuilder::new(kind, "")
+        .tags(tags)
+        .sign_with_keys(keys)
         .map_err(|e| TransportError::SendFailed(format!("Failed to sign hello: {e}")))
 }
 
@@ -277,10 +285,7 @@ impl NostrRelayTransport {
     /// Create a new Nostr signaling transport with its own client.
     pub fn new(keys: Keys, debug: bool) -> Self {
         // Create client with in-memory database to avoid event deduplication
-        let client = ClientBuilder::new()
-            .signer(keys.clone())
-            .database(nostr_sdk::database::MemoryDatabase::new())
-            .build();
+        let client = ClientBuilder::new().signer(keys.clone()).build();
 
         Self::with_client(client, keys, debug)
     }
@@ -328,7 +333,7 @@ impl NostrRelayTransport {
                     Ok(notification) => {
                         if let RelayPoolNotification::Event { event, .. } = notification {
                             if event.kind == Kind::Custom(NOSTR_KIND_HASHTREE)
-                                || event.kind == Kind::Ephemeral(NOSTR_KIND_HASHTREE)
+                                || event.kind == Kind::from_u16(NOSTR_KIND_HASHTREE)
                             {
                                 info!(
                                     "[NostrTransport] Received kind={} event from {}",
@@ -392,7 +397,7 @@ impl SignalingTransport for NostrRelayTransport {
             .kind(Kind::Custom(NOSTR_KIND_HASHTREE))
             .custom_tag(
                 nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::L),
-                vec![HELLO_TAG],
+                HELLO_TAG,
             )
             .since(Timestamp::now() - Duration::from_secs(60));
 
@@ -400,12 +405,16 @@ impl SignalingTransport for NostrRelayTransport {
             .kind(Kind::Custom(NOSTR_KIND_HASHTREE))
             .custom_tag(
                 nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::P),
-                vec![self.pubkey.clone()],
+                self.pubkey.clone(),
             )
             .since(Timestamp::now() - Duration::from_secs(60));
 
         self.client
-            .subscribe(vec![hello_filter, directed_filter], None)
+            .subscribe(hello_filter, None)
+            .await
+            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+        self.client
+            .subscribe(directed_filter, None)
             .await
             .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
 
@@ -459,7 +468,7 @@ impl SignalingTransport for NostrRelayTransport {
             Kind::Custom(NOSTR_KIND_HASHTREE),
         )?;
 
-        match self.client.send_event(event).await {
+        match self.client.send_event(&event).await {
             Ok(output) => {
                 if output.success.is_empty() {
                     warn!(
@@ -615,7 +624,7 @@ mod tests {
             &sender_keys,
             &sender_peer_id,
             &msg,
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            Kind::from_u16(NOSTR_KIND_HASHTREE),
         )
         .expect("encode signaling event");
 
@@ -690,7 +699,7 @@ mod tests {
             &attacker_keys,
             &attacker_keys.public_key().to_hex(),
             &msg,
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            Kind::from_u16(NOSTR_KIND_HASHTREE),
         )
         .expect("encode signaling event");
         let decoded = decode_signaling_event(
@@ -732,16 +741,13 @@ mod tests {
             nip44::Version::V2,
         )
         .expect("encrypt legacy message");
-        let event = EventBuilder::new(
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
-            ciphertext,
-            vec![
+        let event = EventBuilder::new(Kind::from_u16(NOSTR_KIND_HASHTREE), ciphertext)
+            .tags(vec![
                 Tag::public_key(recipient_pk),
                 Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
-            ],
-        )
-        .to_event(&ephemeral_keys)
-        .expect("build event");
+            ])
+            .sign_with_keys(&ephemeral_keys)
+            .expect("build event");
 
         let decoded = decode_signaling_event(
             &event,
@@ -768,7 +774,7 @@ mod tests {
             &sender_keys,
             msg.peer_id(),
             &msg,
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            Kind::from_u16(NOSTR_KIND_HASHTREE),
         )
         .expect("encode signaling event");
         let plaintext = nip44::decrypt(recipient_keys.secret_key(), &event.pubkey, &event.content)
@@ -787,16 +793,13 @@ mod tests {
             nip44::Version::V2,
         )
         .expect("encrypt tampered message");
-        let tampered_event = EventBuilder::new(
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
-            ciphertext,
-            vec![
+        let tampered_event = EventBuilder::new(Kind::from_u16(NOSTR_KIND_HASHTREE), ciphertext)
+            .tags(vec![
                 Tag::public_key(recipient_pk),
                 Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
-            ],
-        )
-        .to_event(&ephemeral_keys)
-        .expect("build tampered event");
+            ])
+            .sign_with_keys(&ephemeral_keys)
+            .expect("build tampered event");
 
         assert!(decode_signaling_event(
             &tampered_event,
@@ -821,7 +824,7 @@ mod tests {
             &sender_keys,
             &sender_peer_id,
             &msg,
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            Kind::from_u16(NOSTR_KIND_HASHTREE),
         )
         .expect("encode hello");
 
@@ -867,10 +870,8 @@ mod tests {
     fn hello_decode_defaults_hash_get_to_true_when_tag_missing() {
         let sender_keys = Keys::generate();
         let sender_peer_id = sender_keys.public_key().to_hex();
-        let event = EventBuilder::new(
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
-            "",
-            vec![
+        let event = EventBuilder::new(Kind::from_u16(NOSTR_KIND_HASHTREE), "")
+            .tags(vec![
                 Tag::custom(
                     nostr_sdk::TagKind::SingleLetter(nostr_sdk::SingleLetterTag::lowercase(
                         nostr_sdk::Alphabet::L,
@@ -882,10 +883,9 @@ mod tests {
                     vec![sender_peer_id.clone()],
                 ),
                 Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
-            ],
-        )
-        .to_event(&sender_keys)
-        .expect("build hello event");
+            ])
+            .sign_with_keys(&sender_keys)
+            .expect("build hello event");
 
         let decoded =
             decode_signaling_event(&event, "receiver", "receiver-pubkey", &Keys::generate())
@@ -910,7 +910,7 @@ mod tests {
             &sender_keys,
             msg.peer_id(),
             &msg,
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+            Kind::from_u16(NOSTR_KIND_HASHTREE),
         )
         .expect("encode hello");
         let mut tampered_value = serde_json::to_value(event).expect("event json");
@@ -957,16 +957,13 @@ mod tests {
             nip44::Version::V2,
         )
         .expect("encrypt legacy message");
-        let event = EventBuilder::new(
-            Kind::Ephemeral(NOSTR_KIND_HASHTREE),
-            ciphertext,
-            vec![
+        let event = EventBuilder::new(Kind::from_u16(NOSTR_KIND_HASHTREE), ciphertext)
+            .tags(vec![
                 Tag::public_key(recipient_pk),
                 Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
-            ],
-        )
-        .to_event(&ephemeral_keys)
-        .expect("build event");
+            ])
+            .sign_with_keys(&ephemeral_keys)
+            .expect("build event");
 
         assert!(decode_signaling_event(
             &event,

@@ -1,6 +1,6 @@
 use super::auth::AppState;
 use nostr::{Event, EventId, Filter as NostrFilter};
-use nostr_sdk::{ClientBuilder, EventSource};
+use nostr_sdk::ClientBuilder;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -83,11 +83,9 @@ async fn fetch_upstream_events(relays: &[String], filter: &NostrFilter) -> Vec<E
 
     client.connect().await;
     let result = client
-        .get_events_of(
-            vec![filter.clone()],
-            EventSource::relays(Some(LOCAL_REQUEST_NOSTR_QUERY_TIMEOUT)),
-        )
+        .fetch_events(filter.clone(), LOCAL_REQUEST_NOSTR_QUERY_TIMEOUT)
         .await
+        .map(|events| events.to_vec())
         .unwrap_or_default();
     let _ = client.disconnect().await;
     result

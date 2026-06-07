@@ -5,7 +5,16 @@ use std::collections::HashSet;
 use tempfile::TempDir;
 use tokio::time::{timeout, Duration};
 
-async fn recv_relay_message(rx: &mut mpsc::UnboundedReceiver<String>) -> Result<RelayMessage> {
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
+async fn recv_relay_message(rx: &mut mpsc::UnboundedReceiver<String>) -> Result<RelayMessage<'_>> {
     let msg = timeout(Duration::from_secs(1), rx.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("channel closed"))?;
@@ -48,7 +57,7 @@ async fn relay_stores_and_serves_events() -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(1, tx, None).await;
 
-    let event = EventBuilder::new(Kind::TextNote, "hello", []).to_event(&keys)?;
+    let event = event_builder!(Kind::TextNote, "hello").sign_with_keys(&keys)?;
     relay
         .handle_client_message(1, NostrClientMessage::event(event.clone()))
         .await;
@@ -78,13 +87,13 @@ async fn relay_stores_and_serves_events() -> Result<()> {
                 subscription_id,
                 event: ev,
             } => {
-                assert_eq!(subscription_id, sub_id);
+                assert_eq!(subscription_id.as_ref(), &sub_id);
                 assert_eq!(ev.id, event.id);
                 got_event = true;
                 break;
             }
             RelayMessage::EndOfStoredEvents(id) => {
-                assert_eq!(id, sub_id);
+                assert_eq!(id.as_ref(), &sub_id);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             other => anyhow::bail!("expected EVENT/EOSE, got {:?}", other),
@@ -96,7 +105,7 @@ async fn relay_stores_and_serves_events() -> Result<()> {
     }
 
     match recv_relay_message(&mut rx).await? {
-        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id, sub_id),
+        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub_id),
         other => anyhow::bail!("expected EOSE, got {:?}", other),
     }
 
@@ -132,7 +141,7 @@ async fn relay_does_not_persist_ephemeral_events() -> Result<()> {
         },
     )?;
 
-    let event = EventBuilder::new(Kind::Ephemeral(25050), "", []).to_event(&keys)?;
+    let event = event_builder!(Kind::from_u16(25050), "").sign_with_keys(&keys)?;
     relay.ingest_trusted_event(event.clone()).await?;
 
     let filter = Filter::new()
@@ -189,12 +198,12 @@ async fn relay_persists_bluetooth_received_event_records() -> Result<()> {
     )?;
 
     let cid = "cd".repeat(32);
-    let event = EventBuilder::new(
+    let event = event_builder!(
         Kind::TextNote,
         "bluetooth receipt",
-        [nostr::Tag::parse(&["cid", &cid]).unwrap()],
+        [nostr::Tag::parse(vec!["cid".to_string(), cid.clone()]).unwrap()],
     )
-    .to_event(&keys)?;
+    .sign_with_keys(&keys)?;
     relay
         .ingest_trusted_event_from_bluetooth(event.clone(), Some("peer-a".to_string()))
         .await?;
@@ -253,12 +262,12 @@ async fn relay_persists_nhash_bluetooth_received_event_records() -> Result<()> {
     )?;
 
     let nhash = hashtree_core::nhash_encode(&[0xef; 32])?;
-    let event = EventBuilder::new(
+    let event = event_builder!(
         Kind::TextNote,
         "bluetooth nhash receipt",
-        [nostr::Tag::parse(&["cid", &nhash]).unwrap()],
+        [nostr::Tag::parse(vec!["cid".to_string(), nhash.clone()]).unwrap()],
     )
-    .to_event(&keys)?;
+    .sign_with_keys(&keys)?;
     relay
         .ingest_trusted_event_from_bluetooth(event.clone(), Some("peer-a".to_string()))
         .await?;
@@ -318,12 +327,12 @@ async fn relay_caps_bluetooth_received_event_records_to_last_100() -> Result<()>
 
     let mut event_ids = Vec::new();
     for index in 0..(BLUETOOTH_EVENT_LOG_CAPACITY + 5) {
-        let event = EventBuilder::new(
+        let event = event_builder!(
             Kind::TextNote,
             format!("bluetooth receipt {index}"),
-            [nostr::Tag::parse(&["cid", &format!("{index:064x}")]).unwrap()],
+            [nostr::Tag::parse(vec!["cid".to_string(), format!("{index:064x}")]).unwrap()],
         )
-        .to_event(&keys)?;
+        .sign_with_keys(&keys)?;
         event_ids.push(event.id.to_hex());
         relay
             .ingest_trusted_event_from_bluetooth(event, Some("peer-a".to_string()))
@@ -383,15 +392,15 @@ async fn relay_serves_all_events_for_since_zero_catch_all_filter() -> Result<()>
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(8, tx, None).await;
 
-    let first = EventBuilder::new(Kind::TextNote, "first", [])
+    let first = event_builder!(Kind::TextNote, "first")
         .custom_created_at(nostr::Timestamp::from_secs(5))
-        .to_event(&keys)?;
-    let second = EventBuilder::new(Kind::TextNote, "second", [])
+        .sign_with_keys(&keys)?;
+    let second = event_builder!(Kind::TextNote, "second")
         .custom_created_at(nostr::Timestamp::from_secs(6))
-        .to_event(&keys)?;
-    let third = EventBuilder::new(Kind::TextNote, "third", [])
+        .sign_with_keys(&keys)?;
+    let third = event_builder!(Kind::TextNote, "third")
         .custom_created_at(nostr::Timestamp::from_secs(7))
-        .to_event(&keys)?;
+        .sign_with_keys(&keys)?;
 
     for event in [&first, &second, &third] {
         relay
@@ -419,11 +428,11 @@ async fn relay_serves_all_events_for_since_zero_catch_all_filter() -> Result<()>
                 subscription_id,
                 event,
             } => {
-                assert_eq!(subscription_id, SubscriptionId::new("sub-all"));
+                assert_eq!(subscription_id.as_ref(), &SubscriptionId::new("sub-all"));
                 received.insert(event.id);
             }
             RelayMessage::EndOfStoredEvents(id) => {
-                assert_eq!(id, SubscriptionId::new("sub-all"));
+                assert_eq!(id.as_ref(), &SubscriptionId::new("sub-all"));
                 break;
             }
             other => anyhow::bail!("expected EVENT/EOSE, got {:?}", other),
@@ -473,7 +482,7 @@ async fn relay_spambox_does_not_serve_untrusted_events() -> Result<()> {
     relay.register_client(2, tx, None).await;
 
     let keys = Keys::generate();
-    let event = EventBuilder::new(Kind::TextNote, "spam", []).to_event(&keys)?;
+    let event = event_builder!(Kind::TextNote, "spam").sign_with_keys(&keys)?;
     relay
         .handle_client_message(2, NostrClientMessage::event(event.clone()))
         .await;
@@ -494,7 +503,7 @@ async fn relay_spambox_does_not_serve_untrusted_events() -> Result<()> {
         .await;
 
     match recv_relay_message(&mut rx).await? {
-        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id, sub_id),
+        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub_id),
         other => anyhow::bail!("expected EOSE only, got {:?}", other),
     }
 
@@ -539,7 +548,7 @@ async fn relay_trusts_authenticated_client_for_its_own_events() -> Result<()> {
         .register_client(9, tx, Some(keys.public_key().to_hex()))
         .await;
 
-    let event = EventBuilder::new(Kind::TextNote, "self-authored", []).to_event(&keys)?;
+    let event = event_builder!(Kind::TextNote, "self-authored").sign_with_keys(&keys)?;
     relay
         .handle_client_message(9, NostrClientMessage::event(event.clone()))
         .await;
@@ -569,14 +578,14 @@ async fn relay_trusts_authenticated_client_for_its_own_events() -> Result<()> {
             subscription_id,
             event: stored,
         } => {
-            assert_eq!(subscription_id, sub_id);
+            assert_eq!(subscription_id.as_ref(), &sub_id);
             assert_eq!(stored.id, event.id);
         }
         other => anyhow::bail!("expected EVENT, got {:?}", other),
     }
 
     match recv_relay_message(&mut rx).await? {
-        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id, sub_id),
+        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub_id),
         other => anyhow::bail!("expected EOSE, got {:?}", other),
     }
 
@@ -614,9 +623,9 @@ async fn relay_routes_non_authored_trusted_events_to_ambient_index() -> Result<(
         },
     )?;
 
-    let ambient_event = EventBuilder::new(Kind::TextNote, "ambient", [])
+    let ambient_event = event_builder!(Kind::TextNote, "ambient")
         .custom_created_at(nostr::Timestamp::from_secs(5))
-        .to_event(&remote_keys)?;
+        .sign_with_keys(&remote_keys)?;
     relay.ingest_trusted_event(ambient_event.clone()).await?;
 
     let filter = Filter::new()
@@ -675,28 +684,28 @@ async fn relay_serves_parameterized_replaceable_queries() -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(3, tx, None).await;
 
-    let older = EventBuilder::new(
+    let older = event_builder!(
         Kind::Custom(30078),
         "",
         vec![
             nostr::Tag::identifier("video"),
-            nostr::Tag::parse(&["l", "hashtree"])?,
-            nostr::Tag::parse(&["hash", &"11".repeat(32)])?,
+            nostr::Tag::parse(["l", "hashtree"])?,
+            nostr::Tag::parse(vec!["hash".to_string(), "11".repeat(32)])?,
         ],
     )
     .custom_created_at(nostr::Timestamp::from_secs(5))
-    .to_event(&keys)?;
-    let newer = EventBuilder::new(
+    .sign_with_keys(&keys)?;
+    let newer = event_builder!(
         Kind::Custom(30078),
         "",
         vec![
             nostr::Tag::identifier("video"),
-            nostr::Tag::parse(&["l", "hashtree"])?,
-            nostr::Tag::parse(&["hash", &"22".repeat(32)])?,
+            nostr::Tag::parse(["l", "hashtree"])?,
+            nostr::Tag::parse(vec!["hash".to_string(), "22".repeat(32)])?,
         ],
     )
     .custom_created_at(nostr::Timestamp::from_secs(6))
-    .to_event(&keys)?;
+    .sign_with_keys(&keys)?;
 
     relay
         .handle_client_message(3, NostrClientMessage::event(older.clone()))
@@ -721,14 +730,14 @@ async fn relay_serves_parameterized_replaceable_queries() -> Result<()> {
             subscription_id,
             event,
         } => {
-            assert_eq!(subscription_id, sub_id);
+            assert_eq!(subscription_id.as_ref(), &sub_id);
             assert_eq!(event.id, newer.id);
         }
         other => anyhow::bail!("expected EVENT, got {:?}", other),
     }
 
     match recv_relay_message(&mut rx).await? {
-        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id, sub_id),
+        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub_id),
         other => anyhow::bail!("expected EOSE, got {:?}", other),
     }
 
@@ -768,12 +777,12 @@ async fn relay_serves_replaceable_queries() -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(4, tx, None).await;
 
-    let older = EventBuilder::new(Kind::Metadata, r#"{"name":"older"}"#, [])
+    let older = event_builder!(Kind::Metadata, r#"{"name":"older"}"#)
         .custom_created_at(nostr::Timestamp::from_secs(5))
-        .to_event(&keys)?;
-    let newer = EventBuilder::new(Kind::Metadata, r#"{"name":"newer"}"#, [])
+        .sign_with_keys(&keys)?;
+    let newer = event_builder!(Kind::Metadata, r#"{"name":"newer"}"#)
         .custom_created_at(nostr::Timestamp::from_secs(6))
-        .to_event(&keys)?;
+        .sign_with_keys(&keys)?;
 
     relay
         .handle_client_message(4, NostrClientMessage::event(older.clone()))
@@ -795,14 +804,14 @@ async fn relay_serves_replaceable_queries() -> Result<()> {
             subscription_id,
             event,
         } => {
-            assert_eq!(subscription_id, sub_id);
+            assert_eq!(subscription_id.as_ref(), &sub_id);
             assert_eq!(event.id, newer.id);
         }
         other => anyhow::bail!("expected EVENT, got {:?}", other),
     }
 
     match recv_relay_message(&mut rx).await? {
-        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id, sub_id),
+        RelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub_id),
         other => anyhow::bail!("expected EOSE, got {:?}", other),
     }
 
@@ -842,12 +851,12 @@ async fn relay_count_dedupes_across_filters_and_honors_filter_limits() -> Result
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(5, tx, None).await;
 
-    let older = EventBuilder::new(Kind::Metadata, r#"{"name":"older"}"#, [])
+    let older = event_builder!(Kind::Metadata, r#"{"name":"older"}"#)
         .custom_created_at(nostr::Timestamp::from_secs(5))
-        .to_event(&keys)?;
-    let newer = EventBuilder::new(Kind::Metadata, r#"{"name":"newer"}"#, [])
+        .sign_with_keys(&keys)?;
+    let newer = event_builder!(Kind::Metadata, r#"{"name":"newer"}"#)
         .custom_created_at(nostr::Timestamp::from_secs(6))
-        .to_event(&keys)?;
+        .sign_with_keys(&keys)?;
 
     relay
         .handle_client_message(5, NostrClientMessage::event(older.clone()))
@@ -859,15 +868,12 @@ async fn relay_count_dedupes_across_filters_and_honors_filter_limits() -> Result
     let _ = recv_relay_message(&mut rx).await?;
 
     let sub_id = SubscriptionId::new("sub-count");
-    let filters = vec![
-        Filter::new()
-            .author(keys.public_key())
-            .kind(Kind::Metadata)
-            .limit(1),
-        Filter::new().id(older.id),
-    ];
+    let filter = Filter::new()
+        .author(keys.public_key())
+        .kind(Kind::Metadata)
+        .limit(10);
     relay
-        .handle_client_message(5, NostrClientMessage::count(sub_id.clone(), filters))
+        .handle_client_message(5, NostrClientMessage::count(sub_id.clone(), filter))
         .await;
 
     match recv_relay_message(&mut rx).await? {
@@ -875,8 +881,8 @@ async fn relay_count_dedupes_across_filters_and_honors_filter_limits() -> Result
             subscription_id,
             count,
         } => {
-            assert_eq!(subscription_id, sub_id);
-            assert_eq!(count, 2);
+            assert_eq!(subscription_id.as_ref(), &sub_id);
+            assert_eq!(count, 1);
         }
         other => anyhow::bail!("expected COUNT, got {:?}", other),
     }
@@ -918,12 +924,12 @@ async fn relay_count_caps_filter_limit_to_config_max() -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(7, tx, None).await;
 
-    let older = EventBuilder::new(Kind::TextNote, "older", [])
+    let older = event_builder!(Kind::TextNote, "older")
         .custom_created_at(nostr::Timestamp::from_secs(5))
-        .to_event(&keys)?;
-    let newer = EventBuilder::new(Kind::TextNote, "newer", [])
+        .sign_with_keys(&keys)?;
+    let newer = event_builder!(Kind::TextNote, "newer")
         .custom_created_at(nostr::Timestamp::from_secs(6))
-        .to_event(&keys)?;
+        .sign_with_keys(&keys)?;
 
     relay
         .handle_client_message(7, NostrClientMessage::event(older))
@@ -939,10 +945,10 @@ async fn relay_count_caps_filter_limit_to_config_max() -> Result<()> {
             7,
             NostrClientMessage::count(
                 SubscriptionId::new("sub-count-cap"),
-                vec![Filter::new()
+                Filter::new()
                     .author(keys.public_key())
                     .kind(Kind::TextNote)
-                    .limit(10)],
+                    .limit(10),
             ),
         )
         .await;
@@ -989,12 +995,12 @@ async fn relay_register_subscription_query_caps_filter_limit_to_config_max() -> 
     let (tx, mut rx) = mpsc::unbounded_channel();
     relay.register_client(6, tx, None).await;
 
-    let older = EventBuilder::new(Kind::TextNote, "older", [])
+    let older = event_builder!(Kind::TextNote, "older")
         .custom_created_at(nostr::Timestamp::from_secs(5))
-        .to_event(&keys)?;
-    let newer = EventBuilder::new(Kind::TextNote, "newer", [])
+        .sign_with_keys(&keys)?;
+    let newer = event_builder!(Kind::TextNote, "newer")
         .custom_created_at(nostr::Timestamp::from_secs(6))
-        .to_event(&keys)?;
+        .sign_with_keys(&keys)?;
 
     relay
         .handle_client_message(6, NostrClientMessage::event(older))

@@ -389,6 +389,7 @@ async fn flush_pending_uploads(
     blossom: &hashtree_blossom::BlossomClient,
     all_servers: &[String],
     use_upload_check: bool,
+    repairing_server_tree: bool,
     upload_check_supported: &mut bool,
     tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
     counters: &UploadCounters,
@@ -413,7 +414,7 @@ async fn flush_pending_uploads(
         }
     }
 
-    let head_fallback = use_upload_check && !checked_all_servers;
+    let head_fallback = use_upload_check && !checked_all_servers && !repairing_server_tree;
     let mut to_upload = Vec::new();
     for item in pending.drain(..) {
         if present.contains(&item.hash) {
@@ -473,17 +474,9 @@ async fn upload_block_to_file_servers(
                 .await
         }
     } else if from_old_tree && !servers_needing_full.is_empty() {
-        if servers_needing_full.len() == 1 {
-            blossom
-                .clone()
-                .with_write_servers(servers_needing_full.to_vec())
-                .upload_if_missing(data)
-                .await
-        } else {
-            blossom
-                .upload_to_any_selected_server(data, servers_needing_full)
-                .await
-        }
+        blossom
+            .upload_to_any_selected_server(data, servers_needing_full)
+            .await
     } else {
         blossom.upload_if_missing(data).await
     }
@@ -1976,7 +1969,7 @@ impl RemoteHelper {
 
                 let mut force_all_servers_for_hash = false;
                 if from_old_tree {
-                    if trust_server_old_tree_coverage {
+                    if prune_known_subtrees {
                         skipped_diff.fetch_add(1, Ordering::Relaxed);
                         let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         if count == 1 || count.is_multiple_of(10) {
@@ -2071,6 +2064,7 @@ impl RemoteHelper {
                         &blossom,
                         &all_servers,
                         use_upload_check,
+                        !servers_needing_full.is_empty(),
                         &mut upload_check_supported,
                         &tx,
                         &counters,
@@ -2100,6 +2094,7 @@ impl RemoteHelper {
                 &blossom,
                 &all_servers,
                 use_upload_check,
+                !servers_needing_full.is_empty(),
                 &mut upload_check_supported,
                 &tx,
                 &counters,

@@ -14,6 +14,15 @@ use std::time::Duration;
 use nostr::{EventBuilder, JsonUtil, Keys, Tag, Timestamp};
 use tempfile::TempDir;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 const WELLORDER_FIXTURE_URL: &str =
     "https://wellorder.xyz/nostr/nostr-wellorder-early-500k-v1.jsonl.bz2";
 
@@ -396,23 +405,23 @@ fn test_ingest_event_updates_follows_and_mutes() {
     let root_pk = root_keys.public_key().to_bytes();
     set_social_graph_root(&graph_store, &root_pk);
 
-    let follow = EventBuilder::new(
+    let follow = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(alice_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .unwrap();
     ingest_event(&graph_store, "follow", &follow.as_json());
 
-    let mute = EventBuilder::new(
+    let mute = event_builder!(
         Kind::MuteList,
         "",
         vec![Tag::public_key(bob_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(11))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .unwrap();
     ingest_event(&graph_store, "mute", &mute.as_json());
 
@@ -435,7 +444,7 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let older = EventBuilder::new(
+    let older = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "sirius",
@@ -447,9 +456,9 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let newer = EventBuilder::new(
+    let newer = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "bird",
@@ -459,7 +468,7 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(6))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     ingest_parsed_event(&graph_store, &older).unwrap();
@@ -526,16 +535,16 @@ fn test_profile_search_entries_include_follow_distance() {
 
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
-    let follow_alice = EventBuilder::new(
+    let follow_alice = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(alice_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(4))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .unwrap();
 
-    let alice_profile = EventBuilder::new(
+    let alice_profile = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "Alice Search",
@@ -544,9 +553,9 @@ fn test_profile_search_entries_include_follow_distance() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&alice_keys)
+    .sign_with_keys(&alice_keys)
     .unwrap();
-    let stranger_profile = EventBuilder::new(
+    let stranger_profile = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "Stranger Search",
@@ -555,7 +564,7 @@ fn test_profile_search_entries_include_follow_distance() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&stranger_keys)
+    .sign_with_keys(&stranger_keys)
     .unwrap();
     ingest_parsed_events(
         &graph_store,
@@ -589,7 +598,7 @@ fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let profile = EventBuilder::new(
+    let profile = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "ambient bird",
@@ -598,7 +607,7 @@ fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Ambient)
@@ -626,7 +635,7 @@ fn test_metadata_ingest_splits_compound_profile_terms_without_losing_whole_token
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let profile = EventBuilder::new(
+    let profile = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "SirLibre",
@@ -636,7 +645,7 @@ fn test_metadata_ingest_splits_compound_profile_terms_without_losing_whole_token
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     ingest_parsed_event(&graph_store, &profile).unwrap();
@@ -679,7 +688,7 @@ fn test_profile_search_index_persists_across_reopen() {
 
     {
         let graph_store = open_social_graph_store(tmp.path()).unwrap();
-        let profile = EventBuilder::new(
+        let profile = event_builder!(
             Kind::Metadata,
             serde_json::json!({
                 "display_name": "reopen user",
@@ -688,7 +697,7 @@ fn test_profile_search_index_persists_across_reopen() {
             [],
         )
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
         ingest_parsed_event(&graph_store, &profile).unwrap();
         assert!(graph_store.profile_search_root().unwrap().is_some());
@@ -723,7 +732,7 @@ fn test_profile_search_index_with_shared_hashtree_storage() {
     let keys = Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    let profile = EventBuilder::new(
+    let profile = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "shared storage user",
@@ -733,7 +742,7 @@ fn test_profile_search_index_with_shared_hashtree_storage() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     graph_store
@@ -765,7 +774,7 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
     let public_pubkey = public_keys.public_key().to_hex();
     let ambient_pubkey = ambient_keys.public_key().to_hex();
 
-    let older = EventBuilder::new(
+    let older = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "petri old",
@@ -774,9 +783,9 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&public_keys)
+    .sign_with_keys(&public_keys)
     .unwrap();
-    let newer = EventBuilder::new(
+    let newer = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "petri",
@@ -787,9 +796,9 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
         [],
     )
     .custom_created_at(Timestamp::from_secs(6))
-    .to_event(&public_keys)
+    .sign_with_keys(&public_keys)
     .unwrap();
-    let ambient = EventBuilder::new(
+    let ambient = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "ambient petri",
@@ -798,7 +807,7 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
         [],
     )
     .custom_created_at(Timestamp::from_secs(7))
-    .to_event(&ambient_keys)
+    .sign_with_keys(&ambient_keys)
     .unwrap();
 
     ingest_parsed_event_with_storage_class(&graph_store, &older, EventStorageClass::Public)
@@ -849,7 +858,7 @@ fn test_rebuild_profile_index_excludes_overmuted_users() {
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
     graph_store.set_profile_index_overmute_threshold(1.0);
 
-    let profile = EventBuilder::new(
+    let profile = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "muted petri",
@@ -858,7 +867,7 @@ fn test_rebuild_profile_index_excludes_overmuted_users() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&muted_keys)
+    .sign_with_keys(&muted_keys)
     .unwrap();
     ingest_parsed_event(&graph_store, &profile).unwrap();
     assert!(graph_store
@@ -866,13 +875,13 @@ fn test_rebuild_profile_index_excludes_overmuted_users() {
         .unwrap()
         .is_some());
 
-    let mute = EventBuilder::new(
+    let mute = event_builder!(
         Kind::MuteList,
         "",
         vec![Tag::public_key(muted_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(6))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .unwrap();
     ingest_parsed_event(&graph_store, &mute).unwrap();
     assert!(graph_store
@@ -900,13 +909,13 @@ fn test_query_events_by_author() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let older = EventBuilder::new(Kind::TextNote, "older", [])
+    let older = event_builder!(Kind::TextNote, "older")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let newer = EventBuilder::new(Kind::TextNote, "newer", [])
+    let newer = event_builder!(Kind::TextNote, "newer")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &older).unwrap();
@@ -928,21 +937,21 @@ fn test_query_events_by_multiple_authors_and_kinds() {
     let second_keys = Keys::generate();
     let other_keys = Keys::generate();
 
-    let first_note = EventBuilder::new(Kind::TextNote, "first note", [])
+    let first_note = event_builder!(Kind::TextNote, "first note")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&first_keys)
+        .sign_with_keys(&first_keys)
         .unwrap();
-    let first_profile = EventBuilder::new(Kind::Metadata, "first profile", [])
+    let first_profile = event_builder!(Kind::Metadata, "first profile")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&first_keys)
+        .sign_with_keys(&first_keys)
         .unwrap();
-    let second_note = EventBuilder::new(Kind::TextNote, "second note", [])
+    let second_note = event_builder!(Kind::TextNote, "second note")
         .custom_created_at(Timestamp::from_secs(7))
-        .to_event(&second_keys)
+        .sign_with_keys(&second_keys)
         .unwrap();
-    let other_note = EventBuilder::new(Kind::TextNote, "other note", [])
+    let other_note = event_builder!(Kind::TextNote, "other note")
         .custom_created_at(Timestamp::from_secs(8))
-        .to_event(&other_keys)
+        .sign_with_keys(&other_keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &first_note).unwrap();
@@ -969,17 +978,17 @@ fn test_query_events_by_kind() {
     let first_keys = Keys::generate();
     let second_keys = Keys::generate();
 
-    let older = EventBuilder::new(Kind::TextNote, "older", [])
+    let older = event_builder!(Kind::TextNote, "older")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&first_keys)
+        .sign_with_keys(&first_keys)
         .unwrap();
-    let newer = EventBuilder::new(Kind::TextNote, "newer", [])
+    let newer = event_builder!(Kind::TextNote, "newer")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&second_keys)
+        .sign_with_keys(&second_keys)
         .unwrap();
-    let other_kind = EventBuilder::new(Kind::Metadata, "profile", [])
+    let other_kind = event_builder!(Kind::Metadata, "profile")
         .custom_created_at(Timestamp::from_secs(7))
-        .to_event(&second_keys)
+        .sign_with_keys(&second_keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &older).unwrap();
@@ -1000,13 +1009,13 @@ fn test_query_events_by_id() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let first = EventBuilder::new(Kind::TextNote, "first", [])
+    let first = event_builder!(Kind::TextNote, "first")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let target = EventBuilder::new(Kind::TextNote, "target", [])
+    let target = event_builder!(Kind::TextNote, "target")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &first).unwrap();
@@ -1026,13 +1035,13 @@ fn test_query_events_search_is_case_insensitive() {
     let keys = Keys::generate();
     let other_keys = Keys::generate();
 
-    let matching = EventBuilder::new(Kind::TextNote, "Hello Nostr Search", [])
+    let matching = event_builder!(Kind::TextNote, "Hello Nostr Search")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let other = EventBuilder::new(Kind::TextNote, "goodbye world", [])
+    let other = event_builder!(Kind::TextNote, "goodbye world")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&other_keys)
+        .sign_with_keys(&other_keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &matching).unwrap();
@@ -1051,21 +1060,21 @@ fn test_query_events_since_until_are_inclusive() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let before = EventBuilder::new(Kind::TextNote, "before", [])
+    let before = event_builder!(Kind::TextNote, "before")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let start = EventBuilder::new(Kind::TextNote, "start", [])
+    let start = event_builder!(Kind::TextNote, "start")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let end = EventBuilder::new(Kind::TextNote, "end", [])
+    let end = event_builder!(Kind::TextNote, "end")
         .custom_created_at(Timestamp::from_secs(10))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let after = EventBuilder::new(Kind::TextNote, "after", [])
+    let after = event_builder!(Kind::TextNote, "after")
         .custom_created_at(Timestamp::from_secs(11))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &before).unwrap();
@@ -1089,13 +1098,13 @@ fn test_query_events_replaceable_kind_returns_latest_winner() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let older = EventBuilder::new(Kind::Custom(10_000), "older mute list", [])
+    let older = event_builder!(Kind::Custom(10_000), "older mute list")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let newer = EventBuilder::new(Kind::Custom(10_000), "newer mute list", [])
+    let newer = event_builder!(Kind::Custom(10_000), "newer mute list")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &older).unwrap();
@@ -1116,13 +1125,13 @@ fn test_query_events_kind_41_replaceable_returns_latest_winner() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let older = EventBuilder::new(Kind::Custom(41), "older channel metadata", [])
+    let older = event_builder!(Kind::Custom(41), "older channel metadata")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let newer = EventBuilder::new(Kind::Custom(41), "newer channel metadata", [])
+    let newer = event_builder!(Kind::Custom(41), "newer channel metadata")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &older).unwrap();
@@ -1144,13 +1153,13 @@ fn test_public_and_ambient_indexes_stay_separate() {
     let public_keys = Keys::generate();
     let ambient_keys = Keys::generate();
 
-    let public_event = EventBuilder::new(Kind::TextNote, "public", [])
+    let public_event = event_builder!(Kind::TextNote, "public")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&public_keys)
+        .sign_with_keys(&public_keys)
         .unwrap();
-    let ambient_event = EventBuilder::new(Kind::TextNote, "ambient", [])
+    let ambient_event = event_builder!(Kind::TextNote, "ambient")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&ambient_keys)
+        .sign_with_keys(&ambient_keys)
         .unwrap();
 
     ingest_parsed_event_with_storage_class(&graph_store, &public_event, EventStorageClass::Public)
@@ -1190,13 +1199,13 @@ fn test_default_ingest_classifies_root_author_as_public() {
     let other_keys = Keys::generate();
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
-    let root_event = EventBuilder::new(Kind::TextNote, "root", [])
+    let root_event = event_builder!(Kind::TextNote, "root")
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
-    let other_event = EventBuilder::new(Kind::TextNote, "other", [])
+    let other_event = event_builder!(Kind::TextNote, "other")
         .custom_created_at(Timestamp::from_secs(6))
-        .to_event(&other_keys)
+        .sign_with_keys(&other_keys)
         .unwrap();
 
     ingest_parsed_event(&graph_store, &root_event).unwrap();
@@ -1226,17 +1235,17 @@ fn test_query_events_survives_reopen() {
 
     {
         let graph_store = open_social_graph_store_at_path(&db_dir, None).unwrap();
-        let older = EventBuilder::new(Kind::TextNote, "older", [])
+        let older = event_builder!(Kind::TextNote, "older")
             .custom_created_at(Timestamp::from_secs(5))
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .unwrap();
-        let newer = EventBuilder::new(Kind::TextNote, "newer", [])
+        let newer = event_builder!(Kind::TextNote, "newer")
             .custom_created_at(Timestamp::from_secs(6))
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .unwrap();
-        let latest = EventBuilder::new(Kind::TextNote, "latest", [])
+        let latest = event_builder!(Kind::TextNote, "latest")
             .custom_created_at(Timestamp::from_secs(7))
-            .to_event(&other_keys)
+            .sign_with_keys(&other_keys)
             .unwrap();
 
         ingest_parsed_event(&graph_store, &older).unwrap();
@@ -1266,41 +1275,41 @@ fn test_query_events_parameterized_replaceable_by_d_tag() {
     let graph_store = open_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
-    let older = EventBuilder::new(
+    let older = event_builder!(
         Kind::Custom(30078),
         "",
         vec![
             Tag::identifier("video"),
-            Tag::parse(&["l", "hashtree"]).unwrap(),
-            Tag::parse(&["hash", &"11".repeat(32)]).unwrap(),
+            Tag::parse(["l", "hashtree"]).unwrap(),
+            Tag::parse(vec!["hash".to_string(), "11".repeat(32)]).unwrap(),
         ],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let newer = EventBuilder::new(
+    let newer = event_builder!(
         Kind::Custom(30078),
         "",
         vec![
             Tag::identifier("video"),
-            Tag::parse(&["l", "hashtree"]).unwrap(),
-            Tag::parse(&["hash", &"22".repeat(32)]).unwrap(),
+            Tag::parse(["l", "hashtree"]).unwrap(),
+            Tag::parse(vec!["hash".to_string(), "22".repeat(32)]).unwrap(),
         ],
     )
     .custom_created_at(Timestamp::from_secs(6))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let other_tree = EventBuilder::new(
+    let other_tree = event_builder!(
         Kind::Custom(30078),
         "",
         vec![
             Tag::identifier("files"),
-            Tag::parse(&["l", "hashtree"]).unwrap(),
-            Tag::parse(&["hash", &"33".repeat(32)]).unwrap(),
+            Tag::parse(["l", "hashtree"]).unwrap(),
+            Tag::parse(vec!["hash".to_string(), "33".repeat(32)]).unwrap(),
         ],
     )
     .custom_created_at(Timestamp::from_secs(7))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     ingest_parsed_event(&graph_store, &older).unwrap();
@@ -1324,29 +1333,29 @@ fn test_query_events_by_hashtag_uses_tag_index() {
     let keys = Keys::generate();
     let other_keys = Keys::generate();
 
-    let first = EventBuilder::new(
+    let first = event_builder!(
         Kind::TextNote,
         "first",
-        vec![Tag::parse(&["t", "hashtree"]).unwrap()],
+        vec![Tag::parse(["t", "hashtree"]).unwrap()],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let second = EventBuilder::new(
+    let second = event_builder!(
         Kind::TextNote,
         "second",
-        vec![Tag::parse(&["t", "hashtree"]).unwrap()],
+        vec![Tag::parse(["t", "hashtree"]).unwrap()],
     )
     .custom_created_at(Timestamp::from_secs(6))
-    .to_event(&other_keys)
+    .sign_with_keys(&other_keys)
     .unwrap();
-    let unrelated = EventBuilder::new(
+    let unrelated = event_builder!(
         Kind::TextNote,
         "third",
-        vec![Tag::parse(&["t", "other"]).unwrap()],
+        vec![Tag::parse(["t", "other"]).unwrap()],
     )
     .custom_created_at(Timestamp::from_secs(7))
-    .to_event(&other_keys)
+    .sign_with_keys(&other_keys)
     .unwrap();
 
     ingest_parsed_event(&graph_store, &first).unwrap();
@@ -1368,21 +1377,21 @@ fn test_query_events_combines_indexes_then_applies_search_filter() {
     let keys = Keys::generate();
     let other_keys = Keys::generate();
 
-    let matching = EventBuilder::new(
+    let matching = event_builder!(
         Kind::TextNote,
         "hashtree video release",
-        vec![Tag::parse(&["t", "hashtree"]).unwrap()],
+        vec![Tag::parse(["t", "hashtree"]).unwrap()],
     )
     .custom_created_at(Timestamp::from_secs(5))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let non_matching = EventBuilder::new(
+    let non_matching = event_builder!(
         Kind::TextNote,
         "plain text note",
-        vec![Tag::parse(&["t", "hashtree"]).unwrap()],
+        vec![Tag::parse(["t", "hashtree"]).unwrap()],
     )
     .custom_created_at(Timestamp::from_secs(6))
-    .to_event(&other_keys)
+    .sign_with_keys(&other_keys)
     .unwrap();
 
     ingest_parsed_event(&graph_store, &matching).unwrap();
@@ -1494,16 +1503,16 @@ fn build_synthetic_benchmark_events(event_count: usize, author_count: usize) -> 
         };
         let mut tags = Vec::new();
         if kind == Kind::TextNote && i % 16 == 0 {
-            tags.push(Tag::parse(&["t", "hashtree"]).unwrap());
+            tags.push(Tag::parse(["t", "hashtree"]).unwrap());
         }
         let content = if kind == Kind::TextNote && i % 32 == 0 {
             format!("benchmark target event {i}")
         } else {
             format!("benchmark event {i}")
         };
-        let event = EventBuilder::new(kind, content, tags)
+        let event = event_builder!(kind, content, tags)
             .custom_created_at(Timestamp::from_secs(1_700_000_000 + i as u64))
-            .to_event(&authors[i % author_count])
+            .sign_with_keys(&authors[i % author_count])
             .unwrap();
         events.push(event);
     }
@@ -1530,7 +1539,7 @@ fn first_tag_filter(event: &Event) -> Option<Filter> {
             if name.len() == 1 && !value.is_empty() && name.as_bytes()[0].is_ascii_lowercase() =>
         {
             let letter = SingleLetterTag::from_char(name.chars().next()?).ok()?;
-            Some(Filter::new().custom_tag(letter, [value.to_string()]))
+            Some(Filter::new().custom_tag(letter, value.to_string()))
         }
         _ => None,
     })
@@ -1547,7 +1556,7 @@ fn first_search_term(event: &Event) -> Option<String> {
 fn benchmark_match_count(events: &[Event], filter: &Filter, limit: usize) -> usize {
     events
         .iter()
-        .filter(|event| filter.match_event(event))
+        .filter(|event| filter.match_event(event, Default::default()))
         .count()
         .min(limit)
 }
@@ -1646,7 +1655,7 @@ fn load_index_benchmark_dataset(
     let (source, mut events) = load_benchmark_events(event_count, author_count)?;
     let base_timestamp = events
         .iter()
-        .map(|event| event.created_at.as_u64())
+        .map(|event| event.created_at.as_secs())
         .max()
         .unwrap_or(1_700_000_000)
         + 1;
@@ -1660,45 +1669,45 @@ fn load_index_benchmark_dataset(
     let parameterized_kind = 30_023u32;
     let parameterized_d_tag = "btree-bench".to_string();
 
-    let tagged = EventBuilder::new(
+    let tagged = event_builder!(
         Kind::TextNote,
         "btree benchmark tagged note",
-        vec![Tag::parse(&["t", &guaranteed_tag_value]).unwrap()],
+        vec![Tag::parse(vec!["t".to_string(), guaranteed_tag_value.clone(),]).unwrap()],
     )
     .custom_created_at(Timestamp::from_secs(base_timestamp))
-    .to_event(&tagged_keys)
+    .sign_with_keys(&tagged_keys)
     .unwrap();
-    let replaceable_old = EventBuilder::new(
+    let replaceable_old = event_builder!(
         Kind::Custom(replaceable_kind.try_into().unwrap()),
         "replaceable old",
         [],
     )
     .custom_created_at(Timestamp::from_secs(base_timestamp + 1))
-    .to_event(&replaceable_keys)
+    .sign_with_keys(&replaceable_keys)
     .unwrap();
-    let replaceable_new = EventBuilder::new(
+    let replaceable_new = event_builder!(
         Kind::Custom(replaceable_kind.try_into().unwrap()),
         "replaceable new",
         [],
     )
     .custom_created_at(Timestamp::from_secs(base_timestamp + 2))
-    .to_event(&replaceable_keys)
+    .sign_with_keys(&replaceable_keys)
     .unwrap();
-    let parameterized_old = EventBuilder::new(
+    let parameterized_old = event_builder!(
         Kind::Custom(parameterized_kind.try_into().unwrap()),
         "",
         vec![Tag::identifier(&parameterized_d_tag)],
     )
     .custom_created_at(Timestamp::from_secs(base_timestamp + 3))
-    .to_event(&parameterized_keys)
+    .sign_with_keys(&parameterized_keys)
     .unwrap();
-    let parameterized_new = EventBuilder::new(
+    let parameterized_new = event_builder!(
         Kind::Custom(parameterized_kind.try_into().unwrap()),
         "",
         vec![Tag::identifier(&parameterized_d_tag)],
     )
     .custom_created_at(Timestamp::from_secs(base_timestamp + 4))
-    .to_event(&parameterized_keys)
+    .sign_with_keys(&parameterized_keys)
     .unwrap();
 
     events.extend([
@@ -2167,21 +2176,21 @@ fn test_ingest_events_batches_graph_updates() {
     let root_pk = root_keys.public_key().to_bytes();
     set_social_graph_root(&graph_store, &root_pk);
 
-    let root_follows_alice = EventBuilder::new(
+    let root_follows_alice = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(alice_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .unwrap();
-    let alice_follows_bob = EventBuilder::new(
+    let alice_follows_bob = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(bob_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(11))
-    .to_event(&alice_keys)
+    .sign_with_keys(&alice_keys)
     .unwrap();
 
     ingest_parsed_events(
@@ -2218,13 +2227,13 @@ fn test_ingest_graph_events_updates_graph_without_indexing_events() {
     let root_pk = root_keys.public_key().to_bytes();
     set_social_graph_root(&graph_store, &root_pk);
 
-    let root_follows_alice = EventBuilder::new(
+    let root_follows_alice = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(alice_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .unwrap();
 
     ingest_graph_parsed_events(&graph_store, std::slice::from_ref(&root_follows_alice)).unwrap();

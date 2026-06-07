@@ -26,7 +26,7 @@ mod nostr_interop {
         client.connect().await;
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            let event = EventBuilder::new(Kind::Custom(30078), content, tags.clone());
+            let event = EventBuilder::new(Kind::Custom(30078), content).tags(tags.clone());
             match client.send_event_builder(event).await {
                 Ok(_) => break,
                 Err(err) if Instant::now() < deadline => {

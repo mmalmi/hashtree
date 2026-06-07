@@ -143,8 +143,9 @@ pub(crate) async fn create_pr(
     }
 
     let content = params.description.clone();
-    let event = EventBuilder::new(Kind::Custom(KIND_PULL_REQUEST), &content, tags)
-        .to_event(&keys)
+    let event = EventBuilder::new(Kind::Custom(KIND_PULL_REQUEST), &content)
+        .tags(tags)
+        .sign_with_keys(&keys)
         .map_err(|e| anyhow::anyhow!("Failed to sign event: {}", e))?;
 
     let event_id = event.id.to_hex();
@@ -167,7 +168,7 @@ pub(crate) async fn create_pr(
         let relay_map = client.relays().await;
         let mut connected = false;
         for relay in relay_map.values() {
-            if relay.is_connected().await {
+            if relay.is_connected() {
                 connected = true;
                 break;
             }
@@ -181,7 +182,7 @@ pub(crate) async fn create_pr(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let publish_result = match client.send_event(event).await {
+    let publish_result = match client.send_event(&event).await {
         Ok(output) => {
             if output.success.is_empty() {
                 Err(anyhow::anyhow!("PR event was not confirmed by any relay"))
@@ -198,11 +199,11 @@ pub(crate) async fn create_pr(
     // Encode as nevent for display
     let event_id_obj =
         EventId::from_hex(&event_id).map_err(|e| anyhow::anyhow!("Invalid event id: {}", e))?;
-    let relay_urls: Vec<String> = relays
+    let relay_urls: Vec<RelayUrl> = relays
         .iter()
-        .filter_map(|r| r.parse::<String>().ok())
+        .filter_map(|relay| RelayUrl::parse(relay).ok())
         .collect();
-    let nevent = Nip19Event::new(event_id_obj, relay_urls);
+    let nevent = Nip19Event::new(event_id_obj).relays(relay_urls);
     let nevent_str = nevent
         .to_bech32()
         .map_err(|e| anyhow::anyhow!("Failed to encode nevent: {}", e))?;

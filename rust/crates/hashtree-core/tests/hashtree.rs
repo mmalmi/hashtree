@@ -54,6 +54,14 @@ fn make_tree_with_max_links(max_links: usize) -> (Arc<MemoryStore>, HashTree<Mem
     (store, tree)
 }
 
+fn make_encrypted_tree_with_max_links(
+    max_links: usize,
+) -> (Arc<MemoryStore>, HashTree<MemoryStore>) {
+    let store = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.clone()).with_max_links(max_links));
+    (store, tree)
+}
+
 // ============ CREATE TESTS ============
 
 mod create {
@@ -291,6 +299,50 @@ mod read {
             .await
             .unwrap();
         assert!(resolved.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_path_reports_missing_intermediate_chunk() {
+        let (source_store, source_tree) = make_encrypted_tree();
+
+        let (file_cid, _) = source_tree.put_file(b"nested asset").await.unwrap();
+        let assets_cid = source_tree
+            .put_directory(vec![
+                DirEntry::from_cid("big.bin", &file_cid).with_link_type(LinkType::File)
+            ])
+            .await
+            .unwrap();
+        let root_cid = source_tree
+            .put_directory(vec![
+                DirEntry::from_cid("assets", &assets_cid).with_link_type(LinkType::Dir)
+            ])
+            .await
+            .unwrap();
+
+        let fresh_store = Arc::new(MemoryStore::new());
+        let root_data = source_store.get(&root_cid.hash).await.unwrap().unwrap();
+        fresh_store.put(root_cid.hash, root_data).await.unwrap();
+        let fresh_tree = HashTree::new(HashTreeConfig::new(fresh_store.clone()));
+
+        let err = fresh_tree
+            .resolve_path(&root_cid, "assets/big.bin")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HashTreeError::MissingChunk(missing) if missing == to_hex(&assets_cid.hash)
+        ));
+
+        let assets_data = source_store.get(&assets_cid.hash).await.unwrap().unwrap();
+        fresh_store.put(assets_cid.hash, assets_data).await.unwrap();
+
+        let resolved = fresh_tree
+            .resolve_path(&root_cid, "assets/big.bin")
+            .await
+            .unwrap()
+            .expect("resolved asset");
+        assert_eq!(resolved.hash, file_cid.hash);
+        assert_eq!(resolved.key, file_cid.key);
     }
 
     #[tokio::test]
@@ -549,6 +601,40 @@ mod read {
             .expect("resolve fanout entry");
         let data = tree.get(&resolved, None).await.unwrap().unwrap();
         assert_eq!(data, b"content-3");
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_large_directory_walks_fanout_nodes() {
+        let (_store, tree) = make_encrypted_tree_with_max_links(2);
+
+        let mut entries = Vec::new();
+        for i in 0..5 {
+            let name = format!("file-{i}.txt");
+            let content = format!("content-{i}");
+            let (file_cid, size) = tree.put_file(content.as_bytes()).await.unwrap();
+            entries.push(
+                DirEntry::from_cid(name, &file_cid)
+                    .with_size(size)
+                    .with_link_type(LinkType::Blob),
+            );
+        }
+
+        let root_cid = tree.put_directory(entries).await.unwrap();
+        let walked = tree.walk(&root_cid, "").await.unwrap();
+        let walked_parallel = tree.walk_parallel(&root_cid, "", 4).await.unwrap();
+
+        let mut walked_stream = Vec::new();
+        let mut stream = tree.walk_stream(root_cid, "".to_string());
+        while let Some(entry) = stream.next().await {
+            walked_stream.push(entry.unwrap());
+        }
+
+        for entries in [&walked, &walked_parallel, &walked_stream] {
+            let paths: Vec<_> = entries.iter().map(|entry| entry.path.as_str()).collect();
+            assert!(paths.contains(&"file-0.txt"));
+            assert!(paths.contains(&"file-4.txt"));
+            assert!(!paths.contains(&"_chunk_0"));
+        }
     }
 }
 

@@ -1022,7 +1022,7 @@ impl SocialGraphStore {
         }
 
         let mut deduped = dedupe_events(candidates);
-        deduped.retain(|event| filter.match_event(event));
+        deduped.retain(|event| filter.match_event(event, Default::default()));
         deduped.truncate(limit);
         Ok(deduped)
     }
@@ -1318,7 +1318,7 @@ fn is_social_graph_event(kind: Kind) -> bool {
 
 fn graph_event_from_nostr(event: &Event) -> GraphEvent {
     GraphEvent {
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         content: event.content.clone(),
         tags: event
             .tags
@@ -1336,7 +1336,7 @@ fn stored_event_from_nostr(event: &Event) -> StoredNostrEvent {
     StoredNostrEvent {
         id: event.id.to_hex(),
         pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         kind: event.kind.as_u16() as u32,
         tags: event
             .tags
@@ -1653,8 +1653,8 @@ fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
 
 fn compare_nostr_events(left: &Event, right: &Event) -> std::cmp::Ordering {
     left.created_at
-        .as_u64()
-        .cmp(&right.created_at.as_u64())
+        .as_secs()
+        .cmp(&right.created_at.as_secs())
         .then_with(|| left.id.to_hex().cmp(&right.id.to_hex()))
 }
 

@@ -179,14 +179,8 @@ impl SocialGraphCrawler {
             return Vec::new();
         };
 
-        match client
-            .get_events_of(
-                vec![filter],
-                nostr_sdk::EventSource::relays(Some(GRAPH_FETCH_TIMEOUT)),
-            )
-            .await
-        {
-            Ok(events) => events,
+        match client.fetch_events(filter, GRAPH_FETCH_TIMEOUT).await {
+            Ok(events) => events.to_vec(),
             Err(err) => {
                 tracing::debug!(
                     "Failed to fetch graph events for {} authors: {}",
@@ -257,24 +251,23 @@ impl SocialGraphCrawler {
     async fn connect_client(&self) -> Option<nostr_sdk::Client> {
         use nostr::nips::nip19::ToBech32;
 
-        let Ok(sdk_keys) =
-            nostr_sdk::Keys::parse(self.keys.secret_key().to_bech32().unwrap_or_default())
-        else {
+        let secret = self.keys.secret_key().to_bech32().unwrap_or_default();
+        let Ok(sdk_keys) = nostr_sdk::Keys::parse(&secret) else {
             return None;
         };
 
         let mut relay_limits = nostr_sdk::pool::RelayLimits::default();
         relay_limits.events.max_size = Some(SOCIALGRAPH_RELAY_EVENT_MAX_SIZE);
-        let client = nostr_sdk::Client::with_opts(
-            sdk_keys,
-            nostr_sdk::Options::new().relay_limits(relay_limits),
-        );
+        let client = nostr_sdk::Client::builder()
+            .signer(sdk_keys)
+            .opts(nostr_sdk::ClientOptions::new().relay_limits(relay_limits))
+            .build();
         for relay in &self.relays {
             if let Err(err) = client.add_relay(relay).await {
                 tracing::warn!("Failed to add relay {}: {}", relay, err);
             }
         }
-        client.connect_with_timeout(RELAY_CONNECT_TIMEOUT).await;
+        let _ = tokio::time::timeout(RELAY_CONNECT_TIMEOUT, client.connect()).await;
         Some(client)
     }
 
@@ -384,7 +377,7 @@ impl SocialGraphCrawler {
             .kinds(vec![nostr::Kind::ContactList, nostr::Kind::MuteList])
             .since(nostr::Timestamp::now());
 
-        let _ = client.subscribe(vec![filter], None).await;
+        let _ = client.subscribe(filter, None).await;
 
         let mut notifications = client.notifications();
         loop {
@@ -522,6 +515,15 @@ mod tests {
     use tokio::sync::broadcast;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+    macro_rules! event_builder {
+        ($kind:expr, $content:expr $(,)?) => {
+            EventBuilder::new($kind, $content)
+        };
+        ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+            EventBuilder::new($kind, $content).tags($tags)
+        };
+    }
+
     #[derive(Debug, Default)]
     struct RelayState {
         events: Vec<nostr::Event>,
@@ -625,7 +627,10 @@ mod tests {
             .events
             .iter()
             .filter(|event| {
-                filters.is_empty() || filters.iter().any(|filter| filter.match_event(event))
+                filters.is_empty()
+                    || filters
+                        .iter()
+                        .any(|filter| filter.match_event(event, Default::default()))
             })
             .cloned()
             .collect()
@@ -636,7 +641,7 @@ mod tests {
             tokio_tungstenite::WebSocketStream<TcpStream>,
             Message,
         >,
-        message: nostr::RelayMessage,
+        message: nostr::RelayMessage<'_>,
     ) {
         let _ = write.send(Message::Text(message.as_json())).await;
     }
@@ -669,6 +674,11 @@ mod tests {
                     subscription_id,
                     filters,
                 } => {
+                    let subscription_id = subscription_id.into_owned();
+                    let filters = filters
+                        .into_iter()
+                        .map(|filter| filter.into_owned())
+                        .collect::<Vec<_>>();
                     let author_count = filters
                         .iter()
                         .filter_map(|filter| filter.authors.as_ref())
@@ -700,7 +710,7 @@ mod tests {
                 nostr::ClientMessage::Close(subscription_id) => {
                     send_relay_message(
                         &mut write,
-                        nostr::RelayMessage::closed(subscription_id, ""),
+                        nostr::RelayMessage::closed(subscription_id.into_owned(), ""),
                     )
                     .await;
                 }
@@ -751,8 +761,9 @@ mod tests {
 
         let unknown_keys = nostr::Keys::generate();
         let follow_tag = Tag::public_key(PublicKey::from_slice(&root_pk).unwrap());
-        let event = EventBuilder::new(Kind::ContactList, "", vec![follow_tag])
-            .to_event(&unknown_keys)
+        let event = event_builder!(Kind::ContactList, "")
+            .tags(vec![follow_tag])
+            .sign_with_keys(&unknown_keys)
             .unwrap();
 
         crawler.handle_incoming_event(&event);
@@ -781,7 +792,7 @@ mod tests {
         let bob_keys = nostr::Keys::generate();
         let carol_keys = nostr::Keys::generate();
 
-        let root_event = EventBuilder::new(
+        let root_event = event_builder!(
             Kind::ContactList,
             "",
             vec![
@@ -790,19 +801,19 @@ mod tests {
             ],
         )
         .custom_created_at(nostr::Timestamp::from(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
-        let alice_event = EventBuilder::new(
+        let alice_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(carol_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
-        let bob_event = EventBuilder::new(Kind::ContactList, "", vec![])
+        let bob_event = event_builder!(Kind::ContactList, "")
             .custom_created_at(nostr::Timestamp::from(12))
-            .to_event(&bob_keys)
+            .sign_with_keys(&bob_keys)
             .unwrap();
 
         let relay = TestRelay::new(vec![root_event, alice_event, bob_event]);
@@ -853,7 +864,7 @@ mod tests {
         let bob_keys = nostr::Keys::generate();
         let carol_keys = nostr::Keys::generate();
 
-        let root_event = EventBuilder::new(
+        let root_event = event_builder!(
             Kind::ContactList,
             "",
             vec![
@@ -862,21 +873,21 @@ mod tests {
             ],
         )
         .custom_created_at(nostr::Timestamp::from(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
         crate::socialgraph::ingest_parsed_event(&graph_store, &root_event).unwrap();
 
-        let alice_event = EventBuilder::new(
+        let alice_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(carol_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
-        let bob_event = EventBuilder::new(Kind::ContactList, "", vec![])
+        let bob_event = event_builder!(Kind::ContactList, "")
             .custom_created_at(nostr::Timestamp::from(12))
-            .to_event(&bob_keys)
+            .sign_with_keys(&bob_keys)
             .unwrap();
 
         let relay = TestRelay::new(vec![alice_event, bob_event]);
@@ -930,7 +941,7 @@ mod tests {
         let alice_keys = nostr::Keys::generate();
         let bob_keys = nostr::Keys::generate();
 
-        let root_event = EventBuilder::new(
+        let root_event = event_builder!(
             Kind::ContactList,
             "",
             vec![
@@ -939,7 +950,7 @@ mod tests {
             ],
         )
         .custom_created_at(nostr::Timestamp::from(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
         crate::socialgraph::ingest_parsed_event(&graph_store, &root_event).unwrap();
 
@@ -987,27 +998,27 @@ mod tests {
         let carol_keys = nostr::Keys::generate();
         let dave_keys = nostr::Keys::generate();
 
-        let root_event = EventBuilder::new(
+        let root_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(alice_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
         crate::socialgraph::ingest_parsed_event(&graph_store, &root_event).unwrap();
 
-        let alice_old_event = EventBuilder::new(
+        let alice_old_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(carol_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
         crate::socialgraph::ingest_parsed_event(&graph_store, &alice_old_event).unwrap();
 
-        let alice_new_event = EventBuilder::new(
+        let alice_new_event = event_builder!(
             Kind::ContactList,
             "",
             vec![
@@ -1016,7 +1027,7 @@ mod tests {
             ],
         )
         .custom_created_at(nostr::Timestamp::from(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
 
         let relay = TestRelay::new(vec![alice_new_event]);
@@ -1069,21 +1080,21 @@ mod tests {
         let alice_keys = nostr::Keys::generate();
         let bob_keys = nostr::Keys::generate();
 
-        let root_event = EventBuilder::new(
+        let root_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(alice_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
-        let alice_event = EventBuilder::new(
+        let alice_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(bob_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
 
         let relay = TestRelay::new(vec![root_event, alice_event]);
@@ -1123,9 +1134,10 @@ mod tests {
             .iter()
             .map(|keys| Tag::public_key(keys.public_key()))
             .collect::<Vec<_>>();
-        let root_event = EventBuilder::new(Kind::ContactList, "", tags)
+        let root_event = event_builder!(Kind::ContactList, "")
+            .tags(tags)
             .custom_created_at(nostr::Timestamp::from(10))
-            .to_event(&root_keys)
+            .sign_with_keys(&root_keys)
             .unwrap();
         assert!(
             root_event.as_json().len() > 70_000,
@@ -1174,13 +1186,13 @@ mod tests {
             &[alice_keys.public_key().to_hex()],
         );
 
-        let alice_event = EventBuilder::new(
+        let alice_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(bob_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
 
         let relay = TestRelay::new(vec![alice_event]);
@@ -1221,13 +1233,13 @@ mod tests {
         let alice_keys = nostr::Keys::generate();
         let bob_keys = nostr::Keys::generate();
 
-        let alice_event = EventBuilder::new(
+        let alice_event = event_builder!(
             Kind::ContactList,
             "",
             vec![Tag::public_key(bob_keys.public_key())],
         )
         .custom_created_at(nostr::Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .unwrap();
 
         let relay = TestRelay::new(vec![alice_event]);

@@ -470,7 +470,7 @@ fn parse_author_allowlist(body: &str, max_authors: usize) -> Vec<String> {
 
 fn hashtags(event: &StoredNostrEvent) -> Vec<String> {
     let mut out = Vec::new();
-    for tag in &event.tags {
+    for tag in event.tags.iter() {
         if tag.first().is_some_and(|name| name == "t") {
             if let Some(value) = tag.get(1) {
                 if !value.is_empty() {
@@ -740,6 +740,15 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::sync::broadcast;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    macro_rules! event_builder {
+        ($kind:expr, $content:expr $(,)?) => {
+            EventBuilder::new($kind, $content)
+        };
+        ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+            EventBuilder::new($kind, $content).tags($tags)
+        };
+    }
 
     struct TestRelay {
         port: u16,
@@ -1042,25 +1051,28 @@ mod tests {
         let root_keys = Keys::generate();
         let alice_keys = Keys::generate();
 
-        let contact_list = EventBuilder::new(
+        let contact_list = event_builder!(
             Kind::ContactList,
             "",
-            [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
+            [
+                Tag::parse(vec!["p".to_string(), alice_keys.public_key().to_hex(),])
+                    .expect("p tag")
+            ],
         )
         .custom_created_at(Timestamp::from_secs(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .expect("contact list");
 
-        let alice_note = EventBuilder::new(
+        let alice_note = event_builder!(
             Kind::TextNote,
             "alice nostr note",
-            [Tag::parse(&["t", "nostr"]).expect("t tag")],
+            [Tag::parse(["t", "nostr"]).expect("t tag")],
         )
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
 
-        let alice_profile = EventBuilder::new(
+        let alice_profile = event_builder!(
             Kind::Metadata,
             serde_json::json!({
                 "display_name": "Alice Relay",
@@ -1070,7 +1082,7 @@ mod tests {
             [],
         )
         .custom_created_at(Timestamp::from_secs(30))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice profile");
 
         let publisher = Client::new(Keys::generate());
@@ -1079,7 +1091,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(250)).await;
         for event in [&contact_list, &alice_note, &alice_profile] {
             publisher
-                .send_event(event.clone())
+                .send_event(event)
                 .await
                 .expect("publish test event");
         }
@@ -1178,7 +1190,7 @@ mod tests {
         let alice_pubkey = alice_keys.public_key().to_hex();
         let allowlist = TestTextServer::new(format!("{alice_pubkey}\nnot-a-pubkey\n"));
 
-        let alice_profile = EventBuilder::new(
+        let alice_profile = event_builder!(
             Kind::Metadata,
             serde_json::json!({
                 "display_name": "Alice Allowlist",
@@ -1188,7 +1200,7 @@ mod tests {
             [],
         )
         .custom_created_at(Timestamp::from_secs(30))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice profile");
 
         let publisher = Client::new(Keys::generate());
@@ -1196,7 +1208,7 @@ mod tests {
         publisher.connect().await;
         tokio::time::sleep(Duration::from_millis(250)).await;
         publisher
-            .send_event(alice_profile.clone())
+            .send_event(&alice_profile)
             .await
             .expect("publish test event");
 

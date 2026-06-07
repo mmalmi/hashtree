@@ -21,6 +21,23 @@ use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
+fn p_tag(pubkey: nostr::PublicKey) -> Tag {
+    Tag::parse(vec!["p".to_string(), pubkey.to_hex()]).expect("p tag")
+}
+
+fn t_tag(value: &str) -> Tag {
+    Tag::parse(vec!["t".to_string(), value.to_string()]).expect("t tag")
+}
+
 #[derive(Debug, Default)]
 struct SharedRelayState {
     events: Vec<Event>,
@@ -155,7 +172,10 @@ fn matching_events(state: &Arc<Mutex<SharedRelayState>>, filters: &[Filter]) -> 
         .clone()
         .into_iter()
         .filter(|event| {
-            filters.is_empty() || filters.iter().any(|filter| filter.match_event(event))
+            filters.is_empty()
+                || filters
+                    .iter()
+                    .any(|filter| filter.match_event(event, Default::default()))
         })
         .collect::<Vec<_>>();
 
@@ -198,7 +218,7 @@ fn build_negentropy_storage(
     for event in events {
         storage
             .insert(
-                event.created_at.as_u64(),
+                event.created_at.as_secs(),
                 Id::from_slice(event.id.as_bytes()).expect("negentropy id"),
             )
             .expect("insert negentropy item");
@@ -227,7 +247,7 @@ fn record_requested_ids(state: &Arc<Mutex<SharedRelayState>>, filters: &[Filter]
 
 async fn send_relay_message(
     write: &mut futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>,
-    message: RelayMessage,
+    message: RelayMessage<'_>,
 ) {
     let _ = write.send(Message::Text(message.as_json())).await;
 }
@@ -260,17 +280,23 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
 
         match parsed {
             ClientMessage::Event(event) => {
+                let event = event.into_owned();
                 state
                     .lock()
                     .expect("relay state lock")
                     .events
-                    .push(*event.clone());
+                    .push(event.clone());
                 send_relay_message(&mut write, RelayMessage::ok(event.id, true, "")).await;
             }
             ClientMessage::Req {
                 subscription_id,
                 filters,
             } => {
+                let subscription_id = subscription_id.into_owned();
+                let filters = filters
+                    .into_iter()
+                    .map(|filter| filter.into_owned())
+                    .collect::<Vec<_>>();
                 record_requested_ids(&state, &filters);
                 let disconnect_on_id_request = {
                     let guard = state.lock().expect("relay state lock");
@@ -296,6 +322,9 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                 initial_message,
                 ..
             } => {
+                let subscription_id = subscription_id.into_owned();
+                let filter = filter.into_owned();
+                let initial_message = initial_message.into_owned();
                 let supports_negentropy = {
                     let mut guard = state.lock().expect("relay state lock");
                     guard.negentropy_open_attempts += 1;
@@ -326,8 +355,8 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                 send_relay_message(
                     &mut write,
                     RelayMessage::NegMsg {
-                        subscription_id,
-                        message: hex::encode(response),
+                        subscription_id: std::borrow::Cow::Owned(subscription_id),
+                        message: hex::encode(response).into(),
                     },
                 )
                 .await;
@@ -336,6 +365,8 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                 subscription_id,
                 message,
             } => {
+                let subscription_id = subscription_id.into_owned();
+                let message = message.into_owned();
                 let Some(negentropy) = negentropy_sessions.get_mut(&subscription_id.to_string())
                 else {
                     continue;
@@ -346,8 +377,8 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                 send_relay_message(
                     &mut write,
                     RelayMessage::NegMsg {
-                        subscription_id,
-                        message: hex::encode(response),
+                        subscription_id: std::borrow::Cow::Owned(subscription_id),
+                        message: hex::encode(response).into(),
                     },
                 )
                 .await;
@@ -357,10 +388,15 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
             }
             ClientMessage::Count {
                 subscription_id,
-                filters,
+                filter,
             } => {
-                let count = matching_events(&state, &filters).len();
-                send_relay_message(&mut write, RelayMessage::count(subscription_id, count)).await;
+                let filter = filter.into_owned();
+                let count = matching_events(&state, std::slice::from_ref(&filter)).len();
+                send_relay_message(
+                    &mut write,
+                    RelayMessage::count(subscription_id.into_owned(), count),
+                )
+                .await;
             }
             ClientMessage::Auth(_) => {}
         }
@@ -369,7 +405,7 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
 
 fn graph_event_from_nostr(event: &Event) -> GraphEvent {
     GraphEvent {
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         content: event.content.clone(),
         tags: event
             .tags
@@ -387,7 +423,7 @@ fn stored_event_from_nostr(event: &Event) -> StoredNostrEvent {
     StoredNostrEvent {
         id: event.id.to_hex(),
         pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         kind: event.kind.as_u16() as u32,
         tags: event
             .tags
@@ -409,14 +445,10 @@ async fn crawls_followed_authors_and_applies_per_author_priority_limit() -> io::
     let bob_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -424,42 +456,26 @@ async fn crawls_followed_authors_and_applies_per_author_priority_limit() -> io::
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let alice_old = EventBuilder::new(
-        Kind::TextNote,
-        "older nostr note",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(20))
-    .to_event(&alice_keys)
-    .expect("alice old");
-    let alice_new = EventBuilder::new(
-        Kind::TextNote,
-        "newer nostr note",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(30))
-    .to_event(&alice_keys)
-    .expect("alice new");
-    let alice_low_priority = EventBuilder::new(
-        Kind::Custom(7),
-        "reaction-ish",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(40))
-    .to_event(&alice_keys)
-    .expect("alice low priority");
-    let bob_note = EventBuilder::new(
-        Kind::TextNote,
-        "bob note",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(50))
-    .to_event(&bob_keys)
-    .expect("bob note");
+    let alice_old = event_builder!(Kind::TextNote, "older nostr note", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&alice_keys)
+        .expect("alice old");
+    let alice_new = event_builder!(Kind::TextNote, "newer nostr note", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(30))
+        .sign_with_keys(&alice_keys)
+        .expect("alice new");
+    let alice_low_priority = event_builder!(Kind::Custom(7), "reaction-ish", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(40))
+        .sign_with_keys(&alice_keys)
+        .expect("alice low priority");
+    let bob_note = event_builder!(Kind::TextNote, "bob note", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(50))
+        .sign_with_keys(&bob_keys)
+        .expect("bob note");
 
     for event in [&alice_old, &alice_new, &alice_low_priority, &bob_note] {
         publisher
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish test event");
     }
@@ -510,14 +526,10 @@ async fn enforces_global_live_byte_cap_after_priority_selection() -> io::Result<
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -525,34 +537,22 @@ async fn enforces_global_live_byte_cap_after_priority_selection() -> io::Result<
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let note_one = EventBuilder::new(
-        Kind::TextNote,
-        "note one",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(20))
-    .to_event(&alice_keys)
-    .expect("note one");
-    let note_two = EventBuilder::new(
-        Kind::TextNote,
-        "note two",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(30))
-    .to_event(&alice_keys)
-    .expect("note two");
-    let note_three = EventBuilder::new(
-        Kind::TextNote,
-        "note three",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(40))
-    .to_event(&alice_keys)
-    .expect("note three");
+    let note_one = event_builder!(Kind::TextNote, "note one", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&alice_keys)
+        .expect("note one");
+    let note_two = event_builder!(Kind::TextNote, "note two", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(30))
+        .sign_with_keys(&alice_keys)
+        .expect("note two");
+    let note_three = event_builder!(Kind::TextNote, "note three", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(40))
+        .sign_with_keys(&alice_keys)
+        .expect("note three");
 
     for event in [&note_one, &note_two, &note_three] {
         publisher
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish test event");
     }
@@ -613,14 +613,10 @@ async fn enforces_per_author_live_byte_cap_after_priority_selection() -> io::Res
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -628,34 +624,22 @@ async fn enforces_per_author_live_byte_cap_after_priority_selection() -> io::Res
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let note_one = EventBuilder::new(
-        Kind::TextNote,
-        "note one",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(20))
-    .to_event(&alice_keys)
-    .expect("note one");
-    let note_two = EventBuilder::new(
-        Kind::TextNote,
-        "note two",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(30))
-    .to_event(&alice_keys)
-    .expect("note two");
-    let note_three = EventBuilder::new(
-        Kind::TextNote,
-        "note three",
-        [Tag::parse(&["t", "nostr"]).expect("t tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(40))
-    .to_event(&alice_keys)
-    .expect("note three");
+    let note_one = event_builder!(Kind::TextNote, "note one", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&alice_keys)
+        .expect("note one");
+    let note_two = event_builder!(Kind::TextNote, "note two", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(30))
+        .sign_with_keys(&alice_keys)
+        .expect("note two");
+    let note_three = event_builder!(Kind::TextNote, "note three", [t_tag("nostr")],)
+        .custom_created_at(Timestamp::from_secs(40))
+        .sign_with_keys(&alice_keys)
+        .expect("note three");
 
     for event in [&note_one, &note_two, &note_three] {
         publisher
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish test event");
     }
@@ -716,14 +700,10 @@ async fn limits_relay_fetches_per_author_batch() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -732,16 +712,16 @@ async fn limits_relay_fetches_per_author_batch() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for created_at in 20..25 {
-        let note = EventBuilder::new(
+        let note = event_builder!(
             Kind::TextNote,
             format!("note {created_at}"),
-            [Tag::parse(&["t", "nostr"]).expect("t tag")],
+            [t_tag("nostr")],
         )
         .custom_created_at(Timestamp::from_secs(created_at))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -774,14 +754,10 @@ async fn full_author_history_retains_per_author_limit() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -791,17 +767,17 @@ async fn full_author_history_retains_per_author_limit() -> io::Result<()> {
 
     let mut expected_ids = Vec::new();
     for created_at in 20..25 {
-        let note = EventBuilder::new(
+        let note = event_builder!(
             Kind::TextNote,
             format!("note {created_at}"),
-            [Tag::parse(&["t", "nostr"]).expect("t tag")],
+            [t_tag("nostr")],
         )
         .custom_created_at(Timestamp::from_secs(created_at))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note");
         expected_ids.push(note.id.to_hex());
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -856,14 +832,10 @@ async fn full_author_history_can_skip_paging_fallback() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -871,12 +843,12 @@ async fn full_author_history_can_skip_paging_fallback() -> io::Result<()> {
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let note = EventBuilder::new(Kind::TextNote, "alice note", [])
+    let note = event_builder!(Kind::TextNote, "alice note")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note");
     publisher
-        .send_event(note)
+        .send_event(&note)
         .await
         .expect("publish test event");
 
@@ -911,14 +883,10 @@ async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -928,12 +896,12 @@ async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()
 
     let mut notes = Vec::new();
     for created_at in 20..25 {
-        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("note {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(&alice_keys)
+            .sign_with_keys(&alice_keys)
             .expect("note");
         publisher
-            .send_event(note.clone())
+            .send_event(&note)
             .await
             .expect("publish test event");
         notes.push(note);
@@ -995,16 +963,13 @@ async fn caches_relays_that_do_not_support_negentropy() -> io::Result<()> {
     let bob_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
+    let contact_list = event_builder!(
         Kind::ContactList,
         "",
-        [
-            Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag"),
-            Tag::parse(&["p", &bob_keys.public_key().to_hex()]).expect("bob p tag"),
-        ],
+        [p_tag(alice_keys.public_key()), p_tag(bob_keys.public_key()),],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
@@ -1014,12 +979,12 @@ async fn caches_relays_that_do_not_support_negentropy() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for (created_at, keys) in [(20, &alice_keys), (21, &bob_keys)] {
-        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("note {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(keys)
+            .sign_with_keys(keys)
             .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1052,19 +1017,15 @@ async fn require_negentropy_skips_relays_that_cannot_reconcile() -> io::Result<(
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
-    let note = EventBuilder::new(Kind::TextNote, "alice note", [])
+    let note = event_builder!(Kind::TextNote, "alice note")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note");
 
     let publisher = Client::new(Keys::generate());
@@ -1074,10 +1035,7 @@ async fn require_negentropy_skips_relays_that_cannot_reconcile() -> io::Result<(
         .expect("add supported relay");
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
-    publisher
-        .send_event(note.clone())
-        .await
-        .expect("publish event");
+    publisher.send_event(&note).await.expect("publish event");
 
     let store = Arc::new(MemoryStore::new());
     let bridge = NostrBridge::new(
@@ -1124,19 +1082,15 @@ async fn relay_disconnect_during_missing_id_fetch_does_not_abort_crawl() -> io::
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
-    let note = EventBuilder::new(Kind::TextNote, "alice note", [])
+    let note = event_builder!(Kind::TextNote, "alice note")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note");
 
     let flaky_publisher = Client::new(Keys::generate());
@@ -1155,10 +1109,7 @@ async fn relay_disconnect_during_missing_id_fetch_does_not_abort_crawl() -> io::
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for publisher in [&flaky_publisher, &good_publisher] {
-        publisher
-            .send_event(note.clone())
-            .await
-            .expect("publish note");
+        publisher.send_event(&note).await.expect("publish note");
     }
 
     let store = Arc::new(MemoryStore::new());
@@ -1205,14 +1156,10 @@ async fn relay_event_max_size_allows_moderately_large_events() -> io::Result<()>
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -1220,12 +1167,12 @@ async fn relay_event_max_size_allows_moderately_large_events() -> io::Result<()>
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let large_note = EventBuilder::new(Kind::TextNote, "x".repeat(90_000), [])
+    let large_note = event_builder!(Kind::TextNote, "x".repeat(90_000))
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("large note");
     publisher
-        .send_event(large_note.clone())
+        .send_event(&large_note)
         .await
         .expect("publish large event");
 
@@ -1271,14 +1218,10 @@ async fn global_recent_scan_filters_locally_by_social_graph() -> io::Result<()> 
     let bob_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -1289,23 +1232,23 @@ async fn global_recent_scan_filters_locally_by_social_graph() -> io::Result<()> 
     let mut events = Vec::new();
     for created_at in 20..22 {
         events.push(
-            EventBuilder::new(Kind::TextNote, format!("alice {created_at}"), [])
+            event_builder!(Kind::TextNote, format!("alice {created_at}"))
                 .custom_created_at(Timestamp::from_secs(created_at))
-                .to_event(&alice_keys)
+                .sign_with_keys(&alice_keys)
                 .expect("alice note"),
         );
     }
     for created_at in 30..33 {
         events.push(
-            EventBuilder::new(Kind::TextNote, format!("bob {created_at}"), [])
+            event_builder!(Kind::TextNote, format!("bob {created_at}"))
                 .custom_created_at(Timestamp::from_secs(created_at))
-                .to_event(&bob_keys)
+                .sign_with_keys(&bob_keys)
                 .expect("bob note"),
         );
     }
     for event in events {
         publisher
-            .send_event(event)
+            .send_event(&event)
             .await
             .expect("publish test event");
     }
@@ -1357,14 +1300,10 @@ async fn reports_global_recent_progress() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -1373,12 +1312,12 @@ async fn reports_global_recent_progress() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for created_at in 20..22 {
-        let note = EventBuilder::new(Kind::TextNote, format!("alice {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("alice {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(&alice_keys)
+            .sign_with_keys(&alice_keys)
             .expect("alice note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1431,12 +1370,12 @@ async fn global_recent_scan_can_use_external_author_allowlist() -> io::Result<()
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for (keys, created_at, label) in [(&alice_keys, 20, "alice"), (&bob_keys, 21, "bob")] {
-        let note = EventBuilder::new(Kind::TextNote, label, [])
+        let note = event_builder!(Kind::TextNote, label)
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(keys)
+            .sign_with_keys(keys)
             .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1488,14 +1427,10 @@ async fn global_recent_scan_paginates_older_pages() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -1504,12 +1439,12 @@ async fn global_recent_scan_paginates_older_pages() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for created_at in 20..25 {
-        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("note {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(&alice_keys)
+            .sign_with_keys(&alice_keys)
             .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1544,14 +1479,10 @@ async fn global_recent_scan_pages_past_relay_side_caps() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -1560,12 +1491,12 @@ async fn global_recent_scan_pages_past_relay_side_caps() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for created_at in 20..25 {
-        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("note {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(&alice_keys)
+            .sign_with_keys(&alice_keys)
             .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1600,14 +1531,10 @@ async fn global_recent_scan_stops_after_max_events_seen() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
     let publisher = Client::new(Keys::generate());
@@ -1616,12 +1543,12 @@ async fn global_recent_scan_stops_after_max_events_seen() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for created_at in 20..25 {
-        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("note {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(&alice_keys)
+            .sign_with_keys(&alice_keys)
             .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1657,27 +1584,23 @@ async fn reconciles_per_relay_and_fetches_only_missing_ids() -> io::Result<()> {
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
-    let note_one = EventBuilder::new(Kind::TextNote, "note one", [])
+    let note_one = event_builder!(Kind::TextNote, "note one")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note one");
-    let note_two = EventBuilder::new(Kind::TextNote, "note two", [])
+    let note_two = event_builder!(Kind::TextNote, "note two")
         .custom_created_at(Timestamp::from_secs(30))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note two");
-    let note_three = EventBuilder::new(Kind::TextNote, "note three", [])
+    let note_three = event_builder!(Kind::TextNote, "note three")
         .custom_created_at(Timestamp::from_secs(40))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note three");
 
     let publisher_one = Client::new(Keys::generate());
@@ -1697,14 +1620,14 @@ async fn reconciles_per_relay_and_fetches_only_missing_ids() -> io::Result<()> {
 
     for event in [&note_one, &note_two] {
         publisher_one
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish relay one event");
     }
 
     for event in [&note_one, &note_two, &note_three] {
         publisher_two
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish relay two event");
     }
@@ -1770,17 +1693,17 @@ async fn limits_authors_considered_by_bfs_order() -> io::Result<()> {
     let carol_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let root_contact_list = EventBuilder::new(
+    let root_contact_list = event_builder!(
         Kind::ContactList,
         "",
         [
-            Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag"),
-            Tag::parse(&["p", &bob_keys.public_key().to_hex()]).expect("bob p tag"),
-            Tag::parse(&["p", &carol_keys.public_key().to_hex()]).expect("carol p tag"),
+            p_tag(alice_keys.public_key()),
+            p_tag(bob_keys.public_key()),
+            p_tag(carol_keys.public_key()),
         ],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&root_contact_list), true, 1.0);
 
@@ -1789,22 +1712,22 @@ async fn limits_authors_considered_by_bfs_order() -> io::Result<()> {
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let alice_note = EventBuilder::new(Kind::TextNote, "alice", [])
+    let alice_note = event_builder!(Kind::TextNote, "alice")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
-    let bob_note = EventBuilder::new(Kind::TextNote, "bob", [])
+    let bob_note = event_builder!(Kind::TextNote, "bob")
         .custom_created_at(Timestamp::from_secs(21))
-        .to_event(&bob_keys)
+        .sign_with_keys(&bob_keys)
         .expect("bob note");
-    let carol_note = EventBuilder::new(Kind::TextNote, "carol", [])
+    let carol_note = event_builder!(Kind::TextNote, "carol")
         .custom_created_at(Timestamp::from_secs(22))
-        .to_event(&carol_keys)
+        .sign_with_keys(&carol_keys)
         .expect("carol note");
 
     for event in [&alice_note, &bob_note, &carol_note] {
         publisher
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish test event");
     }
@@ -1858,16 +1781,13 @@ async fn reports_author_batch_progress() -> io::Result<()> {
     let bob_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let root_contact_list = EventBuilder::new(
+    let root_contact_list = event_builder!(
         Kind::ContactList,
         "",
-        [
-            Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag"),
-            Tag::parse(&["p", &bob_keys.public_key().to_hex()]).expect("bob p tag"),
-        ],
+        [p_tag(alice_keys.public_key()), p_tag(bob_keys.public_key()),],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&root_contact_list), true, 1.0);
 
@@ -1877,12 +1797,12 @@ async fn reports_author_batch_progress() -> io::Result<()> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for (keys, content, created_at) in [(&alice_keys, "alice", 20u64), (&bob_keys, "bob", 21u64)] {
-        let note = EventBuilder::new(Kind::TextNote, content, [])
+        let note = event_builder!(Kind::TextNote, content)
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(keys)
+            .sign_with_keys(keys)
             .expect("note");
         publisher
-            .send_event(note)
+            .send_event(&note)
             .await
             .expect("publish test event");
     }
@@ -1938,23 +1858,19 @@ async fn ignores_missing_local_event_blobs_from_existing_root_in_global_scan() -
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
-    let old_note = EventBuilder::new(Kind::TextNote, "old", [])
+    let old_note = event_builder!(Kind::TextNote, "old")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("old note");
-    let new_note = EventBuilder::new(Kind::TextNote, "new", [])
+    let new_note = event_builder!(Kind::TextNote, "new")
         .custom_created_at(Timestamp::from_secs(21))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("new note");
 
     let publisher = Client::new(Keys::generate());
@@ -1962,7 +1878,7 @@ async fn ignores_missing_local_event_blobs_from_existing_root_in_global_scan() -
     publisher.connect().await;
     tokio::time::sleep(Duration::from_millis(250)).await;
     publisher
-        .send_event(new_note.clone())
+        .send_event(&new_note)
         .await
         .expect("publish new note");
 
@@ -2036,19 +1952,15 @@ async fn global_recent_scan_reuses_existing_root_events_before_fetching() -> io:
     let alice_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
-    let old_note = EventBuilder::new(Kind::TextNote, "old", [])
+    let old_note = event_builder!(Kind::TextNote, "old")
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("old note");
 
     let store = Arc::new(MemoryStore::new());
@@ -2107,27 +2019,23 @@ async fn global_recent_scan_keeps_latest_metadata_available_for_feed_authors() -
     let bob_keys = Keys::generate();
 
     let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
-    let contact_list = EventBuilder::new(
-        Kind::ContactList,
-        "",
-        [Tag::parse(&["p", &alice_keys.public_key().to_hex()]).expect("alice p tag")],
-    )
-    .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
-    .expect("contact list");
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
     graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
 
-    let alice_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Alice"}"#, [])
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice"}"#)
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice profile");
-    let alice_note = EventBuilder::new(Kind::TextNote, "alice note", [])
+    let alice_note = event_builder!(Kind::TextNote, "alice note")
         .custom_created_at(Timestamp::from_secs(199))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
-    let bob_note = EventBuilder::new(Kind::TextNote, "bob noise", [])
+    let bob_note = event_builder!(Kind::TextNote, "bob noise")
         .custom_created_at(Timestamp::from_secs(200))
-        .to_event(&bob_keys)
+        .sign_with_keys(&bob_keys)
         .expect("bob note");
 
     let publisher = Client::new(Keys::generate());
@@ -2137,7 +2045,7 @@ async fn global_recent_scan_keeps_latest_metadata_available_for_feed_authors() -
 
     for event in [&alice_profile, &alice_note, &bob_note] {
         publisher
-            .send_event(event.clone())
+            .send_event(event)
             .await
             .expect("publish test event");
     }

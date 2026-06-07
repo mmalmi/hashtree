@@ -1,5 +1,14 @@
 use super::*;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 const TEST_PUBKEY: &str = "4523be58d395b1b196a9b8c82b038b6895cb02b683d0c253a955068dba1facd0";
 
 fn test_config() -> Config {
@@ -109,13 +118,13 @@ fn test_pick_latest_event_prefers_newer_timestamp() {
     let older = Timestamp::from_secs(1_700_000_000);
     let newer = Timestamp::from_secs(1_700_000_001);
 
-    let event_old = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "old", [])
+    let event_old = event_builder!(Kind::Custom(KIND_APP_DATA), "old")
         .custom_created_at(older)
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let event_new = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "new", [])
+    let event_new = event_builder!(Kind::Custom(KIND_APP_DATA), "new")
         .custom_created_at(newer)
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     let picked = pick_latest_event([&event_old, &event_new]).unwrap();
@@ -127,13 +136,13 @@ fn test_pick_latest_event_breaks_ties_with_event_id() {
     let keys = Keys::generate();
     let created_at = Timestamp::from_secs(1_700_000_000);
 
-    let event_a = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "a", [])
+    let event_a = event_builder!(Kind::Custom(KIND_APP_DATA), "a")
         .custom_created_at(created_at)
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
-    let event_b = EventBuilder::new(Kind::Custom(KIND_APP_DATA), "b", [])
+    let event_b = event_builder!(Kind::Custom(KIND_APP_DATA), "b")
         .custom_created_at(created_at)
-        .to_event(&keys)
+        .sign_with_keys(&keys)
         .unwrap();
 
     let expected_id = if event_a.id > event_b.id {
@@ -175,7 +184,7 @@ fn test_pick_latest_repo_event_ignores_newer_different_d_tag() {
     let older = Timestamp::from_secs(1_700_000_000);
     let newer = Timestamp::from_secs(1_700_000_031);
 
-    let iris_chat = EventBuilder::new(
+    let iris_chat = event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "good",
         [
@@ -184,10 +193,10 @@ fn test_pick_latest_repo_event_ignores_newer_different_d_tag() {
         ],
     )
     .custom_created_at(older)
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
-    let iris_chat_flutter = EventBuilder::new(
+    let iris_chat_flutter = event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "bad",
         [
@@ -196,7 +205,7 @@ fn test_pick_latest_repo_event_ignores_newer_different_d_tag() {
         ],
     )
     .custom_created_at(newer)
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     let picked = pick_latest_repo_event([&iris_chat, &iris_chat_flutter], "iris-chat").unwrap();
@@ -226,7 +235,7 @@ fn test_append_repo_discovery_labels_includes_git_label_and_prefixes() {
 #[test]
 fn test_list_git_repo_announcements_filters_dedupes_and_sorts() {
     let keys = Keys::generate();
-    let alpha_old = EventBuilder::new(
+    let alpha_old = event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "old",
         [
@@ -236,9 +245,9 @@ fn test_list_git_repo_announcements_filters_dedupes_and_sorts() {
         ],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let alpha_new = EventBuilder::new(
+    let alpha_new = event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "new",
         [
@@ -248,9 +257,9 @@ fn test_list_git_repo_announcements_filters_dedupes_and_sorts() {
         ],
     )
     .custom_created_at(Timestamp::from_secs(20))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let zeta = EventBuilder::new(
+    let zeta = event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "zeta",
         [
@@ -260,9 +269,9 @@ fn test_list_git_repo_announcements_filters_dedupes_and_sorts() {
         ],
     )
     .custom_created_at(Timestamp::from_secs(15))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
-    let ignored = EventBuilder::new(
+    let ignored = event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "ignored",
         [
@@ -271,7 +280,7 @@ fn test_list_git_repo_announcements_filters_dedupes_and_sorts() {
         ],
     )
     .custom_created_at(Timestamp::from_secs(30))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
 
     let repos = list_git_repo_announcements(&[alpha_old, zeta, ignored, alpha_new]);
@@ -577,7 +586,7 @@ fn test_encryption_modes_produce_different_values() {
 }
 
 fn build_test_pr_event(keys: &Keys, created_at_secs: u64) -> Event {
-    EventBuilder::new(
+    event_builder!(
         Kind::Custom(KIND_PULL_REQUEST),
         "",
         [Tag::custom(
@@ -586,7 +595,7 @@ fn build_test_pr_event(keys: &Keys, created_at_secs: u64) -> Event {
         )],
     )
     .custom_created_at(Timestamp::from_secs(created_at_secs))
-    .to_event(keys)
+    .sign_with_keys(keys)
     .unwrap()
 }
 
@@ -596,7 +605,7 @@ fn build_test_status_event(
     pr_event_id: &str,
     created_at_secs: u64,
 ) -> Event {
-    EventBuilder::new(
+    event_builder!(
         Kind::Custom(kind),
         "",
         [Tag::custom(
@@ -605,7 +614,7 @@ fn build_test_status_event(
         )],
     )
     .custom_created_at(Timestamp::from_secs(created_at_secs))
-    .to_event(keys)
+    .sign_with_keys(keys)
     .unwrap()
 }
 

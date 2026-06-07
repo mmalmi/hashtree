@@ -6,13 +6,14 @@ use crate::{ListEventsOptions, NostrEventStore, NostrEventStoreError, StoredNost
 use futures::{stream, StreamExt};
 use hashtree_core::{Cid, Store};
 use nostr_sdk::{
-    pool::RelayLimits, Client, EventId, Filter, Keys, Kind, NegentropyOptions, Options, PublicKey,
+    pool::RelayLimits, Client, ClientOptions, EventId, Filter, Keys, Kind, PublicKey, SyncOptions,
     Timestamp,
 };
 use nostr_social_graph::SocialGraphBackend;
 
 const NEGENTROPY_FETCH_CHUNK_SIZE: usize = 256;
 const NEGENTROPY_FETCH_CHUNK_CONCURRENCY: usize = 16;
+const NEGENTROPY_INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
 const FULL_HISTORY_PAGING_CONCURRENCY_PER_RELAY: usize = 64;
 const METADATA_KIND: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,7 +520,10 @@ impl<S: Store> NostrBridge<S> {
         let client = if let Some(max_size) = self.config.relay_event_max_size {
             let mut limits = RelayLimits::default();
             limits.events.max_size = Some(max_size);
-            Client::with_opts(Keys::generate(), Options::new().relay_limits(limits))
+            Client::builder()
+                .signer(Keys::generate())
+                .opts(ClientOptions::new().relay_limits(limits))
+                .build()
         } else {
             Client::new(Keys::generate())
         };
@@ -845,8 +849,9 @@ impl<S: Store> NostrBridge<S> {
             for _ in 0..self.config.max_relay_pages {
                 let filter = self.global_recent_filter(until);
                 let events = match client
-                    .get_events_from([relay], vec![filter], Some(self.config.fetch_timeout))
+                    .fetch_events_from([relay], filter, self.config.fetch_timeout)
                     .await
+                    .map(|events| events.to_vec())
                 {
                     Ok(events) => events,
                     Err(err) => {
@@ -864,7 +869,7 @@ impl<S: Store> NostrBridge<S> {
                 let mut min_created_at = u64::MAX;
                 let mut incoming_by_author = BTreeMap::<String, Vec<StoredNostrEvent>>::new();
                 for event in events {
-                    min_created_at = min_created_at.min(event.created_at.as_u64());
+                    min_created_at = min_created_at.min(event.created_at.as_secs());
                     if event.kind.is_ephemeral() {
                         continue;
                     }
@@ -1276,30 +1281,22 @@ impl<S: Store> NostrBridge<S> {
                 });
         }
 
-        match client
-            .reconcile_advanced(
-                [relay],
-                filter.clone(),
-                local_items,
-                NegentropyOptions::default().dry_run(),
-            )
+        match self
+            .reconcile_missing_ids(client, relay, filter.clone(), local_items)
             .await
         {
-            Ok(output) if !output.success.is_empty() => {
-                let missing = output.remote.iter().cloned().collect::<Vec<_>>();
-                self.fetch_missing_ids(client, relay, missing).await.map(
-                    |RelayFetchResult {
-                         events_seen,
-                         events,
-                         ..
-                     }| RelayFetchResult {
-                        events_seen,
-                        events,
-                        supports_negentropy: true,
-                    },
-                )
-            }
-            Ok(_) | Err(_) => {
+            Ok(Some(missing)) => self.fetch_missing_ids(client, relay, missing).await.map(
+                |RelayFetchResult {
+                     events_seen,
+                     events,
+                     ..
+                 }| RelayFetchResult {
+                    events_seen,
+                    events,
+                    supports_negentropy: true,
+                },
+            ),
+            Ok(None) | Err(_) => {
                 if self.config.require_negentropy {
                     Ok(RelayFetchResult {
                         events_seen: 0,
@@ -1341,8 +1338,9 @@ impl<S: Store> NostrBridge<S> {
             .collect::<Vec<_>>();
         let fetches = filters.into_iter().map(|filter| async move {
             client
-                .get_events_from([relay], vec![filter], Some(self.config.fetch_timeout))
+                .fetch_events_from([relay], filter, self.config.fetch_timeout)
                 .await
+                .map(|events| events.to_vec())
                 .map_err(|err| CrawlError::Nostr(err.to_string()))
         });
         let mut fetches =
@@ -1373,8 +1371,9 @@ impl<S: Store> NostrBridge<S> {
     ) -> Result<Vec<StoredNostrEvent>> {
         let mut out = Vec::new();
         let events = client
-            .get_events_from([relay], vec![filter], Some(self.config.fetch_timeout))
+            .fetch_events_from([relay], filter, self.config.fetch_timeout)
             .await
+            .map(|events| events.to_vec())
             .map_err(|err| CrawlError::Nostr(err.to_string()))?;
 
         for event in events {
@@ -1397,15 +1396,11 @@ impl<S: Store> NostrBridge<S> {
     ) -> Result<RelayFetchResult> {
         if supports_negentropy != Some(false) {
             let filter = self.full_history_negentropy_filter(pubkeys.to_vec());
-            let reconcile = client.reconcile_advanced(
-                [relay],
-                filter,
-                local_items,
-                NegentropyOptions::default().dry_run(),
-            );
-            match tokio::time::timeout(self.config.fetch_timeout, reconcile).await {
-                Ok(Ok(output)) if !output.success.is_empty() => {
-                    let missing = output.remote.iter().cloned().collect::<Vec<_>>();
+            match self
+                .reconcile_missing_ids(client, relay, filter, local_items)
+                .await
+            {
+                Ok(Some(missing)) => {
                     return match self.fetch_missing_ids(client, relay, missing).await {
                         Ok(RelayFetchResult {
                             events_seen,
@@ -1427,22 +1422,14 @@ impl<S: Store> NostrBridge<S> {
                         Err(err) => Err(err),
                     };
                 }
-                Err(_) if self.config.require_negentropy => {
+                Ok(None) | Err(_) if self.config.require_negentropy => {
                     return Ok(RelayFetchResult {
                         events_seen: 0,
                         events: Vec::new(),
                         supports_negentropy: false,
                     });
                 }
-                Err(_) => {}
-                Ok(Ok(_)) | Ok(Err(_)) if self.config.require_negentropy => {
-                    return Ok(RelayFetchResult {
-                        events_seen: 0,
-                        events: Vec::new(),
-                        supports_negentropy: false,
-                    });
-                }
-                Ok(Ok(_)) | Ok(Err(_)) => {}
+                Ok(None) | Err(_) => {}
             }
         }
 
@@ -1455,6 +1442,31 @@ impl<S: Store> NostrBridge<S> {
         }
         self.fetch_full_history_by_paging_from_relay(client, relay, pubkeys)
             .await
+    }
+
+    async fn reconcile_missing_ids(
+        &self,
+        client: &Client,
+        relay: &str,
+        filter: Filter,
+        local_items: Vec<(EventId, Timestamp)>,
+    ) -> Result<Option<Vec<EventId>>> {
+        let initial_timeout = self.config.fetch_timeout.min(NEGENTROPY_INITIAL_TIMEOUT);
+        let opts = SyncOptions::default()
+            .initial_timeout(initial_timeout)
+            .dry_run();
+        let targets = [(relay.to_owned(), (filter, local_items))];
+        let sync = client.pool().sync_targeted(targets, &opts);
+        let output = match tokio::time::timeout(self.config.fetch_timeout, sync).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(_)) | Err(_) => return Ok(None),
+        };
+
+        if output.success.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(output.remote.iter().cloned().collect()))
     }
 
     async fn fetch_full_history_by_paging_from_relay(
@@ -1518,8 +1530,9 @@ impl<S: Store> NostrBridge<S> {
             }
 
             let events = client
-                .get_events_from([relay], vec![filter], Some(self.config.fetch_timeout))
+                .fetch_events_from([relay], filter, self.config.fetch_timeout)
                 .await
+                .map(|events| events.to_vec())
                 .map_err(|err| CrawlError::Nostr(err.to_string()))?;
             let fetched_count = events.len();
             events_seen = events_seen.saturating_add(fetched_count);
@@ -1529,7 +1542,7 @@ impl<S: Store> NostrBridge<S> {
 
             let mut min_created_at = u64::MAX;
             for event in events {
-                min_created_at = min_created_at.min(event.created_at.as_u64());
+                min_created_at = min_created_at.min(event.created_at.as_secs());
                 if event.kind.is_ephemeral() {
                     continue;
                 }
@@ -1681,7 +1694,7 @@ fn stored_event_from_nostr(event: &nostr_sdk::Event) -> StoredNostrEvent {
     StoredNostrEvent {
         id: event.id.to_hex(),
         pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         kind: event.kind.as_u16() as u32,
         tags: event
             .tags

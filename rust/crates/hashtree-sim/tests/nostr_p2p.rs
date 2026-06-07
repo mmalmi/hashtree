@@ -22,8 +22,8 @@ mod nostr_p2p {
         let filter = Filter::new()
             .authors(vec![a_pub])
             .kinds(vec![Kind::Custom(30078)])
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [tree_name])
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), ["hashtree"])
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), tree_name)
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree")
             .limit(10);
 
         mesh.request("c", "sub-1", vec![filter], 2);

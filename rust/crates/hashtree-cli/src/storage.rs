@@ -181,15 +181,15 @@ fn lmdb_map_size_for_existing_env(path: &Path, requested_bytes: u64) -> Result<u
     let existing_bytes = std::fs::metadata(path.join("data.mdb"))
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let existing_headroom = if existing_bytes == 0 {
-        0
-    } else {
-        existing_bytes
+    let requested = if existing_bytes > requested_bytes {
+        let existing_headroom = existing_bytes
             .saturating_div(10)
-            .max(LMDB_METADATA_REOPEN_HEADROOM_BYTES)
+            .max(LMDB_METADATA_REOPEN_HEADROOM_BYTES);
+        existing_bytes.saturating_add(existing_headroom)
+    } else {
+        requested_bytes
     };
-    let requested =
-        align_lmdb_map_size(requested_bytes.max(existing_bytes.saturating_add(existing_headroom)));
+    let requested = align_lmdb_map_size(requested);
     usize::try_from(requested).context("LMDB map size exceeds usize")
 }
 
@@ -2493,6 +2493,34 @@ mod tests {
         );
 
         drop(store);
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn lmdb_map_size_for_existing_env_keeps_matching_requested_size() -> Result<()> {
+        let temp = TempDir::new()?;
+        let requested = LMDB_METADATA_MIN_MAP_SIZE_BYTES;
+        std::fs::File::create(temp.path().join("data.mdb"))?.set_len(requested)?;
+
+        let map_size = lmdb_map_size_for_existing_env(temp.path(), requested)? as u64;
+
+        assert_eq!(map_size, align_lmdb_map_size(requested));
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn lmdb_map_size_for_existing_env_adds_headroom_when_existing_is_larger() -> Result<()> {
+        let temp = TempDir::new()?;
+        let requested = LMDB_METADATA_MIN_MAP_SIZE_BYTES;
+        let existing = requested + 4096;
+        std::fs::File::create(temp.path().join("data.mdb"))?.set_len(existing)?;
+
+        let map_size = lmdb_map_size_for_existing_env(temp.path(), requested)? as u64;
+        let expected = align_lmdb_map_size(existing + LMDB_METADATA_REOPEN_HEADROOM_BYTES);
+
+        assert_eq!(map_size, expected);
         Ok(())
     }
 

@@ -193,8 +193,9 @@ fn build_pubkey_list_event(
         .filter_map(|pk_hex| PublicKey::from_hex(pk_hex).ok().map(Tag::public_key))
         .collect();
 
-    EventBuilder::new(kind, "", tags)
-        .to_event(keys)
+    EventBuilder::new(kind, "")
+        .tags(tags)
+        .sign_with_keys(keys)
         .context("Failed to sign list event")
 }
 
@@ -211,14 +212,19 @@ pub(crate) fn build_mute_list_event(
         };
 
         if let Some(reason) = entry.reason.as_ref().filter(|r| !r.is_empty()) {
-            tags.push(Tag::parse(&["p", &pubkey.to_hex(), reason])?);
+            tags.push(Tag::parse(vec![
+                "p".to_string(),
+                pubkey.to_hex(),
+                reason.to_string(),
+            ])?);
         } else {
             tags.push(Tag::public_key(pubkey));
         }
     }
 
-    EventBuilder::new(nostr::Kind::Custom(10000), "", tags)
-        .to_event(keys)
+    EventBuilder::new(nostr::Kind::Custom(10000), "")
+        .tags(tags)
+        .sign_with_keys(keys)
         .context("Failed to sign mute list event")
 }
 
@@ -342,7 +348,7 @@ pub(crate) async fn update_profile(
 ) -> Result<()> {
     use nostr::nips::nip19::ToBech32;
     use nostr::{EventBuilder, Filter, Keys, Kind};
-    use nostr_sdk::{ClientBuilder, EventSource};
+    use nostr_sdk::ClientBuilder;
     use std::time::Duration;
 
     // Load config for relay list
@@ -372,14 +378,12 @@ pub(crate) async fn update_profile(
         .limit(1);
 
     let timeout = Duration::from_secs(5);
-    let events = tokio::time::timeout(
-        timeout,
-        client.get_events_of(vec![filter], EventSource::relays(None)),
-    )
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .unwrap_or_default();
+    let events = tokio::time::timeout(timeout, client.fetch_events(filter, timeout))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|events| events.to_vec())
+        .unwrap_or_default();
     let _ = client.disconnect().await;
 
     // Parse existing profile or start fresh
@@ -420,8 +424,8 @@ pub(crate) async fn update_profile(
 
     // Build and sign kind 0 event
     let content = serde_json::to_string(&profile)?;
-    let event = EventBuilder::new(Kind::Metadata, &content, [])
-        .to_event(&keys)
+    let event = EventBuilder::new(Kind::Metadata, &content)
+        .sign_with_keys(&keys)
         .context("Failed to sign profile event")?;
 
     // Reuse the client we already have connected for publishing
@@ -433,7 +437,7 @@ pub(crate) async fn update_profile(
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Publish using nostr_sdk
-    match client.send_event(event).await {
+    match client.send_event(&event).await {
         Ok(output) => {
             let success_count = output.success.len();
             let failed_count = output.failed.len();
@@ -470,11 +474,7 @@ pub(crate) async fn list_following(data_dir: &Path) -> Result<()> {
     println!("Following {} users:", contacts.len());
     for pk_hex in &contacts {
         if let Ok(pk) = PublicKey::from_hex(pk_hex) {
-            if let Ok(npub) = pk.to_bech32() {
-                println!("  {}", npub);
-            } else {
-                println!("  {}", pk_hex);
-            }
+            println!("  {}", pk.to_bech32().expect("npub encoding is infallible"));
         } else {
             println!("  {} (invalid)", pk_hex);
         }
@@ -499,11 +499,7 @@ pub(crate) async fn list_muted(data_dir: &Path) -> Result<()> {
     println!("Muted {} users:", mutes.len());
     for entry in &mutes {
         let label = if let Ok(pk) = PublicKey::from_hex(&entry.pubkey) {
-            if let Ok(npub) = pk.to_bech32() {
-                npub
-            } else {
-                entry.pubkey.clone()
-            }
+            pk.to_bech32().expect("npub encoding is infallible")
         } else {
             format!("{} (invalid)", entry.pubkey)
         };

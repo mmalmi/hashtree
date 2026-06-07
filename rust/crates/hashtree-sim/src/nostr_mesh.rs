@@ -155,8 +155,9 @@ impl NostrMesh {
             ),
             Tag::custom(TagKind::Custom("hash".into()), vec![hash_hex.to_string()]),
         ];
-        let event =
-            EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags).to_event(&node.keys)?;
+        let event = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+            .tags(tags)
+            .sign_with_keys(&node.keys)?;
         self.publish_event(node_id, event, ttl);
         Ok(())
     }
@@ -193,8 +194,9 @@ impl NostrMesh {
             .ok_or_else(|| anyhow::anyhow!("unknown node"))?;
         let content = serde_json::to_string(msg)?;
         let tags = vec![Tag::public_key(*target_pubkey)];
-        let event = EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), content, tags)
-            .to_event(&node.keys)?;
+        let event = EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), content)
+            .tags(tags)
+            .sign_with_keys(&node.keys)?;
         let frame =
             MeshNostrFrame::new_event_with_id(event, node_id, frame_id, ttl.clamp(1, MESH_MAX_HTL));
         self.publish_mesh_frame(node_id, frame);
@@ -379,7 +381,10 @@ impl NostrMesh {
         };
 
         for event in events {
-            if filters.iter().any(|filter| filter.match_event(&event)) {
+            if filters
+                .iter()
+                .any(|filter| filter.match_event(&event, Default::default()))
+            {
                 let reply = Envelope::Reply {
                     origin: origin.to_string(),
                     sender: node_id.to_string(),

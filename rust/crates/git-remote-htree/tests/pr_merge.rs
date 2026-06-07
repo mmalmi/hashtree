@@ -115,8 +115,9 @@ fn test_pr_auto_merge_detection() {
         nostr::Tag::custom(nostr::TagKind::custom("c"), vec![feature_tip.clone()]),
     ];
 
-    let pr_event = nostr::EventBuilder::new(nostr::Kind::Custom(1618), "", pr_tags)
-        .to_event(&contributor_keys)
+    let pr_event = nostr::EventBuilder::new(nostr::Kind::Custom(1618), "")
+        .tags(pr_tags)
+        .sign_with_keys(&contributor_keys)
         .expect("Failed to build PR event");
     let pr_event_id = pr_event.id.to_hex();
     println!("PR event ID: {}", &pr_event_id[..12]);
@@ -237,10 +238,8 @@ fn test_pr_auto_merge_ignores_untrusted_spoofed_status() {
     let fixture = setup_pr_merge_fixture(&relay, &server, "test-pr-merge-spoof");
 
     let attacker_keys = nostr::Keys::generate();
-    let spoofed_status = nostr::EventBuilder::new(
-        nostr::Kind::Custom(1632),
-        "",
-        vec![
+    let spoofed_status = nostr::EventBuilder::new(nostr::Kind::Custom(1632), "")
+        .tags(vec![
             nostr::Tag::custom(
                 nostr::TagKind::custom("e"),
                 vec![fixture.pr_event_id.clone()],
@@ -249,11 +248,10 @@ fn test_pr_auto_merge_ignores_untrusted_spoofed_status() {
                 nostr::TagKind::custom("p"),
                 vec![fixture.contributor_pubkey_hex.clone()],
             ),
-        ],
-    )
-    .custom_created_at(nostr::Timestamp::from_secs(1_800_000_000))
-    .to_event(&attacker_keys)
-    .expect("Failed to build spoofed status event");
+        ])
+        .custom_created_at(nostr::Timestamp::from_secs(1_800_000_000))
+        .sign_with_keys(&attacker_keys)
+        .expect("Failed to build spoofed status event");
     publish_event_to_relay(&relay.url(), &spoofed_status);
 
     let push2 = merge_feature_and_push(&fixture);
@@ -345,10 +343,8 @@ fn test_pr_auto_merge_skips_when_pr_status_lookup_times_out() {
     let fixture = setup_pr_merge_fixture(&relay, &server, "test-pr-merge-status-timeout");
 
     let maintainer_keys = load_test_env_keys(&fixture._maintainer_env);
-    let preexisting_applied = nostr::EventBuilder::new(
-        nostr::Kind::Custom(1631),
-        "",
-        vec![
+    let preexisting_applied = nostr::EventBuilder::new(nostr::Kind::Custom(1631), "")
+        .tags(vec![
             nostr::Tag::custom(
                 nostr::TagKind::custom("e"),
                 vec![fixture.pr_event_id.clone()],
@@ -357,11 +353,10 @@ fn test_pr_auto_merge_skips_when_pr_status_lookup_times_out() {
                 nostr::TagKind::custom("p"),
                 vec![fixture.contributor_pubkey_hex.clone()],
             ),
-        ],
-    )
-    .custom_created_at(nostr::Timestamp::from_secs(1_800_000_000))
-    .to_event(&maintainer_keys)
-    .expect("Failed to build maintainer applied status event");
+        ])
+        .custom_created_at(nostr::Timestamp::from_secs(1_800_000_000))
+        .sign_with_keys(&maintainer_keys)
+        .expect("Failed to build maintainer applied status event");
     publish_event_to_relay(&relay.url(), &preexisting_applied);
 
     let before_count = count_stored_merged_status_events(
@@ -597,8 +592,9 @@ fn setup_pr_merge_fixture(
         nostr::Tag::custom(nostr::TagKind::custom("c"), vec![feature_tip]),
     ];
 
-    let pr_event = nostr::EventBuilder::new(nostr::Kind::Custom(1618), "", pr_tags)
-        .to_event(&contributor_keys)
+    let pr_event = nostr::EventBuilder::new(nostr::Kind::Custom(1618), "")
+        .tags(pr_tags)
+        .sign_with_keys(&contributor_keys)
         .expect("Failed to build PR event");
     let pr_event_id = pr_event.id.to_hex();
     publish_event_to_relay(&relay.url(), &pr_event);
@@ -689,8 +685,9 @@ fn create_branch_and_publish_pr(
         nostr::Tag::custom(nostr::TagKind::custom("c"), vec![commit_tip]),
     ];
 
-    let pr_event = nostr::EventBuilder::new(nostr::Kind::Custom(1618), "", pr_tags)
-        .to_event(&contributor_keys)
+    let pr_event = nostr::EventBuilder::new(nostr::Kind::Custom(1618), "")
+        .tags(pr_tags)
+        .sign_with_keys(&contributor_keys)
         .expect("Failed to build PR event");
     let pr_event_id = pr_event.id.to_hex();
     publish_event_to_relay(&relay.url(), &pr_event);

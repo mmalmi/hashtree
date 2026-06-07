@@ -23,7 +23,7 @@ thiserror = "1.0"
 semver = "1"
 
 # P2P/discovery support
-nostr-sdk = { version = "0.35", default-features = false, features = ["nip44", "nip59"] }
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
 futures = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
@@ -59,7 +59,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 
 # Nostr
-nostr = { version = "0.35", features = ["nip44"] }
+nostr = { version = "0.44", features = ["nip44"] }
 
 # Utilities
 anyhow = "1"

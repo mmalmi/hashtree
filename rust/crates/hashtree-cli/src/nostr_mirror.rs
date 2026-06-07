@@ -14,7 +14,7 @@ use nostr::{
     Timestamp,
 };
 use nostr_sdk::{
-    pool::RelayLimits, prelude::RelayPoolNotification, Client, Keys, Options, RelayStatus,
+    pool::RelayLimits, prelude::RelayPoolNotification, Client, ClientOptions, Keys, RelayStatus,
 };
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
@@ -214,7 +214,10 @@ impl BackgroundNostrMirror {
         let client = if let Some(max_size) = config.relay_event_max_size {
             let mut limits = RelayLimits::default();
             limits.events.max_size = Some(max_size);
-            Client::with_opts(Keys::generate(), Options::new().relay_limits(limits))
+            Client::builder()
+                .signer(Keys::generate())
+                .opts(ClientOptions::new().relay_limits(limits))
+                .build()
         } else {
             Client::new(Keys::generate())
         };
@@ -230,7 +233,7 @@ impl BackgroundNostrMirror {
             if config.publish_relays.is_empty() {
                 None
             } else {
-                let client = Client::with_opts(keys, Options::new().wait_for_send(false));
+                let client = Client::new(keys);
                 for relay in &config.publish_relays {
                     client
                         .add_relay(relay)
@@ -491,8 +494,42 @@ impl BackgroundNostrMirror {
                 }
                 _ = refresh_interval.tick() => {
                     let authors = self.collect_authors()?;
+                    let mut reconnected_relay = None;
+                    for (relay_url, status) in self.capture_relay_statuses().await {
+                        let previous = relay_statuses.insert(relay_url.clone(), status);
+                        if reconnected_relay.is_none()
+                            && Self::should_history_sync_on_reconnect(
+                                self.config.history_sync_on_reconnect,
+                                previous,
+                                status,
+                            )
+                        {
+                            reconnected_relay = Some(relay_url);
+                        }
+                    }
+                    if let Some(relay_url) = reconnected_relay {
+                        if Self::should_run_reconnect_history_sync(
+                            last_reconnect_history_sync_at.as_ref(),
+                        ) && !authors.is_empty()
+                        {
+                            info!(
+                                "Nostr mirror relay reconnected; running catch-up history sync: relay={} authors={} negentropy_only={}",
+                                relay_url,
+                                authors.len(),
+                                self.config.require_negentropy
+                            );
+                            self.spawn_author_history_sync(
+                                "relay reconnect catch-up",
+                                authors.clone(),
+                                false,
+                                false,
+                            );
+                            last_reconnect_history_sync_at = Some(Instant::now());
+                        }
+                    }
                     let new_authors = authors
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .filter(|author| !subscribed_authors.contains(author))
                         .collect::<Vec<_>>();
                     if !new_authors.is_empty() {
@@ -549,35 +586,6 @@ impl BackgroundNostrMirror {
                     match notification {
                         Ok(RelayPoolNotification::Event { event, .. }) => {
                             self.ingest_live_event(&event)?;
-                        }
-                        Ok(RelayPoolNotification::RelayStatus { relay_url, status }) => {
-                            let relay_url = relay_url.to_string();
-                            let previous = relay_statuses.insert(relay_url.clone(), status);
-                            if Self::should_history_sync_on_reconnect(
-                                self.config.history_sync_on_reconnect,
-                                previous,
-                                status,
-                            ) && Self::should_run_reconnect_history_sync(
-                                    last_reconnect_history_sync_at.as_ref(),
-                                )
-                            {
-                                let authors = self.collect_authors()?;
-                                if !authors.is_empty() {
-                                    info!(
-                                        "Nostr mirror relay reconnected; running catch-up history sync: relay={} authors={} negentropy_only={}",
-                                        relay_url,
-                                        authors.len(),
-                                        self.config.require_negentropy
-                                    );
-                                    self.spawn_author_history_sync(
-                                        "relay reconnect catch-up",
-                                        authors,
-                                        false,
-                                        false,
-                                    );
-                                    last_reconnect_history_sync_at = Some(Instant::now());
-                                }
-                            }
                         }
                         Ok(RelayPoolNotification::Shutdown) => break,
                         Ok(_) => {}
@@ -745,7 +753,7 @@ impl BackgroundNostrMirror {
     async fn capture_relay_statuses(&self) -> HashMap<String, RelayStatus> {
         let mut statuses = HashMap::new();
         for (relay_url, relay) in self.client.relays().await {
-            statuses.insert(relay_url.to_string(), relay.status().await);
+            statuses.insert(relay_url.to_string(), relay.status());
         }
         statuses
     }
@@ -759,7 +767,7 @@ impl BackgroundNostrMirror {
 
     async fn client_has_connected_relay(client: &Client) -> bool {
         for (_relay_url, relay) in client.relays().await {
-            if relay.status().await == RelayStatus::Connected {
+            if relay.status() == RelayStatus::Connected {
                 return true;
             }
         }
@@ -1503,7 +1511,7 @@ impl BackgroundNostrMirror {
                 .kinds(self.config.kinds.iter().copied().map(Kind::from))
                 .since(since);
 
-            if let Err(err) = self.client.subscribe(vec![filter], None).await {
+            if let Err(err) = self.client.subscribe(filter, None).await {
                 warn!(
                     "Nostr mirror author subscription failed: authors={} error={:#}",
                     chunk.len(),
@@ -2042,7 +2050,7 @@ impl BackgroundNostrMirror {
         let mut failed_relays = Vec::new();
 
         match publish_client
-            .send_event_to(relays.iter().map(|relay| relay.as_str()), event.clone())
+            .send_event_to(relays.iter().map(|relay| relay.as_str()), event)
             .await
         {
             Ok(output) => {
@@ -2056,10 +2064,12 @@ impl BackgroundNostrMirror {
                         successful_relays.push(relay.clone());
                     }
                 }
-                failed_relays.extend(output.failed.into_iter().map(|(url, reason)| match reason {
-                    Some(reason) => format!("{url}: {reason}"),
-                    None => format!("{url}: relay rejected publish"),
-                }));
+                failed_relays.extend(
+                    output
+                        .failed
+                        .into_iter()
+                        .map(|(url, reason)| format!("{url}: {reason}")),
+                );
             }
             Err(err) => {
                 failed_relays.push(format!("publish relays: {err}"));
@@ -2074,7 +2084,7 @@ impl BackgroundNostrMirror {
         relays: &[String],
         event: &Event,
     ) -> (Vec<String>, Vec<String>) {
-        let client = Client::with_opts(Keys::generate(), Options::new().wait_for_send(false));
+        let client = Client::new(Keys::generate());
         let mut setup_failures = Vec::new();
         for relay in relays {
             if let Err(err) = client.add_relay(relay).await {
@@ -2126,7 +2136,9 @@ impl BackgroundNostrMirror {
             ));
         }
 
-        EventBuilder::new(Kind::Custom(30078), "", tags).custom_created_at(created_at)
+        EventBuilder::new(Kind::Custom(30078), "")
+            .tags(tags)
+            .custom_created_at(created_at)
     }
 }
 
@@ -2142,7 +2154,7 @@ fn is_missing_local_blob_message(message: &str) -> bool {
 
 fn next_replaceable_created_at(now: Timestamp, latest_existing: Option<Timestamp>) -> Timestamp {
     match latest_existing {
-        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_u64().saturating_add(1)),
+        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_secs().saturating_add(1)),
         _ => now,
     }
 }

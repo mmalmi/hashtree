@@ -7,6 +7,15 @@ use std::time::Duration;
 use nostr::{EventBuilder, JsonUtil, Kind, Tag, ToBech32};
 use tempfile::TempDir;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 #[test]
 fn socialgraph_filter_drops_unknown_and_overmuted() {
     let temp = TempDir::new().unwrap();
@@ -34,36 +43,36 @@ max_write_distance = 2\n",
     let alice_keys = nostr::Keys::generate();
     let alice_pk = alice_keys.public_key().to_bytes();
     let alice_tag = Tag::public_key(alice_keys.public_key());
-    let root_follows_alice = EventBuilder::new(Kind::ContactList, "", vec![alice_tag])
-        .to_event(&root_keys)
+    let root_follows_alice = event_builder!(Kind::ContactList, "", vec![alice_tag])
+        .sign_with_keys(&root_keys)
         .unwrap();
     hashtree_cli::socialgraph::ingest_event(&graph_store, "sub1", &root_follows_alice.as_json());
 
     let charlie_keys = nostr::Keys::generate();
     let charlie_pk = charlie_keys.public_key().to_bytes();
     let charlie_tag = Tag::public_key(charlie_keys.public_key());
-    let alice_follows_charlie = EventBuilder::new(Kind::ContactList, "", vec![charlie_tag.clone()])
-        .to_event(&alice_keys)
+    let alice_follows_charlie = event_builder!(Kind::ContactList, "", vec![charlie_tag.clone()])
+        .sign_with_keys(&alice_keys)
         .unwrap();
     hashtree_cli::socialgraph::ingest_event(&graph_store, "sub2", &alice_follows_charlie.as_json());
 
-    let root_mutes_charlie = EventBuilder::new(Kind::Custom(10000), "", vec![charlie_tag])
-        .to_event(&root_keys)
+    let root_mutes_charlie = event_builder!(Kind::Custom(10000), "", vec![charlie_tag])
+        .sign_with_keys(&root_keys)
         .unwrap();
     hashtree_cli::socialgraph::ingest_event(&graph_store, "sub3", &root_mutes_charlie.as_json());
 
     thread::sleep(Duration::from_millis(200));
     drop(graph_store);
 
-    let alice_note = EventBuilder::new(Kind::TextNote, "hello from alice", vec![])
-        .to_event(&alice_keys)
+    let alice_note = event_builder!(Kind::TextNote, "hello from alice")
+        .sign_with_keys(&alice_keys)
         .unwrap();
     let bob_keys = nostr::Keys::generate();
-    let bob_note = EventBuilder::new(Kind::TextNote, "hello from bob", vec![])
-        .to_event(&bob_keys)
+    let bob_note = event_builder!(Kind::TextNote, "hello from bob")
+        .sign_with_keys(&bob_keys)
         .unwrap();
-    let charlie_note = EventBuilder::new(Kind::TextNote, "hello from charlie", vec![])
-        .to_event(&charlie_keys)
+    let charlie_note = event_builder!(Kind::TextNote, "hello from charlie")
+        .sign_with_keys(&charlie_keys)
         .unwrap();
 
     let input = format!(

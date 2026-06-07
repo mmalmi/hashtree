@@ -36,6 +36,15 @@ use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 use tower::ServiceExt;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 #[derive(Clone)]
 struct UpstreamBlobTestState {
     store: Arc<HashtreeStore>,
@@ -283,10 +292,16 @@ async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>) -> String {
                 filters,
             } = parsed
             {
-                for event in events
-                    .iter()
-                    .filter(|event| filters.iter().any(|filter| filter.match_event(event)))
-                {
+                let subscription_id = subscription_id.into_owned();
+                let filters = filters
+                    .into_iter()
+                    .map(|filter| filter.into_owned())
+                    .collect::<Vec<_>>();
+                for event in events.iter().filter(|event| {
+                    filters
+                        .iter()
+                        .any(|filter| filter.match_event(event, Default::default()))
+                }) {
                     let _ = write
                         .send(TungsteniteMessage::Text(
                             NostrRelayMessage::event(subscription_id.clone(), event.clone())
@@ -1704,7 +1719,7 @@ async fn resolve_root_offline_accepts_npub_owner_for_local_relay_events() {
     };
     let hash_hex = "ab".repeat(32);
     let tree_name = "offline-tree";
-    let event = EventBuilder::new(
+    let event = event_builder!(
         Kind::Custom(30078),
         "",
         [
@@ -1716,7 +1731,7 @@ async fn resolve_root_offline_accepts_npub_owner_for_local_relay_events() {
             Tag::custom(TagKind::Custom("hash".into()), vec![hash_hex.clone()]),
         ],
     )
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
     relay.ingest_trusted_event(event.clone()).await.unwrap();
 
@@ -1746,7 +1761,7 @@ async fn nostr_profile_queries_upstream_relays_after_local_miss() {
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
     let keys = Keys::generate();
     let relay = test_nostr_relay(&temp_dir, keys.public_key().to_hex()).await;
-    let event = EventBuilder::new(
+    let event = event_builder!(
         Kind::Metadata,
         serde_json::json!({
             "display_name": "Sirius Business",
@@ -1756,7 +1771,7 @@ async fn nostr_profile_queries_upstream_relays_after_local_miss() {
         [],
     )
     .custom_created_at(Timestamp::from_secs(42))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
     let upstream_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
     let mut state = test_app_state(store, Vec::new());
@@ -1857,7 +1872,7 @@ async fn resolve_to_hash_refresh_uses_local_relay_before_relays() {
     let cached_hash = "11".repeat(32);
     let refreshed_hash = "22".repeat(32);
 
-    let event = EventBuilder::new(
+    let event = event_builder!(
         Kind::Custom(30078),
         "",
         [
@@ -1869,7 +1884,7 @@ async fn resolve_to_hash_refresh_uses_local_relay_before_relays() {
             Tag::custom(TagKind::Custom("hash".into()), vec![refreshed_hash.clone()]),
         ],
     )
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
     relay.ingest_trusted_event(event.clone()).await.unwrap();
 
@@ -1920,7 +1935,7 @@ async fn resolve_to_hash_refresh_uses_upstream_relays_after_local_miss() {
     let tree_name = "video";
     let refreshed_hash = "33".repeat(32);
 
-    let event = EventBuilder::new(
+    let event = event_builder!(
         Kind::Custom(30078),
         "",
         [
@@ -1932,7 +1947,7 @@ async fn resolve_to_hash_refresh_uses_upstream_relays_after_local_miss() {
             Tag::custom(TagKind::Custom("hash".into()), vec![refreshed_hash.clone()]),
         ],
     )
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
     let upstream_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
 
@@ -2003,7 +2018,7 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
         .unwrap();
 
     let tree_name = "videos/Mine Bombers in-game music";
-    let historical_event = EventBuilder::new(
+    let historical_event = event_builder!(
         Kind::Custom(30078),
         "",
         [
@@ -2019,14 +2034,14 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
         ],
     )
     .custom_created_at(Timestamp::from(10))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
     relay
         .ingest_trusted_event(historical_event.clone())
         .await
         .unwrap();
 
-    let current_event = EventBuilder::new(
+    let current_event = event_builder!(
         Kind::Custom(30078),
         "",
         [
@@ -2042,7 +2057,7 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
         ],
     )
     .custom_created_at(Timestamp::from(20))
-    .to_event(&keys)
+    .sign_with_keys(&keys)
     .unwrap();
     relay.ingest_trusted_event(current_event).await.unwrap();
 

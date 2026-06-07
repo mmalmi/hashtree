@@ -115,16 +115,16 @@ fn build_exact_tree_filter(key: &str) -> Result<Filter> {
         .author(author)
         .custom_tag(
             SingleLetterTag::lowercase(Alphabet::D),
-            vec![tree_name.to_string()],
+            tree_name.to_string(),
         )
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"]))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree"))
 }
 
 fn build_author_tree_filter(author: PublicKey) -> Filter {
     Filter::new()
         .kind(Kind::Custom(30078))
         .author(author)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"])
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree")
 }
 
 fn load_author_signing_keys() -> HashMap<String, Keys> {
@@ -555,7 +555,7 @@ impl BackgroundSync {
                 }
             };
 
-            match self.client.subscribe(vec![filter], None).await {
+            match self.client.subscribe(filter, None).await {
                 Ok(_) => {
                     info!("Subscribed to pinned ref {}", key);
                     self.subscribed_pinned_refs.write().await.insert(key);
@@ -628,7 +628,7 @@ impl BackgroundSync {
         for (author_hex, author) in new_authors {
             match self
                 .client
-                .subscribe(vec![build_author_tree_filter(author)], None)
+                .subscribe(build_author_tree_filter(author), None)
                 .await
             {
                 Ok(_) => {
@@ -657,7 +657,7 @@ impl BackgroundSync {
     async fn subscribe_own_trees(&self) -> Result<()> {
         let filter = build_author_tree_filter(self.my_pubkey);
 
-        match self.client.subscribe(vec![filter], None).await {
+        match self.client.subscribe(filter, None).await {
             Ok(_) => {
                 info!(
                     "Subscribed to own trees for {}",
@@ -710,9 +710,9 @@ impl BackgroundSync {
         let filter = Filter::new()
             .kind(Kind::Custom(30078))
             .authors(pubkeys.clone())
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), vec!["hashtree"]);
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree");
 
-        match self.client.subscribe(vec![filter], None).await {
+        match self.client.subscribe(filter, None).await {
             Ok(_) => {
                 info!("Subscribed to {} followed users' trees", pubkeys.len());
             }
@@ -957,10 +957,8 @@ mod tests {
             nip44::Version::V2,
         )
         .expect("encrypt private root key");
-        let event = EventBuilder::new(
-            Kind::Custom(30078),
-            "",
-            vec![
+        let event = EventBuilder::new(Kind::Custom(30078), "")
+            .tags(vec![
                 Tag::identifier("backup".to_string()),
                 Tag::custom(
                     TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
@@ -968,10 +966,9 @@ mod tests {
                 ),
                 Tag::custom(TagKind::Custom("hash".into()), vec![hex::encode(root_hash)]),
                 Tag::custom(TagKind::Custom("selfEncryptedKey".into()), vec![ciphertext]),
-            ],
-        )
-        .to_event(&author)
-        .expect("sign private root event");
+            ])
+            .sign_with_keys(&author)
+            .expect("sign private root event");
 
         let cid = cid_from_tree_event(&event, Some(&author)).expect("decrypt tracked private cid");
 

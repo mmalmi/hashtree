@@ -58,10 +58,9 @@ impl<S: Store> HashTree<S> {
             let child_path = match &link.name {
                 Some(name) => {
                     if Self::is_internal_directory_link(&node, link) {
-                        // Internal nodes inherit parent's key
                         let sub_cid = Cid {
                             hash: link.hash,
-                            key: cid.key,
+                            key: link.key,
                         };
                         Box::pin(self.walk_recursive(&sub_cid, path, entries)).await?;
                         continue;
@@ -161,7 +160,15 @@ impl<S: Store> HashTree<S> {
 
                 // Decrypt if key is present
                 let data = if let Some(key) = &node_cid.key {
-                    decrypt_chk(&data, key).map_err(|e| HashTreeError::Decryption(e.to_string()))?
+                    decrypt_chk(&data, key).map_err(|e| {
+                        HashTreeError::Decryption(format!(
+                            "{} at path '{}' hash {} key {}",
+                            e,
+                            node_path,
+                            hex::encode(node_cid.hash),
+                            hex::encode(key)
+                        ))
+                    })?
                 } else {
                     data
                 };
@@ -196,10 +203,9 @@ impl<S: Store> HashTree<S> {
                     let child_path = match &link.name {
                         Some(name) => {
                             if Self::is_internal_directory_link(&node, link) {
-                                // Internal chunked nodes - inherit parent's key, same path
                                 let sub_cid = Cid {
                                     hash: link.hash,
-                                    key: node_cid.key,
+                                    key: link.key,
                                 };
                                 pending.push_back((sub_cid, node_path.clone()));
                                 continue;
@@ -274,7 +280,13 @@ impl<S: Store> HashTree<S> {
                                 Ok(d) => d,
                                 Err(e) => {
                                     return Some((
-                                        Err(HashTreeError::Decryption(e.to_string())),
+                                        Err(HashTreeError::Decryption(format!(
+                                            "{} at path '{}' hash {} key {}",
+                                            e,
+                                            path,
+                                            hex::encode(cid.hash),
+                                            hex::encode(key)
+                                        ))),
                                         WalkStreamState::Done,
                                     ))
                                 }
@@ -358,6 +370,26 @@ impl<S: Store> HashTree<S> {
                 }
             };
 
+            let data = if let Some(key) = &item.key {
+                match decrypt_chk(&data, key) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Some((
+                            Err(HashTreeError::Decryption(format!(
+                                "{} at path '{}' hash {} key {}",
+                                e,
+                                item.path,
+                                hex::encode(item.hash),
+                                hex::encode(key)
+                            ))),
+                            WalkStreamState::Done,
+                        ))
+                    }
+                }
+            } else {
+                data
+            };
+
             let node = match try_decode_tree_node(&data) {
                 Some(n) => n,
                 None => {
@@ -385,7 +417,7 @@ impl<S: Store> HashTree<S> {
                 hash: item.hash,
                 link_type: node.node_type,
                 size: node_size,
-                key: None, // directories are not encrypted
+                key: item.key,
             };
 
             // Push children to stack

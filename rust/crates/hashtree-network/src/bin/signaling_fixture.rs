@@ -34,7 +34,7 @@ fn encode_offer() -> Result<()> {
         &sender_keys,
         &sender_peer_id,
         &msg,
-        Kind::Ephemeral(NOSTR_KIND_HASHTREE),
+        Kind::from_u16(NOSTR_KIND_HASHTREE),
     )?;
     println!("{}", serde_json::to_string(&event)?);
     Ok(())

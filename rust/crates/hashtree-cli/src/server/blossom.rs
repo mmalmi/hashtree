@@ -1538,20 +1538,17 @@ mod tests {
         use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
 
         let now = Timestamp::now();
-        let event = EventBuilder::new(
-            Kind::Custom(BLOSSOM_AUTH_KIND),
-            "",
-            vec![
+        let event = EventBuilder::new(Kind::Custom(BLOSSOM_AUTH_KIND), "")
+            .tags(vec![
                 Tag::custom(TagKind::Custom("t".into()), vec!["upload".to_string()]),
                 Tag::custom(
                     TagKind::Custom("expiration".into()),
-                    vec![(now.as_u64() + 300).to_string()],
+                    vec![(now.as_secs() + 300).to_string()],
                 ),
-            ],
-        )
-        .custom_created_at(now)
-        .to_event(keys)
-        .expect("sign blossom auth");
+            ])
+            .custom_created_at(now)
+            .sign_with_keys(keys)
+            .expect("sign blossom auth");
         let json = serde_json::to_vec(&event).expect("serialize auth event");
         format!(
             "Nostr {}",

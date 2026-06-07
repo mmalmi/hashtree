@@ -106,7 +106,7 @@ where
 
 fn next_replaceable_created_at(now: Timestamp, latest_existing: Option<Timestamp>) -> Timestamp {
     match latest_existing {
-        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_u64().saturating_add(1)),
+        Some(latest) if latest >= now => Timestamp::from_secs(latest.as_secs().saturating_add(1)),
         _ => now,
     }
 }
@@ -330,7 +330,7 @@ impl NostrRootResolver {
             .author(pubkey)
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.to_string()],
+                tree_name.to_string(),
             )
     }
 
@@ -360,8 +360,9 @@ impl NostrRootResolver {
             let timeout = self.config.resolve_timeout;
             join_set.spawn(async move {
                 let result = client
-                    .get_events_from(vec![relay.clone()], vec![filter], Some(timeout))
-                    .await;
+                    .fetch_events_from(vec![relay.clone()], filter, timeout)
+                    .await
+                    .map(|events| events.to_vec());
                 (relay, result)
             });
         }
@@ -639,7 +640,8 @@ impl NostrRootResolver {
         let event = self
             .client
             .sign_event_builder(
-                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags)
+                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+                    .tags(tags)
                     .custom_created_at(created_at),
             )
             .await
@@ -648,7 +650,7 @@ impl NostrRootResolver {
         let client = self.client.clone();
         let event_for_send = event.clone();
         let output =
-            await_publish_result(async move { client.send_event(event_for_send).await }).await?;
+            await_publish_result(async move { client.send_event(&event_for_send).await }).await?;
 
         {
             let mut subs = self.subscriptions.write().await;
@@ -752,7 +754,7 @@ impl RootResolver for NostrRootResolver {
         // Spawn subscription handler
         let client = self.client.clone();
         tokio::spawn(async move {
-            let sub_id = client.subscribe(vec![filter], None).await;
+            let sub_id = client.subscribe(filter, None).await;
 
             if sub_id.is_err() {
                 return;
@@ -841,7 +843,8 @@ impl RootResolver for NostrRootResolver {
         let event = self
             .client
             .sign_event_builder(
-                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags)
+                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+                    .tags(tags)
                     .custom_created_at(created_at),
             )
             .await
@@ -850,7 +853,7 @@ impl RootResolver for NostrRootResolver {
         let client = self.client.clone();
         let event_for_send = event.clone();
         let output =
-            await_publish_result(async move { client.send_event(event_for_send).await }).await?;
+            await_publish_result(async move { client.send_event(&event_for_send).await }).await?;
 
         {
             let mut subs = self.subscriptions.write().await;
@@ -906,7 +909,8 @@ impl RootResolver for NostrRootResolver {
         let event = self
             .client
             .sign_event_builder(
-                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", tags)
+                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+                    .tags(tags)
                     .custom_created_at(created_at),
             )
             .await
@@ -915,7 +919,7 @@ impl RootResolver for NostrRootResolver {
         let client = self.client.clone();
         let event_for_send = event.clone();
         let output =
-            await_publish_result(async move { client.send_event(event_for_send).await }).await?;
+            await_publish_result(async move { client.send_event(&event_for_send).await }).await?;
 
         {
             let mut subs = self.subscriptions.write().await;
@@ -944,10 +948,7 @@ impl RootResolver for NostrRootResolver {
         let filter = Filter::new()
             .kind(Kind::Custom(HASHTREE_KIND))
             .author(pubkey)
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                vec![HASHTREE_LABEL],
-            );
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), HASHTREE_LABEL);
 
         let events = self.fetch_verified_events_from_relays(filter).await?;
 
@@ -1299,9 +1300,10 @@ mod tests {
             ),
             Tag::custom(TagKind::Custom(TAG_HASH.into()), vec![hash.to_string()]),
         ];
-        EventBuilder::new(Kind::Custom(HASHTREE_KIND), content, tags)
+        EventBuilder::new(Kind::Custom(HASHTREE_KIND), content)
+            .tags(tags)
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(keys)
+            .sign_with_keys(keys)
             .unwrap()
     }
 
@@ -1414,14 +1416,14 @@ mod tests {
         let current = build_hashtree_event(
             &keys,
             "tree",
-            created_at.as_u64(),
+            created_at.as_secs(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "current",
         );
         let candidate = build_hashtree_event(
             &keys,
             "tree",
-            created_at.as_u64(),
+            created_at.as_secs(),
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "candidate",
         );
@@ -1531,7 +1533,7 @@ mod tests {
             let keys = Keys::generate();
             let npub = keys.public_key().to_bech32().expect("npub");
             let key = format!("{npub}/tree");
-            let stale_created_at = Timestamp::now().as_u64().saturating_add(30);
+            let stale_created_at = Timestamp::now().as_secs().saturating_add(30);
             let stale = build_hashtree_event(
                 &keys,
                 "tree",

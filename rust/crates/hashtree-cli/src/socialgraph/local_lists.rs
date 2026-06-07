@@ -203,9 +203,10 @@ fn build_contact_list_event(
         .filter_map(|pubkey| PublicKey::from_hex(pubkey).ok())
         .map(Tag::public_key)
         .collect::<Vec<_>>();
-    EventBuilder::new(Kind::ContactList, "", tags)
+    EventBuilder::new(Kind::ContactList, "")
+        .tags(tags)
         .custom_created_at(created_at)
-        .to_event(keys)
+        .sign_with_keys(keys)
         .context("sign local contact list event")
 }
 
@@ -225,13 +226,18 @@ fn build_mute_list_event(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            tags.push(Tag::parse(&["p", &pubkey.to_hex(), reason])?);
+            tags.push(Tag::parse(vec![
+                "p".to_string(),
+                pubkey.to_hex(),
+                reason.to_string(),
+            ])?);
         } else {
             tags.push(Tag::public_key(pubkey));
         }
     }
-    EventBuilder::new(Kind::MuteList, "", tags)
+    EventBuilder::new(Kind::MuteList, "")
+        .tags(tags)
         .custom_created_at(created_at)
-        .to_event(keys)
+        .sign_with_keys(keys)
         .context("sign local mute list event")
 }

@@ -245,7 +245,7 @@ async fn embedded_daemon_accepts_ws_route_with_trailing_slash() {
         matches!(
             NostrRelayMessage::from_json(text.as_str()).expect("parse relay response"),
             NostrRelayMessage::EndOfStoredEvents(subscription_id)
-                if subscription_id == nostr::SubscriptionId::new("test-sub")
+                if subscription_id.as_ref() == &nostr::SubscriptionId::new("test-sub")
         ),
         "expected EOSE response over /ws/ route"
     );

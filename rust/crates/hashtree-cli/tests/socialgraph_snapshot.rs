@@ -7,6 +7,15 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use nostr_social_graph::{BinaryBudget, NostrEvent as ExternalNostrEvent, SocialGraph};
 use tempfile::TempDir;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 #[test]
 fn snapshot_includes_list_timestamps() {
     let _guard = test_lock();
@@ -27,14 +36,14 @@ fn snapshot_includes_list_timestamps() {
     let follow_created_at = 1_700_000_111;
     let mute_created_at = 1_700_000_222;
 
-    let follow_event = EventBuilder::new(Kind::ContactList, "", [Tag::public_key(bob_pk)])
+    let follow_event = event_builder!(Kind::ContactList, "", [Tag::public_key(bob_pk)])
         .custom_created_at(Timestamp::from_secs(follow_created_at))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
 
-    let mute_event = EventBuilder::new(Kind::MuteList, "", [Tag::public_key(carol_pk)])
+    let mute_event = event_builder!(Kind::MuteList, "", [Tag::public_key(carol_pk)])
         .custom_created_at(Timestamp::from_secs(mute_created_at))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap();
 
     hashtree_cli::socialgraph::ingest_event(&graph_store, "follow", &follow_event.as_json());
@@ -79,30 +88,30 @@ fn snapshot_binary_matches_upstream_social_graph_encoding() {
     let root_pk = root_keys.public_key();
     hashtree_cli::socialgraph::set_social_graph_root(&graph_store, &root_pk.to_bytes());
 
-    let outsider_follow = EventBuilder::new(
+    let outsider_follow = event_builder!(
         Kind::ContactList,
         "",
         [Tag::public_key(carol_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&outsider_keys)
+    .sign_with_keys(&outsider_keys)
     .unwrap();
     let root_lists = [
-        EventBuilder::new(
+        event_builder!(
             Kind::ContactList,
             "",
             [Tag::public_key(bob_keys.public_key())],
         )
         .custom_created_at(Timestamp::from_secs(11))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap(),
-        EventBuilder::new(
+        event_builder!(
             Kind::MuteList,
             "",
             [Tag::public_key(carol_keys.public_key())],
         )
         .custom_created_at(Timestamp::from_secs(12))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .unwrap(),
     ];
 
@@ -164,7 +173,7 @@ fn flatten_chunks(chunks: Vec<Bytes>) -> Vec<u8> {
 
 fn to_external_event(event: &nostr::Event) -> ExternalNostrEvent {
     ExternalNostrEvent {
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         content: event.content.clone(),
         tags: event
             .tags

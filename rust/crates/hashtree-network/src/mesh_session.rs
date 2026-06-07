@@ -225,23 +225,20 @@ mod tests {
     }
 
     fn build_root_event(keys: &Keys, tree_name: &str, hash_hex: &str, created_at: u64) -> Event {
-        EventBuilder::new(
-            Kind::Custom(HASHTREE_KIND),
-            "",
-            [
-                Tag::parse(&["d", tree_name]).expect("d tag"),
-                Tag::parse(&["l", HASHTREE_LABEL]).expect("label tag"),
-                Tag::parse(&["hash", hash_hex]).expect("hash tag"),
-            ],
-        )
-        .custom_created_at(Timestamp::from_secs(created_at))
-        .to_event(keys)
-        .expect("root event")
+        EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+            .tags([
+                Tag::parse(["d", tree_name]).expect("d tag"),
+                Tag::parse(["l", HASHTREE_LABEL]).expect("label tag"),
+                Tag::parse(["hash", hash_hex]).expect("hash tag"),
+            ])
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(keys)
+            .expect("root event")
     }
 
     fn build_mesh_event(keys: &Keys) -> Event {
-        EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), "mesh", [])
-            .to_event(keys)
+        EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), "mesh")
+            .sign_with_keys(keys)
             .expect("mesh event")
     }
 

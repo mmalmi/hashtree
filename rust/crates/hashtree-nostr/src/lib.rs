@@ -400,7 +400,7 @@ pub fn stored_event_from_nostr_sdk_event(event: &Event) -> StoredNostrEvent {
     StoredNostrEvent {
         id: event.id.to_hex(),
         pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         kind: u32::from(event.kind.as_u16()),
         tags: event
             .tags
@@ -592,31 +592,27 @@ pub fn build_private_hashtree_root_event(
     .map_err(|err| {
         NostrEventStoreError::Validation(format!("self-encrypted root key failed: {err}"))
     })?;
-    let builder = EventBuilder::new(
-        Kind::from(HASHTREE_ROOT_KIND as u16),
-        "",
-        [
-            Tag::identifier(tree_name.to_string()),
-            Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
-                vec![HASHTREE_LABEL],
-            ),
-            Tag::custom(
-                TagKind::Custom(TAG_HASH.into()),
-                vec![hex::encode(root_cid.hash)],
-            ),
-            Tag::custom(
-                TagKind::Custom(TAG_SELF_ENCRYPTED_KEY.into()),
-                vec![self_encrypted_key],
-            ),
-        ],
-    );
+    let builder = EventBuilder::new(Kind::from(HASHTREE_ROOT_KIND as u16), "").tags([
+        Tag::identifier(tree_name.to_string()),
+        Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+            vec![HASHTREE_LABEL],
+        ),
+        Tag::custom(
+            TagKind::Custom(TAG_HASH.into()),
+            vec![hex::encode(root_cid.hash)],
+        ),
+        Tag::custom(
+            TagKind::Custom(TAG_SELF_ENCRYPTED_KEY.into()),
+            vec![self_encrypted_key],
+        ),
+    ]);
     let builder = if let Some(created_at) = created_at {
         builder.custom_created_at(nostr_sdk::Timestamp::from(created_at))
     } else {
         builder
     };
-    builder.to_event(owner_keys).map_err(|err| {
+    builder.sign_with_keys(owner_keys).map_err(|err| {
         NostrEventStoreError::Validation(format!("build hashtree root event failed: {err}"))
     })
 }

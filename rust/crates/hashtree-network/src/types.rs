@@ -733,7 +733,7 @@ pub fn validate_mesh_frame(frame: &MeshNostrFrame) -> Result<(), &'static str> {
 
     let event = frame.event();
     if event.kind != Kind::Custom(NOSTR_KIND_HASHTREE)
-        && event.kind != Kind::Ephemeral(NOSTR_KIND_HASHTREE)
+        && event.kind != Kind::from_u16(NOSTR_KIND_HASHTREE)
     {
         return Err("unsupported event kind");
     }

@@ -15,6 +15,15 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 fn publish_event(relay_url: &str, event: &Event) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -51,7 +60,7 @@ fn build_pr_event(
     commit_tip: &str,
     created_at_secs: u64,
 ) -> Event {
-    EventBuilder::new(
+    event_builder!(
         Kind::Custom(1618),
         "",
         [
@@ -66,7 +75,7 @@ fn build_pr_event(
         ],
     )
     .custom_created_at(Timestamp::from_secs(created_at_secs))
-    .to_event(author)
+    .sign_with_keys(author)
     .expect("build PR event")
 }
 
@@ -76,7 +85,7 @@ fn build_status_event(
     status_kind: u16,
     created_at_secs: u64,
 ) -> Event {
-    EventBuilder::new(
+    event_builder!(
         Kind::Custom(status_kind),
         "",
         [Tag::custom(
@@ -85,7 +94,7 @@ fn build_status_event(
         )],
     )
     .custom_created_at(Timestamp::from_secs(created_at_secs))
-    .to_event(signer)
+    .sign_with_keys(signer)
     .expect("build status event")
 }
 
@@ -657,7 +666,7 @@ fn test_pr_list_includes_self_authored_browser_style_pr() {
     let repo_address = fixture.target_repo_address();
     let clone_url = fixture.target_repo_url();
 
-    let browser_style_pr = EventBuilder::new(
+    let browser_style_pr = event_builder!(
         Kind::Custom(1618),
         "interop test PR",
         [
@@ -676,7 +685,7 @@ fn test_pr_list_includes_self_authored_browser_style_pr() {
         ],
     )
     .custom_created_at(Timestamp::from_secs(1_700_209_000))
-    .to_event(&fixture.target_keys)
+    .sign_with_keys(&fixture.target_keys)
     .expect("build browser-style self PR");
     fixture.publish(&browser_style_pr);
 

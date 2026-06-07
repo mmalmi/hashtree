@@ -6,8 +6,17 @@ use crate::server::blob_read::{
 use crate::webrtc::WebRTCState;
 
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
+    fetch_and_cache_blob_with_source(state, hash)
+        .await
+        .is_some()
+}
+
+pub(super) async fn fetch_and_cache_blob_with_source(
+    state: &AppState,
+    hash: &[u8],
+) -> Option<BlobSource> {
     if !state.hash_get_enabled {
-        return false;
+        return None;
     }
 
     let hash_hex = hex::encode(hash);
@@ -103,9 +112,9 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
-                    return false;
+                    return None;
                 }
-                return true;
+                return Some(BlobSource::WebRtc(peer_id));
             }
             FetchResult::Fips { data } => {
                 tracing::info!(
@@ -116,9 +125,9 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache FIPS peer data: {}", e);
-                    return false;
+                    return None;
                 }
-                return true;
+                return Some(BlobSource::Fips);
             }
             FetchResult::Upstream { data, server } => {
                 tracing::info!(
@@ -130,9 +139,9 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache upstream data: {}", e);
-                    return false;
+                    return None;
                 }
-                return true;
+                return Some(BlobSource::Upstream(server));
             }
         }
     }
@@ -144,7 +153,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool 
         );
     }
 
-    false
+    None
 }
 
 pub(super) async fn put_cached_blob_without_blocking_runtime(
@@ -682,12 +691,18 @@ where
 
 pub(super) enum BlobSource {
     Local,
+    WebRtc(String),
+    Fips,
+    Upstream(String),
 }
 
 impl BlobSource {
-    fn to_header_value(&self) -> &'static str {
+    fn to_header_value(&self) -> String {
         match self {
-            BlobSource::Local => "local",
+            BlobSource::Local => "local".to_string(),
+            BlobSource::WebRtc(peer_id) => format!("webrtc:{peer_id}"),
+            BlobSource::Fips => "fips".to_string(),
+            BlobSource::Upstream(server) => format!("upstream:{server}"),
         }
     }
 }

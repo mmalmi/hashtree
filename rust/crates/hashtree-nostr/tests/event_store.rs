@@ -610,8 +610,8 @@ fn resolving_private_hashtree_root_requires_matching_owner_key() {
 #[test]
 fn verified_event_types_reject_tampered_signatures() {
     let keys = Keys::generate();
-    let event = EventBuilder::new(Kind::TextNote, "release root", vec![])
-        .to_event(&keys)
+    let event = EventBuilder::new(Kind::TextNote, "release root")
+        .sign_with_keys(&keys)
         .expect("signed event");
     let mut tampered = event.clone();
     tampered.content = "tampered release root".to_string();
@@ -626,8 +626,8 @@ fn verified_event_types_reject_tampered_signatures() {
 #[test]
 fn event_store_can_decode_verified_events_from_storage_bytes() {
     let keys = Keys::generate();
-    let event = EventBuilder::new(Kind::TextNote, "stored event", vec![])
-        .to_event(&keys)
+    let event = EventBuilder::new(Kind::TextNote, "stored event")
+        .sign_with_keys(&keys)
         .expect("signed event");
     let stored = stored_event_from_nostr_sdk_event(&event);
     let encoded = encode_stored_event_msgpack(&stored).expect("encode event");

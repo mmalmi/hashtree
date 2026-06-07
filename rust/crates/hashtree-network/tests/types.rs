@@ -309,8 +309,8 @@ fn test_timed_seen_set_dedupe_and_ttl() {
 #[test]
 fn test_mesh_frame_roundtrip_and_validation() {
     let keys = Keys::generate();
-    let event = EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), "", [])
-        .to_event(&keys)
+    let event = EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), "")
+        .sign_with_keys(&keys)
         .unwrap();
     let frame = MeshNostrFrame::new_event_with_id(event, "peer-a", "frame-1", MESH_DEFAULT_HTL);
     assert!(validate_mesh_frame(&frame).is_ok());
@@ -326,8 +326,8 @@ fn test_mesh_frame_roundtrip_and_validation() {
 #[test]
 fn test_mesh_frame_validation_rejects_invalid_protocol_and_htl() {
     let keys = Keys::generate();
-    let event = EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), "", [])
-        .to_event(&keys)
+    let event = EventBuilder::new(Kind::Custom(NOSTR_KIND_HASHTREE), "")
+        .sign_with_keys(&keys)
         .unwrap();
     let mut frame = MeshNostrFrame::new_event_with_id(event, "peer-a", "frame-1", MESH_DEFAULT_HTL);
 

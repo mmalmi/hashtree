@@ -20,6 +20,15 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::socialgraph::{open_social_graph_store_with_storage, set_social_graph_root};
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 struct TestRelay {
     url: String,
     shutdown: broadcast::Sender<()>,
@@ -297,11 +306,16 @@ async fn handle_connection(
                         subscription_id,
                         filters,
                     } => {
+                        let subscription_id = subscription_id.into_owned();
+                        let filters = filters
+                            .into_iter()
+                            .map(|filter| filter.into_owned())
+                            .collect::<Vec<_>>();
                         request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         subscriptions.insert(subscription_id.to_string(), filters.clone());
                         let current = events.lock().expect("relay events").clone();
                         for event in current {
-                            if filters.iter().any(|filter| filter.match_event(&event)) {
+                            if filters.iter().any(|filter| filter.match_event(&event, Default::default())) {
                                 let _ = write
                                     .send(Message::Text(
                                         nostr::RelayMessage::event(subscription_id.clone(), event)
@@ -317,6 +331,7 @@ async fn handle_connection(
                             .await;
                     }
                     nostr::ClientMessage::Close(subscription_id) => {
+                        let subscription_id = subscription_id.into_owned();
                         subscriptions.remove(&subscription_id.to_string());
                         let _ = write
                             .send(Message::Text(
@@ -325,7 +340,7 @@ async fn handle_connection(
                             .await;
                     }
                     nostr::ClientMessage::Event(event) => {
-                        let event = *event;
+                        let event = event.into_owned();
                         events.lock().expect("relay events").push(event.clone());
                         let _ = broadcaster.send(event.clone());
                         let _ = write
@@ -339,7 +354,7 @@ async fn handle_connection(
             }
             Ok(event) = event_rx.recv() => {
                 for (subscription_id, filters) in &subscriptions {
-                    if filters.iter().any(|filter| filter.match_event(&event)) {
+                    if filters.iter().any(|filter| filter.match_event(&event, Default::default())) {
                         let _ = write
                             .send(Message::Text(
                                 nostr::RelayMessage::event(
@@ -386,24 +401,24 @@ async fn apply_history_root_updates_profile_index() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let root_contacts = EventBuilder::new(
+    let root_contacts = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(alice_keys.public_key())],
     )
     .custom_created_at(Timestamp::from(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("root contacts");
     socialgraph::ingest_parsed_event(graph_store.as_ref(), &root_contacts)?;
 
-    let alice_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Mirror"}"#, [])
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Mirror"}"#)
         .custom_created_at(Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -446,15 +461,14 @@ async fn apply_history_root_publishes_profile_search_tree() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile =
-        EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Published Search"}"#, [])
-            .custom_created_at(Timestamp::from(11))
-            .to_event(&alice_keys)
-            .expect("alice profile");
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Published Search"}"#)
+        .custom_created_at(Timestamp::from(11))
+        .sign_with_keys(&alice_keys)
+        .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -535,18 +549,18 @@ async fn apply_history_root_publishes_profiles_by_pubkey_tree() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile = EventBuilder::new(
+    let alice_profile = event_builder!(
         Kind::Metadata,
         r#"{"name":"Alice Published Profile Tree"}"#,
         [],
     )
     .custom_created_at(Timestamp::from(11))
-    .to_event(&alice_keys)
+    .sign_with_keys(&alice_keys)
     .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -629,15 +643,14 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile =
-        EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Uploaded Search"}"#, [])
-            .custom_created_at(Timestamp::from(11))
-            .to_event(&alice_keys)
-            .expect("alice profile");
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Uploaded Search"}"#)
+        .custom_created_at(Timestamp::from(11))
+        .sign_with_keys(&alice_keys)
+        .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -688,10 +701,21 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
     let published_root = graph_store
         .profile_search_root()?
         .expect("profile-search root");
+    wait_until("profile-search DAG upload", Duration::from_secs(5), || {
+        mirror
+            .profile_search_publish_state
+            .lock()
+            .expect("profile-search publish state")
+            .last_uploaded_root
+            .as_ref()
+            == Some(&published_root)
+    })
+    .await;
     assert!(
         blossom.has_hash(&hex::encode(published_root.hash)),
         "expected profile-search DAG root blob to be uploaded before publish"
     );
+    mirror.maybe_publish_profile_search_root(false).await?;
     assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
     Ok(())
 }
@@ -712,18 +736,18 @@ async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Re
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile = EventBuilder::new(
+    let alice_profile = event_builder!(
         Kind::Metadata,
         r#"{"name":"Alice Concurrent Publish","picture":"https://example.com/alice.png"}"#,
         [],
     )
     .custom_created_at(Timestamp::from(11))
-    .to_event(&alice_keys)
+    .sign_with_keys(&alice_keys)
     .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -834,14 +858,14 @@ async fn uploaded_event_root_state_is_reused_after_restart() -> Result<()> {
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
     let alice_keys = nostr::Keys::generate();
-    let alice_note = EventBuilder::new(Kind::TextNote, "persisted upload", [])
+    let alice_note = event_builder!(Kind::TextNote, "persisted upload")
         .custom_created_at(Timestamp::from(22))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_note.id.to_hex(),
         pubkey: alice_note.pubkey.to_hex(),
-        created_at: alice_note.created_at.as_u64(),
+        created_at: alice_note.created_at.as_secs(),
         kind: alice_note.kind.as_u16() as u32,
         tags: alice_note
             .tags
@@ -909,18 +933,18 @@ async fn event_publish_uses_last_uploaded_root_while_newer_root_uploads() -> Res
     let root_keys = nostr::Keys::generate();
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
     let alice_keys = nostr::Keys::generate();
-    let note_one = EventBuilder::new(Kind::TextNote, "uploaded", [])
+    let note_one = event_builder!(Kind::TextNote, "uploaded")
         .custom_created_at(Timestamp::from(1))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note one");
-    let note_two = EventBuilder::new(Kind::TextNote, "pending", [])
+    let note_two = event_builder!(Kind::TextNote, "pending")
         .custom_created_at(Timestamp::from(2))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("note two");
     let stored_one = hashtree_nostr::StoredNostrEvent {
         id: note_one.id.to_hex(),
         pubkey: note_one.pubkey.to_hex(),
-        created_at: note_one.created_at.as_u64(),
+        created_at: note_one.created_at.as_secs(),
         kind: note_one.kind.as_u16() as u32,
         tags: note_one
             .tags
@@ -933,7 +957,7 @@ async fn event_publish_uses_last_uploaded_root_while_newer_root_uploads() -> Res
     let stored_two = hashtree_nostr::StoredNostrEvent {
         id: note_two.id.to_hex(),
         pubkey: note_two.pubkey.to_hex(),
-        created_at: note_two.created_at.as_u64(),
+        created_at: note_two.created_at.as_secs(),
         kind: note_two.kind.as_u16() as u32,
         tags: note_two
             .tags
@@ -1053,7 +1077,7 @@ async fn root_publish_retries_with_fresh_client_when_primary_publish_client_miss
         &root,
         Timestamp::from(42),
     )
-    .to_event(&root_keys)?;
+    .sign_with_keys(&root_keys)?;
 
     let (successful_relays, failed_relays) = mirror
         .publish_root_event_to_relays(&primary_client, &[relay.url()], &event)
@@ -1086,18 +1110,18 @@ async fn apply_history_root_publishes_profile_search_over_existing_stale_event()
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile = EventBuilder::new(
+    let alice_profile = event_builder!(
         Kind::Metadata,
         r#"{"name":"Alice Replaceable Timestamp"}"#,
         [],
     )
     .custom_created_at(Timestamp::from(11))
-    .to_event(&alice_keys)
+    .sign_with_keys(&alice_keys)
     .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -1111,7 +1135,7 @@ async fn apply_history_root_publishes_profile_search_over_existing_stale_event()
     let root = event_store.build(None, vec![stored]).await?;
 
     let stale_created_at = Timestamp::from_secs(1);
-    let stale_event = EventBuilder::new(
+    let stale_event = event_builder!(
         Kind::Custom(30078),
         "",
         [
@@ -1124,7 +1148,7 @@ async fn apply_history_root_publishes_profile_search_over_existing_stale_event()
         ],
     )
     .custom_created_at(stale_created_at)
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("stale root event");
 
     let relay = TestRelay::new(vec![stale_event]);
@@ -1202,14 +1226,14 @@ async fn apply_history_root_publishes_event_tree() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_note = EventBuilder::new(Kind::TextNote, "hello event tree", [])
+    let alice_note = event_builder!(Kind::TextNote, "hello event tree")
         .custom_created_at(Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_note.id.to_hex(),
         pubkey: alice_note.pubkey.to_hex(),
-        created_at: alice_note.created_at.as_u64(),
+        created_at: alice_note.created_at.as_secs(),
         kind: alice_note.kind.as_u16() as u32,
         tags: alice_note
             .tags
@@ -1290,15 +1314,14 @@ async fn startup_publish_sends_existing_profile_search_root() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile =
-        EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Existing Search"}"#, [])
-            .custom_created_at(Timestamp::from(11))
-            .to_event(&alice_keys)
-            .expect("alice profile");
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Existing Search"}"#)
+        .custom_created_at(Timestamp::from(11))
+        .sign_with_keys(&alice_keys)
+        .expect("alice profile");
     let stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -1382,14 +1405,14 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Checkpoint"}"#, [])
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Checkpoint"}"#)
         .custom_created_at(Timestamp::from(11))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice profile");
     let alice_stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -1466,14 +1489,14 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
     let initial_keys = nostr::Keys::generate();
-    let initial_event = EventBuilder::new(Kind::TextNote, "initial", [])
+    let initial_event = event_builder!(Kind::TextNote, "initial")
         .custom_created_at(Timestamp::from(10))
-        .to_event(&initial_keys)
+        .sign_with_keys(&initial_keys)
         .expect("initial event");
     let initial_stored = hashtree_nostr::StoredNostrEvent {
         id: initial_event.id.to_hex(),
         pubkey: initial_event.pubkey.to_hex(),
-        created_at: initial_event.created_at.as_u64(),
+        created_at: initial_event.created_at.as_secs(),
         kind: initial_event.kind.as_u16() as u32,
         tags: initial_event
             .tags
@@ -1485,14 +1508,14 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
     };
 
     let live_keys = nostr::Keys::generate();
-    let live_event = EventBuilder::new(Kind::TextNote, "live", [])
+    let live_event = event_builder!(Kind::TextNote, "live")
         .custom_created_at(Timestamp::from(11))
-        .to_event(&live_keys)
+        .sign_with_keys(&live_keys)
         .expect("live event");
     let live_stored = hashtree_nostr::StoredNostrEvent {
         id: live_event.id.to_hex(),
         pubkey: live_event.pubkey.to_hex(),
-        created_at: live_event.created_at.as_u64(),
+        created_at: live_event.created_at.as_secs(),
         kind: live_event.kind.as_u16() as u32,
         tags: live_event
             .tags
@@ -1504,14 +1527,14 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
     };
 
     let history_keys = nostr::Keys::generate();
-    let history_event = EventBuilder::new(Kind::TextNote, "history", [])
+    let history_event = event_builder!(Kind::TextNote, "history")
         .custom_created_at(Timestamp::from(12))
-        .to_event(&history_keys)
+        .sign_with_keys(&history_keys)
         .expect("history event");
     let history_stored = hashtree_nostr::StoredNostrEvent {
         id: history_event.id.to_hex(),
         pubkey: history_event.pubkey.to_hex(),
-        created_at: history_event.created_at.as_u64(),
+        created_at: history_event.created_at.as_secs(),
         kind: history_event.kind.as_u16() as u32,
         tags: history_event
             .tags
@@ -1610,14 +1633,14 @@ async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let alice_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Ignored"}"#, [])
+    let alice_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Ignored"}"#)
         .custom_created_at(Timestamp::from(12))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice profile");
     let alice_stored = hashtree_nostr::StoredNostrEvent {
         id: alice_profile.id.to_hex(),
         pubkey: alice_profile.pubkey.to_hex(),
-        created_at: alice_profile.created_at.as_u64(),
+        created_at: alice_profile.created_at.as_secs(),
         kind: alice_profile.kind.as_u16() as u32,
         tags: alice_profile
             .tags
@@ -1692,9 +1715,10 @@ async fn mirror_history_sync_accepts_large_contact_list_events() -> Result<()> {
         .iter()
         .map(|keys| Tag::public_key(keys.public_key()))
         .collect::<Vec<_>>();
-    let root_contacts = EventBuilder::new(Kind::ContactList, "", tags)
+    let root_contacts = event_builder!(Kind::ContactList, "")
+        .tags(tags)
         .custom_created_at(Timestamp::from(10))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .expect("root contacts");
     assert!(
         root_contacts.as_json().len() > 70_000,
@@ -1753,23 +1777,23 @@ async fn mirror_collect_authors_skips_overmuted_users() -> Result<()> {
     let target_keys = nostr::Keys::generate();
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
-    let follow = EventBuilder::new(
+    let follow = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(target_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("follow");
     crate::socialgraph::ingest_parsed_event(&graph_store, &follow)?;
 
-    let mute = EventBuilder::new(
+    let mute = event_builder!(
         Kind::MuteList,
         "",
         vec![Tag::public_key(target_keys.public_key())],
     )
     .custom_created_at(Timestamp::from_secs(11))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("mute");
     crate::socialgraph::ingest_parsed_event(&graph_store, &mute)?;
 
@@ -1807,7 +1831,7 @@ async fn full_text_history_prioritizes_low_indexed_direct_follows() -> Result<()
     let sparse_keys = nostr::Keys::generate();
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
-    let follow = EventBuilder::new(
+    let follow = event_builder!(
         Kind::ContactList,
         "",
         vec![
@@ -1816,20 +1840,20 @@ async fn full_text_history_prioritizes_low_indexed_direct_follows() -> Result<()
         ],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("follow");
     crate::socialgraph::ingest_parsed_event(&graph_store, &follow)?;
 
     let mut stored_notes = Vec::new();
     for created_at in 1..=40 {
-        let note = EventBuilder::new(Kind::TextNote, format!("note {created_at}"), [])
+        let note = event_builder!(Kind::TextNote, format!("note {created_at}"))
             .custom_created_at(Timestamp::from_secs(created_at))
-            .to_event(&prolific_keys)
+            .sign_with_keys(&prolific_keys)
             .expect("prolific note");
         stored_notes.push(hashtree_nostr::StoredNostrEvent {
             id: note.id.to_hex(),
             pubkey: note.pubkey.to_hex(),
-            created_at: note.created_at.as_u64(),
+            created_at: note.created_at.as_secs(),
             kind: note.kind.as_u16() as u32,
             tags: note
                 .tags
@@ -1881,13 +1905,13 @@ async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Res
     let missing_keys = nostr::Keys::generate();
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
 
-    let root_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"root"}"#, [])
+    let root_profile = event_builder!(Kind::Metadata, r#"{"name":"root"}"#)
         .custom_created_at(Timestamp::from_secs(5))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .expect("root profile");
     crate::socialgraph::ingest_parsed_event(&graph_store, &root_profile)?;
 
-    let follow = EventBuilder::new(
+    let follow = event_builder!(
         Kind::ContactList,
         "",
         vec![
@@ -1896,13 +1920,13 @@ async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Res
         ],
     )
     .custom_created_at(Timestamp::from_secs(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("follow");
     crate::socialgraph::ingest_parsed_event(&graph_store, &follow)?;
 
-    let existing_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"existing"}"#, [])
+    let existing_profile = event_builder!(Kind::Metadata, r#"{"name":"existing"}"#)
         .custom_created_at(Timestamp::from_secs(11))
-        .to_event(&existing_keys)
+        .sign_with_keys(&existing_keys)
         .expect("existing profile");
     crate::socialgraph::ingest_parsed_event(&graph_store, &existing_profile)?;
 
@@ -1972,9 +1996,9 @@ async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
     );
 
     let alice_keys = nostr::Keys::generate();
-    let alice_note = EventBuilder::new(Kind::TextNote, "hello live flush", [])
+    let alice_note = event_builder!(Kind::TextNote, "hello live flush")
         .custom_created_at(Timestamp::from(21))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
 
     mirror.ingest_live_event(&alice_note)?;
@@ -2074,9 +2098,9 @@ async fn live_event_flush_recovers_invalid_public_event_root_before_publish() ->
     );
 
     let alice_keys = nostr::Keys::generate();
-    let alice_note = EventBuilder::new(Kind::TextNote, "hello recovered index", [])
+    let alice_note = event_builder!(Kind::TextNote, "hello recovered index")
         .custom_created_at(Timestamp::from(22))
-        .to_event(&alice_keys)
+        .sign_with_keys(&alice_keys)
         .expect("alice note");
 
     mirror.ingest_live_event(&alice_note)?;
@@ -2131,13 +2155,13 @@ async fn mirror_live_ingest_updates_profile_index() -> Result<()> {
     set_social_graph_root(&graph_store, &root_pubkey);
 
     let alice_keys = nostr::Keys::generate();
-    let root_contacts = EventBuilder::new(
+    let root_contacts = event_builder!(
         Kind::ContactList,
         "",
         vec![Tag::public_key(alice_keys.public_key())],
     )
     .custom_created_at(Timestamp::from(10))
-    .to_event(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("root contacts");
     socialgraph::ingest_parsed_event(graph_store.as_ref(), &root_contacts)?;
 
@@ -2175,10 +2199,9 @@ async fn mirror_live_ingest_updates_profile_index() -> Result<()> {
     })
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let updated_profile =
-        EventBuilder::new(Kind::Metadata, r#"{"name":"Alice Mirror Updated"}"#, [])
-            .to_event(&alice_keys)
-            .expect("updated profile");
+    let updated_profile = event_builder!(Kind::Metadata, r#"{"name":"Alice Mirror Updated"}"#)
+        .sign_with_keys(&alice_keys)
+        .expect("updated profile");
     relay.publish(updated_profile);
 
     let alice_hex = alice_keys.public_key().to_hex();
@@ -2246,9 +2269,9 @@ async fn mirror_republishes_roots_changed_outside_the_mirror() -> Result<()> {
     })
     .await;
 
-    let root_profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Root Out Of Band"}"#, [])
+    let root_profile = event_builder!(Kind::Metadata, r#"{"name":"Root Out Of Band"}"#)
         .custom_created_at(Timestamp::from(42))
-        .to_event(&root_keys)
+        .sign_with_keys(&root_keys)
         .expect("root profile");
     socialgraph::ingest_parsed_event(graph_store.as_ref(), &root_profile)?;
 

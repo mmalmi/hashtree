@@ -73,7 +73,7 @@ pub struct MulticastNostrBus {
     relay: SharedMeshEventStore,
     socket: Arc<UdpSocket>,
     target_addr: SocketAddr,
-    pending_queries: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<RelayMessage>>>>,
+    pending_queries: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<RelayMessage<'static>>>>>,
     announced_event_ids: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -213,7 +213,7 @@ impl MulticastNostrBus {
                         RelayMessage::Event { subscription_id: sid, event }
                             if sid.to_string() == subscription_id =>
                         {
-                            events.push(*event);
+                            events.push(event.into_owned());
                             settle_deadline = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
                                 QUERY_SETTLE_GRACE_MS,
                             ))));
@@ -268,14 +268,15 @@ impl MulticastNostrBus {
                 for filter in filters {
                     let limit = filter.limit.unwrap_or(50).min(50);
                     for event in self.relay.query_events(&filter, limit).await {
-                        let relay_msg = RelayMessage::event(subscription_id.clone(), event);
+                        let relay_msg =
+                            RelayMessage::event(subscription_id.clone().into_owned(), event);
                         let _ = self
                             .socket
                             .send_to(relay_msg.as_json().as_bytes(), self.target_addr)
                             .await;
                     }
                 }
-                let eose = RelayMessage::eose(subscription_id);
+                let eose = RelayMessage::eose(subscription_id.into_owned());
                 let _ = self
                     .socket
                     .send_to(eose.as_json().as_bytes(), self.target_addr)
@@ -303,7 +304,10 @@ impl MulticastNostrBus {
                         .get(&subscription_id.to_string())
                         .cloned();
                     if let Some(tx) = tx {
-                        let _ = tx.send(msg);
+                        let _ = tx.send(RelayMessage::event(
+                            subscription_id.clone().into_owned(),
+                            event.clone().into_owned(),
+                        ));
                     }
                 }
                 RelayMessage::EndOfStoredEvents(subscription_id) => {
@@ -314,7 +318,7 @@ impl MulticastNostrBus {
                         .get(&subscription_id.to_string())
                         .cloned();
                     if let Some(tx) = tx {
-                        let _ = tx.send(msg);
+                        let _ = tx.send(RelayMessage::eose(subscription_id.clone().into_owned()));
                     }
                 }
                 _ => {}
@@ -328,7 +332,7 @@ impl MulticastNostrBus {
             .author(self.keys.public_key())
             .custom_tag(
                 SingleLetterTag::lowercase(nostr_sdk::nostr::Alphabet::L),
-                vec![HASHTREE_LABEL.to_string()],
+                HASHTREE_LABEL.to_string(),
             )
             .limit(256);
         let events = self.relay.query_events(&filter, 256).await;
@@ -370,7 +374,7 @@ mod tests {
                 .lock()
                 .await
                 .iter()
-                .filter(|event| filter.match_event(event))
+                .filter(|event| filter.match_event(event, Default::default()))
                 .take(limit)
                 .cloned()
                 .collect()
@@ -386,20 +390,17 @@ mod tests {
     }
 
     fn build_root_event(keys: &Keys, tree_name: &str, hash_hex: &str) -> Event {
-        EventBuilder::new(
-            Kind::Custom(HASHTREE_KIND),
-            "",
-            [
+        EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+            .tags([
                 Tag::identifier(tree_name.to_string()),
                 Tag::custom(
                     TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
                     vec![HASHTREE_LABEL.to_string()],
                 ),
                 Tag::custom(TagKind::Custom("hash".into()), vec![hash_hex.to_string()]),
-            ],
-        )
-        .to_event(keys)
-        .expect("root event")
+            ])
+            .sign_with_keys(keys)
+            .expect("root event")
     }
 
     #[tokio::test]

@@ -1007,8 +1007,9 @@ impl BlossomClient {
             TagKind::custom("expiration"),
             vec![expiration.to_string()],
         ));
-        let event = EventBuilder::new(Kind::Custom(24242), "Upload", tags)
-            .to_event(&self.keys)
+        let event = EventBuilder::new(Kind::Custom(24242), "Upload")
+            .tags(tags)
+            .sign_with_keys(&self.keys)
             .map_err(|e| BlossomError::Signing(e.to_string()))?;
 
         let json = event.as_json();

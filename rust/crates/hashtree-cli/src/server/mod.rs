@@ -767,17 +767,15 @@ mod tests {
         let older = EventBuilder::new(
             Kind::Metadata,
             json!({ "name": "older", "about": "before" }).to_string(),
-            [],
         )
         .custom_created_at(Timestamp::from_secs(10))
-        .to_event(&author)?;
+        .sign_with_keys(&author)?;
         let newer = EventBuilder::new(
             Kind::Metadata,
             json!({ "name": "newer", "about": "after" }).to_string(),
-            [],
         )
         .custom_created_at(Timestamp::from_secs(20))
-        .to_event(&author)?;
+        .sign_with_keys(&author)?;
 
         relay.ingest_trusted_event(older).await?;
         relay.ingest_trusted_event(newer.clone()).await?;

@@ -139,17 +139,14 @@ mod tests {
     fn accepts_signed_nostr_event_snapshots() {
         let keys = nostr::Keys::generate();
         let hash = "11".repeat(32);
-        let event = nostr::EventBuilder::new(
-            nostr::Kind::ParameterizedReplaceable(30078),
-            "",
-            [
-                nostr::Tag::parse(&["d", "metal-catalog"]).expect("d tag"),
-                nostr::Tag::parse(&["l", "hashtree"]).expect("label tag"),
-                nostr::Tag::parse(&["hash", hash.as_str()]).expect("hash tag"),
-            ],
-        )
-        .to_event(&keys)
-        .expect("signed event");
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30078), "")
+            .tags([
+                nostr::Tag::parse(["d", "metal-catalog"]).expect("d tag"),
+                nostr::Tag::parse(["l", "hashtree"]).expect("label tag"),
+                nostr::Tag::parse(vec!["hash".to_string(), hash.clone()]).expect("hash tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("signed event");
         let data = serde_json::to_vec(&event).expect("event json");
 
         assert!(!looks_random(&data).0);

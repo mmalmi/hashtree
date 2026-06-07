@@ -82,13 +82,14 @@ async fn main() -> Result<()> {
         }
 
         let tags = if args.tag_every > 0 && i % args.tag_every == 0 {
-            vec![Tag::parse(&["t", "bench"]).context("parse tag")?]
+            vec![Tag::parse(["t", "bench"]).context("parse tag")?]
         } else {
             Vec::new()
         };
-        let event = EventBuilder::new(Kind::TextNote, format!("bench event {i}"), tags)
+        let event = EventBuilder::new(Kind::TextNote, format!("bench event {i}"))
+            .tags(tags)
             .custom_created_at(Timestamp::from_secs(args.created_at_base + i as u64))
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .context("build signed event")?;
         let event_id = event.id.to_hex();
         let payload = serde_json::json!(["EVENT", event]).to_string();

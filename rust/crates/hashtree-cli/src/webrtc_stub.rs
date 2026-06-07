@@ -240,12 +240,9 @@ pub fn build_root_filter(owner_pubkey: &str, tree_name: &str) -> Option<Filter> 
             .author(author)
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.to_string()],
+                tree_name.to_string(),
             )
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                vec!["hashtree".to_string()],
-            )
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree")
             .limit(50),
     )
 }
@@ -276,7 +273,7 @@ pub fn root_event_from_peer(
     let mut self_encrypted_key = None;
     let mut hash_tag = None;
 
-    for tag in &event.tags {
+    for tag in event.tags.iter() {
         let slice = tag.as_slice();
         if slice.len() < 2 {
             continue;
@@ -310,7 +307,7 @@ pub fn root_event_from_peer(
         encrypted_key,
         self_encrypted_key,
         event_id: event.id.to_hex(),
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         peer_id: peer_id.to_string(),
     })
 }

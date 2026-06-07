@@ -14,6 +14,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 serde_json.workspace = true
+hex.workspace = true
 
 # Nostr resolver
 nostr-sdk = { workspace = true, optional = true }

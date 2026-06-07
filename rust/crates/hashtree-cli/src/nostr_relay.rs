@@ -266,7 +266,7 @@ mod imp {
         fn matching(&self, filter: &NostrFilter) -> Vec<Event> {
             self.events
                 .values()
-                .filter(|event| filter.match_event(event))
+                .filter(|event| filter.match_event(event, Default::default()))
                 .cloned()
                 .collect()
         }
@@ -367,7 +367,7 @@ mod imp {
                 event_id: event.id.to_hex(),
                 pubkey: event.pubkey.to_hex(),
                 kind: event.kind.as_u16() as u32,
-                created_at: event.created_at.as_u64(),
+                created_at: event.created_at.as_secs(),
                 received_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|value| value.as_secs())
@@ -413,7 +413,7 @@ mod imp {
         let mut values = Vec::new();
         let mut seen = HashSet::new();
 
-        for tag in &event.tags {
+        for tag in event.tags.iter() {
             let fields = tag.clone().to_vec();
             if fields.first().is_some_and(|name| name == "cid") {
                 if let Some(value) = fields.get(1).filter(|value| !value.is_empty()) {
@@ -688,28 +688,42 @@ mod imp {
             subs.remove(&client_id);
         }
 
-        pub async fn handle_client_message(&self, client_id: u64, msg: NostrClientMessage) {
+        pub async fn handle_client_message(&self, client_id: u64, msg: NostrClientMessage<'_>) {
             match msg {
                 NostrClientMessage::Event(event) => {
-                    self.handle_event(client_id, *event).await;
+                    self.handle_event(client_id, event.into_owned()).await;
                 }
                 NostrClientMessage::Req {
                     subscription_id,
                     filters,
                 } => {
-                    self.handle_req(client_id, subscription_id, filters).await;
+                    self.handle_req(
+                        client_id,
+                        subscription_id.into_owned(),
+                        filters
+                            .into_iter()
+                            .map(|filter| filter.into_owned())
+                            .collect(),
+                    )
+                    .await;
                 }
                 NostrClientMessage::Count {
                     subscription_id,
-                    filters,
+                    filter,
                 } => {
-                    self.handle_count(client_id, subscription_id, filters).await;
+                    self.handle_count(
+                        client_id,
+                        subscription_id.into_owned(),
+                        vec![filter.into_owned()],
+                    )
+                    .await;
                 }
                 NostrClientMessage::Close(subscription_id) => {
-                    self.handle_close(client_id, subscription_id).await;
+                    self.handle_close(client_id, subscription_id.into_owned())
+                        .await;
                 }
                 NostrClientMessage::Auth(event) => {
-                    self.handle_auth(client_id, *event).await;
+                    self.handle_auth(client_id, event.into_owned()).await;
                 }
                 NostrClientMessage::NegOpen { .. }
                 | NostrClientMessage::NegMsg { .. }
@@ -972,7 +986,10 @@ mod imp {
             let mut deliveries: Vec<(u64, SubscriptionId)> = Vec::new();
             for (client_id, subs) in subscriptions.iter() {
                 for (sub_id, filters) in subs.iter() {
-                    if filters.iter().any(|f| f.match_event(event)) {
+                    if filters
+                        .iter()
+                        .any(|f| f.match_event(event, Default::default()))
+                    {
                         deliveries.push((*client_id, sub_id.clone()));
                     }
                 }
@@ -985,7 +1002,7 @@ mod imp {
             }
         }
 
-        async fn send_to_client(&self, client_id: u64, msg: NostrRelayMessage) {
+        async fn send_to_client(&self, client_id: u64, msg: NostrRelayMessage<'_>) {
             let sender = {
                 let clients = self.clients.lock().await;
                 clients.get(&client_id).map(|state| state.sender.clone())

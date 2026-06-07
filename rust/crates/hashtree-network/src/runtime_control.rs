@@ -78,7 +78,7 @@ pub async fn create_signaling_event(
         keys,
         msg.peer_id(),
         msg,
-        Kind::Ephemeral(signaling_kind as u16),
+        Kind::from_u16(signaling_kind as u16),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
@@ -619,8 +619,8 @@ mod tests {
             },
         );
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(25050), "mesh", [])
-            .to_event(&keys)
+        let event = EventBuilder::new(Kind::Custom(25050), "mesh")
+            .sign_with_keys(&keys)
             .unwrap();
         let frame = MeshNostrFrame::new_event_with_id(event, "sender", "frame-1", 4);
 

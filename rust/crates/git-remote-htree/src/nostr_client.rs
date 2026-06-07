@@ -187,7 +187,7 @@ async fn fetch_events_via_raw_relay_query(
                 };
 
                 match RelayMessage::from_json(text.as_str()) {
-                    Ok(RelayMessage::Event { event, .. }) => relay_events.push(*event),
+                    Ok(RelayMessage::Event { event, .. }) => relay_events.push(event.into_owned()),
                     Ok(RelayMessage::EndOfStoredEvents(_)) => break,
                     Ok(RelayMessage::Closed { message, .. }) => {
                         debug!("Raw relay PR query closed by {}: {}", relay_url, message);
@@ -232,7 +232,7 @@ async fn connected_relay_count(client: &Client) -> (usize, usize) {
     let total = relays.len();
     let mut connected = 0;
     for relay in relays.values() {
-        if relay.is_connected().await {
+        if relay.is_connected() {
             connected += 1;
         }
     }
@@ -451,7 +451,7 @@ impl NostrClient {
 
         let events = match tokio::time::timeout(
             Duration::from_secs(3),
-            client.get_events_of(vec![filter], EventSource::relays(None)),
+            client.fetch_events(filter, Duration::from_secs(3)),
         )
         .await
         {
@@ -472,6 +472,7 @@ impl NostrClient {
         };
 
         let _ = client.disconnect().await;
+        let events = events.to_vec();
 
         Ok(list_git_repo_announcements(&events)
             .into_iter()
@@ -798,14 +799,8 @@ impl NostrClient {
             // Using `EventSource::relays(Some(...))` preserves partial results from responsive
             // relays instead of discarding everything when one relay stalls.
             let events = if has_connected_relay {
-                match client
-                    .get_events_of(
-                        vec![filter.clone()],
-                        EventSource::relays(Some(query_timeout)),
-                    )
-                    .await
-                {
-                    Ok(events) => events,
+                match client.fetch_events(filter.clone(), query_timeout).await {
+                    Ok(events) => events.to_vec(),
                     Err(e) => {
                         warn!("Failed to fetch events: {}", e);
                         vec![]
@@ -1371,13 +1366,14 @@ impl NostrClient {
         append_repo_discovery_labels(&mut tags, repo_name);
 
         // Sign the event
-        let event = EventBuilder::new(Kind::Custom(KIND_APP_DATA), root_hash, tags)
+        let event = EventBuilder::new(Kind::Custom(KIND_APP_DATA), root_hash)
+            .tags(tags)
             .custom_created_at(publish_created_at)
-            .to_event(keys)
+            .sign_with_keys(keys)
             .map_err(|e| anyhow::anyhow!("Failed to sign event: {}", e))?;
 
         // Send event to connected relays
-        match client.send_event(event.clone()).await {
+        match client.send_event(&event).await {
             Ok(output) => {
                 // Track which relays confirmed
                 for url in output.success.iter() {
@@ -1387,12 +1383,10 @@ impl NostrClient {
                     }
                 }
                 // Only mark as failed if we got explicit rejection
-                for (url, err) in output.failed.iter() {
-                    if err.is_some() {
-                        let url_str = url.to_string();
-                        if !failed.contains(&url_str) && !connected.contains(&url_str) {
-                            failed.push(url_str);
-                        }
+                for (url, _err) in output.failed.iter() {
+                    let url_str = url.to_string();
+                    if !failed.contains(&url_str) && !connected.contains(&url_str) {
+                        failed.push(url_str);
                     }
                 }
                 info!(
@@ -1476,15 +1470,18 @@ impl NostrClient {
         let repo_address = format!("{}:{}:{}", KIND_REPO_ANNOUNCEMENT, self.pubkey, repo_name);
         let pull_request_filter = Filter::new()
             .kind(Kind::Custom(KIND_PULL_REQUEST))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::A), vec![&repo_address]);
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::A),
+                repo_address.clone(),
+            );
 
         let mut pr_events = match tokio::time::timeout(
             Duration::from_secs(3),
-            client.get_events_of(vec![pull_request_filter.clone()], EventSource::relays(None)),
+            client.fetch_events(pull_request_filter.clone(), Duration::from_secs(3)),
         )
         .await
         {
-            Ok(Ok(events)) => events,
+            Ok(Ok(events)) => events.to_vec(),
             Ok(Err(e)) => {
                 let _ = client.disconnect().await;
                 return Err(anyhow::anyhow!(
@@ -1531,18 +1528,18 @@ impl NostrClient {
                 Kind::Custom(KIND_STATUS_CLOSED),
                 Kind::Custom(KIND_STATUS_DRAFT),
             ])
-            .custom_tag(
+            .custom_tags(
                 SingleLetterTag::lowercase(Alphabet::E),
                 pr_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             );
 
         let mut status_events = match tokio::time::timeout(
             Duration::from_secs(3),
-            client.get_events_of(vec![status_event_filter.clone()], EventSource::relays(None)),
+            client.fetch_events(status_event_filter.clone(), Duration::from_secs(3)),
         )
         .await
         {
-            Ok(Ok(events)) => events,
+            Ok(Ok(events)) => events.to_vec(),
             Ok(Err(e)) => {
                 let _ = client.disconnect().await;
                 return Err(anyhow::anyhow!(
@@ -1616,7 +1613,7 @@ impl NostrClient {
                 commit_tip,
                 branch,
                 target_branch,
-                created_at: event.created_at.as_u64(),
+                created_at: event.created_at.as_secs(),
             });
         }
 
@@ -1676,11 +1673,12 @@ impl NostrClient {
             Tag::custom(TagKind::custom("p"), vec![pr_author_pubkey.to_string()]),
         ];
 
-        let event = EventBuilder::new(Kind::Custom(KIND_STATUS_APPLIED), "", tags)
-            .to_event(keys)
+        let event = EventBuilder::new(Kind::Custom(KIND_STATUS_APPLIED), "")
+            .tags(tags)
+            .sign_with_keys(keys)
             .map_err(|e| anyhow::anyhow!("Failed to sign status event: {}", e))?;
 
-        let publish_result = match client.send_event(event).await {
+        let publish_result = match client.send_event(&event).await {
             Ok(output) => {
                 if output.success.is_empty() {
                     Err(anyhow::anyhow!(

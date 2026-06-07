@@ -11,6 +11,15 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+macro_rules! event_builder {
+    ($kind:expr, $content:expr $(,)?) => {
+        EventBuilder::new($kind, $content)
+    };
+    ($kind:expr, $content:expr, $tags:expr $(,)?) => {
+        EventBuilder::new($kind, $content).tags($tags)
+    };
+}
+
 const KIND_APP_DATA: u16 = 30078;
 
 fn publish_event(relay_url: &str, event: &Event) {
@@ -41,7 +50,7 @@ fn publish_event(relay_url: &str, event: &Event) {
 }
 
 fn build_repo_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Event {
-    EventBuilder::new(
+    event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "ab".repeat(32),
         [
@@ -52,12 +61,12 @@ fn build_repo_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Eve
         ],
     )
     .custom_created_at(Timestamp::from_secs(created_at_secs))
-    .to_event(author)
+    .sign_with_keys(author)
     .expect("build repo event")
 }
 
 fn build_non_git_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Event {
-    EventBuilder::new(
+    event_builder!(
         Kind::Custom(KIND_APP_DATA),
         "cd".repeat(32),
         [
@@ -67,7 +76,7 @@ fn build_non_git_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> 
         ],
     )
     .custom_created_at(Timestamp::from_secs(created_at_secs))
-    .to_event(author)
+    .sign_with_keys(author)
     .expect("build non-git event")
 }
 

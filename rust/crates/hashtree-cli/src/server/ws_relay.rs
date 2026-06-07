@@ -35,9 +35,9 @@ enum WsClientMessage {
 }
 
 #[derive(Debug)]
-enum WsTextMessage {
+enum WsTextMessage<'a> {
     Hashtree(WsClientMessage),
-    Nostr(NostrClientMessage),
+    Nostr(NostrClientMessage<'a>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -152,7 +152,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_pubkey: Option
     }
 }
 
-fn parse_ws_text_message(text: &str) -> Option<WsTextMessage> {
+fn parse_ws_text_message(text: &str) -> Option<WsTextMessage<'static>> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
         if let Ok(msg) = NostrClientMessage::from_json(trimmed) {
@@ -224,8 +224,8 @@ async fn forward_upstream_nostr_message(
         NostrRelayMessage::Event {
             subscription_id: sid,
             event,
-        } if sid == *subscription_id => {
-            let event = *event;
+        } if sid.as_ref() == subscription_id => {
+            let event = event.into_owned();
             let key = (client_id, subscription_id.to_string());
             let event_id = event.id.to_hex();
             let inserted = {
@@ -248,11 +248,11 @@ async fn forward_upstream_nostr_message(
         NostrRelayMessage::Closed {
             subscription_id: sid,
             message,
-        } if sid == *subscription_id => {
+        } if sid.as_ref() == subscription_id => {
             send_nostr(
                 state,
                 client_id,
-                NostrRelayMessage::closed(subscription_id.clone(), message),
+                NostrRelayMessage::closed(subscription_id.clone(), message.into_owned()),
             )
             .await;
         }
@@ -352,7 +352,7 @@ async fn run_upstream_nostr_subscription(
                             .note_upstream_relay_receive(text.as_bytes().len());
                         if matches!(
                             NostrRelayMessage::from_json(text.as_str()),
-                            Ok(NostrRelayMessage::EndOfStoredEvents(sid)) if sid == subscription_id
+                            Ok(NostrRelayMessage::EndOfStoredEvents(sid)) if sid.as_ref() == &subscription_id
                         ) {
                             if !relay_complete {
                                 relay_complete = true;
@@ -508,6 +508,11 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                                     subscription_id,
                                     filters,
                                 } => {
+                                    let subscription_id = subscription_id.into_owned();
+                                    let filters = filters
+                                        .into_iter()
+                                        .map(|filter| filter.into_owned())
+                                        .collect::<Vec<_>>();
                                     let local_events = match relay
                                         .register_subscription_query(
                                             client_id,
@@ -565,6 +570,7 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                                     }
                                 }
                                 NostrClientMessage::Close(subscription_id) => {
+                                    let subscription_id = subscription_id.into_owned();
                                     close_upstream_nostr_subscription(
                                         state,
                                         client_id,
@@ -574,7 +580,7 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                                     relay
                                         .handle_client_message(
                                             client_id,
-                                            NostrClientMessage::Close(subscription_id.clone()),
+                                            NostrClientMessage::close(subscription_id.clone()),
                                         )
                                         .await;
                                 }
@@ -889,14 +895,14 @@ async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
     pending.retain(|(_, id), p| !(*id == request_id && p.origin_id == origin_id));
 }
 
-async fn handle_nostr_message(client_id: u64, msg: NostrClientMessage, state: &AppState) {
+async fn handle_nostr_message(client_id: u64, msg: NostrClientMessage<'_>, state: &AppState) {
     let replies = nostr_responses_for(&msg);
     for reply in replies {
         send_nostr(state, client_id, reply).await;
     }
 }
 
-fn nostr_responses_for(msg: &NostrClientMessage) -> Vec<NostrRelayMessage> {
+fn nostr_responses_for(msg: &NostrClientMessage<'_>) -> Vec<NostrRelayMessage<'static>> {
     match msg {
         NostrClientMessage::Event(event) => {
             let ok = event.verify().is_ok();
@@ -906,12 +912,17 @@ fn nostr_responses_for(msg: &NostrClientMessage) -> Vec<NostrRelayMessage> {
         NostrClientMessage::Req {
             subscription_id, ..
         } => {
-            vec![NostrRelayMessage::eose(subscription_id.clone())]
+            vec![NostrRelayMessage::eose(
+                subscription_id.clone().into_owned(),
+            )]
         }
         NostrClientMessage::Count {
             subscription_id, ..
         } => {
-            vec![NostrRelayMessage::count(subscription_id.clone(), 0)]
+            vec![NostrRelayMessage::count(
+                subscription_id.clone().into_owned(),
+                0,
+            )]
         }
         NostrClientMessage::Close(_) => Vec::new(),
         NostrClientMessage::Auth(event) => {
@@ -927,7 +938,7 @@ fn nostr_responses_for(msg: &NostrClientMessage) -> Vec<NostrRelayMessage> {
     }
 }
 
-async fn send_nostr(state: &AppState, client_id: u64, response: NostrRelayMessage) {
+async fn send_nostr(state: &AppState, client_id: u64, response: NostrRelayMessage<'_>) {
     let text = response.as_json();
     send_to_client(state, client_id, Message::Text(text)).await;
 }
@@ -1143,7 +1154,7 @@ mod tests {
         let replies = nostr_responses_for(&msg);
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            NostrRelayMessage::EndOfStoredEvents(id) => assert_eq!(id, &sub),
+            NostrRelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub),
             other => panic!("expected EOSE, got {:?}", other),
         }
     }
@@ -1151,8 +1162,8 @@ mod tests {
     #[test]
     fn nostr_replies_for_event_ok() {
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::TextNote, "hello", [])
-            .to_event(&keys)
+        let event = EventBuilder::new(Kind::TextNote, "hello")
+            .sign_with_keys(&keys)
             .unwrap();
         let msg = NostrClientMessage::event(event.clone());
         let replies = nostr_responses_for(&msg);
@@ -1171,8 +1182,8 @@ mod tests {
     #[test]
     fn nostr_replies_for_invalid_event_is_not_ok() {
         let keys = Keys::generate();
-        let mut event = EventBuilder::new(Kind::TextNote, "hello", [])
-            .to_event(&keys)
+        let mut event = EventBuilder::new(Kind::TextNote, "hello")
+            .sign_with_keys(&keys)
             .unwrap();
         event.sig = Signature::from_slice(&[0u8; 64]).unwrap();
         let msg = NostrClientMessage::event(event);
@@ -1204,10 +1215,16 @@ mod tests {
                     filters,
                 } = parsed
                 {
-                    for event in events
-                        .iter()
-                        .filter(|event| filters.iter().any(|filter| filter.match_event(event)))
-                    {
+                    let subscription_id = subscription_id.into_owned();
+                    let filters = filters
+                        .into_iter()
+                        .map(|filter| filter.into_owned())
+                        .collect::<Vec<_>>();
+                    for event in events.iter().filter(|event| {
+                        filters
+                            .iter()
+                            .any(|filter| filter.match_event(event, Default::default()))
+                    }) {
                         let _ = write
                             .send(TungsteniteMessage::Text(
                                 NostrRelayMessage::event(subscription_id.clone(), event.clone())
@@ -1313,15 +1330,12 @@ mod tests {
             },
         )?);
 
-        let event = EventBuilder::new(
-            Kind::from(30078_u16),
-            "",
-            [
-                nostr::Tag::parse(&["d", "videos/Test"]).expect("d tag"),
-                nostr::Tag::parse(&["l", "hashtree"]).expect("label tag"),
-            ],
-        )
-        .to_event(&keys)?;
+        let event = EventBuilder::new(Kind::from(30078_u16), "")
+            .tags([
+                nostr::Tag::parse(["d", "videos/Test"]).expect("d tag"),
+                nostr::Tag::parse(["l", "hashtree"]).expect("label tag"),
+            ])
+            .sign_with_keys(&keys)?;
 
         let relay_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
         let filter = Filter::new()
@@ -1352,7 +1366,7 @@ mod tests {
                 subscription_id: sid,
                 event: forwarded_event,
             } => {
-                assert_eq!(sid, subscription_id);
+                assert_eq!(sid.as_ref(), &subscription_id);
                 assert_eq!(forwarded_event.id, event.id);
             }
             other => panic!("expected forwarded EVENT, got {:?}", other),
@@ -1366,7 +1380,7 @@ mod tests {
         };
         match NostrRelayMessage::from_json(eose_text.as_str())? {
             NostrRelayMessage::EndOfStoredEvents(sid) => {
-                assert_eq!(sid, subscription_id);
+                assert_eq!(sid.as_ref(), &subscription_id);
             }
             other => panic!("expected forwarded EOSE, got {:?}", other),
         }
@@ -1414,15 +1428,12 @@ mod tests {
             },
         )?);
 
-        let event = EventBuilder::new(
-            Kind::from(30078_u16),
-            "",
-            [
-                nostr::Tag::parse(&["d", "videos/Test"]).expect("d tag"),
-                nostr::Tag::parse(&["l", "hashtree"]).expect("label tag"),
-            ],
-        )
-        .to_event(&keys)?;
+        let event = EventBuilder::new(Kind::from(30078_u16), "")
+            .tags([
+                nostr::Tag::parse(["d", "videos/Test"]).expect("d tag"),
+                nostr::Tag::parse(["l", "hashtree"]).expect("label tag"),
+            ])
+            .sign_with_keys(&keys)?;
 
         let relay_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
         let state = test_app_state(&tmp, relay.clone(), relay_url)?;
@@ -1466,7 +1477,7 @@ mod tests {
         };
         match NostrRelayMessage::from_json(second_text.as_str())? {
             NostrRelayMessage::EndOfStoredEvents(sid) => {
-                assert_eq!(sid, SubscriptionId::new("feed"));
+                assert_eq!(sid.as_ref(), &SubscriptionId::new("feed"));
             }
             other => panic!("expected aggregated EOSE, got {:?}", other),
         }
@@ -1523,8 +1534,8 @@ mod tests {
         });
 
         let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await?;
-        let event = EventBuilder::new(Kind::TextNote, "websocket publish ack", [])
-            .to_event(&author_keys)?;
+        let event = EventBuilder::new(Kind::TextNote, "websocket publish ack")
+            .sign_with_keys(&author_keys)?;
         socket
             .send(TungsteniteMessage::Text(
                 NostrClientMessage::event(event.clone()).as_json().into(),
@@ -1622,7 +1633,7 @@ mod tests {
         };
         match NostrRelayMessage::from_json(first_text.as_str())? {
             NostrRelayMessage::EndOfStoredEvents(subscription_id) => {
-                assert_eq!(subscription_id, SubscriptionId::new("sub-1"));
+                assert_eq!(subscription_id.as_ref(), &SubscriptionId::new("sub-1"));
             }
             other => anyhow::bail!("expected EOSE for first request, got {:?}", other),
         }
@@ -1697,8 +1708,10 @@ mod tests {
 
         let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await?;
         let author_keys = Keys::generate();
-        let event_a = EventBuilder::new(Kind::TextNote, "spambox-a", []).to_event(&author_keys)?;
-        let event_b = EventBuilder::new(Kind::TextNote, "spambox-b", []).to_event(&author_keys)?;
+        let event_a =
+            EventBuilder::new(Kind::TextNote, "spambox-a").sign_with_keys(&author_keys)?;
+        let event_b =
+            EventBuilder::new(Kind::TextNote, "spambox-b").sign_with_keys(&author_keys)?;
 
         socket
             .send(TungsteniteMessage::Text(

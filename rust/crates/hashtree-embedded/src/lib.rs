@@ -279,7 +279,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_blossom_auth(keys: &Keys, action: &str) -> String {
-        let expiration = Timestamp::from(Timestamp::now().as_u64() + 300);
+        let expiration = Timestamp::from(Timestamp::now().as_secs() + 300);
         let tags = vec![
             Tag::custom(TagKind::Custom("t".into()), vec![action.to_string()]),
             Tag::custom(
@@ -287,8 +287,9 @@ mod tests {
                 vec![expiration.to_string()],
             ),
         ];
-        let event = EventBuilder::new(Kind::Custom(24242), "", tags)
-            .to_event(keys)
+        let event = EventBuilder::new(Kind::Custom(24242), "")
+            .tags(tags)
+            .sign_with_keys(keys)
             .expect("sign blossom auth");
         let encoded = base64::engine::general_purpose::STANDARD
             .encode(serde_json::to_string(&event).expect("serialize auth event"));
@@ -489,7 +490,11 @@ mod tests {
 
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(1));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
-        assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            payload["mesh"]["enabled"].as_bool(),
+            Some(false),
+            "embedded non-P2P builds keep mesh disabled even when browser settings request WebRTC",
+        );
         assert!(
             !reloaded_status.base_url.is_empty(),
             "reload should keep serving from some loopback endpoint"

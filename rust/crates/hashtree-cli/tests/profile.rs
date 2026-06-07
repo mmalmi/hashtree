@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use nostr::{EventBuilder, Filter, Keys, Kind, ToBech32};
-use nostr_sdk::{ClientBuilder, EventSource};
+use nostr_sdk::ClientBuilder;
 use std::time::Duration;
 
 mod test_relay {
@@ -219,7 +219,7 @@ async fn test_profile_publish_and_fetch() -> Result<()> {
         "about": "A test profile"
     });
 
-    let event = EventBuilder::new(Kind::Metadata, profile.to_string(), []).to_event(&keys)?;
+    let event = EventBuilder::new(Kind::Metadata, profile.to_string()).sign_with_keys(&keys)?;
 
     // Publish using nostr-sdk client
     let client = ClientBuilder::default().build();
@@ -227,7 +227,7 @@ async fn test_profile_publish_and_fetch() -> Result<()> {
     client.connect().await;
 
     // Send event
-    client.send_event(event).await?;
+    client.send_event(&event).await?;
 
     // Small delay for relay to process
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -240,11 +240,11 @@ async fn test_profile_publish_and_fetch() -> Result<()> {
 
     let events = tokio::time::timeout(
         Duration::from_secs(5),
-        client.get_events_of(vec![filter], EventSource::relays(None)),
+        client.fetch_events(filter, Duration::from_secs(5)),
     )
     .await??;
 
-    client.disconnect().await?;
+    client.disconnect().await;
 
     // Verify we got the profile back
     assert!(!events.is_empty(), "Should have received the profile event");
@@ -280,14 +280,14 @@ async fn test_profile_update_merges_fields() -> Result<()> {
         "about": "Original bio"
     });
 
-    let event1 = EventBuilder::new(Kind::Metadata, profile1.to_string(), []).to_event(&keys)?;
+    let event1 = EventBuilder::new(Kind::Metadata, profile1.to_string()).sign_with_keys(&keys)?;
 
     let client = ClientBuilder::default().build();
     client.add_relay(&relay_url).await?;
     client.connect().await;
 
     // Publish initial profile
-    client.send_event(event1).await?;
+    client.send_event(&event1).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Now update with just picture (simulating merge)
@@ -299,7 +299,7 @@ async fn test_profile_update_merges_fields() -> Result<()> {
 
     let events = tokio::time::timeout(
         Duration::from_secs(5),
-        client.get_events_of(vec![filter.clone()], EventSource::relays(None)),
+        client.fetch_events(filter.clone(), Duration::from_secs(5)),
     )
     .await??;
 
@@ -319,10 +319,10 @@ async fn test_profile_update_merges_fields() -> Result<()> {
     // Wait to ensure different timestamp
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let event2 =
-        EventBuilder::new(Kind::Metadata, serde_json::to_string(&updated)?, []).to_event(&keys)?;
+    let event2 = EventBuilder::new(Kind::Metadata, serde_json::to_string(&updated)?)
+        .sign_with_keys(&keys)?;
 
-    client.send_event(event2).await?;
+    client.send_event(&event2).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Fetch final profile - get all events and take the most recent one
@@ -330,7 +330,7 @@ async fn test_profile_update_merges_fields() -> Result<()> {
 
     let events = tokio::time::timeout(
         Duration::from_secs(5),
-        client.get_events_of(vec![filter], EventSource::relays(None)),
+        client.fetch_events(filter, Duration::from_secs(5)),
     )
     .await??;
 
@@ -355,7 +355,7 @@ async fn test_profile_update_merges_fields() -> Result<()> {
         Some("https://example.com/pic.jpg")
     );
 
-    client.disconnect().await?;
+    client.disconnect().await;
     println!("Profile update merge test passed");
     Ok(())
 }
@@ -378,13 +378,14 @@ async fn test_fetch_peer_profile_name() -> Result<()> {
         "about": "A peer user"
     });
 
-    let event = EventBuilder::new(Kind::Metadata, profile.to_string(), []).to_event(&peer_keys)?;
+    let event =
+        EventBuilder::new(Kind::Metadata, profile.to_string()).sign_with_keys(&peer_keys)?;
 
     // Publish peer's profile
     let client = ClientBuilder::default().build();
     client.add_relay(&relay_url).await?;
     client.connect().await;
-    client.send_event(event).await?;
+    client.send_event(&event).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Now fetch the peer's profile as another user would (simulating htree peer)
@@ -395,7 +396,7 @@ async fn test_fetch_peer_profile_name() -> Result<()> {
 
     let events = tokio::time::timeout(
         Duration::from_secs(5),
-        client.get_events_of(vec![filter], EventSource::relays(None)),
+        client.fetch_events(filter, Duration::from_secs(5)),
     )
     .await??;
 
@@ -413,7 +414,7 @@ async fn test_fetch_peer_profile_name() -> Result<()> {
                 .map(|s| s.to_string())
         });
 
-    client.disconnect().await?;
+    client.disconnect().await;
 
     assert_eq!(profile_name, Some("Alice Wonder".to_string()));
     println!(
@@ -445,11 +446,11 @@ async fn test_fetch_missing_profile_returns_none() -> Result<()> {
 
     let events = tokio::time::timeout(
         Duration::from_secs(2),
-        client.get_events_of(vec![filter], EventSource::relays(None)),
+        client.fetch_events(filter, Duration::from_secs(5)),
     )
     .await??;
 
-    client.disconnect().await?;
+    client.disconnect().await;
 
     assert!(events.is_empty(), "Should not find profile for new keypair");
     println!("Missing profile correctly returns empty");

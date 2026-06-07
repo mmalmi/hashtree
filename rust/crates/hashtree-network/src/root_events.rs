@@ -26,11 +26,11 @@ pub fn build_root_filter(owner_pubkey: &str, tree_name: &str) -> Option<Filter> 
             .author(author)
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
-                vec![tree_name.to_string()],
+                tree_name.to_string(),
             )
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::L),
-                vec![HASHTREE_LABEL.to_string()],
+                HASHTREE_LABEL.to_string(),
             )
             .limit(50),
     )
@@ -84,7 +84,7 @@ pub fn root_event_from_peer(
     let mut self_encrypted_key = None;
     let mut hash_tag = None;
 
-    for tag in &event.tags {
+    for tag in event.tags.iter() {
         let slice = tag.as_slice();
         if slice.len() < 2 {
             continue;
@@ -112,7 +112,7 @@ pub fn root_event_from_peer(
         encrypted_key,
         self_encrypted_key,
         event_id: event.id.to_hex(),
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         peer_id: peer_id.to_string(),
     })
 }
@@ -126,18 +126,16 @@ mod tests {
     fn root_event_from_peer_extracts_tags() {
         let keys = Keys::generate();
         let hash = "ab".repeat(32);
-        let event = EventBuilder::new(
-            Kind::Custom(HASHTREE_KIND),
-            "",
-            [
-                Tag::parse(&["d", "repo"]).expect("d tag"),
-                Tag::parse(&["l", HASHTREE_LABEL]).expect("label tag"),
-                Tag::parse(&["hash", &hash]).expect("hash tag"),
-                Tag::parse(&["encryptedKey", &"11".repeat(32)]).expect("encryptedKey tag"),
-            ],
-        )
-        .to_event(&keys)
-        .expect("event");
+        let event = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+            .tags([
+                Tag::parse(["d", "repo"]).expect("d tag"),
+                Tag::parse(["l", HASHTREE_LABEL]).expect("label tag"),
+                Tag::parse(vec!["hash".to_string(), hash.clone()]).expect("hash tag"),
+                Tag::parse(vec!["encryptedKey".to_string(), "11".repeat(32)])
+                    .expect("encryptedKey tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("event");
 
         let parsed = root_event_from_peer(&event, "peer-a", "repo").expect("root event");
         let expected_encrypted = "11".repeat(32);
@@ -154,13 +152,13 @@ mod tests {
     fn pick_latest_event_prefers_higher_event_id_on_timestamp_tie() {
         let keys = Keys::generate();
         let created_at = Timestamp::from_secs(1_700_000_000);
-        let event_a = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", [])
+        let event_a = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
             .custom_created_at(created_at)
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .expect("event a");
-        let event_b = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "", [])
+        let event_b = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
             .custom_created_at(created_at)
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .expect("event b");
 
         let expected = if event_a.id > event_b.id {

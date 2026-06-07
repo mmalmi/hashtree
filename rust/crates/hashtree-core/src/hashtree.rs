@@ -673,6 +673,14 @@ impl<S: Store> HashTree<S> {
             .map_err(|e| HashTreeError::Store(e.to_string()))
     }
 
+    async fn has_stored_chunk(&self, hash: &Hash) -> Result<bool, HashTreeError> {
+        self.store
+            .get(hash)
+            .await
+            .map(|data| data.is_some())
+            .map_err(|e| HashTreeError::Store(e.to_string()))
+    }
+
     /// Get and decode a tree node (unencrypted)
     pub async fn get_tree_node(&self, hash: &Hash) -> Result<Option<TreeNode>, HashTreeError> {
         let data = match self
@@ -1258,7 +1266,12 @@ impl<S: Store> HashTree<S> {
             // Use get_directory_node which handles chunked directory data
             let node = match self.get_directory_node(&current_cid).await? {
                 Some(n) => n,
-                None => return Ok(None),
+                None => {
+                    if !self.has_stored_chunk(&current_cid.hash).await? {
+                        return Err(HashTreeError::MissingChunk(to_hex(&current_cid.hash)));
+                    }
+                    return Ok(None);
+                }
             };
 
             if let Some(link) = self.find_link(&node, part) {
@@ -1318,7 +1331,12 @@ impl<S: Store> HashTree<S> {
 
             let sub_node = match self.get_node(&sub_cid).await? {
                 Some(n) => n,
-                None => continue,
+                None => {
+                    if !self.has_stored_chunk(&sub_cid.hash).await? {
+                        return Err(HashTreeError::MissingChunk(to_hex(&sub_cid.hash)));
+                    }
+                    continue;
+                }
             };
 
             if let Some(found) = self.find_link(&sub_node, name) {

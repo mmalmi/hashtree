@@ -358,7 +358,7 @@ impl EventIndexBucket {
                     continue;
                 }
                 if let Some(event) = self.load_event_by_id(root, &id.to_hex())? {
-                    if filter.match_event(&event) {
+                    if filter.match_event(&event, Default::default()) {
                         candidates.push(event);
                     }
                 }
@@ -385,7 +385,7 @@ impl EventIndexBucket {
                 if !seen.insert(id_bytes) {
                     continue;
                 }
-                if filter.match_event(&event) {
+                if filter.match_event(&event, Default::default()) {
                     candidates.push(event);
                 }
                 if candidates.len() >= limit {
@@ -396,8 +396,8 @@ impl EventIndexBucket {
 
         candidates.sort_by(|a, b| {
             b.created_at
-                .as_u64()
-                .cmp(&a.created_at.as_u64())
+                .as_secs()
+                .cmp(&a.created_at.as_secs())
                 .then_with(|| a.id.cmp(&b.id))
         });
         candidates.truncate(limit);
@@ -713,7 +713,7 @@ fn build_profile_search_entry(
         aliases: names.into_iter().skip(1).collect(),
         nip05,
         follow_distance,
-        created_at: event.created_at.as_u64(),
+        created_at: event.created_at.as_secs(),
         event_nhash: cid_to_nhash(mirrored_cid)?,
     })
 }
@@ -721,8 +721,8 @@ fn build_profile_search_entry(
 fn filter_list_options(filter: &Filter, limit: usize, _exact: bool) -> ListEventsOptions {
     ListEventsOptions {
         limit: Some(limit.max(1)),
-        since: filter.since.map(|timestamp| timestamp.as_u64()),
-        until: filter.until.map(|timestamp| timestamp.as_u64()),
+        since: filter.since.map(|timestamp| timestamp.as_secs()),
+        until: filter.until.map(|timestamp| timestamp.as_secs()),
     }
 }
 
@@ -736,8 +736,8 @@ pub(super) fn dedupe_events(events: Vec<Event>) -> Vec<Event> {
     }
     deduped.sort_by(|a, b| {
         b.created_at
-            .as_u64()
-            .cmp(&a.created_at.as_u64())
+            .as_secs()
+            .cmp(&a.created_at.as_secs())
             .then_with(|| a.id.cmp(&b.id))
     });
     deduped

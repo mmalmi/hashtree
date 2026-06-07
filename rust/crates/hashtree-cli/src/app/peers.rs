@@ -216,7 +216,7 @@ pub(crate) async fn list_peers(addr: &str) -> Result<()> {
 /// Fetch profile name from Nostr relays (2s timeout).
 pub(crate) async fn fetch_profile_name(relays: &[String], pubkey_hex: &str) -> Option<String> {
     use nostr::{Filter, Kind, PublicKey};
-    use nostr_sdk::{ClientBuilder, EventSource};
+    use nostr_sdk::ClientBuilder;
     use std::time::Duration;
 
     let pk = PublicKey::from_hex(pubkey_hex).ok()?;
@@ -232,13 +232,11 @@ pub(crate) async fn fetch_profile_name(relays: &[String], pubkey_hex: &str) -> O
     let filter = Filter::new().author(pk).kind(Kind::Metadata).limit(1);
 
     let timeout = Duration::from_secs(2);
-    let events = tokio::time::timeout(
-        timeout,
-        client.get_events_of(vec![filter], EventSource::relays(None)),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let events = tokio::time::timeout(timeout, client.fetch_events(filter, timeout))
+        .await
+        .ok()?
+        .ok()?
+        .to_vec();
     let _ = client.disconnect().await;
 
     // Parse profile JSON

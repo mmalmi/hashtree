@@ -426,7 +426,7 @@ pub async fn nostr_profile(
             json!({
                 "pubkey": event.pubkey.to_hex(),
                 "event_id": event.id.to_hex(),
-                "created_at": event.created_at.as_u64(),
+                "created_at": event.created_at.as_secs(),
                 "profile": profile,
             })
             .to_string(),
@@ -1328,11 +1328,10 @@ pub async fn serve_content_or_blob(
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
-            match ensure_blob_available(&state, &hash_bytes).await {
-                Ok(true) => match get_blob_without_blocking_runtime(&state, hash_bytes).await {
+            if let Some(source) = fetch_and_cache_blob_with_source(&state, &hash_bytes).await {
+                match get_blob_without_blocking_runtime(&state, hash_bytes).await {
                     Ok(Some(data)) => {
-                        return build_blob_response(data, BlobSource::Local, is_localhost)
-                            .into_response();
+                        return build_blob_response(data, source, is_localhost).into_response();
                     }
                     Ok(None) => {}
                     Err(error) if error == blob_read_busy_error() => {
@@ -1354,10 +1353,6 @@ pub async fn serve_content_or_blob(
                             .unwrap()
                             .into_response();
                     }
-                },
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!("Failed to fetch blob {}: {}", hash_hex, error);
                 }
             }
         }

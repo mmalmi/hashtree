@@ -1,6 +1,8 @@
 use hashtree_blossom::BlossomStore;
 use hashtree_core::{Hash, Store, StoreError};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tracing::debug;
 
 pub(super) struct CachedStore {
     local: Arc<dyn Store + Send + Sync>,
@@ -21,7 +23,14 @@ impl Store for CachedStore {
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         if let Ok(Some(data)) = self.local.get(hash).await {
-            return Ok(Some(data));
+            let computed = Sha256::digest(&data);
+            if computed[..] == hash[..] {
+                return Ok(Some(data));
+            }
+            debug!(
+                "Ignoring corrupt local cache entry for {}",
+                hex::encode(hash)
+            );
         }
 
         let mut last_result = Ok(None);
