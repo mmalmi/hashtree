@@ -156,7 +156,7 @@ FORMULA
             printf 'htree %s\n' "$(cat "${TEST_BREW_STATE}")"
             exit 0
         fi
-        exit 1
+        exit 0
         ;;
     install|reinstall)
         version="$(sed -n 's/^  version "\([^"]*\)".*/\1/p' "${TEST_BREW_REPO}/Formula/htree.rb" | head -n1)"
@@ -229,6 +229,7 @@ grep -F "Summary: 4 passed, 1 failed, 0 skipped" "${OUTPUT_FILE}" >/dev/null
 grep -F "docker:run --rm --platform linux/arm64 alpine:3.22 true" "${LOG_FILE}" >/dev/null
 grep -F "docker:run --rm --platform linux/amd64 alpine:3.22 true" "${LOG_FILE}" >/dev/null
 grep -F "brew:--repo sirius/hashtree" "${LOG_FILE}" >/dev/null
+grep -F "brew:install htree" "${LOG_FILE}" >/dev/null
 grep -F "brew:test htree" "${LOG_FILE}" >/dev/null
 grep -F "prlctl:list -a" "${LOG_FILE}" >/dev/null
 grep -F "prlctl:exec Windows 11 --current-user cmd.exe /c start" "${LOG_FILE}" >/dev/null

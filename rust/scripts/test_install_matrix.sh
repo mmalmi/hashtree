@@ -636,7 +636,7 @@ run_brew_smoke() {
 
     if output="$(
         HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew list --versions "$BREW_FORMULA"
-    2>&1)"; then
+    2>&1)" && [ -n "$(trim "$output")" ]; then
         had_formula=1
         installed_version="$(printf '%s\n' "$output" | awk 'NR==1 {print $2}')"
     else
