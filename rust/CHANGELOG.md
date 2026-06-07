@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.2.58 - 2026-06-07
+
+### Changed
+
+- Updated the Rust Nostr dependency stack to `nostr`/`nostr-sdk` 0.44 and
+  migrated event builders, relay messages, filters, timestamps, and query APIs.
+
+### Fixed
+
+- Fixed encrypted large-directory traversal so chunk fanout nodes use their own
+  link keys across recursive, parallel, and streaming walks.
+- Fixed missing intermediate tree chunks to surface as missing data instead of
+  resolving paths as absent.
+- Fixed git remote repair pushes to re-upload missing old-tree chunks to the
+  servers that need them, while ignoring corrupt local cache entries.
+- Fixed first raw-blob fetch responses to report the actual upstream source in
+  `X-Source`.
+- Fixed embedded reload expectations for non-P2P builds and LMDB map-size
+  reopen sizing around existing environments.
+
 ## 0.2.57 - 2026-06-07
 
 ### Added
