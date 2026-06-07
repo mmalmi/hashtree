@@ -32,6 +32,7 @@ const VERBOSE_THRESHOLD: Duration = Duration::from_secs(3);
 const DEFAULT_GIT_TREE_WALK_CONCURRENCY: usize = 4;
 const MAX_GIT_TREE_WALK_CONCURRENCY: usize = 32;
 const DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 64;
+const DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 16;
 const MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 256;
 
 use crate::nostr_client::NostrClient;
@@ -68,13 +69,41 @@ fn git_tree_walk_concurrency() -> usize {
         .unwrap_or(DEFAULT_GIT_TREE_WALK_CONCURRENCY)
 }
 
-fn git_object_download_concurrency() -> usize {
+fn configured_git_object_download_concurrency() -> Option<usize> {
     std::env::var("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .map(|value| value.min(MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY))
-        .unwrap_or(DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY)
+}
+
+fn is_loopback_read_server(server: &str) -> bool {
+    let lower = server.to_ascii_lowercase();
+    let without_scheme = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+        .unwrap_or(&lower);
+    let host_port_path = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let host = host_port_path
+        .strip_prefix('[')
+        .and_then(|value| value.split(']').next())
+        .unwrap_or_else(|| host_port_path.split(':').next().unwrap_or(host_port_path));
+
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+fn git_object_download_concurrency_for_read_servers(read_servers: &[String]) -> usize {
+    if let Some(configured) = configured_git_object_download_concurrency() {
+        return configured;
+    }
+
+    match read_servers {
+        [] | [_] => DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY,
+        [first, ..] if is_loopback_read_server(first) => {
+            DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+        }
+        _ => DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY,
+    }
 }
 
 /// Git remote helper state machine
@@ -937,7 +966,8 @@ impl RemoteHelper {
         });
 
         // Parallel fetch with concurrency limit
-        let concurrency = git_object_download_concurrency();
+        let concurrency =
+            git_object_download_concurrency_for_read_servers(self.nostr.blossom().read_servers());
         type FetchObjectResult = std::result::Result<(String, Vec<u8>), (String, Cid)>;
 
         // First pass: fetch all objects with normal timeout
@@ -1124,7 +1154,8 @@ impl RemoteHelper {
         let mut queued_writes = 0usize;
         let mut failed: Vec<(String, Cid)> = Vec::new();
 
-        let concurrency = git_object_download_concurrency();
+        let concurrency =
+            git_object_download_concurrency_for_read_servers(self.nostr.blossom().read_servers());
         const WRITE_QUEUE_CAPACITY: usize = 256;
         let git_dir = Self::git_dir_path();
         let (write_tx, mut write_rx) = mpsc::channel::<(String, Vec<u8>)>(WRITE_QUEUE_CAPACITY);

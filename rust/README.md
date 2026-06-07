@@ -197,6 +197,13 @@ New identities seed `contacts.json` locally with the `bootstrap_follows` list so
 
 `git-remote-htree` auto-creates `~/.hashtree/aliases` with the default `siriusbusiness` entry when the config directory exists. Public aliases in `~/.hashtree/keys` are still accepted for compatibility, but `aliases` is the preferred place for read-only identities.
 
+`git-remote-htree` automatically limits loose Git object download concurrency
+based on the configured read path. Multi-server CDN-style reads default to 64
+concurrent downloads, while a single read server or loopback-first local daemon
+defaults to 16 to avoid overwhelming a direct Blossom origin. Override with
+`HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY=<n>` when benchmarking or tuning a
+specific deployment.
+
 ## CLI
 
 ```bash

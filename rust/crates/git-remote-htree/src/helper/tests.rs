@@ -1680,27 +1680,49 @@ fn test_git_tree_walk_concurrency_defaults_and_caps_env() {
 fn test_git_object_download_concurrency_defaults_and_caps_env() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let _clear = EnvGuard::clear("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY");
+    let direct = vec!["https://upload.example".to_string()];
+    let multi = vec![
+        "https://cdn.example".to_string(),
+        "https://upload.example".to_string(),
+    ];
+    let local_first = vec![
+        "http://127.0.0.1:8080".to_string(),
+        "https://cdn.example".to_string(),
+    ];
+
     assert_eq!(
-        git_object_download_concurrency(),
+        git_object_download_concurrency_for_read_servers(&direct),
+        DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+    );
+    assert_eq!(
+        git_object_download_concurrency_for_read_servers(&multi),
         DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+    );
+    assert_eq!(
+        git_object_download_concurrency_for_read_servers(&local_first),
+        DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
     );
 
     {
         let _set = EnvGuard::set("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY", "96");
-        assert_eq!(git_object_download_concurrency(), 96);
+        assert_eq!(
+            git_object_download_concurrency_for_read_servers(&direct),
+            96
+        );
+        assert_eq!(git_object_download_concurrency_for_read_servers(&multi), 96);
     }
 
     {
         let _set = EnvGuard::set("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY", "0");
         assert_eq!(
-            git_object_download_concurrency(),
-            DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+            git_object_download_concurrency_for_read_servers(&direct),
+            DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
         );
     }
 
     let _set = EnvGuard::set("HTREE_GIT_OBJECT_DOWNLOAD_CONCURRENCY", "999");
     assert_eq!(
-        git_object_download_concurrency(),
+        git_object_download_concurrency_for_read_servers(&direct),
         MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY
     );
 }
