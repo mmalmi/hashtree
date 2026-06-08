@@ -255,3 +255,64 @@ Interpretation:
   retries through relays.
 - A corrupted `.git/objects` subtree key now fails the object-tree load loudly
   instead of returning an empty object set to Git.
+
+## 2026-06-08 - Multi-Server Clone Frontier Bottleneck
+
+Question: after the stale-helper cleanup on a remote Linux host, why are clean
+fresh clones still slower there than the best local repeat measurements, and
+which loose-object concurrency default fits the current checkpoint-pack layout?
+
+Setup:
+- The host had stale `htree` and `git-remote-htree` binaries earlier in PATH;
+  cleanup left the Cargo-installed 0.2.61 binaries as the canonical commands.
+- Clone runs used fresh helper data directories and fresh destinations.
+- Default runs used a local daemon read path plus remote read servers. One run
+  disabled local-daemon preference to isolate the relay/CDN path.
+- No pubkeys, private hostnames, exact repo names, raw hashes, temp paths, or
+  IPs were retained.
+
+Fresh clone results:
+
+| Mode | Total wall time | Object-tree enumeration | Pack install | Download and loose write | Installed packs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Default, first cold-ish remote-host run | 39.17 s | 3.64 s | not isolated | 30.25 s | 5 |
+| Default, warmed repeat | 16.14 s | 4.46 s | 2.59 s | 8.36 s | 5 |
+| Relay/CDN path only, warmed repeat | 20.27 s | 4.46 s | 2.61 s | 12.51 s | 5 |
+| Source-built 0.2.62 local smoke | 105.86 s | 7.68 s | 53.48 s | 33.94 s | 5 |
+
+Current loose frontier inspection:
+
+| Object type | Loose count | Payload size |
+| --- | ---: | ---: |
+| commit | 67 | 14.2 KiB |
+| tag | 2 | 0.2 KiB |
+| tree | 403 | 184.3 KiB |
+| blob | 281 | 12.4 MiB |
+| total | 753 | 12.6 MiB |
+
+Concurrency sweep on the default remote-host read path:
+
+| Loose-object concurrency | Total wall time | Object-tree enumeration | Pack install | Download and loose write |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 15.97 s | 2.67 s | 2.64 s | 9.89 s |
+| 32 | 41.37 s | 2.53 s | 2.67 s | 32.61 s |
+| 64 | 12.38 s | 2.64 s | 2.86 s | 6.15 s |
+| 96 | 18.11 s | 5.36 s | 2.61 s | 9.44 s |
+| 128 | 73.05 s | 32.66 s | 32.97 s | 6.67 s |
+
+Interpretation:
+- The installed root used the five deterministic checkpoint packs from the
+  current pack-chain arrangement. The helper was not using a current-tip or
+  tail pack.
+- Remaining clone cost came from the loose current/checkpoint frontier plus
+  per-pack installation, not from re-fetching all historical Git objects.
+- A single direct Blossom server should stay conservative because origin
+  throttling or lower server-side concurrency can make large bursts harmful.
+- The faster default for this shape is to treat two or more read servers as a
+  multi-server path even when the first read server is a loopback daemon. That
+  keeps direct/single-server clones at 16 while allowing local-daemon plus
+  CDN/origin fallback clones to use the 64-concurrent loose-object path.
+- The source-built 0.2.62 smoke clone was kept as a correctness check because
+  it succeeded at the same current root with five checkpoint packs and 753
+  loose frontier objects. Its wall time was dominated by slow pack transfer and
+  install variance, so it was not used to choose the concurrency default.

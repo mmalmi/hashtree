@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.62 - 2026-06-08
+
+### Changed
+
+- Let `git-remote-htree` use the multi-server loose-object download concurrency
+  when a local daemon read server is followed by remote read servers, while
+  keeping direct/single-server reads on the conservative direct-origin default.
+
 ## 0.2.61 - 2026-06-08
 
 ### Fixed

@@ -2037,7 +2037,7 @@ fn test_git_object_download_concurrency_defaults_and_caps_env() {
     );
     assert_eq!(
         git_object_download_concurrency_for_read_servers(&local_first),
-        DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
+        DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
     );
 
     {

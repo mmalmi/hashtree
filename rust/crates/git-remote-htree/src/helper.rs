@@ -77,21 +77,6 @@ fn configured_git_object_download_concurrency() -> Option<usize> {
         .map(|value| value.min(MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY))
 }
 
-fn is_loopback_read_server(server: &str) -> bool {
-    let lower = server.to_ascii_lowercase();
-    let without_scheme = lower
-        .strip_prefix("http://")
-        .or_else(|| lower.strip_prefix("https://"))
-        .unwrap_or(&lower);
-    let host_port_path = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let host = host_port_path
-        .strip_prefix('[')
-        .and_then(|value| value.split(']').next())
-        .unwrap_or_else(|| host_port_path.split(':').next().unwrap_or(host_port_path));
-
-    host == "localhost" || host == "::1" || host.starts_with("127.")
-}
-
 fn git_object_download_concurrency_for_read_servers(read_servers: &[String]) -> usize {
     if let Some(configured) = configured_git_object_download_concurrency() {
         return configured;
@@ -99,9 +84,6 @@ fn git_object_download_concurrency_for_read_servers(read_servers: &[String]) -> 
 
     match read_servers {
         [] | [_] => DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY,
-        [first, ..] if is_loopback_read_server(first) => {
-            DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY
-        }
         _ => DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY,
     }
 }
