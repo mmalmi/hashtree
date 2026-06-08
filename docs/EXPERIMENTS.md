@@ -316,3 +316,15 @@ Interpretation:
   it succeeded at the same current root with five checkpoint packs and 753
   loose frontier objects. Its wall time was dominated by slow pack transfer and
   install variance, so it was not used to choose the concurrency default.
+
+Follow-up:
+- After a release tag push, a fresh remote-host clone of the mutable root no
+  longer saw checkpoint pack metadata. It enumerated about 20.6k object-tree
+  entries, prepared about 20.4k loose objects, spent 50.33 s enumerating and
+  199.22 s downloading/writing loose objects, then failed because an expected
+  Git object was still missing. The bad root shape came from treating a new tag
+  ref with no previous tag tip as a full-repository push instead of using the
+  existing remote branch tip as a delta base. The 0.2.63 fix makes new tag/ref
+  pushes reuse an existing remote ref when it is an ancestor of the pushed ref,
+  and rebuilds missing checkpoint roots from deterministic checkpoint
+  boundaries without adding a current-tip tail pack.

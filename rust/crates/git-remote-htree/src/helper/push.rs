@@ -585,11 +585,7 @@ impl RemoteHelper {
             .map_err(Into::into)
     }
 
-    fn cached_remote_root_pack_checkpoint_available(&self, delta_base: Option<&str>) -> bool {
-        if delta_base.is_none() {
-            return false;
-        }
-
+    fn cached_remote_root_pack_checkpoint_available(&self) -> bool {
         match self.cached_remote_root_has_git_pack_checkpoint() {
             Ok(Some(has_checkpoint)) => has_checkpoint,
             Ok(None) => false,
@@ -601,6 +597,54 @@ impl RemoteHelper {
                 false
             }
         }
+    }
+
+    pub(super) fn delta_base_for_push(
+        &self,
+        sha: &str,
+        force_push: bool,
+        remote_tip_sha: Option<&str>,
+    ) -> Option<String> {
+        if force_push {
+            return None;
+        }
+
+        if let Some(remote_tip) = remote_tip_sha {
+            return Some(remote_tip.to_string());
+        }
+
+        self.find_existing_remote_delta_base(sha)
+    }
+
+    fn find_existing_remote_delta_base(&self, sha: &str) -> Option<String> {
+        let mut heads = Vec::new();
+        let mut other_refs = Vec::new();
+        for (ref_name, ref_sha) in &self.remote_refs {
+            if ref_sha == sha {
+                return Some(ref_sha.clone());
+            }
+            if ref_name.starts_with("refs/heads/") {
+                heads.push(ref_sha.clone());
+            } else {
+                other_refs.push(ref_sha.clone());
+            }
+        }
+
+        heads.sort();
+        heads.dedup();
+        other_refs.sort();
+        other_refs.dedup();
+
+        let mut candidates = heads;
+        candidates.extend(other_refs);
+        for candidate in candidates {
+            match self.check_ancestor(&candidate, sha) {
+                AncestorCheck::Ancestor => return Some(candidate),
+                AncestorCheck::NotAncestor | AncestorCheck::Unknown(_) => {}
+            }
+        }
+
+        None
     }
 
     fn repair_delta_tree_build(
@@ -1109,10 +1153,7 @@ impl RemoteHelper {
 
         eprint!("  Listing objects...");
         let _ = std::io::stderr().flush();
-        let delta_base = (!force_push)
-            .then(|| remote_tip_sha)
-            .flatten()
-            .map(str::to_string);
+        let delta_base = self.delta_base_for_push(sha, force_push, remote_tip_sha);
         let objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
         if let Some(base) = delta_base.as_deref() {
             eprintln!(
@@ -1136,14 +1177,14 @@ impl RemoteHelper {
             debug!("Set HEAD -> {}", dst_ref);
         }
 
-        let base_has_pack_checkpoint =
-            self.cached_remote_root_pack_checkpoint_available(delta_base.as_deref());
-        let force_initial_checkpoint = delta_base.is_some() && !base_has_pack_checkpoint;
+        let base_has_pack_checkpoint = self.cached_remote_root_pack_checkpoint_available();
+        let rebuild_checkpoint_from_first_bucket =
+            delta_base.is_some() && !base_has_pack_checkpoint;
         let checkpoint_covered = match self.prepare_git_pack_checkpoint(
             sha,
             objects.len(),
             delta_base.as_deref(),
-            force_initial_checkpoint,
+            rebuild_checkpoint_from_first_bucket,
         ) {
             Ok(Some(covered)) => covered,
             Ok(None) => HashSet::new(),
@@ -1361,7 +1402,7 @@ impl RemoteHelper {
         sha: &str,
         object_count: usize,
         delta_base: Option<&str>,
-        force_initial_checkpoint: bool,
+        rebuild_checkpoint_from_first_bucket: bool,
     ) -> Result<Option<HashSet<String>>> {
         self.storage
             .set_pack_checkpoint_files(BTreeMap::new(), HashSet::new())?;
@@ -1375,7 +1416,7 @@ impl RemoteHelper {
             object_count,
             delta_base,
             min_objects,
-            force_initial_checkpoint,
+            rebuild_checkpoint_from_first_bucket,
         )?
         else {
             return Ok(None);
@@ -1408,9 +1449,9 @@ impl RemoteHelper {
         object_count: usize,
         delta_base: Option<&str>,
         interval_objects: usize,
-        force_current_tip: bool,
+        rebuild_checkpoint_from_first_bucket: bool,
     ) -> Result<Option<GitPackCheckpointPlan>> {
-        let total_objects = if delta_base.is_none() {
+        let total_objects = if delta_base.is_none() && !rebuild_checkpoint_from_first_bucket {
             object_count
         } else {
             Self::reachable_git_object_count(sha)?
@@ -1422,7 +1463,7 @@ impl RemoteHelper {
         let bucket = total_objects / interval_objects;
         let mut first_bucket = 1;
         let mut previous_tip = None;
-        if let Some(base) = delta_base.filter(|_| !force_current_tip) {
+        if let Some(base) = delta_base.filter(|_| !rebuild_checkpoint_from_first_bucket) {
             let base_objects = Self::reachable_git_object_count(base).unwrap_or(0);
             let base_bucket = base_objects / interval_objects;
             if bucket <= base_bucket {
@@ -1449,14 +1490,6 @@ impl RemoteHelper {
                 exclude_tip: previous_tip.clone(),
             });
             previous_tip = Some(tip);
-        }
-
-        if force_current_tip && previous_tip.as_deref() != Some(sha) {
-            packs.push(GitPackCheckpointPackPlan {
-                tip: sha.to_string(),
-                exclude_tip: previous_tip.clone(),
-            });
-            previous_tip = Some(sha.to_string());
         }
 
         if packs.is_empty() {

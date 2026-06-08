@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.63 - 2026-06-08
+
+### Fixed
+
+- Fixed new tag/ref pushes over existing remote history so they choose an
+  existing remote ref as the delta base, preserving checkpoint-pack clone
+  behavior instead of relisting the whole repository as loose objects.
+- Rebuilt missing checkpoint-pack roots from deterministic checkpoint
+  boundaries without adding a current-tip tail pack.
+
 ## 0.2.62 - 2026-06-08
 
 ### Changed

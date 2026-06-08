@@ -1079,6 +1079,44 @@ fn test_checkpoint_push_import_selection_keeps_current_tree_but_skips_old_histor
 }
 
 #[test]
+fn test_new_tag_push_uses_existing_remote_branch_as_delta_base() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, _base_sha, master_sha, _dev_sha) = create_repo_with_diverged_master_and_dev();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    assert!(git(repo.path(), &["tag", "-a", "v1.0.0", "-m", "release"])
+        .status
+        .success());
+    let tag_sha =
+        String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "refs/tags/v1.0.0"]).stdout)
+            .trim()
+            .to_string();
+
+    let mut helper = create_test_helper().expect("helper");
+    helper
+        .remote_refs
+        .insert("refs/heads/master".to_string(), master_sha.clone());
+
+    let delta_base = helper
+        .delta_base_for_push(&tag_sha, false, None)
+        .expect("new tag should reuse existing remote branch as delta base");
+    assert_eq!(delta_base, master_sha);
+
+    let objects = helper
+        .list_objects_for_shas(
+            std::slice::from_ref(&tag_sha),
+            std::slice::from_ref(&delta_base),
+        )
+        .expect("list tag delta objects");
+    assert_eq!(
+        objects,
+        vec![tag_sha],
+        "annotated tag push should not relist the whole repository when its target is already remote"
+    );
+}
+
+#[test]
 fn test_pack_backed_delta_import_keeps_current_tree_objects() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let (home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
@@ -1260,7 +1298,7 @@ fn test_git_pack_checkpoint_delta_pack_excludes_previous_tip() {
 }
 
 #[test]
-fn test_git_pack_checkpoint_forces_current_tip_when_base_root_has_no_pack() {
+fn test_git_pack_checkpoint_rebuilds_chain_without_tail_when_base_root_has_no_pack() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let (_home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
     let _cwd_guard = CwdGuard::set(repo.path());
@@ -1281,26 +1319,20 @@ fn test_git_pack_checkpoint_forces_current_tip_when_base_root_has_no_pack() {
         "small increment in the same bucket should not normally rebuild a checkpoint"
     );
 
-    let forced =
+    let rebuilt =
         RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, true)
-            .expect("plan forced checkpoint")
-            .expect("forced first checkpoint should be planned");
-    assert_eq!(
-        forced.packs.last().map(|pack| pack.tip.as_str()),
-        Some(master_sha.as_str()),
-        "initial missing checkpoint should pack the current tip"
-    );
+            .expect("plan rebuilt checkpoint")
+            .expect("missing base checkpoint should rebuild deterministic checkpoints");
     assert!(
-        forced
+        rebuilt
             .packs
-            .last()
-            .and_then(|pack| pack.exclude_tip.as_deref())
-            .is_some(),
-        "forced current-tip checkpoint should be layered on the previous deterministic checkpoint when one exists"
+            .iter()
+            .all(|pack| pack.tip.as_str() != master_sha.as_str()),
+        "rebuilding a missing base checkpoint should not add a current-tip tail pack"
     );
     assert!(
-        forced.covered_objects.contains(&master_sha),
-        "current commit should be covered by the forced checkpoint"
+        !rebuilt.covered_objects.contains(&master_sha),
+        "current commit should remain in the loose frontier unless it is a deterministic checkpoint boundary"
     );
 }
 
