@@ -61,7 +61,9 @@ fn parse_last_listed_object_count(stderr: &str) -> Option<u32> {
         .lines()
         .filter_map(|line| {
             let line = line.trim();
-            let rest = line.strip_prefix("Listing objects... ")?;
+            let rest = line
+                .strip_prefix("Listing objects... ")
+                .or_else(|| line.strip_prefix("Listed "))?;
             let count = rest.split_whitespace().next()?;
             count.parse::<u32>().ok()
         })

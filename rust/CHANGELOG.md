@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.2.65 - 2026-06-08
+
+### Changed
+
+- Made `git-remote-htree` enumerate Git pack metadata directly from
+  `.git/objects/pack` and load loose-object prefixes concurrently, reducing
+  fresh clone object-tree enumeration without adding a current-tip tail pack.
+- Kept fetches pack-aware by installing checkpoint packs before the loose
+  object local check, so objects already covered by installed packs are not
+  fetched or written again.
+
+### Fixed
+
+- Refused to publish a mutable Git root when the local repo tree is incomplete,
+  Blossom upload replication is degraded, or the uploaded root is not readable
+  from a configured write server.
+- Treated local-daemon roots as fallbacks unless they came from a live Nostr
+  source, so stale daemon cache entries cannot hide a newer relay root.
+
 ## 0.2.64 - 2026-06-08
 
 ### Changed

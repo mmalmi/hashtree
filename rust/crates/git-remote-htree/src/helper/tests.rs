@@ -546,9 +546,128 @@ fn test_collect_git_object_locations_errors_on_bad_objects_tree_key() {
     };
     assert!(
         err.to_string().contains("Failed to resolve .git/objects")
+            || err.to_string().contains("Failed to list objects directory")
             || err.to_string().contains("resolve .git/objects/info/packs"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn test_collect_git_pack_locations_scans_pack_dir_when_info_packs_missing() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let locations = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let pack_hash = "0123456789abcdef0123456789abcdef01234567";
+        let pack_name = format!("pack-{pack_hash}.pack");
+        let idx_name = format!("pack-{pack_hash}.idx");
+        let (pack_cid, pack_size) = tree.put(b"pack bytes").await.expect("pack blob");
+        let (idx_cid, idx_size) = tree.put(b"idx bytes").await.expect("idx blob");
+        let pack_dir_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid(&pack_name, &pack_cid).with_size(pack_size),
+                DirEntry::from_cid(&idx_name, &idx_cid).with_size(idx_size),
+            ])
+            .await
+            .expect("pack dir");
+        let missing_info_cid = Cid {
+            hash: [0x42; 32],
+            key: None,
+        };
+        let objects_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("pack", &pack_dir_cid),
+                DirEntry::from_cid("info", &missing_info_cid),
+            ])
+            .await
+            .expect("objects dir");
+
+        helper
+            .collect_git_pack_locations_async(&tree, &objects_cid)
+            .await
+            .expect("collect pack locations")
+    });
+
+    assert_eq!(locations.len(), 1);
+    assert_eq!(
+        locations[0].pack_name,
+        "pack-0123456789abcdef0123456789abcdef01234567.pack"
+    );
+    assert_eq!(
+        locations[0].idx_name,
+        "pack-0123456789abcdef0123456789abcdef01234567.idx"
+    );
+}
+
+#[test]
+fn test_collect_git_object_locations_ignores_missing_info_subtree_for_loose_objects() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (root_cid, oid) = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let (object_cid, object_size) = tree
+            .put(b"compressed loose git object")
+            .await
+            .expect("loose object");
+        let prefix_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid(&oid[2..], &object_cid).with_size(object_size)
+            ])
+            .await
+            .expect("loose prefix");
+        let missing_info_cid = Cid {
+            hash: [0x77; 32],
+            key: None,
+        };
+        let objects_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid(&oid[..2], &prefix_cid),
+                DirEntry::from_cid("info", &missing_info_cid),
+            ])
+            .await
+            .expect("objects dir");
+        let refs_cid = tree.put_directory(vec![]).await.expect("refs dir");
+        let git_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("objects", &objects_cid).with_link_type(LinkType::Dir),
+                DirEntry::from_cid("refs", &refs_cid).with_link_type(LinkType::Dir),
+            ])
+            .await
+            .expect(".git dir");
+        let root_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid(".git", &git_cid).with_link_type(LinkType::Dir)
+            ])
+            .await
+            .expect("root dir");
+
+        (root_cid, oid)
+    });
+
+    let (_tree, fetch_tasks, pack_locations, _local_store) = rt
+        .block_on(helper.collect_git_object_locations_async(&hex::encode(root_cid.hash), None))
+        .expect("collect object locations");
+
+    assert!(pack_locations.is_empty());
+    assert_eq!(fetch_tasks.len(), 1);
+    assert_eq!(fetch_tasks[0].oid, oid);
 }
 
 fn write_test_config(home: &std::path::Path, blossom_url: &str, force_upload: bool) {
@@ -1985,6 +2104,103 @@ fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
     assert!(
         !failing_server_a.has_blob(&root_cid.hash) && !failing_server_b.has_blob(&root_cid.hash),
         "failing servers should not receive the blob"
+    );
+}
+
+#[test]
+fn test_blossom_publish_gate_rejects_degraded_upload() {
+    let result = crate::nostr_client::BlossomResult {
+        configured: vec!["http://127.0.0.1:1".to_string()],
+        succeeded: vec![],
+        failed: vec!["http://127.0.0.1:1".to_string()],
+        local_complete: true,
+        degraded: true,
+    };
+
+    let err = super::push::ensure_blossom_publish_ready(&result).expect_err("degraded upload");
+
+    assert!(
+        err.to_string().contains("not publishing root"),
+        "degraded remote replication must block root publication: {err}"
+    );
+}
+
+#[test]
+fn test_blossom_publish_gate_accepts_complete_upload() {
+    let result = crate::nostr_client::BlossomResult {
+        configured: vec!["http://127.0.0.1:1".to_string()],
+        succeeded: vec!["http://127.0.0.1:1".to_string()],
+        failed: vec![],
+        local_complete: true,
+        degraded: false,
+    };
+
+    super::push::ensure_blossom_publish_ready(&result).expect("complete upload can publish");
+}
+
+#[test]
+fn test_verify_root_available_on_write_server_accepts_uploaded_root() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let server = CountingBlossomServer::new();
+    write_test_config(home.path(), server.base_url(), false);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![server.base_url().to_string()];
+    config.blossom.write_servers = vec![server.base_url().to_string()];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let root_cid = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        tree.put(b"root must be visible before publishing")
+            .await
+            .expect("write root")
+            .0
+    });
+    let root_hash = hex::encode(root_cid.hash);
+
+    let result = helper.push_to_file_servers_with_diff(&root_hash, None, None, None, true);
+    super::push::ensure_blossom_publish_ready(&result).expect("upload complete");
+    helper
+        .verify_root_available_on_write_server(&root_hash)
+        .expect("uploaded root is visible");
+
+    assert!(
+        server.get_head_request_count() > 0,
+        "root visibility gate should probe the write server"
+    );
+}
+
+#[test]
+fn test_verify_root_available_on_write_server_rejects_missing_root() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let server = CountingBlossomServer::new();
+    write_test_config(home.path(), server.base_url(), false);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![server.base_url().to_string()];
+    config.blossom.write_servers = vec![server.base_url().to_string()];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let missing_hash = hex::encode([0x55u8; 32]);
+    let err = helper
+        .verify_root_available_on_write_server(&missing_hash)
+        .expect_err("missing root must block publish");
+
+    assert!(
+        err.to_string().contains("not readable"),
+        "unexpected error: {err}"
     );
 }
 

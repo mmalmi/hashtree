@@ -304,7 +304,7 @@ pub struct BlossomResult {
     pub failed: Vec<String>,
     /// Whether the repo tree is complete in the local hashtree store.
     pub local_complete: bool,
-    /// Whether remote replication was incomplete but the local push can still be published.
+    /// Whether remote replication was incomplete.
     pub degraded: bool,
 }
 
@@ -339,6 +339,9 @@ struct RootEventData {
     key_tag_name: Option<String>,
     self_encrypted_ciphertext: Option<String>,
     source: RootResolveSource,
+    daemon_source: Option<String>,
+    event_created_at: Option<u64>,
+    event_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +357,10 @@ struct DaemonResolveResponse {
     self_encrypted_key: Option<String>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    created_at: Option<u64>,
+    #[serde(default)]
+    event_id: Option<String>,
 }
 
 impl NostrClient {
@@ -395,7 +402,7 @@ impl NostrClient {
         let blossom = BlossomClient::new_empty(blossom_keys)
             .with_read_servers(read_servers)
             .with_write_servers(config.blossom.all_write_servers())
-            .with_timeout(Duration::from_secs(30));
+            .with_timeout(Duration::from_secs(120));
 
         tracing::info!(
             "BlossomClient created with read_servers: {:?}, write_servers: {:?}",
@@ -680,6 +687,9 @@ impl NostrClient {
             key_tag_name,
             self_encrypted_ciphertext,
             source: RootResolveSource::Relay,
+            daemon_source: None,
+            event_created_at: Some(event.created_at.as_secs()),
+            event_id: Some(event.id.to_hex()),
         }
     }
 
@@ -687,6 +697,9 @@ impl NostrClient {
         response: DaemonResolveResponse,
     ) -> Option<RootEventData> {
         let parsed_cid = response.cid.as_deref().and_then(|cid| Cid::parse(cid).ok());
+        let daemon_source = response.source.clone();
+        let event_created_at = response.created_at;
+        let event_id = response.event_id.clone();
         let root_hash = response
             .hash
             .or_else(|| parsed_cid.as_ref().map(|cid| hex::encode(cid.hash)))?;
@@ -700,6 +713,9 @@ impl NostrClient {
             key_tag_name: None,
             self_encrypted_ciphertext: None,
             source: RootResolveSource::LocalDaemon,
+            daemon_source,
+            event_created_at,
+            event_id,
         };
 
         if let Some(ciphertext) = response.self_encrypted_key {
@@ -736,7 +752,7 @@ impl NostrClient {
         let base = self.local_daemon_url.as_ref()?;
         let pubkey = self.daemon_pubkey_identifier();
         let url = format!(
-            "{}/api/nostr/resolve/{}/{}",
+            "{}/api/nostr/resolve/{}/{}?refresh=1",
             base.trim_end_matches('/'),
             pubkey,
             repo_name
@@ -759,6 +775,33 @@ impl NostrClient {
             repo_name, source
         );
         Some(parsed)
+    }
+
+    fn daemon_root_needs_relay_confirmation(data: &RootEventData) -> bool {
+        if data.source != RootResolveSource::LocalDaemon {
+            return false;
+        }
+
+        !matches!(data.daemon_source.as_deref(), Some("nostr-relay" | "nostr"))
+    }
+
+    fn root_event_is_newer(left: &RootEventData, right: &RootEventData) -> bool {
+        match (left.event_created_at, right.event_created_at) {
+            (Some(left_time), Some(right_time)) => {
+                (left_time, left.event_id.as_deref().unwrap_or(""))
+                    > (right_time, right.event_id.as_deref().unwrap_or(""))
+            }
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    fn choose_newer_root_data(fallback: RootEventData, relay: RootEventData) -> RootEventData {
+        if Self::root_event_is_newer(&fallback, &relay) {
+            fallback
+        } else {
+            relay
+        }
     }
 
     async fn cache_public_root_in_local_daemon(
@@ -851,14 +894,24 @@ impl NostrClient {
         debug!("Querying relays for repo {} events", repo_name);
 
         let mut root_data = None;
+        let mut daemon_fallback: Option<RootEventData> = None;
         for attempt in 1..=max_attempts {
             if allow_local_daemon {
                 if let Some(data) = self
                     .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
                     .await
                 {
-                    root_data = Some(data);
-                    break;
+                    if Self::daemon_root_needs_relay_confirmation(&data) {
+                        debug!(
+                            "Local daemon resolved {} via {}; checking relays for fresher root",
+                            repo_name,
+                            data.daemon_source.as_deref().unwrap_or("unknown")
+                        );
+                        daemon_fallback = Some(data);
+                    } else {
+                        root_data = Some(data);
+                        break;
+                    }
                 }
             }
 
@@ -869,7 +922,7 @@ impl NostrClient {
                 );
             }
 
-            if allow_local_daemon {
+            if allow_local_daemon && daemon_fallback.is_none() {
                 debug!(
                     "Local daemon did not resolve {}; querying relays",
                     repo_name
@@ -917,6 +970,17 @@ impl NostrClient {
             // Query with relay-level timeout.
             // Using `EventSource::relays(Some(...))` preserves partial results from responsive
             // relays instead of discarding everything when one relay stalls.
+            if !has_connected_relay {
+                if let Some(data) = daemon_fallback.take() {
+                    debug!(
+                        "Using local daemon root for {} because no relay connected",
+                        repo_name
+                    );
+                    root_data = Some(data);
+                    break;
+                }
+            }
+
             let events = if has_connected_relay {
                 match client.fetch_events(filter.clone(), query_timeout).await {
                     Ok(events) => events.to_vec(),
@@ -942,16 +1006,27 @@ impl NostrClient {
                     "Found relay event with root hash: {}",
                     &event.content[..12.min(event.content.len())]
                 );
-                root_data = Some(Self::parse_root_event_data_from_event(event));
+                let relay_data = Self::parse_root_event_data_from_event(event);
+                root_data = Some(match daemon_fallback.take() {
+                    Some(fallback) => Self::choose_newer_root_data(fallback, relay_data),
+                    None => relay_data,
+                });
                 break;
             }
 
             if attempt < max_attempts {
                 debug!(
-                    "No hashtree event found for {} on attempt {}/{}; retrying",
+                    "No relay hashtree event found for {} on attempt {}/{}; retrying",
                     repo_name, attempt, max_attempts
                 );
                 tokio::time::sleep(retry_delay).await;
+            } else if let Some(data) = daemon_fallback.take() {
+                debug!(
+                    "Using local daemon root for {} after relay lookup returned no event",
+                    repo_name
+                );
+                root_data = Some(data);
+                break;
             }
         }
 

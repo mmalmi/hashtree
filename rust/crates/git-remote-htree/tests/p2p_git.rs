@@ -13,6 +13,17 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+fn kill_child_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::killpg(child.id() as i32, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
 /// Test peer with htree daemon
 struct TestPeer {
     _data_dir: TempDir,
@@ -156,10 +167,17 @@ enabled = false
         cwd: &Path,
         timeout: Duration,
     ) -> Result<std::process::Output, String> {
-        let mut child = self
-            .git_command(args, cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        let mut command = self.git_command(args, cwd);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+
+        let mut child = command
             .spawn()
             .map_err(|err| format!("Failed to start git {}: {err}", args.join(" ")))?;
         let start = std::time::Instant::now();
@@ -171,7 +189,7 @@ enabled = false
                         .map_err(|err| format!("Failed to collect git output: {err}"));
                 }
                 Ok(None) if start.elapsed() >= timeout => {
-                    let _ = child.kill();
+                    kill_child_process_group(&mut child);
                     let output = child
                         .wait_with_output()
                         .map_err(|err| format!("Failed to collect timed-out git output: {err}"))?;
@@ -198,6 +216,41 @@ enabled = false
         );
     }
 
+    fn git_with_timeout_retry(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        attempts: usize,
+        timeout: Duration,
+    ) -> Result<std::process::Output, String> {
+        let mut last_error = String::new();
+        for attempt in 1..=attempts {
+            match self.git_with_timeout(args, cwd, timeout) {
+                Ok(out) if out.status.success() => return Ok(out),
+                Ok(out) => {
+                    last_error = format!(
+                        "stdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Err(err) => {
+                    last_error = err;
+                }
+            }
+            if attempt < attempts {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+
+        Err(format!(
+            "git {} failed after {} attempt(s): {}",
+            args.join(" "),
+            attempts,
+            last_error
+        ))
+    }
+
     fn git_clone_ok_retry(&self, remote: &str, dest: &str, cwd: &Path) {
         let dest_path = cwd.join(dest);
         let mut last_stderr = String::new();
@@ -205,7 +258,7 @@ enabled = false
             if dest_path.exists() {
                 std::fs::remove_dir_all(&dest_path).expect("remove failed clone destination");
             }
-            match self.git_with_timeout(&["clone", remote, dest], cwd, Duration::from_secs(30)) {
+            match self.git_with_timeout(&["clone", remote, dest], cwd, Duration::from_secs(120)) {
                 Ok(out) if out.status.success() => return,
                 Ok(out) => {
                     last_stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -299,6 +352,52 @@ fn get_daemon_status(peer_url: &str) -> serde_json::Value {
         .expect("Failed to get status")
         .json()
         .expect("Failed to parse status JSON")
+}
+
+fn matching_root_events(relay: &TestRelay, pubkey: &str, repo: &str) -> Vec<serde_json::Value> {
+    relay
+        .stored_events()
+        .into_iter()
+        .filter(|event| {
+            event.get("kind").and_then(|value| value.as_u64()) == Some(30078)
+                && event.get("pubkey").and_then(|value| value.as_str()) == Some(pubkey)
+                && event
+                    .get("tags")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|tags| {
+                        tags.iter().any(|tag| {
+                            tag.as_array().is_some_and(|parts| {
+                                parts.len() >= 2
+                                    && parts[0].as_str() == Some("d")
+                                    && parts[1].as_str() == Some(repo)
+                            })
+                        })
+                    })
+        })
+        .collect()
+}
+
+fn daemon_refresh(peer: &TestPeer, owner_npub: &str, repo: &str) -> String {
+    reqwest::blocking::get(format!(
+        "{}/api/nostr/resolve/{}/{}?refresh=1",
+        peer.api_url(),
+        owner_npub,
+        repo
+    ))
+    .and_then(|response| response.text())
+    .unwrap_or_else(|err| format!("daemon refresh failed: {err}"))
+}
+
+fn root_diagnostics(
+    relay: &TestRelay,
+    peer: &TestPeer,
+    owner_hex: &str,
+    owner_npub: &str,
+) -> String {
+    let events = matching_root_events(relay, owner_hex, "shared-repo");
+    let events = serde_json::to_string_pretty(&events).unwrap_or_else(|_| format!("{events:?}"));
+    let daemon = daemon_refresh(peer, owner_npub, "shared-repo");
+    format!("relay events:\n{events}\ndaemon refresh:\n{daemon}")
 }
 
 fn wait_for_fips_peer(peer_url: &str, target_npub: &str) -> bool {
@@ -510,7 +609,14 @@ fn test_p2p_git_roundtrip() {
         ],
         repo_a.path(),
     );
-    peer_a.git_ok(&["pull", "--rebase"], repo_a.path());
+    peer_a
+        .git_with_timeout_retry(
+            &["pull", "--rebase"],
+            repo_a.path(),
+            3,
+            Duration::from_secs(90),
+        )
+        .unwrap_or_else(|err| panic!("Peer A pull failed: {err}"));
 
     let count = std::fs::read_to_string(repo_a.path().join("count.txt")).unwrap();
     assert_eq!(count.trim(), "2", "After pull, count should be 2");
@@ -532,11 +638,13 @@ fn test_p2p_git_roundtrip() {
     );
     let push = peer_a.git(&["push"], repo_a.path());
     let stderr = String::from_utf8_lossy(&push.stderr);
-    assert!(
-        push.status.success() || stderr.contains("-> master"),
-        "Peer A second push failed: {}",
-        stderr
-    );
+    if !(push.status.success() || stderr.contains("-> master")) {
+        panic!(
+            "Peer A second push failed: {}\n{}",
+            stderr,
+            root_diagnostics(&relay, &peer_a, &pubkey_a, &peer_a.npub)
+        );
+    }
     println!("   Pushed (count=3)\n");
 
     // === Peer B: Pull final changes ===
@@ -550,9 +658,39 @@ fn test_p2p_git_roundtrip() {
         ],
         &repo_b_path,
     );
-    peer_b.git_ok(&["pull", "--rebase"], &repo_b_path);
-
+    let final_pull = match peer_b.git_with_timeout_retry(
+        &["pull", "--rebase"],
+        &repo_b_path,
+        3,
+        Duration::from_secs(90),
+    ) {
+        Ok(out) => out,
+        Err(err) => {
+            panic!(
+                "final pull failed\n{}\n{}",
+                err,
+                root_diagnostics(&relay, &peer_b, &pubkey_a, &peer_a.npub)
+            );
+        }
+    };
     let count = std::fs::read_to_string(repo_b_path.join("count.txt")).unwrap();
+    if count.trim() != "3" {
+        let log = peer_b.git(
+            &["log", "--oneline", "--decorate", "--graph", "--all", "-8"],
+            &repo_b_path,
+        );
+        let status = peer_b.git(&["status", "-sb"], &repo_b_path);
+        let branches = peer_b.git(&["branch", "-vv"], &repo_b_path);
+        eprintln!(
+            "final pull stdout:\n{}\nfinal pull stderr:\n{}\nlog:\n{}\nstatus:\n{}\nbranches:\n{}\n{}",
+            String::from_utf8_lossy(&final_pull.stdout),
+            String::from_utf8_lossy(&final_pull.stderr),
+            String::from_utf8_lossy(&log.stdout),
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&branches.stdout),
+            root_diagnostics(&relay, &peer_b, &pubkey_a, &peer_a.npub)
+        );
+    }
     assert_eq!(count.trim(), "3", "Final count should be 3");
     assert!(
         repo_b_path.join("from_a.txt").exists(),

@@ -139,6 +139,41 @@ fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize
     }
 }
 
+pub(super) fn ensure_blossom_publish_ready(result: &BlossomResult) -> Result<()> {
+    if !result.local_complete {
+        bail!(
+            "Failed to prepare complete repo tree in local hashtree store; not publishing incomplete root"
+        );
+    }
+
+    if result.degraded {
+        let failed = if result.failed.is_empty() {
+            "unknown write server(s)".to_string()
+        } else {
+            result.failed.join(", ")
+        };
+        bail!(
+            "Remote Blossom replication incomplete ({}); not publishing root that clients may not be able to read",
+            failed
+        );
+    }
+
+    Ok(())
+}
+
+fn root_availability_error(root_hash: &str, unavailable: &[String]) -> anyhow::Error {
+    let servers = if unavailable.is_empty() {
+        "no configured write server".to_string()
+    } else {
+        unavailable.join(", ")
+    };
+    anyhow::anyhow!(
+        "Uploaded repo root {} is not readable from configured Blossom write server(s): {}; not publishing root",
+        &root_hash[..12.min(root_hash.len())],
+        servers
+    )
+}
+
 fn git_pack_checkpoint_min_objects() -> usize {
     std::env::var(GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV)
         .ok()
@@ -499,6 +534,28 @@ async fn upload_block_to_file_servers(
 impl RemoteHelper {
     fn upload_concurrency(&self, server_count: usize) -> usize {
         effective_upload_concurrency(server_count, self.config.blossom.upload_concurrency)
+    }
+
+    pub(super) fn verify_root_available_on_write_server(&self, root_hash: &str) -> Result<()> {
+        let blossom = self.nostr.blossom().clone();
+        let write_servers = blossom.write_servers().to_vec();
+        if write_servers.is_empty() {
+            return Err(root_availability_error(root_hash, &[]));
+        }
+
+        block_on_result(async {
+            let mut unavailable = Vec::new();
+            for server in &write_servers {
+                match blossom.check_on_server(root_hash, server).await {
+                    hashtree_blossom::BlobAvailability::Present => return Ok(()),
+                    hashtree_blossom::BlobAvailability::Missing
+                    | hashtree_blossom::BlobAvailability::Unknown => {
+                        unavailable.push(server.clone());
+                    }
+                }
+            }
+            Err(root_availability_error(root_hash, &unavailable))
+        })
     }
 
     fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
@@ -1447,17 +1504,8 @@ impl RemoteHelper {
             old_encryption_key.as_ref(),
             true,
         );
-        if !blossom_result.local_complete {
-            anyhow::bail!(
-                "Failed to prepare complete repo tree in local hashtree store; not publishing incomplete root"
-            );
-        }
-        if blossom_result.degraded && !blossom_result.failed.is_empty() {
-            eprintln!(
-                "  Warning: remote Blossom replication incomplete: {}",
-                blossom_result.failed.join(", ")
-            );
-        }
+        ensure_blossom_publish_ready(&blossom_result)?;
+        self.verify_root_available_on_write_server(&root_hash_hex)?;
 
         let key_with_privacy = key_to_publish
             .as_ref()
@@ -1494,10 +1542,6 @@ impl RemoteHelper {
         if !blossom_result.failed.is_empty() {
             eprintln!("  Blossom failed: {}", blossom_result.failed.join(", "));
         }
-        if blossom_result.degraded {
-            eprintln!("  Local store: complete (published with degraded Blossom replication)");
-        }
-
         eprintln!("  Config: ~/.hashtree/config.toml");
 
         if let Some(path) = npub_url.strip_prefix("htree://") {

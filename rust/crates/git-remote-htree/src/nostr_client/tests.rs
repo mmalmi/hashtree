@@ -299,6 +299,8 @@ fn test_parse_daemon_response_to_root_data_encrypted_key() {
         encrypted_key: Some("11".repeat(32)),
         self_encrypted_key: None,
         source: Some("webrtc".to_string()),
+        created_at: Some(10),
+        event_id: Some("aa".repeat(32)),
     };
 
     let parsed = NostrClient::parse_daemon_response_to_root_data(payload).unwrap();
@@ -306,6 +308,8 @@ fn test_parse_daemon_response_to_root_data_encrypted_key() {
     assert_eq!(parsed.key_tag_name.as_deref(), Some("encryptedKey"));
     assert!(parsed.self_encrypted_ciphertext.is_none());
     assert_eq!(parsed.encryption_key.unwrap(), [0x11; 32]);
+    assert_eq!(parsed.daemon_source.as_deref(), Some("webrtc"));
+    assert_eq!(parsed.event_created_at, Some(10));
 }
 
 #[test]
@@ -317,6 +321,8 @@ fn test_parse_daemon_response_to_root_data_self_encrypted() {
         encrypted_key: None,
         self_encrypted_key: Some("ciphertext".to_string()),
         source: Some("webrtc".to_string()),
+        created_at: None,
+        event_id: None,
     };
 
     let parsed = NostrClient::parse_daemon_response_to_root_data(payload).unwrap();
@@ -338,12 +344,51 @@ fn test_parse_daemon_response_to_root_data_cid_key() {
         encrypted_key: None,
         self_encrypted_key: None,
         source: Some("nostr".to_string()),
+        created_at: None,
+        event_id: None,
     };
 
     let parsed = NostrClient::parse_daemon_response_to_root_data(payload).unwrap();
     assert_eq!(parsed.root_hash, "ab".repeat(32));
     assert_eq!(parsed.key_tag_name, None);
     assert_eq!(parsed.encryption_key, Some([0x33; 32]));
+}
+
+#[test]
+fn test_daemon_local_relay_root_is_fallback_until_relay_checked() {
+    let local = RootEventData {
+        root_hash: "11".repeat(32),
+        source: RootResolveSource::LocalDaemon,
+        daemon_source: Some("local-relay".to_string()),
+        event_created_at: Some(10),
+        event_id: Some("11".repeat(32)),
+        ..RootEventData::default()
+    };
+    let relay = RootEventData {
+        root_hash: "22".repeat(32),
+        source: RootResolveSource::Relay,
+        event_created_at: Some(20),
+        event_id: Some("22".repeat(32)),
+        ..RootEventData::default()
+    };
+
+    assert!(NostrClient::daemon_root_needs_relay_confirmation(&local));
+    let chosen = NostrClient::choose_newer_root_data(local, relay);
+    assert_eq!(chosen.root_hash, "22".repeat(32));
+}
+
+#[test]
+fn test_daemon_nostr_relay_root_can_be_used_immediately() {
+    let local = RootEventData {
+        root_hash: "11".repeat(32),
+        source: RootResolveSource::LocalDaemon,
+        daemon_source: Some("nostr-relay".to_string()),
+        event_created_at: Some(20),
+        event_id: Some("22".repeat(32)),
+        ..RootEventData::default()
+    };
+
+    assert!(!NostrClient::daemon_root_needs_relay_confirmation(&local));
 }
 
 #[tokio::test]

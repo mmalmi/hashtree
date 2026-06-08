@@ -180,6 +180,10 @@ fn is_safe_git_pack_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn is_git_hex_name(name: &str, len: usize) -> bool {
+    name.len() == len && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 impl RemoteHelper {
     async fn with_git_pack_progress<T>(
         label: String,
@@ -607,6 +611,19 @@ impl RemoteHelper {
             .collect_git_pack_locations_async(&tree, &objects_cid)
             .await?;
 
+        let fetch_tasks = self
+            .collect_git_loose_object_locations_async(&tree, &objects_cid)
+            .await?;
+
+        Ok((tree, fetch_tasks, pack_locations, local_store_for_eviction))
+    }
+
+    async fn collect_git_loose_object_locations_async<S: Store>(
+        &self,
+        tree: &hashtree_core::HashTree<S>,
+        objects_cid: &Cid,
+    ) -> Result<Vec<GitObjectLocation>> {
+        use futures::stream::{self, StreamExt};
         use hashtree_core::LinkType;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc as StdArc;
@@ -626,58 +643,48 @@ impl RemoteHelper {
                 }
                 let current = progress_clone.load(Ordering::Relaxed);
                 if current != last {
-                    eprintln!("  Loading objects tree... {} nodes", current);
+                    eprintln!("  Loading objects tree... {} entries", current);
                     last = current;
                 }
             }
         });
 
-        let walk_entries = match tree
-            .walk_parallel_with_progress(
-                &objects_cid,
-                "",
-                git_tree_walk_concurrency(),
-                Some(&progress),
-            )
-            .await
-        {
+        let objects_entries = match tree.list_directory(objects_cid).await {
             Ok(entries) => entries,
             Err(e) => {
                 done.store(true, Ordering::Relaxed);
                 let _ = progress_task.await;
                 eprintln!("  Loading objects tree... failed: {}", e);
-                warn!("Failed to walk objects directory: {}", e);
-                bail!("Failed to walk objects directory: {}", e);
+                warn!("Failed to list objects directory: {}", e);
+                bail!("Failed to list objects directory: {}", e);
             }
         };
-        done.store(true, Ordering::Relaxed);
-        let _ = progress_task.await;
-
-        eprintln!(
-            "  Loading objects tree... done ({} entries)",
-            walk_entries.len()
+        debug!(
+            ".git/objects entries while looking for loose objects: {:?}",
+            objects_entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
         );
+        progress.fetch_add(objects_entries.len(), Ordering::Relaxed);
 
         let mut fetch_tasks: Vec<GitObjectLocation> = Vec::new();
-        for entry in walk_entries {
-            if entry.link_type == LinkType::Dir {
+        let mut loose_prefixes = Vec::new();
+        for entry in objects_entries {
+            if is_git_hex_name(&entry.name, 2) {
+                loose_prefixes.push((
+                    entry.name,
+                    Cid {
+                        hash: entry.hash,
+                        key: entry.key,
+                    },
+                ));
                 continue;
             }
 
-            let parts: Vec<&str> = entry.path.split('/').collect();
-            if parts.len() == 2 && parts[0].len() == 2 && parts[1].len() == 38 {
-                if hex::decode(parts[0]).is_ok() && hex::decode(parts[1]).is_ok() {
-                    fetch_tasks.push(GitObjectLocation {
-                        oid: format!("{}{}", parts[0], parts[1]),
-                        cid: Cid {
-                            hash: entry.hash,
-                            key: entry.key,
-                        },
-                    });
-                }
-            } else if parts.len() == 1 && parts[0].len() == 40 && hex::decode(parts[0]).is_ok() {
+            if is_git_hex_name(&entry.name, 40) {
                 fetch_tasks.push(GitObjectLocation {
-                    oid: parts[0].to_string(),
+                    oid: entry.name,
                     cid: Cid {
                         hash: entry.hash,
                         key: entry.key,
@@ -686,7 +693,53 @@ impl RemoteHelper {
             }
         }
 
-        Ok((tree, fetch_tasks, pack_locations, local_store_for_eviction))
+        let tree_ref = tree;
+        let prefix_results =
+            stream::iter(loose_prefixes.into_iter().map(|(prefix, prefix_cid)| {
+                let progress = progress.clone();
+                async move {
+                    let entries = tree_ref
+                        .list_directory(&prefix_cid)
+                        .await
+                        .with_context(|| format!("list .git/objects/{prefix}"))?;
+                    progress.fetch_add(entries.len(), Ordering::Relaxed);
+
+                    let mut locations = Vec::new();
+                    for entry in entries {
+                        if entry.link_type == LinkType::Dir || !is_git_hex_name(&entry.name, 38) {
+                            continue;
+                        }
+                        locations.push(GitObjectLocation {
+                            oid: format!("{prefix}{}", entry.name),
+                            cid: Cid {
+                                hash: entry.hash,
+                                key: entry.key,
+                            },
+                        });
+                    }
+
+                    Ok::<Vec<GitObjectLocation>, anyhow::Error>(locations)
+                }
+            }))
+            .buffer_unordered(git_tree_walk_concurrency())
+            .collect::<Vec<_>>()
+            .await;
+
+        done.store(true, Ordering::Relaxed);
+        let _ = progress_task.await;
+
+        for result in prefix_results {
+            fetch_tasks.extend(result?);
+        }
+        fetch_tasks.sort_by(|left, right| left.oid.cmp(&right.oid));
+        fetch_tasks.dedup_by(|left, right| left.oid == right.oid);
+
+        eprintln!(
+            "  Loading objects tree... done ({} loose objects)",
+            fetch_tasks.len()
+        );
+
+        Ok(fetch_tasks)
     }
 
     async fn collect_git_pack_locations_async<S: Store>(
@@ -694,48 +747,117 @@ impl RemoteHelper {
         tree: &hashtree_core::HashTree<S>,
         objects_cid: &Cid,
     ) -> Result<Vec<GitPackLocation>> {
-        let Some(info_packs_cid) = tree
-            .resolve_path(objects_cid, "info/packs")
-            .await
-            .context("resolve .git/objects/info/packs")?
-        else {
-            return Ok(Vec::new());
-        };
-
-        let Some(info_packs_bytes) = tree
-            .get(&info_packs_cid, None)
-            .await
-            .context("read .git/objects/info/packs")?
-        else {
-            return Ok(Vec::new());
-        };
-
-        let Some(pack_dir_cid) = tree
-            .resolve_path(objects_cid, "pack")
-            .await
-            .context("resolve .git/objects/pack")?
-        else {
-            return Ok(Vec::new());
-        };
-        let pack_entries: HashMap<_, _> = tree
-            .list_directory(&pack_dir_cid)
-            .await
-            .context("list .git/objects/pack")?
-            .into_iter()
-            .map(|entry| (entry.name.clone(), entry))
-            .collect();
-
-        let info_packs = String::from_utf8_lossy(&info_packs_bytes);
-        let mut packs = Vec::new();
-        for line in info_packs.lines().map(str::trim) {
-            let Some(pack_name) = line.strip_prefix("P ") else {
-                continue;
-            };
-            if !is_safe_git_pack_name(pack_name) {
-                continue;
+        let objects_entries = match tree.list_directory(objects_cid).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                warn!(
+                    "Failed to list .git/objects while looking for packs: {}",
+                    err
+                );
+                return Ok(Vec::new());
             }
+        };
+        debug!(
+            ".git/objects entries while looking for packs: {:?}",
+            objects_entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+        );
 
-            let Some(pack_entry) = pack_entries.get(pack_name) else {
+        let Some(pack_dir_entry) = objects_entries.iter().find(|entry| entry.name == "pack") else {
+            return Ok(Vec::new());
+        };
+        let pack_dir_cid = Cid {
+            hash: pack_dir_entry.hash,
+            key: pack_dir_entry.key,
+        };
+
+        let pack_entries: HashMap<_, _> = match tree.list_directory(&pack_dir_cid).await {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|entry| (entry.name.clone(), entry))
+                .collect(),
+            Err(err) => {
+                warn!("Failed to list .git/objects/pack: {}", err);
+                return Ok(Vec::new());
+            }
+        };
+        debug!(
+            ".git/objects/pack entries: {:?}",
+            pack_entries.keys().cloned().collect::<Vec<_>>()
+        );
+
+        let mut info_packs_available = false;
+        let mut pack_names = Vec::new();
+        if let Some(info_dir_entry) = objects_entries.iter().find(|entry| entry.name == "info") {
+            let info_dir_cid = Cid {
+                hash: info_dir_entry.hash,
+                key: info_dir_entry.key,
+            };
+            match tree.list_directory(&info_dir_cid).await {
+                Ok(info_entries) => {
+                    if let Some(info_packs_entry) =
+                        info_entries.iter().find(|entry| entry.name == "packs")
+                    {
+                        let info_packs_cid = Cid {
+                            hash: info_packs_entry.hash,
+                            key: info_packs_entry.key,
+                        };
+                        match tree.get(&info_packs_cid, None).await {
+                            Ok(Some(info_packs_bytes)) => {
+                                info_packs_available = true;
+                                let info_packs = String::from_utf8_lossy(&info_packs_bytes);
+                                pack_names.extend(info_packs.lines().map(str::trim).filter_map(
+                                    |line| {
+                                        let pack_name = line.strip_prefix("P ")?;
+                                        is_safe_git_pack_name(pack_name)
+                                            .then(|| pack_name.to_string())
+                                    },
+                                ));
+                            }
+                            Ok(None) => {
+                                warn!(
+                                    ".git/objects/info/packs blob is missing; scanning .git/objects/pack"
+                                );
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "Failed to read .git/objects/info/packs; scanning .git/objects/pack: {}",
+                                    err
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(".git/objects/info/packs not found; scanning .git/objects/pack");
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to list .git/objects/info; scanning .git/objects/pack: {}",
+                        err
+                    );
+                }
+            }
+        } else {
+            warn!(".git/objects/info not found; scanning .git/objects/pack");
+        }
+
+        if pack_names.is_empty() && !info_packs_available {
+            pack_names.extend(
+                pack_entries
+                    .keys()
+                    .filter(|name| is_safe_git_pack_name(name))
+                    .cloned(),
+            );
+        }
+
+        pack_names.sort();
+        pack_names.dedup();
+
+        let mut packs = Vec::new();
+        for pack_name in pack_names {
+            let Some(pack_entry) = pack_entries.get(&pack_name) else {
                 continue;
             };
             let pack_cid = Cid {
@@ -751,7 +873,7 @@ impl RemoteHelper {
             });
 
             packs.push(GitPackLocation {
-                pack_name: pack_name.to_string(),
+                pack_name,
                 pack_cid,
                 pack_size: pack_entry.size,
                 idx_name,
