@@ -338,3 +338,11 @@ Follow-up:
   written, 20,599 objects were already in packs, enumeration took 2.78 s,
   download/write took 35.24 s, and wall time was 41.55 s. The slower wall time
   was again in the loose-object download/write phase, not in pack install.
+- After installing the published 0.2.64 crates and restarting the same
+  remote-host daemon, a fresh-datadir clone succeeded with line-oriented
+  progress output: five packs installed in 3.26 s, 840 loose frontier objects
+  were written, 20,599 objects were already in packs, enumeration took 35.31 s,
+  download/write took 20.37 s, and wall time was 60.82 s. The captured helper
+  log had 21 lines and zero carriage-return redraws. This run was useful for
+  output verification; its slow path was object-tree enumeration plus loose
+  frontier transfer, not pack installation.
