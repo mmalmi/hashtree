@@ -448,7 +448,40 @@ impl RemoteHelper {
         let root_hash = self.nostr.get_cached_root_hash(&self.repo_name).cloned();
 
         if let Some(ref root) = root_hash {
-            let stats = self.fetch_git_objects_to_local_git(root)?;
+            let stats = match self.fetch_git_objects_to_local_git(root) {
+                Ok(stats) => stats,
+                Err(err) if self.nostr.cached_root_is_from_local_daemon(&self.repo_name) => {
+                    warn!(
+                        "Fetch using local daemon root failed for {}: {}. Retrying via relays.",
+                        self.repo_name, err
+                    );
+                    eprintln!("  Local daemon root failed; retrying via relays...");
+                    let (refs, relay_root, _relay_key) = self
+                        .nostr
+                        .refetch_refs_without_local_daemon(&self.repo_name, 10)
+                        .with_context(|| {
+                            format!(
+                                "refreshing {} from relays after local daemon fetch failure",
+                                self.repo_name
+                            )
+                        })?;
+                    self.remote_refs.clear();
+                    for (name, sha) in refs {
+                        self.remote_refs.insert(name, sha);
+                    }
+                    let relay_root = relay_root.ok_or_else(|| {
+                        anyhow::anyhow!("relay refresh did not return a root hash")
+                    })?;
+                    self.fetch_git_objects_to_local_git(&relay_root)
+                        .with_context(|| {
+                            format!(
+                                "fetching git objects after relay retry; local daemon error was: {}",
+                                err
+                            )
+                        })?
+                }
+                Err(err) => return Err(err),
+            };
             info!(
                 "Fetched {} git objects from hashtree ({} new, {} cached)",
                 stats.enumerated, stats.written, stats.cached
@@ -563,7 +596,7 @@ impl RemoteHelper {
             }
             Err(e) => {
                 warn!("Failed to resolve .git/objects: {}", e);
-                return Ok((tree, Vec::new(), Vec::new(), local_store_for_eviction));
+                bail!("Failed to resolve .git/objects: {}", e);
             }
         };
 
@@ -612,7 +645,7 @@ impl RemoteHelper {
                 let _ = progress_task.await;
                 eprintln!("\r  Loading objects tree... failed: {}", e);
                 warn!("Failed to walk objects directory: {}", e);
-                return Ok((tree, Vec::new(), pack_locations, local_store_for_eviction));
+                bail!("Failed to walk objects directory: {}", e);
             }
         };
         done.store(true, Ordering::Relaxed);

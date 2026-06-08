@@ -387,7 +387,7 @@ async fn test_fetch_root_from_local_daemon_parses_response() {
 }
 
 #[test]
-fn test_fetch_refs_caches_root_when_tree_download_fails() {
+fn test_fetch_refs_does_not_cache_unverified_daemon_root_when_tree_download_fails() {
     use std::io::{Read, Write};
 
     let root_hash = "ab".repeat(32);
@@ -423,10 +423,11 @@ fn test_fetch_refs_caches_root_when_tree_download_fails() {
     server.join().unwrap();
 
     assert!(
-        err.to_string().contains("Failed to download root hash")
+        err.to_string().contains("Repository 'repo' not found")
+            || err.to_string().contains("Failed to download root hash")
             || err.to_string().contains("No servers")
     );
-    assert_eq!(client.get_cached_root_hash("repo"), Some(&root_hash));
+    assert_eq!(client.get_cached_root_hash("repo"), None);
     assert!(client.cached_refs.get("repo").is_none());
 }
 

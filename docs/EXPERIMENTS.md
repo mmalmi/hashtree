@@ -223,3 +223,35 @@ Interpretation:
   are simpler and preserve deterministic reuse across publishers.
 - Small pushes after the chained checkpoint root stayed on the cached-root delta
   path and did not rebuild or reupload the historical pack ranges.
+
+## 2026-06-08 - v0.2.61 Clone Recovery Verification
+
+Question: after adding daemon-root validation and relay retry, does a clean
+fresh clone of the same large public project repository still use the current
+checkpoint pack arrangement and avoid the decryption failure path seen with a
+stale local root/key cache?
+
+Setup:
+- Client used source-built `git-remote-htree` 0.2.61.
+- Clone measurements used brand-new helper data directories and fresh
+  destinations.
+- One run disabled local-daemon preference to isolate the relay/CDN path; one
+  run used the default helper configuration.
+- No pubkeys, private hostnames, exact repo names, raw hashes, temp paths, or
+  IPs were retained.
+
+Fresh clone verification:
+
+| Mode | Total wall time | Object-tree enumeration | Pack install | Download and loose write | Installed packs | Loose frontier objects |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Relay/CDN path only | 12.88 s | 2.62 s | 3.83 s | 5.03 s | 5 | 726 |
+| Default helper path | 10.36 s | 2.48 s | 3.12 s | 3.76 s | 5 | 726 |
+
+Interpretation:
+- Both fresh clones succeeded at the same current branch tip and installed the
+  five deterministic checkpoint packs from the v0.2.60 pack-chain root.
+- The local-daemon recovery fix is covered separately by a fake-daemon
+  regression: stale daemon roots are discarded before caching, and ref loading
+  retries through relays.
+- A corrupted `.git/objects` subtree key now fails the object-tree load loudly
+  instead of returning an empty object set to Git.

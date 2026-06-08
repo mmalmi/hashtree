@@ -6,7 +6,9 @@ use axum::{
     routing::put,
     Router,
 };
-use hashtree_core::{collect_hashes, DirEntry, HashTree, HashTreeConfig, Link, MemoryStore, Store};
+use hashtree_core::{
+    collect_hashes, DirEntry, HashTree, HashTreeConfig, Link, LinkType, MemoryStore, Store,
+};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -483,6 +485,69 @@ fn test_cached_fetch_tree_reuses_open_git_storage_store() {
         Arc::strong_count(&storage_store),
         before + 2,
         "cached fetch tree should reuse the already-open GitStorage blob store instead of reopening the shared LMDB environment",
+    );
+}
+
+#[test]
+fn test_collect_git_object_locations_errors_on_bad_objects_tree_key() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::new();
+
+    let mut config = Config::default();
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = config.blossom.read_servers.clone();
+    let helper = create_test_helper_with_config(config).expect("helper");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+    let root_cid = rt.block_on(async {
+        let objects_cid = tree.put_directory(vec![]).await.expect("objects directory");
+        let refs_cid = tree.put_directory(vec![]).await.expect("refs directory");
+
+        let mut bad_objects_key = objects_cid.key.expect("objects tree key");
+        bad_objects_key[0] ^= 0x01;
+        let git_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("objects", &objects_cid)
+                    .with_key(bad_objects_key)
+                    .with_link_type(LinkType::Dir),
+                DirEntry::from_cid("refs", &refs_cid).with_link_type(LinkType::Dir),
+            ])
+            .await
+            .expect(".git directory");
+        let root_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid(".git", &git_cid).with_link_type(LinkType::Dir)
+            ])
+            .await
+            .expect("root directory");
+
+        for cid in [&objects_cid, &refs_cid, &git_cid, &root_cid] {
+            let blob = store
+                .get(&cid.hash)
+                .await
+                .expect("read test blob")
+                .expect("test blob exists");
+            fake_blossom.insert_blob(blob);
+        }
+
+        root_cid
+    });
+
+    let root_hash = hex::encode(root_cid.hash);
+    let err = match rt
+        .block_on(helper.collect_git_object_locations_async(&root_hash, root_cid.key.as_ref()))
+    {
+        Ok(_) => panic!("bad .git/objects key should fail the object tree load"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("Failed to resolve .git/objects")
+            || err.to_string().contains("resolve .git/objects/info/packs"),
+        "unexpected error: {err}"
     );
 }
 

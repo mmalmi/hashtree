@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.61 - 2026-06-08
+
+### Fixed
+
+- Fixed `git-remote-htree` clone and push recovery when the local htree daemon
+  resolves a stale or mismatched repository root/key. Daemon roots are now
+  validated before being cached, and clone fetches retry via relays if the
+  daemon root fails while loading the git object tree.
+- Made encrypted hashtree decode failures while reading remote git refs surface
+  as integrity errors instead of silently advertising an empty remote.
+
 ## 0.2.60 - 2026-06-08
 
 ### Changed

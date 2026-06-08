@@ -50,7 +50,7 @@ use crate::runtime::block_on_result;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use hashtree_blossom::BlossomClient;
-use hashtree_core::{decode_tree_node, decrypt_chk, Cid, LinkType};
+use hashtree_core::{decode_tree_node, decrypt_chk, Cid, LinkType, TreeNode};
 use nostr_sdk::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -253,6 +253,20 @@ async fn wait_for_any_connected_relay(client: &Client, timeout: Duration) -> boo
 }
 
 type FetchedRefs = (HashMap<String, String>, Option<String>, Option<[u8; 32]>);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RootResolveSource {
+    #[default]
+    Relay,
+    LocalDaemon,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRoot {
+    root_hash: Option<String>,
+    encryption_key: Option<[u8; 32]>,
+    source: Option<RootResolveSource>,
+}
 use hashtree_config::Config;
 
 /// Result of publishing to relays
@@ -296,6 +310,8 @@ pub struct NostrClient {
     cached_root_hash: HashMap<String, String>,
     /// Cached encryption keys
     cached_encryption_key: HashMap<String, [u8; 32]>,
+    /// Source of the cached root hash, used to retry tentative daemon roots via relays.
+    cached_root_source: HashMap<String, RootResolveSource>,
     /// URL secret for link-visible repos (#k=<hex>)
     /// If set, encryption keys from nostr are XOR-masked and need unmasking
     url_secret: Option<[u8; 32]>,
@@ -311,6 +327,7 @@ struct RootEventData {
     encryption_key: Option<[u8; 32]>,
     key_tag_name: Option<String>,
     self_encrypted_ciphertext: Option<String>,
+    source: RootResolveSource,
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +418,7 @@ impl NostrClient {
             cached_refs: HashMap::new(),
             cached_root_hash: HashMap::new(),
             cached_encryption_key: HashMap::new(),
+            cached_root_source: HashMap::new(),
             url_secret,
             is_private,
             local_daemon_url,
@@ -502,6 +520,45 @@ impl NostrClient {
         self.fetch_refs_with_timeout(repo_name, 10)
     }
 
+    pub(crate) fn refetch_refs_without_local_daemon(
+        &mut self,
+        repo_name: &str,
+        timeout_secs: u64,
+    ) -> Result<FetchedRefs> {
+        self.clear_cached_remote_state(repo_name);
+        self.fetch_refs_with_timeout_uncached(repo_name, timeout_secs, false)
+    }
+
+    fn clear_cached_remote_state(&mut self, repo_name: &str) {
+        self.cached_refs.remove(repo_name);
+        self.cached_root_hash.remove(repo_name);
+        self.cached_encryption_key.remove(repo_name);
+        self.cached_root_source.remove(repo_name);
+    }
+
+    fn cache_resolved_root(&mut self, repo_name: &str, resolved: &ResolvedRoot) {
+        if let Some(ref root) = resolved.root_hash {
+            self.cached_root_hash
+                .insert(repo_name.to_string(), root.clone());
+        } else {
+            self.cached_root_hash.remove(repo_name);
+        }
+
+        if let Some(key) = resolved.encryption_key {
+            self.cached_encryption_key
+                .insert(repo_name.to_string(), key);
+        } else {
+            self.cached_encryption_key.remove(repo_name);
+        }
+
+        if let Some(source) = resolved.source {
+            self.cached_root_source
+                .insert(repo_name.to_string(), source);
+        } else {
+            self.cached_root_source.remove(repo_name);
+        }
+    }
+
     /// Fetch refs with configurable timeout
     fn fetch_refs_with_timeout(
         &mut self,
@@ -520,24 +577,56 @@ impl NostrClient {
             return Ok((refs.clone(), root, key));
         }
 
-        let (root_hash, encryption_key) =
-            block_on_result(self.resolve_root_async_with_timeout(repo_name, timeout_secs))?;
-        if let Some(ref root) = root_hash {
-            self.cached_root_hash
-                .insert(repo_name.to_string(), root.clone());
+        self.fetch_refs_with_timeout_uncached(repo_name, timeout_secs, true)
+    }
+
+    fn fetch_refs_with_timeout_uncached(
+        &mut self,
+        repo_name: &str,
+        timeout_secs: u64,
+        allow_local_daemon: bool,
+    ) -> Result<FetchedRefs> {
+        let resolved = block_on_result(self.resolve_root_async_with_timeout(
+            repo_name,
+            timeout_secs,
+            allow_local_daemon,
+        ))?;
+
+        match self.fetch_refs_for_resolved_root(repo_name, &resolved) {
+            Ok(fetched) => Ok(fetched),
+            Err(err)
+                if resolved.source == Some(RootResolveSource::LocalDaemon)
+                    && allow_local_daemon =>
+            {
+                warn!(
+                    "Local daemon root for {} could not be read as a valid git tree: {}. Retrying via relays.",
+                    repo_name, err
+                );
+                self.clear_cached_remote_state(repo_name);
+                self.fetch_refs_with_timeout_uncached(repo_name, timeout_secs, false)
+            }
+            Err(err) => Err(err),
         }
-        if let Some(key) = encryption_key {
-            self.cached_encryption_key
-                .insert(repo_name.to_string(), key);
+    }
+
+    fn fetch_refs_for_resolved_root(
+        &mut self,
+        repo_name: &str,
+        resolved: &ResolvedRoot,
+    ) -> Result<FetchedRefs> {
+        if resolved.source != Some(RootResolveSource::LocalDaemon) {
+            self.cache_resolved_root(repo_name, resolved);
         }
 
-        let refs = if let Some(ref root) = root_hash {
-            block_on_result(self.fetch_refs_from_hashtree(root, encryption_key.as_ref()))?
+        let refs = if let Some(ref root) = resolved.root_hash {
+            block_on_result(self.fetch_refs_from_hashtree(root, resolved.encryption_key.as_ref()))?
         } else {
             HashMap::new()
         };
+
+        self.cache_resolved_root(repo_name, resolved);
         self.cached_refs.insert(repo_name.to_string(), refs.clone());
-        Ok((refs, root_hash, encryption_key))
+        Ok((refs, resolved.root_hash.clone(), resolved.encryption_key))
     }
 
     fn parse_root_event_data_from_event(event: &Event) -> RootEventData {
@@ -579,6 +668,7 @@ impl NostrClient {
             encryption_key,
             key_tag_name,
             self_encrypted_ciphertext,
+            source: RootResolveSource::Relay,
         }
     }
 
@@ -598,6 +688,7 @@ impl NostrClient {
             encryption_key: parsed_cid.and_then(|cid| cid.key),
             key_tag_name: None,
             self_encrypted_ciphertext: None,
+            source: RootResolveSource::LocalDaemon,
         };
 
         if let Some(ciphertext) = response.self_encrypted_key {
@@ -717,7 +808,8 @@ impl NostrClient {
         &self,
         repo_name: &str,
         timeout_secs: u64,
-    ) -> Result<(Option<String>, Option<[u8; 32]>)> {
+        allow_local_daemon: bool,
+    ) -> Result<ResolvedRoot> {
         // Create nostr-sdk client
         let client = Client::default();
 
@@ -749,12 +841,28 @@ impl NostrClient {
 
         let mut root_data = None;
         for attempt in 1..=max_attempts {
-            if let Some(data) = self
-                .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
-                .await
-            {
-                root_data = Some(data);
-                break;
+            if allow_local_daemon {
+                if let Some(data) = self
+                    .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
+                    .await
+                {
+                    root_data = Some(data);
+                    break;
+                }
+            }
+
+            if !allow_local_daemon && attempt == 1 {
+                debug!(
+                    "Skipping local daemon while resolving {} because relay retry was requested",
+                    repo_name
+                );
+            }
+
+            if allow_local_daemon {
+                debug!(
+                    "Local daemon did not resolve {}; querying relays",
+                    repo_name
+                );
             }
 
             // Wait for at least one relay to connect (quick timeout - break immediately when one
@@ -854,12 +962,17 @@ impl NostrClient {
 
         if root_hash.is_empty() {
             debug!("Empty root hash in event");
-            return Ok((None, None));
+            return Ok(ResolvedRoot {
+                root_hash: None,
+                encryption_key: None,
+                source: None,
+            });
         }
 
         let encryption_key = root_data.encryption_key;
         let key_tag_name = root_data.key_tag_name;
         let self_encrypted_ciphertext = root_data.self_encrypted_ciphertext;
+        let root_source = root_data.source;
 
         // Process encryption key based on tag type
         let unmasked_key = match key_tag_name.as_deref() {
@@ -942,38 +1055,24 @@ impl NostrClient {
             self.url_secret.is_some()
         );
 
-        Ok((Some(root_hash), unmasked_key))
+        Ok(ResolvedRoot {
+            root_hash: Some(root_hash),
+            encryption_key: unmasked_key,
+            source: Some(root_source),
+        })
     }
 
     /// Decrypt data if encryption key is provided, then decode as tree node
-    fn decrypt_and_decode(
-        &self,
-        data: &[u8],
-        key: Option<&[u8; 32]>,
-    ) -> Option<hashtree_core::TreeNode> {
+    fn decrypt_and_decode(&self, data: &[u8], key: Option<&[u8; 32]>) -> Result<TreeNode> {
         let decrypted_data: Vec<u8>;
         let data_to_decode = if let Some(k) = key {
-            match decrypt_chk(data, k) {
-                Ok(d) => {
-                    decrypted_data = d;
-                    &decrypted_data
-                }
-                Err(e) => {
-                    debug!("Decryption failed: {}", e);
-                    return None;
-                }
-            }
+            decrypted_data = decrypt_chk(data, k).context("Decryption failed")?;
+            &decrypted_data
         } else {
             data
         };
 
-        match decode_tree_node(data_to_decode) {
-            Ok(node) => Some(node),
-            Err(e) => {
-                debug!("Failed to decode tree node: {}", e);
-                None
-            }
-        }
+        decode_tree_node(data_to_decode).context("Failed to decode tree node")
     }
 
     /// Fetch git refs from hashtree structure
@@ -1005,19 +1104,16 @@ impl NostrClient {
         };
 
         // Parse root as directory node (decrypt if needed)
-        let root_node = match self.decrypt_and_decode(&root_data, encryption_key) {
-            Some(node) => {
-                debug!("Decoded root node with {} links", node.links.len());
-                node
-            }
-            None => {
-                debug!(
-                    "Failed to decode root node (encryption_key: {})",
+        let root_node = self
+            .decrypt_and_decode(&root_data, encryption_key)
+            .with_context(|| {
+                format!(
+                    "Failed to decode root node {} (encrypted: {})",
+                    &root_hash[..12.min(root_hash.len())],
                     encryption_key.is_some()
-                );
-                return Ok(refs);
-            }
-        };
+                )
+            })?;
+        debug!("Decoded root node with {} links", root_node.links.len());
 
         // Find .git directory
         debug!(
@@ -1055,23 +1151,24 @@ impl NostrClient {
             }
         };
 
-        let git_node = match self.decrypt_and_decode(&git_data, git_key.as_ref()) {
-            Some(node) => {
-                debug!(
-                    "Decoded .git node with {} links: {:?}",
-                    node.links.len(),
-                    node.links
-                        .iter()
-                        .map(|l| l.name.as_deref())
-                        .collect::<Vec<_>>()
-                );
-                node
-            }
-            None => {
-                debug!("Failed to decode .git node (key: {})", git_key.is_some());
-                return Ok(refs);
-            }
-        };
+        let git_node = self
+            .decrypt_and_decode(&git_data, git_key.as_ref())
+            .with_context(|| {
+                format!(
+                    "Failed to decode .git directory {} (encrypted: {})",
+                    &git_hash[..12.min(git_hash.len())],
+                    git_key.is_some()
+                )
+            })?;
+        debug!(
+            "Decoded .git node with {} links: {:?}",
+            git_node.links.len(),
+            git_node
+                .links
+                .iter()
+                .map(|l| l.name.as_deref())
+                .collect::<Vec<_>>()
+        );
 
         // Find refs directory
         let refs_link = git_node
@@ -1087,20 +1184,20 @@ impl NostrClient {
         };
 
         // Download refs directory
-        let refs_data = match self.blossom.try_download(&refs_hash).await {
-            Some(data) => data,
-            None => {
-                debug!("Could not download refs directory");
-                return Ok(refs);
-            }
-        };
+        let refs_data =
+            self.blossom.download(&refs_hash).await.with_context(|| {
+                format!("Failed to download refs directory {}", &refs_hash[..12])
+            })?;
 
-        let refs_node = match self.decrypt_and_decode(&refs_data, refs_key.as_ref()) {
-            Some(node) => node,
-            None => {
-                return Ok(refs);
-            }
-        };
+        let refs_node = self
+            .decrypt_and_decode(&refs_data, refs_key.as_ref())
+            .with_context(|| {
+                format!(
+                    "Failed to decode refs directory {} (encrypted: {})",
+                    &refs_hash[..12.min(refs_hash.len())],
+                    refs_key.is_some()
+                )
+            })?;
 
         // Look for HEAD in .git directory
         if let Some(head_link) = git_node
@@ -1109,18 +1206,20 @@ impl NostrClient {
             .find(|l| l.name.as_deref() == Some("HEAD"))
         {
             let head_hash = hex::encode(head_link.hash);
-            if let Some(head_data) = self.blossom.try_download(&head_hash).await {
-                // HEAD is a blob, decrypt if needed
-                let head_content = if let Some(k) = head_link.key.as_ref() {
-                    match decrypt_chk(&head_data, k) {
-                        Ok(d) => String::from_utf8_lossy(&d).trim().to_string(),
-                        Err(_) => String::from_utf8_lossy(&head_data).trim().to_string(),
-                    }
-                } else {
-                    String::from_utf8_lossy(&head_data).trim().to_string()
-                };
-                refs.insert("HEAD".to_string(), head_content);
-            }
+            let head_data = self
+                .blossom
+                .download(&head_hash)
+                .await
+                .with_context(|| format!("Failed to download HEAD {}", &head_hash[..12]))?;
+            // HEAD is a blob, decrypt if needed
+            let head_content = if let Some(k) = head_link.key.as_ref() {
+                let decrypted = decrypt_chk(&head_data, k)
+                    .with_context(|| format!("Failed to decrypt HEAD {}", &head_hash[..12]))?;
+                String::from_utf8_lossy(&decrypted).trim().to_string()
+            } else {
+                String::from_utf8_lossy(&head_data).trim().to_string()
+            };
+            refs.insert("HEAD".to_string(), head_content);
         }
 
         // Recursively walk refs/ subdirectories (heads, tags, etc.)
@@ -1140,7 +1239,7 @@ impl NostrClient {
                 &format!("refs/{}", subdir_name),
                 &mut refs,
             )
-            .await;
+            .await?;
         }
 
         debug!("Found {} refs from hashtree", refs.len());
@@ -1154,16 +1253,22 @@ impl NostrClient {
         dir_key: Option<&[u8; 32]>,
         prefix: &str,
         refs: &mut HashMap<String, String>,
-    ) {
-        let dir_data = match self.blossom.try_download(dir_hash).await {
-            Some(data) => data,
-            None => return,
-        };
+    ) -> Result<()> {
+        let dir_data = self
+            .blossom
+            .download(dir_hash)
+            .await
+            .with_context(|| format!("Failed to download refs subtree {}", &dir_hash[..12]))?;
 
-        let dir_node = match self.decrypt_and_decode(&dir_data, dir_key) {
-            Some(node) => node,
-            None => return,
-        };
+        let dir_node = self
+            .decrypt_and_decode(&dir_data, dir_key)
+            .with_context(|| {
+                format!(
+                    "Failed to decode refs subtree {} (encrypted: {})",
+                    &dir_hash[..12.min(dir_hash.len())],
+                    dir_key.is_some()
+                )
+            })?;
 
         for link in &dir_node.links {
             let name = match &link.name {
@@ -1181,26 +1286,30 @@ impl NostrClient {
                     &ref_path,
                     refs,
                 ))
-                .await;
+                .await?;
             } else {
                 // This is a ref file - read the SHA
-                if let Some(ref_data) = self.blossom.try_download(&link_hash).await {
-                    // Decrypt if needed
-                    let sha = if let Some(k) = link.key.as_ref() {
-                        match decrypt_chk(&ref_data, k) {
-                            Ok(d) => String::from_utf8_lossy(&d).trim().to_string(),
-                            Err(_) => String::from_utf8_lossy(&ref_data).trim().to_string(),
-                        }
-                    } else {
-                        String::from_utf8_lossy(&ref_data).trim().to_string()
-                    };
-                    if !sha.is_empty() {
-                        debug!("Found ref {} -> {}", ref_path, sha);
-                        refs.insert(ref_path, sha);
-                    }
+                let ref_data = self
+                    .blossom
+                    .download(&link_hash)
+                    .await
+                    .with_context(|| format!("Failed to download ref {}", ref_path))?;
+                // Decrypt if needed
+                let sha = if let Some(k) = link.key.as_ref() {
+                    let decrypted = decrypt_chk(&ref_data, k)
+                        .with_context(|| format!("Failed to decrypt ref {}", ref_path))?;
+                    String::from_utf8_lossy(&decrypted).trim().to_string()
+                } else {
+                    String::from_utf8_lossy(&ref_data).trim().to_string()
+                };
+                if !sha.is_empty() {
+                    debug!("Found ref {} -> {}", ref_path, sha);
+                    refs.insert(ref_path, sha);
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Update a ref in local cache (will be published with publish_repo)
@@ -1233,6 +1342,10 @@ impl NostrClient {
     /// Get cached encryption key for a repository
     pub fn get_cached_encryption_key(&self, repo_name: &str) -> Option<&[u8; 32]> {
         self.cached_encryption_key.get(repo_name)
+    }
+
+    pub(crate) fn cached_root_is_from_local_daemon(&self, repo_name: &str) -> bool {
+        self.cached_root_source.get(repo_name) == Some(&RootResolveSource::LocalDaemon)
     }
 
     /// Get the Blossom client for direct downloads

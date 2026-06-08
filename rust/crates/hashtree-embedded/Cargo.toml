@@ -10,7 +10,7 @@ description = "Embedded Hashtree daemon runtime for native hosts"
 
 [dependencies]
 anyhow.workspace = true
-hashtree-cli = { version = "0.2.60", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }
+hashtree-cli = { version = "0.2.61", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
