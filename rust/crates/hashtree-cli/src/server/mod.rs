@@ -470,7 +470,7 @@ where
     loop {
         let (tcp_stream, remote_addr) = tokio::select! {
             accepted = accept_tcp(&listener) => {
-                match accepted {
+                match accepted? {
                     Some(connection) => connection,
                     None => continue,
                 }
@@ -559,18 +559,31 @@ fn configure_tcp_stream(tcp_stream: &tokio::net::TcpStream) {
 
 async fn accept_tcp(
     listener: &tokio::net::TcpListener,
-) -> Option<(tokio::net::TcpStream, SocketAddr)> {
+) -> io::Result<Option<(tokio::net::TcpStream, SocketAddr)>> {
     match listener.accept().await {
-        Ok(connection) => Some(connection),
+        Ok(connection) => Ok(Some(connection)),
         Err(err) => {
             if is_connection_error(&err) {
-                return None;
+                return Ok(None);
+            }
+            if is_resource_exhaustion_error(&err) {
+                error!(
+                    "daemon accept failed due to file descriptor exhaustion; exiting for supervisor restart: {err}"
+                );
+                return Err(err);
             }
             error!("daemon accept error: {err}");
             tokio::time::sleep(Duration::from_secs(1)).await;
-            None
+            Ok(None)
         }
     }
+}
+
+fn is_resource_exhaustion_error(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(code) if code == libc::EMFILE || code == libc::ENFILE
+    )
 }
 
 fn is_connection_error(err: &io::Error) -> bool {
@@ -598,6 +611,19 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn resource_exhaustion_errors_are_fatal_accept_errors() {
+        assert!(is_resource_exhaustion_error(&io::Error::from_raw_os_error(
+            libc::EMFILE
+        )));
+        assert!(is_resource_exhaustion_error(&io::Error::from_raw_os_error(
+            libc::ENFILE
+        )));
+        assert!(!is_resource_exhaustion_error(
+            &io::Error::from_raw_os_error(libc::ECONNRESET)
+        ));
+    }
 
     #[tokio::test]
     async fn test_server_serve_file() -> Result<()> {

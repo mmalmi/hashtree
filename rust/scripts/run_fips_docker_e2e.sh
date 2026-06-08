@@ -198,6 +198,7 @@ echo "Starting FIPS relay and htree daemons..."
     -e HOME=/tmp \
     -e HTREE_CONFIG_DIR=/config \
     -e HTREE_DATA_DIR=/data \
+    -e HTREE_ALLOW_ROOT_DAEMON=1 \
     -e RUST_LOG="${RUST_LOG:-info}" \
     -v "${WORKDIR}/a/config:/config" \
     -v "${WORKDIR}/a/data:/data" \
@@ -208,6 +209,7 @@ echo "Starting FIPS relay and htree daemons..."
     -e HOME=/tmp \
     -e HTREE_CONFIG_DIR=/config \
     -e HTREE_DATA_DIR=/data \
+    -e HTREE_ALLOW_ROOT_DAEMON=1 \
     -e RUST_LOG="${RUST_LOG:-info}" \
     -v "${WORKDIR}/b/config:/config" \
     -v "${WORKDIR}/b/data:/data" \

@@ -24,7 +24,8 @@ use super::run::{
 };
 use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_info_target,
-    resolve_load_target_cid, stored_published_pin_hash, warn_if_stun_unavailable,
+    resolve_load_target_cid, root_daemon_override_enabled, stored_published_pin_hash,
+    warn_if_stun_unavailable,
 };
 use super::storage_stats::{
     classify_storage_bucket, render_storage_inventory, AuthorSummary, PinnedDetail, StorageBucket,
@@ -50,6 +51,24 @@ fn args_to_strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
     args.into_iter()
         .map(|arg| arg.to_string_lossy().to_string())
         .collect()
+}
+
+#[test]
+fn test_root_daemon_override_enabled_parses_false_values() {
+    assert!(!root_daemon_override_enabled(None));
+    assert!(!root_daemon_override_enabled(Some("")));
+    assert!(!root_daemon_override_enabled(Some("0")));
+    assert!(!root_daemon_override_enabled(Some("false")));
+    assert!(!root_daemon_override_enabled(Some("NO")));
+    assert!(!root_daemon_override_enabled(Some(" off ")));
+}
+
+#[test]
+fn test_root_daemon_override_enabled_parses_true_values() {
+    assert!(root_daemon_override_enabled(Some("1")));
+    assert!(root_daemon_override_enabled(Some("true")));
+    assert!(root_daemon_override_enabled(Some("yes")));
+    assert!(root_daemon_override_enabled(Some("dev-container")));
 }
 
 #[test]

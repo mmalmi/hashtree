@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use hashtree_cli::config::{
     ensure_auth_cookie, ensure_keys, ensure_keys_string, parse_npub, pubkey_bytes,
@@ -57,6 +57,40 @@ use super::util::{chrono_humanize_timestamp, format_bytes};
 use std::io;
 #[cfg(feature = "fuse")]
 use std::process::Command;
+
+pub(crate) const ALLOW_ROOT_DAEMON_ENV: &str = "HTREE_ALLOW_ROOT_DAEMON";
+
+pub(crate) fn root_daemon_override_enabled(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+#[cfg(unix)]
+fn ensure_daemon_not_root() -> Result<()> {
+    let allow_root = std::env::var(ALLOW_ROOT_DAEMON_ENV).ok();
+    if unsafe { libc::geteuid() } == 0 && !root_daemon_override_enabled(allow_root.as_deref()) {
+        bail!(
+            "Refusing to run htree daemon as root. Run it under a dedicated user, \
+             for example systemd User=hashtree, or set {ALLOW_ROOT_DAEMON_ENV}=1 \
+             for an intentional test/container root daemon."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_daemon_not_root() -> Result<()> {
+    Ok(())
+}
 
 #[cfg(feature = "fuse")]
 pub(crate) fn find_existing_active_mount<'a>(
@@ -273,6 +307,10 @@ pub(crate) async fn run() -> Result<()> {
 
     // Get data_dir early to avoid borrow issues in match arms
     let data_dir = cli.data_dir();
+
+    if matches!(cli.command, Commands::Start { .. }) {
+        ensure_daemon_not_root()?;
+    }
 
     // Background self-update flow:
     //   1) Print any pending notification from the previous bg check.
