@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.2.60 - 2026-06-08
+
+### Changed
+
+- Changed `git-remote-htree` pack checkpoints from overlapping full packs to a
+  deterministic chain of checkpoint pack ranges. Later checkpoint packs now
+  exclude the previous checkpoint tip, so independent publishers with the same
+  history can reuse earlier pack blobs instead of reuploading the same history
+  inside a different pack.
+- Made checkpoint pack generation independent of local Git pack reuse by
+  disabling object and delta reuse and pinning pack settings.
+
+### Fixed
+
+- Kept untracked `.gitignore`d files out of checkpoint packs and added
+  regression coverage for that path.
+- Made `git-remote-htree` storage unit tests use an explicit filesystem backend
+  instead of inheriting the developer machine's configured storage backend.
+
 ## 0.2.59 - 2026-06-08
 
 ### Changed

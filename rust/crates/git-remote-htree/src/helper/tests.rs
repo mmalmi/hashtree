@@ -419,6 +419,46 @@ fn create_repo_with_large_base_and_small_increment() -> (TempDir, TempDir, Strin
     (home, repo, base_sha, master_sha)
 }
 
+fn create_repo_with_linear_history(commit_count: usize) -> (TempDir, TempDir, Vec<String>) {
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+
+    let repo = TempDir::new().expect("temp repo");
+    assert!(git(repo.path(), &["init", "-b", "master"]).status.success());
+    assert!(
+        git(repo.path(), &["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(repo.path(), &["config", "user.name", "Test User"])
+        .status
+        .success());
+
+    let mut shas = Vec::new();
+    for index in 0..commit_count {
+        std::fs::write(
+            repo.path().join(format!("file-{index:02}.txt")),
+            format!("file {index}\n"),
+        )
+        .unwrap();
+        assert!(git(repo.path(), &["add", &format!("file-{index:02}.txt")])
+            .status
+            .success());
+        assert!(
+            git(repo.path(), &["commit", "-m", &format!("Commit {index}")])
+                .status
+                .success()
+        );
+        shas.push(
+            String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string(),
+        );
+    }
+
+    (home, repo, shas)
+}
+
 fn create_test_helper() -> Option<RemoteHelper> {
     let config = Config::default();
     RemoteHelper::new(TEST_PUBKEY, "test-repo", None, None, false, config).ok()
@@ -1054,9 +1094,15 @@ fn test_git_pack_checkpoint_generation_is_deterministic() {
     let (_home, repo, base_sha, _master_sha, _dev_sha) = create_repo_with_diverged_master_and_dev();
     let _cwd_guard = CwdGuard::set(repo.path());
 
-    let first = RemoteHelper::generate_git_pack_checkpoint(std::slice::from_ref(&base_sha))
+    let first = RemoteHelper::generate_git_pack_checkpoint(&base_sha, None)
         .expect("generate first checkpoint pack");
-    let second = RemoteHelper::generate_git_pack_checkpoint(std::slice::from_ref(&base_sha))
+    assert!(
+        git(repo.path(), &["repack", "-ad", "--depth=1", "--window=1"])
+            .status
+            .success(),
+        "local repack should succeed"
+    );
+    let second = RemoteHelper::generate_git_pack_checkpoint(&base_sha, None)
         .expect("generate second checkpoint pack");
 
     assert_eq!(
@@ -1067,6 +1113,84 @@ fn test_git_pack_checkpoint_generation_is_deterministic() {
     assert_eq!(
         first, second,
         "checkpoint pack bytes should converge for the same tip"
+    );
+}
+
+#[test]
+fn test_git_pack_checkpoint_plans_incremental_chain() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (_home, repo, shas) = create_repo_with_linear_history(6);
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let head = shas.last().expect("head sha");
+
+    let total_objects =
+        RemoteHelper::reachable_git_object_count(head).expect("count current reachable objects");
+    let plan = RemoteHelper::plan_git_pack_checkpoint(head, total_objects, None, 3, false)
+        .expect("plan checkpoint")
+        .expect("checkpoint should be planned");
+
+    assert!(
+        plan.packs.len() >= 3,
+        "linear history should produce several checkpoint pack ranges"
+    );
+    for pair in plan.packs.windows(2) {
+        assert_eq!(
+            pair[1].exclude_tip.as_deref(),
+            Some(pair[0].tip.as_str()),
+            "each checkpoint pack should exclude the previous checkpoint tip"
+        );
+    }
+    let unique_tips = plan
+        .packs
+        .iter()
+        .map(|pack| pack.tip.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        unique_tips.len(),
+        plan.packs.len(),
+        "duplicate checkpoint tips should be collapsed"
+    );
+}
+
+#[test]
+fn test_git_pack_checkpoint_delta_pack_excludes_previous_tip() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (_home, repo, shas) = create_repo_with_linear_history(3);
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let base_sha = &shas[0];
+    let head_sha = shas.last().expect("head sha");
+
+    let pack_files = RemoteHelper::generate_git_pack_checkpoint(head_sha, Some(base_sha))
+        .expect("generate delta checkpoint pack");
+    let pack_dir = TempDir::new().expect("temp pack dir");
+    let idx_name = pack_files
+        .keys()
+        .find(|name| name.ends_with(".idx"))
+        .cloned()
+        .expect("idx file");
+    for (name, bytes) in pack_files {
+        std::fs::write(pack_dir.path().join(name), bytes).expect("write pack file");
+    }
+
+    let idx_path = pack_dir.path().join(idx_name);
+    let verify = Command::new("git")
+        .args(["verify-pack", "-v"])
+        .arg(&idx_path)
+        .output()
+        .expect("run git verify-pack");
+    assert!(
+        verify.status.success(),
+        "git verify-pack failed: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_output = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        !verify_output.contains(base_sha),
+        "delta checkpoint pack should not contain objects reachable from the previous checkpoint"
+    );
+    assert!(
+        verify_output.contains(head_sha),
+        "delta checkpoint pack should contain the new checkpoint tip"
     );
 }
 
@@ -1097,12 +1221,35 @@ fn test_git_pack_checkpoint_forces_current_tip_when_base_root_has_no_pack() {
             .expect("plan forced checkpoint")
             .expect("forced first checkpoint should be planned");
     assert_eq!(
-        forced.tip, master_sha,
+        forced.packs.last().map(|pack| pack.tip.as_str()),
+        Some(master_sha.as_str()),
         "initial missing checkpoint should pack the current tip"
+    );
+    assert!(
+        forced
+            .packs
+            .last()
+            .and_then(|pack| pack.exclude_tip.as_deref())
+            .is_some(),
+        "forced current-tip checkpoint should be layered on the previous deterministic checkpoint when one exists"
     );
     assert!(
         forced.covered_objects.contains(&master_sha),
         "current commit should be covered by the forced checkpoint"
+    );
+}
+
+#[test]
+fn test_git_pack_checkpoint_skips_bucket_without_new_boundary_tip() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (_home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let skipped = RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), 6, false)
+        .expect("plan checkpoint");
+    assert!(
+        skipped.is_none(),
+        "a bucket increase should not publish a duplicate checkpoint pack when no newer commit boundary is below the target object count"
     );
 }
 
@@ -1149,7 +1296,7 @@ fn test_git_pack_checkpoint_ignores_untracked_gitignored_files() {
         .to_string();
 
     let _cwd_guard = CwdGuard::set(repo.path());
-    let pack_files = RemoteHelper::generate_git_pack_checkpoint(std::slice::from_ref(&head_sha))
+    let pack_files = RemoteHelper::generate_git_pack_checkpoint(&head_sha, None)
         .expect("generate checkpoint pack");
     let pack_dir = TempDir::new().expect("temp pack dir");
     let idx_name = pack_files

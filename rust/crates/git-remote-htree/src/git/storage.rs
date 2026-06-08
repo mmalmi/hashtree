@@ -2359,7 +2359,9 @@ mod tests {
 
     fn create_test_storage() -> (GitStorage, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = GitStorage::open(temp_dir.path()).unwrap();
+        let storage =
+            GitStorage::open_with_backend_and_max_bytes(temp_dir.path(), StorageBackend::Fs, 0)
+                .unwrap();
         (storage, temp_dir)
     }
 

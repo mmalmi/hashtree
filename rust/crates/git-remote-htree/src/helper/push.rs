@@ -47,8 +47,13 @@ struct UploadCounters {
 }
 
 pub(super) struct GitPackCheckpointPlan {
-    pub(super) tip: String,
+    pub(super) packs: Vec<GitPackCheckpointPackPlan>,
     pub(super) covered_objects: HashSet<String>,
+}
+
+pub(super) struct GitPackCheckpointPackPlan {
+    pub(super) tip: String,
+    pub(super) exclude_tip: Option<String>,
 }
 
 struct RepoTreeProgressReporter {
@@ -1380,7 +1385,12 @@ impl RemoteHelper {
             eprint!("  Building git pack checkpoint...");
             let _ = std::io::stderr().flush();
         }
-        let pack_files = Self::generate_git_pack_checkpoint(std::slice::from_ref(&plan.tip))?;
+        let mut pack_files = BTreeMap::new();
+        for pack in &plan.packs {
+            let generated =
+                Self::generate_git_pack_checkpoint(&pack.tip, pack.exclude_tip.as_deref())?;
+            pack_files.extend(generated);
+        }
         let total_bytes: usize = pack_files.values().map(Vec::len).sum();
         let file_count = pack_files.len();
         let covered_objects = plan.covered_objects;
@@ -1410,22 +1420,55 @@ impl RemoteHelper {
         }
 
         let bucket = total_objects / interval_objects;
+        let mut first_bucket = 1;
+        let mut previous_tip = None;
         if let Some(base) = delta_base.filter(|_| !force_current_tip) {
             let base_objects = Self::reachable_git_object_count(base).unwrap_or(0);
-            if bucket <= base_objects / interval_objects {
+            let base_bucket = base_objects / interval_objects;
+            if bucket <= base_bucket {
                 return Ok(None);
             }
+            if base_bucket > 0 {
+                previous_tip = Some(Self::find_git_pack_checkpoint_tip(
+                    base,
+                    base_bucket * interval_objects,
+                )?);
+            }
+            first_bucket = base_bucket + 1;
         }
 
-        let tip = if force_current_tip {
-            sha.to_string()
-        } else {
-            let target_objects = bucket * interval_objects;
-            Self::find_git_pack_checkpoint_tip(sha, target_objects)?
+        let mut packs = Vec::new();
+        for checkpoint_bucket in first_bucket..=bucket {
+            let tip =
+                Self::find_git_pack_checkpoint_tip(sha, checkpoint_bucket * interval_objects)?;
+            if previous_tip.as_deref() == Some(tip.as_str()) {
+                continue;
+            }
+            packs.push(GitPackCheckpointPackPlan {
+                tip: tip.clone(),
+                exclude_tip: previous_tip.clone(),
+            });
+            previous_tip = Some(tip);
+        }
+
+        if force_current_tip && previous_tip.as_deref() != Some(sha) {
+            packs.push(GitPackCheckpointPackPlan {
+                tip: sha.to_string(),
+                exclude_tip: previous_tip.clone(),
+            });
+            previous_tip = Some(sha.to_string());
+        }
+
+        if packs.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(covered_tip) = previous_tip else {
+            return Ok(None);
         };
-        let covered_objects = Self::reachable_git_object_ids(&tip)?;
+        let covered_objects = Self::reachable_git_object_ids(&covered_tip)?;
         Ok(Some(GitPackCheckpointPlan {
-            tip,
+            packs,
             covered_objects,
         }))
     }
@@ -1515,7 +1558,8 @@ impl RemoteHelper {
     }
 
     pub(super) fn generate_git_pack_checkpoint(
-        tips: &[String],
+        tip: &str,
+        exclude_tip: Option<&str>,
     ) -> Result<BTreeMap<String, Vec<u8>>> {
         let temp_dir = unique_git_pack_temp_dir();
         std::fs::create_dir_all(&temp_dir)
@@ -1526,7 +1570,18 @@ impl RemoteHelper {
             .ok_or_else(|| anyhow::anyhow!("temporary pack path is not valid UTF-8"))?;
 
         let mut child = Command::new("git")
-            .args(["pack-objects", "--threads=1", "--revs", pack_prefix_str])
+            .args([
+                "pack-objects",
+                "--threads=1",
+                "--window=10",
+                "--depth=50",
+                "--compression=6",
+                "--no-reuse-delta",
+                "--no-reuse-object",
+                "--no-use-bitmap-index",
+                "--revs",
+                pack_prefix_str,
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1538,8 +1593,9 @@ impl RemoteHelper {
                 .stdin
                 .as_mut()
                 .context("open git pack-objects stdin")?;
-            for tip in tips {
-                writeln!(stdin, "{}", tip)?;
+            writeln!(stdin, "{}", tip)?;
+            if let Some(exclude_tip) = exclude_tip {
+                writeln!(stdin, "^{}", exclude_tip)?;
             }
         }
 
