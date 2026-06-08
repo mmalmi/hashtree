@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.2.59 - 2026-06-08
+
+### Changed
+
+- Increased `git-remote-htree` clone fetch concurrency for direct Blossom reads
+  and recorded the clean-cache clone performance results.
+- Preserved Git pack checkpoints across delta pushes and avoided rechecking or
+  reuploading objects already represented by inherited packs.
+- Moved product-aware updater helpers into `hashtree-updater` so CLI update
+  flows can share the same manifest and target selection logic.
+
+### Fixed
+
+- Fixed pack-backed delta pushes so inherited pack objects are not emitted as
+  broken loose objects while current tree objects remain available for new refs.
+- Fixed pack-only base reuse during pushes so unchanged visible files can be
+  merged from the cached root without requiring all old loose Git objects.
+
 ## 0.2.58 - 2026-06-07
 
 ### Changed
