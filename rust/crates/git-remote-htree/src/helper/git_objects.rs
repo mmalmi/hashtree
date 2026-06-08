@@ -4,9 +4,10 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 use tracing::debug;
 
-use super::RemoteHelper;
+use super::{fetch_progress_interval, RemoteHelper};
 
 impl RemoteHelper {
     /// Batch check which objects git already has (returns set of existing oids)
@@ -138,6 +139,8 @@ impl RemoteHelper {
 
         let total = oids.len();
         let mut results = Vec::with_capacity(total);
+        let progress_interval = fetch_progress_interval();
+        let mut last_progress = Instant::now();
 
         // Process in batches of 100 to avoid pipe buffer issues
         const BATCH_SIZE: usize = 100;
@@ -197,9 +200,9 @@ impl RemoteHelper {
 
                 // Progress indicator
                 let done = batch_idx * BATCH_SIZE + i + 1;
-                if done == 1 || done.is_multiple_of(100) || done == total {
-                    eprint!("\r  Reading objects: {}/{}", done, total);
-                    let _ = std::io::stderr().flush();
+                if done == total || last_progress.elapsed() >= progress_interval {
+                    eprintln!("  Reading objects: {}/{}", done, total);
+                    last_progress = Instant::now();
                 }
             }
 

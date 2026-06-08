@@ -10,7 +10,6 @@ use hashtree_core::{Cid, Store};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -34,6 +33,8 @@ const MAX_GIT_TREE_WALK_CONCURRENCY: usize = 32;
 const DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 64;
 const DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 16;
 const MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 256;
+const DEFAULT_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+const VERBOSE_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 use crate::nostr_client::NostrClient;
 use hashtree_config::Config;
@@ -85,6 +86,14 @@ fn git_object_download_concurrency_for_read_servers(read_servers: &[String]) -> 
     match read_servers {
         [] | [_] => DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY,
         _ => DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY,
+    }
+}
+
+fn fetch_progress_interval() -> Duration {
+    if std::env::var("HTREE_VERBOSE").is_ok() {
+        VERBOSE_FETCH_PROGRESS_INTERVAL
+    } else {
+        DEFAULT_FETCH_PROGRESS_INTERVAL
     }
 }
 
@@ -182,21 +191,19 @@ impl RemoteHelper {
         let done = StdArc::new(AtomicBool::new(false));
         let done_for_task = StdArc::clone(&done);
         let label_for_task = label.clone();
-        eprint!("\r  {}...", label);
-        let _ = std::io::stderr().flush();
+        eprintln!("  {}...", label);
         let progress_task = tokio::spawn(async move {
             let start = std::time::Instant::now();
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
+                tokio::time::sleep(fetch_progress_interval()).await;
                 if done_for_task.load(Ordering::Relaxed) {
                     break;
                 }
-                eprint!(
-                    "\r  {}... {:.1}s",
+                eprintln!(
+                    "  {}... {:.1}s",
                     label_for_task,
                     start.elapsed().as_secs_f32()
                 );
-                let _ = std::io::stderr().flush();
             }
         });
 
@@ -204,6 +211,19 @@ impl RemoteHelper {
         done.store(true, Ordering::Relaxed);
         let _ = progress_task.await;
         result
+    }
+
+    fn format_transfer_progress(label: &str, written: u64, expected_size: Option<u64>) -> String {
+        if let Some(expected) = expected_size {
+            format!(
+                "{}... {}/{}",
+                label,
+                Self::format_transfer_bytes(written),
+                Self::format_transfer_bytes(expected)
+            )
+        } else {
+            format!("{}... {}", label, Self::format_transfer_bytes(written))
+        }
     }
 
     fn format_transfer_bytes(bytes: u64) -> String {
@@ -594,19 +614,19 @@ impl RemoteHelper {
         let progress = StdArc::new(AtomicUsize::new(0));
         let done = StdArc::new(AtomicBool::new(false));
 
+        eprintln!("  Loading objects tree...");
         let progress_clone = progress.clone();
         let done_clone = done.clone();
         let progress_task = tokio::spawn(async move {
             let mut last = 0;
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(fetch_progress_interval()).await;
                 if done_clone.load(Ordering::Relaxed) {
                     break;
                 }
                 let current = progress_clone.load(Ordering::Relaxed);
                 if current != last {
-                    eprint!("\r  Loading objects tree... {} nodes", current);
-                    let _ = std::io::stderr().flush();
+                    eprintln!("  Loading objects tree... {} nodes", current);
                     last = current;
                 }
             }
@@ -625,7 +645,7 @@ impl RemoteHelper {
             Err(e) => {
                 done.store(true, Ordering::Relaxed);
                 let _ = progress_task.await;
-                eprintln!("\r  Loading objects tree... failed: {}", e);
+                eprintln!("  Loading objects tree... failed: {}", e);
                 warn!("Failed to walk objects directory: {}", e);
                 bail!("Failed to walk objects directory: {}", e);
             }
@@ -633,14 +653,10 @@ impl RemoteHelper {
         done.store(true, Ordering::Relaxed);
         let _ = progress_task.await;
 
-        if self.is_slow() {
-            eprintln!(
-                "\r  Loading objects tree... done ({} entries)        ",
-                walk_entries.len()
-            );
-        } else {
-            eprint!("\r                                                        \r");
-        }
+        eprintln!(
+            "  Loading objects tree... done ({} entries)",
+            walk_entries.len()
+        );
 
         let mut fetch_tasks: Vec<GitObjectLocation> = Vec::new();
         for entry in walk_entries {
@@ -753,6 +769,7 @@ impl RemoteHelper {
         destination: &Path,
         label: String,
         expected_size: Option<u64>,
+        show_start: bool,
     ) -> Result<u64> {
         use futures::StreamExt;
         use tokio::io::AsyncWriteExt;
@@ -780,10 +797,15 @@ impl RemoteHelper {
         let mut stream = tree.get_stream(cid);
         let mut written = 0u64;
         let mut saw_chunk = false;
-        let mut last_progress = Instant::now() - Duration::from_secs(1);
+        let progress_interval = fetch_progress_interval();
+        let mut last_progress = Instant::now();
 
-        eprint!("\r  {}... 0 B", label);
-        let _ = std::io::stderr().flush();
+        if show_start {
+            let size = expected_size
+                .map(Self::format_transfer_bytes)
+                .unwrap_or_else(|| "unknown size".to_string());
+            eprintln!("  {} ({})", label, size);
+        }
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("stream {}", destination.display()))?;
@@ -793,8 +815,11 @@ impl RemoteHelper {
                 .with_context(|| format!("write {}", temp_path.display()))?;
             written += chunk.len() as u64;
 
-            if last_progress.elapsed() >= Duration::from_millis(250) {
-                Self::print_pack_byte_progress(&label, written, expected_size);
+            if last_progress.elapsed() >= progress_interval {
+                eprintln!(
+                    "  {}",
+                    Self::format_transfer_progress(&label, written, expected_size)
+                );
                 last_progress = Instant::now();
             }
         }
@@ -831,22 +856,7 @@ impl RemoteHelper {
                     destination.display()
                 )
             })?;
-        Self::print_pack_byte_progress(&label, written, expected_size);
         Ok(written)
-    }
-
-    fn print_pack_byte_progress(label: &str, written: u64, expected_size: Option<u64>) {
-        if let Some(expected) = expected_size {
-            eprint!(
-                "\r  {}... {}/{}",
-                label,
-                Self::format_transfer_bytes(written),
-                Self::format_transfer_bytes(expected)
-            );
-        } else {
-            eprint!("\r  {}... {}", label, Self::format_transfer_bytes(written));
-        }
-        let _ = std::io::stderr().flush();
     }
 
     async fn install_git_pack_files_async<S: Store>(
@@ -861,6 +871,15 @@ impl RemoteHelper {
         let git_pack_dir = Self::git_dir_path().join("objects").join("pack");
         std::fs::create_dir_all(&git_pack_dir)
             .with_context(|| format!("create {}", git_pack_dir.display()))?;
+        let total_pack_size: u64 = pack_locations
+            .iter()
+            .map(|location| location.pack_size)
+            .sum();
+        eprintln!(
+            "  Installing {} git pack(s), {} total",
+            pack_locations.len(),
+            Self::format_transfer_bytes(total_pack_size)
+        );
         let mut installed = 0usize;
         for (index, location) in pack_locations.iter().enumerate() {
             let pack_path = git_pack_dir.join(&location.pack_name);
@@ -886,6 +905,7 @@ impl RemoteHelper {
                     &pack_path,
                     pack_label,
                     Some(location.pack_size),
+                    true,
                 )
                 .await
                 .with_context(|| format!("read {}", location.pack_name))?
@@ -905,6 +925,7 @@ impl RemoteHelper {
                         &idx_path,
                         idx_label,
                         location.idx_size,
+                        false,
                     )
                     .await
                     .with_context(|| format!("read {}", location.idx_name))?;
@@ -932,7 +953,7 @@ impl RemoteHelper {
             }
 
             eprintln!(
-                "\r  Installed git pack {}/{} {} ({})        ",
+                "  Installed git pack {}/{} {} ({})",
                 index + 1,
                 pack_locations.len(),
                 location.pack_name,
@@ -955,7 +976,6 @@ impl RemoteHelper {
             .collect_git_object_locations_async(root_hash, encryption_key)
             .await?;
         use futures::stream::{self, StreamExt};
-        use std::io::Write;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc as StdArc;
 
@@ -968,15 +988,15 @@ impl RemoteHelper {
         let downloaded_clone = downloaded.clone();
         let download_done_clone = download_done.clone();
         let total_for_timer = total_objects;
+        eprintln!("  Loading {} loose git object(s)", total_objects);
         let timer_task = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(fetch_progress_interval()).await;
                 if download_done_clone.load(Ordering::Relaxed) {
                     break;
                 }
                 let count = downloaded_clone.load(Ordering::Relaxed);
-                eprint!("\r  Loading: {}/{}    ", count, total_for_timer);
-                let _ = std::io::stderr().flush();
+                eprintln!("  Loading loose git objects: {}/{}", count, total_for_timer);
             }
         });
 
@@ -1017,7 +1037,10 @@ impl RemoteHelper {
         }
 
         let success_count = objects.len();
-        eprintln!("\r  Loading: {}/{}    ", success_count, total_objects);
+        eprintln!(
+            "  Loading loose git objects: {}/{}",
+            success_count, total_objects
+        );
 
         // Retry failed downloads sequentially
         let mut missing_objects: Vec<(String, String)> = Vec::new(); // (oid, hash)
@@ -1025,8 +1048,7 @@ impl RemoteHelper {
             eprintln!("  Retrying {} failed downloads...", failed.len());
             for (i, (oid, obj_cid)) in failed.iter().enumerate() {
                 let hash_hex = hex::encode(obj_cid.hash);
-                eprint!("\r  Retrying {}/{}: {}...    ", i + 1, failed.len(), oid);
-                let _ = std::io::stderr().flush();
+                eprintln!("  Retrying {}/{}: {}...", i + 1, failed.len(), oid);
 
                 match tree.get(obj_cid, None).await {
                     Ok(Some(content)) => {
@@ -1088,7 +1110,6 @@ impl RemoteHelper {
         encryption_key: Option<&[u8; 32]>,
     ) -> Result<GitFetchStats> {
         use futures::stream::{self, StreamExt};
-        use std::io::Write;
         use tokio::sync::mpsc;
 
         let enumerate_start = std::time::Instant::now();
@@ -1168,6 +1189,8 @@ impl RemoteHelper {
         let mut completed = 0usize;
         let mut queued_writes = 0usize;
         let mut failed: Vec<(String, Cid)> = Vec::new();
+        let progress_interval = fetch_progress_interval();
+        let mut last_progress = Instant::now();
 
         let concurrency =
             git_object_download_concurrency_for_read_servers(self.nostr.blossom().read_servers());
@@ -1200,6 +1223,7 @@ impl RemoteHelper {
         }))
         .buffer_unordered(concurrency);
 
+        eprintln!("  Fetching {} loose git object(s)", total_to_write);
         while let Some(result) = results.next().await {
             completed += 1;
             match result {
@@ -1213,9 +1237,12 @@ impl RemoteHelper {
                 Err((oid, cid)) => failed.push((oid, cid)),
             }
 
-            if completed == 1 || completed.is_multiple_of(50) || completed == total_to_write {
-                eprint!("\r  Writing to .git: {}/{}    ", completed, total_to_write);
-                let _ = std::io::stderr().flush();
+            if completed < total_to_write && last_progress.elapsed() >= progress_interval {
+                eprintln!(
+                    "  Fetching loose git objects: {}/{}",
+                    completed, total_to_write
+                );
+                last_progress = Instant::now();
             }
         }
 
@@ -1224,8 +1251,7 @@ impl RemoteHelper {
             eprintln!("\n  Retrying {} failed downloads...", failed.len());
             for (i, (oid, obj_cid)) in failed.iter().enumerate() {
                 let hash_hex = hex::encode(obj_cid.hash);
-                eprint!("\r  Retrying {}/{}: {}...    ", i + 1, failed.len(), oid);
-                let _ = std::io::stderr().flush();
+                eprintln!("  Retrying {}/{}: {}...", i + 1, failed.len(), oid);
 
                 match tree.get(obj_cid, None).await {
                     Ok(Some(content)) => {
@@ -1248,7 +1274,7 @@ impl RemoteHelper {
                 }
             }
             eprintln!(
-                "\r  Retried: {}/{} objects available        ",
+                "  Retried: {}/{} objects available",
                 queued_writes, total_to_write
             );
         }
@@ -1272,12 +1298,9 @@ impl RemoteHelper {
         }
 
         if cached > 0 {
-            eprintln!(
-                "\r  Writing to .git: {} new, {} cached    ",
-                written, cached
-            );
+            eprintln!("  Writing to .git: {} new, {} cached", written, cached);
         } else {
-            eprintln!("\r  Writing to .git: {}/{}    ", written, written);
+            eprintln!("  Writing to .git: {}/{}", written, written);
         }
 
         let download_write_elapsed = transfer_start.elapsed();

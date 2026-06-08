@@ -1,5 +1,3 @@
-use std::io::Write;
-
 pub(super) struct UploadProgress {
     pub(super) processed: usize,
     pub(super) discovered: usize,
@@ -43,8 +41,7 @@ impl UploadProgress {
 }
 
 pub(super) fn emit_upload_progress(progress: UploadProgress) {
-    eprint!("\r{}", progress.format());
-    let _ = std::io::stderr().flush();
+    eprintln!("{}", progress.format());
 }
 
 #[cfg(test)]

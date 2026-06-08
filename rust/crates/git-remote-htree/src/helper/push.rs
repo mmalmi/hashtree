@@ -1,6 +1,6 @@
 use super::progress::emit_upload_progress;
 use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir, queue_hash_if_new};
-use super::{upload_progress, AncestorCheck, PushSpec, RemoteHelper};
+use super::{fetch_progress_interval, upload_progress, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
 use crate::nostr_client::{
@@ -23,7 +23,6 @@ use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
-const UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
 const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
 
@@ -81,23 +80,22 @@ impl RepoTreeProgressReporter {
         let label = label.to_string();
 
         let handle = thread::spawn(move || {
-            for _ in 0..5 {
-                if thread_stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
+            let interval = fetch_progress_interval();
             while !thread_stop.load(Ordering::Relaxed) {
-                eprint!("\r{}", progress.snapshot().format_for_label(&label));
-                let _ = std::io::stderr().flush();
-                thread_printed.store(true, Ordering::Relaxed);
-
-                for _ in 0..5 {
+                let mut slept = Duration::ZERO;
+                while slept < interval {
                     if thread_stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    thread::sleep(Duration::from_millis(100));
+                    let step = Duration::from_millis(100).min(interval - slept);
+                    thread::sleep(step);
+                    slept += step;
                 }
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                eprintln!("{}", progress.snapshot().format_for_label(&label));
+                thread_printed.store(true, Ordering::Relaxed);
             }
         });
 
@@ -123,10 +121,10 @@ impl RepoTreeProgressReporter {
 
         match error {
             Some(err) => {
-                eprintln!("\r  {}: failed ({})", label, err);
+                eprintln!("  {}: failed ({})", label, err);
             }
             None => {
-                eprintln!("\r{}", progress.snapshot().format_for_label(label));
+                eprintln!("{}", progress.snapshot().format_for_label(label));
             }
         }
     }
@@ -290,7 +288,7 @@ fn spawn_periodic_upload_progress(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(UPLOAD_PROGRESS_INTERVAL) => {
+                _ = tokio::time::sleep(fetch_progress_interval()) => {
                     emit_upload_progress(upload_progress_from_counters(
                         &counters,
                         &discovery_complete,
@@ -731,18 +729,14 @@ impl RemoteHelper {
                     dst_ref, base, post_hydration_err
                 );
 
-            eprint!("  Listing objects...");
-            let _ = std::io::stderr().flush();
+            eprintln!("  Listing objects...");
             let objects = self.list_objects_to_push(sha, &[])?;
-            eprintln!(" {} objects", objects.len());
+            eprintln!("  Listed {} object(s)", objects.len());
 
             let objects_with_content = self.read_git_objects_batch(&objects)?;
-            eprintln!();
 
-            eprint!("  Writing to local store...");
-            let _ = std::io::stderr().flush();
+            eprintln!("  Writing to local store...");
             Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-            eprintln!();
 
             self.build_tree_with_progress("Building repo tree from repaired local store")
         }
@@ -1302,18 +1296,17 @@ impl RemoteHelper {
             return Ok(());
         }
 
-        eprint!("  Listing objects...");
-        let _ = std::io::stderr().flush();
+        eprintln!("  Listing objects...");
         let delta_base = self.delta_base_for_push(sha, force_push, remote_tip_sha);
         let objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
         if let Some(base) = delta_base.as_deref() {
             eprintln!(
-                " {} objects (delta from {})",
+                "  Listed {} object(s) (delta from {})",
                 objects.len(),
                 &base[..12.min(base.len())]
             );
         } else {
-            eprintln!(" {} objects", objects.len());
+            eprintln!("  Listed {} object(s)", objects.len());
         }
 
         info!("Pushing {} objects for {}", objects.len(), sha);
@@ -1361,22 +1354,18 @@ impl RemoteHelper {
                 .set_pack_checkpoint_files(BTreeMap::new(), inherited_pack_covered)?;
         }
         if checkpoint_covered.is_empty() {
-            eprint!("  Reading objects...");
+            eprintln!("  Reading objects...");
         } else {
-            eprint!(
-                "  Reading needed objects... {}/{} objects",
+            eprintln!(
+                "  Reading needed objects... {}/{} object(s)",
                 objects_to_import.len(),
                 objects.len()
             );
         }
-        let _ = std::io::stderr().flush();
         let objects_with_content = self.read_git_objects_batch(&objects_to_import)?;
-        eprintln!();
 
-        eprint!("  Writing to local store...");
-        let _ = std::io::stderr().flush();
+        eprintln!("  Writing to local store...");
         Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-        eprintln!();
 
         if !self.nostr.can_sign() {
             anyhow::bail!(
@@ -1547,8 +1536,7 @@ impl RemoteHelper {
         for (i, (obj_type, content)) in objects_with_content.into_iter().enumerate() {
             storage.write_raw_object(obj_type, &content)?;
             if (i + 1) % 1000 == 0 || i + 1 == total {
-                eprint!("\r  Writing to local store: {}/{}", i + 1, total);
-                let _ = std::io::stderr().flush();
+                eprintln!("  Writing to local store: {}/{}", i + 1, total);
             }
         }
         Ok(())
@@ -1580,8 +1568,7 @@ impl RemoteHelper {
         };
 
         if self.is_slow() {
-            eprint!("  Building git pack checkpoint...");
-            let _ = std::io::stderr().flush();
+            eprintln!("  Building git pack checkpoint...");
         }
         let mut pack_files = BTreeMap::new();
         for pack in &plan.packs {
@@ -1990,18 +1977,14 @@ impl RemoteHelper {
     }
 
     fn import_full_local_revision(&mut self, sha: &str) -> Result<()> {
-        eprint!("  Listing objects...");
-        let _ = std::io::stderr().flush();
+        eprintln!("  Listing objects...");
         let objects = self.list_objects_to_push(sha, &[])?;
-        eprintln!(" {} objects (full rebuild)", objects.len());
+        eprintln!("  Listed {} object(s) (full rebuild)", objects.len());
 
         let objects_with_content = self.read_git_objects_batch(&objects)?;
-        eprintln!();
 
-        eprint!("  Writing to local store...");
-        let _ = std::io::stderr().flush();
+        eprintln!("  Writing to local store...");
         Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-        eprintln!();
 
         Ok(())
     }
@@ -2208,8 +2191,7 @@ impl RemoteHelper {
                 }
 
                 if verbose {
-                    eprint!("  Computing diff from previous tree...");
-                    let _ = std::io::stderr().flush();
+                    eprintln!("  Computing diff from previous tree...");
                 }
 
                 let tree = HashTree::new(HashTreeConfig::new(store.clone()));

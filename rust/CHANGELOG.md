@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.64 - 2026-06-08
+
+### Changed
+
+- Made `git-remote-htree` clone and push progress line-oriented with bounded
+  update intervals, so Git/SSH sideband output no longer repeats
+  carriage-return transfer fragments while long pack downloads still report
+  periodic byte progress.
+
 ## 0.2.63 - 2026-06-08
 
 ### Fixed
