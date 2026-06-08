@@ -129,3 +129,36 @@ Interpretation:
 - Some of the pressure was avoidable and was fixed by reducing write amplification: batch uploads, batched owner-index writes, capped access updates, and raw-file thumbnail URLs.
 - Remaining addressable work is mostly data-shape work, not more CPU parallelism: avoid rewriting song directories whose only change could live in a compact side index, improve locality of repair ordering where practical, and keep bulk repair concurrency below the point where storage queues grow.
 - Optimistic Blossom upload admission is a separate serving/write-latency tradeoff. It can reduce client-visible latency for small uploads, but it should not be enabled or disabled as part of a bulk catalog repair without a separate burst-write test, because it changes when clients receive success relative to durable storage.
+
+## 2026-06-08 - Git Pack Release Clone And Push
+
+Question: after the pack-backed git remote fixes and release, what are clean
+clone and small incremental push timings for a large public project repository?
+
+Setup:
+- Client used `git-remote-htree` 0.2.59.
+- Clone used a brand-new helper data directory and a fresh destination, so no
+  existing LMDB, helper cache, or local Git object cache was reused.
+- Push measurement used a small documentation-only commit on the same repository.
+- No pubkeys, private hostnames, exact repo names, raw hashes, or IPs were
+  retained.
+
+Fresh clone result:
+
+| Metric | Result |
+| --- | ---: |
+| Total wall time | 11.08 s |
+| Object-tree enumeration | 4.42 s |
+| Pack download and write | 2.87 s |
+| Installed pack count | 1 |
+| Installed pack payload | 77.8 MiB |
+| Git objects in installed pack | 20,478 |
+| Loose current/checkpoint objects written | 687 |
+
+Interpretation:
+- Fresh clone used the pack checkpoint path: one ordinary Git pack carried the
+  historical object set, with a small loose-object frontier for current refs and
+  helper-visible metadata.
+- The remaining clone time was split between tree enumeration/resolution and
+  pack transfer/install; per-object loose download was no longer the dominant
+  cost.
