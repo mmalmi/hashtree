@@ -197,6 +197,16 @@ Fresh clone results:
 | Cold just-published blobs | 47.75 s | 3.64 s | 12.29 s | 30.59 s | 5 | 20,599 | 713 |
 | Warm repeat | 15.46 s | 2.28 s | 3.08 s | 5.50 s | 5 | 20,599 | 713 |
 
+Incremental push result:
+
+| Metric | Result |
+| --- | ---: |
+| Total wall time | 12.90 s |
+| Git object delta listed | 4 |
+| Local objects read for frontier/tree merge | 257 |
+| Cached-root merge output | 66 object blobs, 21 files, 8 dirs, 27 reused |
+| New hashtree blobs uploaded | 21 |
+
 Interpretation:
 - The new root used five deterministic checkpoint pack ranges instead of one
   full pack. A later publisher that reaches the same earlier checkpoint tips
@@ -210,3 +220,5 @@ Interpretation:
   current history shape, not many tiny loose-object downloads. More even
   object-level pack slicing could reduce that, but commit-boundary checkpoints
   are simpler and preserve deterministic reuse across publishers.
+- Small pushes after the chained checkpoint root stayed on the cached-root delta
+  path and did not rebuild or reupload the historical pack ranges.
