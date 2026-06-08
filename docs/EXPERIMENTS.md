@@ -394,11 +394,15 @@ Fresh clone result:
 | Mode | Total wall time | Object-tree enumeration | Pack install | Loose download and write | Installed packs | Loose frontier |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Local workstation smoke | 78.11 s | 10.82 s | 24.7 s | 31.56 s | 5 | 875 |
+| Remote Linux host smoke | 84.64 s | 20.62 s | 39.6 s | 15.19 s | 5 | 897 |
 
 Interpretation:
 - Captured non-terminal output reported checkpoint pack install as one
   aggregate `Loading git packs` progress stream: an initial line, two 10 s
   heartbeat lines while the large pack advanced, and one final done line.
+- Remote-host non-terminal output had the same aggregate shape, with three
+  10 s heartbeat lines while the large pack was stalled/slow and one final done
+  line when it completed.
 - The clone verified with `git fsck --connectivity-only`.
 - This run was for output behavior, not tuning. The slow path again varied
   between metadata/root reads, the largest checkpoint pack transfer, and loose
