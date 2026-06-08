@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.67 - 2026-06-09
+
+### Fixed
+
+- Made mutable npub/htree HTTP reads refresh stale cached tree roots from
+  local/upstream relays before serving files, while falling back to stale roots
+  when refresh misses so origin caches no longer pin releases forever.
+
 ## 0.2.66 - 2026-06-08
 
 ### Changed

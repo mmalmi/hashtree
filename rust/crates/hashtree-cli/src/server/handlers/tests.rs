@@ -29,7 +29,7 @@ use sha2::Digest;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -1924,6 +1924,234 @@ async fn resolve_to_hash_refresh_uses_local_relay_before_relays() {
     assert_eq!(refresh_json["hash"], refreshed_hash);
     assert_eq!(refresh_json["source"], "local-relay");
     assert_eq!(refresh_json["event_id"], event.id.to_hex());
+}
+
+#[tokio::test]
+async fn mutable_root_request_refreshes_stale_cached_root_from_local_relay() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let keys = Keys::generate();
+    let relay = test_nostr_relay(&temp_dir, keys.public_key().to_hex()).await;
+    let tree_name = "video";
+    let cached_hash = "11".repeat(32);
+    let refreshed_hash = "22".repeat(32);
+
+    let event = event_builder!(
+        Kind::Custom(30078),
+        "",
+        [
+            Tag::identifier(tree_name.to_string()),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                vec!["hashtree".to_string()],
+            ),
+            Tag::custom(TagKind::Custom("hash".into()), vec![refreshed_hash.clone()]),
+        ],
+    )
+    .sign_with_keys(&keys)
+    .unwrap();
+    relay.ingest_trusted_event(event.clone()).await.unwrap();
+
+    let state = AppState {
+        nostr_relay: Some(relay),
+        ..test_app_state(store, Vec::new())
+    };
+    let npub = keys.public_key().to_bech32().unwrap();
+    let cache_key = tree_root_cache_key(&npub, tree_name, None);
+    put_cached_tree_root(
+        &state,
+        cache_key.clone(),
+        Cid::parse(&cached_hash).expect("valid cached cid"),
+        "cache",
+        None,
+    );
+    state
+        .tree_root_cache
+        .lock()
+        .unwrap()
+        .get_mut(&cache_key)
+        .unwrap()
+        .cached_at = Instant::now() - Duration::from_secs(120);
+
+    let resolved = resolve_root_for_mutable_request(&state, &npub, tree_name, None)
+        .await
+        .expect("stale root should refresh from local relay");
+
+    assert_eq!(to_hex(&resolved.cid.hash), refreshed_hash);
+    assert_eq!(resolved.source, "local-relay");
+    let event_id = event.id.to_hex();
+    assert_eq!(
+        resolved
+            .root_event
+            .as_ref()
+            .map(|root| root.event_id.as_str()),
+        Some(event_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn mutable_root_request_keeps_fresh_cached_root_without_refresh() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let keys = Keys::generate();
+    let relay = test_nostr_relay(&temp_dir, keys.public_key().to_hex()).await;
+    let tree_name = "video";
+    let cached_hash = "11".repeat(32);
+    let refreshed_hash = "22".repeat(32);
+
+    let event = event_builder!(
+        Kind::Custom(30078),
+        "",
+        [
+            Tag::identifier(tree_name.to_string()),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                vec!["hashtree".to_string()],
+            ),
+            Tag::custom(TagKind::Custom("hash".into()), vec![refreshed_hash]),
+        ],
+    )
+    .sign_with_keys(&keys)
+    .unwrap();
+    relay.ingest_trusted_event(event).await.unwrap();
+
+    let state = AppState {
+        nostr_relay: Some(relay),
+        ..test_app_state(store, Vec::new())
+    };
+    let npub = keys.public_key().to_bech32().unwrap();
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, tree_name, None),
+        Cid::parse(&cached_hash).expect("valid cached cid"),
+        "cache",
+        None,
+    );
+
+    let resolved = resolve_root_for_mutable_request(&state, &npub, tree_name, None)
+        .await
+        .expect("fresh cache should resolve");
+
+    assert_eq!(to_hex(&resolved.cid.hash), cached_hash);
+    assert_eq!(resolved.source, "cache");
+}
+
+#[tokio::test]
+async fn mutable_root_request_serves_stale_cached_root_when_refresh_misses() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let state = test_app_state(store, Vec::new());
+    let tree_name = "video";
+    let cached_hash = "11".repeat(32);
+    let cache_key = tree_root_cache_key("npub1example", tree_name, None);
+    put_cached_tree_root(
+        &state,
+        cache_key.clone(),
+        Cid::parse(&cached_hash).expect("valid cached cid"),
+        "cache",
+        None,
+    );
+    state
+        .tree_root_cache
+        .lock()
+        .unwrap()
+        .get_mut(&cache_key)
+        .unwrap()
+        .cached_at = Instant::now() - Duration::from_secs(120);
+
+    let resolved = resolve_root_for_mutable_request(&state, "npub1example", tree_name, None)
+        .await
+        .expect("stale cache should be served when refresh misses");
+
+    assert_eq!(to_hex(&resolved.cid.hash), cached_hash);
+    assert_eq!(resolved.source, "stale-cache");
+}
+
+#[tokio::test]
+async fn htree_npub_path_refreshes_stale_cached_root_before_serving_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let keys = Keys::generate();
+    let relay = test_nostr_relay(&temp_dir, keys.public_key().to_hex()).await;
+    let tree_name = "releases/hashtree";
+
+    let (old_release_cid, _) = tree.put(br#"{"version":"old"}"#).await.unwrap();
+    let old_latest = tree
+        .put_directory(vec![
+            DirEntry::from_cid("release.json", &old_release_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+    let old_root = tree
+        .put_directory(vec![
+            DirEntry::from_cid("latest", &old_latest).with_link_type(LinkType::Dir)
+        ])
+        .await
+        .unwrap();
+
+    let new_release = br#"{"version":"new"}"#;
+    let (new_release_cid, _) = tree.put(new_release).await.unwrap();
+    let new_latest = tree
+        .put_directory(vec![
+            DirEntry::from_cid("release.json", &new_release_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+    let new_root = tree
+        .put_directory(vec![
+            DirEntry::from_cid("latest", &new_latest).with_link_type(LinkType::Dir)
+        ])
+        .await
+        .unwrap();
+
+    let event = event_builder!(
+        Kind::Custom(30078),
+        "",
+        [
+            Tag::identifier(tree_name.to_string()),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                vec!["hashtree".to_string()],
+            ),
+            Tag::custom(TagKind::Custom("hash".into()), vec![to_hex(&new_root.hash)],),
+        ],
+    )
+    .sign_with_keys(&keys)
+    .unwrap();
+    relay.ingest_trusted_event(event).await.unwrap();
+
+    let state = AppState {
+        nostr_relay: Some(relay),
+        ..test_app_state(store, Vec::new())
+    };
+    let npub = keys.public_key().to_bech32().unwrap();
+    let cache_key = tree_root_cache_key(&npub, tree_name, None);
+    put_cached_tree_root(&state, cache_key.clone(), old_root, "cache", None);
+    state
+        .tree_root_cache
+        .lock()
+        .unwrap()
+        .get_mut(&cache_key)
+        .unwrap()
+        .cached_at = Instant::now() - Duration::from_secs(120);
+
+    let response = htree_npub_impl(
+        State(state.clone()),
+        npub,
+        tree_name.to_string(),
+        Some("latest/release.json".to_string()),
+        Query(HashMap::new()),
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), new_release);
+    let cached = get_cached_tree_root(&state, &cache_key).expect("refreshed root should be cached");
+    assert_eq!(cached.cid.hash, new_root.hash);
 }
 
 #[tokio::test]

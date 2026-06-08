@@ -114,6 +114,7 @@ pub struct CachedTreeRootEntry {
     pub cid: Cid,
     pub source: &'static str,
     pub root_event: Option<PeerRootEvent>,
+    pub cached_at: Instant,
 }
 
 pub type SharedBlobFetch = Shared<BoxFuture<'static, bool>>;

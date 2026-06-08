@@ -7,7 +7,9 @@ use hashtree_core::{from_hex, to_hex, Cid, HashTree, LinkType, Store, TreeEntry}
 use hashtree_resolver::nostr::NostrRootResolver;
 use hashtree_resolver::RootResolver;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const TREE_ROOT_CACHE_FRESH_TTL: Duration = Duration::from_secs(60);
 
 pub(super) async fn resolve_npub_root(
     key: &str,
@@ -80,18 +82,35 @@ pub(super) async fn resolve_root_offline(
     link_key: Option<[u8; 32]>,
 ) -> Option<ResolvedRoot> {
     let cache_key = tree_root_cache_key(pubkey, treename, link_key);
-    if let Some(mut cached) = get_cached_tree_root(state, &cache_key) {
-        if cached.cid.key.is_none() {
-            cached.cid.key = link_key;
-        }
-        return Some(ResolvedRoot {
-            cid: cached.cid,
-            source: "cache",
-            root_event: cached.root_event,
-        });
+    if let Some(cached) = get_cached_tree_root(state, &cache_key) {
+        return Some(resolved_cached_tree_root(cached, link_key, "cache"));
     }
 
     resolve_root_without_cache(state, pubkey, treename, link_key).await
+}
+
+pub(super) async fn resolve_root_for_mutable_request(
+    state: &AppState,
+    pubkey: &str,
+    treename: &str,
+    link_key: Option<[u8; 32]>,
+) -> Option<ResolvedRoot> {
+    let cache_key = tree_root_cache_key(pubkey, treename, link_key);
+    let cached = get_cached_tree_root(state, &cache_key);
+    if let Some(cached_root) = cached.clone() {
+        if cached_tree_root_is_fresh(&cached_root) {
+            return Some(resolved_cached_tree_root(cached_root, link_key, "cache"));
+        }
+    }
+
+    if let Some(resolved) = resolve_root_without_cache(state, pubkey, treename, link_key).await {
+        return Some(resolved);
+    }
+
+    cached.map(|cached_root| {
+        touch_cached_tree_root(state, &cache_key);
+        resolved_cached_tree_root(cached_root, link_key, "stale-cache")
+    })
 }
 
 pub(super) async fn resolve_root_without_cache(
@@ -266,6 +285,25 @@ pub(super) fn get_cached_tree_root(
         .and_then(|cache| cache.get(cache_key).cloned())
 }
 
+fn cached_tree_root_is_fresh(entry: &CachedTreeRootEntry) -> bool {
+    entry.cached_at.elapsed() < TREE_ROOT_CACHE_FRESH_TTL
+}
+
+fn resolved_cached_tree_root(
+    mut cached: CachedTreeRootEntry,
+    link_key: Option<[u8; 32]>,
+    source: &'static str,
+) -> ResolvedRoot {
+    if cached.cid.key.is_none() {
+        cached.cid.key = link_key;
+    }
+    ResolvedRoot {
+        cid: cached.cid,
+        source,
+        root_event: cached.root_event,
+    }
+}
+
 pub(super) fn put_cached_tree_root(
     state: &AppState,
     cache_key: String,
@@ -280,8 +318,17 @@ pub(super) fn put_cached_tree_root(
                 cid,
                 source,
                 root_event,
+                cached_at: Instant::now(),
             },
         );
+    }
+}
+
+fn touch_cached_tree_root(state: &AppState, cache_key: &str) {
+    if let Ok(mut cache) = state.tree_root_cache.lock() {
+        if let Some(entry) = cache.get_mut(cache_key) {
+            entry.cached_at = Instant::now();
+        }
     }
 }
 

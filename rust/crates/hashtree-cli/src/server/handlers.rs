@@ -656,55 +656,56 @@ async fn htree_npub_impl(
     }
 
     let link_key = parse_hex_key(params.get("k"));
-    let resolved =
-        if let Some(resolved) = resolve_root_offline(&state, &npub, &treename, link_key).await {
-            resolved.cid
-        } else {
-            let resolver = match NostrRootResolver::new(resolver_config(&state)).await {
-                Ok(r) => r,
-                Err(e) => {
-                    return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .body(Body::from(format!("Failed to create resolver: {}", e)))
-                        .unwrap();
-                }
-            };
-
-            let cid = match tokio::time::timeout(
-                HTTP_RESOLVER_TIMEOUT,
-                resolve_npub_root(&key, &resolver, link_key),
-            )
-            .await
-            {
-                Ok(Ok(cid)) => cid,
-                Ok(Err(e)) => {
-                    let _ = resolver.stop().await;
-                    return Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .body(Body::from(format!("Resolution failed: {}", e)))
-                        .unwrap();
-                }
-                Err(_) => {
-                    let _ = resolver.stop().await;
-                    return Response::builder()
-                        .status(StatusCode::GATEWAY_TIMEOUT)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .body(Body::from("Resolution timeout"))
-                        .unwrap();
-                }
-            };
-            let _ = resolver.stop().await;
-            put_cached_tree_root(
-                &state,
-                tree_root_cache_key(&npub, &treename, link_key),
-                cid.clone(),
-                "nostr",
-                None,
-            );
-            cid
+    let resolved = if let Some(resolved) =
+        resolve_root_for_mutable_request(&state, &npub, &treename, link_key).await
+    {
+        resolved.cid
+    } else {
+        let resolver = match NostrRootResolver::new(resolver_config(&state)).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .body(Body::from(format!("Failed to create resolver: {}", e)))
+                    .unwrap();
+            }
         };
+
+        let cid = match tokio::time::timeout(
+            HTTP_RESOLVER_TIMEOUT,
+            resolve_npub_root(&key, &resolver, link_key),
+        )
+        .await
+        {
+            Ok(Ok(cid)) => cid,
+            Ok(Err(e)) => {
+                let _ = resolver.stop().await;
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .body(Body::from(format!("Resolution failed: {}", e)))
+                    .unwrap();
+            }
+            Err(_) => {
+                let _ = resolver.stop().await;
+                return Response::builder()
+                    .status(StatusCode::GATEWAY_TIMEOUT)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .body(Body::from("Resolution timeout"))
+                    .unwrap();
+            }
+        };
+        let _ = resolver.stop().await;
+        put_cached_tree_root(
+            &state,
+            tree_root_cache_key(&npub, &treename, link_key),
+            cid.clone(),
+            "nostr",
+            None,
+        );
+        cid
+    };
 
     let mut cid = resolved;
     if cid.key.is_none() {
@@ -1781,7 +1782,8 @@ pub async fn resolve_and_serve(
         return plaintext_read_forbidden_response(&pubkey).into_response();
     }
 
-    if let Some(resolved) = resolve_root_offline(&state, &pubkey, &treename, None).await {
+    if let Some(resolved) = resolve_root_for_mutable_request(&state, &pubkey, &treename, None).await
+    {
         return serve_content_internal(&state, &resolved.cid.hash, headers, false, false).await;
     }
 
