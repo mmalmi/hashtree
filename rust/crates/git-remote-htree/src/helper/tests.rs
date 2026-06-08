@@ -608,6 +608,38 @@ fn test_collect_git_pack_locations_scans_pack_dir_when_info_packs_missing() {
 }
 
 #[test]
+fn test_git_pack_progress_formats_single_aggregate_line() {
+    let total = 82 * 1024 * 1024;
+    let loaded = 20 * 1024 * 1024;
+    assert_eq!(
+        RemoteHelper::format_git_pack_progress_line(
+            3,
+            5,
+            loaded,
+            total,
+            4,
+            GIT_PACK_PHASE_DOWNLOADING,
+            false,
+            std::time::Duration::from_secs(12)
+        ),
+        "  Loading git packs: 3/5 (20.0 MiB/82.0 MiB), downloading 4/5, 12s"
+    );
+    assert_eq!(
+        RemoteHelper::format_git_pack_progress_line(
+            5,
+            5,
+            total,
+            total,
+            5,
+            GIT_PACK_PHASE_IDLE,
+            true,
+            std::time::Duration::from_secs(12)
+        ),
+        "  Loading git packs: 5/5 (82.0 MiB/82.0 MiB) done in 12.0s"
+    );
+}
+
+#[test]
 fn test_collect_git_object_locations_ignores_missing_info_subtree_for_loose_objects() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");

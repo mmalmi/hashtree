@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.66 - 2026-06-08
+
+### Changed
+
+- Collapsed `git-remote-htree` checkpoint pack install output into one
+  aggregate `Loading git packs` progress line, using terminal same-line updates
+  when possible and throttled pipe-safe heartbeats otherwise.
+
 ## 0.2.65 - 2026-06-08
 
 ### Changed

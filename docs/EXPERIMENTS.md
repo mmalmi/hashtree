@@ -380,3 +380,26 @@ Interpretation:
 - Remaining remote-host clone variance came from either the largest checkpoint
   pack transfer or the 871 small loose-object reads. The slow path is network
   retrieval from the Blossom/CDN read path, not local Git object writing.
+
+### 2026-06-08: git-remote-htree 0.2.66 pack progress smoke
+
+Setup:
+- Source-built 0.2.66 debug helper was placed first in `PATH`.
+- Clone used a fresh home/data directory and an empty work directory.
+- No pubkeys, private hostnames, exact repo names, raw hashes, temp paths, or
+  IPs were retained.
+
+Fresh clone result:
+
+| Mode | Total wall time | Object-tree enumeration | Pack install | Loose download and write | Installed packs | Loose frontier |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Local workstation smoke | 78.11 s | 10.82 s | 24.7 s | 31.56 s | 5 | 875 |
+
+Interpretation:
+- Captured non-terminal output reported checkpoint pack install as one
+  aggregate `Loading git packs` progress stream: an initial line, two 10 s
+  heartbeat lines while the large pack advanced, and one final done line.
+- The clone verified with `git fsck --connectivity-only`.
+- This run was for output behavior, not tuning. The slow path again varied
+  between metadata/root reads, the largest checkpoint pack transfer, and loose
+  frontier retrieval.

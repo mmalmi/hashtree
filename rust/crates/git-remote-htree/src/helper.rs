@@ -10,6 +10,7 @@ use hashtree_core::{Cid, Store};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -34,7 +35,11 @@ const DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 64;
 const DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 16;
 const MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 256;
 const DEFAULT_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_GIT_PACK_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 const VERBOSE_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+const GIT_PACK_PHASE_IDLE: usize = 0;
+const GIT_PACK_PHASE_DOWNLOADING: usize = 1;
+const GIT_PACK_PHASE_INDEXING: usize = 2;
 
 use crate::nostr_client::NostrClient;
 use hashtree_config::Config;
@@ -94,6 +99,14 @@ fn fetch_progress_interval() -> Duration {
         VERBOSE_FETCH_PROGRESS_INTERVAL
     } else {
         DEFAULT_FETCH_PROGRESS_INTERVAL
+    }
+}
+
+fn git_pack_progress_interval(stderr_is_terminal: bool) -> Duration {
+    if stderr_is_terminal || std::env::var("HTREE_VERBOSE").is_ok() {
+        VERBOSE_FETCH_PROGRESS_INTERVAL
+    } else {
+        DEFAULT_GIT_PACK_PROGRESS_INTERVAL
     }
 }
 
@@ -185,51 +198,6 @@ fn is_git_hex_name(name: &str, len: usize) -> bool {
 }
 
 impl RemoteHelper {
-    async fn with_git_pack_progress<T>(
-        label: String,
-        future: impl std::future::Future<Output = T>,
-    ) -> T {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc as StdArc;
-
-        let done = StdArc::new(AtomicBool::new(false));
-        let done_for_task = StdArc::clone(&done);
-        let label_for_task = label.clone();
-        eprintln!("  {}...", label);
-        let progress_task = tokio::spawn(async move {
-            let start = std::time::Instant::now();
-            loop {
-                tokio::time::sleep(fetch_progress_interval()).await;
-                if done_for_task.load(Ordering::Relaxed) {
-                    break;
-                }
-                eprintln!(
-                    "  {}... {:.1}s",
-                    label_for_task,
-                    start.elapsed().as_secs_f32()
-                );
-            }
-        });
-
-        let result = future.await;
-        done.store(true, Ordering::Relaxed);
-        let _ = progress_task.await;
-        result
-    }
-
-    fn format_transfer_progress(label: &str, written: u64, expected_size: Option<u64>) -> String {
-        if let Some(expected) = expected_size {
-            format!(
-                "{}... {}/{}",
-                label,
-                Self::format_transfer_bytes(written),
-                Self::format_transfer_bytes(expected)
-            )
-        } else {
-            format!("{}... {}", label, Self::format_transfer_bytes(written))
-        }
-    }
-
     fn format_transfer_bytes(bytes: u64) -> String {
         const KIB: f64 = 1024.0;
         const MIB: f64 = KIB * 1024.0;
@@ -244,6 +212,60 @@ impl RemoteHelper {
             format!("{:.1} KiB", bytes / KIB)
         } else {
             format!("{bytes:.0} B")
+        }
+    }
+
+    fn format_git_pack_progress_line(
+        processed_packs: usize,
+        total_packs: usize,
+        loaded_pack_bytes: u64,
+        total_pack_bytes: u64,
+        current_pack: usize,
+        phase: usize,
+        done: bool,
+        elapsed: Duration,
+    ) -> String {
+        let loaded_pack_bytes = loaded_pack_bytes.min(total_pack_bytes);
+        let progress = format!(
+            "{}/{} ({}/{})",
+            processed_packs,
+            total_packs,
+            Self::format_transfer_bytes(loaded_pack_bytes),
+            Self::format_transfer_bytes(total_pack_bytes)
+        );
+
+        if done {
+            return format!(
+                "  Loading git packs: {} done in {:.1}s",
+                progress,
+                elapsed.as_secs_f32()
+            );
+        }
+
+        let phase = match phase {
+            GIT_PACK_PHASE_DOWNLOADING => {
+                format!(", downloading {}/{}", current_pack, total_packs)
+            }
+            GIT_PACK_PHASE_INDEXING => format!(", indexing {}/{}", current_pack, total_packs),
+            _ => String::new(),
+        };
+        let elapsed = if elapsed >= Duration::from_secs(1) {
+            format!(", {:.0}s", elapsed.as_secs_f32())
+        } else {
+            String::new()
+        };
+        format!("  Loading git packs: {progress}{phase}{elapsed}")
+    }
+
+    fn emit_git_pack_progress_line(line: &str, same_line: bool, finish: bool) {
+        if same_line {
+            eprint!("\r{line}\x1b[K");
+            if finish {
+                eprintln!();
+            }
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("{line}");
         }
     }
 
@@ -891,9 +913,10 @@ impl RemoteHelper {
         destination: &Path,
         label: String,
         expected_size: Option<u64>,
-        show_start: bool,
+        progress_bytes: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<u64> {
         use futures::StreamExt;
+        use std::sync::atomic::Ordering;
         use tokio::io::AsyncWriteExt;
 
         if let Some(parent) = destination.parent() {
@@ -919,15 +942,6 @@ impl RemoteHelper {
         let mut stream = tree.get_stream(cid);
         let mut written = 0u64;
         let mut saw_chunk = false;
-        let progress_interval = fetch_progress_interval();
-        let mut last_progress = Instant::now();
-
-        if show_start {
-            let size = expected_size
-                .map(Self::format_transfer_bytes)
-                .unwrap_or_else(|| "unknown size".to_string());
-            eprintln!("  {} ({})", label, size);
-        }
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("stream {}", destination.display()))?;
@@ -936,13 +950,8 @@ impl RemoteHelper {
                 .await
                 .with_context(|| format!("write {}", temp_path.display()))?;
             written += chunk.len() as u64;
-
-            if last_progress.elapsed() >= progress_interval {
-                eprintln!(
-                    "  {}",
-                    Self::format_transfer_progress(&label, written, expected_size)
-                );
-                last_progress = Instant::now();
+            if let Some(progress_bytes) = progress_bytes {
+                progress_bytes.store(written, Ordering::Relaxed);
             }
         }
 
@@ -986,6 +995,9 @@ impl RemoteHelper {
         tree: &hashtree_core::HashTree<S>,
         pack_locations: &[GitPackLocation],
     ) -> Result<usize> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
         if pack_locations.is_empty() {
             return Ok(0);
         }
@@ -997,94 +1009,174 @@ impl RemoteHelper {
             .iter()
             .map(|location| location.pack_size)
             .sum();
-        eprintln!(
-            "  Installing {} git pack(s), {} total",
-            pack_locations.len(),
-            Self::format_transfer_bytes(total_pack_size)
+        let total_packs = pack_locations.len();
+
+        let progress_done = StdArc::new(AtomicBool::new(false));
+        let progress_notify = StdArc::new(tokio::sync::Notify::new());
+        let processed_packs = StdArc::new(AtomicUsize::new(0));
+        let current_pack = StdArc::new(AtomicUsize::new(0));
+        let phase = StdArc::new(AtomicUsize::new(GIT_PACK_PHASE_IDLE));
+        let loaded_pack_bytes = StdArc::new(AtomicU64::new(0));
+        let current_pack_bytes = StdArc::new(AtomicU64::new(0));
+        let stderr_is_terminal = std::io::stderr().is_terminal();
+        let install_start = Instant::now();
+
+        let initial_line = Self::format_git_pack_progress_line(
+            0,
+            total_packs,
+            0,
+            total_pack_size,
+            0,
+            GIT_PACK_PHASE_IDLE,
+            false,
+            Duration::ZERO,
         );
-        let mut installed = 0usize;
-        for (index, location) in pack_locations.iter().enumerate() {
-            let pack_path = git_pack_dir.join(&location.pack_name);
-            let idx_path = git_pack_dir.join(&location.idx_name);
-            if pack_path.exists() && idx_path.exists() {
-                continue;
-            }
+        Self::emit_git_pack_progress_line(&initial_line, stderr_is_terminal, false);
 
-            let pack_size = if pack_path.exists() {
-                std::fs::metadata(&pack_path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(location.pack_size)
-            } else {
-                let pack_label = format!(
-                    "Downloading git pack {}/{} {}",
-                    index + 1,
-                    pack_locations.len(),
-                    location.pack_name
-                );
-                Self::stream_git_pack_file(
-                    tree,
-                    &location.pack_cid,
-                    &pack_path,
-                    pack_label,
-                    Some(location.pack_size),
-                    true,
-                )
-                .await
-                .with_context(|| format!("read {}", location.pack_name))?
-            };
-
-            if let Some(idx_cid) = &location.idx_cid {
-                let idx_label = format!(
-                    "Downloading git pack index {}/{} {}",
-                    index + 1,
-                    pack_locations.len(),
-                    location.idx_name
-                );
-                if !idx_path.exists() {
-                    Self::stream_git_pack_file(
-                        tree,
-                        idx_cid,
-                        &idx_path,
-                        idx_label,
-                        location.idx_size,
+        let progress_task = {
+            let progress_done = StdArc::clone(&progress_done);
+            let progress_notify = StdArc::clone(&progress_notify);
+            let processed_packs = StdArc::clone(&processed_packs);
+            let current_pack = StdArc::clone(&current_pack);
+            let phase = StdArc::clone(&phase);
+            let loaded_pack_bytes = StdArc::clone(&loaded_pack_bytes);
+            let current_pack_bytes = StdArc::clone(&current_pack_bytes);
+            tokio::spawn(async move {
+                let interval = git_pack_progress_interval(stderr_is_terminal);
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = progress_notify.notified() => {}
+                    }
+                    if progress_done.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let line = RemoteHelper::format_git_pack_progress_line(
+                        processed_packs.load(Ordering::Relaxed),
+                        total_packs,
+                        loaded_pack_bytes.load(Ordering::Relaxed)
+                            + current_pack_bytes.load(Ordering::Relaxed),
+                        total_pack_size,
+                        current_pack.load(Ordering::Relaxed),
+                        phase.load(Ordering::Relaxed),
                         false,
+                        install_start.elapsed(),
+                    );
+                    RemoteHelper::emit_git_pack_progress_line(&line, stderr_is_terminal, false);
+                }
+            })
+        };
+
+        let install_result: Result<usize> = async {
+            let mut installed = 0usize;
+            for (index, location) in pack_locations.iter().enumerate() {
+                current_pack.store(index + 1, Ordering::Relaxed);
+                current_pack_bytes.store(0, Ordering::Relaxed);
+                phase.store(GIT_PACK_PHASE_IDLE, Ordering::Relaxed);
+
+                let pack_path = git_pack_dir.join(&location.pack_name);
+                let idx_path = git_pack_dir.join(&location.idx_name);
+                if pack_path.exists() && idx_path.exists() {
+                    loaded_pack_bytes.fetch_add(location.pack_size, Ordering::Relaxed);
+                    processed_packs.store(index + 1, Ordering::Relaxed);
+                    continue;
+                }
+
+                let pack_size = if pack_path.exists() {
+                    let pack_size = std::fs::metadata(&pack_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(location.pack_size);
+                    loaded_pack_bytes.fetch_add(pack_size, Ordering::Relaxed);
+                    pack_size
+                } else {
+                    phase.store(GIT_PACK_PHASE_DOWNLOADING, Ordering::Relaxed);
+                    let pack_size = Self::stream_git_pack_file(
+                        tree,
+                        &location.pack_cid,
+                        &pack_path,
+                        location.pack_name.clone(),
+                        Some(location.pack_size),
+                        Some(&current_pack_bytes),
                     )
                     .await
-                    .with_context(|| format!("read {}", location.idx_name))?;
+                    .with_context(|| format!("read {}", location.pack_name))?;
+                    current_pack_bytes.store(0, Ordering::Relaxed);
+                    loaded_pack_bytes.fetch_add(pack_size, Ordering::Relaxed);
+                    pack_size
+                };
+
+                if let Some(idx_cid) = &location.idx_cid {
+                    if !idx_path.exists() {
+                        phase.store(GIT_PACK_PHASE_DOWNLOADING, Ordering::Relaxed);
+                        Self::stream_git_pack_file(
+                            tree,
+                            idx_cid,
+                            &idx_path,
+                            location.idx_name.clone(),
+                            location.idx_size,
+                            None,
+                        )
+                        .await
+                        .with_context(|| format!("read {}", location.idx_name))?;
+                    }
                 }
+
+                if !idx_path.exists() {
+                    phase.store(GIT_PACK_PHASE_INDEXING, Ordering::Relaxed);
+                    let index_pack_path = pack_path.clone();
+                    let status = tokio::task::spawn_blocking(move || {
+                        Command::new("git")
+                            .arg("index-pack")
+                            .arg(&index_pack_path)
+                            .status()
+                    })
+                    .await
+                    .context("git index-pack task panicked")?
+                    .context("run git index-pack")?;
+                    if !status.success() {
+                        bail!("git index-pack failed for {}", pack_path.display());
+                    }
+                }
+
+                let _ = pack_size;
+                processed_packs.store(index + 1, Ordering::Relaxed);
+                phase.store(GIT_PACK_PHASE_IDLE, Ordering::Relaxed);
+                installed += 1;
             }
 
-            if !idx_path.exists() {
-                let index_label = format!(
-                    "Indexing git pack {}/{} {}",
-                    index + 1,
+            Ok(installed)
+        }
+        .await;
+
+        progress_done.store(true, Ordering::Relaxed);
+        progress_notify.notify_waiters();
+        let _ = progress_task.await;
+
+        match &install_result {
+            Ok(_) => {
+                let line = Self::format_git_pack_progress_line(
                     pack_locations.len(),
-                    location.pack_name
+                    pack_locations.len(),
+                    total_pack_size,
+                    total_pack_size,
+                    pack_locations.len(),
+                    GIT_PACK_PHASE_IDLE,
+                    true,
+                    install_start.elapsed(),
                 );
-                let status = Self::with_git_pack_progress(index_label, async {
-                    Command::new("git")
-                        .arg("index-pack")
-                        .arg(&pack_path)
-                        .status()
-                })
-                .await
-                .context("run git index-pack")?;
-                if !status.success() {
-                    bail!("git index-pack failed for {}", pack_path.display());
-                }
+                Self::emit_git_pack_progress_line(&line, stderr_is_terminal, true);
             }
-
-            eprintln!(
-                "  Installed git pack {}/{} {} ({})",
-                index + 1,
-                pack_locations.len(),
-                location.pack_name,
-                Self::format_transfer_bytes(pack_size)
-            );
-            installed += 1;
+            Err(_) if stderr_is_terminal => {
+                let line = format!(
+                    "  Loading git packs: failed after {:.1}s",
+                    install_start.elapsed().as_secs_f32()
+                );
+                Self::emit_git_pack_progress_line(&line, true, true);
+            }
+            Err(_) => {}
         }
 
-        Ok(installed)
+        install_result
     }
 
     /// Async implementation of git object fetching using HashTree helpers
@@ -1249,18 +1341,10 @@ impl RemoteHelper {
         }
 
         if !pack_locations.is_empty() {
-            let pack_start = std::time::Instant::now();
             match self
                 .install_git_pack_files_async(&tree, &pack_locations)
                 .await
             {
-                Ok(installed) if installed > 0 => {
-                    eprintln!(
-                        "  Installed {} git pack(s) in {:?}",
-                        installed,
-                        pack_start.elapsed()
-                    );
-                }
                 Ok(_) => {}
                 Err(err) => {
                     warn!("Failed to install git pack checkpoint: {}", err);
