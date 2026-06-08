@@ -332,3 +332,9 @@ Follow-up:
   clone again installed five checkpoint packs. The run enumerated in 2.94 s,
   installed packs in 2.76 s, spent 10.26 s in download/write, wrote 797 loose
   frontier objects, and completed in 16.83 s wall time.
+- After installing the published 0.2.63 crates and restarting the remote-host
+  daemon, another fresh-datadir clone succeeded with the same checkpoint-backed
+  root shape: five packs installed in 2.70 s, 801 loose frontier objects were
+  written, 20,599 objects were already in packs, enumeration took 2.78 s,
+  download/write took 35.24 s, and wall time was 41.55 s. The slower wall time
+  was again in the loose-object download/write phase, not in pack install.
