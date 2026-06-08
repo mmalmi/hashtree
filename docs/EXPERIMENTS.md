@@ -162,3 +162,51 @@ Interpretation:
 - The remaining clone time was split between tree enumeration/resolution and
   pack transfer/install; per-object loose download was no longer the dominant
   cost.
+
+## 2026-06-08 - Deterministic Git Pack Checkpoint Chain
+
+Question: after replacing overlapping full checkpoint packs with deterministic
+checkpoint pack ranges, what are the publish and fresh-clone costs for the same
+large public project repository?
+
+Setup:
+- Client used `git-remote-htree` 0.2.60 built from the release-prep checkout.
+- The current branch was force-published once so the mutable root no longer
+  inherited the previous single full-pack checkpoint.
+- Clone measurements used brand-new helper data directories and fresh
+  destinations, with no existing LMDB, helper cache, or local Git object cache.
+- No pubkeys, private hostnames, exact repo names, raw hashes, temp paths, or
+  IPs were retained.
+
+Force publish result:
+
+| Metric | Result |
+| --- | ---: |
+| Total wall time | 66.29 s |
+| Reachable Git objects listed | 21,190 |
+| Checkpoint files built | 10 |
+| Checkpoint pack ranges | 5 |
+| Checkpoint payload plus indexes | 87.45 MiB |
+| Loose/current Git objects imported | 2,154 |
+| New hashtree blobs uploaded | 128 |
+
+Fresh clone results:
+
+| Cache state | Total wall time | Object-tree enumeration | Pack install | Download and loose write | Installed packs | Packed Git objects | Loose frontier objects |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cold just-published blobs | 47.75 s | 3.64 s | 12.29 s | 30.59 s | 5 | 20,599 | 713 |
+| Warm repeat | 15.46 s | 2.28 s | 3.08 s | 5.50 s | 5 | 20,599 | 713 |
+
+Interpretation:
+- The new root used five deterministic checkpoint pack ranges instead of one
+  full pack. A later publisher that reaches the same earlier checkpoint tips
+  can reuse those earlier pack blobs instead of publishing the same history in a
+  different full-pack blob.
+- Fresh clone still installs ordinary Git packs and avoids loose historical
+  object download, but it now pays per-pack overhead. Warm-cache clone remained
+  close to the earlier single-pack result; the first clone after publishing was
+  dominated by cold CDN/origin transfer for the newly uploaded pack blobs.
+- The largest remaining clone bottleneck is the large checkpoint range in the
+  current history shape, not many tiny loose-object downloads. More even
+  object-level pack slicing could reduce that, but commit-boundary checkpoints
+  are simpler and preserve deterministic reuse across publishers.
