@@ -196,6 +196,7 @@ Fresh clone results:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Cold just-published blobs | 47.75 s | 3.64 s | 12.29 s | 30.59 s | 5 | 20,599 | 713 |
 | Warm repeat | 15.46 s | 2.28 s | 3.08 s | 5.50 s | 5 | 20,599 | 713 |
+| Warm current root after two small delta pushes | 9.74 s | 2.37 s | 2.96 s | 3.43 s | 5 | 20,599 | 721 |
 
 Incremental push result:
 
