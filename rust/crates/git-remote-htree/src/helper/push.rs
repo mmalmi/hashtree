@@ -1494,9 +1494,9 @@ impl RemoteHelper {
         value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
 
-    pub(super) fn current_tree_object_ids(sha: &str) -> Result<HashSet<String>> {
+    fn current_tree_object_ids_for_push(sha: &str, include_blobs: bool) -> Result<HashSet<String>> {
         let mut ids = HashSet::new();
-        if Self::is_hex_object_id(sha) {
+        if include_blobs && Self::is_hex_object_id(sha) {
             ids.insert(sha.to_string());
         }
 
@@ -1537,7 +1537,10 @@ impl RemoteHelper {
             let object_type = parts.next();
             let oid = parts.next();
             match (object_type, oid) {
-                (Some("blob" | "tree"), Some(oid)) if Self::is_hex_object_id(oid) => {
+                (Some("tree"), Some(oid)) if Self::is_hex_object_id(oid) => {
+                    ids.insert(oid.to_string());
+                }
+                (Some("blob"), Some(oid)) if include_blobs && Self::is_hex_object_id(oid) => {
                     ids.insert(oid.to_string());
                 }
                 _ => {}
@@ -1545,6 +1548,14 @@ impl RemoteHelper {
         }
 
         Ok(ids)
+    }
+
+    pub(super) fn current_tree_object_ids(sha: &str) -> Result<HashSet<String>> {
+        Self::current_tree_object_ids_for_push(sha, true)
+    }
+
+    pub(super) fn current_tree_tree_object_ids(sha: &str) -> Result<HashSet<String>> {
+        Self::current_tree_object_ids_for_push(sha, false)
     }
 
     pub(super) fn select_objects_to_import_for_push(
@@ -1561,8 +1572,10 @@ impl RemoteHelper {
             }
         }
 
-        if !checkpoint_covered.is_empty() || base_has_pack_checkpoint {
+        if !checkpoint_covered.is_empty() {
             selected.extend(Self::current_tree_object_ids(sha)?);
+        } else if base_has_pack_checkpoint {
+            selected.extend(Self::current_tree_tree_object_ids(sha)?);
         }
 
         let mut selected: Vec<String> = selected.into_iter().collect();
@@ -1849,54 +1862,57 @@ impl RemoteHelper {
             let servers_needing_full: Arc<Vec<String>> =
                 if has_old_tree && all_servers.len() == 1 {
                     let old_root = old_root_bytes.unwrap();
-                    let mut sample_hashes = vec![hex::encode(old_root)];
-                    for hash in old_hashes
+                    let sample_hashes: Vec<String> = old_hashes
                         .iter()
                         .filter(|h| **h != old_root)
-                        .take(SERVER_COVERAGE_SAMPLE_SIZE.saturating_sub(1))
-                    {
-                        sample_hashes.push(hex::encode(hash));
-                    }
-                    let sample_refs: Vec<&str> = sample_hashes.iter().map(|s| s.as_str()).collect();
-                    match blossom
-                        .server_tree_sample_coverage(
-                            &all_servers[0],
-                            &sample_refs,
-                            SERVER_COVERAGE_SAMPLE_SIZE,
-                        )
-                        .await
-                    {
-                        hashtree_blossom::BlobAvailability::Missing => {
-                            if verbose {
-                                let server_name = all_servers[0]
-                                    .trim_start_matches("https://")
-                                    .trim_start_matches("http://")
-                                    .split('/')
-                                    .next()
-                                    .unwrap_or(&all_servers[0]);
-                                eprintln!(
-                                    "  Full upload needed: {} (missing old tree)",
-                                    server_name
-                                );
+                        .take(SERVER_COVERAGE_SAMPLE_SIZE)
+                        .map(hex::encode)
+                        .collect();
+                    if sample_hashes.is_empty() {
+                        Arc::new(Vec::new())
+                    } else {
+                        let sample_refs: Vec<&str> =
+                            sample_hashes.iter().map(|s| s.as_str()).collect();
+                        match blossom
+                            .server_tree_sample_coverage(
+                                &all_servers[0],
+                                &sample_refs,
+                                SERVER_COVERAGE_SAMPLE_SIZE,
+                            )
+                            .await
+                        {
+                            hashtree_blossom::BlobAvailability::Missing => {
+                                if verbose {
+                                    let server_name = all_servers[0]
+                                        .trim_start_matches("https://")
+                                        .trim_start_matches("http://")
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or(&all_servers[0]);
+                                    eprintln!(
+                                        "  Full upload needed: {} (missing old tree)",
+                                        server_name
+                                    );
+                                }
+                                Arc::new(all_servers.clone())
                             }
-                            Arc::new(all_servers.clone())
-                        }
-                        hashtree_blossom::BlobAvailability::Unknown => {
-                            if verbose {
-                                let server_name = all_servers[0]
-                                    .trim_start_matches("https://")
-                                    .trim_start_matches("http://")
-                                    .split('/')
-                                    .next()
-                                    .unwrap_or(&all_servers[0]);
-                                eprintln!(
-                                    "  Old-tree coverage probe inconclusive: {}",
-                                    server_name
-                                );
+                            hashtree_blossom::BlobAvailability::Unknown => {
+                                if verbose {
+                                    let server_name = all_servers[0]
+                                        .trim_start_matches("https://")
+                                        .trim_start_matches("http://")
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or(&all_servers[0]);
+                                    eprintln!(
+                                        "  Old-tree coverage probe inconclusive: {}",
+                                        server_name
+                                    );
+                                }
+                                Arc::new(Vec::new())
                             }
-                            Arc::new(Vec::new())
+                            hashtree_blossom::BlobAvailability::Present => Arc::new(Vec::new()),
                         }
-                        hashtree_blossom::BlobAvailability::Present => Arc::new(Vec::new()),
                     }
                 } else {
                     Arc::new(Vec::new())

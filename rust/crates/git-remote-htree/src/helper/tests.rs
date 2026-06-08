@@ -989,6 +989,8 @@ fn test_pack_backed_delta_import_keeps_current_tree_objects() {
         .expect("list delta objects");
     let current_tree =
         RemoteHelper::current_tree_object_ids(&master_sha).expect("current tree object ids");
+    let current_tree_trees =
+        RemoteHelper::current_tree_tree_object_ids(&master_sha).expect("current tree tree ids");
 
     let selected_without_pack = helper
         .select_objects_to_import_for_push(&master_sha, &delta, &HashSet::new(), false)
@@ -1006,10 +1008,26 @@ fn test_pack_backed_delta_import_keeps_current_tree_objects() {
         .expect("select pack-backed import objects");
     let selected_with_pack: HashSet<String> = selected_with_pack.into_iter().collect();
     assert!(
-        current_tree
+        current_tree_trees
             .iter()
             .all(|oid| selected_with_pack.contains(oid)),
-        "pack-backed delta merge should import current tree objects for the browsable tree"
+        "pack-backed delta merge should import current tree objects needed for the browsable tree"
+    );
+
+    let delta_set: HashSet<String> = delta.iter().cloned().collect();
+    let unchanged_current_blobs = current_tree
+        .difference(&current_tree_trees)
+        .filter(|oid| !delta_set.contains(*oid))
+        .collect::<Vec<_>>();
+    assert!(
+        !unchanged_current_blobs.is_empty(),
+        "fixture should have unchanged current blobs already covered by the base pack"
+    );
+    assert!(
+        unchanged_current_blobs
+            .iter()
+            .all(|oid| !selected_with_pack.contains(*oid)),
+        "pack-backed delta merge should not re-import unchanged pack-covered blobs as loose objects"
     );
 }
 
@@ -1436,6 +1454,96 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
         "expected only sampled HEAD probes for a single write server, got {} for {} old hashes",
         fake_blossom.get_head_request_count(),
         old_hash_count
+    );
+}
+
+#[test]
+fn test_push_diff_prunes_when_only_previous_root_blob_is_missing_on_server() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::new();
+    write_test_config(home.path(), fake_blossom.base_url(), true);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (old_cid, new_cid, old_hash_count) = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()).public());
+
+        let mut old_entries = Vec::new();
+        for idx in 0..64 {
+            let content = format!("old-file-{idx:02}-{}", "x".repeat(64));
+            let (file_cid, file_size) = tree
+                .put_file(content.as_bytes())
+                .await
+                .expect("write old file");
+            old_entries.push(
+                DirEntry::from_cid(format!("file-{idx:02}.txt"), &file_cid).with_size(file_size),
+            );
+        }
+
+        let old_cid = tree
+            .put_directory(old_entries.clone())
+            .await
+            .expect("write old directory");
+        let old_hashes = collect_hashes(&tree, &old_cid, 32)
+            .await
+            .expect("collect old hashes");
+
+        for hash in &old_hashes {
+            if hash == &old_cid.hash {
+                continue;
+            }
+            let data = store
+                .get(hash)
+                .await
+                .expect("read old blob")
+                .expect("old blob exists");
+            fake_blossom.insert_blob(data);
+        }
+
+        let (new_file_cid, new_file_size) =
+            tree.put_file(b"new file").await.expect("write new file");
+        let mut new_entries = old_entries;
+        new_entries.push(DirEntry::from_cid("new.txt", &new_file_cid).with_size(new_file_size));
+        let new_cid = tree
+            .put_directory(new_entries)
+            .await
+            .expect("write new directory");
+
+        (old_cid, new_cid, old_hashes.len())
+    });
+
+    let result = helper.push_to_file_servers_with_diff(
+        &hex::encode(new_cid.hash),
+        None,
+        Some(&hex::encode(old_cid.hash)),
+        None,
+        true,
+    );
+
+    assert!(
+        result.failed.is_empty(),
+        "diff upload should succeed when reusable old children are on Blossom: {:?}",
+        result.failed
+    );
+    assert!(
+        fake_blossom.get_head_request_count() <= old_hash_count.min(32),
+        "coverage probe should sample old children without forcing a full walk"
+    );
+    assert!(
+        fake_blossom.get_upload_request_count() <= 2,
+        "missing previous root alone should not re-upload unchanged old children"
     );
 }
 

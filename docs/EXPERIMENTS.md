@@ -39,7 +39,7 @@ Interpretation:
 Follow-up:
 - A Git pack checkpoint would likely beat loose-object tuning for initial clone, because it would replace about 21k small object fetches and writes with a small number of large sequential artifacts.
 - If multi-server behavior becomes a bottleneck on less-cached content, test hedged per-object reads across read servers rather than sequential server fallback.
-- Push-side remaining bottleneck: when a client cannot confidently prune the previous published tree, a tiny Git update can still walk and batch-check thousands of hashtree nodes that already exist on the write server. Future work should make old-tree coverage proofs cheaper and more reliable, especially for fresh installs and degraded Blossom coverage probes.
+- Push-side follow-up: pack-backed delta pushes now avoid re-importing unchanged current blobs as loose Git objects when the inherited checkpoint pack already covers them, while still importing current tree objects needed to rebuild the browsable view. The old-tree coverage probe also ignores the previous root blob itself, because that root is not referenced by the new root; a missing previous-root blob alone should not force a full old-tree reupload walk. Future work should still make old-tree coverage proofs cheaper and more reliable, especially for fresh installs and degraded Blossom coverage probes.
 
 ## 2026-05-18 - Blossom Upload Proxy Baseline
 
