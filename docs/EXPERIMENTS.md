@@ -328,3 +328,7 @@ Follow-up:
   pushes reuse an existing remote ref when it is an ancestor of the pushed ref,
   and rebuilds missing checkpoint roots from deterministic checkpoint
   boundaries without adding a current-tip tail pack.
+- After repairing the mutable root with the 0.2.63 helper, a fresh remote-host
+  clone again installed five checkpoint packs. The run enumerated in 2.94 s,
+  installed packs in 2.76 s, spent 10.26 s in download/write, wrote 797 loose
+  frontier objects, and completed in 16.83 s wall time.
