@@ -83,6 +83,7 @@ pub const KIND_REPO_ANNOUNCEMENT: u16 = 30617;
 /// Label for hashtree events
 pub const LABEL_HASHTREE: &str = "hashtree";
 pub const LABEL_GIT: &str = "git";
+const IRIS_GIT_WEB_BASE_URL: &str = "https://git.iris.to/#";
 
 /// Pull request status derived from trusted NIP-34 status events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1680,6 +1681,10 @@ impl NostrClient {
             Tag::custom(TagKind::custom("clone"), vec![clone_url.to_string()]),
         ];
 
+        if let Some(web_url) = Self::iris_git_web_url_for_htree_clone(clone_url) {
+            tags.push(Tag::custom(TagKind::custom("web"), vec![web_url]));
+        }
+
         if !relays.is_empty() {
             tags.push(Tag::custom(TagKind::custom("relays"), relays.to_vec()));
         }
@@ -1716,6 +1721,36 @@ impl NostrClient {
         }
 
         tags
+    }
+
+    fn iris_git_web_url_for_htree_clone(clone_url: &str) -> Option<String> {
+        let raw = clone_url.strip_prefix("htree://")?;
+        let path = raw.split('#').next().unwrap_or(raw);
+        let (owner, repo_path) = path.split_once('/')?;
+        if !owner.starts_with("npub1") || repo_path.is_empty() {
+            return None;
+        }
+
+        let path = std::iter::once(owner)
+            .chain(repo_path.split('/').filter(|segment| !segment.is_empty()))
+            .map(Self::percent_encode_path_segment)
+            .collect::<Vec<_>>()
+            .join("/");
+
+        Some(format!("{IRIS_GIT_WEB_BASE_URL}/{path}"))
+    }
+
+    fn percent_encode_path_segment(segment: &str) -> String {
+        let mut encoded = String::with_capacity(segment.len());
+        for byte in segment.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(byte as char)
+                }
+                _ => encoded.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        encoded
     }
 
     async fn publish_repo_announcement_async(

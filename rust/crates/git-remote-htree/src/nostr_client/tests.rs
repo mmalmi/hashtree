@@ -15,6 +15,20 @@ fn test_config() -> Config {
     Config::default()
 }
 
+fn tag_has_values(tags: &[Tag], expected: &[&str]) -> bool {
+    tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        if parts.len() < expected.len() {
+            return false;
+        }
+
+        expected
+            .iter()
+            .enumerate()
+            .all(|(index, value)| parts.get(index).is_some_and(|part| part == *value))
+    })
+}
+
 #[test]
 fn test_new_client() {
     let config = test_config();
@@ -230,6 +244,37 @@ fn test_append_repo_discovery_labels_includes_git_label_and_prefixes() {
 
     assert!(values.iter().any(|value| value == LABEL_GIT));
     assert!(values.iter().any(|value| value == "tools"));
+}
+
+#[test]
+fn test_repo_announcement_tags_include_iris_git_web_url() {
+    let tags = NostrClient::build_repo_announcement_tags(
+        "tools/my repo",
+        "htree://npub1owner/tools/my repo",
+        &[],
+        &RepoAnnouncementOptions::default(),
+    );
+
+    assert!(tag_has_values(
+        &tags,
+        &["clone", "htree://npub1owner/tools/my repo"]
+    ));
+    assert!(tag_has_values(
+        &tags,
+        &["web", "https://git.iris.to/#/npub1owner/tools/my%20repo"]
+    ));
+}
+
+#[test]
+fn test_repo_announcement_tags_skip_web_url_for_non_npub_clone_url() {
+    let tags = NostrClient::build_repo_announcement_tags(
+        "tools",
+        "htree://self/tools",
+        &[],
+        &RepoAnnouncementOptions::default(),
+    );
+
+    assert!(!tag_has_values(&tags, &["web"]));
 }
 
 #[test]

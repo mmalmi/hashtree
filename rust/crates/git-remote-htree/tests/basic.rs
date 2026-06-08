@@ -292,6 +292,13 @@ fn test_public_push_publishes_nip34_repo_announcement() {
     ));
     assert!(event_has_tag(
         &repo_announcement,
+        &[
+            "web",
+            &format!("https://git.iris.to/#/{}/{repo_name}", test_env.npub)
+        ]
+    ));
+    assert!(event_has_tag(
+        &repo_announcement,
         &["r", &root_commit, "euc"]
     ));
     assert!(
@@ -395,6 +402,13 @@ fn test_public_push_from_cloned_htree_repo_announces_personal_fork() {
         &[
             "clone",
             &format!("htree://{}/{fork_repo_name}", fork_env.npub)
+        ]
+    ));
+    assert!(event_has_tag(
+        &fork_announcement,
+        &[
+            "web",
+            &format!("https://git.iris.to/#/{}/{fork_repo_name}", fork_env.npub)
         ]
     ));
     assert!(event_has_tag(
