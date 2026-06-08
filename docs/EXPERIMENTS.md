@@ -346,3 +346,37 @@ Follow-up:
   log had 21 lines and zero carriage-return redraws. This run was useful for
   output verification; its slow path was object-tree enumeration plus loose
   frontier transfer, not pack installation.
+
+### 2026-06-08: git-remote-htree 0.2.65 clone verification
+
+Setup:
+- Source-built 0.2.65 helper binaries were used before cargo publication.
+- The public mutable root was republished after finding an unreadable root
+  shape whose Git object directory was empty. The new push path verifies that
+  an uploaded repo root is readable from a configured write server before
+  announcing it.
+- Each clone used a fresh helper data directory and an empty work directory.
+- No pubkeys, private hostnames, exact repo names, raw hashes, temp paths, or
+  IPs were retained.
+
+Fresh clone results after the repaired root was published:
+
+| Mode | Total wall time | Object-tree enumeration | Pack install | Loose download and write | Installed packs | Loose frontier |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Local workstation smoke | 24.97 s | 10.02 s | 3.81 s | 9.47 s | 5 | 871 |
+| Remote Linux host, first run | 46.99 s | 5.27 s | 33.25 s | 7.48 s | 5 | 871 |
+| Remote Linux host, warmed repeat | 41.62 s | 20.24 s | 10.88 s | 9.69 s | 5 | 871 |
+| Remote Linux host, warmed repeat | 43.52 s | 5.25 s | 3.24 s | 34.19 s | 5 | 871 |
+
+Interpretation:
+- The repaired root uses the intended five deterministic checkpoint packs and
+  no current-tip tail pack.
+- Git reported 20,599 objects already covered by installed packs and 871 loose
+  frontier objects written. The helper is no longer fetching or writing the
+  historical objects that are inside installed packs.
+- The metadata enumeration shortcut reduced normal object-tree enumeration to
+  about 5.3 s in two remote-host runs, but relay/read-server variance can still
+  make the root/object-tree read phase slower.
+- Remaining remote-host clone variance came from either the largest checkpoint
+  pack transfer or the 871 small loose-object reads. The slow path is network
+  retrieval from the Blossom/CDN read path, not local Git object writing.
