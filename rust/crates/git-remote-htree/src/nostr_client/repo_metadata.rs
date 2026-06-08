@@ -3,7 +3,9 @@ use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{Event, KIND_APP_DATA, KIND_STATUS_APPLIED, LABEL_GIT, LABEL_HASHTREE};
+use super::{
+    Event, KIND_APP_DATA, KIND_REPO_ANNOUNCEMENT, KIND_STATUS_APPLIED, LABEL_GIT, LABEL_HASHTREE,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GitRepoAnnouncement {
@@ -120,6 +122,14 @@ pub(super) fn build_repo_event_filter(author: PublicKey, repo_name: &str) -> Fil
         .limit(50)
 }
 
+pub(super) fn build_repo_announcement_filter(author: PublicKey, repo_name: &str) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(KIND_REPO_ANNOUNCEMENT))
+        .author(author)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), repo_name)
+        .limit(50)
+}
+
 pub(super) fn next_replaceable_created_at(
     now: Timestamp,
     latest_existing: Option<Timestamp>,
@@ -141,6 +151,35 @@ pub(super) async fn latest_repo_event_created_at(
         .await
         .ok()?;
     pick_latest_repo_event(events.iter(), repo_name).map(|event| event.created_at)
+}
+
+pub(super) async fn latest_repo_announcement_created_at(
+    client: &Client,
+    author: PublicKey,
+    repo_name: &str,
+    timeout: Duration,
+) -> Option<Timestamp> {
+    let events = client
+        .fetch_events(build_repo_announcement_filter(author, repo_name), timeout)
+        .await
+        .ok()?;
+    pick_latest_event(events.iter()).map(|event| event.created_at)
+}
+
+pub(super) fn extract_repo_announcement_euc(event: &Event) -> Option<String> {
+    event.tags.iter().find_map(|tag| {
+        let slice = tag.as_slice();
+        if slice.len() >= 3 && slice[0].as_str() == "r" && slice[2].as_str() == "euc" {
+            let commit = slice[1].as_str();
+            if commit.is_empty() {
+                None
+            } else {
+                Some(commit.to_string())
+            }
+        } else {
+            None
+        }
+    })
 }
 
 pub(super) fn append_repo_discovery_labels(tags: &mut Vec<Tag>, repo_name: &str) {

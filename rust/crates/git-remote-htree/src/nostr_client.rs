@@ -61,12 +61,12 @@ use tracing::{debug, info, warn};
 pub use identity::{
     load_key_lists, load_keys, resolve_identity, resolve_self_identity, StoredKey, StoredKeyLists,
 };
-#[cfg(test)]
-use repo_metadata::pick_latest_event;
 use repo_metadata::{
-    append_repo_discovery_labels, build_git_repo_list_filter, build_repo_event_filter,
+    append_repo_discovery_labels, build_git_repo_list_filter, build_repo_announcement_filter,
+    build_repo_event_filter, extract_repo_announcement_euc, latest_repo_announcement_created_at,
     latest_repo_event_created_at, latest_trusted_pr_status_kinds, list_git_repo_announcements,
-    next_replaceable_created_at, pick_latest_repo_event, validate_repo_publish_relays,
+    next_replaceable_created_at, pick_latest_event, pick_latest_repo_event,
+    validate_repo_publish_relays,
 };
 
 /// Event kind for application-specific data (NIP-78)
@@ -279,6 +279,17 @@ pub struct RelayResult {
     pub connected: Vec<String>,
     /// Relays that failed to connect
     pub failed: Vec<String>,
+}
+
+/// Optional NIP-34 metadata to publish alongside the htree root event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoAnnouncementOptions {
+    /// NIP-34 earliest unique commit. Usually the root commit; forks should keep the source euc.
+    pub earliest_unique_commit: Option<String>,
+    /// Mark the repo announcement as a personal fork (`["t", "personal-fork"]`).
+    pub personal_fork: bool,
+    /// Iris/htree extension for showing the exact htree source URL.
+    pub forked_from: Option<String>,
 }
 
 /// Result of uploading to blossom servers
@@ -1385,6 +1396,16 @@ impl NostrClient {
         root_hash: &str,
         encryption_key: Option<(&[u8; 32], bool, bool)>,
     ) -> Result<(String, RelayResult)> {
+        self.publish_repo_with_announcement(repo_name, root_hash, encryption_key, None)
+    }
+
+    pub fn publish_repo_with_announcement(
+        &self,
+        repo_name: &str,
+        root_hash: &str,
+        encryption_key: Option<(&[u8; 32], bool, bool)>,
+        repo_announcement: Option<RepoAnnouncementOptions>,
+    ) -> Result<(String, RelayResult)> {
         let keys = self.keys.as_ref().context(format!(
             "Cannot push: no secret key for {}. You can only push to your own repos.",
             &self.pubkey[..16]
@@ -1398,7 +1419,13 @@ impl NostrClient {
         );
 
         // Create a new multi-threaded runtime for nostr-sdk which spawns background tasks
-        block_on_result(self.publish_repo_async(keys, repo_name, root_hash, encryption_key))
+        block_on_result(self.publish_repo_async(
+            keys,
+            repo_name,
+            root_hash,
+            encryption_key,
+            repo_announcement,
+        ))
     }
 
     async fn publish_repo_async(
@@ -1407,6 +1434,7 @@ impl NostrClient {
         repo_name: &str,
         root_hash: &str,
         encryption_key: Option<(&[u8; 32], bool, bool)>,
+        repo_announcement: Option<RepoAnnouncementOptions>,
     ) -> Result<(String, RelayResult)> {
         // Create nostr-sdk client with our keys
         let client = Client::new(keys.clone());
@@ -1529,6 +1557,23 @@ impl NostrClient {
 
         let relay_validation = validate_repo_publish_relays(&configured, &connected);
 
+        if relay_validation.is_ok() {
+            if let Some(repo_announcement) = repo_announcement.as_ref() {
+                if let Err(err) = self
+                    .publish_repo_announcement_async(
+                        &client,
+                        keys,
+                        repo_name,
+                        &npub_url,
+                        repo_announcement,
+                    )
+                    .await
+                {
+                    warn!("Failed to publish NIP-34 repo announcement: {}", err);
+                }
+            }
+        }
+
         // Disconnect and give time for cleanup
         let _ = client.disconnect().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1546,6 +1591,157 @@ impl NostrClient {
                 failed,
             },
         ))
+    }
+
+    fn build_repo_announcement_tags(
+        repo_name: &str,
+        clone_url: &str,
+        relays: &[String],
+        options: &RepoAnnouncementOptions,
+    ) -> Vec<Tag> {
+        let mut tags = vec![
+            Tag::custom(TagKind::custom("d"), vec![repo_name.to_string()]),
+            Tag::custom(TagKind::custom("name"), vec![repo_name.to_string()]),
+            Tag::custom(TagKind::custom("clone"), vec![clone_url.to_string()]),
+        ];
+
+        if !relays.is_empty() {
+            tags.push(Tag::custom(TagKind::custom("relays"), relays.to_vec()));
+        }
+
+        if let Some(euc) = options
+            .earliest_unique_commit
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            tags.push(Tag::custom(
+                TagKind::custom("r"),
+                vec![euc.to_string(), "euc".to_string()],
+            ));
+        }
+
+        if options.personal_fork {
+            tags.push(Tag::custom(
+                TagKind::custom("t"),
+                vec!["personal-fork".to_string()],
+            ));
+        }
+
+        if let Some(forked_from) = options
+            .forked_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            tags.push(Tag::custom(
+                TagKind::custom("forked-from"),
+                vec![forked_from.to_string()],
+            ));
+        }
+
+        tags
+    }
+
+    async fn publish_repo_announcement_async(
+        &self,
+        client: &Client,
+        keys: &Keys,
+        repo_name: &str,
+        clone_url: &str,
+        options: &RepoAnnouncementOptions,
+    ) -> Result<()> {
+        let created_at = next_replaceable_created_at(
+            Timestamp::now(),
+            latest_repo_announcement_created_at(
+                client,
+                keys.public_key(),
+                repo_name,
+                Duration::from_secs(2),
+            )
+            .await,
+        );
+        let tags = Self::build_repo_announcement_tags(repo_name, clone_url, &self.relays, options);
+        let event = EventBuilder::new(Kind::Custom(KIND_REPO_ANNOUNCEMENT), "")
+            .tags(tags)
+            .custom_created_at(created_at)
+            .sign_with_keys(keys)
+            .map_err(|e| anyhow::anyhow!("Failed to sign NIP-34 repo announcement: {}", e))?;
+
+        let output = client
+            .send_event(&event)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to publish NIP-34 repo announcement: {}", e))?;
+        if output.success.is_empty() {
+            anyhow::bail!("NIP-34 repo announcement was not confirmed by any relay");
+        }
+
+        info!(
+            "Published NIP-34 repo announcement {} to {} relays",
+            output.id(),
+            output.success.len()
+        );
+        Ok(())
+    }
+
+    pub fn fetch_repo_announcement_euc(
+        &self,
+        owner_pubkey_hex: &str,
+        repo_name: &str,
+    ) -> Result<Option<String>> {
+        block_on_result(self.fetch_repo_announcement_euc_async(owner_pubkey_hex, repo_name))
+    }
+
+    async fn fetch_repo_announcement_euc_async(
+        &self,
+        owner_pubkey_hex: &str,
+        repo_name: &str,
+    ) -> Result<Option<String>> {
+        let owner = PublicKey::from_hex(owner_pubkey_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid repo owner pubkey: {}", e))?;
+        let client = Client::default();
+
+        for relay in &self.relays {
+            if let Err(e) = client.add_relay(relay).await {
+                debug!(
+                    "Failed to add relay {} for repo announcement lookup: {}",
+                    relay, e
+                );
+            }
+        }
+        client.connect().await;
+
+        if !wait_for_any_connected_relay(&client, Duration::from_secs(2)).await {
+            let _ = client.disconnect().await;
+            return Ok(None);
+        }
+
+        let filter = build_repo_announcement_filter(owner, repo_name);
+        let events = match tokio::time::timeout(
+            Duration::from_secs(3),
+            client.fetch_events(filter, Duration::from_secs(3)),
+        )
+        .await
+        {
+            Ok(Ok(events)) => events.to_vec(),
+            Ok(Err(err)) => {
+                debug!(
+                    "Failed to fetch NIP-34 repo announcement for {}: {}",
+                    repo_name, err
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                debug!(
+                    "Timed out fetching NIP-34 repo announcement for {}",
+                    repo_name
+                );
+                Vec::new()
+            }
+        };
+
+        let _ = client.disconnect().await;
+        Ok(pick_latest_event(events.iter()).and_then(extract_repo_announcement_euc))
     }
 
     /// Fetch pull requests targeting this repo, filtered by state.

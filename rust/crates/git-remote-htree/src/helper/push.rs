@@ -3,10 +3,13 @@ use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir, queue
 use super::{upload_progress, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
-use crate::nostr_client::{BlossomResult, PullRequestStateFilter};
+use crate::nostr_client::{
+    resolve_identity, BlossomResult, PullRequestStateFilter, RepoAnnouncementOptions,
+};
 use crate::runtime::{block_on_result, new_multi_thread_runtime};
 use anyhow::{bail, Context, Result};
 use hashtree_core::{HashTree, Store};
+use nostr_sdk::prelude::{PublicKey, ToBech32};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -34,6 +37,13 @@ struct PendingUpload {
     data: Vec<u8>,
     from_old_tree: bool,
     force_all_servers: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForkSourceRepo {
+    pubkey_hex: String,
+    repo_name: String,
+    canonical_url: String,
 }
 
 #[derive(Clone)]
@@ -1135,6 +1145,147 @@ impl RemoteHelper {
         }
     }
 
+    fn repo_announcement_options_for_public_push(
+        &self,
+        sha: &str,
+    ) -> Option<RepoAnnouncementOptions> {
+        if self.is_private || self.url_secret.is_some() {
+            return None;
+        }
+
+        let local_root_commit = match self.git_root_commit_for_tip(sha) {
+            Ok(root_commit) => root_commit,
+            Err(err) => {
+                warn!("Could not determine root commit for NIP-34 euc: {}", err);
+                None
+            }
+        };
+
+        let fork_source = self.infer_htree_fork_source_repo();
+        let source_euc = fork_source.as_ref().and_then(|source| {
+            match self
+                .nostr
+                .fetch_repo_announcement_euc(&source.pubkey_hex, &source.repo_name)
+            {
+                Ok(euc) => euc,
+                Err(err) => {
+                    debug!(
+                        "Could not fetch source NIP-34 euc for {}: {}",
+                        source.canonical_url, err
+                    );
+                    None
+                }
+            }
+        });
+
+        let earliest_unique_commit = source_euc.or(local_root_commit);
+        let (personal_fork, forked_from) = match fork_source {
+            Some(source) => (true, Some(source.canonical_url)),
+            None => (false, None),
+        };
+
+        Some(RepoAnnouncementOptions {
+            earliest_unique_commit,
+            personal_fork,
+            forked_from,
+        })
+    }
+
+    fn git_root_commit_for_tip(&self, sha: &str) -> Result<Option<String>> {
+        let output = Command::new("git")
+            .args(["rev-list", "--max-parents=0", "--reverse", sha])
+            .output()
+            .context("run git rev-list for NIP-34 euc")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git rev-list failed{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|line| Self::is_hex_object_id(line))
+            .map(ToString::to_string))
+    }
+
+    fn infer_htree_fork_source_repo(&self) -> Option<ForkSourceRepo> {
+        let output = Command::new("git")
+            .args(["config", "--get-regexp", r"^remote\..*\.url$"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some(split_at) = line.find(char::is_whitespace) else {
+                continue;
+            };
+            let key = &line[..split_at];
+            let url = line[split_at..].trim();
+            let remote_name = key
+                .strip_prefix("remote.")
+                .and_then(|value| value.strip_suffix(".url"))
+                .unwrap_or_default();
+            let Some((identifier, repo_name)) = Self::parse_htree_remote_url(url) else {
+                continue;
+            };
+            let Ok((source_pubkey_hex, _)) = resolve_identity(&identifier) else {
+                continue;
+            };
+            if source_pubkey_hex.eq_ignore_ascii_case(&self.pubkey) {
+                continue;
+            }
+
+            let source_npub = Self::pubkey_hex_to_npub(&source_pubkey_hex)
+                .unwrap_or_else(|| source_pubkey_hex.clone());
+            let canonical_url = format!("htree://{}/{}", source_npub, repo_name);
+            let priority = match remote_name {
+                "origin" => 0,
+                "upstream" => 1,
+                _ => 2,
+            };
+
+            candidates.push((
+                priority,
+                canonical_url.clone(),
+                ForkSourceRepo {
+                    pubkey_hex: source_pubkey_hex,
+                    repo_name,
+                    canonical_url,
+                },
+            ));
+        }
+
+        candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        candidates.into_iter().map(|(_, _, source)| source).next()
+    }
+
+    fn parse_htree_remote_url(url: &str) -> Option<(String, String)> {
+        let raw = url.strip_prefix("htree://")?;
+        let path = raw.split('#').next().unwrap_or(raw);
+        let (identifier, repo_name) = path.split_once('/')?;
+        if identifier.is_empty() || repo_name.is_empty() {
+            return None;
+        }
+        Some((identifier.to_string(), repo_name.to_string()))
+    }
+
+    fn pubkey_hex_to_npub(pubkey_hex: &str) -> Option<String> {
+        PublicKey::from_hex(pubkey_hex)
+            .ok()
+            .and_then(|pubkey| pubkey.to_bech32().ok())
+    }
+
     /// Push all objects reachable from sha
     pub(super) fn push_objects(
         &mut self,
@@ -1322,9 +1473,15 @@ impl RemoteHelper {
         let key_with_privacy = key_to_publish
             .as_ref()
             .map(|k| (k, is_link_visible, self.is_private));
+        let repo_announcement = self.repo_announcement_options_for_public_push(sha);
         let (npub_url, relay_result) = self
             .nostr
-            .publish_repo(&self.repo_name, &root_hash_hex, key_with_privacy)
+            .publish_repo_with_announcement(
+                &self.repo_name,
+                &root_hash_hex,
+                key_with_privacy,
+                repo_announcement,
+            )
             .map_err(|e| anyhow::anyhow!("Failed to publish repo metadata to relays: {}", e))?;
 
         let full_url = if let Some(secret) = self.url_secret {
