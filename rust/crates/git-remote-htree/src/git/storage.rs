@@ -954,22 +954,22 @@ impl GitStorage {
         &self,
         base_tree: Option<&HashTree<S>>,
         base_root: Option<&Cid>,
-        base_commit_sha: Option<&str>,
+        base_tree_sha: Option<&str>,
     ) -> Result<Cid> {
-        self.build_tree_with_base_objects_internal(base_tree, base_root, base_commit_sha, None)
+        self.build_tree_with_base_objects_internal(base_tree, base_root, base_tree_sha, None)
     }
 
     pub fn build_tree_with_base_objects_with_progress<S: Store>(
         &self,
         base_tree: Option<&HashTree<S>>,
         base_root: Option<&Cid>,
-        base_commit_sha: Option<&str>,
+        base_tree_sha: Option<&str>,
         progress: &RepoTreeBuildProgress,
     ) -> Result<Cid> {
         self.build_tree_with_base_objects_internal(
             base_tree,
             base_root,
-            base_commit_sha,
+            base_tree_sha,
             Some(progress),
         )
     }
@@ -978,7 +978,7 @@ impl GitStorage {
         &self,
         base_tree: Option<&HashTree<S>>,
         base_root: Option<&Cid>,
-        base_commit_sha: Option<&str>,
+        base_tree_sha: Option<&str>,
         progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Cid> {
         // Check if we have a cached root
@@ -1040,39 +1040,7 @@ impl GitStorage {
             None
         };
 
-        let base_tree_sha =
-            if let (Some(base_tree), Some(base_objects_cid), Some(base_commit_sha)) =
-                (base_tree, base_objects_cid.as_ref(), base_commit_sha)
-            {
-                self.runtime.block_on(async {
-                    let Some((obj_type, content)) = self
-                        .get_object_content_from_base(base_commit_sha, base_tree, base_objects_cid)
-                        .await?
-                    else {
-                        return Ok(None);
-                    };
-
-                    if obj_type != ObjectType::Commit {
-                        return Err(Error::InvalidObjectType(format!(
-                            "expected commit, got {:?}",
-                            obj_type
-                        )));
-                    }
-
-                    let content = std::str::from_utf8(&content).map_err(|_| {
-                        Error::InvalidObjectFormat("commit: invalid utf-8".to_string())
-                    })?;
-                    Ok::<Option<String>, Error>(
-                        content
-                            .lines()
-                            .find_map(|line| line.strip_prefix("tree "))
-                            .map(str::trim)
-                            .map(str::to_string),
-                    )
-                })?
-            } else {
-                None
-            };
+        let base_tree_sha = base_tree_sha.map(str::to_string);
 
         let base_root_entries = if let (Some(base_tree), Some(base_root)) = (base_tree, base_root) {
             Some(
@@ -1372,18 +1340,23 @@ impl GitStorage {
                 )
                 .await?;
             let old_tree_entries = if let Some(old_tree_oid) = old_tree_oid {
-                Some(
-                    self.get_tree_entries_from_sources(
+                match self
+                    .get_tree_entries_from_sources(
                         old_tree_oid,
                         objects,
                         Some(base_tree),
                         Some(base_objects_cid),
                     )
-                    .await?,
-                )
+                    .await
+                {
+                    Ok(entries) => Some(entries),
+                    Err(Error::ObjectNotFound(_)) if old_dir_entries.is_some() => None,
+                    Err(err) => return Err(err),
+                }
             } else {
                 None
             };
+            let old_tree_available = old_tree_entries.is_some();
 
             let mut old_tree_entry_map = old_tree_entries
                 .unwrap_or_default()
@@ -1491,6 +1464,18 @@ impl GitStorage {
                             "expected blob, got {:?}",
                             obj_type
                         )));
+                    }
+                    None if !old_tree_available => {
+                        if let Some(old_dir_entry) = old_dir_entry.as_ref() {
+                            if old_dir_entry.link_type != LinkType::Dir {
+                                entries.push(Self::tree_entry_to_dir_entry(old_dir_entry));
+                                if let Some(progress) = progress {
+                                    progress.record_working_file(true);
+                                }
+                                continue;
+                            }
+                        }
+                        return Err(Error::ObjectNotFound(oid_hex));
                     }
                     None => match self
                         .get_object_content_from_base(&oid_hex, base_tree, base_objects_cid)
@@ -1612,7 +1597,8 @@ impl GitStorage {
             .read()
             .map_err(|e| Error::StorageError(format!("lock: {}", e)))?
             .clone();
-        let packs_replace_loose_objects = !packed_object_ids.is_empty() && !pack_files.is_empty();
+        let packs_replace_loose_objects =
+            !packed_object_ids.is_empty() && (!pack_files.is_empty() || base_objects_cid.is_some());
         let mut buckets: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
         for (oid, data) in objects {
             if packs_replace_loose_objects && packed_object_ids.contains(oid) {
@@ -2417,6 +2403,32 @@ mod tests {
             .unwrap()
     }
 
+    fn write_root_tree(storage: &GitStorage, blobs: &[(&str, ObjectId)]) -> ObjectId {
+        let mut sorted = blobs.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut tree_content = Vec::new();
+        for (name, oid) in sorted {
+            tree_content.extend_from_slice(format!("100644 {name}\0").as_bytes());
+            tree_content.extend_from_slice(&hex::decode(oid.to_hex()).unwrap());
+        }
+
+        storage
+            .write_raw_object(ObjectType::Tree, &tree_content)
+            .unwrap()
+    }
+
+    fn write_commit_for_tree(storage: &GitStorage, tree_oid: ObjectId, message: &str) -> ObjectId {
+        let commit_content = format!(
+            "tree {}\nauthor Test User <test@example.com> 0 +0000\ncommitter Test User <test@example.com> 0 +0000\n\n{}\n",
+            tree_oid.to_hex(),
+            message
+        );
+        storage
+            .write_raw_object(ObjectType::Commit, commit_content.as_bytes())
+            .unwrap()
+    }
+
     fn export_tree_to_fs<S: Store>(
         runtime: &RuntimeExecutor,
         tree: &HashTree<S>,
@@ -2960,6 +2972,147 @@ mod tests {
             String::from_utf8(packs).unwrap(),
             format!("P {pack_name}\n")
         );
+    }
+
+    #[test]
+    fn test_inherited_pack_checkpoint_can_replace_base_loose_git_objects() {
+        let (storage, _temp) = create_test_storage();
+        let commit_oid = write_test_commit(&storage);
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(commit_oid))
+            .unwrap();
+        storage
+            .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+            .unwrap();
+
+        let pack_hash = "0123456789abcdef0123456789abcdef01234567";
+        let pack_name = format!("pack-{pack_hash}.pack");
+        let idx_name = format!("pack-{pack_hash}.idx");
+        let mut pack_files = BTreeMap::new();
+        pack_files.insert(pack_name.clone(), b"pack bytes".to_vec());
+        pack_files.insert(idx_name, b"idx bytes".to_vec());
+        storage
+            .set_pack_checkpoint_files(pack_files, HashSet::from([commit_oid.to_hex()]))
+            .unwrap();
+        let base_root_cid = storage.build_tree().unwrap();
+
+        storage
+            .set_pack_checkpoint_files(BTreeMap::new(), HashSet::from([commit_oid.to_hex()]))
+            .unwrap();
+
+        let root_cid = storage
+            .build_tree_with_base_objects(Some(&storage.tree), Some(&base_root_cid), None)
+            .unwrap();
+        let loose_path = format!(
+            ".git/objects/{}/{}",
+            &commit_oid.to_hex()[..2],
+            &commit_oid.to_hex()[2..]
+        );
+        let loose_cid = storage
+            .runtime
+            .block_on(storage.tree.resolve_path(&root_cid, &loose_path))
+            .unwrap();
+        assert!(
+            loose_cid.is_none(),
+            "inherited pack-covered objects should not be rewritten loose"
+        );
+
+        let packs_cid = storage
+            .runtime
+            .block_on(
+                storage
+                    .tree
+                    .resolve_path(&root_cid, ".git/objects/info/packs"),
+            )
+            .unwrap()
+            .expect("inherited objects/info/packs exists");
+        let packs = storage
+            .runtime
+            .block_on(storage.tree.get(&packs_cid, None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(packs).unwrap(),
+            format!("P {pack_name}\n")
+        );
+    }
+
+    #[test]
+    fn test_pack_only_base_reuses_visible_working_files_without_loose_old_tree() {
+        let (storage, _temp) = create_test_storage();
+        let readme_oid = storage
+            .write_raw_object(ObjectType::Blob, b"base readme\n")
+            .unwrap();
+        let base_tree_oid = write_root_tree(&storage, &[("README.md", readme_oid)]);
+        let base_commit_oid = write_commit_for_tree(&storage, base_tree_oid, "base");
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(base_commit_oid))
+            .unwrap();
+        storage
+            .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+            .unwrap();
+
+        let pack_hash = "fedcba9876543210fedcba9876543210fedcba98";
+        let pack_name = format!("pack-{pack_hash}.pack");
+        let idx_name = format!("pack-{pack_hash}.idx");
+        let mut pack_files = BTreeMap::new();
+        pack_files.insert(pack_name, b"pack bytes".to_vec());
+        pack_files.insert(idx_name, b"idx bytes".to_vec());
+        storage
+            .set_pack_checkpoint_files(
+                pack_files,
+                HashSet::from([
+                    base_commit_oid.to_hex(),
+                    base_tree_oid.to_hex(),
+                    readme_oid.to_hex(),
+                ]),
+            )
+            .unwrap();
+        let base_root_cid = storage.build_tree().unwrap();
+
+        let new_blob_oid = storage
+            .write_raw_object(ObjectType::Blob, b"new file\n")
+            .unwrap();
+        let current_tree_oid = write_root_tree(
+            &storage,
+            &[("README.md", readme_oid), ("new.txt", new_blob_oid)],
+        );
+        let current_commit_oid = write_commit_for_tree(&storage, current_tree_oid, "delta");
+        storage
+            .write_ref("refs/heads/main", &Ref::Direct(current_commit_oid))
+            .unwrap();
+        storage
+            .set_pack_checkpoint_files(BTreeMap::new(), HashSet::new())
+            .unwrap();
+
+        {
+            let mut objects = storage.objects.write().unwrap();
+            objects.remove(&base_commit_oid.to_hex());
+            objects.remove(&base_tree_oid.to_hex());
+            objects.remove(&readme_oid.to_hex());
+        }
+
+        let root_cid = storage
+            .build_tree_with_base_objects(
+                Some(&storage.tree),
+                Some(&base_root_cid),
+                Some(&base_tree_oid.to_hex()),
+            )
+            .unwrap();
+
+        for (path, expected) in [("README.md", "base readme\n"), ("new.txt", "new file\n")] {
+            let cid = storage
+                .runtime
+                .block_on(storage.tree.resolve_path(&root_cid, path))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{path} should exist"));
+            let content = storage
+                .runtime
+                .block_on(storage.tree.get(&cid, None))
+                .unwrap()
+                .unwrap();
+            assert_eq!(String::from_utf8(content).unwrap(), expected, "{path}");
+        }
     }
 
     #[test]

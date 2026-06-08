@@ -4,7 +4,7 @@ use super::{upload_progress, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
 use crate::nostr_client::{BlossomResult, PullRequestStateFilter};
-use crate::runtime::new_multi_thread_runtime;
+use crate::runtime::{block_on_result, new_multi_thread_runtime};
 use anyhow::{bail, Context, Result};
 use hashtree_core::{HashTree, Store};
 use std::collections::{BTreeMap, HashSet};
@@ -501,12 +501,15 @@ impl RemoteHelper {
         label: &str,
         base_tree: Option<&HashTree<S>>,
         base_root: Option<&hashtree_core::Cid>,
-        delta_base: Option<&str>,
+        base_tree_sha: Option<&str>,
     ) -> Result<hashtree_core::Cid> {
         let progress = RepoTreeBuildProgress::new();
         let reporter = RepoTreeProgressReporter::start(label, progress.clone());
         let result = self.storage.build_tree_with_base_objects_with_progress(
-            base_tree, base_root, delta_base, &progress,
+            base_tree,
+            base_root,
+            base_tree_sha,
+            &progress,
         );
         reporter.finish(label, &progress, result.as_ref().err());
         Ok(result?)
@@ -539,11 +542,16 @@ impl RemoteHelper {
             key: encryption_key,
         };
 
+        let base_tree_sha = delta_base
+            .map(Self::resolve_tree_sha)
+            .transpose()
+            .context("resolve delta base tree")?;
+
         self.build_tree_with_base_progress(
             label,
             Some(&cached_tree),
             Some(&cached_root_cid),
-            delta_base,
+            base_tree_sha.as_deref(),
         )
         .map(Some)
     }
@@ -618,34 +626,88 @@ impl RemoteHelper {
             }
         }
 
-        match self.build_tree_with_progress("Retrying repo tree after cached-object hydration") {
-            Ok(root_cid) => Ok(root_cid),
-            Err(post_hydration_err) => {
-                eprintln!(
-                    "  Cached-root hydration still incomplete ({}); falling back to full local import",
-                    post_hydration_err
-                );
-                debug!(
+        let mut hydrated_missing = HashSet::new();
+        let post_hydration_err = loop {
+            let retry = self
+                .build_tree_with_cached_remote_root(
+                    "Retrying repo tree after cached-object hydration",
+                    Some(base),
+                )
+                .and_then(|root| {
+                    root.ok_or_else(|| {
+                        anyhow::anyhow!("cached remote root disappeared after hydration")
+                    })
+                });
+
+            match retry {
+                Ok(root_cid) => return Ok(root_cid),
+                Err(err) => {
+                    let Some(missing_oid) = Self::missing_object_id_from_error(&err) else {
+                        break err;
+                    };
+                    if !hydrated_missing.insert(missing_oid.clone()) || hydrated_missing.len() > 512
+                    {
+                        break err;
+                    }
+
+                    eprintln!(
+                        "  Hydrating missing local git object {} for cached-root merge",
+                        &missing_oid[..12]
+                    );
+                    let objects_with_content =
+                        self.read_git_objects_batch(std::slice::from_ref(&missing_oid))?;
+                    eprintln!();
+                    Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+                }
+            }
+        };
+
+        {
+            eprintln!(
+                "  Cached-root hydration still incomplete ({}); falling back to full local import",
+                post_hydration_err
+            );
+            debug!(
                     "Cached remote hydration still incomplete for {} via {}: {}. Falling back to full local import.",
                     dst_ref, base, post_hydration_err
                 );
 
-                eprint!("  Listing objects...");
-                let _ = std::io::stderr().flush();
-                let objects = self.list_objects_to_push(sha, &[])?;
-                eprintln!(" {} objects", objects.len());
+            eprint!("  Listing objects...");
+            let _ = std::io::stderr().flush();
+            let objects = self.list_objects_to_push(sha, &[])?;
+            eprintln!(" {} objects", objects.len());
 
-                let objects_with_content = self.read_git_objects_batch(&objects)?;
-                eprintln!();
+            let objects_with_content = self.read_git_objects_batch(&objects)?;
+            eprintln!();
 
-                eprint!("  Writing to local store...");
-                let _ = std::io::stderr().flush();
-                Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-                eprintln!();
+            eprint!("  Writing to local store...");
+            let _ = std::io::stderr().flush();
+            Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+            eprintln!();
 
-                self.build_tree_with_progress("Building repo tree from repaired local store")
+            self.build_tree_with_progress("Building repo tree from repaired local store")
+        }
+    }
+
+    fn missing_object_id_from_error(err: &anyhow::Error) -> Option<String> {
+        for cause in err.chain() {
+            if let Some(crate::git::error::Error::ObjectNotFound(oid)) =
+                cause.downcast_ref::<crate::git::error::Error>()
+            {
+                if Self::is_hex_object_id(oid) {
+                    return Some(oid.clone());
+                }
+            }
+
+            let message = cause.to_string();
+            if let Some(oid) = message.strip_prefix("Object not found: ") {
+                if Self::is_hex_object_id(oid) {
+                    return Some(oid.to_string());
+                }
             }
         }
+
+        None
     }
 
     /// Queue a push operation
@@ -951,6 +1013,33 @@ impl RemoteHelper {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    fn resolve_tree_sha(sha: &str) -> Result<String> {
+        let treeish = format!("{sha}^{{tree}}");
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", &treeish])
+            .output()
+            .context("run git rev-parse for base tree")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "Failed to resolve tree for {}{}",
+                sha,
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        let tree_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !Self::is_hex_object_id(&tree_sha) {
+            bail!("Resolved invalid tree id for {}", sha);
+        }
+        Ok(tree_sha)
+    }
+
     /// Check if ancestor_sha is an ancestor of descendant_sha
     pub(super) fn check_ancestor(&self, ancestor_sha: &str, descendant_sha: &str) -> AncestorCheck {
         let output = Command::new("git")
@@ -1068,6 +1157,12 @@ impl RemoteHelper {
             &checkpoint_covered,
             base_has_pack_checkpoint,
         )?;
+        if checkpoint_covered.is_empty() && base_has_pack_checkpoint {
+            let inherited_pack_covered =
+                self.inherited_pack_covered_imported_tree_ids(sha, &objects)?;
+            self.storage
+                .set_pack_checkpoint_files(BTreeMap::new(), inherited_pack_covered)?;
+        }
         if checkpoint_covered.is_empty() {
             eprint!("  Reading objects...");
         } else {
@@ -1556,6 +1651,71 @@ impl RemoteHelper {
 
     pub(super) fn current_tree_tree_object_ids(sha: &str) -> Result<HashSet<String>> {
         Self::current_tree_object_ids_for_push(sha, false)
+    }
+
+    pub(super) fn inherited_pack_covered_imported_tree_candidates(
+        sha: &str,
+        listed_objects: &[String],
+    ) -> Result<HashSet<String>> {
+        let listed: HashSet<&str> = listed_objects.iter().map(String::as_str).collect();
+        Ok(Self::current_tree_tree_object_ids(sha)?
+            .into_iter()
+            .filter(|oid| !listed.contains(oid.as_str()))
+            .collect())
+    }
+
+    fn inherited_pack_covered_imported_tree_ids(
+        &self,
+        sha: &str,
+        listed_objects: &[String],
+    ) -> Result<HashSet<String>> {
+        let candidates =
+            Self::inherited_pack_covered_imported_tree_candidates(sha, listed_objects)?;
+        if candidates.is_empty() {
+            return Ok(candidates);
+        }
+
+        let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() else {
+            return Ok(HashSet::new());
+        };
+        let encryption_key = self
+            .nostr
+            .get_cached_encryption_key(&self.repo_name)
+            .copied();
+        let (cached_tree, _) = self.build_cached_fetch_tree()?;
+        let root_bytes = hex::decode(&root_hash).context("Invalid cached root hash hex")?;
+        let root_arr: [u8; 32] = root_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Cached root hash must be 32 bytes"))?;
+        let cached_root_cid = hashtree_core::Cid {
+            hash: root_arr,
+            key: encryption_key,
+        };
+
+        block_on_result(async {
+            let Some(objects_cid) = cached_tree
+                .resolve_path(&cached_root_cid, ".git/objects")
+                .await
+                .context("resolve cached .git/objects")?
+            else {
+                return Ok(HashSet::new());
+            };
+
+            let mut pack_covered = HashSet::new();
+            for oid in candidates {
+                let loose_path = format!("{}/{}", &oid[..2], &oid[2..]);
+                let loose_exists = cached_tree
+                    .resolve_path(&objects_cid, &loose_path)
+                    .await
+                    .with_context(|| format!("resolve cached loose object {oid}"))?
+                    .is_some();
+                if !loose_exists {
+                    pack_covered.insert(oid);
+                }
+            }
+
+            Ok(pack_covered)
+        })
     }
 
     pub(super) fn select_objects_to_import_for_push(

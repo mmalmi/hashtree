@@ -1029,6 +1029,23 @@ fn test_pack_backed_delta_import_keeps_current_tree_objects() {
             .all(|oid| !selected_with_pack.contains(*oid)),
         "pack-backed delta merge should not re-import unchanged pack-covered blobs as loose objects"
     );
+
+    let inherited_pack_covered =
+        RemoteHelper::inherited_pack_covered_imported_tree_candidates(&master_sha, &delta)
+            .expect("pack-covered imported tree ids");
+    assert!(
+        current_tree_trees
+            .iter()
+            .filter(|oid| !delta_set.contains(*oid))
+            .all(|oid| inherited_pack_covered.contains(oid)),
+        "unchanged tree objects imported for view building should be marked pack-covered"
+    );
+    assert!(
+        inherited_pack_covered
+            .iter()
+            .all(|oid| !delta_set.contains(oid)),
+        "new delta tree objects must still be written as loose objects when no new pack is built"
+    );
 }
 
 #[test]
