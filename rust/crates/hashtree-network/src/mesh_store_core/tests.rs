@@ -555,6 +555,43 @@ async fn test_pubsub_production_path_delivers_subscribed_stream() {
 }
 
 #[tokio::test]
+async fn test_pubsub_event_receiver_wakes_on_delivery() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
+    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let nodes = [&publisher, &subscriber];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    subscriber.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+
+    publisher
+        .store
+        .publish_pubsub("author:alice", 7, b"event-bytes".to_vec())
+        .await;
+    pump_test_network(&nodes, 12).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(1), subscriber.store.recv_pubsub_event())
+        .await
+        .expect("pubsub receiver should wake");
+
+    assert_eq!(event.stream_id, "author:alice");
+    assert_eq!(event.seq, 7);
+    assert_eq!(event.origin_peer_id, "publisher");
+    assert_eq!(event.payload, b"event-bytes".to_vec());
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
 async fn test_pubsub_inv_want_publish_sends_inventory_before_payload() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;

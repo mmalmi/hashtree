@@ -14,7 +14,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 
 use hashtree_core::{Hash, Store, StoreError};
@@ -662,6 +662,8 @@ where
     pubsub_frame_cache: Mutex<VecDeque<(String, PubsubFrame)>>,
     /// Local pubsub delivery inbox.
     pubsub_inbox: Mutex<VecDeque<PubsubEvent>>,
+    /// Wakes consumers waiting for local pubsub deliveries.
+    pubsub_notify: Notify,
     /// Per stream/peer deferred counts for aging pubsub strategies.
     pubsub_deferred_counts: RwLock<HashMap<(String, String), u64>>,
     /// Monotonic sequence for locally originated pubsub interest updates.
@@ -760,6 +762,7 @@ where
             )),
             pubsub_frame_cache: Mutex::new(VecDeque::new()),
             pubsub_inbox: Mutex::new(VecDeque::new()),
+            pubsub_notify: Notify::new(),
             pubsub_deferred_counts: RwLock::new(HashMap::new()),
             next_pubsub_interest_seq: AtomicU64::new(1),
             pending_response_sends: Mutex::new(Vec::new()),
@@ -1338,6 +1341,7 @@ where
         while inbox.len() > PUBSUB_INBOX_CAPACITY {
             inbox.pop_front();
         }
+        self.pubsub_notify.notify_one();
     }
 
     /// Subscribe this node to a pubsub stream and advertise that interest.
@@ -1461,6 +1465,16 @@ where
     /// Drain locally delivered pubsub events.
     pub async fn drain_pubsub_events(&self) -> Vec<PubsubEvent> {
         self.pubsub_inbox.lock().await.drain(..).collect()
+    }
+
+    /// Wait until a locally delivered pubsub event is available, then return it.
+    pub async fn recv_pubsub_event(&self) -> PubsubEvent {
+        loop {
+            if let Some(event) = self.pubsub_inbox.lock().await.pop_front() {
+                return event;
+            }
+            self.pubsub_notify.notified().await;
+        }
     }
 
     /// Connected peers that currently have local or downstream interest in a stream.

@@ -1223,6 +1223,18 @@ impl<S: Store + Send + Sync + 'static> FipsMeshPubsub<S> {
             .collect()
     }
 
+    /// Wait for the next pubsub event delivered to this node.
+    pub async fn recv_pubsub_event(&self) -> FipsMeshPubsubEvent {
+        let event = self.store.recv_pubsub_event().await;
+        FipsMeshPubsubEvent {
+            stream_id: event.stream_id,
+            seq: event.seq,
+            origin_peer_id: event.origin_peer_id,
+            from_peer_id: event.from_peer_id,
+            payload: event.payload,
+        }
+    }
+
     /// Current mesh peer count known to the shared mesh core.
     pub async fn peer_count(&self) -> usize {
         self.store.peer_count().await
