@@ -34,6 +34,7 @@ use hashtree_nostr::{
     reset_profile as reset_nostr_profile, set_profile_enabled as set_nostr_profile_enabled,
     take_profile as take_nostr_profile,
 };
+use heed::EnvFlags;
 use nostr::{Event, Filter, JsonUtil, Kind, SingleLetterTag};
 use nostr_social_graph::{
     BinaryBudget, GraphStats, NostrEvent as GraphEvent, SocialGraph,
@@ -57,7 +58,7 @@ const AMBIENT_EVENTS_BLOB_DIR: &str = "ambient-blobs";
 const PROFILE_SEARCH_ROOT_FILE: &str = "profile-search-root.msgpack";
 const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
 const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
-const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SOCIALGRAPH_MAX_DBS: u32 = 16;
 const PROFILE_SEARCH_INDEX_ORDER: usize = 64;
 const PROFILE_SEARCH_PREFIX: &str = "p:";
@@ -203,6 +204,20 @@ pub fn open_social_graph_store_with_storage(
     open_social_graph_store_at_path_with_storage(&db_dir, store, mapsize_bytes)
 }
 
+pub fn open_embedded_social_graph_store_with_storage(
+    data_dir: &Path,
+    store: Arc<StorageRouter>,
+    mapsize_bytes: Option<u64>,
+) -> Result<Arc<SocialGraphStore>> {
+    let db_dir = data_dir.join("socialgraph");
+    open_social_graph_store_at_path_with_storage_and_env_flags(
+        &db_dir,
+        store,
+        mapsize_bytes,
+        EnvFlags::NO_LOCK,
+    )
+}
+
 pub fn open_social_graph_store_at_path(
     db_dir: &Path,
     mapsize_bytes: Option<u64>,
@@ -217,10 +232,45 @@ pub fn open_social_graph_store_at_path(
     open_social_graph_store_at_path_with_storage(db_dir, store, mapsize_bytes)
 }
 
+pub fn open_embedded_social_graph_store_at_path(
+    db_dir: &Path,
+    mapsize_bytes: Option<u64>,
+) -> Result<Arc<SocialGraphStore>> {
+    let local_store = Arc::new(
+        LocalStore::new_with_lmdb_map_size(
+            db_dir.join("blobs"),
+            &hashtree_config::StorageBackend::Fs,
+            mapsize_bytes,
+        )
+        .map_err(|err| anyhow::anyhow!("Failed to create social graph blob store: {err}"))?,
+    );
+    let store = Arc::new(StorageRouter::new(local_store));
+    open_social_graph_store_at_path_with_storage_and_env_flags(
+        db_dir,
+        store,
+        mapsize_bytes,
+        EnvFlags::NO_LOCK,
+    )
+}
+
 pub fn open_social_graph_store_at_path_with_storage(
     db_dir: &Path,
     store: Arc<StorageRouter>,
     mapsize_bytes: Option<u64>,
+) -> Result<Arc<SocialGraphStore>> {
+    open_social_graph_store_at_path_with_storage_and_env_flags(
+        db_dir,
+        store,
+        mapsize_bytes,
+        EnvFlags::empty(),
+    )
+}
+
+fn open_social_graph_store_at_path_with_storage_and_env_flags(
+    db_dir: &Path,
+    store: Arc<StorageRouter>,
+    mapsize_bytes: Option<u64>,
+    env_flags: EnvFlags,
 ) -> Result<Arc<SocialGraphStore>> {
     let ambient_backend = store.local_store().backend();
     let ambient_local = Arc::new(
@@ -234,7 +284,13 @@ pub fn open_social_graph_store_at_path_with_storage(
         })?,
     );
     let ambient_store = Arc::new(StorageRouter::new(ambient_local));
-    open_social_graph_store_at_path_with_storage_split(db_dir, store, ambient_store, mapsize_bytes)
+    open_social_graph_store_at_path_with_storage_split_and_env_flags(
+        db_dir,
+        store,
+        ambient_store,
+        mapsize_bytes,
+        env_flags,
+    )
 }
 
 pub fn open_social_graph_store_at_path_with_storage_split(
@@ -243,12 +299,36 @@ pub fn open_social_graph_store_at_path_with_storage_split(
     ambient_store: Arc<StorageRouter>,
     mapsize_bytes: Option<u64>,
 ) -> Result<Arc<SocialGraphStore>> {
+    open_social_graph_store_at_path_with_storage_split_and_env_flags(
+        db_dir,
+        public_store,
+        ambient_store,
+        mapsize_bytes,
+        EnvFlags::empty(),
+    )
+}
+
+fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
+    db_dir: &Path,
+    public_store: Arc<StorageRouter>,
+    ambient_store: Arc<StorageRouter>,
+    mapsize_bytes: Option<u64>,
+    env_flags: EnvFlags,
+) -> Result<Arc<SocialGraphStore>> {
     std::fs::create_dir_all(db_dir)?;
     if let Some(size) = mapsize_bytes {
-        ensure_social_graph_mapsize(db_dir, size)?;
+        ensure_social_graph_mapsize_with_env_flags(db_dir, size, env_flags)?;
     }
-    let graph = HeedSocialGraph::open(db_dir, DEFAULT_ROOT_HEX)
-        .context("open nostr-social-graph heed backend")?;
+    let graph_map_size = social_graph_map_size(mapsize_bytes)?;
+    let graph = unsafe {
+        HeedSocialGraph::open_with_env_flags_and_map_size(
+            db_dir,
+            DEFAULT_ROOT_HEX,
+            env_flags,
+            graph_map_size,
+        )
+    }
+    .context("open nostr-social-graph heed backend")?;
 
     Ok(Arc::new(SocialGraphStore {
         graph: StdMutex::new(graph),
@@ -1662,27 +1742,41 @@ fn map_event_store_error(err: NostrEventStoreError) -> anyhow::Error {
     anyhow::anyhow!("nostr event store error: {err}")
 }
 
+#[cfg(test)]
 fn ensure_social_graph_mapsize(db_dir: &Path, requested_bytes: u64) -> Result<()> {
-    let requested = requested_bytes.max(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES);
-    let page_size = page_size_bytes() as u64;
-    let rounded = requested
-        .checked_add(page_size.saturating_sub(1))
-        .map(|size| size / page_size * page_size)
-        .unwrap_or(requested);
-    let map_size = usize::try_from(rounded).context("social graph mapsize exceeds usize")?;
+    ensure_social_graph_mapsize_with_env_flags(db_dir, requested_bytes, EnvFlags::empty())
+}
 
-    let env = unsafe {
-        heed::EnvOpenOptions::new()
-            .map_size(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES as usize)
-            .max_dbs(SOCIALGRAPH_MAX_DBS)
-            .open(db_dir)
+fn ensure_social_graph_mapsize_with_env_flags(
+    db_dir: &Path,
+    requested_bytes: u64,
+    env_flags: EnvFlags,
+) -> Result<()> {
+    let map_size = social_graph_map_size(Some(requested_bytes))?;
+
+    let mut options = heed::EnvOpenOptions::new();
+    options.map_size(map_size).max_dbs(SOCIALGRAPH_MAX_DBS);
+    unsafe {
+        options.flags(env_flags);
     }
-    .context("open social graph LMDB env for resize")?;
+    let env = unsafe { options.open(db_dir) }.context("open social graph LMDB env for resize")?;
     if env.info().map_size < map_size {
         unsafe { env.resize(map_size) }.context("resize social graph LMDB env")?;
     }
 
     Ok(())
+}
+
+fn social_graph_map_size(requested_bytes: Option<u64>) -> Result<usize> {
+    let requested = requested_bytes
+        .unwrap_or(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES)
+        .max(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES);
+    let page_size = page_size_bytes() as u64;
+    let rounded = requested
+        .checked_add(page_size.saturating_sub(1))
+        .map(|size| size / page_size * page_size)
+        .unwrap_or(requested);
+    usize::try_from(rounded).context("social graph mapsize exceeds usize")
 }
 
 fn page_size_bytes() -> usize {

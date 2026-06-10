@@ -669,7 +669,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         .spambox_max_size_gb
         .saturating_mul(1024 * 1024 * 1024);
 
-    let store = Arc::new(HashtreeStore::with_options(
+    let store = Arc::new(HashtreeStore::with_embedded_options(
         &opts.data_dir,
         config.storage.s3.as_ref(),
         max_size_bytes,
@@ -696,7 +696,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         }
     }
 
-    let graph_store = socialgraph::open_social_graph_store_with_storage(
+    let graph_store = socialgraph::open_embedded_social_graph_store_with_storage(
         &opts.data_dir,
         store.store_arc(),
         Some(nostr_db_max_bytes),
@@ -746,7 +746,10 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
 
     let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
         let spam_dir = opts.data_dir.join("socialgraph_spambox");
-        match socialgraph::open_social_graph_store_at_path(&spam_dir, Some(spambox_db_max_bytes)) {
+        match socialgraph::open_embedded_social_graph_store_at_path(
+            &spam_dir,
+            Some(spambox_db_max_bytes),
+        ) {
             Ok(store) => Some(store),
             Err(err) => {
                 tracing::warn!("Failed to open social graph spambox for crawler: {}", err);

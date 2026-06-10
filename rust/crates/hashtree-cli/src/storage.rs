@@ -11,7 +11,7 @@ use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::LmdbBlobStore;
 use heed::types::*;
-use heed::{Database, EnvOpenOptions};
+use heed::{Database, EnvFlags, EnvOpenOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "s3")]
@@ -1117,6 +1117,45 @@ impl HashtreeStore {
         evict_orphans: bool,
         backend: &hashtree_config::StorageBackend,
     ) -> Result<Self> {
+        Self::with_options_and_backend_and_env_flags(
+            path,
+            s3_config,
+            max_size_bytes,
+            evict_orphans,
+            backend,
+            EnvFlags::empty(),
+        )
+    }
+
+    /// Create a store for an embedded, single-process hashtree host.
+    ///
+    /// The macOS app sandbox denies LMDB's default System V semaphore locks.
+    /// The embedded host owns this data directory in one process, so it uses
+    /// external process isolation plus LMDB `NO_LOCK` for metadata and the
+    /// filesystem blob backend to avoid opening a second LMDB environment.
+    pub fn with_embedded_options<P: AsRef<Path>>(
+        path: P,
+        s3_config: Option<&S3Config>,
+        max_size_bytes: u64,
+    ) -> Result<Self> {
+        Self::with_options_and_backend_and_env_flags(
+            path,
+            s3_config,
+            max_size_bytes,
+            true,
+            &hashtree_config::StorageBackend::Fs,
+            EnvFlags::NO_LOCK,
+        )
+    }
+
+    fn with_options_and_backend_and_env_flags<P: AsRef<Path>>(
+        path: P,
+        s3_config: Option<&S3Config>,
+        max_size_bytes: u64,
+        evict_orphans: bool,
+        backend: &hashtree_config::StorageBackend,
+        env_flags: EnvFlags,
+    ) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
         let metadata_map_size = lmdb_map_size_for_existing_env(
@@ -1124,13 +1163,15 @@ impl HashtreeStore {
             lmdb_metadata_map_size_for_storage_budget(max_size_bytes),
         )?;
 
-        let env = unsafe {
-            EnvOpenOptions::new()
-                .map_size(metadata_map_size)
-                .max_dbs(11) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, pubkey_blob_index, tree_meta, blob_trees, tree_refs, cached_roots, blobs
-                .max_readers(LMDB_MAX_READERS)
-                .open(path)?
-        };
+        let mut env_options = EnvOpenOptions::new();
+        env_options
+            .map_size(metadata_map_size)
+            .max_dbs(11) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, pubkey_blob_index, tree_meta, blob_trees, tree_refs, cached_roots, blobs
+            .max_readers(LMDB_MAX_READERS);
+        unsafe {
+            env_options.flags(env_flags);
+        }
+        let env = unsafe { env_options.open(path)? };
         let _ = env.clear_stale_readers();
         if env.info().map_size < metadata_map_size {
             unsafe { env.resize(metadata_map_size) }?;
@@ -2491,6 +2532,21 @@ mod tests {
             map_size >= expected,
             "expected metadata LMDB map to grow to at least {expected} bytes, got {map_size}"
         );
+
+        drop(store);
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn embedded_store_uses_filesystem_blobs_and_no_lmdb_lock() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store =
+            HashtreeStore::with_embedded_options(temp.path(), None, LMDB_BLOB_MIN_MAP_SIZE_BYTES)?;
+
+        assert_eq!(store.router.local_store().backend(), StorageBackend::Fs);
+        let flags = store.env.flags()?.unwrap_or(EnvFlags::empty());
+        assert!(flags.contains(EnvFlags::NO_LOCK));
 
         drop(store);
         Ok(())

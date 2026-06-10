@@ -214,6 +214,7 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     config.node.limits.max_connections = options.webrtc_max_connections.saturating_mul(2).max(1);
     config.node.limits.max_pending_inbound =
         options.webrtc_max_connections.saturating_mul(4).max(1);
+    config.node.control.enabled = false;
     config.tun.enabled = false;
     config.dns.enabled = false;
     config.node.system_files_enabled = false;
@@ -1753,6 +1754,13 @@ mod tests {
             config.node.discovery.nostr.app,
             "iris-drive-v1:private-owner"
         );
+    }
+
+    #[test]
+    fn endpoint_config_disables_control_socket_for_embedded_clients() {
+        let config = fips_endpoint_config(FipsEndpointOptions::new("nsec1example"), "test-scope");
+
+        assert!(!config.node.control.enabled);
     }
 
     #[test]
