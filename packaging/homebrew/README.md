@@ -17,6 +17,7 @@ gateway, users can tap the published `.git` directory directly:
 
 ```bash
 brew tap <user>/htree https://upload.iris.to/<npub>/<repo>.git
+brew trust --tap <user>/htree
 ```
 
 That path works as long as the published bare repository includes dumb-HTTP
@@ -59,6 +60,7 @@ paths exactly. After it is reachable at a stable URL, users can install with:
 
 ```bash
 brew tap <user>/htree https://upload.iris.to/<npub>/<tap-path>/homebrew-htree.git
+brew trust --tap <user>/htree
 brew install htree
 ```
 
@@ -76,6 +78,7 @@ hashtree and tap the gateway URL:
 
 ```bash
 brew tap <user>/htree https://upload.iris.to/<npub>/<repo>.git
+brew trust --tap <user>/htree
 brew install htree
 ```
 

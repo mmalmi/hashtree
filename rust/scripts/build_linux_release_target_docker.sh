@@ -139,7 +139,7 @@ docker_mounts=(
     -v "${FIPS_DIR}:/fips:ro"
     -v "${TARGET_DIR}:/target-dir"
 )
-for sibling in cashu-service cashu_spilman_channels; do
+for sibling in cashu-service cashu_spilman_channels nostr-social-graph; do
     sibling_dir="${REPO_DIR}/../${sibling}"
     if [ -d "$sibling_dir" ]; then
         sibling_dir="$(cd "$sibling_dir" && pwd)"

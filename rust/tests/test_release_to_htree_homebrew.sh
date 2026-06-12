@@ -206,6 +206,7 @@ grep -F "Added release changelog coverage to the staged repo notes." "${TMPDIR}/
 grep -F "publish_release:v0.2.3 nhash1release releases/hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "publish_tap:--version v0.2.3 --release-base-url https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3/assets --assets-dir ${TMPDIR}/out --tap-repo homebrew-hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "install_matrix:" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -F "curl:-fsSL --max-time 30 https://upload.iris.to/api/resolve/${README_NPUB}/releases%2Fhashtree?refresh=1" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "curl:-fsSIL --max-time 30 https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/latest/install.sh" "${TMPDIR}/logs/calls.log" >/dev/null
 test -f "${TMPDIR}/out/install.sh"
 grep -F "BASE_URL=\"https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3\"" "${TMPDIR}/out/install.sh" >/dev/null

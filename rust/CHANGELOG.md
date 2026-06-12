@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.68 - 2026-06-12
+
+### Fixed
+
+- Refreshed gateway mutable-root caches during hashtree and Homebrew release
+  publishing so live URL gates do not validate stale release roots.
+- Updated Homebrew release smoke checks and install instructions for Homebrew's
+  explicit trust requirement on non-official taps.
+
 ## 0.2.67 - 2026-06-09
 
 ### Fixed

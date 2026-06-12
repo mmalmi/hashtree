@@ -76,6 +76,12 @@ else
 fi
 EOF
 chmod +x "${TMP_DIR}/bin/htree"
+cat >"${TMP_DIR}/bin/curl" <<EOF
+#!/bin/bash
+set -euo pipefail
+echo "curl:\$*" >>"${LOG_FILE}"
+EOF
+chmod +x "${TMP_DIR}/bin/curl"
 
 output="$(
     PATH="${TMP_DIR}/bin:$PATH" "${PUBLISH_TAP_SCRIPT}" \
@@ -89,8 +95,10 @@ printf '%s\n' "$output" >"$STDOUT_FILE"
 
 grep -F "htree:add " "$LOG_FILE" >/dev/null
 grep -F -- "--publish homebrew-htree-test.git" "$LOG_FILE" >/dev/null
+grep -F "curl:-fsSL --max-time 30 https://upload.iris.to/api/resolve/npub1test/homebrew-htree-test.git?refresh=1" "$LOG_FILE" >/dev/null
 grep -F 'htree://self/homebrew-htree-test.git' "$STDOUT_FILE" >/dev/null
 grep -F 'https://upload.iris.to/npub1test/homebrew-htree-test.git' "$STDOUT_FILE" >/dev/null
 grep -F 'brew tap <user>/<repo> https://upload.iris.to/npub1test/homebrew-htree-test.git' "$STDOUT_FILE" >/dev/null
+grep -F 'brew trust --tap <user>/<repo>' "$STDOUT_FILE" >/dev/null
 
 echo "test_publish_tap_to_htree_publish.sh passed"

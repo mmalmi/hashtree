@@ -11,7 +11,12 @@ const scriptDir = dirname(scriptPath)
 const rustDir = dirname(scriptDir)
 const repoDir = dirname(rustDir)
 const sourceRootDir = dirname(repoDir)
-export const requiredSiblingSourceDirs = ['cashu-service', 'cashu_spilman_channels', 'fips']
+export const requiredSiblingSourceDirs = [
+  'cashu-service',
+  'cashu_spilman_channels',
+  'fips',
+  'nostr-social-graph',
+]
 const siblingSourceCopies = [
   {
     name: 'cashu-service',
@@ -31,6 +36,14 @@ const siblingSourceCopies = [
     name: 'fips',
     paths: ['fips/Cargo.toml', 'fips/Cargo.lock', 'fips/crates'],
     excludes: [],
+  },
+  {
+    name: 'nostr-social-graph',
+    paths: ['nostr-social-graph/rust'],
+    excludes: [
+      'nostr-social-graph/rust/target',
+      'nostr-social-graph/rust/dist',
+    ],
   },
 ]
 
@@ -157,7 +170,7 @@ export function windowsBuildScriptLines({ guestRepoPath }) {
     '$guestParent = Split-Path $guestRepo',
     'New-Item -ItemType Directory -Force -Path $guestParent | Out-Null',
     'if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }',
-    "foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips')) {",
+    "foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips', 'nostr-social-graph')) {",
     '  $siblingPath = Join-Path $guestParent $sibling',
     '  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath -ErrorAction SilentlyContinue }',
     '}',
@@ -213,7 +226,7 @@ $guestRepo = ${psQuote(guestRepo)}
 $guestParent = Split-Path $guestRepo
 New-Item -ItemType Directory -Force -Path $guestParent | Out-Null
 if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }
-foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips')) {
+foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips', 'nostr-social-graph')) {
   $siblingPath = Join-Path $guestParent $sibling
   if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath -ErrorAction SilentlyContinue }
 }

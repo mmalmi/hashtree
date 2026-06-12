@@ -76,6 +76,23 @@ htree_publish_name_from_url() {
     default_htree_publish_name "$name"
 }
 
+refresh_gateway_tap_root_cache() {
+    local publish_name="$1"
+    local resolve_url
+
+    if [ -z "$NPUB" ]; then
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    resolve_url="https://upload.iris.to/api/resolve/${NPUB}/$(urlencode_path_segment "$publish_name")?refresh=1"
+    if ! curl -fsSL --max-time 30 "$resolve_url" >/dev/null; then
+        echo "Warning: gateway tap root cache refresh failed; continuing." >&2
+    fi
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)
@@ -195,6 +212,7 @@ if [[ "$PUSH_URL" == htree://* ]]; then
         cd "${REPO_DIR}"
         htree add "${bare_repo}" --publish "${publish_name}" >/dev/null
     )
+    refresh_gateway_tap_root_cache "$publish_name"
 
     canonical_url="htree://self/${publish_name}"
     if [ -n "$NPUB" ]; then
@@ -230,6 +248,7 @@ Gateway URL:
 
 Install:
   brew tap <user>/<repo> ${gateway_url}
+  brew trust --tap <user>/<repo>
   brew install ${FORMULA_NAME}
 EOF
 

@@ -344,6 +344,24 @@ fi
 echo "Release CID: ${release_cid}"
 "${SCRIPT_DIR}/publish_release.sh" "$VERSION_PATH" "$release_cid" "$TREE_NAME"
 
+refresh_gateway_release_root_cache() {
+    local resolve_url
+
+    if [ "$SKIP_POST_PUBLISH_INSTALL_CHECKS" -eq 1 ]; then
+        return 0
+    fi
+    if [ -z "$npub" ]; then
+        return 0
+    fi
+
+    require_command curl
+    resolve_url="https://upload.iris.to/api/resolve/${npub}/$(urlencode_path_segment "$TREE_NAME")?refresh=1"
+    echo "Refreshing gateway release root cache..."
+    if ! curl -fsSL --max-time 30 "$resolve_url" >/dev/null; then
+        echo "Warning: gateway release root cache refresh failed; continuing to live URL checks." >&2
+    fi
+}
+
 latest_path_for_version_path() {
     local version_path="$1"
     if [[ "$version_path" == */* ]]; then
@@ -463,6 +481,7 @@ run_post_publish_install_checks() {
     fi
 }
 
+refresh_gateway_release_root_cache
 run_post_publish_asset_url_gate
 run_post_publish_install_checks
 

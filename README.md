@@ -65,6 +65,7 @@ cargo install --path rust/crates/hashtree-cli --no-default-features --features p
 
 ```bash
 brew tap sirius/hashtree https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/homebrew-hashtree.git
+brew trust --tap sirius/hashtree
 brew install htree
 ```
 
