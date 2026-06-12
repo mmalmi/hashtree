@@ -578,7 +578,7 @@ EOF
 
 run_brew_smoke() {
     local label="homebrew-host"
-    local had_tap=0 had_formula=0 output log_path tap_repo formula_path formula_version installed_version
+    local had_tap=0 had_formula=0 output log_path tap_repo formula_path formula_version installed_version formula_ref alias_ref
 
     if ! command -v brew >/dev/null 2>&1; then
         record_result "$label" "SKIP" "brew not available"
@@ -608,6 +608,11 @@ run_brew_smoke() {
         fi
     fi
 
+    if ! HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew trust --tap "$BREW_TAP_NAME" >>"$log_path" 2>&1; then
+        record_result "$label" "FAIL" "$(failure_note_from_log "$log_path")"
+        return 0
+    fi
+
     tap_repo="$(HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew --repo "$BREW_TAP_NAME" 2>>"$log_path" || true)"
     if [ -z "$tap_repo" ] || [ ! -d "$tap_repo" ]; then
         record_result "$label" "FAIL" "$(failure_note_from_log "$log_path")"
@@ -633,6 +638,8 @@ run_brew_smoke() {
         return 0
     fi
     installed_version=""
+    formula_ref="${BREW_TAP_NAME}/${BREW_FORMULA}"
+    alias_ref="${BREW_TAP_NAME}/hashtree"
 
     if output="$(
         HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew list --versions "$BREW_FORMULA"
@@ -641,7 +648,7 @@ run_brew_smoke() {
         installed_version="$(printf '%s\n' "$output" | awk 'NR==1 {print $2}')"
     else
         had_formula=0
-        if ! HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$BREW_FORMULA" >"$log_path" 2>&1; then
+        if ! HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula_ref" >"$log_path" 2>&1; then
             if [ "$had_tap" -eq 0 ]; then
                 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew untap "$BREW_TAP_NAME" >/dev/null 2>&1 || true
             fi
@@ -651,16 +658,16 @@ run_brew_smoke() {
     fi
 
     if [ "$had_formula" -eq 1 ] && [ -n "$installed_version" ] && [ "$installed_version" != "$formula_version" ]; then
-        if ! HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew reinstall "$BREW_FORMULA" >"$log_path" 2>&1; then
+        if ! HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew reinstall "$formula_ref" >"$log_path" 2>&1; then
             record_result "$label" "FAIL" "$(failure_note_from_log "$log_path")"
             return 0
         fi
     fi
 
     if (
-        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew test "$BREW_FORMULA" &&
-            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew info "$BREW_FORMULA" >/dev/null &&
-            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew info hashtree >/dev/null
+        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew test "$formula_ref" &&
+            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew info "$formula_ref" >/dev/null &&
+            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew info "$alias_ref" >/dev/null
     ) >"$log_path" 2>&1; then
         record_result "$label" "PASS" "brew install/test/info succeeded for ${BREW_FORMULA} ${formula_version}"
     else
