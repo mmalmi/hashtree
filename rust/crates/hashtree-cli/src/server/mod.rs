@@ -331,6 +331,13 @@ impl HashtreeServer {
             .route("/ws", get(ws_relay::ws_data))
             .route("/ws/", get(ws_relay::ws_data))
             .route(
+                "/__iris/store/:hash",
+                get(handlers::iris_store_get)
+                    .head(handlers::iris_store_head)
+                    .put(handlers::iris_store_put)
+                    .delete(handlers::iris_store_delete),
+            )
+            .route(
                 "/htree/test",
                 get(handlers::htree_test).head(handlers::htree_test),
             )

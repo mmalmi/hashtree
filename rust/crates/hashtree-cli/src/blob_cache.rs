@@ -79,6 +79,10 @@ impl BlobSizeCache {
             },
         );
     }
+
+    fn remove(&mut self, key: &str) {
+        self.cache.pop(key);
+    }
 }
 
 struct BlobBodyEntry {
@@ -126,6 +130,12 @@ impl BlobBodyCache {
                 self.current_bytes = 0;
                 break;
             };
+            self.current_bytes = self.current_bytes.saturating_sub(entry.bytes.len());
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(entry) = self.cache.pop(key) {
             self.current_bytes = self.current_bytes.saturating_sub(entry.bytes.len());
         }
     }
@@ -187,6 +197,15 @@ impl BlobCache {
     pub(crate) fn put_size(&self, hash_hex: String, size: Option<u64>) {
         if let Ok(mut cache) = self.sizes.lock() {
             cache.put(hash_hex, size);
+        }
+    }
+
+    pub(crate) fn remove(&self, hash_hex: &str) {
+        if let Ok(mut cache) = self.bodies.lock() {
+            cache.remove(hash_hex);
+        }
+        if let Ok(mut cache) = self.sizes.lock() {
+            cache.remove(hash_hex);
         }
     }
 }

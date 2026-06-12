@@ -146,6 +146,67 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
     }
 }
 
+#[tokio::test]
+async fn native_store_endpoint_round_trips_raw_blob() {
+    let temp = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), vec![]);
+    let body = Bytes::from_static(b"tiny");
+    let hash = hashtree_core::sha256(&body);
+    let hash_hex = to_hex(&hash);
+
+    let put = iris_store_put(
+        AxumState(state.clone()),
+        AxumPath(hash_hex.clone()),
+        body.clone(),
+    )
+    .await
+    .into_response();
+    assert_eq!(put.status(), StatusCode::CREATED);
+
+    let head = iris_store_head(AxumState(state.clone()), AxumPath(hash_hex.clone()))
+        .await
+        .into_response();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["content-length"], body.len().to_string());
+
+    let get = iris_store_get(AxumState(state.clone()), AxumPath(hash_hex.clone()))
+        .await
+        .into_response();
+    assert_eq!(get.status(), StatusCode::OK);
+    let bytes = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(bytes, body);
+
+    let delete = iris_store_delete(AxumState(state.clone()), AxumPath(hash_hex.clone()))
+        .await
+        .into_response();
+    assert_eq!(delete.status(), StatusCode::OK);
+    assert_eq!(store.get_blob(&hash).unwrap(), None);
+
+    let missing = iris_store_get(AxumState(state), AxumPath(hash_hex))
+        .await
+        .into_response();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn native_store_endpoint_rejects_hash_mismatch() {
+    let temp = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp.path().join("store")).unwrap());
+    let state = test_app_state(store, vec![]);
+    let wrong_hash = to_hex(&[1u8; 32]);
+
+    let response = iris_store_put(
+        AxumState(state),
+        AxumPath(wrong_hash),
+        Bytes::from_static(b"tiny"),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 fn allow_plaintext_read_author(state: &mut AppState, keys: &Keys) -> String {
     let npub = keys.public_key().to_bech32().unwrap();
     state.allowed_pubkeys.insert(keys.public_key().to_hex());

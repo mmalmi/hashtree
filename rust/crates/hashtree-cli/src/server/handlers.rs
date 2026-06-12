@@ -20,8 +20,8 @@ use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use hashtree_core::{
-    from_hex, nhash_decode, to_hex, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType, Store,
-    TreeEntry,
+    from_hex, nhash_decode, sha256, to_hex, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType,
+    Store, TreeEntry,
 };
 use hashtree_resolver::{
     nostr::{NostrResolverConfig, NostrRootResolver},
@@ -90,6 +90,182 @@ pub async fn htree_test() -> impl IntoResponse {
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Body::from("ok"))
         .unwrap()
+}
+
+fn invalid_native_store_hash() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::from("invalid store hash"))
+        .unwrap()
+}
+
+fn parse_native_store_hash(hash_hex: &str) -> Result<[u8; 32], Response<Body>> {
+    if hash_hex.len() != 64 || !hash_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(invalid_native_store_hash());
+    }
+    from_hex(hash_hex).map_err(|_| invalid_native_store_hash())
+}
+
+pub async fn iris_store_get(
+    State(state): State<AppState>,
+    Path(hash_hex): Path<String>,
+) -> impl IntoResponse {
+    let hash = match parse_native_store_hash(&hash_hex) {
+        Ok(hash) => hash,
+        Err(response) => return response,
+    };
+
+    match get_blob_without_blocking_runtime(&state, hash).await {
+        Ok(Some(data)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, data.len())
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(data))
+            .unwrap(),
+        Ok(None) => not_found_response("not found"),
+        Err(error) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(error))
+            .unwrap(),
+    }
+}
+
+pub async fn iris_store_head(
+    State(state): State<AppState>,
+    Path(hash_hex): Path<String>,
+) -> impl IntoResponse {
+    let hash = match parse_native_store_hash(&hash_hex) {
+        Ok(hash) => hash,
+        Err(response) => return response,
+    };
+
+    match get_blob_size_without_blocking_runtime(&state, hash).await {
+        Ok(Some(size)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, size)
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::empty())
+            .unwrap(),
+        Ok(None) => not_found_response(Body::empty()),
+        Err(error) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(error))
+            .unwrap(),
+    }
+}
+
+pub async fn iris_store_put(
+    State(state): State<AppState>,
+    Path(hash_hex): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let expected_hash = match parse_native_store_hash(&hash_hex) {
+        Ok(hash) => hash,
+        Err(response) => return response,
+    };
+    let actual_hash = sha256(&body);
+    if actual_hash != expected_hash {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from("content hash mismatch"))
+            .unwrap();
+    }
+
+    let existed = state.store.blob_exists(&expected_hash).unwrap_or(false);
+    let store = state.store.clone();
+    let blob_cache = state.blob_cache.clone();
+    let data = body.to_vec();
+    let size = data.len() as u64;
+    match tokio::task::spawn_blocking(move || {
+        let result = store.put_cached_blob(&data).map_err(|e| e.to_string());
+        if let Ok(hash_hex) = &result {
+            blob_cache.put_size(hash_hex.clone(), Some(size));
+            blob_cache.put_body(hash_hex.clone(), &data);
+        }
+        result
+    })
+    .await
+    {
+        Ok(Ok(_)) => Response::builder()
+            .status(if existed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            })
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(format!(
+                r#"{{"hash":"{}","stored":true}}"#,
+                hash_hex.to_ascii_lowercase()
+            )))
+            .unwrap(),
+        Ok(Err(error)) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(error))
+            .unwrap(),
+        Err(error) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(format!("store task failed: {error}")))
+            .unwrap(),
+    }
+}
+
+pub async fn iris_store_delete(
+    State(state): State<AppState>,
+    Path(hash_hex): Path<String>,
+) -> impl IntoResponse {
+    let hash = match parse_native_store_hash(&hash_hex) {
+        Ok(hash) => hash,
+        Err(response) => return response,
+    };
+
+    let store = state.store.clone();
+    let blob_cache = state.blob_cache.clone();
+    let normalized_hash_hex = hash_hex.to_ascii_lowercase();
+    match tokio::task::spawn_blocking(move || store.router().delete_sync(&hash)).await {
+        Ok(Ok(deleted)) => {
+            if deleted {
+                blob_cache.remove(&normalized_hash_hex);
+            }
+            Response::builder()
+                .status(if deleted {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                })
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::empty())
+                .unwrap()
+        }
+        Ok(Err(error)) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(error.to_string()))
+            .unwrap(),
+        Err(error) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::from(format!("delete task failed: {error}")))
+            .unwrap(),
+    }
 }
 
 pub async fn p2p_signal(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
