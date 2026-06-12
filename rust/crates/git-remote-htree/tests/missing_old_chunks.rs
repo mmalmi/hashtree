@@ -148,9 +148,9 @@ async fn upload_blob(
     let mut state = state.lock().expect("state lock poisoned");
     let was_new = state.blobs.insert(computed_hash, body.to_vec()).is_none();
     if was_new {
-        StatusCode::OK
+        StatusCode::CREATED
     } else {
-        StatusCode::CONFLICT
+        StatusCode::OK
     }
 }
 

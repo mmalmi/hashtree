@@ -325,12 +325,14 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
     async fn recv(&self) -> Option<FipsEndpointPacket> {
         loop {
             let message = fips_core::FipsEndpoint::recv(self).await?;
-            if let Some(peer_id) = message.source_npub {
-                return Some(FipsEndpointPacket {
-                    peer_id,
-                    data: message.data,
-                });
+            let peer_id = message.source_npub();
+            if peer_id.is_empty() {
+                continue;
             }
+            return Some(FipsEndpointPacket {
+                peer_id,
+                data: message.data,
+            });
         }
     }
 

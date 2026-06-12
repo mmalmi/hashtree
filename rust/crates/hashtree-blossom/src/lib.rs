@@ -319,7 +319,7 @@ impl BlossomClient {
     /// Upload data only if it doesn't already exist
     /// Returns (hash, was_uploaded) tuple
     ///
-    /// For small files (<256KB), skips existence check and relies on server returning 409.
+    /// For small files (<256KB), skips existence check and uses the upload response status.
     /// For large files (>=256KB), does HEAD check first to save bandwidth.
     /// Retries up to 3 times with exponential backoff on transient failures.
     pub async fn upload_if_missing(&self, data: &[u8]) -> Result<(String, bool), BlossomError> {
@@ -921,7 +921,7 @@ impl BlossomClient {
     }
 
     /// Upload to a single server
-    /// Returns Ok(Uploaded) if uploaded, Ok(AlreadyExists) if already exists (409)
+    /// Returns Ok(Uploaded) if uploaded, Ok(AlreadyExists) if already exists.
     async fn upload_to_server(
         &self,
         server: &str,
@@ -950,10 +950,10 @@ impl BlossomClient {
             })?;
 
         let status = resp.status();
-        if status.is_success() {
-            Ok(UploadOutcome::Uploaded)
-        } else if status.as_u16() == 409 {
+        if status == StatusCode::OK || status.as_u16() == 409 {
             Ok(UploadOutcome::AlreadyExists)
+        } else if status.is_success() {
+            Ok(UploadOutcome::Uploaded)
         } else {
             let text = resp.text().await.unwrap_or_default();
             let detail = format!("{}: {}", status, text);
@@ -1213,6 +1213,8 @@ mod tests {
                     let reason = match status {
                         200 => "OK",
                         403 => "Forbidden",
+                        201 => "Created",
+                        202 => "Accepted",
                         409 => "Conflict",
                         429 => "Too Many Requests",
                         500 => "Internal Server Error",
@@ -1509,7 +1511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_if_missing_retries_transient_server_errors() {
-        let mut server = TestUploadServer::new(vec![500, 500, 200]);
+        let mut server = TestUploadServer::new(vec![500, 500, 201]);
         let keys = Keys::generate();
         let client = BlossomClient::new_empty(keys).with_write_servers(vec![server.url.clone()]);
 
@@ -1522,6 +1524,40 @@ mod tests {
 
         server.wait_for_requests().await;
         assert_eq!(server.request_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_upload_if_missing_treats_200_as_already_exists() {
+        let mut server = TestUploadServer::new(vec![200]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys).with_write_servers(vec![server.url.clone()]);
+
+        let (hash, uploaded) = client
+            .upload_if_missing(b"test data")
+            .await
+            .expect("upload");
+        assert!(!uploaded);
+        assert_eq!(hash, compute_sha256(b"test data"));
+
+        server.wait_for_requests().await;
+        assert_eq!(server.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_upload_if_missing_accepts_legacy_409_as_already_exists() {
+        let mut server = TestUploadServer::new(vec![409]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys).with_write_servers(vec![server.url.clone()]);
+
+        let (hash, uploaded) = client
+            .upload_if_missing(b"test data")
+            .await
+            .expect("upload");
+        assert!(!uploaded);
+        assert_eq!(hash, compute_sha256(b"test data"));
+
+        server.wait_for_requests().await;
+        assert_eq!(server.request_count(), 1);
     }
 
     #[tokio::test]
@@ -1542,7 +1578,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_to_selected_servers_retries_transient_failures() {
-        let mut server = TestUploadServer::new(vec![503, 200]);
+        let mut server = TestUploadServer::new(vec![503, 201]);
         let keys = Keys::generate();
         let client = BlossomClient::new_empty(keys);
         let servers = vec![server.url.clone()];

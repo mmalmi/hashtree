@@ -367,7 +367,9 @@ impl HashtreeServer {
             )
             .route(
                 "/upload",
-                put(blossom::upload_blob).options(blossom::cors_preflight),
+                put(blossom::upload_blob)
+                    .head(blossom::head_upload)
+                    .options(blossom::cors_preflight),
             )
             .route(
                 "/upload/batch",

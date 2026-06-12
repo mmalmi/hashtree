@@ -186,9 +186,9 @@ async fn upload_blob(
 
     let mut state = state.lock().expect("state lock");
     if state.blobs.insert(computed_hash, body.to_vec()).is_some() {
-        StatusCode::CONFLICT
-    } else {
         StatusCode::OK
+    } else {
+        StatusCode::CREATED
     }
 }
 

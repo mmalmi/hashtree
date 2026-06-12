@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BlossomStore } from '../src/store/blossom.js';
+import { BlossomStore, type BlossomSigner } from '../src/store/blossom.js';
 import { sha256 } from '../src/hash.js';
 import { toHex } from '../src/types.js';
 import type { Hash } from '../src/types.js';
@@ -10,13 +10,31 @@ async function makeHash(): Promise<Hash> {
   return await sha256(DATA) as Hash;
 }
 
-function makeResponse(status: number, body?: Uint8Array): Response {
+function makeResponse(status: number, body?: Uint8Array, jsonBody?: unknown): Response {
+  const textBody = jsonBody === undefined ? '' : JSON.stringify(jsonBody);
   return {
     ok: status >= 200 && status < 300,
     status,
     arrayBuffer: async () => (body ?? new Uint8Array()).buffer,
+    text: async () => textBody,
+    json: async () => {
+      if (jsonBody === undefined) {
+        throw new SyntaxError('Unexpected end of JSON input');
+      }
+      return jsonBody;
+    },
   } as Response;
 }
+
+const signer: BlossomSigner = async () => ({
+  kind: 24242,
+  created_at: 1,
+  content: '',
+  tags: [],
+  pubkey: '0'.repeat(64),
+  id: '1'.repeat(64),
+  sig: '2'.repeat(128),
+});
 
 describe('BlossomStore', () => {
   afterEach(() => {
@@ -165,15 +183,7 @@ describe('BlossomStore', () => {
 
     const store = new BlossomStore({
       servers: [{ url: 'https://write.example', write: true }],
-      signer: async () => ({
-        kind: 24242,
-        created_at: 1,
-        content: '',
-        tags: [],
-        pubkey: '0'.repeat(64),
-        id: '1'.repeat(64),
-        sig: '2'.repeat(128),
-      }),
+      signer,
       putTimeoutMs: 5,
       onUploadProgress: (_serverUrl, status) => uploadEvents.push(status),
     });
@@ -190,5 +200,59 @@ describe('BlossomStore', () => {
       }),
     );
     expect(uploadEvents).toEqual(['failed']);
+  });
+
+  it('treats 201 upload responses as newly stored', async () => {
+    const hash = await makeHash();
+    const hashHex = toHex(hash);
+    const uploadEvents: string[] = [];
+
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(201, undefined, { sha256: hashHex })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://write.example', write: true }],
+      signer,
+      onUploadProgress: (_serverUrl, status) => uploadEvents.push(status),
+    });
+
+    await expect(store.put(hash, DATA)).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith('https://write.example/upload', expect.objectContaining({ method: 'PUT' }));
+    expect(uploadEvents).toEqual(['uploaded']);
+  });
+
+  it('treats BUD-02 200 upload responses as already stored', async () => {
+    const hash = await makeHash();
+    const hashHex = toHex(hash);
+    const uploadEvents: string[] = [];
+
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(200, undefined, { sha256: hashHex })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://write.example', write: true }],
+      signer,
+      onUploadProgress: (_serverUrl, status) => uploadEvents.push(status),
+    });
+
+    await expect(store.put(hash, DATA)).resolves.toBe(false);
+    expect(uploadEvents).toEqual(['skipped']);
+  });
+
+  it('accepts legacy 409 upload responses as already stored', async () => {
+    const hash = await makeHash();
+    const uploadEvents: string[] = [];
+
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(409)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://write.example', write: true }],
+      signer,
+      onUploadProgress: (_serverUrl, status) => uploadEvents.push(status),
+    });
+
+    await expect(store.put(hash, DATA)).resolves.toBe(false);
+    expect(uploadEvents).toEqual(['skipped']);
   });
 });

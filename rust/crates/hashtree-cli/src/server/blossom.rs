@@ -34,6 +34,8 @@ const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
 const IMMUTABLE_NOT_FOUND_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=5";
 const OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS_ENV: &str = "HTREE_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS";
 const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS: u64 = 15_000;
+const BLOSSOM_PUBLIC_BASE_URL_ENV: &str = "HTREE_BLOSSOM_PUBLIC_BASE_URL";
+const LEGACY_BLOSSOM_PUBLIC_BASE_URL_ENV: &str = "HASHTREE_BLOSSOM_PUBLIC_BASE_URL";
 
 /// Default maximum upload size in bytes (5 MB)
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
@@ -443,6 +445,84 @@ pub async fn cors_preflight(headers: HeaderMap) -> impl IntoResponse {
         .unwrap()
 }
 
+/// HEAD /upload - BUD-06 upload preflight.
+pub async fn head_upload(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let sha256_hex = match first_header_value(&headers, "x-sha-256") {
+        Some(hash) if is_valid_sha256(&hash) => hash.to_ascii_lowercase(),
+        Some(_) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", "Invalid X-SHA-256 header")
+                .body(Body::empty())
+                .unwrap();
+        }
+        None => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", "Missing X-SHA-256 header")
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+
+    let content_length = match first_header_value(&headers, "x-content-length")
+        .or_else(|| first_header_value(&headers, header::CONTENT_LENGTH.as_str()))
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        Some(length) => length,
+        None => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", "Missing or invalid X-Content-Length header")
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+
+    if content_length > state.max_upload_bytes {
+        return Response::builder()
+            .status(StatusCode::PAYLOAD_TOO_LARGE)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header("X-Reason", "Upload exceeds maximum size")
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    let content_type = first_header_value(&headers, "x-content-type")
+        .or_else(|| first_header_value(&headers, header::CONTENT_TYPE.as_str()))
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    if !is_chk_content_type(&content_type_base(&content_type)) {
+        let auth = verify_blossom_auth(&headers, "upload", Some(&sha256_hex));
+        let can_upload_raw = auth
+            .as_ref()
+            .map(|auth| can_accept_upload_author(&state, &auth.pubkey))
+            .unwrap_or(false);
+        if !can_upload_raw {
+            let status = if auth.is_err() {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            return Response::builder()
+                .status(status)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", "Raw media uploads require write access")
+                .body(Body::empty())
+                .unwrap();
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn encode_upload_check_bitset(bits: &[bool]) -> String {
     let mut bytes = vec![0u8; bits.len().div_ceil(8)];
     for (index, present) in bits.iter().enumerate() {
@@ -688,6 +768,180 @@ fn upload_descriptor_response(status: StatusCode, descriptor: &BlobDescriptor) -
         .unwrap()
 }
 
+fn make_blob_descriptor(
+    headers: &HeaderMap,
+    sha256_hex: String,
+    size: u64,
+    mime_type: String,
+    uploaded: u64,
+) -> BlobDescriptor {
+    let url = blossom_blob_url(headers, &sha256_hex, &mime_type);
+    BlobDescriptor {
+        url,
+        sha256: sha256_hex,
+        size,
+        mime_type,
+        uploaded,
+    }
+}
+
+fn blossom_blob_url(headers: &HeaderMap, sha256_hex: &str, mime_type: &str) -> String {
+    format!(
+        "{}/{}{}",
+        blossom_public_base_url(headers),
+        sha256_hex,
+        descriptor_extension_for_mime(mime_type)
+    )
+}
+
+fn descriptor_extension_for_mime(mime_type: &str) -> &'static str {
+    let base = content_type_base(mime_type);
+    mime_to_extension(&base)
+}
+
+fn blossom_public_base_url(headers: &HeaderMap) -> String {
+    if let Some(configured) = configured_public_base_url() {
+        return configured;
+    }
+
+    let host = first_header_value(headers, "x-forwarded-host")
+        .and_then(|value| normalize_host(&value))
+        .or_else(|| {
+            forwarded_header_param(headers, "host").and_then(|value| normalize_host(&value))
+        })
+        .or_else(|| {
+            first_header_value(headers, header::HOST.as_str())
+                .and_then(|value| normalize_host(&value))
+        });
+
+    let Some(host) = host else {
+        return "http://localhost".to_string();
+    };
+
+    let scheme = first_header_value(headers, "x-forwarded-proto")
+        .and_then(|value| normalize_scheme(&value))
+        .or_else(|| {
+            forwarded_header_param(headers, "proto").and_then(|value| normalize_scheme(&value))
+        })
+        .or_else(|| cloudflare_visitor_scheme(headers))
+        .unwrap_or_else(|| default_scheme_for_host(&host).to_string());
+
+    format!("{scheme}://{host}")
+}
+
+fn configured_public_base_url() -> Option<String> {
+    [
+        BLOSSOM_PUBLIC_BASE_URL_ENV,
+        LEGACY_BLOSSOM_PUBLIC_BASE_URL_ENV,
+    ]
+    .into_iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| normalize_public_base_url(&value))
+    })
+}
+
+fn normalize_public_base_url(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+        && !trimmed.contains('?')
+        && !trimmed.contains('#')
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn first_header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(name)?.to_str().ok()?;
+    first_header_component(raw)
+}
+
+fn first_header_component(value: &str) -> Option<String> {
+    clean_header_value(value.split(',').next().unwrap_or(value))
+}
+
+fn forwarded_header_param(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get("forwarded")?.to_str().ok()?;
+    let first = raw.split(',').next().unwrap_or(raw);
+    for part in first.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case(name) {
+            return clean_header_value(value);
+        }
+    }
+    None
+}
+
+fn clean_header_value(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('"').trim();
+    if trimmed.is_empty() || trimmed.chars().any(|ch| ch.is_control()) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_scheme(value: &str) -> Option<String> {
+    match value.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+        "http" => Some("http".to_string()),
+        "https" => Some("https".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_host(value: &str) -> Option<String> {
+    let mut host = value.trim().trim_matches('"').trim();
+    if let Some(rest) = host.strip_prefix("http://") {
+        host = rest;
+    } else if let Some(rest) = host.strip_prefix("https://") {
+        host = rest;
+    }
+    host = host.split('/').next().unwrap_or(host).trim();
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_ascii_whitespace() || ch == '\\')
+    {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+fn cloudflare_visitor_scheme(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get("cf-visitor")?.to_str().ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    parsed
+        .get("scheme")
+        .and_then(|value| value.as_str())
+        .and_then(normalize_scheme)
+}
+
+fn default_scheme_for_host(host: &str) -> &'static str {
+    let host_without_port = host
+        .trim_start_matches('[')
+        .split(']')
+        .next()
+        .unwrap_or(host)
+        .split(':')
+        .next()
+        .unwrap_or(host)
+        .to_ascii_lowercase();
+    if host_without_port == "localhost"
+        || host_without_port == "::1"
+        || host_without_port.starts_with("127.")
+    {
+        "http"
+    } else {
+        "https"
+    }
+}
+
 fn optimistic_upload_queue_timeout() -> Duration {
     let millis = std::env::var(OPTIMISTIC_UPLOAD_QUEUE_TIMEOUT_MS_ENV)
         .ok()
@@ -909,14 +1163,7 @@ pub async fn upload_blob(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let ext = mime_to_extension(&content_type_base(&content_type));
-    let descriptor = BlobDescriptor {
-        url: format!("/{}{}", sha256_hex, ext),
-        sha256: sha256_hex.clone(),
-        size,
-        mime_type: content_type,
-        uploaded: now,
-    };
+    let descriptor = make_blob_descriptor(&headers, sha256_hex.clone(), size, content_type, now);
 
     if state.optimistic_blossom_uploads && optimistic_upload_is_inflight(&sha256_hex) {
         return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
@@ -993,7 +1240,7 @@ pub async fn upload_blob(
                         .unwrap();
                 }
             }
-            return upload_descriptor_response(StatusCode::CONFLICT, &descriptor);
+            return upload_descriptor_response(StatusCode::OK, &descriptor);
         }
         Ok(false) => {}
         Err(error) => {
@@ -1014,7 +1261,7 @@ pub async fn upload_blob(
     .await;
 
     match store_result {
-        Ok(()) => upload_descriptor_response(StatusCode::OK, &descriptor),
+        Ok(()) => upload_descriptor_response(StatusCode::CREATED, &descriptor),
         Err(e) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -1136,14 +1383,13 @@ pub async fn upload_blob_batch(
         }
         validate_ms += validate_started.elapsed().as_millis();
 
-        let ext = mime_to_extension(&content_type);
-        descriptors.push(BlobDescriptor {
-            url: format!("/{}{}", sha256_hex, ext),
-            sha256: sha256_hex,
-            size: data.len() as u64,
-            mime_type: content_type,
-            uploaded: now,
-        });
+        descriptors.push(make_blob_descriptor(
+            &headers,
+            sha256_hex,
+            data.len() as u64,
+            content_type,
+            now,
+        ));
         items.push((actual_hash, data));
     }
     let prepare_ms = started_at.elapsed().as_millis();
@@ -1413,11 +1659,20 @@ pub async fn list_blobs(
             let limit = query.limit.unwrap_or(100).min(1000);
             filtered.truncate(limit);
 
+            let descriptors: Vec<_> = filtered
+                .into_iter()
+                .map(|mut descriptor| {
+                    descriptor.url =
+                        blossom_blob_url(&headers, &descriptor.sha256, &descriptor.mime_type);
+                    descriptor
+                })
+                .collect();
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_string(&filtered).unwrap()))
+                .body(Body::from(serde_json::to_string(&descriptors).unwrap()))
                 .unwrap()
         }
         Err(_) => Response::builder()
@@ -1475,7 +1730,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "text/plain" => ".txt",
         "text/html" => ".html",
         "application/json" => ".json",
-        _ => "",
+        _ => ".bin",
     }
 }
 
@@ -1556,6 +1811,43 @@ mod tests {
         )
     }
 
+    fn create_list_auth_header(keys: &nostr::Keys) -> String {
+        use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
+
+        let now = Timestamp::now();
+        let event = EventBuilder::new(Kind::Custom(BLOSSOM_AUTH_KIND), "")
+            .tags(vec![
+                Tag::custom(TagKind::Custom("t".into()), vec!["list".to_string()]),
+                Tag::custom(
+                    TagKind::Custom("expiration".into()),
+                    vec![(now.as_secs() + 300).to_string()],
+                ),
+            ])
+            .custom_created_at(now)
+            .sign_with_keys(keys)
+            .expect("sign blossom list auth");
+        let json = serde_json::to_vec(&event).expect("serialize list auth event");
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(json)
+        )
+    }
+
+    fn hosted_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "origin.internal".parse().unwrap());
+        headers.insert("x-forwarded-host", "cdn.iris.to".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers
+    }
+
+    async fn read_descriptor(response: axum::response::Response) -> BlobDescriptor {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read descriptor body");
+        serde_json::from_slice(&body).expect("parse descriptor")
+    }
+
     fn upload_check_bits(response: UploadCheckResponse) -> Vec<bool> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(response.present)
@@ -1608,8 +1900,23 @@ mod tests {
         assert_eq!(mime_to_extension("image/png"), ".png");
         assert_eq!(mime_to_extension("image/jpeg"), ".jpg");
         assert_eq!(mime_to_extension("video/mp4"), ".mp4");
-        assert_eq!(mime_to_extension("application/octet-stream"), "");
-        assert_eq!(mime_to_extension("unknown/type"), "");
+        assert_eq!(mime_to_extension("application/octet-stream"), ".bin");
+        assert_eq!(mime_to_extension("unknown/type"), ".bin");
+    }
+
+    #[test]
+    fn blossom_blob_url_uses_forwarded_public_origin_and_extension() {
+        let headers = hosted_headers();
+        let hash = "00".repeat(32);
+
+        assert_eq!(
+            blossom_blob_url(&headers, &hash, "application/octet-stream"),
+            format!("https://cdn.iris.to/{hash}.bin")
+        );
+        assert_eq!(
+            blossom_blob_url(&headers, &hash, "image/png"),
+            format!("https://cdn.iris.to/{hash}.png")
+        );
     }
 
     #[tokio::test]
@@ -1684,6 +1991,118 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn head_upload_accepts_valid_bud06_preflight() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(store);
+        let mut headers = hosted_headers();
+        headers.insert("x-sha-256", "00".repeat(32).parse().unwrap());
+        headers.insert("x-content-length", "16".parse().unwrap());
+        headers.insert(
+            "x-content-type",
+            "application/octet-stream".parse().unwrap(),
+        );
+
+        let response = head_upload(State(state), headers).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_blob_returns_bud02_statuses_and_public_descriptor_url() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(store);
+        let keys = nostr::Keys::generate();
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let body = axum::body::Bytes::from((0u8..=255).collect::<Vec<_>>());
+        let hash_hex = hex::encode(sha256(&body));
+        let first = upload_blob(State(state.clone()), headers.clone(), body.clone())
+            .await
+            .into_response();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first_descriptor = read_descriptor(first).await;
+        assert_eq!(
+            first_descriptor.url,
+            format!("https://cdn.iris.to/{hash_hex}.bin")
+        );
+        assert_eq!(first_descriptor.sha256, hash_hex);
+
+        let second = upload_blob(State(state), headers, body)
+            .await
+            .into_response();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_descriptor = read_descriptor(second).await;
+        assert_eq!(second_descriptor.url, first_descriptor.url);
+    }
+
+    #[tokio::test]
+    async fn list_blobs_returns_public_descriptor_urls_with_extensions() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let pubkey_bytes: [u8; 32] = from_hex(&pubkey_hex).expect("pubkey bytes");
+        let body = (0u8..=255).collect::<Vec<_>>();
+        let hash_hex = store
+            .put_owned_blob(&body, &pubkey_bytes)
+            .expect("store owned blob");
+        let state = test_app_state(store);
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_list_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+
+        let response = list_blobs(
+            State(state),
+            Path(pubkey_hex),
+            Query(ListQuery {
+                since: None,
+                until: None,
+                limit: None,
+                cursor: None,
+            }),
+            headers,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read list body");
+        let descriptors: Vec<BlobDescriptor> =
+            serde_json::from_slice(&body).expect("parse descriptor list");
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors[0].url,
+            format!("https://cdn.iris.to/{hash_hex}.bin")
+        );
     }
 
     #[tokio::test]
@@ -1763,7 +2182,7 @@ mod tests {
         let response = upload_blob(State(state), headers, body)
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

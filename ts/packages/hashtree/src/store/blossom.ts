@@ -546,11 +546,11 @@ export class BlossomStore implements StoreWithMeta {
             throw new Error(`${server.url}: ${error}`);
           }
 
-          // 409 means already exists - count as skipped
-          const alreadyExisted = response.status === 409;
+          // 200 (BUD-02) means already exists; 409 is accepted for older servers.
+          const alreadyExisted = response.status === 200 || response.status === 409;
 
           // Verify blossom received the correct data by checking returned hash
-          if (!alreadyExisted) {
+          if (response.status !== 409) {
             try {
               const result = await response.json();
               if (result.sha256 && result.sha256 !== hashHex) {

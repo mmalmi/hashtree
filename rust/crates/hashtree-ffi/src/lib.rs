@@ -289,7 +289,7 @@ mod tests {
         let hash = compute_sha256(&body);
         let mut blobs = state.blobs.write().unwrap();
         if blobs.contains_key(&hash) {
-            return StatusCode::CONFLICT;
+            return StatusCode::OK;
         }
         blobs.insert(hash, body.to_vec());
         StatusCode::CREATED
