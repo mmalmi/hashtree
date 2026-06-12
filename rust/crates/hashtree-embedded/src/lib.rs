@@ -29,7 +29,7 @@ pub struct HostDaemonStatus {
 
 pub struct HostDaemonRuntime {
     runtime: tokio::runtime::Runtime,
-    info: EmbeddedDaemonInfo,
+    info: Option<EmbeddedDaemonInfo>,
     bind_address: String,
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -90,7 +90,7 @@ impl HostDaemonRuntime {
 
         Ok(Self {
             runtime,
-            info,
+            info: Some(info),
             bind_address,
             config_dir,
             data_dir,
@@ -98,9 +98,13 @@ impl HostDaemonRuntime {
     }
 
     pub fn status(&self) -> HostDaemonStatus {
+        let info = self
+            .info
+            .as_ref()
+            .expect("host daemon status requested after shutdown");
         HostDaemonStatus {
-            base_url: format!("http://{}", self.info.addr),
-            self_npub: self.info.npub.clone(),
+            base_url: format!("http://{}", info.addr),
+            self_npub: info.npub.clone(),
             config_dir: self.config_dir.clone(),
             data_dir: self.data_dir.clone(),
         }
@@ -111,17 +115,18 @@ impl HostDaemonRuntime {
     }
 
     pub fn self_npub(&self) -> &str {
-        &self.info.npub
+        &self
+            .info
+            .as_ref()
+            .expect("host daemon identity requested after shutdown")
+            .npub
     }
 
     pub fn reload(&mut self) -> Result<HostDaemonStatus> {
-        let controller = self.info.daemon_controller.clone();
-        self.runtime.block_on(async move {
-            controller.shutdown().await;
-        });
+        self.shutdown_current();
 
         let config = browser_config(&self.data_dir, &self.config_dir);
-        self.info = self
+        let info = self
             .runtime
             .block_on(hashtree_cli::daemon::start_embedded(
                 EmbeddedDaemonOptions {
@@ -135,14 +140,24 @@ impl HostDaemonRuntime {
                 },
             ))
             .context("reload embedded hashtree daemon")?;
-        self.bind_address = self.info.addr.clone();
+        self.bind_address = info.addr.clone();
+        self.info = Some(info);
         Ok(self.status())
     }
 
     pub fn shutdown(&mut self) {
-        let controller = self.info.daemon_controller.clone();
+        self.shutdown_current();
+    }
+
+    fn shutdown_current(&mut self) {
+        let Some(info) = self.info.take() else {
+            return;
+        };
+        let controller = info.daemon_controller.clone();
         self.runtime.block_on(async move {
             controller.shutdown().await;
+            drop(info);
+            tokio::task::yield_now().await;
         });
     }
 }
@@ -319,6 +334,8 @@ mod tests {
 
         let stopped = reqwest::blocking::get(format!("{}/htree/test", status.base_url)).is_err();
         assert!(stopped, "expected host daemon shutdown to stop serving");
+
+        runtime.shutdown();
     }
 
     #[test]
