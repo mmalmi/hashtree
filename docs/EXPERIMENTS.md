@@ -621,6 +621,10 @@ Results:
 | Public edge binary batch, 64 blobs/request | c4, 256 x 256 KiB | 5.69 MiB/s | p95 8.59 s |
 | Public edge binary batch, 128 blobs/request | c2, 256 x 256 KiB | 4.16 MiB/s | p95 10.00 s |
 | Public edge binary batch, 256 blobs/request | c1, 256 x 256 KiB | 3.07 MiB/s | p95 10.33 s |
+| Public edge binary batch, 16 blobs/request, post git-target tuning | c8, 256 x 256 KiB | 6.19 MiB/s | p95 4.76 s |
+| Public edge binary batch, 16 blobs/request, post git-target tuning | c10, 256 x 256 KiB | 6.65 MiB/s | p95 5.07 s |
+| Public edge binary batch, 16 blobs/request, post git-target tuning | c12, 256 x 256 KiB | 7.47 MiB/s | p95 6.10 s |
+| Public edge binary batch, 16 blobs/request, post git-target tuning | c16, 256 x 256 KiB | 5.75 MiB/s | p95 9.20 s |
 | Public edge read of fresh binary-batch blobs | GET, c32, 256 x 256 KiB | 26.05 MiB/s | p95 0.32 s |
 | Origin read of fresh binary-batch blobs | GET, c32, 256 x 256 KiB | 2160 MiB/s | cache-hot local read |
 
@@ -634,6 +638,9 @@ Interpretation:
   65-68 MiB/s with 64-256 blobs/request. The public edge path penalizes the same
   larger request bodies, so `git-remote-htree` defaults to a 4 MiB batch target
   and exposes `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` for origin/local tuning.
+- Short post-change public probes confirmed 16-blob batches still peak near c12
+  under the current baseline traffic. Raising client concurrency to c16 reduced
+  throughput and nearly doubled p95 latency.
 - Temporarily raising the live blob write queue limit from 8 to 12 improved
   origin c16 throughput but reduced public-edge c12 throughput and worsened
   latency. The live queue limit was restored to 8.
