@@ -773,3 +773,57 @@ Interpretation:
   with upstream/router inbound filtering. The temporary DNS/proxy exposure was
   removed after the test. A usable direct path needs explicit public TCP ingress
   to the local fileserver or a better non-Worker upload transport.
+
+### 2026-06-15: Public upload redirect and write-concurrency check
+
+Setup:
+- Same production-like local origin as above, with hot LMDB metadata, external
+  packed blobs, external blob sync enabled, and live blob write queue limit 4.
+- The public Worker was briefly configured to return a `307` for large
+  `/upload/batch-binary` bodies to a public tunnel hostname that reaches the
+  same local-origin fileserver. No R2/S3/object-store hot path was used.
+- Payloads were deterministic 256 KiB blobs. Batch size is blob count per
+  request; throughput is end-to-end from a public client through the public
+  hostname.
+
+Results:
+
+| Path | Shape | Throughput | Latency notes |
+| --- | --- | ---: | --- |
+| Public Worker, large redirect enabled | c4, 96 blobs/request | 0 MiB/s | failed: cross-host 307 dropped `Authorization` in reqwest, origin returned 401 |
+| Public Worker, redirect disabled | c4, 96 blobs/request | 7.31 MiB/s | p50 12.01 s |
+| Public tunnel, no Worker body handler | c4, 96 blobs/request | 8.69 MiB/s | p50 10.79 s |
+| Public Worker, 16 blobs/request | c4 | 7.32-8.35 MiB/s | p95 about 2.5-2.8 s in clean sequential runs |
+| Public Worker, 16 blobs/request | c8 | 7.74 MiB/s | p95 5.48 s |
+| Public Worker, 16 blobs/request | c12 | 8.00-8.50 MiB/s | p95 about 7.1-7.5 s |
+| Public Worker, 32 blobs/request | c4 | 8.38 MiB/s | p95 4.98 s |
+| Public Worker, 32 blobs/request | c8 | 8.09 MiB/s | p95 8.44 s |
+| Public Worker, 32 blobs/request | c12 | 7.68 MiB/s | p95 12.42 s |
+| Public Worker, 64 blobs/request | c4 | 6.93 MiB/s | p95 9.38 s |
+| Public Worker, 64 blobs/request | c8 | 7.36 MiB/s | p95 12.95 s |
+| Public Worker, 64 blobs/request | c12 | 8.19 MiB/s | p95 11.62 s |
+| Public tunnel, 16 blobs/request | c4 | 7.45 MiB/s | p95 2.47 s |
+| Public tunnel, 16 blobs/request | c12 | 8.89 MiB/s | p95 6.21 s |
+
+Interpretation:
+- Cross-origin upload redirects are not a safe generic accelerator for
+  authenticated Blossom writes. Common HTTP clients, including reqwest, strip
+  `Authorization` when following a redirect to another host. The Worker redirect
+  option was changed to require an explicit enable flag and the live deployment
+  was redeployed with no redirect binding; large unauthenticated test bodies now
+  return the normal validation error instead of redirecting.
+- Four server-side blob write permits remain reasonable. Origin-local c4 writes
+  already reached about 68 MiB/s in the previous test, while public c4-c12 writes
+  all cluster around 8 MiB/s. Raising public client concurrency mostly increases
+  tail latency once the tunnel is saturated.
+- The current git-upload default of roughly 4 MiB batch bodies is still a good
+  conservative public default. Today's matrix found 8 MiB bodies can tie or
+  slightly beat 4 MiB in one run, but the gain is small and less stable than the
+  transport ceiling. Use `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` for controlled
+  origin/local experiments rather than raising the public default blindly.
+- LMDB and the local fileserver are no longer the slow path for these writes.
+  The remaining gap to modern throughput is public ingress: Worker request-body
+  proxying plus Cloudflare Tunnel transport. A truly large improvement needs a
+  better direct local-fileserver upload transport, long-lived upload stream, or
+  git pack/tail-pack upload path that reduces per-request edge overhead without
+  moving hot storage into a cloud object store.
