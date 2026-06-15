@@ -23,7 +23,8 @@ use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
-const GIT_BATCH_UPLOAD_TARGET_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_GIT_BATCH_UPLOAD_TARGET_BYTES: usize = 4 * 1024 * 1024;
+const GIT_BATCH_UPLOAD_TARGET_BYTES_ENV: &str = "HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES";
 const BATCH_UPLOAD_RETRIES: u32 = 4;
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
 const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
@@ -142,7 +143,11 @@ fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize
 }
 
 fn git_batch_upload_target_bytes() -> usize {
-    GIT_BATCH_UPLOAD_TARGET_BYTES
+    std::env::var(GIT_BATCH_UPLOAD_TARGET_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GIT_BATCH_UPLOAD_TARGET_BYTES)
         .min(hashtree_blossom::BATCH_UPLOAD_MAX_BYTES)
         .max(1)
 }
@@ -2717,13 +2722,44 @@ impl RemoteHelper {
 mod tests {
     use super::{
         batch_upload_retry_delay, effective_upload_concurrency, git_batch_upload_target_bytes,
-        upload_progress_from_counters, UploadCounters,
+        upload_progress_from_counters, UploadCounters, GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
     };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
     use std::time::Duration;
+
+    static BATCH_TARGET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_deref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn upload_concurrency_uses_configured_parallelism_for_single_server() {
@@ -2738,8 +2774,43 @@ mod tests {
 
     #[test]
     fn git_batch_upload_target_bytes_stays_below_protocol_max() {
-        assert_eq!(git_batch_upload_target_bytes(), 8 * 1024 * 1024);
+        let _lock = BATCH_TARGET_ENV_LOCK.lock().unwrap();
+        let _clear = EnvGuard::clear(GIT_BATCH_UPLOAD_TARGET_BYTES_ENV);
+
+        assert_eq!(git_batch_upload_target_bytes(), 4 * 1024 * 1024);
         assert!(git_batch_upload_target_bytes() <= hashtree_blossom::BATCH_UPLOAD_MAX_BYTES);
+    }
+
+    #[test]
+    fn git_batch_upload_target_bytes_uses_positive_env_override() {
+        let _lock = BATCH_TARGET_ENV_LOCK.lock().unwrap();
+        let _set = EnvGuard::set(GIT_BATCH_UPLOAD_TARGET_BYTES_ENV, "1048576");
+
+        assert_eq!(git_batch_upload_target_bytes(), 1024 * 1024);
+    }
+
+    #[test]
+    fn git_batch_upload_target_bytes_ignores_invalid_env_override() {
+        let _lock = BATCH_TARGET_ENV_LOCK.lock().unwrap();
+
+        {
+            let _set = EnvGuard::set(GIT_BATCH_UPLOAD_TARGET_BYTES_ENV, "0");
+            assert_eq!(git_batch_upload_target_bytes(), 4 * 1024 * 1024);
+        }
+
+        let _set = EnvGuard::set(GIT_BATCH_UPLOAD_TARGET_BYTES_ENV, "nope");
+        assert_eq!(git_batch_upload_target_bytes(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn git_batch_upload_target_bytes_caps_env_override_to_protocol_max() {
+        let _lock = BATCH_TARGET_ENV_LOCK.lock().unwrap();
+        let _set = EnvGuard::set(GIT_BATCH_UPLOAD_TARGET_BYTES_ENV, "999999999999");
+
+        assert_eq!(
+            git_batch_upload_target_bytes(),
+            hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
+        );
     }
 
     #[test]

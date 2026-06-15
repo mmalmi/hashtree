@@ -20,10 +20,12 @@ Findings:
   queue and make agents wait through a slow per-object loop.
 
 Change:
-- `git-remote-htree` now targets smaller 8 MiB upload batches for the public
-  Worker path, retries batch upload failures with bounded exponential backoff,
-  and only falls back to individual uploads when the server explicitly lacks
-  the batch endpoint.
+- `git-remote-htree` targets smaller upload batches for public edge-backed
+  paths, retries batch upload failures with bounded exponential backoff, and
+  only falls back to individual uploads when the server explicitly lacks the
+  batch endpoint. A later binary-batch experiment lowered the default target to
+  4 MiB and added `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` for origin/local
+  experiments that can benefit from larger bodies.
 
 Verification:
 - Focused helper tests passed with `cargo test -p git-remote-htree
@@ -608,6 +610,14 @@ Results:
 | Public edge JSON batch | c4, 128 x 256 KiB | 3.67 MiB/s | p95 3.96 s |
 | Public edge binary batch | c4, 128 x 256 KiB | 5.14 MiB/s | p95 2.66 s |
 | Public edge binary batch | c12, 256 x 256 KiB | 7.02 MiB/s | p95 5.97 s |
+| Origin binary batch, 64 blobs/request | c2, 256 x 256 KiB | 61.03 MiB/s | p95 0.56 s |
+| Origin binary batch, 64 blobs/request | c4, 256 x 256 KiB | 67.70 MiB/s | p95 0.90 s |
+| Origin binary batch, 128 blobs/request | c2, 256 x 256 KiB | 68.14 MiB/s | p95 0.85 s |
+| Origin binary batch, 256 blobs/request | c1, 256 x 256 KiB | 65.35 MiB/s | p95 0.80 s |
+| Public edge binary batch, 64 blobs/request | c2, 256 x 256 KiB | 4.20 MiB/s | p95 5.26 s |
+| Public edge binary batch, 64 blobs/request | c4, 256 x 256 KiB | 5.69 MiB/s | p95 8.59 s |
+| Public edge binary batch, 128 blobs/request | c2, 256 x 256 KiB | 4.16 MiB/s | p95 10.00 s |
+| Public edge binary batch, 256 blobs/request | c1, 256 x 256 KiB | 3.07 MiB/s | p95 10.33 s |
 | Public edge read of fresh binary-batch blobs | GET, c32, 256 x 256 KiB | 26.05 MiB/s | p95 0.32 s |
 | Origin read of fresh binary-batch blobs | GET, c32, 256 x 256 KiB | 2160 MiB/s | cache-hot local read |
 
@@ -617,6 +627,10 @@ Interpretation:
   payload shape.
 - Higher public-edge concurrency helped until roughly c12 with 16-blob batches.
   Larger 32-blob batches were worse and mostly inflated tail latency.
+- Origin-only uploads benefit strongly from fat binary batches, reaching roughly
+  65-68 MiB/s with 64-256 blobs/request. The public edge path penalizes the same
+  larger request bodies, so `git-remote-htree` defaults to a 4 MiB batch target
+  and exposes `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` for origin/local tuning.
 - Temporarily raising the live blob write queue limit from 8 to 12 improved
   origin c16 throughput but reduced public-edge c12 throughput and worsened
   latency. The live queue limit was restored to 8.
