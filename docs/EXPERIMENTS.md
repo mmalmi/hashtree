@@ -100,6 +100,54 @@ Follow-up:
   second write server to config without preserving the helper's binary batch
   path for multi-server write configurations.
 
+## 2026-06-16 - Plain Cloudflare Proxy Via Datacenter Reverse Proxy
+
+Question: can public `upload.iris.to`/`cdn.iris.to` drop the Worker and Tunnel
+hot path by using plain Cloudflare proxy/cache in front of a datacenter reverse
+proxy that forwards to the deep storage origin over a private mesh link?
+
+Setup:
+- Retired an unused upload Worker hostname and confirmed the active
+  `upload.iris.to` and `cdn.iris.to` hostnames had no Worker custom-domain
+  bindings.
+- Confirmed the Cloudflare account had no R2 buckets, so the active path is not
+  using Cloudflare object storage.
+- Configured a datacenter nginx origin with a 60 GiB immutable-blob cache for the
+  CDN hostname, unbuffered upload proxying for the upload hostname, and upstream
+  forwarding over a private mesh link to the deep storage origin.
+- Changed `upload.iris.to` and `cdn.iris.to` from proxied Tunnel CNAME records to
+  proxied direct origin records. Public hostnames are retained; identifying
+  origin IPs, private hostnames, and raw hashes are omitted.
+
+Verification:
+- Forced-origin probes returned the hashtree UI through the upload and CDN
+  hostnames, `POST /upload/check` returned the expected empty inventory response,
+  and the CDN hostname preserved the extensionless 308 redirect to `/<hash>.bin`.
+- After DNS cutover, public `GET /`, `GET /upload/check`, CDN extensionless
+  redirect, and missing `.bin` lookup all reached the new path.
+- A small public binary-batch write smoke through `upload.iris.to` succeeded
+  with 128 x 256 KiB blobs at c4: 3.21 MiB/s, p95 4.66 s.
+- A c12 public binary-batch write smoke succeeded with 256 x 256 KiB blobs:
+  4.23 MiB/s, p95 12.07 s.
+- Direct private-link writes from the datacenter proxy host to the deep storage
+  origin were only modestly faster: c4 reached 5.27 MiB/s, c12 reached
+  4.63 MiB/s, and 64-blob batches at c4 reached 5.51 MiB/s.
+- The existing local datacenter hashtree container is not ready to become the
+  hot origin: it is older than the current binary-batch server, rejects the
+  binary batch path, and the JSON batch probe stalled long enough to abort.
+
+Interpretation:
+- Plain Cloudflare proxy/cache plus nginx is operationally simpler than the
+  Worker/Tunnel write path, but a pure forwarding proxy does not reach modern
+  write throughput because every upload body still waits on the private mesh hop
+  to the deep storage origin.
+- The next performance step is not another Worker or an R2 hot cache. It is a
+  current datacenter hot hashtree/Blossom origin with bounded local disk use,
+  read-after-write serving from the hot store, and background replication to the
+  deep storage host.
+- Until that hot-origin design exists, public writes remain transport-bound even
+  though origin storage and LMDB are no longer the main limiter.
+
 ## 2026-06-15 - Blossom Upload Write Queue Limit
 
 Question: is a `HTREE_MAX_CONCURRENT_BLOB_WRITES` value of 4 optimal for raw
