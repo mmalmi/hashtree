@@ -489,3 +489,59 @@ Interpretation:
 - This run was for output behavior, not tuning. The slow path again varied
   between metadata/root reads, the largest checkpoint pack transfer, and loose
   frontier retrieval.
+
+### 2026-06-15: Blossom upload write-path tuning on a large live LMDB store
+
+Setup:
+- Benchmarks used a large production-like Blossom origin with multi-terabyte
+  LMDB blob state. Identifying hostnames, exact repos, pubkeys, IPs, raw hashes,
+  and temp paths are intentionally omitted.
+- Payloads were deterministic 256 KiB blobs unless noted. Origin tests used a
+  local tunnel to the daemon; public-edge tests used the deployed Worker path.
+- The starting point was a live LMDB blob database where direct inline LMDB
+  batch writes were pathologically slow: 32 x 256 KiB took 109.7 s with default
+  LMDB flags, or 66.9 s with `MDB_NORDAHEAD`.
+
+Changes tested:
+- Keep LMDB for metadata but spill blobs >=64 KiB to content-addressed external
+  files, with old inline LMDB blobs still readable.
+- Add an optional hot LMDB tier for new writes, with reads falling back to the
+  legacy giant LMDB. The main upload store must open through the same `LocalStore`
+  path as other LMDB stores; otherwise only side stores use the hot tier.
+- Remove read-before-write checks on cached blob uploads and rely on LMDB
+  `NO_OVERWRITE` for primary-tier dedupe.
+- Raise the live blob-write limiter from 2 to 8 after hot-tier deployment.
+- Stream Worker `/upload/check` and `/upload/batch` passthrough bodies instead
+  of buffering the entire request in the Worker before forwarding.
+
+Results:
+
+| Path | Shape | Throughput | Latency notes |
+| --- | --- | ---: | --- |
+| Inline legacy LMDB | direct batch, 32 x 256 KiB | 0.07 MiB/s | 109.7 s wall |
+| Legacy LMDB + external spill, sync off | direct batch, 128 x 256 KiB | 4.45 MiB/s | 7.19 s wall |
+| Hot LMDB + external spill, sync off | direct batch, 128 x 256 KiB | 5.19 MiB/s | 6.17 s wall |
+| Origin before main store used hot tier | `/upload/batch`, c1, 128 x 256 KiB | 2.33 MiB/s | p95 2.36 s |
+| Origin after main store used hot tier | `/upload/batch`, c1, 128 x 256 KiB | 4.18 MiB/s | p95 0.57 s |
+| Origin hot tier, write limit 8 | raw PUT, c8, 32 x 256 KiB | 2.79 MiB/s | p95 0.84 s |
+| Origin hot tier, write limit 16 | raw PUT, c16, 32 x 256 KiB | 3.53 MiB/s | p95 1.49 s |
+| Origin hot tier, write limit 8 | `/upload/batch`, c4, 128 x 256 KiB | 11.66 MiB/s | p95 0.89 s |
+| Origin hot tier, sync on | `/upload/batch`, c4, 128 x 256 KiB | 3.41 MiB/s | p95 4.55 s |
+| Public edge after streaming Worker | `/upload/batch`, c1, 32 x 256 KiB | 1.70 MiB/s | p95 1.66 s |
+| Public edge after streaming Worker | `/upload/batch`, c4, 128 x 256 KiB | 2.44 MiB/s | p95 6.19 s |
+
+Interpretation:
+- LMDB itself was not the enemy; using one huge LMDB database as both metadata
+  index and large-blob body store was the enemy. The write path became dominated
+  by giant-database page/freelist behavior and per-object durability work.
+- The hot-tier plus external-spill path makes the origin usable again and lets
+  parallel batch uploads exceed 10 MiB/s at the origin.
+- Raw single-object PUT is still fixed-cost-heavy for 256 KiB blobs. It needs
+  server-side coalescing or a packed/segmented blob writer to reach modern
+  small-object throughput without pushing tail latency up.
+- Public-edge throughput remains much lower than origin-tunnel throughput. The
+  Worker streaming passthrough removes one full-body buffer/copy, but the public
+  edge-to-origin leg and JSON/base64 batch protocol remain limiting factors.
+- `HTREE_LMDB_EXTERNAL_BLOB_SYNC=0` is a fast interim setting. Durable modern
+  performance should use a pack/segment writer with one sync per group rather
+  than syncing one external file and directory per blob.

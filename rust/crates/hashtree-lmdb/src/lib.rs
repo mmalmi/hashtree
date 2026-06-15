@@ -2,10 +2,12 @@
 
 use async_trait::async_trait;
 use hashtree_core::store::{Store, StoreError, StoreStats};
-use hashtree_core::types::Hash;
+use hashtree_core::{to_hex, types::Hash};
 use heed::types::*;
-use heed::{Database, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
-use std::path::Path;
+use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +29,11 @@ const ORDER_KEY_BYTES: usize = 40;
 const PIN_COUNT_BYTES: usize = 4;
 const STORE_TOTALS_BYTES: usize = 32;
 const STORE_TOTALS_KEY: &[u8] = b"totals";
+const EXTERNAL_BLOB_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-blob-v1\0";
+const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
+const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
+const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
+const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
 
 #[derive(Debug, Clone, Copy)]
 struct BlobMeta {
@@ -41,6 +48,47 @@ struct StoreTotals {
     total_bytes: u64,
     pinned_count: u64,
     pinned_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalBlobConfig {
+    base_path: PathBuf,
+    min_bytes: usize,
+    sync: bool,
+}
+
+impl ExternalBlobConfig {
+    fn from_env(env_path: &Path) -> Option<Self> {
+        let min_bytes = std::env::var(LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)?;
+        let base_path = std::env::var(LMDB_EXTERNAL_BLOB_DIR_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_path.join("external-blobs"));
+        let sync = env_bool(LMDB_EXTERNAL_BLOB_SYNC_ENV).unwrap_or(true);
+        Some(Self {
+            base_path,
+            min_bytes,
+            sync,
+        })
+    }
+}
+
+enum PreparedBlob<'a> {
+    Inline(&'a [u8]),
+    External(Vec<u8>),
+}
+
+impl PreparedBlob<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Inline(data) => data,
+            Self::External(marker) => marker,
+        }
+    }
 }
 
 /// LMDB-backed blob store implementing hashtree's Store trait.
@@ -59,6 +107,7 @@ pub struct LmdbBlobStore {
     max_bytes: AtomicU64,
     current_bytes: AtomicU64,
     next_order: AtomicU64,
+    external_blobs: Option<ExternalBlobConfig>,
 }
 
 impl LmdbBlobStore {
@@ -112,6 +161,24 @@ impl LmdbBlobStore {
 
     /// Open or create with custom map size.
     pub fn with_map_size<P: AsRef<Path>>(path: P, map_size: usize) -> Result<Self, StoreError> {
+        Self::with_map_size_and_settings(
+            path,
+            map_size,
+            env_flags_from_env(),
+            ExternalBlobConfig::from_env,
+        )
+    }
+
+    fn with_map_size_and_settings<P, F>(
+        path: P,
+        map_size: usize,
+        flags: EnvFlags,
+        external_blobs: F,
+    ) -> Result<Self, StoreError>
+    where
+        P: AsRef<Path>,
+        F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
+    {
         let path_ref = path.as_ref();
         std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
         let existing_map_size = std::fs::metadata(path_ref.join("data.mdb"))
@@ -130,14 +197,15 @@ impl LmdbBlobStore {
         ))
         .unwrap_or(usize::MAX);
 
-        let env = unsafe {
-            EnvOpenOptions::new()
-                .map_size(map_size)
-                .max_dbs(DATABASE_COUNT)
-                .max_readers(DEFAULT_MAX_READERS)
-                .open(path_ref)
-                .map_err(map_heed_error)?
-        };
+        let mut env_options = EnvOpenOptions::new();
+        env_options
+            .map_size(map_size)
+            .max_dbs(DATABASE_COUNT)
+            .max_readers(DEFAULT_MAX_READERS);
+        unsafe {
+            env_options.flags(flags);
+        }
+        let env = unsafe { env_options.open(path_ref).map_err(map_heed_error)? };
         let _ = env.clear_stale_readers();
         if env.info().map_size < map_size {
             unsafe { env.resize(map_size) }.map_err(map_heed_error)?;
@@ -188,6 +256,7 @@ impl LmdbBlobStore {
             max_bytes: AtomicU64::new(0),
             current_bytes: AtomicU64::new(totals.total_bytes),
             next_order: AtomicU64::new(next_order),
+            external_blobs: external_blobs(path_ref),
         })
     }
 
@@ -405,21 +474,19 @@ impl LmdbBlobStore {
         self.evict_to_target(current, target)
     }
 
-    fn is_map_full_error(err: &HeedError) -> bool {
-        matches!(err, HeedError::Mdb(MdbError::MapFull))
-    }
-
-    fn put_sync_attempt(&self, hash: Hash, data: &[u8]) -> std::result::Result<bool, HeedError> {
-        let mut wtxn = self.env.write_txn()?;
-        let inserted =
-            match self
-                .blobs
-                .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, &hash, data)
-            {
-                Ok(()) => true,
-                Err(HeedError::Mdb(MdbError::KeyExist)) => false,
-                Err(err) => return Err(err),
-            };
+    fn put_sync_attempt(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
+        let prepared = self.prepare_blob_for_write(&hash, data)?;
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        let inserted = match self.blobs.put_with_flags(
+            &mut wtxn,
+            PutFlags::NO_OVERWRITE,
+            &hash,
+            prepared.bytes(),
+        ) {
+            Ok(()) => true,
+            Err(HeedError::Mdb(MdbError::KeyExist)) => false,
+            Err(err) => return Err(map_heed_error(err)),
+        };
 
         if inserted {
             let order = self.next_order.fetch_add(1, Ordering::Relaxed);
@@ -429,42 +496,53 @@ impl LmdbBlobStore {
                 last_accessed_at: unix_timestamp_now(),
             });
             let order_key = Self::encode_order_key(order, &hash);
-            self.metadata.put(&mut wtxn, &hash, &meta)?;
-            self.eviction_order.put(&mut wtxn, &order_key, &())?;
-            let pin_count = self.read_pin_count_lossy(&wtxn, &hash)?;
+            self.metadata
+                .put(&mut wtxn, &hash, &meta)
+                .map_err(map_heed_error)?;
+            self.eviction_order
+                .put(&mut wtxn, &order_key, &())
+                .map_err(map_heed_error)?;
+            let pin_count = self
+                .read_pin_count_lossy(&wtxn, &hash)
+                .map_err(map_heed_error)?;
             self.increment_totals_in_txn(
                 &mut wtxn,
                 1,
                 data.len() as u64,
                 u64::from(pin_count > 0),
                 if pin_count > 0 { data.len() as u64 } else { 0 },
-            )?;
+            )
+            .map_err(map_heed_error)?;
         }
 
-        wtxn.commit()?;
+        wtxn.commit().map_err(map_heed_error)?;
         Ok(inserted)
     }
 
-    fn put_many_sync_attempt(
-        &self,
-        items: &[(Hash, Vec<u8>)],
-    ) -> std::result::Result<(usize, u64), HeedError> {
-        let mut wtxn = self.env.write_txn()?;
+    fn put_many_sync_attempt(&self, items: &[(Hash, Vec<u8>)]) -> Result<(usize, u64), StoreError> {
+        let prepared = items
+            .iter()
+            .map(|(hash, data)| {
+                self.prepare_blob_for_write(hash, data)
+                    .map(|prepared| (*hash, data.len() as u64, prepared))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
         let mut inserted = 0usize;
         let mut inserted_bytes = 0u64;
         let mut inserted_pinned = 0u64;
         let mut inserted_pinned_bytes = 0u64;
 
-        for (hash, data) in items {
+        for (hash, data_len, prepared) in &prepared {
             let inserted_blob = match self.blobs.put_with_flags(
                 &mut wtxn,
                 PutFlags::NO_OVERWRITE,
                 hash,
-                data.as_slice(),
+                prepared.bytes(),
             ) {
                 Ok(()) => true,
                 Err(HeedError::Mdb(MdbError::KeyExist)) => false,
-                Err(err) => return Err(err),
+                Err(err) => return Err(map_heed_error(err)),
             };
 
             if !inserted_blob {
@@ -474,17 +552,25 @@ impl LmdbBlobStore {
             let order = self.next_order.fetch_add(1, Ordering::Relaxed);
             let meta = Self::encode_blob_meta(BlobMeta {
                 order,
-                size: data.len() as u64,
+                size: *data_len,
                 last_accessed_at: unix_timestamp_now(),
             });
             let order_key = Self::encode_order_key(order, hash);
-            self.metadata.put(&mut wtxn, hash, &meta)?;
-            self.eviction_order.put(&mut wtxn, &order_key, &())?;
+            self.metadata
+                .put(&mut wtxn, hash, &meta)
+                .map_err(map_heed_error)?;
+            self.eviction_order
+                .put(&mut wtxn, &order_key, &())
+                .map_err(map_heed_error)?;
             inserted += 1;
-            inserted_bytes = inserted_bytes.saturating_add(data.len() as u64);
-            if self.read_pin_count_lossy(&wtxn, hash)? > 0 {
+            inserted_bytes = inserted_bytes.saturating_add(*data_len);
+            if self
+                .read_pin_count_lossy(&wtxn, hash)
+                .map_err(map_heed_error)?
+                > 0
+            {
                 inserted_pinned = inserted_pinned.saturating_add(1);
-                inserted_pinned_bytes = inserted_pinned_bytes.saturating_add(data.len() as u64);
+                inserted_pinned_bytes = inserted_pinned_bytes.saturating_add(*data_len);
             }
         }
 
@@ -495,10 +581,11 @@ impl LmdbBlobStore {
                 inserted_bytes,
                 inserted_pinned,
                 inserted_pinned_bytes,
-            )?;
+            )
+            .map_err(map_heed_error)?;
         }
 
-        wtxn.commit()?;
+        wtxn.commit().map_err(map_heed_error)?;
         Ok((inserted, inserted_bytes))
     }
 
@@ -568,14 +655,14 @@ impl LmdbBlobStore {
                     }
                     return Ok(inserted);
                 }
-                Err(err) if Self::is_map_full_error(&err) && !retried_after_eviction => {
+                Err(err) if is_map_full_store_error(&err) && !retried_after_eviction => {
                     let freed = self.evict_for_write_pressure(incoming_bytes)?;
                     if freed == 0 {
-                        return Err(StoreError::Other(err.to_string()));
+                        return Err(err);
                     }
                     retried_after_eviction = true;
                 }
-                Err(err) => return Err(StoreError::Other(err.to_string())),
+                Err(err) => return Err(err),
             }
         }
     }
@@ -602,14 +689,14 @@ impl LmdbBlobStore {
                     }
                     return Ok(inserted);
                 }
-                Err(err) if Self::is_map_full_error(&err) && !retried_after_eviction => {
+                Err(err) if is_map_full_store_error(&err) && !retried_after_eviction => {
                     let freed = self.evict_for_write_pressure(incoming_bytes)?;
                     if freed == 0 {
-                        return Err(StoreError::Other(err.to_string()));
+                        return Err(err);
                     }
                     retried_after_eviction = true;
                 }
-                Err(err) => return Err(StoreError::Other(err.to_string())),
+                Err(err) => return Err(err),
             }
         }
     }
@@ -621,11 +708,15 @@ impl LmdbBlobStore {
             .read_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
 
-        Ok(self
+        let Some(blob) = self
             .blobs
             .get(&rtxn, hash)
             .map_err(|e| StoreError::Other(e.to_string()))?
-            .map(|b| b.to_vec()))
+        else {
+            return Ok(None);
+        };
+
+        self.decode_blob_value(hash, blob).map(Some)
     }
 
     pub fn get_range_sync(
@@ -645,6 +736,10 @@ impl LmdbBlobStore {
         else {
             return Ok(None);
         };
+
+        if self.is_external_blob_ref(hash, blob) {
+            return self.read_external_blob_range(hash, start, end_inclusive);
+        }
 
         if blob.is_empty() || end_inclusive < start {
             return Ok(Some(Vec::new()));
@@ -767,6 +862,9 @@ impl LmdbBlobStore {
         if freed > 0 {
             self.current_bytes.fetch_sub(freed, Ordering::Relaxed);
         }
+        if existed {
+            self.remove_external_blob_file(hash);
+        }
 
         Ok(existed)
     }
@@ -852,6 +950,7 @@ impl LmdbBlobStore {
                 .map_err(|e| StoreError::Other(e.to_string()))?;
             let mut batch_freed = 0u64;
             let mut batch_items = 0usize;
+            let mut batch_external_paths = Vec::new();
 
             while freed_total + batch_freed < to_free && index < order_keys.len() {
                 let order_key = &order_keys[index];
@@ -873,6 +972,9 @@ impl LmdbBlobStore {
 
                 batch_freed = batch_freed.saturating_add(bytes_freed);
                 batch_items += 1;
+                if let Some(path) = self.external_blob_path(&hash) {
+                    batch_external_paths.push(path);
+                }
 
                 if batch_freed >= EVICTION_BATCH_TARGET_BYTES
                     || batch_items >= EVICTION_BATCH_MAX_ITEMS
@@ -883,6 +985,9 @@ impl LmdbBlobStore {
 
             wtxn.commit()
                 .map_err(|e| StoreError::Other(e.to_string()))?;
+            for path in batch_external_paths {
+                let _ = fs::remove_file(path);
+            }
             if batch_freed > 0 {
                 self.current_bytes.fetch_sub(batch_freed, Ordering::Relaxed);
                 freed_total = freed_total.saturating_add(batch_freed);
@@ -929,7 +1034,7 @@ impl LmdbBlobStore {
                 .delete(wtxn, &order_key)
                 .map_err(|e| StoreError::Other(e.to_string()))?;
         }
-        let bytes_freed = data_len.or(meta.map(|m| m.size)).unwrap_or(0);
+        let bytes_freed = meta.map(|m| m.size).or(data_len).unwrap_or(0);
         if existed || meta.is_some() {
             self.decrement_totals_in_txn(
                 wtxn,
@@ -1095,6 +1200,132 @@ impl LmdbBlobStore {
         }
         Some(u32::from_be_bytes(bytes.try_into().ok()?))
     }
+
+    fn prepare_blob_for_write<'a>(
+        &self,
+        hash: &Hash,
+        data: &'a [u8],
+    ) -> Result<PreparedBlob<'a>, StoreError> {
+        let Some(config) = &self.external_blobs else {
+            return Ok(PreparedBlob::Inline(data));
+        };
+        if data.len() < config.min_bytes {
+            return Ok(PreparedBlob::Inline(data));
+        }
+
+        self.write_external_blob(hash, data, config)?;
+        Ok(PreparedBlob::External(Self::external_blob_ref(hash)))
+    }
+
+    fn external_blob_ref(hash: &Hash) -> Vec<u8> {
+        let mut marker = Vec::with_capacity(EXTERNAL_BLOB_MARKER_PREFIX.len() + hash.len());
+        marker.extend_from_slice(EXTERNAL_BLOB_MARKER_PREFIX);
+        marker.extend_from_slice(hash);
+        marker
+    }
+
+    fn is_external_blob_ref(&self, hash: &Hash, value: &[u8]) -> bool {
+        value.len() == EXTERNAL_BLOB_MARKER_PREFIX.len() + hash.len()
+            && value.starts_with(EXTERNAL_BLOB_MARKER_PREFIX)
+            && &value[EXTERNAL_BLOB_MARKER_PREFIX.len()..] == hash
+    }
+
+    fn external_blob_path_for_config(config: &ExternalBlobConfig, hash: &Hash) -> PathBuf {
+        let hex = to_hex(hash);
+        config
+            .base_path
+            .join(&hex[..2])
+            .join(&hex[2..4])
+            .join(&hex[4..])
+    }
+
+    fn external_blob_path(&self, hash: &Hash) -> Option<PathBuf> {
+        self.external_blobs
+            .as_ref()
+            .map(|config| Self::external_blob_path_for_config(config, hash))
+    }
+
+    fn write_external_blob(
+        &self,
+        hash: &Hash,
+        data: &[u8],
+        config: &ExternalBlobConfig,
+    ) -> Result<(), StoreError> {
+        let path = Self::external_blob_path_for_config(config, hash);
+        if path.exists() {
+            return Ok(());
+        }
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| StoreError::Other("external blob path has no parent".to_string()))?;
+        fs::create_dir_all(parent)?;
+        let temp_path = unique_temp_path(&path);
+        {
+            let mut file = File::options()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)?;
+            file.write_all(data)?;
+            if config.sync {
+                file.sync_all()?;
+            }
+        }
+
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        if config.sync {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn decode_blob_value(&self, hash: &Hash, value: &[u8]) -> Result<Vec<u8>, StoreError> {
+        if self.is_external_blob_ref(hash, value) {
+            let path = self.external_blob_path(hash).ok_or_else(|| {
+                StoreError::Other(
+                    "external LMDB blob marker found but external blobs are disabled".into(),
+                )
+            })?;
+            return fs::read(path).map_err(StoreError::Io);
+        }
+        Ok(value.to_vec())
+    }
+
+    fn read_external_blob_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let path = self.external_blob_path(hash).ok_or_else(|| {
+            StoreError::Other(
+                "external LMDB blob marker found but external blobs are disabled".into(),
+            )
+        })?;
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len();
+        if len == 0 || start >= len || end_inclusive < start {
+            return Ok(Some(Vec::new()));
+        }
+
+        let actual_end = end_inclusive.min(len - 1);
+        let read_len = actual_end.saturating_sub(start).saturating_add(1);
+        let read_len = usize::try_from(read_len)
+            .map_err(|_| StoreError::Other("blob range is too large to read".to_string()))?;
+        let mut data = vec![0; read_len];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut data)?;
+        Ok(Some(data))
+    }
+
+    fn remove_external_blob_file(&self, hash: &Hash) {
+        if let Some(path) = self.external_blob_path(hash) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn map_heed_error(error: HeedError) -> StoreError {
@@ -1102,6 +1333,47 @@ fn map_heed_error(error: HeedError) -> StoreError {
         HeedError::Io(io_error) => StoreError::Io(io_error),
         other => StoreError::Other(other.to_string()),
     }
+}
+
+fn is_map_full_store_error(err: &StoreError) -> bool {
+    let message = err.to_string();
+    message.contains("MDB_MAP_FULL") || message.contains("MapFull")
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| {
+        let value = value.trim();
+        if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") {
+            Some(true)
+        } else if value == "0"
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("no")
+        {
+            Some(false)
+        } else {
+            None
+        }
+    })
+}
+
+fn env_flags_from_env() -> EnvFlags {
+    let mut flags = EnvFlags::empty();
+    if env_bool(LMDB_NO_READ_AHEAD_ENV).unwrap_or(false) {
+        flags |= EnvFlags::NO_READ_AHEAD;
+    }
+    flags
+}
+
+fn unique_temp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("blob");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(".{file_name}.tmp.{}.{}", std::process::id(), nanos))
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -1264,6 +1536,64 @@ mod tests {
         assert!(store.has(&hash).await?);
         assert_eq!(store.get(&hash).await?, Some(data.to_vec()));
 
+        Ok(())
+    }
+
+    #[test]
+    fn external_blob_spill_keeps_large_values_out_of_lmdb() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let external_dir = temp.path().join("external");
+        let store = LmdbBlobStore::with_map_size_and_settings(
+            temp.path().join("blobs"),
+            16 * 1024 * 1024,
+            EnvFlags::empty(),
+            |_| {
+                Some(ExternalBlobConfig {
+                    base_path: external_dir.clone(),
+                    min_bytes: 8,
+                    sync: false,
+                })
+            },
+        )?;
+
+        let small = b"tiny";
+        let small_hash = sha256(small);
+        assert!(store.put_sync(small_hash, small)?);
+
+        let large = b"large external blob payload";
+        let large_hash = sha256(large);
+        assert!(store.put_sync(large_hash, large)?);
+
+        assert_eq!(store.get_sync(&small_hash)?, Some(small.to_vec()));
+        assert_eq!(store.get_sync(&large_hash)?, Some(large.to_vec()));
+        assert_eq!(
+            store.get_range_sync(&large_hash, 6, 13)?,
+            Some(b"external".to_vec())
+        );
+
+        let rtxn = store.env.read_txn().map_err(map_heed_error)?;
+        let inline_value = store
+            .blobs
+            .get(&rtxn, &small_hash)
+            .map_err(map_heed_error)?
+            .expect("small inline value");
+        assert_eq!(inline_value, small);
+        let external_value = store
+            .blobs
+            .get(&rtxn, &large_hash)
+            .map_err(map_heed_error)?
+            .expect("large marker value");
+        assert!(store.is_external_blob_ref(&large_hash, external_value));
+        drop(rtxn);
+
+        let external_path = store.external_blob_path(&large_hash).unwrap();
+        assert_eq!(std::fs::read(&external_path)?, large);
+        let stats = store.stats()?;
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.total_bytes, (small.len() + large.len()) as u64);
+
+        assert!(store.delete_sync(&large_hash)?);
+        assert!(!external_path.exists());
         Ok(())
     }
 

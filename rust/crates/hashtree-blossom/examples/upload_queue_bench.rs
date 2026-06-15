@@ -1,4 +1,4 @@
-use hashtree_blossom::BlossomClient;
+use hashtree_blossom::{BatchUploadItem, BlossomClient};
 use nostr::Keys;
 use sha2::{Digest, Sha256};
 use std::error::Error;
@@ -10,15 +10,24 @@ use tokio::sync::Semaphore;
 struct Config {
     server: String,
     requests: usize,
+    batch_size: usize,
     concurrency: usize,
     size: usize,
     seed: String,
     timeout_secs: u64,
+    mode: Mode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Raw,
+    Batch,
 }
 
 #[derive(Debug)]
 struct UploadSample {
     elapsed: Duration,
+    blobs: usize,
     error: Option<String>,
 }
 
@@ -32,22 +41,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
     let started = Instant::now();
-    let mut handles = Vec::with_capacity(config.requests);
+    let mut handles = Vec::new();
 
-    for index in 0..config.requests {
-        let permit = semaphore.clone().acquire_owned().await?;
-        let client = client.clone();
-        let config = config.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = permit;
-            let data = deterministic_payload(&config.seed, index, config.size);
-            let started = Instant::now();
-            let result = client.upload(&data).await;
-            UploadSample {
-                elapsed: started.elapsed(),
-                error: result.err().map(|error| error.to_string()),
+    match config.mode {
+        Mode::Raw => {
+            handles.reserve(config.requests);
+            for index in 0..config.requests {
+                let permit = semaphore.clone().acquire_owned().await?;
+                let client = client.clone();
+                let config = config.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    let data = deterministic_payload(&config.seed, index, config.size);
+                    let started = Instant::now();
+                    let result = client.upload(&data).await;
+                    UploadSample {
+                        elapsed: started.elapsed(),
+                        blobs: 1,
+                        error: result.err().map(|error| error.to_string()),
+                    }
+                }));
             }
-        }));
+        }
+        Mode::Batch => {
+            handles.reserve(config.requests.div_ceil(config.batch_size));
+            let mut index = 0usize;
+            while index < config.requests {
+                let end = (index + config.batch_size).min(config.requests);
+                let permit = semaphore.clone().acquire_owned().await?;
+                let client = client.clone();
+                let config = config.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    let mut items = Vec::with_capacity(end - index);
+                    for item_index in index..end {
+                        let data = deterministic_payload(&config.seed, item_index, config.size);
+                        let hash = hex::encode(Sha256::digest(&data));
+                        items.push(BatchUploadItem::new(hash, data));
+                    }
+                    let started = Instant::now();
+                    let result = client.upload_batch_to_server(&config.server, &items).await;
+                    UploadSample {
+                        elapsed: started.elapsed(),
+                        blobs: items.len(),
+                        error: match result {
+                            Ok(Some(_)) => None,
+                            Ok(None) => Some("batch upload unsupported".to_string()),
+                            Err(error) => Some(error.to_string()),
+                        },
+                    }
+                }));
+                index = end;
+            }
+        }
     }
 
     let mut samples = Vec::with_capacity(handles.len());
@@ -56,11 +102,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let wall = started.elapsed();
-    let successes = samples
+    let successes: usize = samples
         .iter()
         .filter(|sample| sample.error.is_none())
-        .count();
-    let failures = samples.len().saturating_sub(successes);
+        .map(|sample| sample.blobs)
+        .sum();
+    let failures: usize = samples
+        .iter()
+        .filter(|sample| sample.error.is_some())
+        .map(|sample| sample.blobs)
+        .sum();
     let total_mib = successes as f64 * config.size as f64 / 1024.0 / 1024.0;
     let throughput_mib_s = if wall.as_secs_f64() > 0.0 {
         total_mib / wall.as_secs_f64()
@@ -77,8 +128,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("server={}", config.server);
     println!(
-        "requests={} concurrency={} size={} timeout_secs={} seed={}",
-        config.requests, config.concurrency, config.size, config.timeout_secs, config.seed
+        "mode={:?} requests={} batch_size={} concurrency={} size={} timeout_secs={} seed={}",
+        config.mode,
+        config.requests,
+        config.batch_size,
+        config.concurrency,
+        config.size,
+        config.timeout_secs,
+        config.seed
     );
     println!(
         "success={} failed={} wall_ms={} throughput_mib_s={:.2}",
@@ -116,10 +173,12 @@ impl Config {
         let mut config = Self {
             server: "http://127.0.0.1:8080".to_string(),
             requests: 128,
+            batch_size: 32,
             concurrency: 32,
             size: 256 * 1024,
             seed: "upload-queue-bench".to_string(),
             timeout_secs: 120,
+            mode: Mode::Raw,
         };
 
         let mut args = std::env::args().skip(1);
@@ -129,6 +188,9 @@ impl Config {
                 "--requests" => {
                     config.requests = required_value(&mut args, "--requests")?.parse()?
                 }
+                "--batch-size" => {
+                    config.batch_size = required_value(&mut args, "--batch-size")?.parse()?
+                }
                 "--concurrency" => {
                     config.concurrency = required_value(&mut args, "--concurrency")?.parse()?
                 }
@@ -136,6 +198,13 @@ impl Config {
                 "--seed" => config.seed = required_value(&mut args, "--seed")?,
                 "--timeout-secs" => {
                     config.timeout_secs = required_value(&mut args, "--timeout-secs")?.parse()?
+                }
+                "--mode" => {
+                    config.mode = match required_value(&mut args, "--mode")?.as_str() {
+                        "raw" => Mode::Raw,
+                        "batch" => Mode::Batch,
+                        other => return Err(format!("unknown mode: {other}").into()),
+                    }
                 }
                 "--help" | "-h" => {
                     print_usage();
@@ -150,6 +219,9 @@ impl Config {
         }
         if config.concurrency == 0 {
             return Err("--concurrency must be greater than zero".into());
+        }
+        if config.batch_size == 0 {
+            return Err("--batch-size must be greater than zero".into());
         }
         if config.size == 0 {
             return Err("--size must be greater than zero".into());
@@ -169,7 +241,7 @@ fn required_value(
 fn print_usage() {
     println!(
         "usage: cargo run -p hashtree-blossom --example upload_queue_bench -- \\
-  --server http://127.0.0.1:8080 --requests 128 --concurrency 32 --size 262144"
+  --server http://127.0.0.1:8080 --mode raw --requests 128 --concurrency 32 --size 262144"
     );
 }
 
