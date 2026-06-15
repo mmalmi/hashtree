@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Avoided writing orphan external LMDB pack files when a batch upload repeats
+  blobs that are already present, reducing retry/replay write amplification.
+
 ## 0.2.68 - 2026-06-12
 
 ### Fixed

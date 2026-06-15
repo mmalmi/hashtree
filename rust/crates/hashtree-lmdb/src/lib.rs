@@ -5,6 +5,7 @@ use hashtree_core::store::{Store, StoreError, StoreStats};
 use hashtree_core::{to_hex, types::Hash};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -535,7 +536,7 @@ impl LmdbBlobStore {
         Ok(inserted)
     }
 
-    fn put_many_sync_attempt(&self, items: &[(Hash, Vec<u8>)]) -> Result<(usize, u64), StoreError> {
+    fn put_many_sync_attempt(&self, items: &[(Hash, &[u8])]) -> Result<(usize, u64), StoreError> {
         let prepared = self.prepare_blobs_for_write(items)?;
         let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
         let mut inserted = 0usize;
@@ -683,7 +684,31 @@ impl LmdbBlobStore {
             return Ok(0);
         }
 
-        let incoming_bytes = items
+        let mut sorted_hashes: Vec<Hash> = items.iter().map(|(hash, _)| *hash).collect();
+        sorted_hashes.sort_unstable();
+        sorted_hashes.dedup();
+        let existing = self.existing_hashes_in_sorted_candidates(&sorted_hashes)?;
+        let existing_hashes: HashSet<Hash> = sorted_hashes
+            .into_iter()
+            .zip(existing)
+            .filter_map(|(hash, exists)| exists.then_some(hash))
+            .collect();
+        let mut seen_missing = HashSet::new();
+        let write_items = items
+            .iter()
+            .filter_map(|(hash, data)| {
+                if existing_hashes.contains(hash) || !seen_missing.insert(*hash) {
+                    None
+                } else {
+                    Some((*hash, data.as_slice()))
+                }
+            })
+            .collect::<Vec<_>>();
+        if write_items.is_empty() {
+            return Ok(0);
+        }
+
+        let incoming_bytes = write_items
             .iter()
             .map(|(_, data)| data.len() as u64)
             .fold(0u64, |total, size| total.saturating_add(size));
@@ -691,7 +716,7 @@ impl LmdbBlobStore {
 
         let mut retried_after_eviction = false;
         loop {
-            match self.put_many_sync_attempt(items) {
+            match self.put_many_sync_attempt(&write_items) {
                 Ok((inserted, inserted_bytes)) => {
                     if inserted_bytes > 0 {
                         self.current_bytes
@@ -1234,12 +1259,12 @@ impl LmdbBlobStore {
 
     fn prepare_blobs_for_write<'a>(
         &self,
-        items: &'a [(Hash, Vec<u8>)],
+        items: &[(Hash, &'a [u8])],
     ) -> Result<Vec<(Hash, u64, PreparedBlob<'a>)>, StoreError> {
         let Some(config) = &self.external_blobs else {
             return Ok(items
                 .iter()
-                .map(|(hash, data)| (*hash, data.len() as u64, PreparedBlob::Inline(data)))
+                .map(|(hash, data)| (*hash, data.len() as u64, PreparedBlob::Inline(*data)))
                 .collect());
         };
         let Some(pack_target_bytes) = config.pack_target_bytes else {
@@ -1259,7 +1284,7 @@ impl LmdbBlobStore {
 
         for (index, (hash, data)) in items.iter().enumerate() {
             if data.len() < config.min_bytes {
-                prepared[index] = Some((*hash, data.len() as u64, PreparedBlob::Inline(data)));
+                prepared[index] = Some((*hash, data.len() as u64, PreparedBlob::Inline(*data)));
                 continue;
             }
 
@@ -1275,7 +1300,7 @@ impl LmdbBlobStore {
                 pack_bytes = 0;
             }
 
-            pack_entries.push((index, *hash, data));
+            pack_entries.push((index, *hash, *data));
             pack_bytes = pack_bytes.saturating_add(data.len());
         }
 
@@ -1804,6 +1829,23 @@ mod tests {
     #[cfg(unix)]
     const TEST_MAX_READERS: u32 = 4;
 
+    fn count_files_under(path: &std::path::Path) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let mut count = 0usize;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                count += count_files_under(&entry.path())?;
+            } else if metadata.is_file() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     #[cfg(unix)]
     fn run_helper(mode: &str, path: &Path, marker: &Path) {
         let output = Command::new(std::env::current_exe().expect("test binary path"))
@@ -1974,6 +2016,14 @@ mod tests {
         assert_eq!(
             std::fs::read(&pack_path)?,
             [first.as_slice(), second.as_slice()].concat()
+        );
+        let pack_count_after_first_write = count_files_under(&external_dir.join("packs"))?;
+
+        assert_eq!(store.put_many_sync(&items)?, 0);
+        assert_eq!(
+            count_files_under(&external_dir.join("packs"))?,
+            pack_count_after_first_write,
+            "rewriting an already-present batch must not create orphan external pack files"
         );
 
         assert!(store.delete_sync(&first_hash)?);
