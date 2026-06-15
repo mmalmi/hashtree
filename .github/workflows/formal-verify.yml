@@ -102,6 +102,23 @@ jobs:
             rust/target/debug/deps/
           retention-days: 7
 
+  bud16-messagepack-tlc:
+    name: BUD-16 MessagePack TLC
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Run BUD-16 MessagePack determinism model
+        run: ./formal/bud16_messagepack_determinism/run_tlc.sh --mode ci
+
   core-integrity:
     name: Core Integrity
     runs-on: ubuntu-latest

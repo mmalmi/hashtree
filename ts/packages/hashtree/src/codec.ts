@@ -7,11 +7,15 @@
  * **Determinism:** We ensure deterministic output by:
  * 1. Using fixed field order in the encoded map
  * 2. Sorting metadata keys alphabetically before encoding
+ * 3. Sorting directory links by BUD-16 name order before encoding
+ *
+ * File-node link order is preserved because chunk order is semantic.
  */
 
 import { encode, decode } from '@msgpack/msgpack';
 import { TreeNode, Link, LinkType, Hash } from './types.js';
 import { sha256 } from './hash.js';
+import { compareNames } from './compare.js';
 
 /**
  * Internal MessagePack representation of a link
@@ -53,14 +57,22 @@ function sortObjectKeys<T extends Record<string, unknown>>(obj: T): T {
   return sorted as T;
 }
 
+function linksForEncoding(node: TreeNode): Link[] {
+  if (node.type !== LinkType.Dir) return node.links;
+  return [...node.links].sort((left, right) =>
+    compareNames(left.name ?? '', right.name ?? '')
+  );
+}
+
 /**
  * Encode a tree node to MessagePack
  * Fields are ordered alphabetically for canonical encoding
  */
 export function encodeTreeNode(node: TreeNode): Uint8Array {
+  const links = linksForEncoding(node);
   // TreeNode fields in alphabetical order: l, t
   const msgpack: TreeNodeMsgpack = {
-    l: node.links.map(link => {
+    l: links.map(link => {
       // Link fields in alphabetical order: h, k?, m?, n?, s, t
       // Build object with all fields in order, undefined values are omitted by msgpack
       const l: LinkMsgpack = {
@@ -139,4 +151,3 @@ export function getNodeType(data: Uint8Array): LinkType {
   const node = tryDecodeTreeNode(data);
   return node?.type ?? LinkType.Blob;
 }
-

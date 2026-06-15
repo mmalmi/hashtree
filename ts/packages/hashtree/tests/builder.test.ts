@@ -4,6 +4,7 @@ import { MemoryStore } from '../src/store/memory.js';
 import { toHex, cid, LinkType } from '../src/types.js';
 import { sha256 } from '../src/hash.js';
 import { decodeTreeNode } from '../src/codec.js';
+import { compareNames } from '../src/compare.js';
 
 describe('HashTree write operations', () => {
   let store: MemoryStore;
@@ -130,7 +131,7 @@ describe('HashTree write operations', () => {
       expect(node!.links.map(l => l.name)).toEqual(['apple', 'mango', 'zebra']);
     });
 
-    it('should sort unicode names by lexicographic code-point order', async () => {
+    it('should sort unicode names by bytewise UTF-8 order', async () => {
       const hash = await tree.putBlob(new Uint8Array([1]));
       const names = ['bastard', 'berzerker', 'bong', 'bätlick'];
 
@@ -141,7 +142,7 @@ describe('HashTree write operations', () => {
 
       const node = await tree.getTreeNode(dirCid);
       expect(node!.links.map((link) => link.name)).toEqual(
-        [...names].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+        [...names].sort(compareNames),
       );
     });
 

@@ -22,6 +22,8 @@ test-results/
 # Local tooling/artifact junk
 .claude/worktrees/
 .wrangler/cache/
+formal/**/.tools/
+formal/**/states/
 tmp/
 apps/iris-files/scripts/probe-video-sidebar.mjs
 

@@ -33,17 +33,17 @@ A stored object is one of:
 
 Node map fields:
 
-- `t` (`u8`): node type. MUST be `1` (File) or `2` (Dir).
 - `l` (array): links to child objects.
+- `t` (`u8`): node type. MUST be `1` (File) or `2` (Dir).
 
 Link map fields:
 
 - `h` (`bytes32`): child hash. REQUIRED.
-- `s` (`u64`): child byte size. REQUIRED.
-- `t` (`u8`): link type. OPTIONAL, default `0`.
-- `n` (`utf8`): entry name. OPTIONAL (mainly for directories).
 - `k` (`bytes32`): child CHK key. OPTIONAL.
 - `m` (map): metadata. OPTIONAL.
+- `n` (`utf8`): entry name. OPTIONAL (mainly for directories).
+- `s` (`u64`): child byte size. REQUIRED.
+- `t` (`u8`): link type. OPTIONAL, default `0`.
 
 Type values:
 
@@ -54,8 +54,12 @@ Type values:
 Determinism rules:
 
 1. Identical logical nodes MUST encode to identical MessagePack bytes.
-2. Metadata map keys MUST be lexicographically sorted before encoding.
-3. Directory ordering MUST be deterministic (name sort is RECOMMENDED).
+2. Node map fields MUST be encoded in `l`, then `t` order.
+3. Link map fields MUST be encoded in `h`, optional `k`, optional `m`, optional
+   `n`, `s`, then `t` order.
+4. Metadata map keys MUST be sorted by UTF-8 bytes before encoding.
+5. Dir-node links MUST be sorted by entry-name UTF-8 bytes before encoding.
+6. File-node link order is semantic chunk order and MUST be preserved.
 
 Decoding rules:
 

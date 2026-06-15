@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { HashTree, MemoryStore, toHex, LinkType, type CID } from '../src/index.js';
+import { compareNames } from '../src/compare.js';
 
 describe('HashTree', () => {
   let store: MemoryStore;
@@ -161,7 +162,7 @@ describe('HashTree', () => {
       expect(entries[0].name).toBe('test.txt');
     });
 
-    it('should keep setEntry ordering lexicographic for unicode names', async () => {
+    it('should keep setEntry ordering bytewise UTF-8 for unicode names', async () => {
       const { cid: rootCid } = await tree.putDirectory([], { unencrypted: true });
       const names = ['bastard', 'berzerker', 'bong', 'bätlick'];
       let currentRoot = rootCid;
@@ -173,7 +174,7 @@ describe('HashTree', () => {
 
       const entries = await tree.listDirectory(currentRoot);
       expect(entries.map((entry) => entry.name)).toEqual(
-        [...names].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+        [...names].sort(compareNames),
       );
     });
 

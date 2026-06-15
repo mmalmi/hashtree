@@ -17,6 +17,7 @@ Status values:
 | HT-CORE-002: encoding is deterministic across runs | `docs/HTS-01.md` §3 | `rust/crates/hashtree-core/src/codec.rs` | `formal_codec_props.rs` | `core-props` | Verified |
 | HT-CORE-003: metadata insertion order does not affect encoding | `docs/HTS-01.md` §3 | `rust/crates/hashtree-core/src/codec.rs` | `formal_codec_props.rs` | `core-props` | Verified |
 | HT-CORE-004: invalid node `t` rejected; invalid link `t` defaults to Blob | `docs/HTS-01.md` §3 | `rust/crates/hashtree-core/src/codec.rs` | `formal_codec_props.rs` | `core-props` | Verified |
+| HT-CORE-014: BUD-16 directory profile gives one encoding per semantic directory | BUD-16 deterministic MessagePack profile | `rust/crates/hashtree-core/src/codec.rs`, `ts/packages/hashtree/src/codec.ts`, directory builders | `formal/bud16_messagepack_determinism/Bud16MessagePackDeterminism.tla`, `formal_codec_props.rs`, `codec.test.ts`, `builder.test.ts` | `bud16-messagepack-tlc` + `core-props` | Verified |
 | HT-CORE-005: `get(put(bytes)) == bytes` (public + encrypted) | `docs/HTS-01.md` §2-§5 | `rust/crates/hashtree-core/src/hashtree.rs` | `formal_tree_props.rs` | `core-props` | Verified |
 | HT-CORE-006: `put_stream` equivalent to `put` for same input/config | `docs/HTS-01.md` §2-§5 | `rust/crates/hashtree-core/src/hashtree.rs` | `formal_tree_props.rs` | `core-props` | Verified |
 | HT-CORE-007: `read_file_range` equals slice semantics | `docs/HTS-01.md` §2-§4 | `rust/crates/hashtree-core/src/reader.rs` | `formal_tree_props.rs` | `core-props` | Verified |

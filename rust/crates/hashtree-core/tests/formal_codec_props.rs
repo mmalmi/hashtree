@@ -63,12 +63,24 @@ fn arb_node() -> impl Strategy<Value = TreeNode> {
         .prop_map(|(node_type, links)| TreeNode { node_type, links })
 }
 
+fn normalize_for_encoding(mut node: TreeNode) -> TreeNode {
+    if node.node_type == LinkType::Dir {
+        node.links
+            .sort_by(|left, right| dir_link_sort_name(left).cmp(dir_link_sort_name(right)));
+    }
+    node
+}
+
+fn dir_link_sort_name(link: &Link) -> &str {
+    link.name.as_deref().unwrap_or("")
+}
+
 proptest! {
     #[test]
     fn prop_decode_encode_roundtrip(node in arb_node()) {
         let encoded = encode_tree_node(&node).unwrap();
         let decoded = decode_tree_node(&encoded).unwrap();
-        prop_assert_eq!(decoded, node);
+        prop_assert_eq!(decoded, normalize_for_encoding(node));
     }
 
     #[test]
@@ -116,6 +128,38 @@ fn test_metadata_insertion_order_does_not_change_encoding() {
     let enc1 = encode_tree_node(&node1).unwrap();
     let enc2 = encode_tree_node(&node2).unwrap();
     assert_eq!(enc1, enc2);
+}
+
+#[test]
+fn test_directory_link_order_does_not_change_encoding() {
+    let node1 = TreeNode::dir(vec![
+        Link::new([2u8; 32]).with_name("zebra").with_size(2),
+        Link::new([1u8; 32]).with_name("apple").with_size(1),
+    ]);
+    let node2 = TreeNode::dir(vec![
+        Link::new([1u8; 32]).with_name("apple").with_size(1),
+        Link::new([2u8; 32]).with_name("zebra").with_size(2),
+    ]);
+
+    let enc1 = encode_tree_node(&node1).unwrap();
+    let enc2 = encode_tree_node(&node2).unwrap();
+    assert_eq!(enc1, enc2);
+}
+
+#[test]
+fn test_file_link_order_remains_semantic() {
+    let node1 = TreeNode::file(vec![
+        Link::new([1u8; 32]).with_size(1),
+        Link::new([2u8; 32]).with_size(1),
+    ]);
+    let node2 = TreeNode::file(vec![
+        Link::new([2u8; 32]).with_size(1),
+        Link::new([1u8; 32]).with_size(1),
+    ]);
+
+    let enc1 = encode_tree_node(&node1).unwrap();
+    let enc2 = encode_tree_node(&node2).unwrap();
+    assert_ne!(enc1, enc2);
 }
 
 #[derive(Serialize, Deserialize)]

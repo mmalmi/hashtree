@@ -7,6 +7,9 @@
 //! We ensure deterministic output by:
 //! 1. Using fixed struct field order (Rust declaration order via serde)
 //! 2. Converting HashMap metadata to BTreeMap before encoding (sorted keys)
+//! 3. Sorting directory links by BUD-16 name order before encoding
+//!
+//! File-node link order is preserved because chunk order is semantic.
 //!
 //! Format uses short keys for compact encoding:
 //! - t: type (1 = File, 2 = Dir) - node type
@@ -102,10 +105,10 @@ struct WireTreeNode {
 
 /// Encode a tree node to MessagePack
 pub fn encode_tree_node(node: &TreeNode) -> Result<Vec<u8>, CodecError> {
+    let links = links_for_encoding(node);
     let wire = WireTreeNode {
         t: node.node_type as u8,
-        l: node
-            .links
+        l: links
             .iter()
             .map(|link| {
                 // Convert HashMap to BTreeMap for deterministic key ordering
@@ -127,6 +130,18 @@ pub fn encode_tree_node(node: &TreeNode) -> Result<Vec<u8>, CodecError> {
     };
 
     rmp_serde::to_vec_named(&wire).map_err(|e| CodecError::MsgpackEncode(e.to_string()))
+}
+
+fn links_for_encoding(node: &TreeNode) -> Vec<&Link> {
+    let mut links = node.links.iter().collect::<Vec<_>>();
+    if node.node_type == LinkType::Dir {
+        links.sort_by(|left, right| dir_link_sort_name(left).cmp(dir_link_sort_name(right)));
+    }
+    links
+}
+
+fn dir_link_sort_name(link: &Link) -> &str {
+    link.name.as_deref().unwrap_or("")
 }
 
 /// Decode MessagePack to a tree node
@@ -256,12 +271,14 @@ mod tests {
         let decoded = decode_tree_node(&encoded).unwrap();
 
         assert_eq!(decoded.links.len(), 2);
-        assert_eq!(decoded.links[0].name, Some("file1.txt".to_string()));
-        assert_eq!(decoded.links[0].size, 100);
-        assert_eq!(decoded.links[0].link_type, LinkType::Blob);
-        assert_eq!(to_hex(&decoded.links[0].hash), to_hex(&hash1));
-        assert_eq!(decoded.links[1].name, Some("dir".to_string()));
-        assert_eq!(decoded.links[1].link_type, LinkType::Dir);
+        assert_eq!(decoded.links[0].name, Some("dir".to_string()));
+        assert_eq!(decoded.links[0].size, 0);
+        assert_eq!(decoded.links[0].link_type, LinkType::Dir);
+        assert_eq!(to_hex(&decoded.links[0].hash), to_hex(&hash2));
+        assert_eq!(decoded.links[1].name, Some("file1.txt".to_string()));
+        assert_eq!(decoded.links[1].size, 100);
+        assert_eq!(decoded.links[1].link_type, LinkType::Blob);
+        assert_eq!(to_hex(&decoded.links[1].hash), to_hex(&hash1));
     }
 
     #[test]
@@ -421,6 +438,61 @@ mod tests {
 
         assert_eq!(encoded1, encoded2, "Encoding should be deterministic");
         assert_eq!(encoded2, encoded3, "Encoding should be deterministic");
+    }
+
+    #[test]
+    fn test_directory_link_order_is_canonicalized() {
+        let apple = Link::new([1u8; 32]).with_name("apple").with_size(1);
+        let zebra = Link::new([2u8; 32]).with_name("zebra").with_size(2);
+
+        let sorted = TreeNode::dir(vec![apple.clone(), zebra.clone()]);
+        let reversed = TreeNode::dir(vec![zebra, apple]);
+
+        let encoded_sorted = encode_tree_node(&sorted).unwrap();
+        let encoded_reversed = encode_tree_node(&reversed).unwrap();
+        assert_eq!(encoded_sorted, encoded_reversed);
+
+        let decoded = decode_tree_node(&encoded_reversed).unwrap();
+        let names = decoded
+            .links
+            .iter()
+            .map(|link| link.name.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![Some("apple"), Some("zebra")]);
+    }
+
+    #[test]
+    fn test_directory_link_order_uses_utf8_bytes() {
+        let bmp_private_use = Link::new([1u8; 32]).with_name("\u{E000}").with_size(1);
+        let supplementary = Link::new([2u8; 32]).with_name("\u{10000}").with_size(2);
+
+        let node = TreeNode::dir(vec![supplementary, bmp_private_use]);
+        let decoded = decode_tree_node(&encode_tree_node(&node).unwrap()).unwrap();
+        let names = decoded
+            .links
+            .iter()
+            .map(|link| link.name.as_deref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec![Some("\u{E000}"), Some("\u{10000}")]);
+    }
+
+    #[test]
+    fn test_file_link_order_is_preserved() {
+        let first = Link::new([1u8; 32]).with_size(1);
+        let second = Link::new([2u8; 32]).with_size(1);
+
+        let file = TreeNode::file(vec![first.clone(), second.clone()]);
+        let reversed_file = TreeNode::file(vec![second, first]);
+
+        assert_ne!(
+            encode_tree_node(&file).unwrap(),
+            encode_tree_node(&reversed_file).unwrap()
+        );
+
+        let decoded = decode_tree_node(&encode_tree_node(&reversed_file).unwrap()).unwrap();
+        assert_eq!(decoded.links[0].hash, [2u8; 32]);
+        assert_eq!(decoded.links[1].hash, [1u8; 32]);
     }
 
     #[test]

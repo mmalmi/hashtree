@@ -34,10 +34,12 @@ describe('codec', () => {
       const decoded = decodeTreeNode(encoded);
 
       expect(decoded.links.length).toBe(2);
-      expect(decoded.links[0].name).toBe('file1.txt');
-      expect(decoded.links[0].size).toBe(100);
-      expect(toHex(decoded.links[0].hash)).toBe(toHex(hash1));
-      expect(decoded.links[1].name).toBe('dir');
+      expect(decoded.links[0].name).toBe('dir');
+      expect(decoded.links[0].size).toBe(500);
+      expect(toHex(decoded.links[0].hash)).toBe(toHex(hash2));
+      expect(decoded.links[1].name).toBe('file1.txt');
+      expect(decoded.links[1].size).toBe(100);
+      expect(toHex(decoded.links[1].hash)).toBe(toHex(hash1));
     });
 
     it('should preserve link meta', () => {
@@ -172,6 +174,47 @@ describe('codec', () => {
       const hash1 = await sha256(encoded1);
       const hash2 = await sha256(encoded2);
       expect(toHex(hash1)).toBe(toHex(hash2));
+    });
+
+    it('should produce identical bytes regardless of directory link order', () => {
+      const apple = { hash: new Uint8Array(32).fill(1), name: 'apple', size: 1, type: LinkType.Blob };
+      const zebra = { hash: new Uint8Array(32).fill(2), name: 'zebra', size: 2, type: LinkType.Blob };
+
+      const sorted: TreeNode = {
+        type: LinkType.Dir,
+        links: [apple, zebra],
+      };
+      const reversed: TreeNode = {
+        type: LinkType.Dir,
+        links: [zebra, apple],
+      };
+
+      const encodedSorted = encodeTreeNode(sorted);
+      const encodedReversed = encodeTreeNode(reversed);
+      expect(toHex(encodedSorted)).toBe(toHex(encodedReversed));
+
+      const decoded = decodeTreeNode(encodedReversed);
+      expect(decoded.links.map(link => link.name)).toEqual(['apple', 'zebra']);
+    });
+
+    it('should preserve file link order because chunk order is semantic', () => {
+      const first = { hash: new Uint8Array(32).fill(1), size: 1, type: LinkType.Blob };
+      const second = { hash: new Uint8Array(32).fill(2), size: 1, type: LinkType.Blob };
+
+      const file: TreeNode = {
+        type: LinkType.File,
+        links: [first, second],
+      };
+      const reversedFile: TreeNode = {
+        type: LinkType.File,
+        links: [second, first],
+      };
+
+      expect(toHex(encodeTreeNode(file))).not.toBe(toHex(encodeTreeNode(reversedFile)));
+      expect(decodeTreeNode(encodeTreeNode(reversedFile)).links.map(link => toHex(link.hash))).toEqual([
+        toHex(second.hash),
+        toHex(first.hash),
+      ]);
     });
   });
 });
