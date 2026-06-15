@@ -812,6 +812,10 @@ Interpretation:
   option was changed to require an explicit enable flag and the live deployment
   was redeployed with no redirect binding; large unauthenticated test bodies now
   return the normal validation error instead of redirecting.
+- The Rust Blossom client now follows upload body redirects manually only for
+  same-origin targets, same-host HTTP-to-HTTPS upgrades, and loopback test
+  redirects; it refuses cross-host HTTPS redirects instead of carrying upload
+  authorization to a different hostname.
 - Four server-side blob write permits remain reasonable. Origin-local c4 writes
   already reached about 68 MiB/s in the previous test, while public c4-c12 writes
   all cluster around 8 MiB/s. Raising public client concurrency mostly increases
@@ -827,6 +831,51 @@ Interpretation:
   better direct local-fileserver upload transport, long-lived upload stream, or
   git pack/tail-pack upload path that reduces per-request edge overhead without
   moving hot storage into a cloud object store.
+
+Follow-up:
+- `upload.iris.to` was moved off the Worker custom-domain path and added directly
+  to the existing Cloudflare Tunnel ingress alongside the CDN/read hostname.
+  `https://upload.iris.to/api/status` returned 200 and the Worker custom-domain
+  list for that hostname was empty after the change.
+- A direct proxied AAAA origin prototype was prepared with a local Caddy reverse
+  proxy on HTTP/HTTPS and firewall rules limited to Cloudflare source ranges.
+  Public requests moved from stale tunnel 404s to Cloudflare 522/timeouts, and a
+  destination-filtered packet capture saw no inbound origin packets for the
+  direct hostname. This confirms public TCP ingress to the local fileserver is
+  still blocked before the origin, so direct DNS cannot be the fix until the
+  upstream/router path is opened.
+- Workerless tunnel upload throughput was correct but not good enough: c4,
+  192 x 256 KiB binary batches with 16 blobs/request reached 3.63-3.67 MiB/s
+  through `upload.iris.to`; the same shape through the CDN/read tunnel hostname
+  reached 4.66 MiB/s. c12 reached 3.80 MiB/s. Adding one extra tunnel connector
+  moved c12 only to 4.08 MiB/s, and five connector processes with c24 reached
+  only 4.36 MiB/s with much worse tail latency. Larger 24 MiB binary batch
+  requests did not fix it either, reaching 3.92 MiB/s at c4. A same-host
+  loopback origin check with 64-blob binary batches reached 15.12 MiB/s during
+  the same pass, so public ingress remained the tighter cap even under current
+  origin load.
+- A temporary HTTP/2 tunnel connector was tested against the same Workerless
+  ingress. It reached 4.07 MiB/s at c4 and 3.85 MiB/s at c12 for
+  192 x 256 KiB binary batches, then the normal QUIC connector was restored.
+  HTTP/2 was not a meaningful improvement.
+- Direct public ingress was also checked via local router port-mapping paths.
+  UPnP TCP mappings for the HTTP/HTTPS origin path were rejected by the router
+  with policy errors, and the simple IPv6 UPnP path exposed no pinhole-capable
+  device. Direct `upload.iris.to`/`cdn.iris.to` therefore still needs a router,
+  ISP, or admin-side ingress change; it is not something the hashtree daemon can
+  fix from inside the tunnel.
+- A bounded live probe after these changes wrote 64 x 256 KiB fresh blobs through
+  `upload.iris.to` as binary batches at 3.43 MiB/s. Reads of those same fresh
+  blobs were 3.26 MiB/s on first fill and 25.30 MiB/s warm through
+  `upload.iris.to`; through `cdn.iris.to`, the first fill was 4.46 MiB/s and the
+  warm repeat was 24.33 MiB/s. The server stayed healthy afterward with idle
+  blob queues and no recent 5xx burst.
+- Conclusion: dropping the Worker is architecturally cleaner and fixes the 404
+  routing failure, but it is not the modern-throughput fix. The hard bottleneck
+  remains Cloudflare Tunnel/request-body transport under shared read/write load.
+  The next meaningful architecture change is real public TCP ingress to the
+  local fileserver, or a protocol change that avoids repeated public tunnel body
+  uploads, such as a long-lived upload stream or git pack/tail-pack admission.
 
 ### 2026-06-15: Underfull first-publish Git pack checkpoint
 
@@ -881,3 +930,43 @@ Interpretation:
   request/object churn for git pushes while the remaining large write throughput
   work stays focused on public ingress, long-lived upload streams, or direct
   local-fileserver transport.
+
+### 2026-06-16: Underfull delta Git tail-pack checkpoints
+
+Question: can `git-remote-htree` make medium delta pushes cheaper, not only
+medium first publishes?
+
+Change:
+- Delta pushes that already have a pack-backed remote base now build a
+  current-tip tail pack when the pushed delta has at least the underfull
+  threshold of Git objects. The normal deterministic checkpoint interval stays
+  unchanged, and missing-base-checkpoint rebuilds still avoid adding a
+  current-tip tail pack.
+- Inherited base pack coverage is merged with the new tail pack coverage before
+  building the hashtree root. Import selection still brings in current tree
+  objects needed to materialize the browsable working tree, but it avoids
+  re-importing unchanged base blobs as loose Git objects.
+
+Shape measurements:
+
+| Shape | Delta Git objects | Loose Git payload | Pack+idx payload | Current working-tree payload |
+| --- | ---: | ---: | ---: | ---: |
+| Repeated medium text edits | 900 | 278.6 KiB | 102.3 KiB | 13.1 KiB |
+| Tiny-object edge case | 900 | 69.1 KiB | 89.5 KiB | 4 B |
+
+Interpretation:
+- For source-like repeated text deltas, the tail pack cuts the `.git/objects`
+  upload payload substantially and replaces hundreds of loose Git object entries
+  with pack+idx files. This should reduce public tunnel pain for medium git
+  pushes even while raw `upload.iris.to` body throughput remains capped.
+- For extremely tiny object deltas, pack index overhead can exceed loose bytes,
+  but the pack still collapses object fanout. Keep the underfull threshold
+  tunable with `HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS`.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree underfull_delta -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree tail_pack -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree helper::tests -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree git::storage::tests -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree --lib`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-blossom`

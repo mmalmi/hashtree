@@ -539,6 +539,20 @@ impl GitStorage {
         Ok(())
     }
 
+    pub fn add_pack_covered_objects(&self, covered_objects: HashSet<String>) -> Result<()> {
+        let mut packed_object_ids = self
+            .packed_object_ids
+            .write()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+        packed_object_ids.extend(covered_objects);
+
+        if let Ok(mut root) = self.root_cid.write() {
+            *root = None;
+        }
+
+        Ok(())
+    }
+
     /// Check if a ref exists
     #[cfg(test)]
     pub fn has_ref(&self, name: &str) -> Result<bool> {

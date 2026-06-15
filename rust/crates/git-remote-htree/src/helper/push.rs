@@ -1515,7 +1515,7 @@ impl RemoteHelper {
         let base_has_pack_checkpoint = self.cached_remote_root_pack_checkpoint_available();
         let rebuild_checkpoint_from_first_bucket =
             delta_base.is_some() && !base_has_pack_checkpoint;
-        let checkpoint_covered = match self.prepare_git_pack_checkpoint(
+        let mut checkpoint_covered = match self.prepare_git_pack_checkpoint(
             sha,
             objects.len(),
             delta_base.as_deref(),
@@ -1531,6 +1531,16 @@ impl RemoteHelper {
                 HashSet::new()
             }
         };
+        let inherited_pack_covered = if base_has_pack_checkpoint {
+            self.inherited_pack_covered_imported_tree_ids(sha, &objects)?
+        } else {
+            HashSet::new()
+        };
+        if !checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
+            self.storage
+                .add_pack_covered_objects(inherited_pack_covered.clone())?;
+            checkpoint_covered.extend(inherited_pack_covered.iter().cloned());
+        }
 
         let objects_to_import = self.select_objects_to_import_for_push(
             sha,
@@ -1538,9 +1548,7 @@ impl RemoteHelper {
             &checkpoint_covered,
             base_has_pack_checkpoint,
         )?;
-        if checkpoint_covered.is_empty() && base_has_pack_checkpoint {
-            let inherited_pack_covered =
-                self.inherited_pack_covered_imported_tree_ids(sha, &objects)?;
+        if checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
             self.storage
                 .set_pack_checkpoint_files(BTreeMap::new(), inherited_pack_covered)?;
         }
@@ -1795,6 +1803,13 @@ impl RemoteHelper {
                     covered_objects: Self::reachable_git_object_ids(sha)?,
                 }));
             }
+            if let Some(base) = delta_base.filter(|_| !rebuild_checkpoint_from_first_bucket) {
+                return Self::underfull_delta_tail_checkpoint_plan(
+                    sha,
+                    base,
+                    underfull_min_objects,
+                );
+            }
             return Ok(None);
         }
 
@@ -1805,7 +1820,11 @@ impl RemoteHelper {
             let base_objects = Self::reachable_git_object_count(base).unwrap_or(0);
             let base_bucket = base_objects / interval_objects;
             if bucket <= base_bucket {
-                return Ok(None);
+                return Self::underfull_delta_tail_checkpoint_plan(
+                    sha,
+                    base,
+                    underfull_min_objects,
+                );
             }
             if base_bucket > 0 {
                 previous_tip = Some(Self::find_git_pack_checkpoint_tip(
@@ -1831,17 +1850,32 @@ impl RemoteHelper {
         }
 
         if packs.is_empty() {
+            if let Some(base) = delta_base.filter(|_| !rebuild_checkpoint_from_first_bucket) {
+                return Self::underfull_delta_tail_checkpoint_plan(
+                    sha,
+                    base,
+                    underfull_min_objects,
+                );
+            }
             return Ok(None);
         }
 
         let Some(covered_tip) = previous_tip else {
             return Ok(None);
         };
-        let covered_objects = Self::reachable_git_object_ids(&covered_tip)?;
-        Ok(Some(GitPackCheckpointPlan {
+        let mut plan = GitPackCheckpointPlan {
             packs,
-            covered_objects,
-        }))
+            covered_objects: Self::reachable_git_object_ids(&covered_tip)?,
+        };
+        if delta_base.is_some() && !rebuild_checkpoint_from_first_bucket {
+            Self::append_underfull_delta_tail_checkpoint(
+                &mut plan,
+                sha,
+                &covered_tip,
+                underfull_min_objects,
+            )?;
+        }
+        Ok(Some(plan))
     }
 
     pub(super) fn reachable_git_object_count(sha: &str) -> Result<usize> {
@@ -1871,6 +1905,72 @@ impl RemoteHelper {
             .filter(|line| line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .map(str::to_string)
             .collect())
+    }
+
+    fn git_object_ids_excluding(sha: &str, exclude_tip: &str) -> Result<HashSet<String>> {
+        let exclude = format!("^{exclude_tip}");
+        let output = Command::new("git")
+            .args(["rev-list", "--objects", "--no-object-names", sha, &exclude])
+            .output()
+            .context("run git rev-list for delta checkpoint objects")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git rev-list failed while checking delta checkpoint objects{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn underfull_delta_tail_checkpoint_plan(
+        sha: &str,
+        exclude_tip: &str,
+        underfull_min_objects: usize,
+    ) -> Result<Option<GitPackCheckpointPlan>> {
+        if underfull_min_objects == 0 || sha == exclude_tip {
+            return Ok(None);
+        }
+
+        let covered_objects = Self::git_object_ids_excluding(sha, exclude_tip)?;
+        if covered_objects.len() < underfull_min_objects {
+            return Ok(None);
+        }
+
+        Ok(Some(GitPackCheckpointPlan {
+            packs: vec![GitPackCheckpointPackPlan {
+                tip: sha.to_string(),
+                exclude_tip: Some(exclude_tip.to_string()),
+            }],
+            covered_objects,
+        }))
+    }
+
+    fn append_underfull_delta_tail_checkpoint(
+        plan: &mut GitPackCheckpointPlan,
+        sha: &str,
+        exclude_tip: &str,
+        underfull_min_objects: usize,
+    ) -> Result<()> {
+        let Some(tail_plan) =
+            Self::underfull_delta_tail_checkpoint_plan(sha, exclude_tip, underfull_min_objects)?
+        else {
+            return Ok(());
+        };
+
+        plan.packs.extend(tail_plan.packs);
+        plan.covered_objects.extend(tail_plan.covered_objects);
+        Ok(())
     }
 
     fn rev_list_first_parent_commits(sha: &str) -> Result<Vec<String>> {
@@ -2160,7 +2260,17 @@ impl RemoteHelper {
         }
 
         if !checkpoint_covered.is_empty() {
-            selected.extend(Self::current_tree_object_ids(sha)?);
+            let current_tree = Self::current_tree_object_ids(sha)?;
+            if base_has_pack_checkpoint {
+                selected.extend(Self::current_tree_tree_object_ids(sha)?);
+                selected.extend(
+                    current_tree
+                        .into_iter()
+                        .filter(|oid| checkpoint_covered.contains(oid)),
+                );
+            } else {
+                selected.extend(current_tree);
+            }
         } else if base_has_pack_checkpoint {
             selected.extend(Self::current_tree_tree_object_ids(sha)?);
         }

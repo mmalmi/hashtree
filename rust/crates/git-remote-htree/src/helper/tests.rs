@@ -1648,6 +1648,101 @@ fn test_underfull_initial_push_gets_single_head_checkpoint_pack() {
 }
 
 #[test]
+fn test_underfull_delta_push_gets_single_tail_checkpoint_pack() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let helper = create_test_helper().expect("helper");
+
+    let delta = helper
+        .list_objects_for_shas(
+            std::slice::from_ref(&master_sha),
+            std::slice::from_ref(&base_sha),
+        )
+        .expect("list delta objects");
+    let total_objects = RemoteHelper::reachable_git_object_count(&master_sha)
+        .expect("count current reachable objects");
+    let plan = RemoteHelper::plan_git_pack_checkpoint(
+        &master_sha,
+        delta.len(),
+        Some(&base_sha),
+        total_objects + 100,
+        delta.len(),
+        false,
+    )
+    .expect("plan checkpoint")
+    .expect("underfull delta push should get a head tail pack");
+
+    assert_eq!(plan.packs.len(), 1);
+    assert_eq!(plan.packs[0].tip, master_sha);
+    assert_eq!(
+        plan.packs[0].exclude_tip.as_deref(),
+        Some(base_sha.as_str())
+    );
+    assert!(
+        delta.iter().all(|oid| plan.covered_objects.contains(oid)),
+        "tail pack should cover the pushed delta objects"
+    );
+    assert!(
+        !plan.covered_objects.contains(&base_sha),
+        "tail pack should not claim the excluded base commit"
+    );
+}
+
+#[test]
+fn test_delta_tail_pack_import_selection_keeps_base_blobs_out() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let helper = create_test_helper().expect("helper");
+    let delta = helper
+        .list_objects_for_shas(
+            std::slice::from_ref(&master_sha),
+            std::slice::from_ref(&base_sha),
+        )
+        .expect("list delta objects");
+    let delta_set: HashSet<String> = delta.iter().cloned().collect();
+    let current_tree =
+        RemoteHelper::current_tree_object_ids(&master_sha).expect("current tree object ids");
+    let current_tree_trees =
+        RemoteHelper::current_tree_tree_object_ids(&master_sha).expect("current tree tree ids");
+
+    let selected = helper
+        .select_objects_to_import_for_push(&master_sha, &delta, &delta_set, true)
+        .expect("select tail-pack import objects");
+    let selected: HashSet<String> = selected.into_iter().collect();
+
+    assert!(
+        current_tree_trees.iter().all(|oid| selected.contains(oid)),
+        "tree objects are still needed to build the browsable tree"
+    );
+    assert!(
+        current_tree
+            .intersection(&delta_set)
+            .all(|oid| selected.contains(oid)),
+        "current delta blobs covered by the tail pack still need local content for the working tree"
+    );
+
+    let unchanged_current_blobs = current_tree
+        .difference(&current_tree_trees)
+        .filter(|oid| !delta_set.contains(*oid))
+        .collect::<Vec<_>>();
+    assert!(
+        !unchanged_current_blobs.is_empty(),
+        "fixture should have unchanged current blobs already covered by the base pack"
+    );
+    assert!(
+        unchanged_current_blobs
+            .iter()
+            .all(|oid| !selected.contains(*oid)),
+        "tail-pack delta merge should not re-import unchanged base blobs as loose objects"
+    );
+}
+
+#[test]
 fn test_git_pack_checkpoint_delta_pack_excludes_previous_tip() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let (_home, repo, shas) = create_repo_with_linear_history(3);

@@ -28,15 +28,22 @@
 
 use base64::Engine;
 use nostr::prelude::*;
-use reqwest::StatusCode;
+use reqwest::{
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, LOCATION},
+    Method, StatusCode, Url,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, warn};
 
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
+const MAX_UPLOAD_REDIRECTS: usize = 3;
+const UPLOAD_REDIRECT_OPT_IN_ENV: &str = "HTREE_BLOSSOM_UPLOAD_REDIRECT_OPT_IN";
+const UPLOAD_REDIRECT_OPT_IN_HEADER: &str = "x-hashtree-upload-redirect";
 pub const BATCH_UPLOAD_MAX_BLOBS: usize = 1024;
 pub const BATCH_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const BATCH_UPLOAD_BINARY_CONTENT_TYPE: &str = "application/vnd.hashtree.blossom.batch.v1";
@@ -81,6 +88,7 @@ pub struct BlossomClient {
     /// Servers for writing (upload)
     write_servers: Vec<String>,
     http: reqwest::Client,
+    upload_http: reqwest::Client,
     timeout: Duration,
 }
 
@@ -100,6 +108,16 @@ impl UploadOutcome {
 struct UploadAttemptError {
     detail: String,
     retryable: bool,
+}
+
+#[derive(Clone)]
+struct UploadBodyRequest {
+    method: Method,
+    url: String,
+    auth_header: String,
+    content_type: String,
+    extra_headers: Vec<(&'static str, String)>,
+    body: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -218,6 +236,61 @@ fn encode_binary_batch_upload(items: &[BatchUploadItem]) -> Result<Vec<u8>, Blos
     Ok(body)
 }
 
+fn default_http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder().timeout(timeout).build().unwrap()
+}
+
+fn upload_http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn is_loopback_url(url: &Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+fn trusted_upload_redirect(from: &Url, to: &Url) -> bool {
+    if same_origin(from, to) {
+        return true;
+    }
+
+    if from.scheme() == "http" && to.scheme() == "https" && from.host_str() == to.host_str() {
+        return true;
+    }
+
+    from.scheme() == "http" && to.scheme() == "http" && is_loopback_url(from) && is_loopback_url(to)
+}
+
+fn upload_redirect_extra_headers() -> Vec<(&'static str, String)> {
+    match std::env::var(UPLOAD_REDIRECT_OPT_IN_ENV) {
+        Ok(value)
+            if matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ) =>
+        {
+            vec![(UPLOAD_REDIRECT_OPT_IN_HEADER, "1".to_string())]
+        }
+        _ => Vec::new(),
+    }
+}
+
 async fn parse_batch_upload_response(
     resp: reqwest::Response,
     items: &[BatchUploadItem],
@@ -302,10 +375,8 @@ impl BlossomClient {
             keys,
             read_servers,
             write_servers: config.blossom.all_write_servers(),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap(),
+            http: default_http_client(Duration::from_secs(30)),
+            upload_http: upload_http_client(Duration::from_secs(30)),
             timeout: Duration::from_secs(30),
         }
     }
@@ -317,10 +388,8 @@ impl BlossomClient {
             keys,
             read_servers: vec![],
             write_servers: vec![],
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap(),
+            http: default_http_client(Duration::from_secs(30)),
+            upload_http: upload_http_client(Duration::from_secs(30)),
             timeout: Duration::from_secs(30),
         }
     }
@@ -331,10 +400,8 @@ impl BlossomClient {
             keys,
             read_servers: vec![],
             write_servers: vec![],
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap(),
+            http: default_http_client(Duration::from_secs(30)),
+            upload_http: upload_http_client(Duration::from_secs(30)),
             timeout: Duration::from_secs(30),
         }
     }
@@ -361,7 +428,8 @@ impl BlossomClient {
     /// Set request timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
-        self.http = reqwest::Client::builder().timeout(timeout).build().unwrap();
+        self.http = default_http_client(timeout);
+        self.upload_http = upload_http_client(timeout);
         self
     }
 
@@ -643,12 +711,14 @@ impl BlossomClient {
         let url = format!("{}/upload/batch-binary", server.trim_end_matches('/'));
 
         let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", auth_header)
-            .header("Content-Type", BATCH_UPLOAD_BINARY_CONTENT_TYPE)
-            .body(body)
-            .send()
+            .send_upload_body_request(UploadBodyRequest {
+                method: Method::POST,
+                url,
+                auth_header,
+                content_type: BATCH_UPLOAD_BINARY_CONTENT_TYPE.to_string(),
+                extra_headers: upload_redirect_extra_headers(),
+                body,
+            })
             .await?;
 
         parse_batch_upload_response(resp, items).await
@@ -683,12 +753,14 @@ impl BlossomClient {
         let url = format!("{}/upload/batch", server.trim_end_matches('/'));
 
         let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", auth_header)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
+            .send_upload_body_request(UploadBodyRequest {
+                method: Method::POST,
+                url,
+                auth_header,
+                content_type: "application/json".to_string(),
+                extra_headers: upload_redirect_extra_headers(),
+                body,
+            })
             .await?;
 
         parse_batch_upload_response(resp, items).await
@@ -1012,6 +1084,109 @@ impl BlossomClient {
         self.download(hash).await.ok()
     }
 
+    async fn send_upload_body_request(
+        &self,
+        request: UploadBodyRequest,
+    ) -> Result<reqwest::Response, BlossomError> {
+        let mut current_url = Url::parse(&request.url)
+            .map_err(|err| BlossomError::UploadFailed(format!("invalid upload URL: {err}")))?;
+
+        for redirect_count in 0..=MAX_UPLOAD_REDIRECTS {
+            let response = self
+                .send_upload_body_once(current_url.as_str(), &request)
+                .await?;
+            let status = response.status();
+            if status != StatusCode::TEMPORARY_REDIRECT && status != StatusCode::PERMANENT_REDIRECT
+            {
+                return Ok(response);
+            }
+
+            if redirect_count == MAX_UPLOAD_REDIRECTS {
+                return Err(BlossomError::UploadFailed(format!(
+                    "upload redirected more than {MAX_UPLOAD_REDIRECTS} times"
+                )));
+            }
+
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .ok_or_else(|| {
+                    BlossomError::UploadFailed("upload redirect missing Location".to_string())
+                })?
+                .to_str()
+                .map_err(|err| {
+                    BlossomError::UploadFailed(format!("invalid upload redirect Location: {err}"))
+                })?;
+            let next_url = current_url.join(location).map_err(|err| {
+                BlossomError::UploadFailed(format!("invalid upload redirect URL: {err}"))
+            })?;
+
+            if !trusted_upload_redirect(&current_url, &next_url) {
+                return Err(BlossomError::UploadFailed(format!(
+                    "refusing upload redirect from {} to {}",
+                    current_url, next_url
+                )));
+            }
+
+            debug!("Following trusted upload redirect to {}", next_url);
+            current_url = next_url;
+        }
+
+        Err(BlossomError::UploadFailed(
+            "unreachable upload redirect loop".to_string(),
+        ))
+    }
+
+    async fn send_upload_body_once(
+        &self,
+        url: &str,
+        request: &UploadBodyRequest,
+    ) -> Result<reqwest::Response, BlossomError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&request.auth_header).map_err(|err| {
+                BlossomError::UploadFailed(format!("invalid Authorization header: {err}"))
+            })?,
+        );
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_str(&request.content_type).map_err(|err| {
+                BlossomError::UploadFailed(format!("invalid Content-Type header: {err}"))
+            })?,
+        );
+        for (name, value) in &request.extra_headers {
+            headers.insert(
+                *name,
+                HeaderValue::from_str(value).map_err(|err| {
+                    BlossomError::UploadFailed(format!("invalid {name} header: {err}"))
+                })?,
+            );
+        }
+
+        Ok(self
+            .upload_http
+            .request(request.method.clone(), url)
+            .headers(headers)
+            .body(request.body.clone())
+            .send()
+            .await?)
+    }
+
+    fn upload_request_error(error: BlossomError) -> UploadAttemptError {
+        match error {
+            BlossomError::Http(error) => {
+                if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+                {
+                    UploadAttemptError::retryable(error.to_string())
+                } else {
+                    UploadAttemptError::fatal(error.to_string())
+                }
+            }
+            error => UploadAttemptError::fatal(error.to_string()),
+        }
+    }
+
     /// Upload to a single server
     /// Returns Ok(Uploaded) if uploaded, Ok(AlreadyExists) if already exists.
     async fn upload_to_server(
@@ -1024,22 +1199,16 @@ impl BlossomClient {
         let url = format!("{}/upload", server.trim_end_matches('/'));
 
         let resp = self
-            .http
-            .put(&url)
-            .header("Authorization", auth_header)
-            .header("Content-Type", "application/octet-stream")
-            .header("X-SHA-256", hash)
-            .body(data.to_vec())
-            .send()
+            .send_upload_body_request(UploadBodyRequest {
+                method: Method::PUT,
+                url,
+                auth_header: auth_header.to_string(),
+                content_type: "application/octet-stream".to_string(),
+                extra_headers: vec![("x-sha-256", hash.to_string())],
+                body: data.to_vec(),
+            })
             .await
-            .map_err(|error| {
-                if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
-                {
-                    UploadAttemptError::retryable(error.to_string())
-                } else {
-                    UploadAttemptError::fatal(error.to_string())
-                }
-            })?;
+            .map_err(Self::upload_request_error)?;
 
         let status = resp.status();
         if status == StatusCode::OK || status.as_u16() == 409 {
@@ -1252,6 +1421,13 @@ mod tests {
         done: Option<tokio::sync::oneshot::Receiver<()>>,
     }
 
+    struct TestRedirectBodyServer {
+        url: String,
+        saw_redirect_opt_in: Arc<std::sync::atomic::AtomicBool>,
+        saw_authorization: Arc<std::sync::atomic::AtomicBool>,
+        done: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
     impl TestUploadServer {
         fn new(statuses: Vec<u16>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
@@ -1395,7 +1571,111 @@ mod tests {
         }
     }
 
-    fn drain_http_request(stream: &mut std::net::TcpStream, buffer: &mut [u8; 8192]) {
+    impl TestRedirectBodyServer {
+        fn new(success_body: String) -> Self {
+            let redirect_listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind redirect test server");
+            let redirect_addr = redirect_listener.local_addr().expect("redirect local addr");
+            let target_listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind redirect target server");
+            let target_addr = target_listener.local_addr().expect("target local addr");
+            let saw_redirect_opt_in = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let saw_authorization = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let saw_redirect_opt_in_for_thread = Arc::clone(&saw_redirect_opt_in);
+            let saw_authorization_for_thread = Arc::clone(&saw_authorization);
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+            thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                let target_url = format!("http://{target_addr}/upload/batch-binary");
+
+                let (mut redirect_stream, _) =
+                    redirect_listener.accept().expect("accept redirect request");
+                let redirect_request = read_http_request(&mut redirect_stream, &mut buffer);
+                let redirect_header_end = redirect_request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .unwrap_or(redirect_request.len());
+                let redirect_headers =
+                    String::from_utf8_lossy(&redirect_request[..redirect_header_end]);
+                let has_redirect_opt_in = redirect_headers.lines().any(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with("x-hashtree-upload-redirect:")
+                });
+                saw_redirect_opt_in_for_thread
+                    .store(has_redirect_opt_in, std::sync::atomic::Ordering::SeqCst);
+                write!(
+                    redirect_stream,
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("write redirect response");
+                redirect_stream.flush().expect("flush redirect response");
+
+                let (mut target_stream, _) =
+                    target_listener.accept().expect("accept redirected request");
+                let request = read_http_request(&mut target_stream, &mut buffer);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .unwrap_or(request.len());
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let has_authorization = headers
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("authorization:"));
+                saw_authorization_for_thread
+                    .store(has_authorization, std::sync::atomic::Ordering::SeqCst);
+
+                if has_authorization {
+                    write!(
+                        target_stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        success_body.len(),
+                        success_body
+                    )
+                    .expect("write redirected success response");
+                } else {
+                    let body = r#"{"error":"missing authorization"}"#;
+                    write!(
+                        target_stream,
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .expect("write redirected failure response");
+                }
+                target_stream.flush().expect("flush target response");
+
+                let _ = done_tx.send(());
+            });
+
+            Self {
+                url: format!("http://{redirect_addr}"),
+                saw_redirect_opt_in,
+                saw_authorization,
+                done: Some(done_rx),
+            }
+        }
+
+        async fn wait_for_requests(&mut self) {
+            if let Some(done) = self.done.take() {
+                let _ = done.await;
+            }
+        }
+
+        fn saw_authorization(&self) -> bool {
+            self.saw_authorization
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn saw_redirect_opt_in(&self) -> bool {
+            self.saw_redirect_opt_in
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream, buffer: &mut [u8; 8192]) -> Vec<u8> {
         let mut request = Vec::new();
         let header_end = loop {
             let bytes = stream.read(buffer).expect("read request");
@@ -1426,10 +1706,17 @@ mod tests {
                     if bytes == 0 {
                         break;
                     }
+                    request.extend_from_slice(&buffer[..bytes]);
                     remaining = remaining.saturating_sub(bytes);
                 }
             }
         }
+
+        request
+    }
+
+    fn drain_http_request(stream: &mut std::net::TcpStream, buffer: &mut [u8; 8192]) {
+        let _ = read_http_request(stream, buffer);
     }
 
     #[test]
@@ -1570,6 +1857,44 @@ mod tests {
         assert_eq!(result.accepted, 2);
         assert_eq!(result.uploaded, 2);
         server.wait_for_requests().await;
+    }
+
+    #[tokio::test]
+    async fn test_upload_binary_batch_to_server_preserves_auth_on_trusted_redirect() {
+        let data = b"redirected binary batch blob".to_vec();
+        let hash = compute_sha256(&data);
+        let response = format!(r#"{{"uploaded":1,"blobs":[{{"sha256":"{}"}}]}}"#, hash);
+        let mut server = TestRedirectBodyServer::new(response);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+
+        let result = client
+            .upload_binary_batch_to_server(&server.url, &[BatchUploadItem::new(hash, data)])
+            .await
+            .expect("redirected binary batch upload")
+            .expect("binary batch endpoint supported");
+
+        assert_eq!(result.accepted, 1);
+        assert_eq!(result.uploaded, 1);
+        server.wait_for_requests().await;
+        assert!(!server.saw_redirect_opt_in());
+        assert!(server.saw_authorization());
+    }
+
+    #[test]
+    fn test_upload_redirect_trust_rejects_cross_host_https() {
+        let from = Url::parse("https://upload.example/upload").unwrap();
+        let to = Url::parse("https://upload-direct.example/upload").unwrap();
+
+        assert!(!trusted_upload_redirect(&from, &to));
+    }
+
+    #[test]
+    fn test_upload_redirect_trust_allows_same_host_https_upgrade() {
+        let from = Url::parse("http://upload.example/upload").unwrap();
+        let to = Url::parse("https://upload.example/upload").unwrap();
+
+        assert!(trusted_upload_redirect(&from, &to));
     }
 
     #[test]
