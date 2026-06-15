@@ -23,6 +23,8 @@ use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
+const GIT_BATCH_UPLOAD_TARGET_BYTES: usize = 8 * 1024 * 1024;
+const BATCH_UPLOAD_RETRIES: u32 = 4;
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
 const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
 
@@ -137,6 +139,16 @@ fn effective_upload_concurrency(server_count: usize, configured: usize) -> usize
     } else {
         configured
     }
+}
+
+fn git_batch_upload_target_bytes() -> usize {
+    GIT_BATCH_UPLOAD_TARGET_BYTES
+        .min(hashtree_blossom::BATCH_UPLOAD_MAX_BYTES)
+        .max(1)
+}
+
+fn batch_upload_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(1 << attempt.min(3))
 }
 
 pub(super) fn ensure_blossom_publish_ready(result: &BlossomResult) -> Result<()> {
@@ -294,6 +306,11 @@ fn record_batch_upload_result(counters: &UploadCounters, attempted: usize, uploa
     counters.completed.fetch_add(attempted, Ordering::Relaxed);
 }
 
+fn record_batch_upload_failure(counters: &UploadCounters, attempted: usize) {
+    counters.failed.fetch_add(attempted, Ordering::Relaxed);
+    counters.completed.fetch_add(attempted, Ordering::Relaxed);
+}
+
 fn upload_progress_from_counters(
     counters: &UploadCounters,
     discovery_complete: &AtomicBool,
@@ -361,24 +378,45 @@ async fn upload_one_pending_batch_to_server(
     blossom: &hashtree_blossom::BlossomClient,
     server: &str,
     counters: &UploadCounters,
-) -> Result<bool> {
+) -> Result<Option<()>> {
     let items: Vec<_> = batch
         .iter()
         .map(|item| {
             hashtree_blossom::BatchUploadItem::new(hex::encode(item.hash), item.data.clone())
         })
         .collect();
-    match blossom.upload_batch_to_server(server, &items).await {
-        Ok(Some(result)) => {
-            record_batch_upload_result(counters, batch.len(), result.uploaded);
-            Ok(true)
+
+    let mut last_error = String::new();
+    for attempt in 0..BATCH_UPLOAD_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(batch_upload_retry_delay(attempt - 1)).await;
         }
-        Ok(None) => Ok(false),
-        Err(err) => {
-            debug!("Blossom batch upload failed on {}: {}", server, err);
-            Ok(false)
+
+        match blossom.upload_batch_to_server(server, &items).await {
+            Ok(Some(result)) => {
+                record_batch_upload_result(counters, batch.len(), result.uploaded);
+                return Ok(Some(()));
+            }
+            Ok(None) => return Ok(None),
+            Err(err) => {
+                last_error = err.to_string();
+                debug!(
+                    "Blossom batch upload attempt {}/{} failed on {}: {}",
+                    attempt + 1,
+                    BATCH_UPLOAD_RETRIES,
+                    server,
+                    last_error
+                );
+            }
         }
     }
+
+    Err(anyhow::anyhow!(
+        "Blossom batch upload failed on {} after {} attempts: {}",
+        server,
+        BATCH_UPLOAD_RETRIES,
+        last_error
+    ))
 }
 
 async fn upload_pending_with_single_server_batches(
@@ -386,15 +424,16 @@ async fn upload_pending_with_single_server_batches(
     blossom: &hashtree_blossom::BlossomClient,
     server: &str,
     counters: &UploadCounters,
-) -> Vec<PendingUpload> {
+) -> Result<Vec<PendingUpload>> {
     if items.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut fallback = Vec::new();
     let mut batch = Vec::new();
     let mut batch_bytes = 0usize;
     let mut batch_supported = true;
+    let batch_target_bytes = git_batch_upload_target_bytes();
 
     for item in items {
         if !batch_supported {
@@ -405,19 +444,24 @@ async fn upload_pending_with_single_server_batches(
         let item_len = item.data.len();
         let would_overflow = !batch.is_empty()
             && (batch.len() >= hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS
-                || batch_bytes.saturating_add(item_len) > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES);
+                || batch_bytes.saturating_add(item_len) > batch_target_bytes);
         if would_overflow {
             match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
-                Ok(true) => {
+                Ok(Some(())) => {
                     batch.clear();
                     batch_bytes = 0;
                 }
-                Ok(false) | Err(_) => {
+                Ok(None) => {
                     fallback.append(&mut batch);
                     batch_bytes = 0;
                     batch_supported = false;
                     fallback.push(item);
                     continue;
+                }
+                Err(err) => {
+                    record_batch_upload_failure(counters, batch.len());
+                    eprintln!("\n  Batch upload failed ({} blobs): {}", batch.len(), err);
+                    return Err(err);
                 }
             }
         }
@@ -428,16 +472,21 @@ async fn upload_pending_with_single_server_batches(
 
     if batch_supported && !batch.is_empty() {
         match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
-            Ok(true) => {}
-            Ok(false) | Err(_) => {
+            Ok(Some(())) => {}
+            Ok(None) => {
                 fallback.append(&mut batch);
+            }
+            Err(err) => {
+                record_batch_upload_failure(counters, batch.len());
+                eprintln!("\n  Batch upload failed ({} blobs): {}", batch.len(), err);
+                return Err(err);
             }
         }
     } else {
         fallback.append(&mut batch);
     }
 
-    fallback
+    Ok(fallback)
 }
 
 async fn flush_pending_uploads(
@@ -493,8 +542,13 @@ async fn flush_pending_uploads(
             }
         }
 
-        to_upload =
-            upload_pending_with_single_server_batches(batchable, blossom, server, counters).await;
+        match upload_pending_with_single_server_batches(batchable, blossom, server, counters).await
+        {
+            Ok(fallback) => {
+                to_upload = fallback;
+            }
+            Err(_) => return false,
+        }
     }
 
     for item in to_upload {
@@ -2661,11 +2715,15 @@ impl RemoteHelper {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_upload_concurrency, upload_progress_from_counters, UploadCounters};
+    use super::{
+        batch_upload_retry_delay, effective_upload_concurrency, git_batch_upload_target_bytes,
+        upload_progress_from_counters, UploadCounters,
+    };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
+    use std::time::Duration;
 
     #[test]
     fn upload_concurrency_uses_configured_parallelism_for_single_server() {
@@ -2676,6 +2734,20 @@ mod tests {
     fn upload_concurrency_clamps_zero_to_one() {
         assert_eq!(effective_upload_concurrency(1, 0), 1);
         assert_eq!(effective_upload_concurrency(0, 10), 1);
+    }
+
+    #[test]
+    fn git_batch_upload_target_bytes_stays_below_protocol_max() {
+        assert_eq!(git_batch_upload_target_bytes(), 8 * 1024 * 1024);
+        assert!(git_batch_upload_target_bytes() <= hashtree_blossom::BATCH_UPLOAD_MAX_BYTES);
+    }
+
+    #[test]
+    fn batch_upload_retry_delay_caps_exponential_backoff() {
+        assert_eq!(batch_upload_retry_delay(0), Duration::from_secs(1));
+        assert_eq!(batch_upload_retry_delay(1), Duration::from_secs(2));
+        assert_eq!(batch_upload_retry_delay(2), Duration::from_secs(4));
+        assert_eq!(batch_upload_retry_delay(99), Duration::from_secs(8));
     }
 
     #[test]
