@@ -982,3 +982,35 @@ Verification:
 - `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree git::storage::tests -- --nocapture`
 - `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree --lib`
 - `cargo test --manifest-path rust/Cargo.toml -p hashtree-blossom`
+
+### 2026-06-16: CDN extensionless hash redirect
+
+Question: can the public read hostname avoid Cloudflare's extensionless-cache
+miss path without broad Cache Rules or Worker logic?
+
+Change:
+- Added a narrow server redirect for GET `/<sha256>` on the CDN hostname to
+  `/<sha256>.bin`. The upload hostname keeps normal Blossom-compatible
+  extensionless lookup behavior.
+- Added `docs/PERFORMANCE.md` to capture the current public-edge model:
+  extensionful CDN blob reads, local-origin writes, no R2/S3 hot-path admission,
+  no bulk-upload Worker handler, and the direct-ingress options for dynamic
+  home IPs or public reverse proxy fallback.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli serve_content_or_blob_ -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib`
+- A clean Linux release build using a fresh hashtree checkout and matching FIPS
+  source completed successfully, then the live origin daemon was restarted with
+  the new binary.
+- Live public probes after restart showed the CDN hostname returning `308` from
+  an extensionless 64-hex blob path to the `.bin` path with immutable cache
+  headers, while the upload hostname kept extensionless Blossom lookup semantics
+  and returned a normal not-found response for a missing blob.
+
+Interpretation:
+- This improves extensionless CDN read behavior without reintroducing Worker or
+  object-store logic. It does not fix the public write ceiling; write throughput
+  still needs direct 443 ingress to the local reverse proxy, or a public reverse
+  proxy connected to the local origin over an authenticated private link when
+  direct home NAT forwarding is unavailable.
