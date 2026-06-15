@@ -1,9 +1,9 @@
 use super::*;
 use axum::{
     body::{Body, Bytes},
-    extract::{Path as AxumPath, State},
+    extract::{Json, Path as AxumPath, State},
     http::{header, HeaderMap, Response, StatusCode},
-    routing::put,
+    routing::{post, put},
     Router,
 };
 use hashtree_core::{
@@ -26,7 +26,11 @@ struct CountingBlossomState {
     get_requests: usize,
     head_requests: usize,
     upload_requests: usize,
+    batch_upload_requests: usize,
+    upload_check_requests: usize,
     fail_uploads: bool,
+    support_upload_check: bool,
+    support_batch_upload: bool,
 }
 
 struct CountingBlossomServer {
@@ -38,16 +42,26 @@ struct CountingBlossomServer {
 
 impl CountingBlossomServer {
     fn new() -> Self {
-        Self::with_upload_failures(false)
+        Self::with_options(false, true, true)
     }
 
     fn failing_uploads() -> Self {
-        Self::with_upload_failures(true)
+        Self::with_options(true, true, true)
     }
 
-    fn with_upload_failures(fail_uploads: bool) -> Self {
+    fn without_upload_extensions() -> Self {
+        Self::with_options(false, false, false)
+    }
+
+    fn with_options(
+        fail_uploads: bool,
+        support_upload_check: bool,
+        support_batch_upload: bool,
+    ) -> Self {
         let state = Arc::new(Mutex::new(CountingBlossomState {
             fail_uploads,
+            support_upload_check,
+            support_batch_upload,
             ..CountingBlossomState::default()
         }));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake blossom");
@@ -68,6 +82,8 @@ impl CountingBlossomServer {
             rt.block_on(async move {
                 let app = Router::new()
                     .route("/upload", put(upload_blob))
+                    .route("/upload/check", post(upload_check))
+                    .route("/upload/batch-binary", post(upload_blob_batch_binary))
                     .route("/:id", axum::routing::get(get_blob).head(head_blob))
                     .with_state(state_clone);
 
@@ -113,6 +129,14 @@ impl CountingBlossomServer {
 
     fn get_upload_request_count(&self) -> usize {
         self.state.lock().expect("state lock").upload_requests
+    }
+
+    fn get_batch_upload_request_count(&self) -> usize {
+        self.state.lock().expect("state lock").batch_upload_requests
+    }
+
+    fn get_upload_check_request_count(&self) -> usize {
+        self.state.lock().expect("state lock").upload_check_requests
     }
 
     fn has_blob(&self, hash: &[u8; 32]) -> bool {
@@ -190,6 +214,194 @@ async fn upload_blob(
     } else {
         StatusCode::CREATED
     }
+}
+
+#[derive(serde::Deserialize)]
+struct UploadCheckRequest {
+    hashes: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct UploadCheckResponse {
+    count: usize,
+    present: String,
+}
+
+async fn upload_check(
+    State(state): State<Arc<Mutex<CountingBlossomState>>>,
+    Json(payload): Json<UploadCheckRequest>,
+) -> Response<Body> {
+    let mut bits = vec![false; payload.hashes.len()];
+    {
+        let mut state = state.lock().expect("state lock");
+        state.upload_check_requests += 1;
+        if !state.support_upload_check {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap();
+        }
+        for (index, hash) in payload.hashes.iter().enumerate() {
+            bits[index] = state.blobs.contains_key(&hash.to_ascii_lowercase());
+        }
+    }
+
+    let body = serde_json::to_vec(&UploadCheckResponse {
+        count: payload.hashes.len(),
+        present: encode_test_upload_check_bitset(&bits),
+    })
+    .unwrap();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[derive(serde::Serialize)]
+struct BatchUploadResponse {
+    uploaded: usize,
+    blobs: Vec<BatchUploadDescriptor>,
+}
+
+#[derive(serde::Serialize)]
+struct BatchUploadDescriptor {
+    sha256: String,
+}
+
+fn take_batch_bytes<'a>(body: &'a [u8], cursor: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = cursor.checked_add(len)?;
+    if end > body.len() {
+        return None;
+    }
+    let bytes = &body[*cursor..end];
+    *cursor = end;
+    Some(bytes)
+}
+
+fn read_batch_u16(body: &[u8], cursor: &mut usize) -> Option<u16> {
+    let bytes = take_batch_bytes(body, cursor, 2)?;
+    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_batch_u32(body: &[u8], cursor: &mut usize) -> Option<u32> {
+    let bytes = take_batch_bytes(body, cursor, 4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_batch_u64(body: &[u8], cursor: &mut usize) -> Option<u64> {
+    let bytes = take_batch_bytes(body, cursor, 8)?;
+    Some(u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn parse_test_binary_batch(body: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut cursor = 0usize;
+    if take_batch_bytes(body, &mut cursor, 8)? != b"HTBBV1\0\0" {
+        return None;
+    }
+    let count = read_batch_u32(body, &mut cursor)? as usize;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let hash = hex::encode(take_batch_bytes(body, &mut cursor, 32)?);
+        let content_type_len = read_batch_u16(body, &mut cursor)? as usize;
+        let data_len = usize::try_from(read_batch_u64(body, &mut cursor)?).ok()?;
+        let _content_type = take_batch_bytes(body, &mut cursor, content_type_len)?;
+        let data = take_batch_bytes(body, &mut cursor, data_len)?.to_vec();
+        items.push((hash, data));
+    }
+    (cursor == body.len()).then_some(items)
+}
+
+async fn upload_blob_batch_binary(
+    State(state): State<Arc<Mutex<CountingBlossomState>>>,
+    body: Bytes,
+) -> Response<Body> {
+    let Some(items) = parse_test_binary_batch(&body) else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap();
+    };
+
+    let mut descriptors = Vec::with_capacity(items.len());
+    let mut uploaded = 0usize;
+    let mut state = state.lock().expect("state lock");
+    state.batch_upload_requests += 1;
+    if !state.support_batch_upload {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap();
+    }
+    if state.fail_uploads {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    for (expected_hash, data) in items {
+        let actual_hash = hex::encode(Sha256::digest(&data));
+        if actual_hash != expected_hash {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap();
+        }
+        if state.blobs.insert(expected_hash.clone(), data).is_none() {
+            uploaded += 1;
+        }
+        descriptors.push(BatchUploadDescriptor {
+            sha256: expected_hash,
+        });
+    }
+
+    let body = serde_json::to_vec(&BatchUploadResponse {
+        uploaded,
+        blobs: descriptors,
+    })
+    .unwrap();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn encode_test_upload_check_bitset(bits: &[bool]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+    for (index, present) in bits.iter().enumerate() {
+        if *present {
+            bytes[index / 8] |= 1 << (index % 8);
+        }
+    }
+
+    let mut output = String::new();
+    let mut chunks = bytes.chunks(3).peekable();
+    while let Some(chunk) = chunks.next() {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunks.peek().is_none() {
+            break;
+        }
+    }
+    output
 }
 
 async fn head_blob(
@@ -1700,7 +1912,7 @@ fn test_push_to_file_servers_with_unavailable_old_root_probes_before_reupload() 
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
-    let fake_blossom = CountingBlossomServer::new();
+    let fake_blossom = CountingBlossomServer::without_upload_extensions();
     write_test_config(home.path(), fake_blossom.base_url(), true);
 
     let mut config = Config::default();
@@ -1769,6 +1981,10 @@ fn test_push_to_file_servers_with_unavailable_old_root_probes_before_reupload() 
     assert!(
         fake_blossom.get_head_request_count() >= new_hash_count,
         "fallback should probe server state before uploading existing blobs"
+    );
+    assert!(
+        fake_blossom.get_upload_check_request_count() > 0,
+        "fallback should first try the modern inventory endpoint before legacy HEAD probes"
     );
     assert_eq!(
         fake_blossom.get_upload_request_count(),
@@ -2076,6 +2292,16 @@ fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_any_write_server() 
     assert!(
         server_a.has_blob(&root_cid.hash) || server_b.has_blob(&root_cid.hash),
         "at least one write server should have the new root"
+    );
+    assert!(
+        server_a.get_batch_upload_request_count() > 0
+            || server_b.get_batch_upload_request_count() > 0,
+        "multi-server ordinary writes should preserve the binary batch upload path"
+    );
+    assert_eq!(
+        server_a.get_upload_request_count() + server_b.get_upload_request_count(),
+        0,
+        "batch-capable write servers should not fall back to per-blob PUTs"
     );
 }
 

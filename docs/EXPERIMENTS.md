@@ -38,6 +38,68 @@ Verification:
   already present via server inventory, uploaded a few dozen new blobs, and
   published successfully.
 
+## 2026-06-15 - Public Blossom Origin/Edge Split
+
+Question: after binary batch upload support, why are public writes still far
+below local storage speed, and which part of the path is the limiter?
+
+Findings:
+- The disruptive healthcheck timer that had been stopping the daemon during
+  uploads was masked, inactive, and no benchmark process was running. A
+  30-second live sample showed modest traffic, idle queues, no 5xx responses,
+  and low daemon/tunnel CPU, so the slow push behavior was not an active spam or
+  DDoS event.
+- The safe origin write queue winner for public-shaped binary batches was
+  `HTREE_MAX_CONCURRENT_BLOB_WRITES=4`: loopback origin write throughput for
+  256 x 256 KiB blobs in 16-blob batches was 21.5 MiB/s at limit 2,
+  28.0 MiB/s at limit 4, and 25.5 MiB/s at limit 8.
+- External blob fsync is a major local cost but not the public bottleneck. With
+  the same origin workload and write limit 4, `HTREE_LMDB_EXTERNAL_BLOB_SYNC=1`
+  reached 27.9 MiB/s; disabling it reached 47.7 MiB/s. Public writes through
+  the edge/tunnel path only moved from about 9.7 MiB/s to about 10.1 MiB/s, so
+  disabling fsync is not enough to make public uploads modern-fast and weakens
+  the durability point.
+- The public Worker was not the limiter for batch writes. Direct public writes
+  to the tunnel-backed CDN hostname and writes through the upload Worker were
+  both around 9-10 MiB/s for the best 4 MiB request shape.
+- Public batch-size/concurrency sweep after the origin tuning still favored the
+  existing public shape: 16 blobs per request at roughly 12 concurrent requests.
+  Smaller batches created too many requests, while larger bodies and higher
+  concurrency worsened tail latency.
+- Cloudflared `http2-origin` worked functionally but slowed the write sample
+  to about 8.2 MiB/s. Forcing IPv6 edge connections and leaving edge address
+  selection automatic both selected IPv6 edge connections and were slower than
+  the current IPv4 setting. The tunnel was restored to IPv4 QUIC.
+- Public reads are not LMDB-limited. A hot loopback origin read sample was over
+  1 GiB/s, and a single public client read sample was roughly 55-60 MiB/s at
+  8-32 concurrent reads. An earlier very slow read result was caused by running
+  two independent 64-way public read clients at once.
+
+Interpretation:
+- LMDB is not the primary remaining problem on the measured hot paths. Large
+  blobs are stored outside LMDB, with LMDB holding markers/metadata; origin
+  writes are mostly external pack file writes plus fsync and one LMDB
+  transaction.
+- Public writes are currently bounded by the Cloudflare/tunnel request-body
+  path. Origin storage tuning helps localhost and private/direct writers, but
+  only leaks through as a few percent at the public endpoint.
+- The live origin should keep `HTREE_MAX_CONCURRENT_BLOB_WRITES=4` with
+  external blob fsync enabled until a separate durability design replaces
+  per-request fsync.
+
+Follow-up:
+- To get public writes to 50+ MiB/s, change architecture rather than only
+  tuning LMDB: either expose a direct public origin path with modern TLS/HTTP
+  transport, or make the Worker an edge-admission layer that stores batch blobs
+  into the same read-visible edge/cache path and asynchronously syncs the
+  hashtree origin. Edge admission must also answer `/upload/check` consistently
+  from the edge store; otherwise git pushes can publish roots before the
+  canonical read path sees the blobs.
+- For trusted internal writers, prefer direct/private origin routes with larger
+  `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` values when available. Do not add a
+  second write server to config without preserving the helper's binary batch
+  path for multi-server write configurations.
+
 ## 2026-06-15 - Blossom Upload Write Queue Limit
 
 Question: is a `HTREE_MAX_CONCURRENT_BLOB_WRITES` value of 4 optimal for raw

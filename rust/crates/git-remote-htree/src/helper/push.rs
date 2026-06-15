@@ -453,10 +453,10 @@ fn split_pending_upload_batches(
     batches
 }
 
-async fn upload_pending_with_single_server_batches(
+async fn upload_pending_with_server_batches(
     items: Vec<PendingUpload>,
     blossom: &hashtree_blossom::BlossomClient,
-    server: &str,
+    servers: &[String],
     counters: &UploadCounters,
     batch_upload_concurrency: usize,
 ) -> Result<Vec<PendingUpload>> {
@@ -472,16 +472,33 @@ async fn upload_pending_with_single_server_batches(
         return Ok(Vec::new());
     };
 
-    match upload_one_pending_batch_to_server(&first_batch, blossom, server, counters).await {
-        Ok(Some(())) => {}
-        Ok(None) => {
+    let mut selected_server = None;
+    let mut last_error = None;
+    let mut saw_unsupported = false;
+    for server in servers {
+        match upload_one_pending_batch_to_server(&first_batch, blossom, server, counters).await {
+            Ok(Some(())) => {
+                selected_server = Some(server.clone());
+                break;
+            }
+            Ok(None) => {
+                saw_unsupported = true;
+            }
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+    }
+
+    let Some(server) = selected_server else {
+        if saw_unsupported {
             fallback.append(&mut first_batch);
             for mut batch in batches {
                 fallback.append(&mut batch);
             }
             return Ok(fallback);
         }
-        Err(err) => {
+        if let Some(err) = last_error {
             record_batch_upload_failure(counters, first_batch.len());
             eprintln!(
                 "\n  Batch upload failed ({} blobs): {}",
@@ -490,12 +507,16 @@ async fn upload_pending_with_single_server_batches(
             );
             return Err(err);
         }
-    }
+        fallback.append(&mut first_batch);
+        for mut batch in batches {
+            fallback.append(&mut batch);
+        }
+        return Ok(fallback);
+    };
 
     use futures::stream::{self, StreamExt};
 
     let concurrency = batch_upload_concurrency.max(1);
-    let server = server.to_string();
     let mut upload_stream = stream::iter(batches.map(|batch| {
         let blossom = blossom.clone();
         let counters = counters.clone();
@@ -564,23 +585,29 @@ async fn flush_pending_uploads(
         to_upload.push(item);
     }
 
-    if all_servers.len() == 1 && !to_upload.is_empty() {
-        let server = &all_servers[0];
+    let batch_servers = if all_servers.len() == 1 || !repairing_server_tree {
+        Some(all_servers)
+    } else {
+        None
+    };
+
+    if !to_upload.is_empty() && batch_servers.is_some_and(|servers| !servers.is_empty()) {
+        let batch_servers = batch_servers.unwrap();
         let mut batchable = Vec::new();
+        let mut fallback_to_individual = Vec::new();
         for item in to_upload {
-            if item.data.len() > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES {
-                if !enqueue_pending_upload(tx, item, head_fallback).await {
-                    return false;
-                }
+            if item.force_all_servers || item.data.len() > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
+            {
+                fallback_to_individual.push(item);
             } else {
                 batchable.push(item);
             }
         }
 
-        match upload_pending_with_single_server_batches(
+        match upload_pending_with_server_batches(
             batchable,
             blossom,
-            server,
+            batch_servers,
             counters,
             batch_upload_concurrency,
         )
@@ -588,6 +615,7 @@ async fn flush_pending_uploads(
         {
             Ok(fallback) => {
                 to_upload = fallback;
+                to_upload.extend(fallback_to_individual);
             }
             Err(_) => return false,
         }
