@@ -106,6 +106,14 @@ pub struct ServerConfig {
     /// Empty means use active [nostr].relays, then FIPS built-in defaults.
     #[serde(default)]
     pub fips_relays: Vec<String>,
+    /// Always-configured Hashtree FIPS peers. These are useful for origin/cache
+    /// pairs that should connect immediately without waiting for discovery.
+    #[serde(
+        default,
+        alias = "preconfigured_fips_peers",
+        alias = "fips_static_peers"
+    )]
+    pub fips_peers: Vec<ConfiguredFipsPeer>,
     /// Enable ordinary FIPS UDP endpoint transport.
     #[serde(default = "default_enable_fips_udp")]
     pub enable_fips_udp: bool,
@@ -172,6 +180,13 @@ pub struct ServerConfig {
     /// Allow public access to social graph snapshot endpoint (default: false)
     #[serde(default = "default_socialgraph_snapshot_public")]
     pub socialgraph_snapshot_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredFipsPeer {
+    pub npub: String,
+    #[serde(default)]
+    pub udp_addresses: Vec<String>,
 }
 
 fn default_public_writes() -> bool {
@@ -719,6 +734,7 @@ impl Default for ServerConfig {
             enable_fips: default_enable_fips(),
             fips_discovery_scope: default_fips_discovery_scope(),
             fips_relays: Vec::new(),
+            fips_peers: Vec::new(),
             enable_fips_udp: default_enable_fips_udp(),
             fips_udp_bind_addr: None,
             fips_udp_public: false,
@@ -1401,6 +1417,7 @@ chunk_target_bytes = 65536
         assert!(server.enable_fips_webrtc);
         assert!(server.fetch_from_fips_peers);
         assert!(server.fips_relays.is_empty());
+        assert!(server.fips_peers.is_empty());
         assert_eq!(server.fips_discovery_scope, "hashtree-v1");
         assert_eq!(server.fips_request_timeout_ms, 5_500);
     }
@@ -1413,6 +1430,10 @@ chunk_target_bytes = 65536
 enable_fips = true
 fips_discovery_scope = "test-hashtree"
 fips_relays = ["wss://fips.example"]
+fips_peers = [
+  { npub = "npub1origin", udp_addresses = ["udp:192.0.2.10:2121"] },
+  { npub = "npub1cache" },
+]
 enable_fips_udp = false
 fips_udp_bind_addr = "0.0.0.0:2121"
 fips_udp_public = true
@@ -1427,6 +1448,19 @@ fips_request_timeout_ms = 42
         assert!(config.server.enable_fips);
         assert_eq!(config.server.fips_discovery_scope, "test-hashtree");
         assert_eq!(config.server.fips_relays, ["wss://fips.example"]);
+        assert_eq!(
+            config.server.fips_peers,
+            [
+                ConfiguredFipsPeer {
+                    npub: "npub1origin".to_string(),
+                    udp_addresses: vec!["udp:192.0.2.10:2121".to_string()],
+                },
+                ConfiguredFipsPeer {
+                    npub: "npub1cache".to_string(),
+                    udp_addresses: Vec::new(),
+                },
+            ]
+        );
         assert!(!config.server.enable_fips_udp);
         assert_eq!(
             config.server.fips_udp_bind_addr.as_deref(),

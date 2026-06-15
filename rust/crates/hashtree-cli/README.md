@@ -85,6 +85,11 @@ Config file: `~/.hashtree/config.toml`
 read_servers = ["https://cdn.iris.to"]
 write_servers = ["https://upload.iris.to"]
 
+[server]
+fips_peers = [
+  { npub = "npub1...", udp_addresses = ["udp:192.0.2.10:2121"] }
+] # optional static Hashtree FIPS origin/cache peers
+
 [nostr]
 relays = ["wss://relay.damus.io", "wss://relay.snort.social"]
 socialgraph_root = "npub1..."         # defaults to own key
