@@ -870,6 +870,11 @@ Follow-up:
   `upload.iris.to`; through `cdn.iris.to`, the first fill was 4.46 MiB/s and the
   warm repeat was 24.33 MiB/s. The server stayed healthy afterward with idle
   blob queues and no recent 5xx burst.
+- The first htree push after the tail-pack change uploaded only 57 hashtree blobs
+  but still paid for failed attempts to use `wss://upload.iris.to/nostr`, which
+  now returns 404 on the Workerless origin path. The stale relay was removed from
+  default generated configs and from the local operator config; existing
+  blocklists still protect users who already have it configured.
 - Conclusion: dropping the Worker is architecturally cleaner and fixes the 404
   routing failure, but it is not the modern-throughput fix. The hard bottleneck
   remains Cloudflare Tunnel/request-body transport under shared read/write load.

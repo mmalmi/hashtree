@@ -614,7 +614,6 @@ fn default_relays() -> Vec<String> {
         "wss://relay.damus.io".to_string(),
         "wss://relay.snort.social".to_string(),
         "wss://temp.iris.to".to_string(),
-        "wss://upload.iris.to/nostr".to_string(),
     ]
 }
 
@@ -1085,7 +1084,7 @@ mod tests {
         assert!(config
             .nostr
             .relays
-            .contains(&"wss://upload.iris.to/nostr".to_string()));
+            .contains(&"wss://temp.iris.to".to_string()));
         assert!(config.blossom.enabled);
         assert!(!config.blossom.optimistic_uploads);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);

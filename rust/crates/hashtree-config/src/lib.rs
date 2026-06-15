@@ -19,7 +19,6 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
     "wss://relay.snort.social",
     "wss://relay.primal.net",
-    "wss://upload.iris.to/nostr",
 ];
 
 /// Default social graph entrypoint followed when a new identity is initialized.
@@ -768,7 +767,7 @@ mod tests {
         assert!(config
             .nostr
             .relays
-            .contains(&"wss://upload.iris.to/nostr".to_string()));
+            .contains(&"wss://temp.iris.to".to_string()));
     }
 
     #[test]
