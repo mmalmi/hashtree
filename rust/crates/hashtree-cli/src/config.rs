@@ -611,7 +611,7 @@ fn default_nostr_full_text_note_history_max_relay_pages() -> usize {
 
 fn default_relays() -> Vec<String> {
     vec![
-        "wss://relay.damus.io".to_string(),
+        "wss://nos.lol".to_string(),
         "wss://relay.snort.social".to_string(),
         "wss://temp.iris.to".to_string(),
     ]

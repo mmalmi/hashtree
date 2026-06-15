@@ -16,7 +16,7 @@ pub const DEFAULT_WRITE_SERVERS: &[&str] = &["https://upload.iris.to"];
 /// Default nostr relays
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://temp.iris.to",
-    "wss://relay.damus.io",
+    "wss://nos.lol",
     "wss://relay.snort.social",
     "wss://relay.primal.net",
 ];
