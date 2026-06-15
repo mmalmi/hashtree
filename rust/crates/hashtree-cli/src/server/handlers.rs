@@ -12,7 +12,7 @@ use crate::socialgraph;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, OriginalUri, Path, Query, State},
-    http::{header, Response, StatusCode},
+    http::{header, HeaderMap, Response, StatusCode},
     response::{IntoResponse, Json},
 };
 use bytes::Bytes;
@@ -956,6 +956,7 @@ pub async fn htree_npub_path(
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const CORP_CROSS_ORIGIN: &str = "cross-origin";
 const CROSS_ORIGIN_RESOURCE_POLICY_HEADER: &str = "cross-origin-resource-policy";
+const DEFAULT_CDN_HOST: &str = "cdn.iris.to";
 
 fn parse_hex_key(value: Option<&String>) -> Option<[u8; 32]> {
     let hex = value?;
@@ -971,6 +972,41 @@ fn content_type_for_path(path: Option<&str>) -> &'static str {
         return "application/octet-stream";
     }
     get_mime_type(filename)
+}
+
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.split('/').next().unwrap_or(value))
+        .map(|value| {
+            value
+                .rsplit_once(':')
+                .map(|(host, _)| host)
+                .unwrap_or(value)
+        })
+}
+
+fn should_redirect_extensionless_cdn_blob(headers: &HeaderMap, ext: Option<&str>) -> bool {
+    ext.is_none()
+        && request_host(headers)
+            .map(|host| host.eq_ignore_ascii_case(DEFAULT_CDN_HOST))
+            .unwrap_or(false)
+}
+
+fn extensionful_blob_redirect(hash_hex: &str) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::PERMANENT_REDIRECT)
+        .header(header::LOCATION, format!("/{hash_hex}.bin"))
+        .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN)
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn build_json_response(
@@ -1368,7 +1404,7 @@ pub async fn serve_content_or_blob(
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| connect_info.0.ip().to_string());
     // Parse potential extension for blossom
-    let (hash_part, _ext) = if let Some(dot_pos) = id.rfind('.') {
+    let (hash_part, ext) = if let Some(dot_pos) = id.rfind('.') {
         (&id[..dot_pos], Some(&id[dot_pos..]))
     } else {
         (id.as_str(), None)
@@ -1382,6 +1418,9 @@ pub async fn serve_content_or_blob(
     // file content when the caller expects raw chunk data
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
+        if should_redirect_extensionless_cdn_blob(&headers, ext) {
+            return extensionful_blob_redirect(&hash_hex).into_response();
+        }
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
             if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
                 match get_blob_size_without_blocking_runtime(&state, hash_bytes).await {

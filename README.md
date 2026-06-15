@@ -130,6 +130,7 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
 - [`docs/URL-ENCODING.md`](docs/URL-ENCODING.md) - concise routing rules for slash-containing tree names
 - [`docs/architecture.html`](docs/architecture.html) - visual overview of the current content, routing, and transport layers
 - [`docs/blossom-reconciliation-and-large-fetch-plan.md`](docs/blossom-reconciliation-and-large-fetch-plan.md) - deterministic Blossom reconciliation and large-repo fetch plan
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) - public edge performance notes for reads, writes, and Cloudflare ingress choices
 - [`docs/git-repo-fetch-push-improvement-plan.md`](docs/git-repo-fetch-push-improvement-plan.md) - measured roadmap for faster git repo fetch and push over hashtree and Blossom
 - [`docs/torrent-bridge-plan.md`](docs/torrent-bridge-plan.md) - torrent-backed virtual serving and optional materialization plan
 - [`docs/vercel-on-hashtree-plan.md`](docs/vercel-on-hashtree-plan.md) - static-site deploy platform plan built on top of hashtree, `iris-sites`, and `blossom-cf-worker-rust`

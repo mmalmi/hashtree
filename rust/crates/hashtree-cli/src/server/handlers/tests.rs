@@ -1666,6 +1666,75 @@ async fn serve_content_or_blob_honors_raw_blob_ranges() {
 }
 
 #[tokio::test]
+async fn serve_content_or_blob_redirects_extensionless_cdn_hash_to_bin() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let hash_hex = store.put_blob(b"cdn-cacheable-blob").unwrap();
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-host",
+        header::HeaderValue::from_static("cdn.iris.to"),
+    );
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(hash_hex.clone()),
+        Query(HashMap::new()),
+        headers,
+        axum::extract::ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/{hash_hex}.bin").as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(IMMUTABLE_CACHE_CONTROL)
+    );
+}
+
+#[tokio::test]
+async fn serve_content_or_blob_keeps_extensionless_upload_hash_compatible() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let data = b"upload-blossom-compatible";
+    let hash_hex = store.put_blob(data).unwrap();
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-host",
+        header::HeaderValue::from_static("upload.iris.to"),
+    );
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(hash_hex),
+        Query(HashMap::new()),
+        headers,
+        axum::extract::ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), data);
+}
+
+#[tokio::test]
 async fn hot_blob_cache_serves_repeated_raw_blob_reads() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
