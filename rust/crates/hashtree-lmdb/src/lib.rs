@@ -30,10 +30,13 @@ const PIN_COUNT_BYTES: usize = 4;
 const STORE_TOTALS_BYTES: usize = 32;
 const STORE_TOTALS_KEY: &[u8] = b"totals";
 const EXTERNAL_BLOB_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-blob-v1\0";
+const EXTERNAL_PACK_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-v1\0";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
 const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
 const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
+const LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES";
+static EXTERNAL_PACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy)]
 struct BlobMeta {
@@ -55,6 +58,7 @@ struct ExternalBlobConfig {
     base_path: PathBuf,
     min_bytes: usize,
     sync: bool,
+    pack_target_bytes: Option<usize>,
 }
 
 impl ExternalBlobConfig {
@@ -69,12 +73,24 @@ impl ExternalBlobConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| env_path.join("external-blobs"));
         let sync = env_bool(LMDB_EXTERNAL_BLOB_SYNC_ENV).unwrap_or(true);
+        let pack_target_bytes = std::env::var(LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0);
         Some(Self {
             base_path,
             min_bytes,
             sync,
+            pack_target_bytes,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct ExternalPackRef {
+    name: String,
+    offset: u64,
+    len: u64,
 }
 
 enum PreparedBlob<'a> {
@@ -520,13 +536,7 @@ impl LmdbBlobStore {
     }
 
     fn put_many_sync_attempt(&self, items: &[(Hash, Vec<u8>)]) -> Result<(usize, u64), StoreError> {
-        let prepared = items
-            .iter()
-            .map(|(hash, data)| {
-                self.prepare_blob_for_write(hash, data)
-                    .map(|prepared| (*hash, data.len() as u64, prepared))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let prepared = self.prepare_blobs_for_write(items)?;
         let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
         let mut inserted = 0usize;
         let mut inserted_bytes = 0u64;
@@ -740,6 +750,9 @@ impl LmdbBlobStore {
         if self.is_external_blob_ref(hash, blob) {
             return self.read_external_blob_range(hash, start, end_inclusive);
         }
+        if let Some(pack_ref) = Self::decode_external_pack_ref(blob)? {
+            return self.read_external_pack_range(&pack_ref, start, end_inclusive);
+        }
 
         if blob.is_empty() || end_inclusive < start {
             return Ok(Some(Vec::new()));
@@ -855,6 +868,7 @@ impl LmdbBlobStore {
             .env
             .write_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
+        let external_path = self.external_blob_path_in_txn(&wtxn, hash)?;
         let (existed, freed) = self.delete_blob_in_txn(&mut wtxn, hash)?;
 
         wtxn.commit()
@@ -863,7 +877,7 @@ impl LmdbBlobStore {
             self.current_bytes.fetch_sub(freed, Ordering::Relaxed);
         }
         if existed {
-            self.remove_external_blob_file(hash);
+            self.remove_external_blob_file(external_path);
         }
 
         Ok(existed)
@@ -961,6 +975,7 @@ impl LmdbBlobStore {
                     continue;
                 }
 
+                let external_path = self.external_blob_path_in_txn(&wtxn, &hash)?;
                 let (_, bytes_freed) = self.delete_blob_in_txn(&mut wtxn, &hash)?;
                 if bytes_freed == 0 {
                     let _ = self
@@ -972,7 +987,7 @@ impl LmdbBlobStore {
 
                 batch_freed = batch_freed.saturating_add(bytes_freed);
                 batch_items += 1;
-                if let Some(path) = self.external_blob_path(&hash) {
+                if let Some(path) = external_path {
                     batch_external_paths.push(path);
                 }
 
@@ -1217,6 +1232,71 @@ impl LmdbBlobStore {
         Ok(PreparedBlob::External(Self::external_blob_ref(hash)))
     }
 
+    fn prepare_blobs_for_write<'a>(
+        &self,
+        items: &'a [(Hash, Vec<u8>)],
+    ) -> Result<Vec<(Hash, u64, PreparedBlob<'a>)>, StoreError> {
+        let Some(config) = &self.external_blobs else {
+            return Ok(items
+                .iter()
+                .map(|(hash, data)| (*hash, data.len() as u64, PreparedBlob::Inline(data)))
+                .collect());
+        };
+        let Some(pack_target_bytes) = config.pack_target_bytes else {
+            return items
+                .iter()
+                .map(|(hash, data)| {
+                    self.prepare_blob_for_write(hash, data)
+                        .map(|prepared| (*hash, data.len() as u64, prepared))
+                })
+                .collect();
+        };
+
+        let mut prepared = Vec::with_capacity(items.len());
+        prepared.resize_with(items.len(), || None);
+        let mut pack_entries: Vec<(usize, Hash, &'a [u8])> = Vec::new();
+        let mut pack_bytes = 0usize;
+
+        for (index, (hash, data)) in items.iter().enumerate() {
+            if data.len() < config.min_bytes {
+                prepared[index] = Some((*hash, data.len() as u64, PreparedBlob::Inline(data)));
+                continue;
+            }
+
+            let would_exceed_target = !pack_entries.is_empty()
+                && pack_bytes.saturating_add(data.len()) > pack_target_bytes;
+            if would_exceed_target {
+                for (entry_index, marker) in self.write_external_blob_pack(&pack_entries, config)? {
+                    let (hash, data) = &items[entry_index];
+                    prepared[entry_index] =
+                        Some((*hash, data.len() as u64, PreparedBlob::External(marker)));
+                }
+                pack_entries.clear();
+                pack_bytes = 0;
+            }
+
+            pack_entries.push((index, *hash, data));
+            pack_bytes = pack_bytes.saturating_add(data.len());
+        }
+
+        if !pack_entries.is_empty() {
+            for (entry_index, marker) in self.write_external_blob_pack(&pack_entries, config)? {
+                let (hash, data) = &items[entry_index];
+                prepared[entry_index] =
+                    Some((*hash, data.len() as u64, PreparedBlob::External(marker)));
+            }
+        }
+
+        prepared
+            .into_iter()
+            .map(|prepared| {
+                prepared.ok_or_else(|| {
+                    StoreError::Other("internal error preparing packed LMDB blobs".to_string())
+                })
+            })
+            .collect()
+    }
+
     fn external_blob_ref(hash: &Hash) -> Vec<u8> {
         let mut marker = Vec::with_capacity(EXTERNAL_BLOB_MARKER_PREFIX.len() + hash.len());
         marker.extend_from_slice(EXTERNAL_BLOB_MARKER_PREFIX);
@@ -1224,10 +1304,81 @@ impl LmdbBlobStore {
         marker
     }
 
+    fn external_pack_blob_ref(
+        pack_name: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let name_len = u16::try_from(pack_name.len())
+            .map_err(|_| StoreError::Other("external pack file name is too long".to_string()))?;
+        let mut marker =
+            Vec::with_capacity(EXTERNAL_PACK_MARKER_PREFIX.len() + 2 + pack_name.len() + 16);
+        marker.extend_from_slice(EXTERNAL_PACK_MARKER_PREFIX);
+        marker.extend_from_slice(&name_len.to_be_bytes());
+        marker.extend_from_slice(pack_name.as_bytes());
+        marker.extend_from_slice(&offset.to_be_bytes());
+        marker.extend_from_slice(&len.to_be_bytes());
+        Ok(marker)
+    }
+
     fn is_external_blob_ref(&self, hash: &Hash, value: &[u8]) -> bool {
         value.len() == EXTERNAL_BLOB_MARKER_PREFIX.len() + hash.len()
             && value.starts_with(EXTERNAL_BLOB_MARKER_PREFIX)
             && &value[EXTERNAL_BLOB_MARKER_PREFIX.len()..] == hash
+    }
+
+    fn decode_external_pack_ref(value: &[u8]) -> Result<Option<ExternalPackRef>, StoreError> {
+        if !value.starts_with(EXTERNAL_PACK_MARKER_PREFIX) {
+            return Ok(None);
+        }
+
+        let rest = &value[EXTERNAL_PACK_MARKER_PREFIX.len()..];
+        if rest.len() < 2 + 8 + 8 {
+            return Err(StoreError::Other(
+                "invalid external LMDB pack marker length".to_string(),
+            ));
+        }
+        let name_len = u16::from_be_bytes(
+            rest[..2]
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid external pack name length".into()))?,
+        ) as usize;
+        let expected_len = 2usize.saturating_add(name_len).saturating_add(16);
+        if rest.len() != expected_len {
+            return Err(StoreError::Other(format!(
+                "invalid external LMDB pack marker length: {}",
+                value.len()
+            )));
+        }
+        let name_bytes = &rest[2..2 + name_len];
+        let name = std::str::from_utf8(name_bytes)
+            .map_err(|_| StoreError::Other("external pack name is not UTF-8".into()))?;
+        if name.len() < 2
+            || name.contains('/')
+            || name.contains('\\')
+            || name.starts_with('.')
+            || name.contains("..")
+        {
+            return Err(StoreError::Other(
+                "external pack name is not a safe relative file name".into(),
+            ));
+        }
+        let offset_start = 2 + name_len;
+        let offset = u64::from_be_bytes(
+            rest[offset_start..offset_start + 8]
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid external pack offset".into()))?,
+        );
+        let len = u64::from_be_bytes(
+            rest[offset_start + 8..offset_start + 16]
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid external pack length".into()))?,
+        );
+        Ok(Some(ExternalPackRef {
+            name: name.to_string(),
+            offset,
+            len,
+        }))
     }
 
     fn external_blob_path_for_config(config: &ExternalBlobConfig, hash: &Hash) -> PathBuf {
@@ -1243,6 +1394,36 @@ impl LmdbBlobStore {
         self.external_blobs
             .as_ref()
             .map(|config| Self::external_blob_path_for_config(config, hash))
+    }
+
+    fn external_pack_path_for_config(config: &ExternalBlobConfig, pack_name: &str) -> PathBuf {
+        config
+            .base_path
+            .join("packs")
+            .join(&pack_name[..2])
+            .join(pack_name)
+    }
+
+    fn external_pack_path(&self, pack_ref: &ExternalPackRef) -> Option<PathBuf> {
+        self.external_blobs
+            .as_ref()
+            .map(|config| Self::external_pack_path_for_config(config, &pack_ref.name))
+    }
+
+    fn external_pack_name(first_hash: &Hash) -> String {
+        let hash_hex = to_hex(first_hash);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let counter = EXTERNAL_PACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "{}-{:032x}-{}-{:016x}.pack",
+            &hash_hex[..12],
+            nanos,
+            std::process::id(),
+            counter
+        )
     }
 
     fn write_external_blob(
@@ -1282,6 +1463,58 @@ impl LmdbBlobStore {
         Ok(())
     }
 
+    fn write_external_blob_pack(
+        &self,
+        entries: &[(usize, Hash, &[u8])],
+        config: &ExternalBlobConfig,
+    ) -> Result<Vec<(usize, Vec<u8>)>, StoreError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pack_name = Self::external_pack_name(&entries[0].1);
+        let path = Self::external_pack_path_for_config(config, &pack_name);
+        let parent = path
+            .parent()
+            .ok_or_else(|| StoreError::Other("external pack path has no parent".to_string()))?;
+        fs::create_dir_all(parent)?;
+        let temp_path = unique_temp_path(&path);
+        let mut markers = Vec::with_capacity(entries.len());
+        let write_result = (|| -> Result<(), StoreError> {
+            let mut file = File::options()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)?;
+            let mut offset = 0u64;
+            for (index, _, data) in entries {
+                let len = data.len() as u64;
+                file.write_all(data)?;
+                markers.push((
+                    *index,
+                    Self::external_pack_blob_ref(&pack_name, offset, len)?,
+                ));
+                offset = offset.saturating_add(len);
+            }
+            if config.sync {
+                file.sync_all()?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        if config.sync {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(markers)
+    }
+
     fn decode_blob_value(&self, hash: &Hash, value: &[u8]) -> Result<Vec<u8>, StoreError> {
         if self.is_external_blob_ref(hash, value) {
             let path = self.external_blob_path(hash).ok_or_else(|| {
@@ -1290,6 +1523,9 @@ impl LmdbBlobStore {
                 )
             })?;
             return fs::read(path).map_err(StoreError::Io);
+        }
+        if let Some(pack_ref) = Self::decode_external_pack_ref(value)? {
+            return self.read_external_pack_blob(&pack_ref);
         }
         Ok(value.to_vec())
     }
@@ -1321,8 +1557,80 @@ impl LmdbBlobStore {
         Ok(Some(data))
     }
 
-    fn remove_external_blob_file(&self, hash: &Hash) {
-        if let Some(path) = self.external_blob_path(hash) {
+    fn read_external_pack_blob(&self, pack_ref: &ExternalPackRef) -> Result<Vec<u8>, StoreError> {
+        let read_len = usize::try_from(pack_ref.len).map_err(|_| {
+            StoreError::Other("external pack blob is too large to read".to_string())
+        })?;
+        let path = self.external_pack_path(pack_ref).ok_or_else(|| {
+            StoreError::Other(
+                "external LMDB pack marker found but external blobs are disabled".into(),
+            )
+        })?;
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(pack_ref.offset))?;
+        let mut data = vec![0; read_len];
+        file.read_exact(&mut data)?;
+        Ok(data)
+    }
+
+    fn read_external_pack_range(
+        &self,
+        pack_ref: &ExternalPackRef,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if pack_ref.len == 0 || start >= pack_ref.len || end_inclusive < start {
+            return Ok(Some(Vec::new()));
+        }
+
+        let actual_end = end_inclusive.min(pack_ref.len - 1);
+        let read_len = actual_end.saturating_sub(start).saturating_add(1);
+        let read_len = usize::try_from(read_len).map_err(|_| {
+            StoreError::Other("external pack blob range is too large to read".to_string())
+        })?;
+        let path = self.external_pack_path(pack_ref).ok_or_else(|| {
+            StoreError::Other(
+                "external LMDB pack marker found but external blobs are disabled".into(),
+            )
+        })?;
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(pack_ref.offset.saturating_add(start)))?;
+        let mut data = vec![0; read_len];
+        file.read_exact(&mut data)?;
+        Ok(Some(data))
+    }
+
+    fn external_blob_path_for_value(
+        &self,
+        hash: &Hash,
+        value: &[u8],
+    ) -> Result<Option<PathBuf>, StoreError> {
+        if self.is_external_blob_ref(hash, value) {
+            return Ok(self.external_blob_path(hash));
+        }
+        if Self::decode_external_pack_ref(value)?.is_some() {
+            return Ok(None);
+        }
+        Ok(None)
+    }
+
+    fn external_blob_path_in_txn(
+        &self,
+        txn: &heed::RoTxn,
+        hash: &Hash,
+    ) -> Result<Option<PathBuf>, StoreError> {
+        let Some(value) = self
+            .blobs
+            .get(txn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        self.external_blob_path_for_value(hash, value)
+    }
+
+    fn remove_external_blob_file(&self, path: Option<PathBuf>) {
+        if let Some(path) = path {
             let _ = fs::remove_file(path);
         }
     }
@@ -1552,6 +1860,7 @@ mod tests {
                     base_path: external_dir.clone(),
                     min_bytes: 8,
                     sync: false,
+                    pack_target_bytes: None,
                 })
             },
         )?;
@@ -1594,6 +1903,82 @@ mod tests {
 
         assert!(store.delete_sync(&large_hash)?);
         assert!(!external_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn external_blob_pack_batches_large_values() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let external_dir = temp.path().join("external");
+        let store = LmdbBlobStore::with_map_size_and_settings(
+            temp.path().join("blobs"),
+            16 * 1024 * 1024,
+            EnvFlags::empty(),
+            |_| {
+                Some(ExternalBlobConfig {
+                    base_path: external_dir.clone(),
+                    min_bytes: 8,
+                    sync: true,
+                    pack_target_bytes: Some(1024 * 1024),
+                })
+            },
+        )?;
+
+        let first = b"first packed blob payload".to_vec();
+        let second = b"second packed blob payload".to_vec();
+        let tiny = b"tiny".to_vec();
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let tiny_hash = sha256(&tiny);
+        let items = vec![
+            (first_hash, first.clone()),
+            (tiny_hash, tiny.clone()),
+            (second_hash, second.clone()),
+        ];
+
+        assert_eq!(store.put_many_sync(&items)?, 3);
+        assert_eq!(store.get_sync(&first_hash)?, Some(first.clone()));
+        assert_eq!(store.get_sync(&second_hash)?, Some(second.clone()));
+        assert_eq!(store.get_sync(&tiny_hash)?, Some(tiny.clone()));
+        assert_eq!(
+            store.get_range_sync(&second_hash, 7, 12)?,
+            Some(b"packed".to_vec())
+        );
+
+        let rtxn = store.env.read_txn().map_err(map_heed_error)?;
+        let first_value = store
+            .blobs
+            .get(&rtxn, &first_hash)
+            .map_err(map_heed_error)?
+            .expect("first pack marker");
+        let second_value = store
+            .blobs
+            .get(&rtxn, &second_hash)
+            .map_err(map_heed_error)?
+            .expect("second pack marker");
+        let tiny_value = store
+            .blobs
+            .get(&rtxn, &tiny_hash)
+            .map_err(map_heed_error)?
+            .expect("tiny inline value");
+        let first_pack =
+            LmdbBlobStore::decode_external_pack_ref(first_value)?.expect("first external pack ref");
+        let second_pack = LmdbBlobStore::decode_external_pack_ref(second_value)?
+            .expect("second external pack ref");
+        assert_eq!(first_pack.name, second_pack.name);
+        assert_eq!(tiny_value, tiny.as_slice());
+        drop(rtxn);
+
+        let pack_path = store.external_pack_path(&first_pack).unwrap();
+        assert!(pack_path.exists());
+        assert_eq!(
+            std::fs::read(&pack_path)?,
+            [first.as_slice(), second.as_slice()].concat()
+        );
+
+        assert!(store.delete_sync(&first_hash)?);
+        assert!(pack_path.exists());
+        assert_eq!(store.get_sync(&second_hash)?, Some(second));
         Ok(())
     }
 

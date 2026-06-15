@@ -545,3 +545,39 @@ Interpretation:
 - `HTREE_LMDB_EXTERNAL_BLOB_SYNC=0` is a fast interim setting. Durable modern
   performance should use a pack/segment writer with one sync per group rather
   than syncing one external file and directory per blob.
+
+### 2026-06-15: Packed external blob writes with durable sync
+
+Setup:
+- Same large production-like origin shape as the previous write-path tuning
+  experiment, with identifying hostnames, exact repos, pubkeys, IPs, raw hashes,
+  and temp paths omitted.
+- The daemon used a hot LMDB tier for new blob metadata, legacy LMDB fallback for
+  older blobs, external blob spill for blobs >=64 KiB, and a 64 MiB external pack
+  target. External blob sync was enabled.
+- Payloads were deterministic 256 KiB blobs. Batch writes used 16 blobs per
+  `/upload/batch` request and four concurrent requests unless noted.
+
+Results:
+
+| Path | Shape | Throughput | Latency notes |
+| --- | --- | ---: | --- |
+| Origin, packed external blobs, sync on | `/upload/batch`, c4, 128 x 256 KiB | 11.58 MiB/s | p95 0.86 s |
+| Public edge, packed external blobs, sync on | `/upload/batch`, c4, 128 x 256 KiB | 2.70 MiB/s | p95 5.72 s |
+| Origin read of fresh packed blobs | GET, c32, 128 x 256 KiB | 98.46 MiB/s | raw blob reads |
+| Public edge read of fresh packed blobs | GET, c32, 128 x 256 KiB | 65.04 MiB/s | raw blob reads |
+
+Interpretation:
+- Packed external blob writes remove the durability/performance tradeoff from
+  the interim external-spill design: origin write throughput with sync enabled
+  stayed essentially equal to the previous unsynced per-hash external-file mode
+  and far above per-file sync mode.
+- Each concurrent 16-blob write batch produced one 4 MiB pack file in this test,
+  so the origin synced one pack file and parent directory per request instead of
+  one file and directory per blob.
+- Packed reads are not the bottleneck for fresh blobs. Origin and public-edge
+  reads both stayed well above write throughput under 32-way fetch load.
+- Remaining public-edge write bottlenecks are outside the local storage writer:
+  Cloudflare/public edge-to-origin behavior plus JSON/base64 batch protocol
+  overhead. The next protocol-level improvement is a binary batch upload format
+  or git pack/tail-pack transport that avoids base64 JSON for many small blobs.
