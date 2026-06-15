@@ -81,8 +81,8 @@ Tree enumeration is controlled separately by `HTREE_GIT_TREE_WALK_CONCURRENCY` a
 
 Pushes batch new loose Git objects before uploading them to a single Blossom
 write server. The default batch target is 4 MiB, tuned for public edge-backed
-uploads. Override it in bytes for local-origin benchmarks or unusual server
-paths:
+uploads. Batch requests run with the configured Blossom `upload_concurrency`.
+Override the target in bytes for local-origin benchmarks or unusual server paths:
 
 ```bash
 HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES=8388608 git push htree://npub1.../repo main

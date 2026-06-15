@@ -424,71 +424,100 @@ async fn upload_one_pending_batch_to_server(
     ))
 }
 
-async fn upload_pending_with_single_server_batches(
+fn split_pending_upload_batches(
     items: Vec<PendingUpload>,
-    blossom: &hashtree_blossom::BlossomClient,
-    server: &str,
-    counters: &UploadCounters,
-) -> Result<Vec<PendingUpload>> {
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut fallback = Vec::new();
+    batch_target_bytes: usize,
+) -> Vec<Vec<PendingUpload>> {
+    let mut batches = Vec::new();
     let mut batch = Vec::new();
     let mut batch_bytes = 0usize;
-    let mut batch_supported = true;
-    let batch_target_bytes = git_batch_upload_target_bytes();
 
     for item in items {
-        if !batch_supported {
-            fallback.push(item);
-            continue;
-        }
-
         let item_len = item.data.len();
         let would_overflow = !batch.is_empty()
             && (batch.len() >= hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS
                 || batch_bytes.saturating_add(item_len) > batch_target_bytes);
         if would_overflow {
-            match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
-                Ok(Some(())) => {
-                    batch.clear();
-                    batch_bytes = 0;
-                }
-                Ok(None) => {
-                    fallback.append(&mut batch);
-                    batch_bytes = 0;
-                    batch_supported = false;
-                    fallback.push(item);
-                    continue;
-                }
-                Err(err) => {
-                    record_batch_upload_failure(counters, batch.len());
-                    eprintln!("\n  Batch upload failed ({} blobs): {}", batch.len(), err);
-                    return Err(err);
-                }
-            }
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = 0;
         }
 
         batch_bytes = batch_bytes.saturating_add(item_len);
         batch.push(item);
     }
 
-    if batch_supported && !batch.is_empty() {
-        match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
-            Ok(Some(())) => {}
-            Ok(None) => {
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+
+    batches
+}
+
+async fn upload_pending_with_single_server_batches(
+    items: Vec<PendingUpload>,
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+    batch_upload_concurrency: usize,
+) -> Result<Vec<PendingUpload>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut fallback = Vec::new();
+    let batch_target_bytes = git_batch_upload_target_bytes();
+    let mut batches = split_pending_upload_batches(items, batch_target_bytes).into_iter();
+
+    let Some(mut first_batch) = batches.next() else {
+        return Ok(Vec::new());
+    };
+
+    match upload_one_pending_batch_to_server(&first_batch, blossom, server, counters).await {
+        Ok(Some(())) => {}
+        Ok(None) => {
+            fallback.append(&mut first_batch);
+            for mut batch in batches {
                 fallback.append(&mut batch);
             }
+            return Ok(fallback);
+        }
+        Err(err) => {
+            record_batch_upload_failure(counters, first_batch.len());
+            eprintln!(
+                "\n  Batch upload failed ({} blobs): {}",
+                first_batch.len(),
+                err
+            );
+            return Err(err);
+        }
+    }
+
+    use futures::stream::{self, StreamExt};
+
+    let concurrency = batch_upload_concurrency.max(1);
+    let server = server.to_string();
+    let mut upload_stream = stream::iter(batches.map(|batch| {
+        let blossom = blossom.clone();
+        let counters = counters.clone();
+        let server = server.clone();
+        async move {
+            let result =
+                upload_one_pending_batch_to_server(&batch, &blossom, &server, &counters).await;
+            (batch, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+
+    while let Some((mut batch, result)) = upload_stream.next().await {
+        match result {
+            Ok(Some(())) => {}
+            Ok(None) => fallback.append(&mut batch),
             Err(err) => {
                 record_batch_upload_failure(counters, batch.len());
                 eprintln!("\n  Batch upload failed ({} blobs): {}", batch.len(), err);
                 return Err(err);
             }
         }
-    } else {
-        fallback.append(&mut batch);
     }
 
     Ok(fallback)
@@ -503,6 +532,7 @@ async fn flush_pending_uploads(
     upload_check_supported: &mut bool,
     tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
     counters: &UploadCounters,
+    batch_upload_concurrency: usize,
 ) -> bool {
     if pending.is_empty() {
         return true;
@@ -547,7 +577,14 @@ async fn flush_pending_uploads(
             }
         }
 
-        match upload_pending_with_single_server_batches(batchable, blossom, server, counters).await
+        match upload_pending_with_single_server_batches(
+            batchable,
+            blossom,
+            server,
+            counters,
+            batch_upload_concurrency,
+        )
+        .await
         {
             Ok(fallback) => {
                 to_upload = fallback;
@@ -2579,6 +2616,7 @@ impl RemoteHelper {
                         &mut upload_check_supported,
                         &tx,
                         &counters,
+                        upload_concurrency,
                     )
                     .await
                 {
@@ -2595,6 +2633,7 @@ impl RemoteHelper {
                 &mut upload_check_supported,
                 &tx,
                 &counters,
+                upload_concurrency,
             )
             .await;
 
@@ -2722,7 +2761,8 @@ impl RemoteHelper {
 mod tests {
     use super::{
         batch_upload_retry_delay, effective_upload_concurrency, git_batch_upload_target_bytes,
-        upload_progress_from_counters, UploadCounters, GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
+        split_pending_upload_batches, upload_progress_from_counters, PendingUpload, UploadCounters,
+        GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
     };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2811,6 +2851,44 @@ mod tests {
             git_batch_upload_target_bytes(),
             hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
         );
+    }
+
+    fn pending_upload_with_len(len: usize) -> PendingUpload {
+        PendingUpload {
+            hash: [0; 32],
+            data: vec![0; len],
+            from_old_tree: false,
+            force_all_servers: false,
+        }
+    }
+
+    #[test]
+    fn split_pending_upload_batches_respects_target_bytes() {
+        let items: Vec<_> = (0..5).map(|_| pending_upload_with_len(4)).collect();
+        let batches = split_pending_upload_batches(items, 10);
+
+        let sizes: Vec<_> = batches.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn split_pending_upload_batches_respects_protocol_blob_count() {
+        let items: Vec<_> = (0..=hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS)
+            .map(|_| pending_upload_with_len(1))
+            .collect();
+        let batches = split_pending_upload_batches(items, usize::MAX);
+
+        let sizes: Vec<_> = batches.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS, 1]);
+    }
+
+    #[test]
+    fn split_pending_upload_batches_keeps_oversized_item_in_single_batch() {
+        let batches = split_pending_upload_batches(vec![pending_upload_with_len(11)], 10);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0].data.len(), 11);
     }
 
     #[test]

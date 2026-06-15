@@ -25,7 +25,10 @@ Change:
   only falls back to individual uploads when the server explicitly lacks the
   batch endpoint. A later binary-batch experiment lowered the default target to
   4 MiB and added `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` for origin/local
-  experiments that can benefit from larger bodies.
+  experiments that can benefit from larger bodies. A follow-up git helper fix
+  kept the first batch as an endpoint-support probe, then uploaded remaining
+  single-server batches concurrently using configured Blossom
+  `upload_concurrency` instead of serializing every batch request.
 
 Verification:
 - Focused helper tests passed with `cargo test -p git-remote-htree
