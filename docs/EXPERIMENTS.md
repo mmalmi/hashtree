@@ -877,9 +877,11 @@ Follow-up:
   blocklists still protect users who already have it configured.
 - A follow-up push confirmed that the stale upload relay 404 was gone, then
   showed `wss://relay.damus.io` as the remaining failed relay. Defaults were
-  adjusted toward the relays that succeeded in the push (`temp.iris.to`,
-  `nos.lol`, and `relay.primal.net`) by removing Damus and adding `nos.lol`;
-  the local operator config was updated the same way.
+  adjusted toward the relays that succeeded in the push by removing Damus and
+  adding `nos.lol`; the local operator config was updated the same way. A second
+  smoke then showed `relay.primal.net` failing while `temp.iris.to` and
+  `nos.lol` succeeded, so Primal was removed from the shared default and local
+  operator config as well.
 - Conclusion: dropping the Worker is architecturally cleaner and fixes the 404
   routing failure, but it is not the modern-throughput fix. The hard bottleneck
   remains Cloudflare Tunnel/request-body transport under shared read/write load.

@@ -18,7 +18,6 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://temp.iris.to",
     "wss://nos.lol",
     "wss://relay.snort.social",
-    "wss://relay.primal.net",
 ];
 
 /// Default social graph entrypoint followed when a new identity is initialized.
