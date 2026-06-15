@@ -822,6 +822,39 @@ Interpretation:
   removed after the test. A usable direct path needs explicit public TCP ingress
   to the local fileserver or a better non-Worker upload transport.
 
+### 2026-06-16: Streaming add batches leaf chunk writes
+
+Setup:
+- Follow-up from a large local import where direct writes into a multi-terabyte
+  LMDB blob database stalled while faulting cold database pages.
+- The existing LMDB layer already had `put_many` batch writes, hot-tier support,
+  external blob spill, and packed external blobs, but `HashTree::put_stream`
+  admitted leaf chunks one at a time through `Store::put`.
+
+Change:
+- `HashTree::put_stream_with_progress` now batches prepared leaf chunks through
+  `Store::put_many`, flushing at 64 MiB or 128 chunks. The cap keeps memory
+  bounded while letting LMDB use one batched transaction/existence preflight for
+  streamed file chunks.
+
+Evidence:
+- `cargo test -p hashtree-core put_stream` passed, including the existing
+  `prop_put_stream_matches_put` property and a new test proving streamed leaf
+  chunks use bounded `put_many` batches.
+- `cargo test -p hashtree-cli --lib storage::tests::lmdb_hot_blob_legacy_guard_scopes_tiered_store`
+  passed.
+- `cargo test -p hashtree-cli --lib storage::tests::hashtree_store_uses_scoped_lmdb_hot_blob_dir`
+  passed.
+- `cargo test -p hashtree-lmdb external_blob_pack_batches_large_values` passed.
+
+Interpretation:
+- This is the near-term fix for huge `htree add` imports: do not ask a giant cold
+  LMDB store to perform one transaction per stream chunk.
+- The larger architecture remains hot-to-cold tiering: new writes should land in
+  a small hot LMDB/external-pack store, while old multi-terabyte state is used as
+  a read fallback. Direct live imports into the legacy giant store are still the
+  wrong operational shape for HDD-backed state.
+
 ### 2026-06-15: Public upload redirect and write-concurrency check
 
 Setup:

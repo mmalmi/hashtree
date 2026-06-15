@@ -1,5 +1,7 @@
 use super::*;
-use crate::store::MemoryStore;
+use crate::store::{MemoryStore, Store, StoreError};
+use async_trait::async_trait;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn make_tree() -> (Arc<MemoryStore>, HashTree<MemoryStore>) {
     let store = Arc::new(MemoryStore::new());
@@ -154,6 +156,67 @@ async fn test_unified_put_get_encrypted_chunked() {
 
     let retrieved = tree.get(&cid, None).await.unwrap().unwrap();
     assert_eq!(retrieved, data);
+}
+
+#[derive(Default)]
+struct CountingStore {
+    inner: MemoryStore,
+    put_calls: AtomicUsize,
+    put_many_calls: AtomicUsize,
+    put_many_items: AtomicUsize,
+}
+
+#[async_trait]
+impl Store for CountingStore {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.put_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.put(hash, data).await
+    }
+
+    async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.put_many_calls.fetch_add(1, Ordering::Relaxed);
+        self.put_many_items
+            .fetch_add(items.len(), Ordering::Relaxed);
+        self.inner.put_many(items).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.get(hash).await
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.delete(hash).await
+    }
+}
+
+#[tokio::test]
+async fn test_put_stream_batches_leaf_chunk_writes() {
+    let store = Arc::new(CountingStore::default());
+    let tree = HashTree::new(
+        HashTreeConfig::new(store.clone())
+            .public()
+            .with_chunk_size(4),
+    );
+    let data = (0..(4 * 130)).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let mut progressed = 0u64;
+
+    let (cid, size) = tree
+        .put_stream_with_progress(futures::io::Cursor::new(data.clone()), |bytes| {
+            progressed += bytes;
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(size, data.len() as u64);
+    assert_eq!(progressed, data.len() as u64);
+    assert_eq!(store.put_many_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(store.put_many_items.load(Ordering::Relaxed), 130);
+    assert_eq!(store.put_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(tree.get(&cid, None).await.unwrap(), Some(data));
 }
 
 #[tokio::test]

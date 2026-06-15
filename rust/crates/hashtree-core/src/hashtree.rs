@@ -21,6 +21,9 @@ use crate::types::{to_hex, Cid, DirEntry, Hash, Link, LinkType, TreeNode};
 
 use crate::crypto::{decrypt_chk, encrypt_chk, EncryptionKey};
 
+const STREAM_PUT_BATCH_TARGET_BYTES: usize = 64 * 1024 * 1024;
+const STREAM_PUT_BATCH_MAX_ITEMS: usize = 128;
+
 #[path = "hashtree/stream.rs"]
 mod read_stream;
 mod walk;
@@ -249,6 +252,8 @@ impl<S: Store> HashTree<S> {
         let mut links = Vec::new();
         let mut total_size: u64 = 0;
         let mut consistent_key: Option<[u8; 32]> = None;
+        let mut pending_store_items = Vec::new();
+        let mut pending_store_bytes = 0usize;
 
         loop {
             let mut chunk = Vec::new();
@@ -274,8 +279,7 @@ impl<S: Store> HashTree<S> {
             let chunk_len = chunk.len() as u64;
             total_size += chunk_len;
 
-            let (hash, key) = self.put_chunk_internal(&chunk).await?;
-            progress(chunk_len);
+            let (hash, data, key) = self.prepare_chunk_for_store(&chunk)?;
 
             // Track consistent key for single-key result
             if links.is_empty() {
@@ -292,6 +296,20 @@ impl<S: Store> HashTree<S> {
                 link_type: LinkType::Blob, // Leaf chunk (raw blob)
                 meta: None,
             });
+
+            pending_store_bytes = pending_store_bytes.saturating_add(data.len());
+            pending_store_items.push((hash, data, chunk_len));
+            if pending_store_bytes >= STREAM_PUT_BATCH_TARGET_BYTES
+                || pending_store_items.len() >= STREAM_PUT_BATCH_MAX_ITEMS
+            {
+                Self::flush_stream_store_batch(
+                    self.store.as_ref(),
+                    &mut pending_store_items,
+                    &mut pending_store_bytes,
+                    &mut progress,
+                )
+                .await?;
+            }
         }
 
         if links.is_empty() {
@@ -299,6 +317,14 @@ impl<S: Store> HashTree<S> {
             let (hash, key) = self.put_chunk_internal(&[]).await?;
             return Ok((Cid { hash, key }, 0));
         }
+
+        Self::flush_stream_store_batch(
+            self.store.as_ref(),
+            &mut pending_store_items,
+            &mut pending_store_bytes,
+            &mut progress,
+        )
+        .await?;
 
         // Build tree from chunks
         let (root_hash, root_key) = self.build_tree_internal(links, Some(total_size)).await?;
@@ -316,19 +342,58 @@ impl<S: Store> HashTree<S> {
         &self,
         data: &[u8],
     ) -> Result<(Hash, Option<EncryptionKey>), HashTreeError> {
+        let (hash, stored_data, key) = self.prepare_chunk_for_store(data)?;
+        self.store
+            .put(hash, stored_data)
+            .await
+            .map_err(|e| HashTreeError::Store(e.to_string()))?;
+        Ok((hash, key))
+    }
+
+    fn prepare_chunk_for_store(
+        &self,
+        data: &[u8],
+    ) -> Result<(Hash, Vec<u8>, Option<EncryptionKey>), HashTreeError> {
         if self.encrypted {
             let (encrypted, key) =
                 encrypt_chk(data).map_err(|e| HashTreeError::Encryption(e.to_string()))?;
             let hash = sha256(&encrypted);
-            self.store
-                .put(hash, encrypted)
-                .await
-                .map_err(|e| HashTreeError::Store(e.to_string()))?;
-            Ok((hash, Some(key)))
+            Ok((hash, encrypted, Some(key)))
         } else {
-            let hash = self.put_blob(data).await?;
-            Ok((hash, None))
+            let hash = sha256(data);
+            Ok((hash, data.to_vec(), None))
         }
+    }
+
+    async fn flush_stream_store_batch<F>(
+        store: &S,
+        pending: &mut Vec<(Hash, Vec<u8>, u64)>,
+        pending_bytes: &mut usize,
+        progress: &mut F,
+    ) -> Result<(), HashTreeError>
+    where
+        F: FnMut(u64),
+    {
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut items = Vec::with_capacity(pending.len());
+        let mut sizes = Vec::with_capacity(pending.len());
+        for (hash, data, size) in pending.drain(..) {
+            items.push((hash, data));
+            sizes.push(size);
+        }
+        *pending_bytes = 0;
+
+        store
+            .put_many(items)
+            .await
+            .map_err(|e| HashTreeError::Store(e.to_string()))?;
+        for size in sizes {
+            progress(size);
+        }
+        Ok(())
     }
 
     /// Build tree and return (hash, optional_key)
