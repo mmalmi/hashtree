@@ -581,3 +581,46 @@ Interpretation:
   Cloudflare/public edge-to-origin behavior plus JSON/base64 batch protocol
   overhead. The next protocol-level improvement is a binary batch upload format
   or git pack/tail-pack transport that avoids base64 JSON for many small blobs.
+
+### 2026-06-15: Binary Blossom batch upload
+
+Setup:
+- Same large production-like origin shape as the packed external blob writer
+  experiment. Identifying hostnames, exact repos, pubkeys, IPs, raw hashes, and
+  temp paths are omitted.
+- The daemon used hot LMDB metadata, legacy LMDB fallback, external blob spill
+  for blobs >=64 KiB, 64 MiB external pack target, external blob sync enabled,
+  and blob write queue limit 8.
+- The new `/upload/batch-binary` extension uses one auth event per batch and a
+  binary body with per-entry sha256, optional content type, and raw bytes. The
+  existing JSON/base64 `/upload/batch` remains supported, and the client tries
+  binary first with JSON fallback.
+- Payloads were deterministic 256 KiB blobs. Unless noted, batches used 16 blobs
+  per request.
+
+Results:
+
+| Path | Shape | Throughput | Latency notes |
+| --- | --- | ---: | --- |
+| Origin JSON batch | c4, 128 x 256 KiB | 25.42 MiB/s | p95 0.80 s |
+| Origin binary batch | c4, 128 x 256 KiB | 29.48 MiB/s | p95 0.78 s |
+| Origin binary batch | c8, 256 x 256 KiB | 32.57 MiB/s | p95 1.53 s |
+| Public edge JSON batch | c4, 128 x 256 KiB | 3.67 MiB/s | p95 3.96 s |
+| Public edge binary batch | c4, 128 x 256 KiB | 5.14 MiB/s | p95 2.66 s |
+| Public edge binary batch | c12, 256 x 256 KiB | 7.02 MiB/s | p95 5.97 s |
+| Public edge read of fresh binary-batch blobs | GET, c32, 256 x 256 KiB | 26.05 MiB/s | p95 0.32 s |
+| Origin read of fresh binary-batch blobs | GET, c32, 256 x 256 KiB | 2160 MiB/s | cache-hot local read |
+
+Interpretation:
+- Removing JSON/base64 from the public write path improved c4 public-edge
+  throughput by about 40% and cut p95 latency by about one third on the same
+  payload shape.
+- Higher public-edge concurrency helped until roughly c12 with 16-blob batches.
+  Larger 32-blob batches were worse and mostly inflated tail latency.
+- Temporarily raising the live blob write queue limit from 8 to 12 improved
+  origin c16 throughput but reduced public-edge c12 throughput and worsened
+  latency. The live queue limit was restored to 8.
+- Origin storage and local reads are no longer the limiting path for this blob
+  size. Remaining public write work is mostly edge/origin transport overhead and
+  request scheduling; the next likely step is git pack/tail-pack upload or a
+  long-lived upload stream that avoids per-batch request overhead.

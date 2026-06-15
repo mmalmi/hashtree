@@ -39,6 +39,9 @@ use tracing::{debug, warn};
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
 pub const BATCH_UPLOAD_MAX_BLOBS: usize = 1024;
 pub const BATCH_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const BATCH_UPLOAD_BINARY_CONTENT_TYPE: &str = "application/vnd.hashtree.blossom.batch.v1";
+const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
+const BINARY_BATCH_UPLOAD_MAX_CONTENT_TYPE_BYTES: usize = 1024;
 
 #[derive(Error, Debug)]
 pub enum BlossomError {
@@ -155,6 +158,106 @@ struct BatchUploadResponse {
 #[derive(Deserialize)]
 struct BatchUploadDescriptor {
     sha256: String,
+}
+
+fn validate_batch_upload_items(items: &[BatchUploadItem]) -> Result<(), BlossomError> {
+    if items.len() > BATCH_UPLOAD_MAX_BLOBS {
+        return Err(BlossomError::UploadFailed(format!(
+            "batch contains {} blobs, maximum is {}",
+            items.len(),
+            BATCH_UPLOAD_MAX_BLOBS
+        )));
+    }
+
+    let total_bytes = items.iter().try_fold(0usize, |total, item| {
+        total
+            .checked_add(item.data.len())
+            .filter(|value| *value <= BATCH_UPLOAD_MAX_BYTES)
+    });
+    if total_bytes.is_none() {
+        return Err(BlossomError::UploadFailed(format!(
+            "batch exceeds maximum size of {} bytes",
+            BATCH_UPLOAD_MAX_BYTES
+        )));
+    }
+
+    Ok(())
+}
+
+fn encode_binary_batch_upload(items: &[BatchUploadItem]) -> Result<Vec<u8>, BlossomError> {
+    let total_bytes = items.iter().map(|item| item.data.len()).sum::<usize>();
+    let mut body = Vec::with_capacity(
+        BINARY_BATCH_UPLOAD_MAGIC.len() + 4 + items.len() * (32 + 2 + 8) + total_bytes,
+    );
+    body.extend_from_slice(BINARY_BATCH_UPLOAD_MAGIC);
+    body.extend_from_slice(&(items.len() as u32).to_be_bytes());
+
+    for item in items {
+        let hash = hex::decode(&item.hash)
+            .map_err(|_| BlossomError::UploadFailed("invalid batch blob hash".to_string()))?;
+        let hash: [u8; 32] = hash
+            .try_into()
+            .map_err(|_| BlossomError::UploadFailed("invalid batch blob hash".to_string()))?;
+        let content_type = item.content_type.as_deref().unwrap_or("");
+        if content_type.len() > BINARY_BATCH_UPLOAD_MAX_CONTENT_TYPE_BYTES {
+            return Err(BlossomError::UploadFailed(
+                "batch blob content type is too long".to_string(),
+            ));
+        }
+        let content_type_len = u16::try_from(content_type.len()).map_err(|_| {
+            BlossomError::UploadFailed("batch blob content type is too long".to_string())
+        })?;
+
+        body.extend_from_slice(&hash);
+        body.extend_from_slice(&content_type_len.to_be_bytes());
+        body.extend_from_slice(&(item.data.len() as u64).to_be_bytes());
+        body.extend_from_slice(content_type.as_bytes());
+        body.extend_from_slice(&item.data);
+    }
+
+    Ok(body)
+}
+
+async fn parse_batch_upload_response(
+    resp: reqwest::Response,
+    items: &[BatchUploadItem],
+) -> Result<Option<BatchUploadResult>, BlossomError> {
+    let status = resp.status();
+    if status == StatusCode::NOT_FOUND
+        || status == StatusCode::METHOD_NOT_ALLOWED
+        || status == StatusCode::NOT_IMPLEMENTED
+    {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(BlossomError::UploadFailed(format!("{}: {}", status, text)));
+    }
+
+    let parsed: BatchUploadResponse = resp.json().await?;
+    if parsed.blobs.len() != items.len() {
+        return Err(BlossomError::UploadFailed(format!(
+            "batch response contained {} blobs, expected {}",
+            parsed.blobs.len(),
+            items.len()
+        )));
+    }
+
+    let requested: HashSet<&str> = items.iter().map(|item| item.hash.as_str()).collect();
+    if parsed
+        .blobs
+        .iter()
+        .any(|blob| !requested.contains(blob.sha256.as_str()))
+    {
+        return Err(BlossomError::UploadFailed(
+            "batch response contained unexpected blob hash".to_string(),
+        ));
+    }
+
+    Ok(Some(BatchUploadResult {
+        accepted: parsed.blobs.len(),
+        uploaded: parsed.uploaded,
+    }))
 }
 
 impl UploadAttemptError {
@@ -514,30 +617,54 @@ impl BlossomClient {
         server: &str,
         items: &[BatchUploadItem],
     ) -> Result<Option<BatchUploadResult>, BlossomError> {
+        if let Some(result) = self.upload_binary_batch_to_server(server, items).await? {
+            return Ok(Some(result));
+        }
+        self.upload_json_batch_to_server(server, items).await
+    }
+
+    pub async fn upload_binary_batch_to_server(
+        &self,
+        server: &str,
+        items: &[BatchUploadItem],
+    ) -> Result<Option<BatchUploadResult>, BlossomError> {
+        validate_batch_upload_items(items)?;
         if items.is_empty() {
             return Ok(Some(BatchUploadResult {
                 accepted: 0,
                 uploaded: 0,
             }));
         }
-        if items.len() > BATCH_UPLOAD_MAX_BLOBS {
-            return Err(BlossomError::UploadFailed(format!(
-                "batch contains {} blobs, maximum is {}",
-                items.len(),
-                BATCH_UPLOAD_MAX_BLOBS
-            )));
-        }
 
-        let total_bytes = items.iter().try_fold(0usize, |total, item| {
-            total
-                .checked_add(item.data.len())
-                .filter(|value| *value <= BATCH_UPLOAD_MAX_BYTES)
-        });
-        if total_bytes.is_none() {
-            return Err(BlossomError::UploadFailed(format!(
-                "batch exceeds maximum size of {} bytes",
-                BATCH_UPLOAD_MAX_BYTES
-            )));
+        let auth_header = self
+            .create_upload_auth_for_hashes(items.iter().map(|item| item.hash.as_str()))
+            .await?;
+        let body = encode_binary_batch_upload(items)?;
+        let url = format!("{}/upload/batch-binary", server.trim_end_matches('/'));
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", auth_header)
+            .header("Content-Type", BATCH_UPLOAD_BINARY_CONTENT_TYPE)
+            .body(body)
+            .send()
+            .await?;
+
+        parse_batch_upload_response(resp, items).await
+    }
+
+    pub async fn upload_json_batch_to_server(
+        &self,
+        server: &str,
+        items: &[BatchUploadItem],
+    ) -> Result<Option<BatchUploadResult>, BlossomError> {
+        validate_batch_upload_items(items)?;
+        if items.is_empty() {
+            return Ok(Some(BatchUploadResult {
+                accepted: 0,
+                uploaded: 0,
+            }));
         }
 
         let auth_header = self
@@ -564,42 +691,7 @@ impl BlossomClient {
             .send()
             .await?;
 
-        let status = resp.status();
-        if status == StatusCode::NOT_FOUND
-            || status == StatusCode::METHOD_NOT_ALLOWED
-            || status == StatusCode::NOT_IMPLEMENTED
-        {
-            return Ok(None);
-        }
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(BlossomError::UploadFailed(format!("{}: {}", status, text)));
-        }
-
-        let parsed: BatchUploadResponse = resp.json().await?;
-        if parsed.blobs.len() != items.len() {
-            return Err(BlossomError::UploadFailed(format!(
-                "batch response contained {} blobs, expected {}",
-                parsed.blobs.len(),
-                items.len()
-            )));
-        }
-
-        let requested: HashSet<&str> = items.iter().map(|item| item.hash.as_str()).collect();
-        if parsed
-            .blobs
-            .iter()
-            .any(|blob| !requested.contains(blob.sha256.as_str()))
-        {
-            return Err(BlossomError::UploadFailed(
-                "batch response contained unexpected blob hash".to_string(),
-            ));
-        }
-
-        Ok(Some(BatchUploadResult {
-            accepted: parsed.blobs.len(),
-            uploaded: parsed.uploaded,
-        }))
+        parse_batch_upload_response(resp, items).await
     }
 
     /// Probe a blob on a specific server, distinguishing explicit misses from
@@ -1452,8 +1544,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_upload_binary_batch_to_server_accepts_batch_response() {
+        let first = b"first binary batch blob".to_vec();
+        let second = b"second binary batch blob".to_vec();
+        let first_hash = compute_sha256(&first);
+        let second_hash = compute_sha256(&second);
+        let response = format!(
+            r#"{{"uploaded":2,"blobs":[{{"sha256":"{}"}},{{"sha256":"{}"}}]}}"#,
+            first_hash, second_hash
+        );
+        let mut server = TestBodyServer::new(vec![(200, response)]);
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let items = vec![
+            BatchUploadItem::new(first_hash, first),
+            BatchUploadItem::new(second_hash, second),
+        ];
+
+        let result = client
+            .upload_binary_batch_to_server(&server.url, &items)
+            .await
+            .expect("binary batch upload")
+            .expect("binary batch endpoint supported");
+
+        assert_eq!(result.accepted, 2);
+        assert_eq!(result.uploaded, 2);
+        server.wait_for_requests().await;
+    }
+
+    #[test]
+    fn test_encode_binary_batch_upload_body_shape() {
+        let data = b"binary body shape".to_vec();
+        let hash = compute_sha256(&data);
+        let mut item = BatchUploadItem::new(hash.clone(), data.clone());
+        item.content_type = Some("application/octet-stream".to_string());
+
+        let body = encode_binary_batch_upload(&[item]).expect("binary batch body");
+        let expected_hash = hex::decode(hash).expect("hash bytes");
+        let content_type = b"application/octet-stream";
+        let header_len = BINARY_BATCH_UPLOAD_MAGIC.len() + 4;
+
+        assert_eq!(
+            &body[..BINARY_BATCH_UPLOAD_MAGIC.len()],
+            BINARY_BATCH_UPLOAD_MAGIC
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                body[BINARY_BATCH_UPLOAD_MAGIC.len()..header_len]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert_eq!(&body[header_len..header_len + 32], expected_hash.as_slice());
+        assert_eq!(
+            u16::from_be_bytes(body[header_len + 32..header_len + 34].try_into().unwrap()),
+            content_type.len() as u16
+        );
+        assert_eq!(
+            u64::from_be_bytes(body[header_len + 34..header_len + 42].try_into().unwrap()),
+            data.len() as u64
+        );
+        assert_eq!(
+            &body[header_len + 42..header_len + 42 + content_type.len()],
+            content_type
+        );
+        assert_eq!(
+            &body[header_len + 42 + content_type.len()..],
+            data.as_slice()
+        );
+    }
+
+    #[tokio::test]
     async fn test_upload_batch_to_server_returns_none_when_unsupported() {
-        let mut server = TestBodyServer::new(vec![(404, r#"{"error":"not found"}"#)]);
+        let mut server = TestBodyServer::new(vec![
+            (404, r#"{"error":"not found"}"#),
+            (404, r#"{"error":"not found"}"#),
+        ]);
         let keys = Keys::generate();
         let client = BlossomClient::new_empty(keys);
         let data = b"batch blob".to_vec();

@@ -4,7 +4,7 @@
 //! See: https://github.com/hzrd149/blossom
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
@@ -44,6 +44,8 @@ pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
 const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
+const MAX_BINARY_BATCH_CONTENT_TYPE_BYTES: usize = 1024;
 const MAX_UPLOAD_CHECK_HASHES: usize = 10_000;
 const SLOW_BATCH_UPLOAD_LOG_MS_ENV: &str = "HTREE_SLOW_BATCH_UPLOAD_LOG_MS";
 
@@ -229,10 +231,17 @@ pub struct BatchUploadRequest {
     pub blobs: Vec<BatchUploadBlob>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BatchUploadResponse {
     pub uploaded: usize,
     pub blobs: Vec<BlobDescriptor>,
+}
+
+#[derive(Debug)]
+struct DecodedBatchUploadBlob {
+    sha256: String,
+    content_type: Option<String>,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1312,19 +1321,145 @@ pub async fn upload_blob(
     }
 }
 
-/// POST /upload/batch - Upload multiple blobs with one auth event and one storage batch.
-pub async fn upload_blob_batch(
-    State(state): State<AppState>,
+fn take_binary_batch_bytes<'a>(
+    body: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], (StatusCode, String)> {
+    let end = cursor.checked_add(len).ok_or_else(|| {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Binary batch field length overflow".to_string(),
+        )
+    })?;
+    if end > body.len() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Binary batch body is truncated".to_string(),
+        ));
+    }
+    let slice = &body[*cursor..end];
+    *cursor = end;
+    Ok(slice)
+}
+
+fn read_binary_batch_u16(body: &[u8], cursor: &mut usize) -> Result<u16, (StatusCode, String)> {
+    let bytes = take_binary_batch_bytes(body, cursor, 2)?;
+    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_binary_batch_u32(body: &[u8], cursor: &mut usize) -> Result<u32, (StatusCode, String)> {
+    let bytes = take_binary_batch_bytes(body, cursor, 4)?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_binary_batch_u64(body: &[u8], cursor: &mut usize) -> Result<u64, (StatusCode, String)> {
+    let bytes = take_binary_batch_bytes(body, cursor, 8)?;
+    Ok(u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn parse_binary_batch_upload(
+    body: &[u8],
+) -> Result<Vec<DecodedBatchUploadBlob>, (StatusCode, String)> {
+    let mut cursor = 0usize;
+    let magic = take_binary_batch_bytes(body, &mut cursor, BINARY_BATCH_UPLOAD_MAGIC.len())?;
+    if magic != BINARY_BATCH_UPLOAD_MAGIC {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid binary batch magic".to_string(),
+        ));
+    }
+
+    let count = read_binary_batch_u32(body, &mut cursor)? as usize;
+    if count == 0 {
+        return Err((StatusCode::BAD_REQUEST, "Batch is empty".to_string()));
+    }
+    if count > MAX_BATCH_UPLOAD_BLOBS {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Batch contains too many blobs".to_string(),
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    let mut blobs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let hash = take_binary_batch_bytes(body, &mut cursor, 32)?;
+        let content_type_len = read_binary_batch_u16(body, &mut cursor)? as usize;
+        if content_type_len > MAX_BINARY_BATCH_CONTENT_TYPE_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Binary batch content type is too long".to_string(),
+            ));
+        }
+        let data_len =
+            usize::try_from(read_binary_batch_u64(body, &mut cursor)?).map_err(|_| {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Binary batch blob is too large".to_string(),
+                )
+            })?;
+        total_bytes = total_bytes.checked_add(data_len).ok_or_else(|| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Batch exceeds maximum upload size".to_string(),
+            )
+        })?;
+        if total_bytes > MAX_BATCH_UPLOAD_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Batch exceeds maximum upload size".to_string(),
+            ));
+        }
+
+        let content_type = if content_type_len == 0 {
+            None
+        } else {
+            let bytes = take_binary_batch_bytes(body, &mut cursor, content_type_len)?;
+            Some(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            "Binary batch content type is not UTF-8".to_string(),
+                        )
+                    })?
+                    .to_string(),
+            )
+        };
+        let data = take_binary_batch_bytes(body, &mut cursor, data_len)?.to_vec();
+        blobs.push(DecodedBatchUploadBlob {
+            sha256: hex::encode(hash),
+            content_type,
+            data,
+        });
+    }
+
+    if cursor != body.len() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Binary batch body has trailing bytes".to_string(),
+        ));
+    }
+
+    Ok(blobs)
+}
+
+async fn upload_decoded_blob_batch(
+    state: AppState,
     headers: HeaderMap,
-    Json(payload): Json<BatchUploadRequest>,
-) -> impl IntoResponse {
-    let started_at = Instant::now();
+    blobs: Vec<DecodedBatchUploadBlob>,
+    started_at: Instant,
+    encoding: &'static str,
+) -> Response<Body> {
     let slow_log_ms = slow_batch_upload_log_ms();
-    let payload_blobs = payload.blobs.len();
-    if payload.blobs.is_empty() {
+    let payload_blobs = blobs.len();
+    if blobs.is_empty() {
         return blossom_json_error(StatusCode::BAD_REQUEST, "Batch is empty");
     }
-    if payload.blobs.len() > MAX_BATCH_UPLOAD_BLOBS {
+    if blobs.len() > MAX_BATCH_UPLOAD_BLOBS {
         return blossom_json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "Batch contains too many blobs",
@@ -1362,12 +1497,12 @@ pub async fn upload_blob_batch(
         .unwrap()
         .as_secs();
     let mut total_bytes = 0usize;
-    let mut items = Vec::with_capacity(payload.blobs.len());
-    let mut descriptors = Vec::with_capacity(payload.blobs.len());
+    let mut items = Vec::with_capacity(payload_blobs);
+    let mut descriptors = Vec::with_capacity(payload_blobs);
     let mut decode_hash_ms = 0u128;
     let mut validate_ms = 0u128;
 
-    for blob in payload.blobs {
+    for blob in blobs {
         let decode_started = Instant::now();
         let sha256_hex = blob.sha256.to_lowercase();
         let expected_hash: [u8; 32] = match from_hex(&sha256_hex) {
@@ -1381,10 +1516,7 @@ pub async fn upload_blob_batch(
             );
         }
 
-        let data = match base64::engine::general_purpose::STANDARD.decode(blob.data.as_bytes()) {
-            Ok(data) => data,
-            Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob data"),
-        };
+        let data = blob.data;
         if data.len() > state.max_upload_bytes {
             return blossom_json_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -1466,6 +1598,7 @@ pub async fn upload_blob_batch(
                     decode_hash_ms,
                     validate_ms,
                     store_ms,
+                    encoding,
                     allowed_author = is_allowed_author,
                     "slow Blossom batch upload"
                 );
@@ -1485,6 +1618,42 @@ pub async fn upload_blob_batch(
         }
         Ok(Err(error)) | Err(error) => blob_write_error_response(error.into()),
     }
+}
+
+/// POST /upload/batch - Upload multiple blobs with one auth event and one storage batch.
+pub async fn upload_blob_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BatchUploadRequest>,
+) -> impl IntoResponse {
+    let started_at = Instant::now();
+    let mut blobs = Vec::with_capacity(payload.blobs.len());
+    for blob in payload.blobs {
+        let data = match base64::engine::general_purpose::STANDARD.decode(blob.data.as_bytes()) {
+            Ok(data) => data,
+            Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob data"),
+        };
+        blobs.push(DecodedBatchUploadBlob {
+            sha256: blob.sha256,
+            content_type: blob.content_type,
+            data,
+        });
+    }
+    upload_decoded_blob_batch(state, headers, blobs, started_at, "json").await
+}
+
+/// POST /upload/batch-binary - Upload a binary encoded blob batch.
+pub async fn upload_blob_batch_binary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let started_at = Instant::now();
+    let blobs = match parse_binary_batch_upload(&body) {
+        Ok(blobs) => blobs,
+        Err((status, reason)) => return blossom_json_error(status, reason),
+    };
+    upload_decoded_blob_batch(state, headers, blobs, started_at, "binary").await
 }
 
 /// DELETE /<sha256> - Delete a blob (BUD-02)
@@ -1896,6 +2065,21 @@ mod tests {
             .collect()
     }
 
+    fn binary_batch_body(items: &[(&[u8], Option<&str>)]) -> Bytes {
+        let mut body = Vec::new();
+        body.extend_from_slice(BINARY_BATCH_UPLOAD_MAGIC);
+        body.extend_from_slice(&(items.len() as u32).to_be_bytes());
+        for (data, content_type) in items {
+            body.extend_from_slice(&sha256(data));
+            let content_type = content_type.unwrap_or("");
+            body.extend_from_slice(&(content_type.len() as u16).to_be_bytes());
+            body.extend_from_slice(&(*data).len().to_be_bytes());
+            body.extend_from_slice(content_type.as_bytes());
+            body.extend_from_slice(data);
+        }
+        Bytes::from(body)
+    }
+
     #[test]
     fn test_is_valid_sha256() {
         assert!(is_valid_sha256(
@@ -2030,6 +2214,67 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn upload_blob_batch_binary_stores_multiple_blobs() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(Arc::clone(&store));
+        let keys = nostr::Keys::generate();
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/vnd.hashtree.blossom.batch.v1"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let first = (0u8..=255).collect::<Vec<_>>();
+        let second = (0u8..=255).map(|byte| byte ^ 0xaa).collect::<Vec<_>>();
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let body = binary_batch_body(&[
+            (&first, Some("application/octet-stream")),
+            (&second, Some("application/octet-stream")),
+        ]);
+
+        let response = upload_blob_batch_binary(State(state), headers, body)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read batch response");
+        let parsed: BatchUploadResponse =
+            serde_json::from_slice(&body).expect("parse batch response");
+        assert_eq!(parsed.uploaded, 2);
+        assert_eq!(parsed.blobs.len(), 2);
+        assert_eq!(parsed.blobs[0].sha256, hex::encode(first_hash));
+        assert_eq!(parsed.blobs[1].sha256, hex::encode(second_hash));
+        assert!(store.blob_exists(&first_hash).expect("first exists"));
+        assert!(store.blob_exists(&second_hash).expect("second exists"));
+    }
+
+    #[test]
+    fn binary_batch_parser_rejects_trailing_bytes() {
+        let data = (0u8..=255).collect::<Vec<_>>();
+        let mut body = binary_batch_body(&[(&data, None)]).to_vec();
+        body.push(0);
+
+        let error = parse_binary_batch_upload(&body).expect_err("trailing bytes rejected");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("trailing"));
     }
 
     #[tokio::test]

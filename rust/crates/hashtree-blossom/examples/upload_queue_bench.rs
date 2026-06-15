@@ -21,7 +21,10 @@ struct Config {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Raw,
+    Read,
     Batch,
+    BatchJson,
+    BatchBinary,
 }
 
 #[derive(Debug)]
@@ -36,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::parse()?;
     let client = Arc::new(
         BlossomClient::new_empty(Keys::generate())
-            .with_write_servers(vec![config.server.clone()])
+            .with_servers(vec![config.server.clone()])
             .with_timeout(Duration::from_secs(config.timeout_secs)),
     );
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
@@ -63,7 +66,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }));
             }
         }
-        Mode::Batch => {
+        Mode::Read => {
+            handles.reserve(config.requests);
+            for index in 0..config.requests {
+                let permit = semaphore.clone().acquire_owned().await?;
+                let client = client.clone();
+                let config = config.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    let data = deterministic_payload(&config.seed, index, config.size);
+                    let hash = hex::encode(Sha256::digest(&data));
+                    let started = Instant::now();
+                    let result = client.download(&hash).await.and_then(|downloaded| {
+                        if downloaded.len() == config.size {
+                            Ok(downloaded)
+                        } else {
+                            Err(hashtree_blossom::BlossomError::DownloadFailed(format!(
+                                "downloaded {} bytes, expected {}",
+                                downloaded.len(),
+                                config.size
+                            )))
+                        }
+                    });
+                    UploadSample {
+                        elapsed: started.elapsed(),
+                        blobs: 1,
+                        error: result.err().map(|error| error.to_string()),
+                    }
+                }));
+            }
+        }
+        Mode::Batch | Mode::BatchJson | Mode::BatchBinary => {
             handles.reserve(config.requests.div_ceil(config.batch_size));
             let mut index = 0usize;
             while index < config.requests {
@@ -80,7 +113,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         items.push(BatchUploadItem::new(hash, data));
                     }
                     let started = Instant::now();
-                    let result = client.upload_batch_to_server(&config.server, &items).await;
+                    let result = match config.mode {
+                        Mode::Batch => client.upload_batch_to_server(&config.server, &items).await,
+                        Mode::BatchJson => {
+                            client
+                                .upload_json_batch_to_server(&config.server, &items)
+                                .await
+                        }
+                        Mode::BatchBinary => {
+                            client
+                                .upload_binary_batch_to_server(&config.server, &items)
+                                .await
+                        }
+                        Mode::Raw => unreachable!("raw mode handled separately"),
+                        Mode::Read => unreachable!("read mode handled separately"),
+                    };
                     UploadSample {
                         elapsed: started.elapsed(),
                         blobs: items.len(),
@@ -202,7 +249,10 @@ impl Config {
                 "--mode" => {
                     config.mode = match required_value(&mut args, "--mode")?.as_str() {
                         "raw" => Mode::Raw,
+                        "read" => Mode::Read,
                         "batch" => Mode::Batch,
+                        "batch-json" => Mode::BatchJson,
+                        "batch-binary" => Mode::BatchBinary,
                         other => return Err(format!("unknown mode: {other}").into()),
                     }
                 }
@@ -241,7 +291,7 @@ fn required_value(
 fn print_usage() {
     println!(
         "usage: cargo run -p hashtree-blossom --example upload_queue_bench -- \\
-  --server http://127.0.0.1:8080 --mode raw --requests 128 --concurrency 32 --size 262144"
+  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary --requests 128 --concurrency 32 --size 262144"
     );
 }
 
