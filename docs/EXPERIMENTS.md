@@ -2,6 +2,37 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-15 - Git Push Upload Batch Recovery
+
+Question: why did public `htree` git pushes still spend minutes processing
+already-present blobs after the origin supported batch upload checks?
+
+Findings:
+- The public upload Worker was returning 404 for `POST /upload/check` and
+  `POST /upload/batch`, while the self-hosted origin already supported those
+  endpoints. That forced helpers into per-object HEAD/PUT fallback.
+- After deploying Worker passthrough for those two endpoints, public
+  `/upload/check` returned the origin bitset response and `/upload/batch`
+  returned origin validation instead of a Worker 404.
+- A later live push showed the remaining failure mode: if a batch upload
+  transiently failed, the helper treated that like "batch unsupported" and
+  fell back to individual uploads, which can saturate the origin's small write
+  queue and make agents wait through a slow per-object loop.
+
+Change:
+- `git-remote-htree` now targets smaller 8 MiB upload batches for the public
+  Worker path, retries batch upload failures with bounded exponential backoff,
+  and only falls back to individual uploads when the server explicitly lacks
+  the batch endpoint.
+
+Verification:
+- Focused helper tests passed with `cargo test -p git-remote-htree
+  helper::push::tests`.
+- A live small-delta htree push using the rebuilt helper completed without the
+  old long retry loop: it discovered a few hundred blobs, skipped most as
+  already present via server inventory, uploaded a few dozen new blobs, and
+  published successfully.
+
 ## 2026-06-07 - Git Clone Blossom Download Concurrency
 
 Question: does a larger `git-remote-htree` loose-object Blossom download concurrency make a clean-cache public clone faster through the Iris Blossom read path?
