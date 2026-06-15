@@ -844,6 +844,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     ));
 
     let upstream_blossom = config.blossom.all_read_servers();
+    let blossom_replica_queue_bytes =
+        (config.blossom.replicate_queue_mb.max(1) as usize) * 1024 * 1024;
     let active_nostr_relays = config.nostr.active_relays();
     let fips_handle = crate::fips_transport::start_daemon_fips_transport(
         &config,
@@ -865,6 +867,11 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         .with_require_random_untrusted_ingest(config.blossom.require_random_untrusted_ingest)
         .with_optimistic_blossom_uploads(config.blossom.optimistic_uploads)
         .with_upstream_blossom(upstream_blossom)
+        .with_blossom_upload_replicas(
+            config.blossom.replicate_servers.clone(),
+            blossom_replica_queue_bytes,
+            keys.clone(),
+        )
         .with_nostr_relay_urls(active_nostr_relays)
         .with_social_graph(social_graph)
         .with_socialgraph_snapshot(

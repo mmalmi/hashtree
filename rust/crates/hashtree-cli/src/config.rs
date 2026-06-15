@@ -355,6 +355,18 @@ pub struct BlossomConfig {
     /// writes in the background.
     #[serde(default = "default_optimistic_uploads")]
     pub optimistic_uploads: bool,
+    /// Background write-behind targets for blobs accepted by this server.
+    /// Useful for hot-cache origins that should ACK local writes quickly and
+    /// replicate them to a larger origin without blocking the client.
+    #[serde(
+        default,
+        alias = "write_behind_servers",
+        alias = "mirror_write_servers"
+    )]
+    pub replicate_servers: Vec<String>,
+    /// Maximum in-memory upload body bytes waiting for background replication.
+    #[serde(default = "default_replicate_queue_mb")]
+    pub replicate_queue_mb: u64,
 }
 
 impl BlossomConfig {
@@ -423,6 +435,10 @@ fn default_require_random_untrusted_ingest() -> bool {
 
 fn default_optimistic_uploads() -> bool {
     false
+}
+
+fn default_replicate_queue_mb() -> u64 {
+    512
 }
 
 fn default_nostr_enabled() -> bool {
@@ -808,6 +824,8 @@ impl Default for BlossomConfig {
             max_upload_mb: default_max_upload_mb(),
             require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
             optimistic_uploads: default_optimistic_uploads(),
+            replicate_servers: Vec::new(),
+            replicate_queue_mb: default_replicate_queue_mb(),
         }
     }
 }
@@ -1103,6 +1121,8 @@ mod tests {
             .contains(&"wss://temp.iris.to".to_string()));
         assert!(config.blossom.enabled);
         assert!(!config.blossom.optimistic_uploads);
+        assert!(config.blossom.replicate_servers.is_empty());
+        assert_eq!(config.blossom.replicate_queue_mb, 512);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);
         assert_eq!(config.nostr.mirror_max_follow_distance, None);
         assert_eq!(config.nostr.max_write_distance, 3);
@@ -1148,6 +1168,18 @@ optimistic_uploads = true
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.blossom.optimistic_uploads);
         assert!(config.blossom.require_random_untrusted_ingest);
+    }
+
+    #[test]
+    fn test_blossom_replication_deserialize() {
+        let toml_str = r#"
+[blossom]
+replicate_servers = ["http://127.0.0.1:8081"]
+replicate_queue_mb = 128
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.blossom.replicate_servers, ["http://127.0.0.1:8081"]);
+        assert_eq!(config.blossom.replicate_queue_mb, 128);
     }
 
     #[test]
@@ -1370,6 +1402,8 @@ chunk_target_bytes = 65536
             max_upload_mb: default_max_upload_mb(),
             require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
             optimistic_uploads: default_optimistic_uploads(),
+            replicate_servers: Vec::new(),
+            replicate_queue_mb: default_replicate_queue_mb(),
         };
 
         let read = config.all_read_servers();
@@ -1400,6 +1434,8 @@ chunk_target_bytes = 65536
             max_upload_mb: default_max_upload_mb(),
             require_random_untrusted_ingest: default_require_random_untrusted_ingest(),
             optimistic_uploads: default_optimistic_uploads(),
+            replicate_servers: Vec::new(),
+            replicate_queue_mb: default_replicate_queue_mb(),
         };
         assert!(blossom.all_read_servers().is_empty());
         assert!(blossom.all_write_servers().is_empty());

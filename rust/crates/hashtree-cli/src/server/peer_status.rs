@@ -263,6 +263,7 @@ pub(super) async fn daemon_status(
     });
     let blob_io = blob_read::blob_io_queue_snapshot();
     let optimistic_uploads = blossom::optimistic_upload_queue_snapshot(&state);
+    let upload_replicas = blossom::blossom_upload_replica_queue_snapshot(&state);
     let queues = json!({
         "blob_reads": {
             "limit": blob_io.read_limit,
@@ -284,6 +285,13 @@ pub(super) async fn daemon_status(
             "reserved_bytes": optimistic_uploads.reserved_bytes,
             "in_flight": optimistic_uploads.in_flight,
             "queue_timeout_ms": optimistic_uploads.queue_timeout_ms,
+        },
+        "upload_replication": {
+            "enabled": upload_replicas.enabled,
+            "targets": upload_replicas.target_count,
+            "max_bytes": upload_replicas.max_bytes,
+            "available_bytes": upload_replicas.available_bytes,
+            "reserved_bytes": upload_replicas.reserved_bytes,
         },
     });
     let http_status = status_metrics::http_status_snapshot();

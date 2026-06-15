@@ -14,6 +14,7 @@ use axum::{
 use futures::future::{BoxFuture, Shared};
 use hashtree_core::{Cid, LinkType, TreeEntry};
 use lru::LruCache;
+use nostr::Keys;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
@@ -233,6 +234,14 @@ pub struct AppState {
     pub allowed_pubkeys: HashSet<String>,
     /// Upstream Blossom servers for cascade fetching
     pub upstream_blossom: Vec<String>,
+    /// Write-behind Blossom servers for blobs accepted by this server.
+    pub blossom_upload_replicas: Vec<String>,
+    /// Background replication queue byte budget. Each queued body holds one
+    /// permit per byte until the remote upload attempt finishes.
+    pub blossom_upload_replica_queue_bytes: usize,
+    pub blossom_upload_replica_queue: Arc<Semaphore>,
+    /// Signing key used for server-side write-behind replication auth.
+    pub blossom_upload_replica_keys: Option<Arc<Keys>>,
     /// Social graph access control
     pub social_graph: Option<Arc<socialgraph::SocialGraphAccessControl>>,
     /// Social graph store handle for snapshot export

@@ -11,12 +11,15 @@ use axum::{
     Json,
 };
 use base64::Engine;
+use hashtree_blossom::{BatchUploadItem, BlossomClient};
 use hashtree_core::from_hex;
+use nostr::Keys;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::auth::AppState;
 use super::blob_read::{
@@ -64,6 +67,37 @@ pub(super) struct OptimisticUploadQueueSnapshot {
     pub reserved_bytes: usize,
     pub in_flight: usize,
     pub queue_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BlossomUploadReplicaQueueSnapshot {
+    pub enabled: bool,
+    pub target_count: usize,
+    pub max_bytes: usize,
+    pub available_bytes: usize,
+    pub reserved_bytes: usize,
+}
+
+struct PreparedBlossomUploadReplication {
+    servers: Vec<String>,
+    keys: Arc<Keys>,
+    permit: OwnedSemaphorePermit,
+    total_bytes: usize,
+}
+
+pub(super) fn blossom_upload_replica_queue_snapshot(
+    state: &AppState,
+) -> BlossomUploadReplicaQueueSnapshot {
+    let available_bytes = state.blossom_upload_replica_queue.available_permits();
+    BlossomUploadReplicaQueueSnapshot {
+        enabled: !state.blossom_upload_replicas.is_empty(),
+        target_count: state.blossom_upload_replicas.len(),
+        max_bytes: state.blossom_upload_replica_queue_bytes,
+        available_bytes,
+        reserved_bytes: state
+            .blossom_upload_replica_queue_bytes
+            .saturating_sub(available_bytes),
+    }
 }
 
 /// Check if a pubkey has write access based on allowed_npubs config or social graph
@@ -1055,6 +1089,146 @@ fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn replica_item(hash: String, data: Vec<u8>, content_type: String) -> BatchUploadItem {
+    BatchUploadItem {
+        hash,
+        data,
+        content_type: Some(content_type),
+    }
+}
+
+fn prepare_blossom_upload_replication(
+    state: &AppState,
+    total_bytes: usize,
+) -> Option<PreparedBlossomUploadReplication> {
+    if state.blossom_upload_replicas.is_empty() {
+        return None;
+    }
+    let permits = match u32::try_from(total_bytes.max(1)) {
+        Ok(permits) => permits,
+        Err(_) => {
+            tracing::warn!(
+                total_bytes,
+                "Skipping Blossom write-behind replication because batch is too large"
+            );
+            return None;
+        }
+    };
+    let permit = match state
+        .blossom_upload_replica_queue
+        .clone()
+        .try_acquire_many_owned(permits)
+    {
+        Ok(permit) => permit,
+        Err(error) => {
+            tracing::warn!(
+                total_bytes,
+                targets = state.blossom_upload_replicas.len(),
+                error = %error,
+                "Skipping Blossom write-behind replication because queue is full"
+            );
+            return None;
+        }
+    };
+
+    let keys = match state.blossom_upload_replica_keys.clone() {
+        Some(keys) => keys,
+        None => {
+            tracing::warn!(
+                "Skipping Blossom write-behind replication because server keys are unavailable"
+            );
+            return None;
+        }
+    };
+    Some(PreparedBlossomUploadReplication {
+        servers: state.blossom_upload_replicas.clone(),
+        keys,
+        permit,
+        total_bytes,
+    })
+}
+
+fn schedule_prepared_blossom_upload_replication(
+    prepared: PreparedBlossomUploadReplication,
+    items: Vec<BatchUploadItem>,
+) {
+    if items.is_empty() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let _permit = prepared.permit;
+        let client = BlossomClient::new((*prepared.keys).clone())
+            .with_write_servers(prepared.servers.clone());
+        for server in prepared.servers {
+            match client.upload_batch_to_server(&server, &items).await {
+                Ok(Some(result)) => {
+                    tracing::info!(
+                        target = %server,
+                        accepted = result.accepted,
+                        uploaded = result.uploaded,
+                        total = items.len(),
+                        bytes = prepared.total_bytes,
+                        "Replicated Blossom upload batch"
+                    );
+                }
+                Ok(None) => {
+                    replicate_items_individually(&client, &server, &items, prepared.total_bytes)
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target = %server,
+                        error = %error,
+                        total = items.len(),
+                        bytes = prepared.total_bytes,
+                        "Blossom write-behind replication failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+async fn replicate_items_individually(
+    client: &BlossomClient,
+    server: &str,
+    items: &[BatchUploadItem],
+    total_bytes: usize,
+) {
+    let mut uploaded = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let server_list = [server.to_string()];
+    for item in items {
+        match client
+            .upload_to_selected_servers(&item.data, &server_list)
+            .await
+        {
+            Ok((_hash, successes)) if successes > 0 => uploaded += 1,
+            Ok((_hash, _)) => skipped += 1,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    target = %server,
+                    hash = %item.hash,
+                    error = %error,
+                    "Blossom write-behind item replication failed"
+                );
+            }
+        }
+    }
+    tracing::info!(
+        target = %server,
+        uploaded,
+        skipped,
+        failed,
+        total = items.len(),
+        bytes = total_bytes,
+        "Replicated Blossom upload items without batch support"
+    );
+}
+
 async fn acquire_optimistic_upload_queue(
     state: &AppState,
     permits: u32,
@@ -1224,6 +1398,15 @@ pub async fn upload_blob(
         return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
     }
 
+    let replication = prepare_blossom_upload_replication(&state, body.len());
+    let replication_item = replication.as_ref().map(|_| {
+        replica_item(
+            sha256_hex.clone(),
+            body.to_vec(),
+            descriptor.mime_type.clone(),
+        )
+    });
+
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
     if state.optimistic_blossom_uploads {
@@ -1249,7 +1432,7 @@ pub async fn upload_blob(
             let hash_for_log = sha256_hex.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) = store_blossom_blob_without_blocking_runtime(
+                match store_blossom_blob_without_blocking_runtime(
                     &state_for_write,
                     body,
                     pubkey_bytes,
@@ -1257,11 +1440,23 @@ pub async fn upload_blob(
                 )
                 .await
                 {
-                    tracing::error!(
-                        "Background Blossom storage failed for {}: {:#}",
-                        hash_for_log,
-                        error
-                    );
+                    Ok(()) => {
+                        if let (Some(replication), Some(replication_item)) =
+                            (replication, replication_item)
+                        {
+                            schedule_prepared_blossom_upload_replication(
+                                replication,
+                                vec![replication_item],
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "Background Blossom storage failed for {}: {:#}",
+                            hash_for_log,
+                            error
+                        );
+                    }
                 }
                 clear_optimistic_upload_inflight(&hash_for_log);
             });
@@ -1295,6 +1490,9 @@ pub async fn upload_blob(
                         .unwrap();
                 }
             }
+            if let (Some(replication), Some(replication_item)) = (replication, replication_item) {
+                schedule_prepared_blossom_upload_replication(replication, vec![replication_item]);
+            }
             return upload_descriptor_response(StatusCode::OK, &descriptor);
         }
         Ok(false) => {}
@@ -1316,7 +1514,12 @@ pub async fn upload_blob(
     .await;
 
     match store_result {
-        Ok(()) => upload_descriptor_response(StatusCode::CREATED, &descriptor),
+        Ok(()) => {
+            if let (Some(replication), Some(replication_item)) = (replication, replication_item) {
+                schedule_prepared_blossom_upload_replication(replication, vec![replication_item]);
+            }
+            upload_descriptor_response(StatusCode::CREATED, &descriptor)
+        }
         Err(error) => blob_write_error_response(error),
     }
 }
@@ -1498,6 +1701,7 @@ async fn upload_decoded_blob_batch(
         .as_secs();
     let mut total_bytes = 0usize;
     let mut items = Vec::with_capacity(payload_blobs);
+    let mut replica_specs = Vec::with_capacity(payload_blobs);
     let mut descriptors = Vec::with_capacity(payload_blobs);
     let mut decode_hash_ms = 0u128;
     let mut validate_ms = 0u128;
@@ -1557,14 +1761,25 @@ async fn upload_decoded_blob_batch(
 
         descriptors.push(make_blob_descriptor(
             &headers,
-            sha256_hex,
+            sha256_hex.clone(),
             data.len() as u64,
-            content_type,
+            content_type.clone(),
             now,
         ));
+        replica_specs.push((sha256_hex, content_type));
         items.push((actual_hash, data));
     }
     let prepare_ms = started_at.elapsed().as_millis();
+    let replication = prepare_blossom_upload_replication(&state, total_bytes);
+    let replica_items = replication.as_ref().map(|_| {
+        replica_specs
+            .iter()
+            .zip(items.iter())
+            .map(|((sha256_hex, content_type), (_hash, data))| {
+                replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
+            })
+            .collect::<Vec<_>>()
+    });
 
     let permit = match acquire_blob_write().await {
         Ok(permit) => permit,
@@ -1587,6 +1802,9 @@ async fn upload_decoded_blob_batch(
 
     match stored {
         Ok(Ok(uploaded)) => {
+            if let (Some(replication), Some(replica_items)) = (replication, replica_items) {
+                schedule_prepared_blossom_upload_replication(replication, replica_items);
+            }
             if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
                 tracing::warn!(
                     blobs = payload_blobs,
@@ -1947,7 +2165,9 @@ mod tests {
     use super::*;
     use crate::server::auth::WsRelayState;
     use crate::storage::HashtreeStore;
+    use crate::test_support::{test_env_lock, EnvVarGuard};
     use axum::response::IntoResponse;
+    use axum::{routing::post, Router};
     use base64::Engine;
     use hashtree_core::sha256;
     use std::collections::HashSet;
@@ -1976,6 +2196,10 @@ mod tests {
             optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
             allowed_pubkeys: HashSet::new(),
             upstream_blossom: Vec::new(),
+            blossom_upload_replicas: Vec::new(),
+            blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
+            blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
+            blossom_upload_replica_keys: None,
             social_graph: None,
             social_graph_store: None,
             social_graph_root: None,
@@ -2338,6 +2562,69 @@ mod tests {
         assert_eq!(second.status(), StatusCode::OK);
         let second_descriptor = read_descriptor(second).await;
         assert_eq!(second_descriptor.url, first_descriptor.url);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_blob_replicates_to_configured_blossom_target() {
+        let _lock = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let config_dir = TempDir::new().expect("config dir");
+        let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
+
+        let data = Bytes::from_static(b"write-behind-replication-data");
+        let expected_hash = hex::encode(sha256(data.as_ref()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        let response_hash = expected_hash.clone();
+        let replica_router = Router::new().route(
+            "/upload/batch-binary",
+            post(move |body: Bytes| {
+                let tx = tx.clone();
+                let response_hash = response_hash.clone();
+                async move {
+                    let _ = tx.send(body.len());
+                    Json(serde_json::json!({
+                        "uploaded": 1,
+                        "blobs": [{"sha256": response_hash}],
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replica");
+        let replica_addr = listener.local_addr().expect("replica addr");
+        let _server_task =
+            tokio::spawn(async move { axum::serve(listener, replica_router).await.unwrap() });
+
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(HashtreeStore::new(temp.path()).expect("store"));
+        let mut state = test_app_state(store);
+        state.require_random_untrusted_ingest = false;
+        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys).parse().unwrap(),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream".parse().unwrap(),
+        );
+
+        let response = upload_blob(State(state), headers, data)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let replicated = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("replication request timed out")
+            .expect("replication channel closed");
+        assert!(replicated > 0);
+        assert_eq!(expected_hash.len(), 64);
     }
 
     #[tokio::test]

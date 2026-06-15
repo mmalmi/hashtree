@@ -84,6 +84,8 @@ Config file: `~/.hashtree/config.toml`
 [blossom]
 read_servers = ["https://cdn.iris.to"]
 write_servers = ["https://upload.iris.to"]
+replicate_servers = ["http://192.0.2.20:8080"] # optional write-behind targets for accepted server uploads
+replicate_queue_mb = 512
 
 [server]
 fips_peers = [

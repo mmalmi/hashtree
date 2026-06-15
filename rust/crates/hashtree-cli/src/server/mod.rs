@@ -51,6 +51,7 @@ pub use auth::{new_lookup_cache, AppState, AuthCredentials, CachedTreeRootEntry}
 
 static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES: usize = 512 * 1024 * 1024;
 
 #[cfg(not(test))]
 const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -153,6 +154,12 @@ impl HashtreeServer {
                 )),
                 allowed_pubkeys: HashSet::new(), // No pubkeys allowed by default (use public_writes)
                 upstream_blossom: Vec::new(),
+                blossom_upload_replicas: Vec::new(),
+                blossom_upload_replica_queue_bytes: DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
+                blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(
+                    DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
+                )),
+                blossom_upload_replica_keys: None,
                 social_graph: None,
                 social_graph_store: None,
                 social_graph_root: None,
@@ -255,6 +262,30 @@ impl HashtreeServer {
     /// Set upstream Blossom servers for cascade fetching
     pub fn with_upstream_blossom(mut self, servers: Vec<String>) -> Self {
         self.state.upstream_blossom = servers;
+        self
+    }
+
+    /// Set write-behind Blossom servers for blobs accepted by this server.
+    pub fn with_blossom_upload_replicas(
+        mut self,
+        servers: Vec<String>,
+        queue_bytes: usize,
+        keys: nostr::Keys,
+    ) -> Self {
+        let queue_bytes = queue_bytes.max(1);
+        let mut servers: Vec<String> = servers
+            .into_iter()
+            .map(|server| server.trim().trim_end_matches('/').to_string())
+            .filter(|server| !server.is_empty())
+            .collect();
+        servers.sort();
+        servers.dedup();
+        let replica_keys = (!servers.is_empty()).then(|| Arc::new(keys));
+        self.state.blossom_upload_replicas = servers;
+        self.state.blossom_upload_replica_queue_bytes = queue_bytes;
+        self.state.blossom_upload_replica_queue =
+            Arc::new(tokio::sync::Semaphore::new(queue_bytes));
+        self.state.blossom_upload_replica_keys = replica_keys;
         self
     }
 
