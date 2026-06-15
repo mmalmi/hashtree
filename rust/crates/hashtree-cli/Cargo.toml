@@ -97,6 +97,7 @@ ignore = "0.4"
 
 # HTTP client for Blossom
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+http-body-util = "0.1"
 
 # TLS crypto provider
 rustls = { version = "0.23", features = ["ring"] }
@@ -114,4 +115,3 @@ tempfile.workspace = true
 walkdir = "2"
 nostr.workspace = true
 serde_json.workspace = true
-http-body-util = "0.1"
