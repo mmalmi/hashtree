@@ -737,6 +737,8 @@ Results:
 | Public edge binary batch, first write | c1, 96 x 256 KiB | 5.06 MiB/s | about 4.60 s request latency |
 | Public edge binary batch, duplicate replay | c1, 96 x 256 KiB | 4.65 MiB/s | about 5.02 s request latency |
 | Public edge binary batch, first write | c4, 4 x 96 x 256 KiB | 4.84 MiB/s | p50 about 19.6 s |
+| Public tunnel, no Worker upload handler | c1, 96 x 256 KiB | 6.22 MiB/s | about 3.72 s request latency |
+| Public tunnel, no Worker upload handler | c4, 4 x 96 x 256 KiB | 8.02 MiB/s | p50 about 11.31 s |
 | Origin read of fresh blobs | GET, c64, 256 x 256 KiB | 1507.63 MiB/s | cache-hot local read |
 | Public edge read of fresh blobs | GET, c16, 96 x 256 KiB | 8.39 MiB/s | benchmark client path |
 | Public CDN-style redirected read | GET, 1 x 4 MiB | 13-18 MB/s | direct curl sample |
@@ -758,7 +760,16 @@ Interpretation:
 - Public writes remained around 5 MiB/s even when the origin queue was idle.
   That points to request body transfer before the origin writer rather than
   LMDB or local disk throughput.
+- Sending the same upload benchmark through an existing public tunnel to the
+  local origin, bypassing the Worker upload handler, improved c4 throughput to
+  about 8 MiB/s. That is better but still far below origin capacity, so the
+  tunnel request-body path is also a limiter for large writes.
 - The next performance step should be a direct local-origin upload transport
   for large write bodies, such as a restricted HTTPS upload hostname/proxy or
   equivalent local fileserver path. A cloud object-store admission/cache layer is
   not part of the desired architecture unless explicitly approved.
+- A DNS-only direct HTTPS prototype was prepared with a narrow reverse proxy,
+  but public ACME validation timed out before reaching the origin, consistent
+  with upstream/router inbound filtering. The temporary DNS/proxy exposure was
+  removed after the test. A usable direct path needs explicit public TCP ingress
+  to the local fileserver or a better non-Worker upload transport.
