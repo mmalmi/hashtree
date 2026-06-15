@@ -1,19 +1,23 @@
 use anyhow::{Context, Result};
 use hashtree_cli::config::ensure_keys_string;
 use hashtree_cli::{
-    Config, HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, NostrToBech32,
-    RootResolver, PRIORITY_OWN,
+    AddProgress, AddProgressSnapshot, Config, HashtreeStore, NostrKeys, NostrResolverConfig,
+    NostrRootResolver, NostrToBech32, RootResolver, PRIORITY_OWN,
 };
 use hashtree_core::{
     from_hex, key_from_hex, nhash_encode, nhash_encode_full, Cid, HashTree, HashTreeConfig,
     NHashData,
 };
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::blossom::background_blossom_push;
-use super::content::add_directory;
+use super::content::add_directory_with_progress;
+use super::util::format_bytes;
 
 const IRIS_FILES_WEB_BASE_URL: &str = "https://files.iris.to";
 const IRIS_SITES_WEB_BASE_URL: &str = "https://sites.iris.to";
@@ -29,8 +33,10 @@ pub(crate) async fn run_add(
     local: bool,
 ) -> Result<()> {
     let is_dir = path.is_dir();
+    let show_progress = add_progress_enabled();
 
     if only_hash {
+        use futures::executor::block_on as sync_block_on;
         use futures::io::AllowStdIo;
         use hashtree_core::store::MemoryStore;
 
@@ -44,20 +50,42 @@ pub(crate) async fn run_add(
             config = config.with_chunk_size(chunk_size);
         }
         let tree = HashTree::new(config);
+        let progress = Arc::new(AddProgress::new());
 
         if is_dir {
-            let cid = add_directory(&tree, &path, !no_ignore).await?;
+            let cid = run_with_add_progress("Hashing", Arc::clone(&progress), || {
+                if show_progress {
+                    discover_add_input(&path, !no_ignore, progress.as_ref())?;
+                }
+                sync_block_on(add_directory_with_progress(
+                    &tree,
+                    &path,
+                    !no_ignore,
+                    Some(progress.as_ref()),
+                ))
+            })?;
             println!("hash: {}", hashtree_core::to_hex(&cid.hash));
             if let Some(key) = cid.key {
                 println!("key:  {}", hashtree_core::to_hex(&key));
             }
         } else {
-            let file = std::fs::File::open(&path)
-                .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
-            let (cid, _size) = tree
-                .put_stream(AllowStdIo::new(file))
-                .await
+            let cid = run_with_add_progress("Hashing", Arc::clone(&progress), || {
+                if show_progress {
+                    discover_add_input(&path, !no_ignore, progress.as_ref())?;
+                }
+                let file = std::fs::File::open(&path).with_context(|| {
+                    format!("Failed to open file for hashing: {}", path.display())
+                })?;
+                let (cid, _size) = sync_block_on(async {
+                    tree.put_stream_with_progress(AllowStdIo::new(file), |bytes| {
+                        progress.record_bytes(bytes);
+                    })
+                    .await
+                })
                 .map_err(|e| anyhow::anyhow!("Failed to hash file: {}", e))?;
+                progress.record_file_finished();
+                Ok(cid)
+            })?;
             println!("hash: {}", hashtree_core::to_hex(&cid.hash));
             if let Some(key) = cid.key {
                 println!("key:  {}", hashtree_core::to_hex(&key));
@@ -69,51 +97,75 @@ pub(crate) async fn run_add(
 
     let store = HashtreeStore::new(&data_dir)?;
     let site_entry = detect_site_entry_for_path(&path, is_dir);
+    let progress = Arc::new(AddProgress::new());
 
     let (cid_for_push, hash_hex, key_hex, display_root): (String, String, Option<String>, String) =
-        if unencrypted {
-            let hash_hex = if is_dir {
-                store
-                    .upload_dir_with_options_and_chunk_size(&path, !no_ignore, chunk_size)
-                    .context("Failed to add directory")?
+        run_with_add_progress("Adding", Arc::clone(&progress), || {
+            if show_progress {
+                discover_add_input(&path, !no_ignore, progress.as_ref())?;
+            }
+            if unencrypted {
+                let hash_hex = if is_dir {
+                    store
+                        .upload_dir_with_options_and_chunk_size_and_progress(
+                            &path,
+                            !no_ignore,
+                            chunk_size,
+                            progress.as_ref(),
+                        )
+                        .context("Failed to add directory")?
+                } else {
+                    store
+                        .upload_file_with_chunk_size_and_progress(
+                            &path,
+                            chunk_size,
+                            progress.as_ref(),
+                        )
+                        .context("Failed to add file")?
+                };
+                let hash = from_hex(&hash_hex).context("Invalid hash")?;
+                let nhash = nhash_encode(&hash)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
+                Ok((hash_hex.clone(), hash_hex, None, nhash))
             } else {
-                store
-                    .upload_file_with_chunk_size(&path, chunk_size)
-                    .context("Failed to add file")?
-            };
-            let hash = from_hex(&hash_hex).context("Invalid hash")?;
-            let nhash = nhash_encode(&hash)
-                .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
-            (hash_hex.clone(), hash_hex, None, nhash)
-        } else {
-            let cid_str = if is_dir {
-                store
-                    .upload_dir_encrypted_with_options_and_chunk_size(&path, !no_ignore, chunk_size)
-                    .context("Failed to add directory")?
-            } else {
-                store
-                    .upload_file_encrypted_with_chunk_size(&path, chunk_size)
-                    .context("Failed to add file")?
-            };
-            let (hash_hex, key_hex) = if let Some((h, k)) = cid_str.split_once(':') {
-                (h.to_string(), Some(k.to_string()))
-            } else {
-                (cid_str.clone(), None)
-            };
-            let hash = from_hex(&hash_hex).context("Invalid hash")?;
-            let key = key_hex
-                .as_ref()
-                .map(|k| key_from_hex(k))
-                .transpose()
-                .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
-            let nhash_data = NHashData {
-                hash,
-                decrypt_key: key,
-            };
-            let nhash = nhash_encode_full(&nhash_data)
-                .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
-            (cid_str, hash_hex, key_hex, nhash)
-        };
+                let cid_str = if is_dir {
+                    store
+                        .upload_dir_encrypted_with_options_and_chunk_size_and_progress(
+                            &path,
+                            !no_ignore,
+                            chunk_size,
+                            progress.as_ref(),
+                        )
+                        .context("Failed to add directory")?
+                } else {
+                    store
+                        .upload_file_encrypted_with_chunk_size_and_progress(
+                            &path,
+                            chunk_size,
+                            progress.as_ref(),
+                        )
+                        .context("Failed to add file")?
+                };
+                let (hash_hex, key_hex) = if let Some((h, k)) = cid_str.split_once(':') {
+                    (h.to_string(), Some(k.to_string()))
+                } else {
+                    (cid_str.clone(), None)
+                };
+                let hash = from_hex(&hash_hex).context("Invalid hash")?;
+                let key = key_hex
+                    .as_ref()
+                    .map(|k| key_from_hex(k))
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
+                let nhash_data = NHashData {
+                    hash,
+                    decrypt_key: key,
+                };
+                let nhash = nhash_encode_full(&nhash_data)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
+                Ok((cid_str, hash_hex, key_hex, nhash))
+            }
+        })?;
 
     println!("added {}", path.display());
     let display_route = if is_dir {
@@ -242,6 +294,211 @@ pub(crate) async fn run_add(
     Ok(())
 }
 
+fn add_progress_enabled() -> bool {
+    std::io::stderr().is_terminal()
+}
+
+fn discover_add_input(path: &Path, respect_gitignore: bool, progress: &AddProgress) -> Result<()> {
+    if path.is_dir() {
+        let walker = hashtree_cli::ignore_rules::build_content_walker(path, respect_gitignore);
+        for result in walker {
+            let entry = result?;
+            let entry_path = entry.path();
+            if entry_path == path {
+                continue;
+            }
+            if entry_path.is_file() {
+                let metadata = std::fs::metadata(entry_path)
+                    .with_context(|| format!("Failed to inspect file {}", entry_path.display()))?;
+                progress.record_file_discovered(metadata.len());
+            }
+        }
+    } else {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("Failed to inspect file {}", path.display()))?;
+        progress.record_file_discovered(metadata.len());
+    }
+    progress.mark_totals_known();
+    Ok(())
+}
+
+fn run_with_add_progress<T, F>(label: &'static str, progress: Arc<AddProgress>, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    if !add_progress_enabled() {
+        return f();
+    }
+
+    let done = Arc::new(AtomicBool::new(false));
+    let outcome = Arc::new(AtomicU8::new(0));
+    let progress_thread =
+        spawn_add_progress_thread(label, progress, Arc::clone(&done), Arc::clone(&outcome));
+    let result = f();
+    outcome.store(if result.is_ok() { 1 } else { 2 }, Ordering::Relaxed);
+    done.store(true, Ordering::Relaxed);
+    let _ = progress_thread.join();
+    result
+}
+
+fn spawn_add_progress_thread(
+    label: &'static str,
+    progress: Arc<AddProgress>,
+    done: Arc<AtomicBool>,
+    outcome: Arc<AtomicU8>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let start = Instant::now();
+        let mut shown = false;
+        let mut previous_line_len = 0usize;
+        let mut last_report_second = None;
+
+        loop {
+            thread::sleep(Duration::from_millis(200));
+            let elapsed = start.elapsed();
+            let snapshot = progress.snapshot();
+
+            if done.load(Ordering::Relaxed) {
+                if shown {
+                    let status = match outcome.load(Ordering::Relaxed) {
+                        2 => "stopped",
+                        _ => "complete",
+                    };
+                    let final_line = format!(
+                        "{} {}: {}",
+                        label,
+                        status,
+                        format_add_progress_line(snapshot, elapsed)
+                    );
+                    print_progress_line(&final_line, &mut previous_line_len, true);
+                }
+                break;
+            }
+
+            if elapsed < Duration::from_secs(1) {
+                continue;
+            }
+
+            let elapsed_seconds = elapsed.as_secs();
+            if last_report_second == Some(elapsed_seconds) {
+                continue;
+            }
+            last_report_second = Some(elapsed_seconds);
+            shown = true;
+            let line = format!("{label}... {}", format_add_progress_line(snapshot, elapsed));
+            print_progress_line(&line, &mut previous_line_len, false);
+        }
+    })
+}
+
+fn format_add_progress_line(snapshot: AddProgressSnapshot, elapsed: Duration) -> String {
+    let elapsed_text = format_duration_compact(elapsed);
+    let rate = bytes_per_second(snapshot.bytes_processed, elapsed);
+    let rate_text = if rate > 0 {
+        format!("{}/s", format_bytes(rate))
+    } else {
+        "waiting for data".to_string()
+    };
+
+    if snapshot.totals_known && snapshot.bytes_total > 0 {
+        let percent_total = snapshot.bytes_total.max(snapshot.bytes_processed);
+        let percent = (snapshot.bytes_processed as f64 / percent_total as f64) * 100.0;
+        let mut line = format!(
+            "{}/{} ({percent:.1}%), {}, {}",
+            format_bytes(snapshot.bytes_processed),
+            format_bytes(snapshot.bytes_total),
+            format_file_progress(snapshot),
+            rate_text
+        );
+        if snapshot.bytes_processed < snapshot.bytes_total && rate > 0 {
+            let remaining = snapshot.bytes_total - snapshot.bytes_processed;
+            let eta = Duration::from_secs_f64(remaining as f64 / rate as f64);
+            line.push_str(&format!(", eta {}", format_duration_compact(eta)));
+        }
+        line.push_str(&format!(" in {elapsed_text}"));
+        return line;
+    }
+
+    if snapshot.totals_known {
+        return format!(
+            "{}, {} in {}",
+            format_bytes(snapshot.bytes_processed),
+            format_file_progress(snapshot),
+            elapsed_text
+        );
+    }
+
+    if snapshot.bytes_processed > 0 {
+        return format!(
+            "{} processed, {}, {} in {}",
+            format_bytes(snapshot.bytes_processed),
+            format_file_progress(snapshot),
+            rate_text,
+            elapsed_text
+        );
+    }
+
+    if snapshot.bytes_total > 0 || snapshot.files_total > 0 {
+        return format!(
+            "scanning... discovered {} ({}) in {}",
+            pluralize_files(snapshot.files_total),
+            format_bytes(snapshot.bytes_total),
+            elapsed_text
+        );
+    }
+
+    format!("scanning... in {elapsed_text}")
+}
+
+fn format_file_progress(snapshot: AddProgressSnapshot) -> String {
+    if snapshot.totals_known {
+        return format!(
+            "{}/{} files",
+            snapshot.files_processed, snapshot.files_total
+        );
+    }
+    pluralize_files(snapshot.files_processed)
+}
+
+fn pluralize_files(files: u64) -> String {
+    if files == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{files} files")
+    }
+}
+
+fn bytes_per_second(bytes: u64, elapsed: Duration) -> u64 {
+    let elapsed = elapsed.as_secs_f64();
+    if bytes == 0 || elapsed <= 0.0 {
+        return 0;
+    }
+    (bytes as f64 / elapsed).max(1.0) as u64
+}
+
+fn print_progress_line(line: &str, previous_line_len: &mut usize, newline: bool) {
+    let padding_len = previous_line_len.saturating_sub(line.len());
+    let padding = " ".repeat(padding_len);
+    if newline {
+        eprintln!("\r{line}{padding}");
+    } else {
+        eprint!("\r{line}{padding}");
+        let _ = std::io::stderr().flush();
+    }
+    *previous_line_len = line.len();
+}
+
+fn format_duration_compact(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 60 {
+        return format!("{}m{:02}s", seconds / 60, seconds % 60);
+    }
+    if seconds > 0 {
+        return format!("{seconds}s");
+    }
+    format!("{}ms", duration.as_millis())
+}
+
 fn encode_hash_route_segment(segment: &str) -> String {
     let mut encoded = String::with_capacity(segment.len());
     for byte in segment.bytes() {
@@ -361,10 +618,8 @@ pub(crate) fn detect_site_entry_for_path(path: &Path, is_dir: bool) -> Option<St
             let name = entry.file_name().to_string_lossy().to_string();
             match name.to_ascii_lowercase().as_str() {
                 "index.html" => return Some(name),
-                "index.htm" => {
-                    if index_htm.is_none() {
-                        index_htm = Some(name);
-                    }
+                "index.htm" if index_htm.is_none() => {
+                    index_htm = Some(name);
                 }
                 _ => {}
             }

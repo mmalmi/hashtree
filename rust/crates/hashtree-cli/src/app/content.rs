@@ -1,10 +1,10 @@
 use anyhow::Result;
 
-/// Recursively add a directory (handles encryption automatically based on tree config).
-pub(crate) async fn add_directory<S: hashtree_core::store::Store>(
+pub(crate) async fn add_directory_with_progress<S: hashtree_core::store::Store>(
     tree: &hashtree_core::HashTree<S>,
     dir: &std::path::Path,
     respect_gitignore: bool,
+    progress: Option<&hashtree_cli::AddProgress>,
 ) -> Result<hashtree_core::Cid> {
     use futures::io::AllowStdIo;
     use hashtree_cli::ignore_rules::build_content_walker;
@@ -31,10 +31,22 @@ pub(crate) async fn add_directory<S: hashtree_core::store::Store>(
         if path.is_file() {
             let file = std::fs::File::open(path)
                 .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path.display(), e))?;
+            if let Some(progress) = progress {
+                if let Ok(metadata) = file.metadata() {
+                    progress.record_file_discovered(metadata.len());
+                }
+            }
             let (cid, _size) = tree
-                .put_stream(AllowStdIo::new(file))
+                .put_stream_with_progress(AllowStdIo::new(file), |bytes| {
+                    if let Some(progress) = progress {
+                        progress.record_bytes(bytes);
+                    }
+                })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to add file {}: {}", path.display(), e))?;
+            if let Some(progress) = progress {
+                progress.record_file_finished();
+            }
 
             let parent = relative
                 .parent()
@@ -104,7 +116,7 @@ pub(crate) async fn add_directory<S: hashtree_core::store::Store>(
 
 #[cfg(test)]
 mod tests {
-    use super::add_directory;
+    use super::add_directory_with_progress;
     use hashtree_core::{
         decode_tree_node, decrypt_chk, store::Store, HashTree, HashTreeConfig, LinkType,
         MemoryStore,
@@ -123,7 +135,9 @@ mod tests {
 
         let store = Arc::new(MemoryStore::new());
         let tree = HashTree::new(HashTreeConfig::new(store.clone()));
-        let root = add_directory(&tree, &site_dir, true).await.unwrap();
+        let root = add_directory_with_progress(&tree, &site_dir, true, None)
+            .await
+            .unwrap();
 
         let root_bytes = Store::get(store.as_ref(), &root.hash)
             .await

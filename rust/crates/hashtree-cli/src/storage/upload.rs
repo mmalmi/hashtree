@@ -2,6 +2,61 @@ use super::*;
 use futures::io::AllowStdIo;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[derive(Debug, Default)]
+pub struct AddProgress {
+    bytes_processed: AtomicU64,
+    bytes_total: AtomicU64,
+    files_processed: AtomicU64,
+    files_total: AtomicU64,
+    totals_known: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AddProgressSnapshot {
+    pub bytes_processed: u64,
+    pub bytes_total: u64,
+    pub files_processed: u64,
+    pub files_total: u64,
+    pub totals_known: bool,
+}
+
+impl AddProgress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_file_discovered(&self, bytes: u64) {
+        if self.totals_known.load(Ordering::Relaxed) {
+            return;
+        }
+        self.files_total.fetch_add(1, Ordering::Relaxed);
+        self.bytes_total.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn mark_totals_known(&self) {
+        self.totals_known.store(true, Ordering::Relaxed);
+    }
+
+    pub fn record_bytes(&self, bytes: u64) {
+        self.bytes_processed.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn record_file_finished(&self) {
+        self.files_processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> AddProgressSnapshot {
+        AddProgressSnapshot {
+            bytes_processed: self.bytes_processed.load(Ordering::Relaxed),
+            bytes_total: self.bytes_total.load(Ordering::Relaxed),
+            files_processed: self.files_processed.load(Ordering::Relaxed),
+            files_total: self.files_total.load(Ordering::Relaxed),
+            totals_known: self.totals_known.load(Ordering::Relaxed),
+        }
+    }
+}
 
 impl HashtreeStore {
     /// Upload a file as raw plaintext and return its CID, with auto-pin
@@ -11,7 +66,7 @@ impl HashtreeStore {
 
     /// Upload a file without pinning (for blossom uploads that can be evicted)
     pub fn upload_file_no_pin<P: AsRef<Path>>(&self, file_path: P) -> Result<String> {
-        self.upload_file_internal(file_path, false, None)
+        self.upload_file_internal(file_path, false, None, None)
     }
 
     pub fn upload_file_with_chunk_size<P: AsRef<Path>>(
@@ -19,7 +74,16 @@ impl HashtreeStore {
         file_path: P,
         chunk_size: Option<usize>,
     ) -> Result<String> {
-        self.upload_file_internal(file_path, true, chunk_size)
+        self.upload_file_internal(file_path, true, chunk_size, None)
+    }
+
+    pub fn upload_file_with_chunk_size_and_progress<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        chunk_size: Option<usize>,
+        progress: &AddProgress,
+    ) -> Result<String> {
+        self.upload_file_internal(file_path, true, chunk_size, Some(progress))
     }
 
     fn upload_file_internal<P: AsRef<Path>>(
@@ -27,10 +91,16 @@ impl HashtreeStore {
         file_path: P,
         pin: bool,
         chunk_size: Option<usize>,
+        progress: Option<&AddProgress>,
     ) -> Result<String> {
         let file_path = file_path.as_ref();
         let file = std::fs::File::open(file_path)
             .with_context(|| format!("Failed to open file {}", file_path.display()))?;
+        if let Some(progress) = progress {
+            if let Ok(metadata) = file.metadata() {
+                progress.record_file_discovered(metadata.len());
+            }
+        }
 
         // Store raw plaintext blobs without CHK encryption, streaming from disk.
         let store = self.store_arc();
@@ -40,8 +110,18 @@ impl HashtreeStore {
         }
         let tree = HashTree::new(config);
 
-        let (cid, _size) = sync_block_on(async { tree.put_stream(AllowStdIo::new(file)).await })
-            .context("Failed to store file")?;
+        let (cid, _size) = sync_block_on(async {
+            tree.put_stream_with_progress(AllowStdIo::new(file), |bytes| {
+                if let Some(progress) = progress {
+                    progress.record_bytes(bytes);
+                }
+            })
+            .await
+        })
+        .context("Failed to store file")?;
+        if let Some(progress) = progress {
+            progress.record_file_finished();
+        }
 
         // Only pin if requested (htree add = pin, blossom upload = no pin)
         if pin {
@@ -102,6 +182,36 @@ impl HashtreeStore {
         respect_gitignore: bool,
         chunk_size: Option<usize>,
     ) -> Result<String> {
+        self.upload_dir_with_options_and_chunk_size_internal(
+            dir_path,
+            respect_gitignore,
+            chunk_size,
+            None,
+        )
+    }
+
+    pub fn upload_dir_with_options_and_chunk_size_and_progress<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+        respect_gitignore: bool,
+        chunk_size: Option<usize>,
+        progress: &AddProgress,
+    ) -> Result<String> {
+        self.upload_dir_with_options_and_chunk_size_internal(
+            dir_path,
+            respect_gitignore,
+            chunk_size,
+            Some(progress),
+        )
+    }
+
+    fn upload_dir_with_options_and_chunk_size_internal<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+        respect_gitignore: bool,
+        chunk_size: Option<usize>,
+        progress: Option<&AddProgress>,
+    ) -> Result<String> {
         let dir_path = dir_path.as_ref();
 
         let store = self.store_arc();
@@ -112,7 +222,7 @@ impl HashtreeStore {
         let tree = HashTree::new(config);
 
         let root_cid = sync_block_on(async {
-            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore)
+            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore, progress)
                 .await
         })
         .context("Failed to upload directory")?;
@@ -132,6 +242,7 @@ impl HashtreeStore {
         _root_path: &Path,
         current_path: &Path,
         respect_gitignore: bool,
+        progress: Option<&AddProgress>,
     ) -> Result<Cid> {
         // Build directory structure from flat file list - store full Cid with key
         let mut dir_contents: HashMap<String, Vec<(String, Cid)>> = HashMap::new();
@@ -153,9 +264,24 @@ impl HashtreeStore {
             if path.is_file() {
                 let file = std::fs::File::open(path)
                     .with_context(|| format!("Failed to open file {}", path.display()))?;
-                let (cid, _size) = tree.put_stream(AllowStdIo::new(file)).await.map_err(|e| {
-                    anyhow::anyhow!("Failed to upload file {}: {}", path.display(), e)
-                })?;
+                if let Some(progress) = progress {
+                    if let Ok(metadata) = file.metadata() {
+                        progress.record_file_discovered(metadata.len());
+                    }
+                }
+                let (cid, _size) = tree
+                    .put_stream_with_progress(AllowStdIo::new(file), |bytes| {
+                        if let Some(progress) = progress {
+                            progress.record_bytes(bytes);
+                        }
+                    })
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to upload file {}: {}", path.display(), e)
+                    })?;
+                if let Some(progress) = progress {
+                    progress.record_file_finished();
+                }
 
                 // Get parent directory path and file name
                 let parent = relative
@@ -243,9 +369,32 @@ impl HashtreeStore {
         file_path: P,
         chunk_size: Option<usize>,
     ) -> Result<String> {
+        self.upload_file_encrypted_with_chunk_size_internal(file_path, chunk_size, None)
+    }
+
+    pub fn upload_file_encrypted_with_chunk_size_and_progress<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        chunk_size: Option<usize>,
+        progress: &AddProgress,
+    ) -> Result<String> {
+        self.upload_file_encrypted_with_chunk_size_internal(file_path, chunk_size, Some(progress))
+    }
+
+    fn upload_file_encrypted_with_chunk_size_internal<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        chunk_size: Option<usize>,
+        progress: Option<&AddProgress>,
+    ) -> Result<String> {
         let file_path = file_path.as_ref();
         let file = std::fs::File::open(file_path)
             .with_context(|| format!("Failed to open file {}", file_path.display()))?;
+        if let Some(progress) = progress {
+            if let Ok(metadata) = file.metadata() {
+                progress.record_file_discovered(metadata.len());
+            }
+        }
 
         // Use unified API with encryption enabled (default), streaming from disk.
         let store = self.store_arc();
@@ -255,8 +404,18 @@ impl HashtreeStore {
         }
         let tree = HashTree::new(config);
 
-        let (cid, _size) = sync_block_on(async { tree.put_stream(AllowStdIo::new(file)).await })
-            .map_err(|e| anyhow::anyhow!("Failed to encrypt file: {}", e))?;
+        let (cid, _size) = sync_block_on(async {
+            tree.put_stream_with_progress(AllowStdIo::new(file), |bytes| {
+                if let Some(progress) = progress {
+                    progress.record_bytes(bytes);
+                }
+            })
+            .await
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to encrypt file: {}", e))?;
+        if let Some(progress) = progress {
+            progress.record_file_finished();
+        }
 
         let cid_str = cid.to_string();
 
@@ -289,6 +448,36 @@ impl HashtreeStore {
         respect_gitignore: bool,
         chunk_size: Option<usize>,
     ) -> Result<String> {
+        self.upload_dir_encrypted_with_options_and_chunk_size_internal(
+            dir_path,
+            respect_gitignore,
+            chunk_size,
+            None,
+        )
+    }
+
+    pub fn upload_dir_encrypted_with_options_and_chunk_size_and_progress<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+        respect_gitignore: bool,
+        chunk_size: Option<usize>,
+        progress: &AddProgress,
+    ) -> Result<String> {
+        self.upload_dir_encrypted_with_options_and_chunk_size_internal(
+            dir_path,
+            respect_gitignore,
+            chunk_size,
+            Some(progress),
+        )
+    }
+
+    fn upload_dir_encrypted_with_options_and_chunk_size_internal<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+        respect_gitignore: bool,
+        chunk_size: Option<usize>,
+        progress: Option<&AddProgress>,
+    ) -> Result<String> {
         let dir_path = dir_path.as_ref();
         let store = self.store_arc();
 
@@ -300,7 +489,7 @@ impl HashtreeStore {
         let tree = HashTree::new(config);
 
         let root_cid = sync_block_on(async {
-            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore)
+            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore, progress)
                 .await
         })
         .context("Failed to upload encrypted directory")?;

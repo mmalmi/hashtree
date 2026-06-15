@@ -1,4 +1,4 @@
-use hashtree_cli::HashtreeStore;
+use hashtree_cli::{AddProgress, HashtreeStore};
 use hashtree_core::{from_hex, is_tree_node, Cid};
 
 #[test]
@@ -72,6 +72,49 @@ fn upload_file_with_large_chunk_size_stores_single_blob() {
         "expected direct blob storage when chunk size exceeds file size"
     );
     assert_eq!(stored, source);
+}
+
+#[test]
+fn upload_file_progress_records_bytes_and_file_count() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = HashtreeStore::new(tmp.path().join("store")).expect("store");
+
+    let source = vec![9u8; 512_345];
+    let source_path = tmp.path().join("progress.bin");
+    std::fs::write(&source_path, &source).expect("write source");
+
+    let progress = AddProgress::new();
+    store
+        .upload_file_with_chunk_size_and_progress(&source_path, Some(64 * 1024), &progress)
+        .expect("upload with progress");
+
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot.bytes_processed, source.len() as u64);
+    assert_eq!(snapshot.bytes_total, source.len() as u64);
+    assert_eq!(snapshot.files_processed, 1);
+    assert_eq!(snapshot.files_total, 1);
+}
+
+#[test]
+fn upload_directory_progress_records_nested_files_and_bytes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = HashtreeStore::new(tmp.path().join("store")).expect("store");
+
+    let dir = tmp.path().join("site");
+    std::fs::create_dir_all(dir.join("assets")).expect("create dir");
+    std::fs::write(dir.join("index.html"), vec![1u8; 101]).expect("write index");
+    std::fs::write(dir.join("assets").join("main.js"), vec![2u8; 202]).expect("write asset");
+
+    let progress = AddProgress::new();
+    store
+        .upload_dir_with_options_and_chunk_size_and_progress(&dir, true, Some(64), &progress)
+        .expect("upload dir with progress");
+
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot.bytes_processed, 303);
+    assert_eq!(snapshot.bytes_total, 303);
+    assert_eq!(snapshot.files_processed, 2);
+    assert_eq!(snapshot.files_total, 2);
 }
 
 #[test]

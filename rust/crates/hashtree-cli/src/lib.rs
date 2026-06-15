@@ -41,8 +41,8 @@ pub use hashtree_resolver::{
 };
 pub use server::HashtreeServer;
 pub use storage::{
-    CachedRoot, HashtreeStore, StorageByPriority, TreeMeta, PRIORITY_FOLLOWED, PRIORITY_OTHER,
-    PRIORITY_OWN,
+    AddProgress, AddProgressSnapshot, CachedRoot, HashtreeStore, StorageByPriority, TreeMeta,
+    PRIORITY_FOLLOWED, PRIORITY_OTHER, PRIORITY_OWN,
 };
 pub use sync::{BackgroundSync, SyncConfig, SyncPriority, SyncStatus, SyncTask};
 pub use webrtc::{ConnectionState, WebRTCState};

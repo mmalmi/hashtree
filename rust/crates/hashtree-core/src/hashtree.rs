@@ -230,8 +230,21 @@ impl<S: Store> HashTree<S> {
     /// Returns (Cid, size) where Cid is hash + optional key
     pub async fn put_stream<R: AsyncRead + Unpin>(
         &self,
-        mut reader: R,
+        reader: R,
     ) -> Result<(Cid, u64), HashTreeError> {
+        self.put_stream_with_progress(reader, |_| {}).await
+    }
+
+    /// Store content from an async reader and report each stored chunk size.
+    pub async fn put_stream_with_progress<R, F>(
+        &self,
+        mut reader: R,
+        mut progress: F,
+    ) -> Result<(Cid, u64), HashTreeError>
+    where
+        R: AsyncRead + Unpin,
+        F: FnMut(u64),
+    {
         let mut buffer = vec![0u8; self.chunk_size];
         let mut links = Vec::new();
         let mut total_size: u64 = 0;
@@ -262,6 +275,7 @@ impl<S: Store> HashTree<S> {
             total_size += chunk_len;
 
             let (hash, key) = self.put_chunk_internal(&chunk).await?;
+            progress(chunk_len);
 
             // Track consistent key for single-key result
             if links.is_empty() {

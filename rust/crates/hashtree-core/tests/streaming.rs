@@ -44,6 +44,28 @@ async fn test_put_stream_chunked() {
 }
 
 #[tokio::test]
+async fn test_put_stream_with_progress_reports_stored_chunks() {
+    let store = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(HashTreeConfig::new(store).public().with_chunk_size(100));
+
+    let data: Vec<u8> = (0..250).map(|i| (i % 256) as u8).collect();
+    let cursor = std::io::Cursor::new(data.clone());
+    let mut progress = Vec::new();
+    let (cid, size) = tree
+        .put_stream_with_progress(futures::io::AllowStdIo::new(cursor), |chunk_len| {
+            progress.push(chunk_len);
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(size, 250);
+    assert_eq!(progress, vec![100, 100, 50]);
+
+    let result = tree.get(&cid, None).await.unwrap().unwrap();
+    assert_eq!(result, data);
+}
+
+#[tokio::test]
 async fn test_get_stream_small() {
     let store = Arc::new(MemoryStore::new());
     let tree = HashTree::new(HashTreeConfig::new(store).public());

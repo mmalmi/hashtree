@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod upload;
+pub use upload::{AddProgress, AddProgressSnapshot};
 
 mod maintenance;
 mod retention;
