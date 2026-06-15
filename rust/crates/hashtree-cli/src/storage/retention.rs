@@ -268,8 +268,8 @@ impl HashtreeStore {
     fn evict_disposable_orphans_to_target(&self, target_bytes: u64) -> Result<u64> {
         let stats = self
             .router
-            .stats()
-            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
         let mut current_size = stats.total_bytes;
         if current_size <= target_bytes {
             return Ok(0);
@@ -295,8 +295,8 @@ impl HashtreeStore {
         let protected_hashes = self.protected_hashes()?;
         let all_hashes = self
             .router
-            .list()
-            .map_err(|e| anyhow::anyhow!("Failed to list hashes: {}", e))?;
+            .list_writable()
+            .map_err(|e| anyhow::anyhow!("Failed to list writable hashes: {}", e))?;
 
         let mut freed = 0u64;
         for hash in all_hashes {
@@ -312,15 +312,14 @@ impl HashtreeStore {
                 continue;
             }
 
-            let Some(data) = self
+            let Some(size) = self
                 .router
-                .get_sync(&hash)
-                .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?
+                .blob_size_sync(&hash)
+                .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
             else {
                 continue;
             };
 
-            let size = data.len() as u64;
             if self
                 .router
                 .delete_local_only(&hash)
@@ -346,8 +345,8 @@ impl HashtreeStore {
 
         let stats = self
             .router
-            .stats()
-            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
         if stats.total_bytes.saturating_add(incoming_bytes) <= self.max_size_bytes {
             return Ok(0);
         }
@@ -376,8 +375,8 @@ impl HashtreeStore {
 
         let stats = self
             .router
-            .stats()
-            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
         if stats.total_bytes.saturating_add(incoming_bytes) <= self.max_size_bytes {
             return Ok(0);
         }
@@ -388,8 +387,8 @@ impl HashtreeStore {
 
         let next_stats = self
             .router
-            .stats()
-            .map_err(|e| anyhow::anyhow!("Failed to get stats after eviction: {}", e))?;
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats after eviction: {}", e))?;
         if next_stats.total_bytes.saturating_add(incoming_bytes) > self.max_size_bytes {
             anyhow::bail!(
                 "storage limit exceeded: {} bytes used, {} byte incoming blob, {} byte limit",
@@ -405,8 +404,8 @@ impl HashtreeStore {
     pub fn relieve_cached_blob_write_pressure(&self, incoming_bytes: u64) -> Result<u64> {
         let stats = self
             .router
-            .stats()
-            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
         if stats.total_bytes == 0 {
             return Ok(0);
         }
@@ -486,9 +485,8 @@ impl HashtreeStore {
                 meta.total_size
             } else {
                 self.router
-                    .get_sync(&hash)
-                    .map_err(|e| anyhow::anyhow!("Failed to get pinned blob: {}", e))?
-                    .map(|data| data.len() as u64)
+                    .blob_size_sync(&hash)
+                    .map_err(|e| anyhow::anyhow!("Failed to get pinned blob size: {}", e))?
                     .unwrap_or(0)
             };
 
@@ -644,12 +642,12 @@ impl HashtreeStore {
                 }
             } else {
                 // It's a blob - get its size
-                if let Some(data) = self
+                if let Some(size) = self
                     .router
-                    .get_sync(&hash)
-                    .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?
+                    .blob_size_sync(&hash)
+                    .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
                 {
-                    total_size += data.len() as u64;
+                    total_size += size;
                     blobs.push(hash);
                 }
             }
@@ -691,12 +689,12 @@ impl HashtreeStore {
 
             // If orphaned, delete the blob
             if !has_other_tree {
-                if let Some(data) = self
+                if let Some(size) = self
                     .router
-                    .get_sync(tracked_hash)
-                    .map_err(|e| anyhow::anyhow!("Failed to get blob: {}", e))?
+                    .blob_size_sync(tracked_hash)
+                    .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
                 {
-                    freed += data.len() as u64;
+                    freed += size;
                     // Delete locally only - keep S3 as archive
                     self.router
                         .delete_local_only(tracked_hash)
@@ -796,11 +794,12 @@ impl HashtreeStore {
     /// 1. Orphaned blobs (not in any indexed tree and not pinned)
     /// 2. Trees by priority (lowest first) and access age (least recent first)
     pub fn evict_if_needed(&self) -> Result<u64> {
-        // Get actual storage used
+        // Get writable-tier storage used. In tiered LMDB mode the legacy env is
+        // cold archive/read-through data and must not drive hot-cache eviction.
         let stats = self
             .router
-            .stats()
-            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
         let current = stats.total_bytes;
 
         if current <= self.max_size_bytes {

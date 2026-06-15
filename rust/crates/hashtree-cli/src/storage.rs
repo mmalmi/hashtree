@@ -273,6 +273,23 @@ fn open_lmdb_blob_store<P: AsRef<Path>>(
     }
 }
 
+#[cfg(feature = "lmdb")]
+fn open_unbounded_lmdb_blob_store<P: AsRef<Path>>(
+    path: P,
+    map_size_bytes: Option<u64>,
+) -> Result<LmdbBlobStore, StoreError> {
+    std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
+    remove_stale_fs_blob_shards(path.as_ref())?;
+    match map_size_bytes {
+        Some(map_size_bytes) => {
+            let map_size = usize::try_from(align_lmdb_map_size(map_size_bytes))
+                .map_err(|_| StoreError::Other("LMDB map size exceeds usize".to_string()))?;
+            LmdbBlobStore::with_map_size(path, map_size)
+        }
+        None => LmdbBlobStore::new(path),
+    }
+}
+
 impl LocalStore {
     /// Create a new unbounded local store.
     ///
@@ -333,6 +350,52 @@ impl LocalStore {
         backend: &StorageBackend,
     ) -> Result<Self, StoreError> {
         Self::new_with_lmdb_map_size(path, backend, None)
+    }
+
+    /// Create a local store with an explicit LMDB map size but without adapter-level eviction.
+    ///
+    /// Higher layers use this when they need a large mmap while enforcing quota
+    /// with richer retention policy. In tiered LMDB mode, both the hot primary
+    /// and cold legacy envs are opened without adapter-level eviction so merely
+    /// enabling the hot tier can never reclaim legacy data on startup.
+    pub fn new_unbounded_with_lmdb_map_size<P: AsRef<Path>>(
+        path: P,
+        backend: &StorageBackend,
+        _map_size_bytes: Option<u64>,
+    ) -> Result<Self, StoreError> {
+        match backend {
+            StorageBackend::Fs => Ok(LocalStore::Fs(FsBlobStore::new(path)?)),
+            #[cfg(feature = "lmdb")]
+            StorageBackend::Lmdb => {
+                if let Some(hot_path) = lmdb_hot_blob_dir_for(path.as_ref()) {
+                    let legacy_path = path.as_ref().to_path_buf();
+                    if hot_path != legacy_path {
+                        let primary = open_unbounded_lmdb_blob_store(&hot_path, _map_size_bytes)?;
+                        let legacy = open_unbounded_lmdb_blob_store(&legacy_path, _map_size_bytes)?;
+                        tracing::info!(
+                            "Using tiered LMDB blob storage: primary={}, legacy={}",
+                            hot_path.display(),
+                            legacy_path.display()
+                        );
+                        return Ok(LocalStore::TieredLmdb {
+                            primary: Box::new(primary),
+                            legacy: Box::new(legacy),
+                        });
+                    }
+                }
+                Ok(LocalStore::Lmdb(open_unbounded_lmdb_blob_store(
+                    path,
+                    _map_size_bytes,
+                )?))
+            }
+            #[cfg(not(feature = "lmdb"))]
+            StorageBackend::Lmdb => {
+                tracing::warn!(
+                    "LMDB backend requested but lmdb feature not enabled, using filesystem storage"
+                );
+                Ok(LocalStore::Fs(FsBlobStore::new(path)?))
+            }
+        }
     }
 
     pub fn backend(&self) -> StorageBackend {
@@ -569,6 +632,22 @@ impl LocalStore {
         }
     }
 
+    pub fn delete_writable_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.delete_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.delete_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::TieredLmdb { primary, .. } => {
+                if primary.exists(hash)? {
+                    primary.delete_sync(hash)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
     /// Get storage statistics
     pub fn stats(&self) -> Result<LocalStoreStats, StoreError> {
         match self {
@@ -601,6 +680,35 @@ impl LocalStore {
         }
     }
 
+    /// Get storage statistics for the tier that receives new writes.
+    pub fn writable_stats(&self) -> Result<LocalStoreStats, StoreError> {
+        match self {
+            LocalStore::Fs(store) => {
+                let stats = store.stats()?;
+                Ok(LocalStoreStats {
+                    count: stats.count,
+                    total_bytes: stats.total_bytes,
+                })
+            }
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => {
+                let stats = store.stats()?;
+                Ok(LocalStoreStats {
+                    count: stats.count,
+                    total_bytes: stats.total_bytes,
+                })
+            }
+            #[cfg(feature = "lmdb")]
+            LocalStore::TieredLmdb { primary, .. } => {
+                let stats = primary.stats()?;
+                Ok(LocalStoreStats {
+                    count: stats.count,
+                    total_bytes: stats.total_bytes,
+                })
+            }
+        }
+    }
+
     /// List all hashes in the store
     pub fn list(&self) -> Result<Vec<Hash>, StoreError> {
         match self {
@@ -618,6 +726,17 @@ impl LocalStore {
                 }
                 Ok(hashes)
             }
+        }
+    }
+
+    /// List hashes in the tier that receives new writes.
+    pub fn list_writable(&self) -> Result<Vec<Hash>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.list(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.list(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::TieredLmdb { primary, .. } => primary.list(),
         }
     }
 }
@@ -1086,9 +1205,9 @@ impl StorageRouter {
     }
 
     /// Delete data from local store only (don't propagate to S3)
-    /// Used for eviction where we want to keep S3 as archive
+    /// Used for eviction where we want to keep archives and cold tiers intact.
     pub fn delete_local_only(&self, hash: &Hash) -> Result<bool, StoreError> {
-        self.local.delete_sync(hash)
+        self.local.delete_writable_sync(hash)
     }
 
     /// Get stats from local store
@@ -1096,9 +1215,19 @@ impl StorageRouter {
         self.local.stats()
     }
 
+    /// Get stats for the writable local tier used for quota and eviction pressure.
+    pub fn writable_stats(&self) -> Result<LocalStoreStats, StoreError> {
+        self.local.writable_stats()
+    }
+
     /// List all hashes from local store
     pub fn list(&self) -> Result<Vec<Hash>, StoreError> {
         self.local.list()
+    }
+
+    /// List hashes from the writable local tier used for quota and eviction pressure.
+    pub fn list_writable(&self) -> Result<Vec<Hash>, StoreError> {
+        self.local.list_writable()
     }
 
     /// Mark which sorted candidate hashes already exist in local storage.
@@ -1382,8 +1511,12 @@ impl HashtreeStore {
         #[cfg(not(feature = "lmdb"))]
         let blob_map_size = None;
         let local_store = Arc::new(
-            LocalStore::new_with_lmdb_map_size(path.join("blobs"), backend, blob_map_size)
-                .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?,
+            LocalStore::new_unbounded_with_lmdb_map_size(
+                path.join("blobs"),
+                backend,
+                blob_map_size,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?,
         );
 
         // Create storage router with optional S3
@@ -2850,6 +2983,70 @@ mod tests {
         let local = store.router.local_store();
         assert!(matches!(local.as_ref(), LocalStore::TieredLmdb { .. }));
 
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn tiered_lmdb_legacy_bytes_do_not_drive_hot_quota() -> Result<()> {
+        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let data_dir = temp.path().join("store");
+        let hot = temp.path().join("hot-main-blobs");
+        let legacy = data_dir.join("blobs");
+        let legacy_blob = vec![7u8; 10 * 1024 * 1024];
+        let legacy_hash = sha256(&legacy_blob);
+        let hot_blob = vec![3u8; 8 * 1024 * 1024];
+
+        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
+        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
+        let store = HashtreeStore::with_options_and_backend(
+            &data_dir,
+            None,
+            LMDB_BLOB_MIN_MAP_SIZE_BYTES,
+            true,
+            &StorageBackend::Lmdb,
+        )?;
+
+        let local = store.router.local_store();
+        match local.as_ref() {
+            LocalStore::TieredLmdb { primary: _, legacy } => {
+                assert_eq!(legacy.max_bytes(), None);
+                assert!(legacy.put_sync(legacy_hash, &legacy_blob)?);
+            }
+            _ => panic!("expected tiered LMDB local store"),
+        }
+
+        assert!(store.blob_exists(&legacy_hash)?);
+        assert_eq!(
+            store.blob_size(&legacy_hash)?,
+            Some(legacy_blob.len() as u64)
+        );
+        assert_eq!(store.router.writable_stats()?.total_bytes, 0);
+
+        let pubkey = [1u8; 32];
+        let hot_hash_hex = store.put_owned_blob(&hot_blob, &pubkey)?;
+        let hot_hash = from_hex(&hot_hash_hex)?;
+        assert_eq!(store.blob_size(&hot_hash)?, Some(hot_blob.len() as u64));
+        assert!(store.blob_exists(&legacy_hash)?);
+        assert!(!store.router.delete_local_only(&legacy_hash)?);
+        assert!(store.blob_exists(&legacy_hash)?);
+
+        let local = store.router.local_store();
+        match local.as_ref() {
+            LocalStore::TieredLmdb { primary, legacy } => {
+                assert!(primary.exists(&hot_hash)?);
+                assert!(!primary.exists(&legacy_hash)?);
+                assert!(legacy.exists(&legacy_hash)?);
+            }
+            _ => panic!("expected tiered LMDB local store"),
+        }
+
+        let writable_stats = store.router.writable_stats()?;
+        assert_eq!(writable_stats.count, 1);
+        assert_eq!(writable_stats.total_bytes, hot_blob.len() as u64);
+
+        drop(store);
         Ok(())
     }
 

@@ -1095,3 +1095,32 @@ Interpretation:
   still needs direct 443 ingress to the local reverse proxy, or a public reverse
   proxy connected to the local origin over an authenticated private link when
   direct home NAT forwarding is unavailable.
+
+### 2026-06-16: Tiered LMDB hot quota excludes legacy cold data
+
+Question: can an Osiris hot LMDB tier sit in front of a much larger legacy LMDB
+without startup or write-time quota pressure evicting the cold database?
+
+Change:
+- `HashtreeStore` now opens its raw blob backend with an explicit LMDB map size
+  but without adapter-level `max_bytes` eviction. The tree/Blossom retention
+  layer remains responsible for quota policy.
+- Tiered LMDB exposes writable-tier stats/list/delete helpers. Hot-cache quota
+  checks and local-only eviction use the writable primary tier only; full reads
+  still fall through to the legacy tier, and explicit full deletes still delete
+  from both tiers.
+- Size-only retention/indexing paths now use blob metadata instead of reading
+  whole blob bodies.
+
+Verification:
+- `cargo fmt --check`
+- `cargo test -p hashtree-cli --lib storage::tests::tiered_lmdb_legacy_bytes_do_not_drive_hot_quota`
+- `cargo test -p hashtree-cli --lib storage::tests::lmdb_hot_blob_legacy_guard_scopes_tiered_store`
+- `cargo test -p hashtree-cli --lib storage::tests::hashtree_store_uses_scoped_lmdb_hot_blob_dir`
+- `cargo test -p hashtree-cli --lib`
+
+Interpretation:
+- A hot tier can now be capped for writes without treating an old, larger LMDB
+  as disposable cache. This is a prerequisite for routing public uploads to an
+  Osiris hot origin while keeping Vader's large store as cold/read-through data
+  and replication target.

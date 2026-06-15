@@ -365,11 +365,12 @@ impl HashtreeStore {
 
         drop(rtxn);
 
-        // Get all stored hashes
+        // Get hashes in the writable tier. Cold/legacy tiers are archival in
+        // tiered LMDB mode and must not be reclaimed by local GC.
         let all_hashes = self
             .router
-            .list()
-            .map_err(|e| anyhow::anyhow!("Failed to list hashes: {}", e))?;
+            .list_writable()
+            .map_err(|e| anyhow::anyhow!("Failed to list writable hashes: {}", e))?;
 
         // Delete unpinned hashes
         let mut deleted = 0;
@@ -377,8 +378,8 @@ impl HashtreeStore {
 
         for hash in all_hashes {
             if !pinned.contains(&hash) {
-                if let Ok(Some(data)) = self.router.get_sync(&hash) {
-                    freed_bytes += data.len() as u64;
+                if let Ok(Some(size)) = self.router.blob_size_sync(&hash) {
+                    freed_bytes += size;
                     // Delete locally only - keep S3 as archive
                     let _ = self.router.delete_local_only(&hash);
                     deleted += 1;
