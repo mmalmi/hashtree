@@ -88,4 +88,14 @@ Override the target in bytes for local-origin benchmarks or unusual server paths
 HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES=8388608 git push htree://npub1.../repo main
 ```
 
+First publishes with at least 256 reachable Git objects also build a single
+underfull Git pack checkpoint even when they are below the normal 4096-object
+deterministic checkpoint interval. This reduces loose Git-object request churn
+for medium repos without increasing the large-repo checkpoint range count.
+Override or disable the underfull threshold for experiments:
+
+```bash
+HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS=0 git push htree://npub1.../repo main
+```
+
 Part of [hashtree-rs](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree).

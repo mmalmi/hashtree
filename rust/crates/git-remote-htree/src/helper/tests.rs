@@ -1591,7 +1591,7 @@ fn test_git_pack_checkpoint_plans_incremental_chain() {
 
     let total_objects =
         RemoteHelper::reachable_git_object_count(head).expect("count current reachable objects");
-    let plan = RemoteHelper::plan_git_pack_checkpoint(head, total_objects, None, 3, false)
+    let plan = RemoteHelper::plan_git_pack_checkpoint(head, total_objects, None, 3, 0, false)
         .expect("plan checkpoint")
         .expect("checkpoint should be planned");
 
@@ -1615,6 +1615,35 @@ fn test_git_pack_checkpoint_plans_incremental_chain() {
         unique_tips.len(),
         plan.packs.len(),
         "duplicate checkpoint tips should be collapsed"
+    );
+}
+
+#[test]
+fn test_underfull_initial_push_gets_single_head_checkpoint_pack() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let (_home, repo, shas) = create_repo_with_linear_history(3);
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let head = shas.last().expect("head sha");
+
+    let total_objects =
+        RemoteHelper::reachable_git_object_count(head).expect("count current reachable objects");
+    let plan = RemoteHelper::plan_git_pack_checkpoint(
+        head,
+        total_objects,
+        None,
+        total_objects + 100,
+        total_objects,
+        false,
+    )
+    .expect("plan checkpoint")
+    .expect("underfull initial push should get a head pack");
+
+    assert_eq!(plan.packs.len(), 1);
+    assert_eq!(plan.packs[0].tip, *head);
+    assert_eq!(plan.packs[0].exclude_tip, None);
+    assert!(
+        plan.covered_objects.contains(head),
+        "head commit should be covered by the underfull initial pack"
     );
 }
 
@@ -1675,7 +1704,7 @@ fn test_git_pack_checkpoint_rebuilds_chain_without_tail_when_base_root_has_no_pa
     );
 
     let skipped =
-        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, false)
+        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, 0, false)
             .expect("plan checkpoint without force");
     assert!(
         skipped.is_none(),
@@ -1683,7 +1712,7 @@ fn test_git_pack_checkpoint_rebuilds_chain_without_tail_when_base_root_has_no_pa
     );
 
     let rebuilt =
-        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, true)
+        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), interval, 0, true)
             .expect("plan rebuilt checkpoint")
             .expect("missing base checkpoint should rebuild deterministic checkpoints");
     assert!(
@@ -1705,8 +1734,9 @@ fn test_git_pack_checkpoint_skips_bucket_without_new_boundary_tip() {
     let (_home, repo, base_sha, master_sha) = create_repo_with_large_base_and_small_increment();
     let _cwd_guard = CwdGuard::set(repo.path());
 
-    let skipped = RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), 6, false)
-        .expect("plan checkpoint");
+    let skipped =
+        RemoteHelper::plan_git_pack_checkpoint(&master_sha, 1, Some(&base_sha), 6, 0, false)
+            .expect("plan checkpoint");
     assert!(
         skipped.is_none(),
         "a bucket increase should not publish a duplicate checkpoint pack when no newer commit boundary is below the target object count"

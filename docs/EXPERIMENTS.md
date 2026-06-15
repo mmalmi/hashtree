@@ -827,3 +827,57 @@ Interpretation:
   better direct local-fileserver upload transport, long-lived upload stream, or
   git pack/tail-pack upload path that reduces per-request edge overhead without
   moving hot storage into a cloud object store.
+
+### 2026-06-15: Underfull first-publish Git pack checkpoint
+
+Question: can `git-remote-htree` make medium first publishes cheaper without
+lowering the normal deterministic checkpoint interval for large repos?
+
+Setup:
+- Local measurements compared reachable Git object counts, current-tree object
+  counts, raw loose Git-object payload size, working-tree payload size, and a
+  deterministic `git pack-objects` pack+idx payload for three repository shapes.
+- No exact repo names, pubkeys, hashes, private paths, or host details are
+  retained here.
+
+Results:
+
+| Shape | Reachable Git objects | Current-tree objects | Loose Git payload | Working-tree payload | Pack+idx payload |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Medium source repo | 455 | 409 | 2.1 MiB | 2.0 MiB | 0.54 MiB |
+| Small history-heavy worker repo | 225 | 17 | 3.2 MiB | 0.26 MiB | 0.11 MiB |
+| Large project repo | 21,695 | 1,638 | 281.4 MiB | 15.5 MiB | 78.1 MiB |
+
+Change:
+- Added a separate underfull first-publish checkpoint threshold. No-delta
+  first publishes with at least 256 reachable Git objects now build one
+  current-tip pack even when below the normal 4096-object deterministic
+  checkpoint interval.
+- The main interval stays 4096, so large repos do not suddenly produce many
+  more checkpoint ranges. Delta and rebuild paths still avoid current-tip tail
+  packs.
+- Operators can disable or tune the behavior with
+  `HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS`.
+
+Verification:
+- `cargo fmt --manifest-path rust/Cargo.toml -p git-remote-htree -- --check`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree git_pack_checkpoint -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree underfull -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree -- --nocapture`
+  was stopped after the P2P integration test hung in its final pull; before the
+  stop, the full lib suite passed 168 tests, the basic and diff-push
+  integrations passed, and the missing-old-chunks integration showed a pack
+  backed clone shape with one loose object plus one small pack.
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree --test p2p_git -- --nocapture`
+  passed in isolation afterward, so the earlier hang appears order/flakiness
+  related rather than a deterministic regression from the underfull pack change.
+
+Interpretation:
+- For medium first-publish repos, a single pack can replace hundreds of loose
+  Git-object uploads and is substantially smaller than the corresponding loose
+  Git payload. Working-tree files still need to be present in the hashtree root,
+  but the `.git/objects` side no longer has to be hundreds of small blobs.
+- This does not solve the raw public ingress ceiling by itself. It reduces
+  request/object churn for git pushes while the remaining large write throughput
+  work stays focused on public ingress, long-lived upload streams, or direct
+  local-fileserver transport.

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Added an underfull first-publish Git pack checkpoint for medium repos so
+  `git-remote-htree` avoids hundreds of loose Git-object uploads below the
+  normal deterministic checkpoint interval.
+
 ### Fixed
 
 - Avoided writing orphan external LMDB pack files when a batch upload repeats

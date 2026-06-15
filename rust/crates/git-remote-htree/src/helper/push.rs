@@ -28,6 +28,9 @@ const GIT_BATCH_UPLOAD_TARGET_BYTES_ENV: &str = "HTREE_GIT_BATCH_UPLOAD_TARGET_B
 const BATCH_UPLOAD_RETRIES: u32 = 4;
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
 const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
+const DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS: usize = 256;
+const GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV: &str =
+    "HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS";
 
 struct ServerUploadPresence {
     present: HashSet<[u8; 32]>,
@@ -196,6 +199,13 @@ fn git_pack_checkpoint_min_objects() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS)
+}
+
+fn git_pack_checkpoint_underfull_min_objects() -> usize {
+    std::env::var(GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS)
 }
 
 fn unique_git_pack_temp_dir() -> std::path::PathBuf {
@@ -1723,12 +1733,14 @@ impl RemoteHelper {
         if min_objects == 0 {
             return Ok(None);
         }
+        let underfull_min_objects = git_pack_checkpoint_underfull_min_objects();
 
         let Some(plan) = Self::plan_git_pack_checkpoint(
             sha,
             object_count,
             delta_base,
             min_objects,
+            underfull_min_objects,
             rebuild_checkpoint_from_first_bucket,
         )?
         else {
@@ -1761,6 +1773,7 @@ impl RemoteHelper {
         object_count: usize,
         delta_base: Option<&str>,
         interval_objects: usize,
+        underfull_min_objects: usize,
         rebuild_checkpoint_from_first_bucket: bool,
     ) -> Result<Option<GitPackCheckpointPlan>> {
         let total_objects = if delta_base.is_none() && !rebuild_checkpoint_from_first_bucket {
@@ -1769,6 +1782,19 @@ impl RemoteHelper {
             Self::reachable_git_object_count(sha)?
         };
         if total_objects < interval_objects {
+            if delta_base.is_none()
+                && !rebuild_checkpoint_from_first_bucket
+                && underfull_min_objects > 0
+                && total_objects >= underfull_min_objects
+            {
+                return Ok(Some(GitPackCheckpointPlan {
+                    packs: vec![GitPackCheckpointPackPlan {
+                        tip: sha.to_string(),
+                        exclude_tip: None,
+                    }],
+                    covered_objects: Self::reachable_git_object_ids(sha)?,
+                }));
+            }
             return Ok(None);
         }
 
@@ -2789,8 +2815,10 @@ impl RemoteHelper {
 mod tests {
     use super::{
         batch_upload_retry_delay, effective_upload_concurrency, git_batch_upload_target_bytes,
-        split_pending_upload_batches, upload_progress_from_counters, PendingUpload, UploadCounters,
-        GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
+        git_pack_checkpoint_underfull_min_objects, split_pending_upload_batches,
+        upload_progress_from_counters, PendingUpload, UploadCounters,
+        DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS, GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
+        GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV,
     };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2799,6 +2827,7 @@ mod tests {
     use std::time::Duration;
 
     static BATCH_TARGET_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static PACK_UNDERFULL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
         key: &'static str,
@@ -2878,6 +2907,25 @@ mod tests {
         assert_eq!(
             git_batch_upload_target_bytes(),
             hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn git_pack_checkpoint_underfull_min_objects_uses_env_override() {
+        let _lock = PACK_UNDERFULL_ENV_LOCK.lock().unwrap();
+        let _set = EnvGuard::set(GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV, "123");
+
+        assert_eq!(git_pack_checkpoint_underfull_min_objects(), 123);
+    }
+
+    #[test]
+    fn git_pack_checkpoint_underfull_min_objects_ignores_invalid_env_override() {
+        let _lock = PACK_UNDERFULL_ENV_LOCK.lock().unwrap();
+        let _set = EnvGuard::set(GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV, "nope");
+
+        assert_eq!(
+            git_pack_checkpoint_underfull_min_objects(),
+            DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS
         );
     }
 
