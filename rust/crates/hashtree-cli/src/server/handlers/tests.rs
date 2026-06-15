@@ -474,6 +474,12 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     assert!(json["uptime_seconds"].as_u64().unwrap() > 0);
     assert!(json["queues"]["blob_reads"]["limit"].as_u64().unwrap() > 0);
     assert!(json["queues"]["blob_writes"]["limit"].as_u64().unwrap() > 0);
+    assert!(
+        json["queues"]["blob_writes"]["queue_timeout_ms"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     assert_eq!(
         json["queues"]["optimistic_uploads"]["max_bytes"],
         512 * 1024 * 1024u64

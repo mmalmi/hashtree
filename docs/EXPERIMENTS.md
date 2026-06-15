@@ -33,6 +33,57 @@ Verification:
   already present via server inventory, uploaded a few dozen new blobs, and
   published successfully.
 
+## 2026-06-15 - Blossom Upload Write Queue Limit
+
+Question: is a `HTREE_MAX_CONCURRENT_BLOB_WRITES` value of 4 optimal for raw
+Blossom `PUT /upload` traffic on the self-hosted origin?
+
+Setup:
+- Benchmarked the origin over an SSH loopback tunnel so public Worker and WAN
+  latency did not dominate the result.
+- Each run used generated upload keys, unique deterministic 256 KiB
+  encrypted-looking bodies, public-write cache storage, and fixed client
+  concurrency above the tested server write limit.
+- Exact hostnames, pubkeys, raw hashes, private repo names, and IPs are omitted.
+
+Results:
+
+| Server write limit | Workload | Result |
+| --- | --- | --- |
+| 1 | 16 uploads, concurrency 16 | 31.94 s wall, 0.13 MiB/s, p95 31.87 s |
+| 2 | 16 uploads, concurrency 16 | 25.99 s wall, 0.15 MiB/s, p95 25.92 s |
+| 4 | 16 uploads, concurrency 16 | 38.94 s wall, 0.10 MiB/s, p95 38.85 s |
+| 8 | 16 uploads, concurrency 16 | 0 successes; clients failed after about 111.6 s |
+| 2 | 24 uploads, concurrency 24 | 19.04 s wall, 0.32 MiB/s, p95 18.00 s |
+| 3 | 24 uploads, concurrency 24 | 28.21 s wall, 0.21 MiB/s, p95 27.30 s |
+| 4 | 24 uploads, concurrency 24 | 28.17 s wall, 0.21 MiB/s, p95 27.40 s |
+
+Interpretation:
+- Higher raw write concurrency did not improve the origin. The high side
+  saturated storage, hurt status responsiveness, and at 8 caused upload clients
+  to fail.
+- The best longer same-pass result was limit 2. Shorter 2/3/4 samples were
+  noisy, but 2 gave the best throughput and tail latency once the sample was
+  long enough to smooth warmup variation.
+- The raw write limit mainly protects fallback/single-upload traffic. Git pushes
+  should normally use `/upload/batch`; the server now gates batch storage with
+  the same write limiter and exposes a write queue timeout so batch uploads get
+  bounded retryable backpressure instead of bypassing the limiter.
+
+Change:
+- Set the live origin override to `HTREE_MAX_CONCURRENT_BLOB_WRITES=2`.
+- Added a reusable Blossom upload queue benchmark example.
+- Added `HTREE_BLOB_WRITE_QUEUE_TIMEOUT_MS` with a 30 s default, surfaced it in
+  `/api/status`, and made `/upload/batch` acquire the blob write permit.
+
+Verification:
+- Linux and local `hashtree-cli` Blossom/status tests passed.
+- The live origin reported `blob_writes.limit=2` and
+  `blob_writes.queue_timeout_ms=30000`.
+- A post-deploy smoke upload over origin loopback succeeded, `/upload/check`
+  returned an empty inventory response, and `/upload/batch` reached the origin
+  route and returned validation for an empty batch.
+
 ## 2026-06-07 - Git Clone Blossom Download Concurrency
 
 Question: does a larger `git-remote-htree` loose-object Blossom download concurrency make a clean-cache public clone faster through the Iris Blossom read path?

@@ -275,6 +275,7 @@ pub(super) async fn daemon_status(
             "limit": blob_io.write_limit,
             "in_use": blob_io.write_in_use,
             "available": blob_io.write_available,
+            "queue_timeout_ms": blob_io.write_queue_timeout_ms,
         },
         "optimistic_uploads": {
             "enabled": optimistic_uploads.enabled,

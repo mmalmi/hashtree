@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(super) const BLOB_READ_BUSY: &str = "blob read queue is full";
+pub(super) const BLOB_WRITE_BUSY: &str = "blob write queue is full";
 const DEFAULT_MAX_CONCURRENT_BLOB_READS: usize = 16;
 const MAX_CONCURRENT_BLOB_READS_ENV: &str = "HTREE_MAX_CONCURRENT_BLOB_READS";
 const DEFAULT_BLOB_READ_TIMEOUT_MS: u64 = 5_000;
@@ -11,6 +12,8 @@ const DEFAULT_BLOB_READ_QUEUE_TIMEOUT_MS: u64 = 2_000;
 const BLOB_READ_QUEUE_TIMEOUT_MS_ENV: &str = "HTREE_BLOB_READ_QUEUE_TIMEOUT_MS";
 const DEFAULT_MAX_CONCURRENT_BLOB_WRITES: usize = 4;
 const MAX_CONCURRENT_BLOB_WRITES_ENV: &str = "HTREE_MAX_CONCURRENT_BLOB_WRITES";
+const DEFAULT_BLOB_WRITE_QUEUE_TIMEOUT_MS: u64 = 30_000;
+const BLOB_WRITE_QUEUE_TIMEOUT_MS_ENV: &str = "HTREE_BLOB_WRITE_QUEUE_TIMEOUT_MS";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BlobIoQueueSnapshot {
@@ -20,6 +23,7 @@ pub(super) struct BlobIoQueueSnapshot {
     pub write_limit: usize,
     pub write_available: usize,
     pub write_in_use: usize,
+    pub write_queue_timeout_ms: u64,
     pub read_queue_timeout_ms: u64,
     pub read_task_timeout_ms: u64,
 }
@@ -64,11 +68,16 @@ pub(super) async fn acquire_blob_read() -> Result<OwnedSemaphorePermit, &'static
 }
 
 pub(super) async fn acquire_blob_write() -> Result<OwnedSemaphorePermit, &'static str> {
-    blob_write_limiter()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| "blob write queue is closed")
+    match tokio::time::timeout(
+        blob_write_queue_timeout(),
+        blob_write_limiter().clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err("blob write queue is closed"),
+        Err(_) => Err(BLOB_WRITE_BUSY),
+    }
 }
 
 pub(super) fn blob_read_timeout() -> Duration {
@@ -89,6 +98,15 @@ fn blob_read_queue_timeout() -> Duration {
     Duration::from_millis(millis)
 }
 
+fn blob_write_queue_timeout() -> Duration {
+    let millis = std::env::var(BLOB_WRITE_QUEUE_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOB_WRITE_QUEUE_TIMEOUT_MS);
+    Duration::from_millis(millis)
+}
+
 pub(super) fn blob_io_queue_snapshot() -> BlobIoQueueSnapshot {
     let read_limit = max_concurrent_blob_reads();
     let read_available = blob_read_limiter().available_permits().min(read_limit);
@@ -102,6 +120,7 @@ pub(super) fn blob_io_queue_snapshot() -> BlobIoQueueSnapshot {
         write_limit,
         write_available,
         write_in_use: write_limit.saturating_sub(write_available),
+        write_queue_timeout_ms: duration_millis_u64(blob_write_queue_timeout()),
         read_queue_timeout_ms: duration_millis_u64(blob_read_queue_timeout()),
         read_task_timeout_ms: duration_millis_u64(blob_read_timeout()),
     }

@@ -19,7 +19,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
-use super::blob_read::{acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY};
+use super::blob_read::{
+    acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY, BLOB_WRITE_BUSY,
+};
 use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
 };
@@ -155,6 +157,52 @@ fn blossom_retryable_json_error(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
         .unwrap()
+}
+
+#[derive(Debug)]
+enum BlobWriteError {
+    Busy(&'static str),
+    Storage(anyhow::Error),
+}
+
+impl std::fmt::Display for BlobWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy(reason) => f.write_str(reason),
+            Self::Storage(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for BlobWriteError {}
+
+impl From<anyhow::Error> for BlobWriteError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
+fn blob_write_queue_error(reason: &'static str) -> BlobWriteError {
+    if reason == BLOB_WRITE_BUSY {
+        BlobWriteError::Busy(reason)
+    } else {
+        BlobWriteError::Storage(anyhow::anyhow!(reason))
+    }
+}
+
+fn blob_write_error_response(error: BlobWriteError) -> Response<Body> {
+    match error {
+        BlobWriteError::Busy(reason) => {
+            blossom_retryable_json_error(StatusCode::SERVICE_UNAVAILABLE, reason, 2)
+        }
+        BlobWriteError::Storage(error) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header("X-Reason", "Storage error")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
+            .unwrap(),
+    }
 }
 
 /// Blob descriptor returned by upload and list endpoints
@@ -732,14 +780,12 @@ async fn store_blossom_blob_without_blocking_runtime(
     data: axum::body::Bytes,
     pubkey: [u8; 32],
     track_ownership: bool,
-) -> anyhow::Result<()> {
+) -> Result<(), BlobWriteError> {
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let hash_hex = hex::encode(hasher.finalize());
     let data_for_cache = data.clone();
-    let permit = acquire_blob_write()
-        .await
-        .map_err(|err| anyhow::anyhow!(err))?;
+    let permit = acquire_blob_write().await.map_err(blob_write_queue_error)?;
     let store = state.store.clone();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -1262,13 +1308,7 @@ pub async fn upload_blob(
 
     match store_result {
         Ok(()) => upload_descriptor_response(StatusCode::CREATED, &descriptor),
-        Err(e) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header("X-Reason", "Storage error")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(format!(r#"{{"error":"{}"}}"#, e)))
-            .unwrap(),
+        Err(error) => blob_write_error_response(error),
     }
 }
 
@@ -1394,9 +1434,14 @@ pub async fn upload_blob_batch(
     }
     let prepare_ms = started_at.elapsed().as_millis();
 
+    let permit = match acquire_blob_write().await {
+        Ok(permit) => permit,
+        Err(reason) => return blob_write_error_response(blob_write_queue_error(reason)),
+    };
     let store = state.store.clone();
     let store_started = Instant::now();
     let stored = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         if is_allowed_author {
             store.put_owned_blobs(&items, &pubkey_bytes)
         } else {
@@ -1438,13 +1483,7 @@ pub async fn upload_blob_batch(
                 ))
                 .unwrap()
         }
-        Ok(Err(error)) | Err(error) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header("X-Reason", "Storage error")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
-            .unwrap(),
+        Ok(Err(error)) | Err(error) => blob_write_error_response(error.into()),
     }
 }
 
