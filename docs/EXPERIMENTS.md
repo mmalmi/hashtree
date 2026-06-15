@@ -710,3 +710,55 @@ Interpretation:
   size. Remaining public write work is mostly edge/origin transport overhead and
   request scheduling; the next likely step is git pack/tail-pack upload or a
   long-lived upload stream that avoids per-batch request overhead.
+
+### 2026-06-15: Duplicate LMDB replay writes and public upload body path
+
+Setup:
+- Same production-like origin shape as the binary batch upload experiment.
+  Identifying hostnames, exact repos, pubkeys, IPs, raw hashes, and temp paths
+  are omitted.
+- The daemon used hot LMDB metadata, external blob spill for blobs >=64 KiB,
+  64 MiB external pack target, external blob sync enabled, and a blob write
+  queue limit of 4.
+- The test focused on replay/retry behavior: uploading the same packed binary
+  batch again after all hashes were already present.
+- Public-edge object storage was intentionally not used for the hot path. The
+  target architecture remains local origin storage/local fileserver capacity for
+  cost and operational control.
+
+Results:
+
+| Path | Shape | Throughput | Latency notes |
+| --- | --- | ---: | --- |
+| Origin binary batch, first write | c1, 96 x 256 KiB | 14.04 MiB/s | about 1.65 s request latency |
+| Origin binary batch, duplicate replay | c1, 96 x 256 KiB | 189.59 MiB/s | about 70 ms request latency |
+| Origin binary batch, first write | c1, 256 x 256 KiB | 36.50 MiB/s | about 1.60 s request latency |
+| Origin binary batch, first write | c4, 4 x 256 x 256 KiB | 67.70 MiB/s | p50 about 3.53 s |
+| Public edge binary batch, first write | c1, 96 x 256 KiB | 5.06 MiB/s | about 4.60 s request latency |
+| Public edge binary batch, duplicate replay | c1, 96 x 256 KiB | 4.65 MiB/s | about 5.02 s request latency |
+| Public edge binary batch, first write | c4, 4 x 96 x 256 KiB | 4.84 MiB/s | p50 about 19.6 s |
+| Origin read of fresh blobs | GET, c64, 256 x 256 KiB | 1507.63 MiB/s | cache-hot local read |
+| Public edge read of fresh blobs | GET, c16, 96 x 256 KiB | 8.39 MiB/s | benchmark client path |
+| Public CDN-style redirected read | GET, 1 x 4 MiB | 13-18 MB/s | direct curl sample |
+
+Interpretation:
+- The LMDB writer had been preparing external pack files before it knew whether
+  hashes already existed. Duplicate/retry batches could therefore create orphan
+  pack files and perform avoidable filesystem sync work even when LMDB skipped
+  every insert. The fix preflights sorted candidate hashes, filters existing
+  hashes before pack preparation, and deduplicates repeated hashes inside the
+  same batch.
+- The duplicate replay path now returns quickly and does not create additional
+  external pack files. This confirms LMDB itself was not the source of the
+  duplicate-write slowness; the storage layer was feeding it unnecessary file
+  work.
+- A write queue limit of 4 is reasonable for the current synchronous local
+  durability policy: four concurrent 64 MiB origin batches reached about
+  68 MiB/s, while duplicate checks are effectively metadata-bound.
+- Public writes remained around 5 MiB/s even when the origin queue was idle.
+  That points to request body transfer before the origin writer rather than
+  LMDB or local disk throughput.
+- The next performance step should be a direct local-origin upload transport
+  for large write bodies, such as a restricted HTTPS upload hostname/proxy or
+  equivalent local fileserver path. A cloud object-store admission/cache layer is
+  not part of the desired architecture unless explicitly approved.
