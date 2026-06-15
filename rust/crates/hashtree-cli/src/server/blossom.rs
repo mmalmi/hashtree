@@ -4,21 +4,18 @@
 //! See: https://github.com/hzrd149/blossom
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
     Json,
 };
 use base64::Engine;
-use bytes::BytesMut;
-use futures::{stream::FuturesUnordered, StreamExt};
 use hashtree_core::from_hex;
-use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::auth::AppState;
@@ -29,7 +26,6 @@ use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
 };
 use super::mime::get_mime_type;
-use crate::storage::HashtreeStore;
 
 /// Blossom authorization event kind (NIP-98 style)
 const BLOSSOM_AUTH_KIND: u16 = 24242;
@@ -50,8 +46,6 @@ const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
 const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
 const MAX_BINARY_BATCH_CONTENT_TYPE_BYTES: usize = 1024;
-const STREAMING_BINARY_BATCH_FLUSH_BYTES: usize = 4 * 1024 * 1024;
-const STREAMING_BINARY_BATCH_MAX_IN_FLIGHT_FLUSHES: usize = 8;
 const MAX_UPLOAD_CHECK_HASHES: usize = 10_000;
 const SLOW_BATCH_UPLOAD_LOG_MS_ENV: &str = "HTREE_SLOW_BATCH_UPLOAD_LOG_MS";
 
@@ -1327,7 +1321,6 @@ pub async fn upload_blob(
     }
 }
 
-#[cfg(test)]
 fn take_binary_batch_bytes<'a>(
     body: &'a [u8],
     cursor: &mut usize,
@@ -1350,19 +1343,16 @@ fn take_binary_batch_bytes<'a>(
     Ok(slice)
 }
 
-#[cfg(test)]
 fn read_binary_batch_u16(body: &[u8], cursor: &mut usize) -> Result<u16, (StatusCode, String)> {
     let bytes = take_binary_batch_bytes(body, cursor, 2)?;
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
-#[cfg(test)]
 fn read_binary_batch_u32(body: &[u8], cursor: &mut usize) -> Result<u32, (StatusCode, String)> {
     let bytes = take_binary_batch_bytes(body, cursor, 4)?;
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-#[cfg(test)]
 fn read_binary_batch_u64(body: &[u8], cursor: &mut usize) -> Result<u64, (StatusCode, String)> {
     let bytes = take_binary_batch_bytes(body, cursor, 8)?;
     Ok(u64::from_be_bytes([
@@ -1370,105 +1360,6 @@ fn read_binary_batch_u64(body: &[u8], cursor: &mut usize) -> Result<u64, (Status
     ]))
 }
 
-struct BinaryBatchBodyReader {
-    body: Body,
-    buffered: BytesMut,
-    eof: bool,
-}
-
-impl BinaryBatchBodyReader {
-    fn new(body: Body) -> Self {
-        Self {
-            body,
-            buffered: BytesMut::new(),
-            eof: false,
-        }
-    }
-
-    async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>, (StatusCode, String)> {
-        while self.buffered.len() < len && !self.eof {
-            match self.body.frame().await {
-                Some(Ok(frame)) => {
-                    if let Ok(data) = frame.into_data() {
-                        self.buffered.extend_from_slice(&data);
-                    }
-                }
-                Some(Err(error)) => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("Failed to read binary batch body: {error}"),
-                    ));
-                }
-                None => {
-                    self.eof = true;
-                }
-            }
-        }
-
-        if self.buffered.len() < len {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Truncated binary batch body".to_string(),
-            ));
-        }
-
-        Ok(self.buffered.split_to(len).to_vec())
-    }
-
-    async fn read_u16(&mut self) -> Result<u16, (StatusCode, String)> {
-        let bytes = self.read_exact(2).await?;
-        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
-    }
-
-    async fn read_u32(&mut self) -> Result<u32, (StatusCode, String)> {
-        let bytes = self.read_exact(4).await?;
-        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
-    async fn read_u64(&mut self) -> Result<u64, (StatusCode, String)> {
-        let bytes = self.read_exact(8).await?;
-        Ok(u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
-    }
-
-    async fn ensure_eof(&mut self) -> Result<(), (StatusCode, String)> {
-        if !self.buffered.is_empty() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Binary batch body has trailing bytes".to_string(),
-            ));
-        }
-
-        while !self.eof {
-            match self.body.frame().await {
-                Some(Ok(frame)) => {
-                    if let Ok(data) = frame.into_data() {
-                        if !data.is_empty() {
-                            return Err((
-                                StatusCode::BAD_REQUEST,
-                                "Binary batch body has trailing bytes".to_string(),
-                            ));
-                        }
-                    }
-                }
-                Some(Err(error)) => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("Failed to read binary batch body: {error}"),
-                    ));
-                }
-                None => {
-                    self.eof = true;
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 fn parse_binary_batch_upload(
     body: &[u8],
 ) -> Result<Vec<DecodedBatchUploadBlob>, (StatusCode, String)> {
@@ -1554,29 +1445,6 @@ fn parse_binary_batch_upload(
     }
 
     Ok(blobs)
-}
-
-async fn store_blob_items(
-    store: Arc<HashtreeStore>,
-    items: Vec<([u8; 32], Vec<u8>)>,
-    pubkey_bytes: [u8; 32],
-    is_allowed_author: bool,
-) -> Result<usize, BlobWriteError> {
-    let permit = acquire_blob_write().await.map_err(blob_write_queue_error)?;
-    let stored = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        if is_allowed_author {
-            store.put_owned_blobs(&items, &pubkey_bytes)
-        } else {
-            store.put_cached_blobs(&items)
-        }
-    })
-    .await
-    .map_err(|error| {
-        BlobWriteError::Storage(anyhow::anyhow!("blob batch write task failed: {}", error))
-    })?;
-
-    stored.map_err(BlobWriteError::Storage)
 }
 
 async fn upload_decoded_blob_batch(
@@ -1698,14 +1566,27 @@ async fn upload_decoded_blob_batch(
     }
     let prepare_ms = started_at.elapsed().as_millis();
 
+    let permit = match acquire_blob_write().await {
+        Ok(permit) => permit,
+        Err(reason) => return blob_write_error_response(blob_write_queue_error(reason)),
+    };
+    let store = state.store.clone();
     let store_started = Instant::now();
-    let stored =
-        store_blob_items(state.store.clone(), items, pubkey_bytes, is_allowed_author).await;
+    let stored = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if is_allowed_author {
+            store.put_owned_blobs(&items, &pubkey_bytes)
+        } else {
+            store.put_cached_blobs(&items)
+        }
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("blob batch write task failed: {}", error));
     let store_ms = store_started.elapsed().as_millis();
     let total_ms = started_at.elapsed().as_millis();
 
     match stored {
-        Ok(uploaded) => {
+        Ok(Ok(uploaded)) => {
             if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
                 tracing::warn!(
                     blobs = payload_blobs,
@@ -1735,297 +1616,8 @@ async fn upload_decoded_blob_batch(
                 ))
                 .unwrap()
         }
-        Err(error) => blob_write_error_response(error),
+        Ok(Err(error)) | Err(error) => blob_write_error_response(error.into()),
     }
-}
-
-fn spawn_streaming_binary_batch_flush(
-    store: Arc<HashtreeStore>,
-    items: Vec<([u8; 32], Vec<u8>)>,
-    pubkey_bytes: [u8; 32],
-    is_allowed_author: bool,
-) -> tokio::task::JoinHandle<Result<(usize, u128), BlobWriteError>> {
-    tokio::spawn(async move {
-        let started = Instant::now();
-        let uploaded = store_blob_items(store, items, pubkey_bytes, is_allowed_author).await?;
-        Ok((uploaded, started.elapsed().as_millis()))
-    })
-}
-
-async fn await_streaming_binary_batch_flush(
-    flushes: &mut FuturesUnordered<tokio::task::JoinHandle<Result<(usize, u128), BlobWriteError>>>,
-    uploaded: &mut usize,
-    store_ms: &mut u128,
-) -> Result<(), Response<Body>> {
-    let Some(result) = flushes.next().await else {
-        return Ok(());
-    };
-
-    match result {
-        Ok(Ok((batch_uploaded, batch_store_ms))) => {
-            *uploaded += batch_uploaded;
-            *store_ms += batch_store_ms;
-            Ok(())
-        }
-        Ok(Err(error)) => Err(blob_write_error_response(error)),
-        Err(error) => Err(blob_write_error_response(BlobWriteError::Storage(
-            anyhow::anyhow!("blob batch write task failed: {}", error),
-        ))),
-    }
-}
-
-async fn upload_binary_blob_batch_streamed(
-    state: AppState,
-    headers: HeaderMap,
-    mut reader: BinaryBatchBodyReader,
-    started_at: Instant,
-) -> Response<Body> {
-    let slow_log_ms = slow_batch_upload_log_ms();
-
-    let magic = match reader.read_exact(BINARY_BATCH_UPLOAD_MAGIC.len()).await {
-        Ok(magic) => magic,
-        Err((status, reason)) => return blossom_json_error(status, reason),
-    };
-    if magic.as_slice() != BINARY_BATCH_UPLOAD_MAGIC {
-        return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid binary batch magic");
-    }
-
-    let payload_blobs = match reader.read_u32().await {
-        Ok(count) => count as usize,
-        Err((status, reason)) => return blossom_json_error(status, reason),
-    };
-    if payload_blobs == 0 {
-        return blossom_json_error(StatusCode::BAD_REQUEST, "Batch is empty");
-    }
-    if payload_blobs > MAX_BATCH_UPLOAD_BLOBS {
-        return blossom_json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Batch contains too many blobs",
-        );
-    }
-
-    let auth = match verify_blossom_auth(&headers, "upload", None) {
-        Ok(a) => a,
-        Err((status, reason)) => {
-            return Response::builder()
-                .status(status)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header("X-Reason", reason)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
-                .unwrap();
-        }
-    };
-    let auth_ms = started_at.elapsed().as_millis();
-
-    let is_allowed_author = is_allowed_write_author(&state, &auth.pubkey);
-    let can_upload = can_accept_upload_author(&state, &auth.pubkey);
-    if !can_upload {
-        let _ = check_write_access(&state, &auth.pubkey);
-        return blossom_json_error(StatusCode::FORBIDDEN, "Write access denied");
-    }
-
-    let pubkey_bytes = match from_hex(&auth.pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid pubkey format"),
-    };
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let mut total_bytes = 0usize;
-    let mut descriptors = Vec::with_capacity(payload_blobs);
-    let mut pending_items = Vec::new();
-    let mut pending_bytes = 0usize;
-    let mut uploaded = 0usize;
-    let mut decode_hash_ms = 0u128;
-    let mut validate_ms = 0u128;
-    let mut store_ms = 0u128;
-    let mut flushes = FuturesUnordered::new();
-
-    for _ in 0..payload_blobs {
-        let hash = match reader.read_exact(32).await {
-            Ok(hash) => hash,
-            Err((status, reason)) => return blossom_json_error(status, reason),
-        };
-        let expected_hash: [u8; 32] = match hash.try_into() {
-            Ok(hash) => hash,
-            Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob hash"),
-        };
-        let sha256_hex = hex::encode(expected_hash);
-        if !auth.blob_hashes.is_empty() && !auth.blob_hashes.contains(&sha256_hex) {
-            return blossom_json_error(
-                StatusCode::FORBIDDEN,
-                "Uploaded blob hash does not match authorized hash",
-            );
-        }
-
-        let content_type_len = match reader.read_u16().await {
-            Ok(len) => len as usize,
-            Err((status, reason)) => return blossom_json_error(status, reason),
-        };
-        if content_type_len > MAX_BINARY_BATCH_CONTENT_TYPE_BYTES {
-            return blossom_json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Binary batch content type is too long",
-            );
-        }
-
-        let data_len = match reader.read_u64().await {
-            Ok(len) => match usize::try_from(len) {
-                Ok(len) => len,
-                Err(_) => {
-                    return blossom_json_error(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "Binary batch blob is too large",
-                    );
-                }
-            },
-            Err((status, reason)) => return blossom_json_error(status, reason),
-        };
-        if data_len > state.max_upload_bytes {
-            return blossom_json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Blob exceeds maximum upload size",
-            );
-        }
-        total_bytes = total_bytes.saturating_add(data_len);
-        if total_bytes > MAX_BATCH_UPLOAD_BYTES {
-            return blossom_json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Batch exceeds maximum upload size",
-            );
-        }
-
-        let content_type = if content_type_len == 0 {
-            None
-        } else {
-            let bytes = match reader.read_exact(content_type_len).await {
-                Ok(bytes) => bytes,
-                Err((status, reason)) => return blossom_json_error(status, reason),
-            };
-            let content_type = match String::from_utf8(bytes) {
-                Ok(content_type) => content_type,
-                Err(_) => {
-                    return blossom_json_error(
-                        StatusCode::BAD_REQUEST,
-                        "Binary batch content type is not UTF-8",
-                    );
-                }
-            };
-            Some(content_type)
-        };
-
-        let data = match reader.read_exact(data_len).await {
-            Ok(data) => data,
-            Err((status, reason)) => return blossom_json_error(status, reason),
-        };
-
-        let decode_started = Instant::now();
-        let mut hasher = Sha256::new();
-        hasher.update(&data);
-        let actual_hash: [u8; 32] = hasher.finalize().into();
-        if actual_hash != expected_hash {
-            return blossom_json_error(StatusCode::FORBIDDEN, "Hash mismatch");
-        }
-        decode_hash_ms += decode_started.elapsed().as_millis();
-
-        let validate_started = Instant::now();
-        let content_type = content_type
-            .as_deref()
-            .map(content_type_base)
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        if let Err((status, reason)) = validate_upload_payload(
-            &data,
-            &content_type,
-            can_upload,
-            state.require_random_untrusted_ingest,
-        ) {
-            return blossom_json_error(status, reason);
-        }
-        validate_ms += validate_started.elapsed().as_millis();
-
-        descriptors.push(make_blob_descriptor(
-            &headers,
-            sha256_hex,
-            data.len() as u64,
-            content_type,
-            now,
-        ));
-
-        pending_bytes = pending_bytes.saturating_add(data.len());
-        pending_items.push((actual_hash, data));
-        if pending_bytes >= STREAMING_BINARY_BATCH_FLUSH_BYTES {
-            flushes.push(spawn_streaming_binary_batch_flush(
-                state.store.clone(),
-                std::mem::take(&mut pending_items),
-                pubkey_bytes.clone(),
-                is_allowed_author,
-            ));
-            pending_bytes = 0;
-        }
-
-        while flushes.len() >= STREAMING_BINARY_BATCH_MAX_IN_FLIGHT_FLUSHES {
-            if let Err(response) =
-                await_streaming_binary_batch_flush(&mut flushes, &mut uploaded, &mut store_ms).await
-            {
-                return response;
-            }
-        }
-    }
-
-    if let Err((status, reason)) = reader.ensure_eof().await {
-        return blossom_json_error(status, reason);
-    }
-
-    if !pending_items.is_empty() {
-        flushes.push(spawn_streaming_binary_batch_flush(
-            state.store.clone(),
-            pending_items,
-            pubkey_bytes,
-            is_allowed_author,
-        ));
-    }
-
-    while !flushes.is_empty() {
-        if let Err(response) =
-            await_streaming_binary_batch_flush(&mut flushes, &mut uploaded, &mut store_ms).await
-        {
-            return response;
-        }
-    }
-
-    let total_ms = started_at.elapsed().as_millis();
-    if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
-        tracing::warn!(
-            blobs = payload_blobs,
-            uploaded,
-            total_bytes,
-            total_ms,
-            auth_ms,
-            prepare_ms = total_ms.saturating_sub(store_ms),
-            decode_hash_ms,
-            validate_ms,
-            store_ms,
-            encoding = "binary-stream",
-            allowed_author = is_allowed_author,
-            "slow Blossom batch upload"
-        );
-    }
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::to_string(&BatchUploadResponse {
-                uploaded,
-                blobs: descriptors,
-            })
-            .unwrap(),
-        ))
-        .unwrap()
 }
 
 /// POST /upload/batch - Upload multiple blobs with one auth event and one storage batch.
@@ -2054,11 +1646,14 @@ pub async fn upload_blob_batch(
 pub async fn upload_blob_batch_binary(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Body,
+    body: Bytes,
 ) -> impl IntoResponse {
     let started_at = Instant::now();
-    upload_binary_blob_batch_streamed(state, headers, BinaryBatchBodyReader::new(body), started_at)
-        .await
+    let blobs = match parse_binary_batch_upload(&body) {
+        Ok(blobs) => blobs,
+        Err((status, reason)) => return blossom_json_error(status, reason),
+    };
+    upload_decoded_blob_batch(state, headers, blobs, started_at, "binary").await
 }
 
 /// DELETE /<sha256> - Delete a blob (BUD-02)
@@ -2354,7 +1949,6 @@ mod tests {
     use crate::storage::HashtreeStore;
     use axum::response::IntoResponse;
     use base64::Engine;
-    use bytes::Bytes;
     use hashtree_core::sha256;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -2653,7 +2247,7 @@ mod tests {
             (&second, Some("application/octet-stream")),
         ]);
 
-        let response = upload_blob_batch_binary(State(state), headers, Body::from(body))
+        let response = upload_blob_batch_binary(State(state), headers, body)
             .await
             .into_response();
 
@@ -2669,59 +2263,6 @@ mod tests {
         assert_eq!(parsed.blobs[1].sha256, hex::encode(second_hash));
         assert!(store.blob_exists(&first_hash).expect("first exists"));
         assert!(store.blob_exists(&second_hash).expect("second exists"));
-    }
-
-    #[tokio::test]
-    async fn upload_blob_batch_binary_streams_across_internal_flushes() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let store = Arc::new(
-            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
-        );
-        let state = test_app_state(Arc::clone(&store));
-        let keys = nostr::Keys::generate();
-        let mut headers = hosted_headers();
-        headers.insert(
-            header::AUTHORIZATION,
-            create_upload_auth_header(&keys)
-                .parse()
-                .expect("auth header value"),
-        );
-        headers.insert(
-            header::CONTENT_TYPE,
-            "application/vnd.hashtree.blossom.batch.v1"
-                .parse()
-                .expect("content type header value"),
-        );
-
-        let blobs: Vec<Vec<u8>> = (0..20)
-            .map(|index| {
-                (0..256 * 1024)
-                    .map(|offset| (index as u8).wrapping_add(offset as u8))
-                    .collect()
-            })
-            .collect();
-        let batch_items: Vec<_> = blobs
-            .iter()
-            .map(|blob| (blob.as_slice(), Some("application/octet-stream")))
-            .collect();
-        let hashes: Vec<_> = blobs.iter().map(|blob| sha256(blob)).collect();
-        let body = binary_batch_body(&batch_items);
-
-        let response = upload_blob_batch_binary(State(state), headers, Body::from(body))
-            .await
-            .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read batch response");
-        let parsed: BatchUploadResponse =
-            serde_json::from_slice(&body).expect("parse batch response");
-        assert_eq!(parsed.uploaded, blobs.len());
-        assert_eq!(parsed.blobs.len(), blobs.len());
-        for hash in hashes {
-            assert!(store.blob_exists(&hash).expect("blob exists"));
-        }
     }
 
     #[test]
