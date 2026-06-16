@@ -37,11 +37,17 @@ struct ServerUploadPresence {
     complete: bool,
 }
 
+#[derive(Clone)]
 struct PendingUpload {
     hash: [u8; 32],
     data: Vec<u8>,
     from_old_tree: bool,
     force_all_servers: bool,
+}
+
+enum BatchUploadOutcome {
+    Uploaded,
+    Unsupported(Vec<PendingUpload>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,25 +400,14 @@ async fn upload_one_pending_batch_to_server(
     server: &str,
     counters: &UploadCounters,
 ) -> Result<Option<()>> {
-    let items: Vec<_> = batch
-        .iter()
-        .map(|item| {
-            hashtree_blossom::BatchUploadItem::new(hex::encode(item.hash), item.data.clone())
-        })
-        .collect();
-
     let mut last_error = String::new();
     for attempt in 0..BATCH_UPLOAD_RETRIES {
         if attempt > 0 {
             tokio::time::sleep(batch_upload_retry_delay(attempt - 1)).await;
         }
 
-        match blossom.upload_batch_to_server(server, &items).await {
-            Ok(Some(result)) => {
-                record_batch_upload_result(counters, batch.len(), result.uploaded);
-                return Ok(Some(()));
-            }
-            Ok(None) => return Ok(None),
+        match upload_one_pending_batch_attempt_to_server(batch, blossom, server, counters).await {
+            Ok(result) => return Ok(result),
             Err(err) => {
                 last_error = err.to_string();
                 debug!(
@@ -432,6 +427,75 @@ async fn upload_one_pending_batch_to_server(
         BATCH_UPLOAD_RETRIES,
         last_error
     ))
+}
+
+async fn upload_one_pending_batch_attempt_to_server(
+    batch: &[PendingUpload],
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+) -> Result<Option<()>> {
+    let items: Vec<_> = batch
+        .iter()
+        .map(|item| {
+            hashtree_blossom::BatchUploadItem::new(hex::encode(item.hash), item.data.clone())
+        })
+        .collect();
+
+    match blossom.upload_batch_to_server(server, &items).await {
+        Ok(Some(result)) => {
+            record_batch_upload_result(counters, batch.len(), result.uploaded);
+            Ok(Some(()))
+        }
+        Ok(None) => Ok(None),
+        Err(err) => Err(anyhow::anyhow!("{}", err)),
+    }
+}
+
+async fn upload_pending_batch_adaptive_to_server(
+    batch: Vec<PendingUpload>,
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+) -> Result<BatchUploadOutcome> {
+    let mut stack = vec![batch];
+    let mut unsupported = Vec::new();
+
+    while let Some(mut batch) = stack.pop() {
+        if batch.len() <= 1 {
+            match upload_one_pending_batch_to_server(&batch, blossom, server, counters).await {
+                Ok(Some(())) => {}
+                Ok(None) => unsupported.append(&mut batch),
+                Err(err) => return Err(err),
+            }
+            continue;
+        }
+
+        match upload_one_pending_batch_attempt_to_server(&batch, blossom, server, counters).await {
+            Ok(Some(())) => {}
+            Ok(None) => unsupported.append(&mut batch),
+            Err(err) => {
+                let mid = batch.len() / 2;
+                let right = batch.split_off(mid);
+                debug!(
+                    "Splitting failed Blossom batch upload on {} from {} blobs into {} + {} blobs: {}",
+                    server,
+                    mid + right.len(),
+                    mid,
+                    right.len(),
+                    err
+                );
+                stack.push(right);
+                stack.push(batch);
+            }
+        }
+    }
+
+    if unsupported.is_empty() {
+        Ok(BatchUploadOutcome::Uploaded)
+    } else {
+        Ok(BatchUploadOutcome::Unsupported(unsupported))
+    }
 }
 
 fn split_pending_upload_batches(
@@ -486,13 +550,22 @@ async fn upload_pending_with_server_batches(
     let mut last_error = None;
     let mut saw_unsupported = false;
     for server in servers {
-        match upload_one_pending_batch_to_server(&first_batch, blossom, server, counters).await {
-            Ok(Some(())) => {
+        match upload_pending_batch_adaptive_to_server(
+            first_batch.clone(),
+            blossom,
+            server,
+            counters,
+        )
+        .await
+        {
+            Ok(BatchUploadOutcome::Uploaded) => {
                 selected_server = Some(server.clone());
                 break;
             }
-            Ok(None) => {
+            Ok(BatchUploadOutcome::Unsupported(mut unsupported)) => {
                 saw_unsupported = true;
+                first_batch = Vec::new();
+                first_batch.append(&mut unsupported);
             }
             Err(err) => {
                 last_error = Some(err);
@@ -531,21 +604,22 @@ async fn upload_pending_with_server_batches(
         let blossom = blossom.clone();
         let counters = counters.clone();
         let server = server.clone();
+        let batch_len = batch.len();
         async move {
             let result =
-                upload_one_pending_batch_to_server(&batch, &blossom, &server, &counters).await;
-            (batch, result)
+                upload_pending_batch_adaptive_to_server(batch, &blossom, &server, &counters).await;
+            (batch_len, result)
         }
     }))
     .buffer_unordered(concurrency);
 
-    while let Some((mut batch, result)) = upload_stream.next().await {
+    while let Some((batch_len, result)) = upload_stream.next().await {
         match result {
-            Ok(Some(())) => {}
-            Ok(None) => fallback.append(&mut batch),
+            Ok(BatchUploadOutcome::Uploaded) => {}
+            Ok(BatchUploadOutcome::Unsupported(mut batch)) => fallback.append(&mut batch),
             Err(err) => {
-                record_batch_upload_failure(counters, batch.len());
-                eprintln!("\n  Batch upload failed ({} blobs): {}", batch.len(), err);
+                record_batch_upload_failure(counters, batch_len);
+                eprintln!("\n  Batch upload failed ({} blobs): {}", batch_len, err);
                 return Err(err);
             }
         }

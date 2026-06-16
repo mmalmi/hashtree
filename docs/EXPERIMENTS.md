@@ -2,6 +2,39 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Public Write Sweep and Adaptive Git Batch Split
+
+Question: after moving public writes to the hot origin with background
+replication, what request shape is currently optimal, and how should
+`git-remote-htree` behave when the public edge rejects an oversized upload body?
+
+Findings:
+- A fresh outside-client sample against `upload.iris.to` wrote 128 x 256 KiB
+  blobs as 32-blob binary batches at 7.99 MiB/s. Reads of the same fresh blobs
+  were 45.38 MiB/s through `upload.iris.to` and 43.82 MiB/s through
+  `cdn.iris.to`, so the active limiter remains public write ingress rather than
+  read serving.
+- A bounded public write sweep found the current sweet spot around 16 blobs per
+  request: 16-blob batches reached 6.79 MiB/s at c2, 9.09 MiB/s at c4, and
+  9.40 MiB/s at c8. Larger 32- and 64-blob request bodies were lower or had
+  worse tails, and 128-blob request bodies returned edge 520 responses before
+  the origin reported any 5xx.
+- The hot origin queue remained bounded and drained after the sweep; the
+  write-behind queue reported zero reserved bytes once the run settled.
+
+Change:
+- `git-remote-htree` now adaptively splits a failed multi-blob batch upload
+  into smaller batch requests instead of retrying the same large body shape
+  until the push fails. Single-blob failures still use the existing bounded
+  retry path. This keeps the normal 4 MiB git batch target, but makes accidental
+  large-target overrides or edge body-size failures recover without falling
+  back to per-blob PUTs.
+
+Verification:
+- `cargo test -p git-remote-htree
+  test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body -- --nocapture`
+- `cargo test -p git-remote-htree test_push_to_file_servers_with_diff_ -- --nocapture`
+
 ## 2026-06-15 - Git Push Upload Batch Recovery
 
 Question: why did public `htree` git pushes still spend minutes processing
