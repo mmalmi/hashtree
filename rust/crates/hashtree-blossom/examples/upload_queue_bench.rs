@@ -2,6 +2,7 @@ use hashtree_blossom::{BatchUploadItem, BlossomClient};
 use nostr::Keys;
 use sha2::{Digest, Sha256};
 use std::error::Error;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -16,6 +17,8 @@ struct Config {
     seed: String,
     timeout_secs: u64,
     upload_http1_only: bool,
+    resolve_overrides: Vec<(String, Vec<SocketAddr>)>,
+    danger_accept_invalid_certs: bool,
     mode: Mode,
 }
 
@@ -45,6 +48,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         client = client.with_upload_http1_only();
     } else {
         client = client.with_upload_http2_auto();
+    }
+    for (host, addrs) in &config.resolve_overrides {
+        client = client.with_dns_override(host.clone(), addrs.clone());
+    }
+    if config.danger_accept_invalid_certs {
+        client = client.danger_accept_invalid_certs(true);
     }
     let client = Arc::new(client);
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
@@ -180,7 +189,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("server={}", config.server);
     println!(
-        "mode={:?} requests={} batch_size={} concurrency={} size={} timeout_secs={} upload_http1_only={} seed={}",
+        "mode={:?} requests={} batch_size={} concurrency={} size={} timeout_secs={} upload_http1_only={} resolve_overrides={} danger_accept_invalid_certs={} seed={}",
         config.mode,
         config.requests,
         config.batch_size,
@@ -188,6 +197,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config.size,
         config.timeout_secs,
         config.upload_http1_only,
+        config.resolve_overrides.len(),
+        config.danger_accept_invalid_certs,
         config.seed
     );
     println!(
@@ -232,6 +243,8 @@ impl Config {
             seed: "upload-queue-bench".to_string(),
             timeout_secs: 120,
             upload_http1_only: true,
+            resolve_overrides: Vec::new(),
+            danger_accept_invalid_certs: false,
             mode: Mode::Raw,
         };
 
@@ -255,6 +268,15 @@ impl Config {
                 }
                 "--upload-http1-only" => config.upload_http1_only = true,
                 "--upload-http2-auto" => config.upload_http1_only = false,
+                "--resolve" => {
+                    config
+                        .resolve_overrides
+                        .push(parse_resolve_override(&required_value(
+                            &mut args,
+                            "--resolve",
+                        )?)?)
+                }
+                "--danger-accept-invalid-certs" => config.danger_accept_invalid_certs = true,
                 "--mode" => {
                     config.mode = match required_value(&mut args, "--mode")?.as_str() {
                         "raw" => Mode::Raw,
@@ -300,8 +322,30 @@ fn required_value(
 fn print_usage() {
     println!(
         "usage: cargo run -p hashtree-blossom --example upload_queue_bench -- \\
-  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary --requests 128 --concurrency 32 --size 262144 [--upload-http1-only|--upload-http2-auto]"
+  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary --requests 128 --concurrency 32 --size 262144 [--upload-http1-only|--upload-http2-auto] [--resolve host=ip:port] [--danger-accept-invalid-certs]"
     );
+}
+
+fn parse_resolve_override(value: &str) -> Result<(String, Vec<SocketAddr>), Box<dyn Error>> {
+    let (host, addrs) = value
+        .split_once('=')
+        .ok_or_else(|| format!("--resolve expects host=ip:port, got {value}"))?;
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("--resolve host must not be empty".into());
+    }
+
+    let addrs = addrs
+        .split(',')
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+        .map(str::parse)
+        .collect::<Result<Vec<SocketAddr>, _>>()?;
+    if addrs.is_empty() {
+        return Err("--resolve must include at least one ip:port address".into());
+    }
+
+    Ok((host.to_string(), addrs))
 }
 
 fn deterministic_payload(seed: &str, index: usize, size: usize) -> Vec<u8> {

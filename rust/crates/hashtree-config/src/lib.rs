@@ -309,7 +309,7 @@ fn default_require_random_untrusted_ingest() -> bool {
 }
 
 fn default_upload_concurrency() -> usize {
-    10
+    4
 }
 
 impl BlossomConfig {

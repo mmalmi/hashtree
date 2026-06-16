@@ -35,7 +35,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -91,6 +91,8 @@ pub struct BlossomClient {
     http: reqwest::Client,
     upload_http: reqwest::Client,
     upload_http1_only: bool,
+    dns_overrides: Vec<(String, Vec<SocketAddr>)>,
+    danger_accept_invalid_certs: bool,
     timeout: Duration,
 }
 
@@ -258,14 +260,33 @@ where
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn default_http_client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder().timeout(timeout).build().unwrap()
-}
-
-fn upload_http_client(timeout: Duration, http1_only: bool) -> reqwest::Client {
+fn default_http_client(
+    timeout: Duration,
+    dns_overrides: &[(String, Vec<SocketAddr>)],
+    danger_accept_invalid_certs: bool,
+) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none());
+        .danger_accept_invalid_certs(danger_accept_invalid_certs);
+    for (host, addrs) in dns_overrides {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+    builder.build().unwrap()
+}
+
+fn upload_http_client(
+    timeout: Duration,
+    http1_only: bool,
+    dns_overrides: &[(String, Vec<SocketAddr>)],
+    danger_accept_invalid_certs: bool,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(danger_accept_invalid_certs);
+    for (host, addrs) in dns_overrides {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
     if http1_only {
         builder = builder.http1_only();
     }
@@ -399,9 +420,11 @@ impl BlossomClient {
             keys,
             read_servers,
             write_servers: config.blossom.all_write_servers(),
-            http: default_http_client(Duration::from_secs(30)),
-            upload_http: upload_http_client(Duration::from_secs(30), true),
+            http: default_http_client(Duration::from_secs(30), &[], false),
+            upload_http: upload_http_client(Duration::from_secs(30), true, &[], false),
             upload_http1_only: true,
+            dns_overrides: Vec::new(),
+            danger_accept_invalid_certs: false,
             timeout: Duration::from_secs(30),
         }
     }
@@ -413,9 +436,11 @@ impl BlossomClient {
             keys,
             read_servers: vec![],
             write_servers: vec![],
-            http: default_http_client(Duration::from_secs(30)),
-            upload_http: upload_http_client(Duration::from_secs(30), true),
+            http: default_http_client(Duration::from_secs(30), &[], false),
+            upload_http: upload_http_client(Duration::from_secs(30), true, &[], false),
             upload_http1_only: true,
+            dns_overrides: Vec::new(),
+            danger_accept_invalid_certs: false,
             timeout: Duration::from_secs(30),
         }
     }
@@ -426,9 +451,11 @@ impl BlossomClient {
             keys,
             read_servers: vec![],
             write_servers: vec![],
-            http: default_http_client(Duration::from_secs(30)),
-            upload_http: upload_http_client(Duration::from_secs(30), true),
+            http: default_http_client(Duration::from_secs(30), &[], false),
+            upload_http: upload_http_client(Duration::from_secs(30), true, &[], false),
             upload_http1_only: true,
+            dns_overrides: Vec::new(),
+            danger_accept_invalid_certs: false,
             timeout: Duration::from_secs(30),
         }
     }
@@ -455,22 +482,81 @@ impl BlossomClient {
     /// Set request timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
-        self.http = default_http_client(timeout);
-        self.upload_http = upload_http_client(timeout, self.upload_http1_only);
+        self.http = default_http_client(
+            timeout,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
+        self.upload_http = upload_http_client(
+            timeout,
+            self.upload_http1_only,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
         self
     }
 
     /// Force upload requests to use HTTP/1.1 while leaving read requests unchanged.
     pub fn with_upload_http1_only(mut self) -> Self {
         self.upload_http1_only = true;
-        self.upload_http = upload_http_client(self.timeout, true);
+        self.upload_http = upload_http_client(
+            self.timeout,
+            true,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
         self
     }
 
     /// Allow the HTTP client to negotiate HTTP/2 for uploads.
     pub fn with_upload_http2_auto(mut self) -> Self {
         self.upload_http1_only = false;
-        self.upload_http = upload_http_client(self.timeout, false);
+        self.upload_http = upload_http_client(
+            self.timeout,
+            false,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
+        self
+    }
+
+    /// Override DNS resolution for a host on both read and upload clients.
+    pub fn with_dns_override(mut self, host: impl Into<String>, addrs: Vec<SocketAddr>) -> Self {
+        let host = host.into();
+        self.dns_overrides.retain(|(existing, _)| existing != &host);
+        if !addrs.is_empty() {
+            self.dns_overrides.push((host, addrs));
+        }
+        self.http = default_http_client(
+            self.timeout,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
+        self.upload_http = upload_http_client(
+            self.timeout,
+            self.upload_http1_only,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
+        self
+    }
+
+    /// Disable TLS certificate validation for diagnostics against controlled targets.
+    ///
+    /// This is intentionally named with `danger`: do not use it for normal clients.
+    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.danger_accept_invalid_certs = accept;
+        self.http = default_http_client(
+            self.timeout,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
+        self.upload_http = upload_http_client(
+            self.timeout,
+            self.upload_http1_only,
+            &self.dns_overrides,
+            self.danger_accept_invalid_certs,
+        );
         self
     }
 
@@ -1495,6 +1581,24 @@ mod tests {
             .with_timeout(Duration::from_secs(60));
 
         assert!(!client.upload_http1_only);
+    }
+
+    #[test]
+    fn dns_override_survives_timeout_and_transport_rebuilds() {
+        let addr = "127.0.0.1:443".parse().unwrap();
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_dns_override("upload.example", vec![addr])
+            .danger_accept_invalid_certs(true)
+            .with_upload_http2_auto()
+            .with_timeout(Duration::from_secs(60))
+            .with_upload_http1_only();
+
+        assert_eq!(
+            client.dns_overrides,
+            vec![("upload.example".to_string(), vec![addr])]
+        );
+        assert!(client.upload_http1_only);
+        assert!(client.danger_accept_invalid_certs);
     }
 
     impl TestUploadServer {

@@ -40,7 +40,9 @@ client-to-public-origin network path plus Cloudflare proxy/TLS/body handling.
 
 Raising the local blob write queue is therefore not the main fix once the origin
 queue is idle. Higher client concurrency mostly increases tail latency when the
-public ingress path is saturated.
+public ingress path is saturated. The default Blossom upload concurrency is kept
+conservative (`4`) for public pushes; private or same-LAN origins can raise
+`upload_concurrency` in config after measuring their own path.
 
 Request timing on the reverse proxy should include `$request_time`,
 `$request_length`, and `$upstream_response_time` while debugging public upload
@@ -65,6 +67,12 @@ specific target proves HTTP/2 is better. Public `upload.iris.to` benchmarks foun
 HTTP/1.1-only uploads matched or slightly beat HTTP/2-auto in the stable part of
 the sweep, and avoided at least one bad HTTP/2-auto sample. Reads still use the
 normal HTTP client and may negotiate HTTP/2.
+
+For diagnostics, compare three paths before changing architecture: public
+hostname, direct-origin override with the same TLS name, and origin-local htree.
+If public and direct-origin uploads are both slow while origin-local htree is
+fast, DNS-only upload routing will not solve the problem by itself; the remaining
+limit is the client-to-origin network path and request-body ingress.
 
 LMDB duplicate handling is already exact enough for the hot Blossom write path:
 single puts and batch puts rely on LMDB `NO_OVERWRITE`, duplicate writes do not

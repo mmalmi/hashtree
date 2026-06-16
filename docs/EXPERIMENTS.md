@@ -2061,3 +2061,66 @@ Interpretation:
   duplicate-aware write path. Continue prioritizing public ingress/topology,
   request-body transport, and git object fanout before adding probabilistic
   duplicate filters or cloud object-store admission layers.
+
+### 2026-06-16: Public ingress, direct-origin, and concurrency follow-up
+
+Question: after the hot origin is local and LMDB is fast, is the remaining
+single-digit public upload rate caused by Cloudflare proxying, direct-origin
+network path, nginx/host socket limits, or too much client concurrency?
+
+Setup:
+- Public upload hostname routed to the hot origin's local htree daemon. A
+  same-host benchmark to that daemon removes Cloudflare and public network
+  ingress from the path.
+- The hot-origin filesystem had become dangerously full because of Docker build
+  cache and old build contexts. Disposable build/cache artifacts were removed,
+  restoring about 54 GiB free space without deleting active htree blob data.
+- `upload_queue_bench` gained a diagnostic `--resolve host=ip:port` option and
+  `--danger-accept-invalid-certs` flag so the same Blossom upload code can test
+  a direct origin path without changing DNS. The danger flag is for measurement
+  only; direct deployment needs a publicly trusted certificate.
+- The hot origin's TCP receive/send buffer caps were raised from tiny defaults
+  to 32 MiB and persisted with sysctl.
+
+Results:
+
+| Shape | Result |
+| --- | ---: |
+| Hot origin to local htree, binary batch c12, 128 x 256 KiB | 100.96 MiB/s |
+| Public hostname, same shape after disk cleanup | 6.81 MiB/s |
+| Direct-origin override, same TLS name, invalid-cert diagnostic | 9.31 MiB/s |
+| Public hostname immediate A/B after direct-origin run | 8.94 MiB/s |
+| Second client public hostname, same shape | 9.32 MiB/s |
+| Second client raw 32 MiB unauthenticated PUT through public hostname | 7.8 MB/s upload, 401 after body |
+| Second client raw 32 MiB unauthenticated PUT direct-origin diagnostic | 6.8 MB/s upload, 401 after body |
+| Public hostname after 32 MiB socket buffer cap | 9.45 MiB/s |
+
+Public batch/concurrency sweep after the above:
+
+| Blob batch size | Concurrency | Result |
+| ---: | ---: | ---: |
+| 16 | 4 | 9.67 MiB/s |
+| 16 | 8 | 8.68 MiB/s |
+| 16 | 12 | 5.44 MiB/s |
+| 16 | 16 | 8.54 MiB/s |
+| 32 | 4 | 5.44 MiB/s |
+| 32 | 8 | 5.49 MiB/s |
+| 32 | 12 | 5.03 MiB/s |
+| 32 | 16 | 5.66 MiB/s |
+| 64 | 4 | 8.09 MiB/s |
+| 64 | 8 | 8.98 MiB/s |
+| 64 | 12 | 9.40 MiB/s |
+| 64 | 16 | 8.95 MiB/s |
+
+Interpretation:
+- The hot-origin daemon and local store are healthy; the same request shape is
+  about 10x faster without public ingress.
+- Direct-origin was not a step-function win in this test and also needs a real
+  public certificate before it could be used by normal clients. Do not flip DNS
+  to direct-only expecting it to solve write throughput by itself.
+- The public path currently behaves like a request-body ingress ceiling around
+  8-10 MiB/s from multiple clients. Socket buffer modernization is worth keeping
+  but did not move this particular sample.
+- Keep public git-push defaults conservative: the default Blossom
+  `upload_concurrency` is 4, while private/local origins can explicitly raise it
+  after measuring their path.
