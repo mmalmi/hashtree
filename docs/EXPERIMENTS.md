@@ -2,6 +2,48 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Framed Upload Stream Prototype Rejected
+
+Question: can one framed, chunked `POST` carrying many binary blobs beat the
+existing `/upload/batch-binary` shape enough to justify another write endpoint?
+
+Prototype:
+- Implemented a temporary `POST /upload/stream-binary` extension using a compact
+  binary frame: magic, blob count, then repeated hash, content-type length, data
+  length, content-type, and data bytes.
+- The server read the Axum body incrementally, verified each declared hash, and
+  flushed decoded blobs through the existing batch storage/report path.
+- The client used a plain Blossom upload auth event with no `x` or `x-batch`
+  hash tags, because validating a compact batch digest for an unknown-length
+  stream would require buffering the whole body before accepting any blob.
+- Focused client/server tests passed. The prototype was deployed only as a
+  temporary hot-origin image, benchmarked, then rolled back and removed from the
+  worktree because it did not materially move the bottleneck.
+
+Live samples:
+
+| Path / shape | Existing binary batch | Framed stream |
+| --- | ---: | ---: |
+| Outside client to public hostname, 1024 x 256 KiB, 16 blobs/request, c16 | 8.77 MiB/s | 9.39 MiB/s |
+| Outside client to public hostname, one 64 MiB body | n/a | 7.27 MiB/s |
+| Outside client to public hostname, four 16 MiB bodies, c4 | n/a | 7.47 MiB/s |
+| Outside client to public hostname, 8 MiB bodies, c8 | n/a | 8.21 MiB/s |
+| Hot-origin Docker network, 1024 x 256 KiB, 16 blobs/request, c16 | 106.92 MiB/s | 108.20 MiB/s |
+| Hot-origin host through public hostname, 512 x 256 KiB, 16 blobs/request, c16 | 24.43 MiB/s | 24.64 MiB/s |
+
+Interpretation:
+- The generic framed stream route does not earn its extra protocol surface. It
+  is effectively tied with binary batch at the origin and from the hot-origin
+  host through the public hostname. The small outside-client gain was not a
+  step-function improvement and did not unlock larger public request bodies.
+- The active write ceiling is still outside LMDB and the local blob writer:
+  hot-origin local writes are about 100+ MiB/s for this shape, while the public
+  hostname is much lower and varies by client path.
+- Do not re-add a generic framed upload endpoint just to reduce request count.
+  Future write work should focus on real public ingress improvements, reducing
+  bytes/object fanout in git pushes, or pack/tail-pack admission with a measured
+  material win. This does not require R2/S3/object-store admission.
+
 ## 2026-06-16 - Coalesced Blossom Write-Behind Replication
 
 Question: can the hot origin keep public writes bounded under load by sending

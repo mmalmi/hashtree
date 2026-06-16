@@ -27,10 +27,12 @@ Blossom traffic. Detailed measurements belong in `docs/EXPERIMENTS.md`.
 Public bulk upload throughput is currently limited before LMDB and the local
 blob writer. Origin-local release-mode writes have reached roughly 100 MiB/s
 for public-shaped binary batches, while public request-body uploads from an
-outside client have clustered around 6-10 MiB/s. In the current deployment this
-is not explained by Worker logic or an active cloudflared tunnel; the remaining
-limit is the client-to-public-origin network path plus Cloudflare proxy/TLS/body
-handling.
+outside client have clustered around 6-10 MiB/s. A same-host probe through the
+public hostname reached about 24 MiB/s, so the current gap is split between the
+Cloudflare/public-origin path and the outside client's path to that edge. In the
+current deployment this is not explained by Worker logic or an active
+cloudflared tunnel; the remaining limit is the client-to-public-origin network
+path plus Cloudflare proxy/TLS/body handling.
 
 Raising the local blob write queue is therefore not the main fix once the origin
 queue is idle. Higher client concurrency mostly increases tail latency when the
@@ -84,8 +86,10 @@ setup before traffic reaches the public ingress ceiling:
   public measurements make 4-16 MiB binary batch bodies the safe operating
   range; 32 MiB bodies have produced edge 520 failures before reaching origin
   even after compact batch authorization removed per-blob auth-header growth.
-- Prefer long-lived upload streams or pack/tail-pack admission for future
-  protocol work.
+- A generic framed upload stream was tested and did not materially outperform
+  binary batch; do not re-add that endpoint just to reduce request count.
+  Prefer pack/tail-pack admission or other git-aware byte/fanout reductions
+  where a benchmark shows a material win.
 - For a large step-function improvement, provide direct public TCP ingress to the
   local fileserver through a Cloudflare-proxied origin path restricted to
   Cloudflare source IPs, or an equivalent direct ingress design.
