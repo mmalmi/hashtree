@@ -2,6 +2,45 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Git Pack Admission Uses Actual Loose Upload Bytes
+
+Question: when deciding whether to keep an underfull git pack/tail-pack
+checkpoint, are we comparing against the bytes that would actually be uploaded
+without the pack?
+
+Finding:
+- The admission check used `git cat-file --batch-check=%(objectsize)`, which
+  counts uncompressed object content. Hashtree loose Git objects are uploaded as
+  zlib-compressed loose objects, including the Git loose-object header.
+- This could accept a pack+idx that looked smaller than raw content while not
+  actually saving public upload bytes against the loose-object path.
+
+Change:
+- The git remote helper now accounts for loose-object upload bytes by reading
+  objects with `git cat-file --batch`, recompressing the exact loose-object
+  payload shape, and comparing pack+idx bytes against that total.
+- Existing `put`/batch upload protocol shapes are unchanged. This is a
+  git-aware byte/fanout decision, not a new network endpoint and not an
+  R2/S3/object-store admission layer.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree
+  git_loose_object_upload_bytes_counts_compressed_loose_bytes -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree underfull
+  -- --nocapture --test-threads=1`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree
+  git_pack_checkpoint -- --nocapture --test-threads=1`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree tail_pack
+  -- --nocapture --test-threads=1`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree --lib
+  -- --nocapture --test-threads=1`
+
+Interpretation:
+- This does not directly raise the public MiB/s ceiling. It prevents
+  byte-negative pack decisions and makes medium git pushes more honest about
+  whether a pack/tail-pack reduces the bytes and object fanout sent through the
+  already saturated public upload path.
+
 ## 2026-06-16 - Framed Upload Stream Prototype Rejected
 
 Question: can one framed, chunked `POST` carrying many binary blobs beat the

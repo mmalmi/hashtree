@@ -718,7 +718,7 @@ fn create_repo_with_linear_history(commit_count: usize) -> (TempDir, TempDir, Ve
     (home, repo, shas)
 }
 
-fn create_repo_with_repetitive_text_history(
+fn create_repo_with_rewritten_text_history(
     commit_count: usize,
     lines_per_file: usize,
 ) -> (TempDir, TempDir, Vec<String>) {
@@ -737,19 +737,17 @@ fn create_repo_with_repetitive_text_history(
         .success());
 
     let mut shas = Vec::new();
+    let mut lines = (0..lines_per_file)
+        .map(|line| format!("stable source-like line {line:04}\n"))
+        .collect::<Vec<_>>();
     for index in 0..commit_count {
-        let line = format!("source-like repeated line {index}\n");
-        std::fs::write(
-            repo.path().join(format!("large-{index:02}.txt")),
-            line.repeat(lines_per_file),
-        )
-        .unwrap();
-        assert!(git(repo.path(), &["add", &format!("large-{index:02}.txt")])
-            .status
-            .success());
+        let changed = index % lines_per_file;
+        lines[changed] = format!("stable source-like line {changed:04} revision {index}\n");
+        std::fs::write(repo.path().join("large.txt"), lines.concat()).unwrap();
+        assert!(git(repo.path(), &["add", "large.txt"]).status.success());
         assert!(git(
             repo.path(),
-            &["commit", "-m", &format!("Large commit {index}")]
+            &["commit", "-m", &format!("Rewrite large file {index}")]
         )
         .status
         .success());
@@ -1308,9 +1306,16 @@ fn test_should_exit_initially_false() {
 
 #[test]
 fn test_get_hashtree_data_dir() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let data_dir = TempDir::new().expect("data dir");
+    let _data_env = EnvGuard::set(
+        "HTREE_DATA_DIR",
+        data_dir.path().to_str().expect("utf-8 temp path"),
+    );
+
     let dir = get_hashtree_data_dir();
-    assert!(dir.ends_with("data"));
-    assert!(dir.to_string_lossy().contains(".hashtree"));
+
+    assert_eq!(dir, data_dir.path());
 }
 
 #[test]
@@ -1765,7 +1770,7 @@ fn test_underfull_initial_push_keeps_pack_when_it_saves_bytes() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let _min_objects = EnvGuard::set(GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV, "4096");
     let _underfull_min = EnvGuard::set(GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV, "1");
-    let (home, repo, shas) = create_repo_with_repetitive_text_history(3, 512);
+    let (home, repo, shas) = create_repo_with_rewritten_text_history(20, 4096);
     let _home_guard = HomeGuard::set(home.path());
     let _cwd_guard = CwdGuard::set(repo.path());
     let head = shas.last().expect("head sha");
@@ -1776,7 +1781,7 @@ fn test_underfull_initial_push_keeps_pack_when_it_saves_bytes() {
     let covered = helper
         .prepare_git_pack_checkpoint(head, total_objects, None, false)
         .expect("prepare checkpoint")
-        .expect("byte-saving underfull pack should be installed");
+        .expect("underfull pack should save compressed loose upload bytes");
 
     assert!(
         covered.contains(head),

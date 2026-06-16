@@ -8,10 +8,11 @@ use crate::nostr_client::{
 };
 use crate::runtime::{block_on_result, new_multi_thread_runtime};
 use anyhow::{bail, Context, Result};
+use flate2::{write::ZlibEncoder, Compression};
 use hashtree_core::{HashTree, Store};
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -33,6 +34,22 @@ pub(super) const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str =
 const DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS: usize = 256;
 pub(super) const GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV: &str =
     "HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS";
+
+#[derive(Default)]
+struct ByteCountWriter {
+    bytes: usize,
+}
+
+impl Write for ByteCountWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 struct ServerUploadPresence {
     present: HashSet<[u8; 32]>,
@@ -2099,11 +2116,11 @@ impl RemoteHelper {
         covered_objects: &HashSet<String>,
         pack_bytes: usize,
     ) -> Result<(bool, usize)> {
-        let loose_bytes = Self::git_object_content_bytes(covered_objects)?;
+        let loose_bytes = Self::git_loose_object_upload_bytes(covered_objects)?;
         Ok((pack_bytes < loose_bytes, loose_bytes))
     }
 
-    fn git_object_content_bytes(object_ids: &HashSet<String>) -> Result<usize> {
+    fn git_loose_object_upload_bytes(object_ids: &HashSet<String>) -> Result<usize> {
         if object_ids.is_empty() {
             return Ok(0);
         }
@@ -2112,55 +2129,87 @@ impl RemoteHelper {
         sorted_ids.sort_unstable();
 
         let mut child = Command::new("git")
-            .args(["cat-file", "--batch-check=%(objectsize)"])
+            .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("spawn git cat-file for object sizes")?;
+            .context("spawn git cat-file for loose object byte accounting")?;
 
         {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .context("open git cat-file size stdin")?;
+            let stdin = child.stdin.as_mut().context("open git cat-file stdin")?;
             for oid in &sorted_ids {
                 writeln!(stdin, "{}", oid)?;
             }
         }
 
+        let stdout = child.stdout.take().context("open git cat-file stdout")?;
+        let mut reader = BufReader::new(stdout);
+        let mut total = 0usize;
+
+        for oid in &sorted_ids {
+            let mut header = String::new();
+            reader
+                .read_line(&mut header)
+                .context("read git cat-file object header")?;
+            let header = header.trim_end();
+            let parts = header.split_whitespace().collect::<Vec<_>>();
+            if parts.len() < 3 {
+                bail!("git cat-file returned invalid header for {oid}: {header}");
+            }
+            if parts[0] != *oid {
+                bail!(
+                    "git cat-file returned object {} while accounting for {}",
+                    parts[0],
+                    oid
+                );
+            }
+            if parts[1] == "missing" {
+                bail!("git object {oid} is missing while accounting for loose bytes");
+            }
+
+            let object_type = parts[1];
+            let size: usize = parts[2]
+                .parse()
+                .with_context(|| format!("parse git object size for {oid}"))?;
+            let mut encoder = ZlibEncoder::new(ByteCountWriter::default(), Compression::default());
+            write!(encoder, "{} {}\0", object_type, size)?;
+            let copied = {
+                let mut content = reader.by_ref().take(size as u64);
+                std::io::copy(&mut content, &mut encoder)
+                    .with_context(|| format!("compress git loose object content for {oid}"))?
+            };
+            if copied != size as u64 {
+                bail!(
+                    "git cat-file returned {} content bytes for {oid}, expected {size}",
+                    copied
+                );
+            }
+            let mut newline = [0u8; 1];
+            reader
+                .read_exact(&mut newline)
+                .with_context(|| format!("read git object terminator for {oid}"))?;
+            if newline != [b'\n'] {
+                bail!("git cat-file returned invalid object terminator for {oid}");
+            }
+
+            total = total.saturating_add(encoder.finish()?.bytes);
+        }
+
+        drop(reader);
         let output = child
             .wait_with_output()
-            .context("wait for git cat-file object sizes")?;
+            .context("wait for git cat-file loose byte accounting")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             bail!(
-                "git cat-file failed while measuring checkpoint object sizes{}",
+                "git cat-file failed while accounting for loose object bytes{}",
                 if stderr.is_empty() {
                     String::new()
                 } else {
                     format!(": {stderr}")
                 }
             );
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut lines = stdout.lines();
-        let mut total = 0usize;
-        for oid in &sorted_ids {
-            let line = lines.next().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "git cat-file did not report a size for {}",
-                    &oid[..12.min(oid.len())]
-                )
-            })?;
-            let size = line.trim().parse::<usize>().with_context(|| {
-                format!("parse git object size for {}", &oid[..12.min(oid.len())])
-            })?;
-            total = total.saturating_add(size);
-        }
-        if lines.next().is_some() {
-            bail!("git cat-file reported more object sizes than requested");
         }
 
         Ok(total)
@@ -3119,15 +3168,18 @@ mod tests {
     use super::{
         batch_upload_retry_delay, effective_upload_concurrency, git_batch_upload_target_bytes,
         git_pack_checkpoint_underfull_min_objects, split_pending_upload_batches,
-        upload_progress_from_counters, PendingUpload, UploadCounters,
+        upload_progress_from_counters, PendingUpload, RemoteHelper, UploadCounters,
         DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS, GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
         GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV,
     };
+    use std::collections::HashSet;
+    use std::process::Command;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     };
     use std::time::Duration;
+    use tempfile::TempDir;
 
     static BATCH_TARGET_ENV_LOCK: Mutex<()> = Mutex::new(());
     static PACK_UNDERFULL_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3159,6 +3211,39 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).expect("restore current dir");
+        }
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[test]
@@ -3229,6 +3314,34 @@ mod tests {
         assert_eq!(
             git_pack_checkpoint_underfull_min_objects(),
             DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS
+        );
+    }
+
+    #[test]
+    fn git_loose_object_upload_bytes_counts_compressed_loose_bytes() {
+        let repo = TempDir::new().expect("repo");
+        git(repo.path(), &["init", "-q"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        let content = "a".repeat(16 * 1024);
+        std::fs::write(repo.path().join("repeated.txt"), &content).expect("write fixture");
+        git(repo.path(), &["add", "repeated.txt"]);
+        git(repo.path(), &["commit", "-qm", "add repeated text"]);
+        let oid = git(repo.path(), &["rev-parse", "HEAD:repeated.txt"]);
+        let _cwd = CwdGuard::set(repo.path());
+        let mut ids = HashSet::new();
+        ids.insert(oid);
+
+        let upload_bytes = RemoteHelper::git_loose_object_upload_bytes(&ids).expect("loose bytes");
+
+        assert!(upload_bytes > 0);
+        assert!(
+            upload_bytes < content.len() / 4,
+            "expected compressed loose bytes, got {upload_bytes} for {} raw bytes",
+            content.len()
         );
     }
 
