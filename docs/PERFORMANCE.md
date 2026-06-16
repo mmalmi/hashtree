@@ -44,6 +44,12 @@ ceilings. With streaming proxying enabled, request time and upstream time will
 track together because the origin receives the client body as it arrives; compare
 those timings with origin-local benchmarks before blaming LMDB.
 
+The public reverse proxy should also have enough file-descriptor and worker
+connection headroom for websocket traffic plus upload/CDN bursts. A container
+default such as 1024 open files or 1024 worker connections is unnecessarily low
+for this role; tune nginx worker limits and keep access-log timing enabled so
+connection pressure is visible before it becomes an upload/read symptom.
+
 ## Read path
 
 Cloudflare's default cache behavior is extension-based, not MIME-type based.

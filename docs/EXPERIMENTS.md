@@ -2,6 +2,42 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Edge Nginx Connection Headroom and CDN Read Check
+
+Question: is the current public reverse proxy leaving obvious read/write
+performance on the table through low connection limits or uncached read paths?
+
+Checks:
+- Confirmed the public reverse proxy for the upload/CDN hostnames streams
+  upload request bodies to the hot hashtree origin with request buffering off.
+- Confirmed CDN hash reads use an nginx cache for content-addressed
+  `/<sha256>.bin` paths.
+- Raised the live reverse proxy worker file limit and connection capacity from
+  the container default of 1024 to `worker_rlimit_nofile 65535` and
+  `worker_connections 8192`, with `multi_accept on`. The config tested cleanly
+  and nginx was reloaded in place.
+- Verified new nginx workers had `Max open files` set to 65535. Existing old
+  workers with the previous limit were only draining after reload.
+
+Live samples:
+
+| Path / shape | Result |
+| --- | ---: |
+| CDN read, first pass, 64 x 256 KiB, c16 | 30.63 MiB/s |
+| CDN read, warm pass, same sample | 47.78 MiB/s |
+| CDN read, post-reload warm smoke, same sample | 51.59 MiB/s |
+| Public outside-client write, post-reload, 64 x 256 KiB, b16 c8 | 3.33 MiB/s |
+| Hot-origin host through public hostname, post-reload write, same shape | 20.67 MiB/s |
+
+Interpretation:
+- The nginx connection tune is useful under websocket/upload/CDN load because it
+  removes an avoidable low file-descriptor and worker-connection ceiling. It is
+  not a public write throughput fix by itself; outside-client writes remained
+  ingress/client-path bound after reload.
+- CDN reads are healthy for this shape, especially once warmed. The remaining
+  write gap is still before LMDB and before the hot-origin daemon's local write
+  path.
+
 ## 2026-06-16 - Current Ingress and Replica Drain Check
 
 Question: after duplicate-aware LMDB writes, binary batches, hot-origin storage,
