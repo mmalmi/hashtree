@@ -12,11 +12,13 @@ use hashtree_fs::FsBlobStore;
 use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobStore};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "s3")]
 use std::future::Future;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +55,8 @@ const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 const DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 64;
 const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT_ENV: &str = "HTREE_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT";
+const DEFAULT_FILE_METADATA_CACHE_ENTRIES: usize = 128;
+const FILE_METADATA_CACHE_ENTRIES_ENV: &str = "HTREE_FILE_METADATA_CACHE_ENTRIES";
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
 const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
 #[cfg(feature = "lmdb")]
@@ -94,6 +98,15 @@ fn access_update_background_batch_limit() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT)
+}
+
+fn file_metadata_cache_entries() -> NonZeroUsize {
+    let entries = std::env::var(FILE_METADATA_CACHE_ENTRIES_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_FILE_METADATA_CACHE_ENTRIES);
+    NonZeroUsize::new(entries).unwrap_or(NonZeroUsize::new(1).expect("nonzero cache size"))
 }
 
 fn env_bool(name: &str) -> Option<bool> {
@@ -1490,6 +1503,8 @@ pub struct HashtreeStore {
     blob_access_update_gate: BlobAccessUpdateGate,
     /// Keeps access-time maintenance out of foreground blob reads.
     blob_access_update_inflight: Arc<AtomicBool>,
+    /// Immutable file chunk metadata cache for hot range-read workloads.
+    file_metadata_cache: Mutex<LruCache<Hash, Arc<FileChunkMetadata>>>,
 }
 
 impl HashtreeStore {
@@ -1693,6 +1708,7 @@ impl HashtreeStore {
             evict_orphans,
             blob_access_update_gate: BlobAccessUpdateGate::default(),
             blob_access_update_inflight: Arc::new(AtomicBool::new(false)),
+            file_metadata_cache: Mutex::new(LruCache::new(file_metadata_cache_entries())),
         })
     }
 
@@ -2438,7 +2454,17 @@ impl HashtreeStore {
     }
 
     /// Get chunk metadata for a file (chunk list, sizes, total size)
-    pub fn get_file_chunk_metadata(&self, hash: &[u8; 32]) -> Result<Option<FileChunkMetadata>> {
+    pub fn get_file_chunk_metadata(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<Option<Arc<FileChunkMetadata>>> {
+        if let Ok(mut cache) = self.file_metadata_cache.lock() {
+            if let Some(metadata) = cache.get(hash).cloned() {
+                self.record_blob_accesses(std::iter::once(*hash));
+                return Ok(Some(metadata));
+            }
+        }
+
         let access_store = AccessRecordingStore::new(self.store_arc());
         let tree = HashTree::new(HashTreeConfig::new(Arc::new(access_store.clone())).public());
 
@@ -2468,12 +2494,7 @@ impl HashtreeStore {
 
             if !is_tree_node {
                 // Single blob, not chunked
-                return Ok(Some(FileChunkMetadata {
-                    total_size,
-                    chunk_hashes: vec![],
-                    chunk_sizes: vec![],
-                    is_chunked: false,
-                }));
+                return Ok(Some(FileChunkMetadata::single_blob(total_size)));
             }
 
             // Get tree node to extract chunk info
@@ -2500,18 +2521,24 @@ impl HashtreeStore {
             let chunk_hashes: Vec<Hash> = node.links.iter().map(|l| l.hash).collect();
             let chunk_sizes: Vec<u64> = node.links.iter().map(|l| l.size).collect();
 
-            Ok(Some(FileChunkMetadata {
+            Ok(Some(FileChunkMetadata::new(
                 total_size,
                 chunk_hashes,
                 chunk_sizes,
-                is_chunked: !node.links.is_empty(),
-            }))
+            )))
         });
         let metadata = metadata?;
         if metadata.is_some() {
             self.record_blob_accesses(access_store.take_accessed_hashes());
         }
-        Ok(metadata)
+        let Some(metadata) = metadata else {
+            return Ok(None);
+        };
+        let metadata = Arc::new(metadata);
+        if let Ok(mut cache) = self.file_metadata_cache.lock() {
+            cache.put(*hash, Arc::clone(&metadata));
+        }
+        Ok(Some(metadata))
     }
 
     /// Get byte range from file
@@ -2551,9 +2578,9 @@ impl HashtreeStore {
 
         // For chunked files, load only needed chunks
         let mut result = Vec::new();
-        let mut current_offset = 0u64;
+        let (start_idx, mut current_offset) = metadata.chunk_start_for_range(start);
 
-        for (i, chunk_hash) in metadata.chunk_hashes.iter().enumerate() {
+        for (i, chunk_hash) in metadata.chunk_hashes.iter().enumerate().skip(start_idx) {
             let chunk_size = metadata.chunk_sizes[i];
             let chunk_end = current_offset + chunk_size - 1;
 
@@ -2609,13 +2636,15 @@ impl HashtreeStore {
 
         let end = end.min(metadata.total_size - 1);
 
+        let (current_chunk_idx, current_offset) = metadata.chunk_start_for_range(start);
+
         Ok(Some(FileRangeChunksOwned {
             store: self,
             metadata,
             start,
             end,
-            current_chunk_idx: 0,
-            current_offset: 0,
+            current_chunk_idx,
+            current_offset,
         }))
     }
 
@@ -2850,12 +2879,78 @@ pub struct FileChunkMetadata {
     pub chunk_hashes: Vec<Hash>,
     pub chunk_sizes: Vec<u64>,
     pub is_chunked: bool,
+    uniform_chunk_size: Option<u64>,
+}
+
+impl FileChunkMetadata {
+    fn new(total_size: u64, chunk_hashes: Vec<Hash>, chunk_sizes: Vec<u64>) -> Self {
+        let is_chunked = !chunk_hashes.is_empty();
+        let uniform_chunk_size = uniform_chunk_size(&chunk_sizes);
+        Self {
+            total_size,
+            chunk_hashes,
+            chunk_sizes,
+            is_chunked,
+            uniform_chunk_size,
+        }
+    }
+
+    fn single_blob(total_size: u64) -> Self {
+        Self {
+            total_size,
+            chunk_hashes: Vec::new(),
+            chunk_sizes: Vec::new(),
+            is_chunked: false,
+            uniform_chunk_size: None,
+        }
+    }
+
+    fn chunk_start_for_range(&self, start: u64) -> (usize, u64) {
+        if !self.is_chunked || self.chunk_sizes.is_empty() {
+            return (0, 0);
+        }
+
+        if let Some(chunk_size) = self.uniform_chunk_size {
+            let index = start
+                .checked_div(chunk_size)
+                .unwrap_or(0)
+                .min(self.chunk_sizes.len().saturating_sub(1) as u64)
+                as usize;
+            return (index, chunk_size.saturating_mul(index as u64));
+        }
+
+        let mut offset = 0u64;
+        for (index, chunk_size) in self.chunk_sizes.iter().copied().enumerate() {
+            let next_offset = offset.saturating_add(chunk_size);
+            if start < next_offset {
+                return (index, offset);
+            }
+            offset = next_offset;
+        }
+
+        (self.chunk_sizes.len(), offset)
+    }
+}
+
+fn uniform_chunk_size(chunk_sizes: &[u64]) -> Option<u64> {
+    let (&first, rest) = chunk_sizes.split_first()?;
+    if first == 0 {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some(first);
+    }
+    let (last, prefix) = rest.split_last()?;
+    if prefix.iter().any(|size| *size != first) || *last > first {
+        return None;
+    }
+    Some(first)
 }
 
 /// Owned iterator for async streaming
 pub struct FileRangeChunksOwned {
     store: Arc<HashtreeStore>,
-    metadata: FileChunkMetadata,
+    metadata: Arc<FileChunkMetadata>,
     start: u64,
     end: u64,
     current_chunk_idx: usize,
@@ -3032,6 +3127,50 @@ mod tests {
             gate.due_hashes([second, first], 10 + ACCESS_UPDATE_INTERVAL_SECS),
             vec![second, first]
         );
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn file_range_reads_reuse_metadata_and_seek_to_uniform_chunk() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::with_options_and_backend(
+            temp.path(),
+            None,
+            LMDB_BLOB_MIN_MAP_SIZE_BYTES,
+            true,
+            &StorageBackend::Fs,
+        )?);
+        let tree = HashTree::new(
+            HashTreeConfig::new(store.store_arc())
+                .with_chunk_size(4)
+                .public(),
+        );
+        let data = (0u8..20).collect::<Vec<_>>();
+        let (cid, _) = sync_block_on(tree.put_file(&data))?;
+
+        let first = store.get_file_chunk_metadata(&cid.hash)?.unwrap();
+        let second = store.get_file_chunk_metadata(&cid.hash)?.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "hot file metadata should be returned from the in-process cache"
+        );
+        assert_eq!(first.uniform_chunk_size, Some(4));
+        assert_eq!(first.chunk_start_for_range(14), (3, 12));
+
+        let mut chunks = Arc::clone(&store)
+            .stream_file_range_chunks_owned(&cid.hash, 14, 17)?
+            .unwrap();
+        assert_eq!(chunks.current_chunk_idx, 3);
+        assert_eq!(chunks.current_offset, 12);
+        assert_eq!(chunks.next().unwrap()?, vec![14, 15]);
+        assert_eq!(chunks.next().unwrap()?, vec![16, 17]);
+        assert!(chunks.next().is_none());
+
+        let (range, total_size) = store.get_file_range(&cid.hash, 14, Some(17))?.unwrap();
+        assert_eq!(total_size, data.len() as u64);
+        assert_eq!(range, vec![14, 15, 16, 17]);
+
+        Ok(())
     }
 
     #[cfg(feature = "lmdb")]
