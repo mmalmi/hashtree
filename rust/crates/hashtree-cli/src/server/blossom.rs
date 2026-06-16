@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::auth::AppState;
 use super::blob_read::{
@@ -51,12 +51,39 @@ const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
 const MAX_BINARY_BATCH_CONTENT_TYPE_BYTES: usize = 1024;
 const MAX_UPLOAD_CHECK_HASHES: usize = 10_000;
 const SLOW_BATCH_UPLOAD_LOG_MS_ENV: &str = "HTREE_SLOW_BATCH_UPLOAD_LOG_MS";
+const BLOSSOM_REPLICA_UPLOAD_CONCURRENCY_ENV: &str = "HTREE_BLOSSOM_REPLICA_UPLOAD_CONCURRENCY";
+const DEFAULT_BLOSSOM_REPLICA_UPLOAD_CONCURRENCY: usize = 4;
+const BLOSSOM_REPLICA_UPLOAD_ATTEMPTS_ENV: &str = "HTREE_BLOSSOM_REPLICA_UPLOAD_ATTEMPTS";
+const DEFAULT_BLOSSOM_REPLICA_UPLOAD_ATTEMPTS: usize = 3;
 
 fn slow_batch_upload_log_ms() -> Option<u128> {
     std::env::var(SLOW_BATCH_UPLOAD_LOG_MS_ENV)
         .ok()
         .and_then(|value| value.parse::<u128>().ok())
         .filter(|value| *value > 0)
+}
+
+fn blossom_replica_upload_concurrency() -> usize {
+    std::env::var(BLOSSOM_REPLICA_UPLOAD_CONCURRENCY_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOSSOM_REPLICA_UPLOAD_CONCURRENCY)
+}
+
+fn blossom_replica_upload_attempts() -> usize {
+    std::env::var(BLOSSOM_REPLICA_UPLOAD_ATTEMPTS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOSSOM_REPLICA_UPLOAD_ATTEMPTS)
+}
+
+fn blossom_replica_upload_semaphore() -> Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(blossom_replica_upload_concurrency())))
+        .clone()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1158,32 +1185,68 @@ fn schedule_prepared_blossom_upload_replication(
 
     tokio::spawn(async move {
         let _permit = prepared.permit;
+        let upload_limit = blossom_replica_upload_semaphore();
+        let _upload_permit = match upload_limit.acquire().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Skipping Blossom write-behind replication because upload limiter is closed"
+                );
+                return;
+            }
+        };
+        let attempts = blossom_replica_upload_attempts();
         let client = BlossomClient::new((*prepared.keys).clone())
             .with_write_servers(prepared.servers.clone());
         for server in prepared.servers {
-            match client.upload_batch_to_server(&server, &items).await {
-                Ok(Some(result)) => {
-                    tracing::info!(
-                        target = %server,
-                        accepted = result.accepted,
-                        uploaded = result.uploaded,
-                        total = items.len(),
-                        bytes = prepared.total_bytes,
-                        "Replicated Blossom upload batch"
-                    );
-                }
-                Ok(None) => {
-                    replicate_items_individually(&client, &server, &items, prepared.total_bytes)
+            for attempt in 1..=attempts {
+                match client.upload_batch_to_server(&server, &items).await {
+                    Ok(Some(result)) => {
+                        tracing::info!(
+                            target = %server,
+                            accepted = result.accepted,
+                            uploaded = result.uploaded,
+                            total = items.len(),
+                            bytes = prepared.total_bytes,
+                            "Replicated Blossom upload batch"
+                        );
+                        break;
+                    }
+                    Ok(None) => {
+                        replicate_items_individually(
+                            &client,
+                            &server,
+                            &items,
+                            prepared.total_bytes,
+                        )
                         .await;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target = %server,
-                        error = %error,
-                        total = items.len(),
-                        bytes = prepared.total_bytes,
-                        "Blossom write-behind replication failed"
-                    );
+                        break;
+                    }
+                    Err(error) if attempt < attempts => {
+                        tracing::warn!(
+                            target = %server,
+                            error = %error,
+                            attempt,
+                            attempts,
+                            total = items.len(),
+                            bytes = prepared.total_bytes,
+                            "Blossom write-behind replication retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target = %server,
+                            error = %error,
+                            attempt,
+                            attempts,
+                            total = items.len(),
+                            bytes = prepared.total_bytes,
+                            "Blossom write-behind replication failed"
+                        );
+                        break;
+                    }
                 }
             }
         }
