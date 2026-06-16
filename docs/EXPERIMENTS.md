@@ -1190,3 +1190,47 @@ Interpretation:
   remains far below these local numbers, the remaining bottleneck is ingress
   transport/body forwarding or remote deployment shape, not LMDB insert
   membership.
+
+### 2026-06-16: Hot origin with workerless replica tunnel
+
+Question: after the LMDB insert-if-absent fix, does the public write path still
+stall because of local storage, public ingress, or hot-origin-to-replica
+transport?
+
+Setup:
+- Public `upload.iris.to` and `cdn.iris.to` point at a hot local origin with
+  bounded write-behind replication to a much larger replica origin.
+- The replica queue is capped at 512 MiB and upload concurrency is 4.
+- The first private route to the replica was tested with the same signed
+  binary-batch client used for public upload tests. A workerless tunnel hostname
+  to the same replica was then tested as a fallback route.
+
+Results:
+
+| Path | Shape | Result |
+| --- | --- | ---: |
+| Hot origin container loopback | 128 x 256 KiB, batch 32, c4 | 142.80 MiB/s |
+| Private hot-origin-to-replica route | 8 x 256 KiB, batch 8, c1 | did not finish in 30s; earlier 32 x 8 run was 0.06-0.08 MiB/s |
+| Workerless replica tunnel | 128 x 256 KiB, batch 32, c4 | 8.83 MiB/s |
+| Workerless replica tunnel | 128 x 256 KiB, batch 32, c8 | 4.72 MiB/s |
+| Workerless replica tunnel | 128 x 256 KiB, batch 32, c12 | 4.46 MiB/s |
+| Public `upload.iris.to` from a Linux host | 128 x 256 KiB, batch 32, c4 | 8.46 MiB/s |
+| Public `upload.iris.to` reads | 128 x 256 KiB, c16 | 39.67 MiB/s |
+| Public `cdn.iris.to` reads | 128 x 256 KiB, c16 | 35.05 MiB/s |
+
+Operational changes:
+- The replica target was switched from the unusably slow private route to the
+  existing workerless tunnel hostname. Under the measured public c4 write load,
+  the bounded replica queue drained back to near-empty instead of saturating.
+- Successful write-behind replication logs were moved from info to debug; warn
+  logs still cover queue-full, retry, and failure cases.
+
+Interpretation:
+- The hot origin's local LMDB/write path is not the public bottleneck.
+- The broken private route was the cause of replica queue saturation; the
+  workerless tunnel route is fast enough to keep pace with the measured public
+  write path at c4.
+- Public writes are still transport-bound at about 8-9 MiB/s for this shape.
+  Reaching modern bulk-write throughput still needs a better ingress path or a
+  protocol shape that sends fewer/larger long-lived bodies; it does not need
+  R2/S3/object-store admission.

@@ -1203,7 +1203,7 @@ fn schedule_prepared_blossom_upload_replication(
             for attempt in 1..=attempts {
                 match client.upload_batch_to_server(&server, &items).await {
                     Ok(Some(result)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             target = %server,
                             accepted = result.accepted,
                             uploaded = result.uploaded,
@@ -1281,7 +1281,7 @@ async fn replicate_items_individually(
             }
         }
     }
-    tracing::info!(
+    tracing::debug!(
         target = %server,
         uploaded,
         skipped,
