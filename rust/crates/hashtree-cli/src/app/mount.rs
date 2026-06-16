@@ -7,7 +7,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::add::build_files_iris_to_url_for_published_target;
+use super::add::build_drive_iris_to_url_for_published_target;
 use super::blossom::background_blossom_push;
 use super::mount_publish::{
     MountPublishQueue, PostPublishHook, PublishSink, MOUNT_PUBLISH_DEBOUNCE,
@@ -445,8 +445,8 @@ pub(crate) async fn mount_fuse(
     println!("mounted {}", mountpoint.display());
     if let Some(target) = published_target.as_ref() {
         println!(
-            "  files: {}",
-            build_files_iris_to_url_for_published_target(
+            "  drive: {}",
+            build_drive_iris_to_url_for_published_target(
                 &target.npub,
                 &target.tree_name,
                 target.path.as_deref(),

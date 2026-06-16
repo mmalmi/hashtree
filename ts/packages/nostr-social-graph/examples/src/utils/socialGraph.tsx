@@ -93,7 +93,7 @@ export const loadFromFile = (merge = false) => {
 export const loadAndMerge = () => loadFromFile(true)
 
 export const downloadLargeGraph = () => {
-  fetch("https://files.iris.to/large_social_graph.bin")
+  fetch("https://drive.iris.to/large_social_graph.bin")
     .then(response => response.arrayBuffer())
     .then(async (buffer) => {
       const data = new Uint8Array(buffer)

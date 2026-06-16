@@ -1,6 +1,6 @@
 use super::add::{
-    build_files_iris_to_url_for_add_route, build_files_iris_to_url_for_published_ref,
-    build_files_iris_to_url_for_published_target, build_sites_iris_to_url_for_add_route,
+    build_drive_iris_to_url_for_add_route, build_drive_iris_to_url_for_published_ref,
+    build_drive_iris_to_url_for_published_target, build_sites_iris_to_url_for_add_route,
     build_sites_iris_to_url_for_published_ref, detect_site_entry_for_path,
 };
 use super::daemonize::{
@@ -448,31 +448,31 @@ fn test_format_cid_for_display_preserves_decrypt_key() {
 }
 
 #[test]
-fn test_build_files_iris_to_url_for_add_route_encodes_path_segments() {
+fn test_build_drive_iris_to_url_for_add_route_encodes_path_segments() {
     assert_eq!(
-        build_files_iris_to_url_for_add_route("nhash1example/My notes/index.html"),
-        "https://files.iris.to/#/nhash1example/My%20notes/index.html"
+        build_drive_iris_to_url_for_add_route("nhash1example/My notes/index.html"),
+        "https://drive.iris.to/#/nhash1example/My%20notes/index.html"
     );
 }
 
 #[test]
-fn test_build_files_iris_to_url_for_published_ref_encodes_tree_name_as_single_segment() {
+fn test_build_drive_iris_to_url_for_published_ref_encodes_tree_name_as_single_segment() {
     assert_eq!(
-        build_files_iris_to_url_for_published_ref("npub1owner", "apps/iris ui",),
-        "https://files.iris.to/#/npub1owner/apps%2Firis%20ui"
+        build_drive_iris_to_url_for_published_ref("npub1owner", "apps/iris ui",),
+        "https://drive.iris.to/#/npub1owner/apps%2Firis%20ui"
     );
 }
 
 #[test]
-fn test_build_files_iris_to_url_for_published_target_includes_path_and_link_key() {
+fn test_build_drive_iris_to_url_for_published_target_includes_path_and_link_key() {
     assert_eq!(
-        build_files_iris_to_url_for_published_target(
+        build_drive_iris_to_url_for_published_target(
             "npub1owner",
             "apps/iris ui",
             Some("docs/Read me.md"),
             Some("001122"),
         ),
-        "https://files.iris.to/#/npub1owner/apps%2Firis%20ui/docs/Read%20me.md?k=001122"
+        "https://drive.iris.to/#/npub1owner/apps%2Firis%20ui/docs/Read%20me.md?k=001122"
     );
 }
 

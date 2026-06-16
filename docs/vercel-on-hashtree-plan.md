@@ -35,7 +35,7 @@ The substrate is already mostly here.
 - detects site entrypoints such as `index.html`
 - prints immutable `nhash` URLs
 - with `--publish`, updates a mutable `npub/tree` route
-- prints `sites.iris.to` and `files.iris.to` URLs for both mutable and immutable routes
+- prints `sites.iris.to` and `drive.iris.to` URLs for both mutable and immutable routes
 
 Relevant code:
 
@@ -49,7 +49,7 @@ This is already the equivalent of "deploy the built output and give me preview +
 `iris-sites` already behaves like the browser/runtime layer of a deploy platform:
 
 - launcher URLs on `sites.iris.to`
-- source URLs on `files.iris.to`
+- source URLs on `drive.iris.to`
 - immutable runtime hosts on `*.hashtree.cc`
 - mutable runtime hosts derived from opaque labels instead of leaking `npub/tree` in DNS
 - permalink generation from the currently resolved mutable root
@@ -69,7 +69,7 @@ This is already close to the "site runtime + preview launcher" part of a Vercel-
 - accepts encrypted Blossom uploads
 - accepts whitelisted hashtree root events over Nostr WebSocket
 - serves latest `/<npub>/<tree>/...`
-- serves host-mapped sites like `files.iris.to`
+- serves host-mapped sites like `drive.iris.to`
 - caches directory indexes and assembled file bytes per root
 
 Relevant code:

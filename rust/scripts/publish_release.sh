@@ -58,6 +58,6 @@ Direct:
   $(gateway_release_base_url "$npub" "$tree_name" "$latest_path")/
 
 Browser:
-  https://files.iris.to/#/${npub}/${tree_name}/${version_path}
-  https://files.iris.to/#/${npub}/${tree_name}/${latest_path}
+  https://drive.iris.to/#/${npub}/${tree_name}/${version_path}
+  https://drive.iris.to/#/${npub}/${tree_name}/${latest_path}
 EOF

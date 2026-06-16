@@ -20,7 +20,7 @@ use super::blossom::background_blossom_push;
 use super::content::add_directory_with_progress;
 use super::util::format_bytes;
 
-const IRIS_FILES_WEB_BASE_URL: &str = "https://files.iris.to";
+const IRIS_DRIVE_WEB_BASE_URL: &str = "https://drive.iris.to";
 const IRIS_SITES_WEB_BASE_URL: &str = "https://sites.iris.to";
 const LOCAL_ADD_STREAM_BATCH_TARGET_BYTES: &str = "268435456";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
@@ -185,8 +185,8 @@ pub(crate) async fn run_add(
     };
     println!("  url:   {}", display_route);
     println!(
-        "  files: {}",
-        build_files_iris_to_url_for_add_route(&display_route)
+        "  drive: {}",
+        build_drive_iris_to_url_for_add_route(&display_route)
     );
     if let Some(entry_path) = site_entry.as_deref() {
         let site_route = format!("{display_root}/{entry_path}");
@@ -265,8 +265,8 @@ pub(crate) async fn run_add(
             Ok(_) => {
                 println!("  published: {}", nostr_key);
                 println!(
-                    "  files: {}",
-                    build_files_iris_to_url_for_published_ref(&npub, ref_name)
+                    "  drive: {}",
+                    build_drive_iris_to_url_for_published_ref(&npub, ref_name)
                 );
                 if let Some(entry_path) = site_entry.as_deref() {
                     println!(
@@ -555,7 +555,7 @@ fn encode_hash_route_segment(segment: &str) -> String {
     encoded
 }
 
-pub(crate) fn build_files_iris_to_url_for_add_route(route: &str) -> String {
+pub(crate) fn build_drive_iris_to_url_for_add_route(route: &str) -> String {
     let segments = route
         .trim_matches('/')
         .split('/')
@@ -564,20 +564,20 @@ pub(crate) fn build_files_iris_to_url_for_add_route(route: &str) -> String {
         .collect::<Vec<_>>();
 
     if segments.is_empty() {
-        IRIS_FILES_WEB_BASE_URL.to_string()
+        IRIS_DRIVE_WEB_BASE_URL.to_string()
     } else {
-        format!("{IRIS_FILES_WEB_BASE_URL}/#/{}", segments.join("/"))
+        format!("{IRIS_DRIVE_WEB_BASE_URL}/#/{}", segments.join("/"))
     }
 }
 
-pub(crate) fn build_files_iris_to_url_for_published_ref(
+pub(crate) fn build_drive_iris_to_url_for_published_ref(
     owner_npub: &str,
     ref_name: &str,
 ) -> String {
-    build_files_iris_to_url_for_published_target(owner_npub, ref_name, None, None)
+    build_drive_iris_to_url_for_published_target(owner_npub, ref_name, None, None)
 }
 
-pub(crate) fn build_files_iris_to_url_for_published_target(
+pub(crate) fn build_drive_iris_to_url_for_published_target(
     owner_npub: &str,
     ref_name: &str,
     path: Option<&str>,
@@ -585,7 +585,7 @@ pub(crate) fn build_files_iris_to_url_for_published_target(
 ) -> String {
     let owner = encode_hash_route_segment(owner_npub.trim());
     let reference = encode_hash_route_segment(ref_name.trim_matches('/'));
-    let mut url = format!("{IRIS_FILES_WEB_BASE_URL}/#/{owner}/{reference}");
+    let mut url = format!("{IRIS_DRIVE_WEB_BASE_URL}/#/{owner}/{reference}");
 
     if let Some(path) = path {
         let encoded_path = path
