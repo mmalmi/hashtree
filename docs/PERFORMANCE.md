@@ -21,6 +21,10 @@ Blossom traffic. Detailed measurements belong in `docs/EXPERIMENTS.md`.
   normal reverse proxy. Put host-specific cache, body-size, and routing policy on
   that reverse proxy where it can be observed and changed without Worker
   redeploys.
+- S3/R2 support, if kept at all, should be explicit migration/archive tooling,
+  not a hidden public read/write hot path. Removing that optional code is a
+  simplification task, not a performance prerequisite for the current local
+  origin design.
 
 ## Known bottleneck
 
@@ -63,6 +67,12 @@ extensionless hash URL can miss Cloudflare's default cache eligibility unless a
 Cache Rule explicitly covers it. Cache Rules are suitable for read hostnames when
 their match condition is limited to immutable content-addressed blob paths and
 does not include mutable tree, API, or status routes.
+
+The upload hostname can also serve immutable hash GETs when clients reuse a
+Blossom upload URL as a blob URL. Before adding origin-side cache complexity,
+check the live headers: `cache-control: public, max-age=31536000, immutable` and
+`cf-cache-status: HIT` are enough evidence that Cloudflare is already caching
+that object at the edge.
 
 Cold read-through from a deep upstream should use hashtree's batch blob read
 extension when both sides support it. The hot origin asks for many missing

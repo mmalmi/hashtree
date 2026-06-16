@@ -1909,3 +1909,30 @@ Interpretation:
 - Further large improvements need a better bulk-write ingress path or fewer
   bytes/objects per git push, not R2/S3/bucket admission and not a larger local
   LMDB write queue.
+
+### 2026-06-16: Upload-host immutable read cache check
+
+Question: should `upload.iris.to` get another origin-side cache layer for hash
+GETs, or is that extra complexity with the current Cloudflare/local-origin path?
+
+Setup:
+- A previously uploaded 256 KiB benchmark blob was requested through both the
+  upload and CDN public hostnames using extensionful `/<sha256>.bin` URLs.
+- The public path was not changed during this check.
+
+Results:
+
+| Path / request | Observed headers |
+| --- | --- |
+| `upload.iris.to/<sha256>.bin`, repeated HEAD | `cache-control: public, max-age=31536000, immutable`; `cf-cache-status: HIT`; content length 256 KiB |
+| `cdn.iris.to/<sha256>.bin`, first HEAD | immutable cache-control; origin cache header reported `MISS`; Cloudflare reported `MISS` |
+| `cdn.iris.to/<sha256>.bin`, repeated HEAD | immutable cache-control; Cloudflare reported `HIT` |
+| `upload.iris.to` read benchmark, 64 x 256 KiB, c16 | 31.82 MiB/s first pass, 54.57 MiB/s repeated pass |
+
+Interpretation:
+- Do not add a second upload-host cache layer without a colder-edge benchmark
+  showing it is needed. Extensionful immutable blob URLs are already eligible
+  for Cloudflare edge caching on the upload hostname.
+- This keeps the public design simpler: writes stream through the local origin,
+  reads use immutable content-addressed cache behavior, and no R2/S3/bucket hot
+  path is involved.
