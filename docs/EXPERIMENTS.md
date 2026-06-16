@@ -1465,3 +1465,57 @@ Interpretation:
   Reaching modern bulk-write throughput still needs a better ingress path or a
   protocol shape that sends fewer/larger long-lived bodies; it does not need
   R2/S3/object-store admission.
+
+### 2026-06-16: Workerless hot-origin public ingress timing
+
+Question: after moving public writes to the workerless hot origin, is the
+remaining upload ceiling Cloudflare, nginx, hashtree/LMDB, or batch sizing?
+
+Setup:
+- Public `upload.iris.to` and `cdn.iris.to` resolved through Cloudflare and
+  negotiated HTTP/2 from the client. The public reverse proxy also listens with
+  HTTP/2 and proxies upload traffic to the hot local origin with request
+  buffering disabled.
+- The hot origin status stayed healthy during the test: replica queue remained
+  bounded and recent 5xx stayed at zero.
+- The reverse proxy access log was extended to include request length, request
+  time, upstream response time, upstream status, and cache status. No private IPs
+  or raw blob hashes are retained here.
+
+Results:
+
+| Path / shape | Result |
+| --- | ---: |
+| Public writes, release client, 128 x 256 KiB, batch 16, c8 | 8.02 MiB/s |
+| Public writes, release client, 64 x 256 KiB, batch 16, c1/c2/c4/c8/c16 | 5.37 / 7.37 / 7.56 / 7.05 / 8.09 MiB/s |
+| Public reads through CDN, release client, 128 x 256 KiB, c8 | 40.10 MiB/s |
+| Public writes from a second client host, 64 x 256 KiB, batch 16, c8 | 7.29 MiB/s |
+| Normal Cloudflare path, one 4 MiB signed binary batch via curl | 4.08 MB/s upload, 1.03 s total |
+| Direct origin resolve, same host/SNI, one 4 MiB signed binary batch via curl | 4.59 MB/s upload, 0.91 s total |
+| Public single stream, 4 / 8 / 16 MiB binary batch bodies | 4.51 / 5.62 / 6.79 MiB/s |
+| Public single stream, 32 MiB binary batch body | failed with edge 520 before origin log entry |
+| Public writes, 64 MiB total, 16 MiB batches, c4 | 9.37 MiB/s |
+
+Reverse-proxy timing sample:
+- 4 MiB public binary batch requests reached nginx with `req_time` and
+  `upstream_time` both around 0.5-1.1 s. With request buffering disabled, this
+  means nginx is streaming the body to the origin as Cloudflare/client delivers
+  it; the timing does not indicate a separate slow LMDB commit.
+- 8 MiB and 16 MiB single-stream requests reached origin and completed, while
+  the 32 MiB request did not appear in the origin proxy access log.
+
+Interpretation:
+- Release-mode reads are fine for current purposes; earlier lower read numbers
+  were client/build-profile artifacts.
+- The write ceiling is still public body ingress. It reproduced from two client
+  hosts, did not stress nginx or htree CPU, and did not grow the replica queue.
+- Bypassing the Cloudflare proxy for one direct-origin request improved a 4 MiB
+  upload only marginally, so simply turning off the proxy is unlikely to produce
+  a step-function throughput win by itself.
+- Larger binary batches reduce request count and improve single-stream
+  throughput up to about 16 MiB, but 32 MiB is unsafe through the current public
+  path. Keep the conservative 4 MiB git batch default and use
+  `HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES` for controlled origin/local experiments.
+- Further large improvements need a better bulk-write ingress path or fewer
+  bytes/objects per git push, not R2/S3/bucket admission and not a larger local
+  LMDB write queue.

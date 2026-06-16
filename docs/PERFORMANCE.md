@@ -36,6 +36,12 @@ Raising the local blob write queue is therefore not the main fix once the origin
 queue is idle. Higher client concurrency mostly increases tail latency when the
 public ingress path is saturated.
 
+Request timing on the reverse proxy should include `$request_time`,
+`$request_length`, and `$upstream_response_time` while debugging public upload
+ceilings. With streaming proxying enabled, request time and upstream time will
+track together because the origin receives the client body as it arrives; compare
+those timings with origin-local benchmarks before blaming LMDB.
+
 ## Read path
 
 Cloudflare's default cache behavior is extension-based, not MIME-type based.
@@ -60,7 +66,9 @@ setup before traffic reaches the public ingress ceiling:
   edge cases do not install a pack+idx that is larger than the loose content it
   replaces.
 - Keep batch bodies large enough to amortize per-request overhead, but do not
-  expect larger batches to beat a saturated tunnel by themselves.
+  expect larger batches to beat saturated public ingress by themselves. Current
+  public measurements make 4-16 MiB binary batch bodies the safe operating
+  range; 32 MiB bodies have produced edge 520 failures before reaching origin.
 - Prefer long-lived upload streams or pack/tail-pack admission for future
   protocol work.
 - For a large step-function improvement, provide direct public TCP ingress to the
