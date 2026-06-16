@@ -1133,6 +1133,25 @@ async fn serve_cid_with_range(
         }
     };
 
+    let keyed_body = async |start: u64, end_inclusive: u64| -> Result<Option<Bytes>, String> {
+        let Some(data) = get_cid_with_fetch(state, &tree, cid).await? else {
+            return Ok(None);
+        };
+        let start = usize::try_from(start)
+            .map_err(|_| "range start does not fit in memory size".to_string())?;
+        let end_exclusive = usize::try_from(end_inclusive.saturating_add(1))
+            .map_err(|_| "range end does not fit in memory size".to_string())?;
+        if start > end_exclusive || end_exclusive > data.len() {
+            return Err(format!(
+                "decoded keyed body length {} does not satisfy requested range {}..{}",
+                data.len(),
+                start,
+                end_exclusive
+            ));
+        }
+        Ok(Some(Bytes::copy_from_slice(&data[start..end_exclusive])))
+    };
+
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     if let Some(range_str) = range_header {
         if let Some(parsed_range) = parse_byte_range(range_str, total_size) {
@@ -1156,6 +1175,18 @@ async fn serve_cid_with_range(
             let content_range = format!("bytes {}-{}/{}", start, end_inclusive, total_size);
             let body = if head_only {
                 Body::empty()
+            } else if cid.key.is_some() {
+                match keyed_body(start, end_inclusive).await {
+                    Ok(Some(data)) => Body::from(data),
+                    Ok(None) => return not_found_response("Not found"),
+                    Err(e) => {
+                        return Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                            .body(Body::from(format!("Error: {}", e)))
+                            .unwrap();
+                    }
+                }
             } else {
                 Body::from_stream(stream_file_range_cid_with_fetch(
                     state.clone(),
@@ -1199,6 +1230,18 @@ async fn serve_cid_with_range(
 
     let body = if head_only || total_size == 0 {
         Body::empty()
+    } else if cid.key.is_some() {
+        match keyed_body(0, total_size.saturating_sub(1)).await {
+            Ok(Some(data)) => Body::from(data),
+            Ok(None) => return not_found_response("Not found"),
+            Err(e) => {
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .body(Body::from(format!("Error: {}", e)))
+                    .unwrap();
+            }
+        }
     } else {
         Body::from_stream(stream_file_range_cid_with_fetch(
             state.clone(),

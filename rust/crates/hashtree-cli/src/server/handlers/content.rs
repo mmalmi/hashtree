@@ -790,7 +790,6 @@ pub(super) async fn resolve_path_with_fetch<S: Store>(
     Ok(Some(entry))
 }
 
-#[cfg(test)]
 pub(super) async fn get_cid_with_fetch<S: Store>(
     state: &AppState,
     tree: &HashTree<S>,

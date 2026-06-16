@@ -1695,6 +1695,82 @@ async fn serve_cid_with_range_streams_large_full_gets() {
     assert_eq!(first_chunk.as_ref(), &data[..first_chunk.len()]);
 }
 
+#[tokio::test]
+async fn serve_cid_with_range_materializes_keyed_full_gets() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+    let data: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+    assert!(cid.key.is_some(), "test must cover keyed/encrypted CIDs");
+
+    let response = serve_cid_with_range(
+        &state,
+        &cid,
+        axum::http::HeaderMap::new(),
+        true,
+        false,
+        Some("release.tar.gz"),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let expected_len = data.len().to_string();
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_len.as_str())
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), data.as_slice());
+}
+
+#[tokio::test]
+async fn serve_cid_with_range_materializes_keyed_ranges() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+    let data: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+    assert!(cid.key.is_some(), "test must cover keyed/encrypted CIDs");
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        header::RANGE,
+        header::HeaderValue::from_static("bytes=1024-4095"),
+    );
+
+    let response = serve_cid_with_range(
+        &state,
+        &cid,
+        headers,
+        true,
+        false,
+        Some("release.tar.gz"),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let expected_range = format!("bytes 1024-4095/{}", data.len());
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_range.as_str())
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), &data[1024..4096]);
+}
+
 fn copy_blob_between_stores(
     source_store: &Arc<HashtreeStore>,
     target_store: &Arc<HashtreeStore>,
