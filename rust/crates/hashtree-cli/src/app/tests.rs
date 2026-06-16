@@ -293,6 +293,19 @@ fn test_daemon_status_formats_queue_and_http_counters() {
                 "reserved_bytes": 256 * 1024u64,
                 "in_flight": 3,
                 "queue_timeout_ms": 15000
+            },
+            "upload_replication": {
+                "enabled": true,
+                "targets": 1,
+                "max_bytes": 512 * 1024 * 1024u64,
+                "reserved_bytes": 1024 * 1024u64,
+                "coalesce_queued_jobs": 2,
+                "in_flight_batches": 1,
+                "accepted_batches": 3,
+                "accepted_blobs": 96,
+                "replicated_bytes": 24 * 1024 * 1024u64,
+                "failed_batches": 1,
+                "skipped_jobs": 2
             }
         },
         "http": {
@@ -318,6 +331,9 @@ fn test_daemon_status_formats_queue_and_http_counters() {
     assert!(rendered.contains("Blob writes: 1/4 in use, 3 available"));
     assert!(rendered.contains(
         "Optimistic uploads: enabled, 256.0 KiB/512.0 MiB reserved, 3 in flight, queue 15000ms"
+    ));
+    assert!(rendered.contains(
+        "Upload replication: enabled, 1 target(s), 1.0 MiB/512.0 MiB reserved, 2 queued, 1 in flight, accepted 3 batch(es)/96 blob(s) (24.0 MiB), failed 1, skipped 2"
     ));
     assert!(rendered.contains("Last 60s: 42 total, 1 1xx, 30 2xx, 2 3xx, 8 4xx, 1 5xx, 1 other"));
 }

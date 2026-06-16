@@ -62,6 +62,37 @@ fn append_queue_status(lines: &mut Vec<String>, queues: &serde_json::Value) {
             queue_timeout
         ));
     }
+
+    if let Some(replication) = queues.get("upload_replication") {
+        let enabled = replication
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let targets = json_u64(replication, "targets").unwrap_or(0);
+        let reserved = json_u64(replication, "reserved_bytes").unwrap_or(0);
+        let max = json_u64(replication, "max_bytes").unwrap_or(0);
+        let queued = json_u64(replication, "coalesce_queued_jobs").unwrap_or(0);
+        let in_flight = json_u64(replication, "in_flight_batches").unwrap_or(0);
+        let accepted_batches = json_u64(replication, "accepted_batches").unwrap_or(0);
+        let accepted_blobs = json_u64(replication, "accepted_blobs").unwrap_or(0);
+        let replicated_bytes = json_u64(replication, "replicated_bytes").unwrap_or(0);
+        let failed_batches = json_u64(replication, "failed_batches").unwrap_or(0);
+        let skipped_jobs = json_u64(replication, "skipped_jobs").unwrap_or(0);
+        lines.push(format!(
+            "  Upload replication: {}, {} target(s), {}/{} reserved, {} queued, {} in flight, accepted {} batch(es)/{} blob(s) ({}), failed {}, skipped {}",
+            if enabled { "enabled" } else { "disabled" },
+            targets,
+            format_bytes(reserved),
+            format_bytes(max),
+            queued,
+            in_flight,
+            accepted_batches,
+            accepted_blobs,
+            format_bytes(replicated_bytes),
+            failed_batches,
+            skipped_jobs
+        ));
+    }
 }
 
 fn append_http_status(lines: &mut Vec<String>, status: &serde_json::Value) {

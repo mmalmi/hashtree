@@ -19,7 +19,10 @@ use nostr::Keys;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
@@ -147,6 +150,61 @@ pub(super) struct BlossomUploadReplicaQueueSnapshot {
     pub max_bytes: usize,
     pub available_bytes: usize,
     pub reserved_bytes: usize,
+    pub coalesce_queue_capacity_jobs: usize,
+    pub coalesce_queued_jobs: usize,
+    pub coalesce_max_blobs: usize,
+    pub coalesce_max_bytes: usize,
+    pub coalesce_flush_ms: u64,
+    pub upload_concurrency: usize,
+    pub in_flight_batches: usize,
+    pub accepted_batches: u64,
+    pub accepted_blobs: u64,
+    pub uploaded_blobs: u64,
+    pub replicated_bytes: u64,
+    pub failed_batches: u64,
+    pub skipped_jobs: u64,
+    pub fallback_batches: u64,
+    pub fallback_uploaded_blobs: u64,
+    pub fallback_failed_blobs: u64,
+}
+
+#[derive(Default)]
+struct BlossomUploadReplicaMetrics {
+    coalesce_queued_jobs: AtomicUsize,
+    in_flight_batches: AtomicUsize,
+    accepted_batches: AtomicU64,
+    accepted_blobs: AtomicU64,
+    uploaded_blobs: AtomicU64,
+    replicated_bytes: AtomicU64,
+    failed_batches: AtomicU64,
+    skipped_jobs: AtomicU64,
+    fallback_batches: AtomicU64,
+    fallback_uploaded_blobs: AtomicU64,
+    fallback_failed_blobs: AtomicU64,
+}
+
+fn blossom_upload_replica_metrics() -> &'static BlossomUploadReplicaMetrics {
+    static METRICS: OnceLock<BlossomUploadReplicaMetrics> = OnceLock::new();
+    METRICS.get_or_init(BlossomUploadReplicaMetrics::default)
+}
+
+struct BlossomReplicaInFlightGuard;
+
+impl BlossomReplicaInFlightGuard {
+    fn new() -> Self {
+        blossom_upload_replica_metrics()
+            .in_flight_batches
+            .fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for BlossomReplicaInFlightGuard {
+    fn drop(&mut self) {
+        blossom_upload_replica_metrics()
+            .in_flight_batches
+            .fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct PreparedBlossomUploadReplication {
@@ -244,10 +302,21 @@ impl BlossomUploadReplicaScheduler {
         let mut job = job;
         for _ in 0..2 {
             let sender = self.sender();
+            blossom_upload_replica_metrics()
+                .coalesce_queued_jobs
+                .fetch_add(1, Ordering::Relaxed);
             match sender.try_send(job) {
                 Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(returned)) => return Err(returned),
+                Err(mpsc::error::TrySendError::Full(returned)) => {
+                    blossom_upload_replica_metrics()
+                        .coalesce_queued_jobs
+                        .fetch_sub(1, Ordering::Relaxed);
+                    return Err(returned);
+                }
                 Err(mpsc::error::TrySendError::Closed(returned)) => {
+                    blossom_upload_replica_metrics()
+                        .coalesce_queued_jobs
+                        .fetch_sub(1, Ordering::Relaxed);
                     self.clear_sender();
                     job = returned;
                 }
@@ -287,6 +356,7 @@ pub(super) fn blossom_upload_replica_queue_snapshot(
     state: &AppState,
 ) -> BlossomUploadReplicaQueueSnapshot {
     let available_bytes = state.blossom_upload_replica_queue.available_permits();
+    let metrics = blossom_upload_replica_metrics();
     BlossomUploadReplicaQueueSnapshot {
         enabled: !state.blossom_upload_replicas.is_empty(),
         target_count: state.blossom_upload_replicas.len(),
@@ -295,6 +365,22 @@ pub(super) fn blossom_upload_replica_queue_snapshot(
         reserved_bytes: state
             .blossom_upload_replica_queue_bytes
             .saturating_sub(available_bytes),
+        coalesce_queue_capacity_jobs: blossom_replica_coalesce_queue_jobs(),
+        coalesce_queued_jobs: metrics.coalesce_queued_jobs.load(Ordering::Relaxed),
+        coalesce_max_blobs: blossom_replica_coalesce_max_blobs(),
+        coalesce_max_bytes: blossom_replica_coalesce_max_bytes(),
+        coalesce_flush_ms: duration_millis_u64(blossom_replica_coalesce_flush_delay()),
+        upload_concurrency: blossom_replica_upload_concurrency(),
+        in_flight_batches: metrics.in_flight_batches.load(Ordering::Relaxed),
+        accepted_batches: metrics.accepted_batches.load(Ordering::Relaxed),
+        accepted_blobs: metrics.accepted_blobs.load(Ordering::Relaxed),
+        uploaded_blobs: metrics.uploaded_blobs.load(Ordering::Relaxed),
+        replicated_bytes: metrics.replicated_bytes.load(Ordering::Relaxed),
+        failed_batches: metrics.failed_batches.load(Ordering::Relaxed),
+        skipped_jobs: metrics.skipped_jobs.load(Ordering::Relaxed),
+        fallback_batches: metrics.fallback_batches.load(Ordering::Relaxed),
+        fallback_uploaded_blobs: metrics.fallback_uploaded_blobs.load(Ordering::Relaxed),
+        fallback_failed_blobs: metrics.fallback_failed_blobs.load(Ordering::Relaxed),
     }
 }
 
@@ -1309,6 +1395,9 @@ fn prepare_blossom_upload_replication(
     let permits = match u32::try_from(total_bytes.max(1)) {
         Ok(permits) => permits,
         Err(_) => {
+            blossom_upload_replica_metrics()
+                .skipped_jobs
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 total_bytes,
                 "Skipping Blossom write-behind replication because batch is too large"
@@ -1323,6 +1412,9 @@ fn prepare_blossom_upload_replication(
     {
         Ok(permit) => permit,
         Err(error) => {
+            blossom_upload_replica_metrics()
+                .skipped_jobs
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 total_bytes,
                 targets = state.blossom_upload_replicas.len(),
@@ -1336,6 +1428,9 @@ fn prepare_blossom_upload_replication(
     let keys = match state.blossom_upload_replica_keys.clone() {
         Some(keys) => keys,
         None => {
+            blossom_upload_replica_metrics()
+                .skipped_jobs
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 "Skipping Blossom write-behind replication because server keys are unavailable"
             );
@@ -1356,6 +1451,9 @@ fn schedule_prepared_blossom_upload_replication(
     items: Vec<BatchUploadItem>,
 ) {
     if items.is_empty() {
+        blossom_upload_replica_metrics()
+            .skipped_jobs
+            .fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -1373,6 +1471,9 @@ async fn blossom_replica_coalescer_worker(mut receiver: mpsc::Receiver<BlossomRe
     let flush_delay = blossom_replica_coalesce_flush_delay();
 
     while let Some(job) = receiver.recv().await {
+        blossom_upload_replica_metrics()
+            .coalesce_queued_jobs
+            .fetch_sub(1, Ordering::Relaxed);
         let mut batch = BlossomReplicaUploadBatch::from_job(job);
         loop {
             if batch.reached_limits(max_blobs, max_bytes) {
@@ -1380,6 +1481,9 @@ async fn blossom_replica_coalescer_worker(mut receiver: mpsc::Receiver<BlossomRe
             }
             match tokio::time::timeout(flush_delay, receiver.recv()).await {
                 Ok(Some(next_job)) => {
+                    blossom_upload_replica_metrics()
+                        .coalesce_queued_jobs
+                        .fetch_sub(1, Ordering::Relaxed);
                     if batch.can_append(&next_job, max_blobs, max_bytes) {
                         batch.append(next_job);
                     } else {
@@ -1400,6 +1504,7 @@ async fn blossom_replica_coalescer_worker(mut receiver: mpsc::Receiver<BlossomRe
 
 fn spawn_blossom_replica_upload_batch(batch: BlossomReplicaUploadBatch) {
     tokio::spawn(async move {
+        let _in_flight = BlossomReplicaInFlightGuard::new();
         let BlossomReplicaUploadBatch {
             servers,
             keys,
@@ -1412,6 +1517,9 @@ fn spawn_blossom_replica_upload_batch(batch: BlossomReplicaUploadBatch) {
         let _upload_permit = match upload_limit.acquire().await {
             Ok(permit) => permit,
             Err(error) => {
+                blossom_upload_replica_metrics()
+                    .failed_batches
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     error = %error,
                     "Skipping Blossom write-behind replication because upload limiter is closed"
@@ -1425,6 +1533,17 @@ fn spawn_blossom_replica_upload_batch(batch: BlossomReplicaUploadBatch) {
             for attempt in 1..=attempts {
                 match client.upload_batch_to_server(&server, &items).await {
                     Ok(Some(result)) => {
+                        let metrics = blossom_upload_replica_metrics();
+                        metrics.accepted_batches.fetch_add(1, Ordering::Relaxed);
+                        metrics
+                            .accepted_blobs
+                            .fetch_add(result.accepted as u64, Ordering::Relaxed);
+                        metrics
+                            .uploaded_blobs
+                            .fetch_add(result.uploaded as u64, Ordering::Relaxed);
+                        metrics
+                            .replicated_bytes
+                            .fetch_add(total_bytes as u64, Ordering::Relaxed);
                         tracing::debug!(
                             target = %server,
                             accepted = result.accepted,
@@ -1452,6 +1571,9 @@ fn spawn_blossom_replica_upload_batch(batch: BlossomReplicaUploadBatch) {
                         tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
                     }
                     Err(error) => {
+                        blossom_upload_replica_metrics()
+                            .failed_batches
+                            .fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             target = %server,
                             error = %error,
@@ -1496,6 +1618,28 @@ async fn replicate_items_individually(
                 );
             }
         }
+    }
+    let metrics = blossom_upload_replica_metrics();
+    metrics.fallback_batches.fetch_add(1, Ordering::Relaxed);
+    metrics
+        .fallback_uploaded_blobs
+        .fetch_add(uploaded as u64, Ordering::Relaxed);
+    metrics
+        .fallback_failed_blobs
+        .fetch_add(failed as u64, Ordering::Relaxed);
+    if failed == 0 {
+        metrics.accepted_batches.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .accepted_blobs
+            .fetch_add(items.len() as u64, Ordering::Relaxed);
+        metrics
+            .uploaded_blobs
+            .fetch_add(uploaded as u64, Ordering::Relaxed);
+        metrics
+            .replicated_bytes
+            .fetch_add(total_bytes as u64, Ordering::Relaxed);
+    } else {
+        metrics.failed_batches.fetch_add(1, Ordering::Relaxed);
     }
     tracing::debug!(
         target = %server,
@@ -3068,6 +3212,7 @@ mod tests {
         state.require_random_untrusted_ingest = false;
         state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
         state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
+        let metrics_before = blossom_upload_replica_queue_snapshot(&state);
 
         let keys = nostr::Keys::generate();
         let mut headers = hosted_headers();
@@ -3097,7 +3242,7 @@ mod tests {
                 .await
                 .into_response();
         assert_eq!(first_response.status(), StatusCode::OK);
-        let second_response = upload_blob_batch_binary(State(state), headers, second_body)
+        let second_response = upload_blob_batch_binary(State(state.clone()), headers, second_body)
             .await
             .into_response();
         assert_eq!(second_response.status(), StatusCode::OK);
@@ -3113,6 +3258,15 @@ mod tests {
                 .await
                 .is_err(),
             "adjacent batches should be merged into one replica request"
+        );
+        let metrics_after = blossom_upload_replica_queue_snapshot(&state);
+        assert!(
+            metrics_after.accepted_batches >= metrics_before.accepted_batches + 1,
+            "coalesced replication should increment accepted batch metrics"
+        );
+        assert!(
+            metrics_after.accepted_blobs >= metrics_before.accepted_blobs + 4,
+            "coalesced replication should increment accepted blob metrics"
         );
     }
 

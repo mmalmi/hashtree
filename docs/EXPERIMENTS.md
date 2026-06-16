@@ -32,6 +32,48 @@ Interpretation:
 - It does not raise the public upload bandwidth ceiling; public writes can
   still be ingress-limited before LMDB or local storage.
 
+## 2026-06-16 - Current Hot-Origin Upload and Replica Status Check
+
+Question: after the hot-tier, duplicate-aware write, and git upload changes, is
+the active public write bottleneck still ingress, and can operators see whether
+background upload replication is draining?
+
+Current bounded samples:
+
+| Path / shape | Result |
+| --- | ---: |
+| Public `upload.iris.to`, 64 x 256 KiB, binary batch 16, c4 | 4.27 MiB/s |
+| Public `cdn.iris.to`, same write shape | 4.22 MiB/s |
+| Same client direct to Osiris origin IP with upload hostname/SNI, same write shape | 8.01 MiB/s |
+| Same client direct to Vader nVPN daemon, same write shape | 5.79 MiB/s |
+| Osiris host to local htree container, 128 x 256 KiB, binary batch 16, c4 | 101.75 MiB/s |
+| Vader host to local daemon with large production store, same 128 x 256 KiB shape | 193.12 MiB/s |
+| CDN read of the fresh public upload, 64 x 256 KiB, c16 first pass / second pass | 32.42 / 41.89 MiB/s |
+
+Change:
+- `/api/status` now exposes upload-replication scheduler visibility in addition
+  to the existing byte-reservation semaphore: coalescer queued jobs and limits,
+  upload concurrency, in-flight replica batches, accepted batches/blobs/bytes,
+  fallback batches, failures, and skipped jobs.
+- `htree status` renders a compact upload-replication line so operators can spot
+  backlog or failures without reading raw JSON.
+
+Verification:
+- `cargo test -p hashtree-cli test_daemon_status_formats_queue_and_http_counters -- --nocapture`
+- `cargo test -p hashtree-cli daemon_status_exposes_mesh_alias_with_transport_metadata -- --nocapture`
+- `cargo test -p hashtree-cli upload_replication_coalesces_adjacent_binary_batches -- --nocapture`
+- `cargo test -p hashtree-cli --lib -- --test-threads=8`
+
+Interpretation:
+- Database size can still matter for cold metadata/random-read paths, eviction
+  scans, page-cache misses, and legacy startup/write scans. The current accepted
+  binary-batch write path, however, is not showing a large-store penalty: both
+  Osiris local hot-origin writes and Vader local large-store writes are far
+  above the public/client ingress rates.
+- The public write ceiling remains before LMDB/local storage. The new status
+  counters do not improve throughput directly; they make the hot-origin plus
+  background-replica architecture safer to operate under load.
+
 ## 2026-06-16 - Tiered LMDB External Pack Roots for Hot Storage
 
 Question: when a large hashtree store uses tiered LMDB, can new hot writes place

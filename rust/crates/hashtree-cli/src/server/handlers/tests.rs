@@ -673,6 +673,34 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
         json["queues"]["optimistic_uploads"]["max_bytes"],
         512 * 1024 * 1024u64
     );
+    assert_eq!(
+        json["queues"]["upload_replication"]["max_bytes"],
+        512 * 1024 * 1024u64
+    );
+    assert!(
+        json["queues"]["upload_replication"]["coalesce_queue_capacity_jobs"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        json["queues"]["upload_replication"]["coalesce_max_blobs"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        json["queues"]["upload_replication"]["upload_concurrency"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(json["queues"]["upload_replication"]["accepted_batches"]
+        .as_u64()
+        .is_some());
+    assert!(json["queues"]["upload_replication"]["failed_batches"]
+        .as_u64()
+        .is_some());
     assert!(
         json["http"]["status_classes"]["recent"]["1xx"]
             .as_u64()
