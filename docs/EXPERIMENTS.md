@@ -39,6 +39,19 @@ Verification:
 - `cargo test -p hashtree-lmdb --lib -- --nocapture`
 - `cargo test -p hashtree-cli --lib`
 
+Live deployment check:
+- Deployed build `d85bb578` to the hot origin and deep replica.
+- A small public first-pass raw upload probe wrote 64 x 64 KiB successfully
+  at 2.43 MiB/s. Replaying the same payloads over the public endpoint returned
+  faster at 7.07 MiB/s, but concurrent accepted uploader traffic made the
+  public replica queue too noisy to use as a duplicate-only signal.
+- A direct single-daemon probe through a temporary admin tunnel removed that
+  noise. First pass wrote 32 x 64 KiB successfully at 2.03 MiB/s; replaying the
+  exact same payloads returned at 5.53 MiB/s and left the replica queue at
+  `reserved_bytes=0` with no recent 5xx.
+- No bucket, R2, or S3 hot path was added or required; this change only removes
+  duplicate local metadata work and duplicate write-behind replication.
+
 ## 2026-06-16 - Replicate Only Inserted Batch Blobs
 
 Question: with the front node acting as the hot origin, is write-behind
