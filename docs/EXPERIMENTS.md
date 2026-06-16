@@ -2493,3 +2493,45 @@ Interpretation:
   origin, and replication drained without backlog. That keeps LMDB, local
   storage, and the hashtree write queue out of the primary-cause box for this
   public-client sample.
+
+### 2026-06-17: PMTiles range-read CPU under live local load
+
+Question: while a local map-index job is reading a large PMTiles object through
+`htree` over localhost, is the active Vader bottleneck ZFS/storage, or repeated
+range-serving CPU work?
+
+Setup:
+- Live deep store on an XFS filesystem backed by a ZFS zvol.
+- Active local map-index job reading the PMTiles object through
+  `http://127.0.0.1:8080/.../tiles.pmtiles` with high tile concurrency.
+- Live daemon was still on the pre-cache binary.
+- Patched side daemon from commit `f71ae2be` was started temporarily on
+  `127.0.0.1:18080` against the same data directory, then stopped after the
+  benchmark.
+- Benchmark: 240 fixed random 16 KiB HTTP range reads against the same PMTiles
+  path, first against live `8080`, then against patched side `18080`.
+
+Results:
+
+| Shape | Result |
+| --- | ---: |
+| Live pre-cache daemon, same host load | avg 62.210 ms, p50 62.266 ms, p95 100.037 ms, wall 14.931 s |
+| Patched side daemon, same host load | avg 3.802 ms, p50 1.927 ms, p95 3.860 ms, wall 0.913 s |
+| Full threaded `hashtree-cli --lib` test suite | 293 passed, 0 failed, 7 ignored |
+
+Interpretation:
+- The active PMTiles/indexer load was mostly `htree` CPU, not ZFS write
+  throughput. Device telemetry during the run showed the hashtree zvol doing
+  light reads, while the daemon spent several cores on localhost HTTP range
+  serving.
+- The old range path rebuilt immutable file chunk metadata and started chunk
+  iteration from the beginning for every request. On a large 2 MiB-chunked
+  object, random tiny ranges can repeatedly scan/copy tens of thousands of
+  chunk entries.
+- Commit `f71ae2be` adds a bounded in-process immutable file metadata cache and
+  starts uniform-chunk range iteration at the overlapping chunk. This removes
+  the observed repeated CPU work without changing on-disk format, CIDs, LMDB,
+  or the storage topology.
+- Do not migrate away from the ZFS zvol for this specific bottleneck. ZFS may
+  still matter for separate bulk-write or durability policy decisions, but this
+  live load is better addressed in hashtree's range-serving path.
