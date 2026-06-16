@@ -10,6 +10,10 @@ Blossom traffic. Detailed measurements belong in `docs/EXPERIMENTS.md`.
 - Public writes should go to the upload hostname backed by the local hashtree
   origin. The preferred hot path is local fileserver and local storage capacity,
   not an R2/S3 object-store admission layer.
+- The current public upload/read hostnames are intended to be plain
+  Cloudflare-proxied DNS to a normal reverse proxy, then to the hashtree daemon.
+  Do not assume the active write path is a Cloudflare Worker or cloudflared
+  Tunnel without rechecking current deployment.
 - Cloudflare Worker upload handlers should not be reintroduced for bulk Blossom
   writes unless a future benchmark shows a clear win. The measured Worker and
   Workerless tunnel paths were both far below local-origin write capacity.
@@ -21,9 +25,12 @@ Blossom traffic. Detailed measurements belong in `docs/EXPERIMENTS.md`.
 ## Known bottleneck
 
 Public bulk upload throughput is currently limited before LMDB and the local
-blob writer. Local-origin writes have reached tens of MiB/s in experiments,
-while public request-body uploads through Cloudflare Tunnel have clustered in
-the low single-digit MiB/s range under realistic load.
+blob writer. Origin-local release-mode writes have reached roughly 100 MiB/s
+for public-shaped binary batches, while public request-body uploads from an
+outside client have clustered around 6-10 MiB/s. In the current deployment this
+is not explained by Worker logic or an active cloudflared tunnel; the remaining
+limit is the client-to-public-origin network path plus Cloudflare proxy/TLS/body
+handling.
 
 Raising the local blob write queue is therefore not the main fix once the origin
 queue is idle. Higher client concurrency mostly increases tail latency when the

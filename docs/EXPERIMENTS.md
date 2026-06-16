@@ -2,6 +2,51 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Public Host Versus Origin-Local Upload Ceiling
+
+Question: after removing Worker/Tunnel upload handling from the active public
+path, is the remaining write ceiling still local storage, Cloudflare edge
+logic, or the client-to-public-origin network path?
+
+Setup:
+- `upload.iris.to` and `cdn.iris.to` resolved to Cloudflare edge addresses for
+  a normal proxied hostname. The public host had nginx listening on 80/443 and
+  no active `cloudflared` service units, so the active public request path was
+  Cloudflare proxy to nginx to the hashtree daemon, not a Worker or Tunnel
+  upload handler.
+- Public samples used the release-built local benchmark client from outside
+  the public host. Origin-local samples used a release-built benchmark client
+  inside the public host's Docker network pointed directly at the hashtree
+  daemon.
+- Shape was 128 x 256 KiB blobs unless otherwise noted.
+
+Results:
+
+| Path | Shape | Result |
+| --- | --- | ---: |
+| Public `upload.iris.to` write | batch-binary, 16 blobs/request, c8 | 7.35 MiB/s |
+| Public `upload.iris.to` write | batch-binary, 32 blobs/request, c8 | 6.42 MiB/s |
+| Admin tunnel to daemon from same outside client | batch-binary, 16 blobs/request, c8 | 8.38 MiB/s |
+| Public `cdn.iris.to` read, first pass | c16 | 25.81 MiB/s |
+| Public `cdn.iris.to` read, warm pass | c16 | 36.95 MiB/s |
+| Origin-local daemon write | batch-binary, 16 blobs/request, c8 | 94.23 MiB/s |
+| Origin-local daemon read | c16 | 899.17 MiB/s |
+
+Interpretation:
+- The daemon, LMDB hot tier, packed external blob storage, and local Docker
+  network are not the current public write bottleneck for this shape.
+- The active public write ceiling is now outside the daemon: client-to-public
+  host network path plus Cloudflare proxy/TLS/request-body handling. From the
+  same outside client, bypassing Cloudflare with an admin tunnel was only
+  modestly faster than the public hostname.
+- Larger public request bodies still did not help; 32-blob batches were slower
+  than 16-blob batches in this sample.
+- Future code work should prioritize sending fewer bytes and fewer objects for
+  git pushes, or a genuinely different long-lived/framed upload admission
+  shape. Future deployment work should prioritize a hot origin with better
+  public ingress bandwidth if bulk writes need to exceed the current WAN/edge
+  ceiling. Do not add R2/S3/bucket admission for this.
+
 ## 2026-06-16 - Git Batch Retries Before Adaptive Split
 
 Question: when `git-remote-htree` sees a transient public-edge batch upload
