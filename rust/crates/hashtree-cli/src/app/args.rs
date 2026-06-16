@@ -233,8 +233,8 @@ pub(crate) enum Commands {
         /// Override content chunk size in bytes for stored files
         #[arg(long)]
         chunk_size: Option<usize>,
-        /// Don't push to file servers (local only)
-        #[arg(long)]
+        /// Store locally only; skip configured Blossom/file-server pushes
+        #[arg(long, alias = "no-blossom-push")]
         local: bool,
     },
 

@@ -974,6 +974,15 @@ fn test_cli_add_parses_chunk_size_override() {
 }
 
 #[test]
+fn test_cli_add_no_blossom_push_alias_sets_local() {
+    let cli = Cli::parse_from(["htree", "add", "site", "--no-blossom-push"]);
+    match cli.command {
+        Commands::Add { local, .. } => assert!(local),
+        _ => panic!("expected add command"),
+    }
+}
+
+#[test]
 fn test_cli_parses_socialgraph_rebuild_profile_index_command() {
     let cli = Cli::parse_from(["htree", "socialgraph", "rebuild-profile-index"]);
 
