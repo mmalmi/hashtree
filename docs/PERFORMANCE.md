@@ -37,6 +37,9 @@ current gap is split between the Cloudflare/public-origin path and the outside
 client's path to that edge. In the current deployment this is not explained by
 Worker logic or an active cloudflared tunnel; the remaining limit is the
 client-to-public-origin network path plus Cloudflare proxy/TLS/body handling.
+A raw SSH stream from the same client to the public hot host landed in the same
+single-digit MiB/s band as Blossom uploads, so treat the host/network path as a
+first-class suspect before tuning LMDB, request parsing, or local write queues.
 
 Raising the local blob write queue is therefore not the main fix once the origin
 queue is idle. Higher client concurrency mostly increases tail latency when the

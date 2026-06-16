@@ -2094,6 +2094,10 @@ Results:
 | Second client raw 32 MiB unauthenticated PUT through public hostname | 7.8 MB/s upload, 401 after body |
 | Second client raw 32 MiB unauthenticated PUT direct-origin diagnostic | 6.8 MB/s upload, 401 after body |
 | Public hostname after 32 MiB socket buffer cap | 9.45 MiB/s |
+| Public hostname, later small c4/c8 recheck, 64 x 256 KiB | 7.00-7.41 MiB/s |
+| Upload-host origin HTTP/1.1-only A/B, 128 x 256 KiB c4 | 9.69 MiB/s |
+| Restored origin HTTP/2 A/B, same 128 x 256 KiB c4 | 9.63 MiB/s |
+| Raw SSH stream from same client to the public hot host | 8.86 MiB/s |
 
 Public batch/concurrency sweep after the above:
 
@@ -2118,6 +2122,12 @@ Interpretation:
 - Direct-origin was not a step-function win in this test and also needs a real
   public certificate before it could be used by normal clients. Do not flip DNS
   to direct-only expecting it to solve write throughput by itself.
+- Disabling Cloudflare-to-origin HTTP/2 for the upload host did not materially
+  change the larger c4 sample, so the origin HTTP version is not the current
+  step-function bottleneck.
+- A raw SSH stream to the same hot host landed in the same throughput band as
+  Blossom uploads, which points at the client-to-hot-host network path rather
+  than LMDB, request parsing, or nginx buffering.
 - The public path currently behaves like a request-body ingress ceiling around
   8-10 MiB/s from multiple clients. Socket buffer modernization is worth keeping
   but did not move this particular sample.
