@@ -16,6 +16,9 @@
 
 - Avoided writing orphan external LMDB pack files when a batch upload repeats
   blobs that are already present, reducing retry/replay write amplification.
+- Served tree-host `HEAD` requests from metadata and streamed full-file `GET`
+  responses so large release assets do not require full blob reads before the
+  first byte is sent.
 
 ## 0.2.68 - 2026-06-12
 

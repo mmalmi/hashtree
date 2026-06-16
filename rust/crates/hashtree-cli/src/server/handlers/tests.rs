@@ -852,6 +852,7 @@ async fn serve_content_or_blob_fetches_raw_blob_over_fips() {
         State(state),
         Path(format!("{hash_hex}.bin")),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
     )
@@ -1472,6 +1473,7 @@ async fn htree_nhash_path_fetches_nested_assets_from_upstream_tree() {
         State(state),
         Path((route_nhash.to_string(), "assets/main.js".to_string())),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
     )
@@ -1512,6 +1514,7 @@ async fn htree_nhash_path_resolves_thumbnail_alias() {
         State(test_app_state(store, Vec::new())),
         Path((route_nhash.to_string(), "thumbnail".to_string())),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
     )
@@ -1564,7 +1567,7 @@ async fn serve_cid_with_range_honors_suffix_ranges() {
     headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=-4"));
 
     let response =
-        serve_cid_with_range(&state, &cid, headers, false, false, Some("clip.mp4")).await;
+        serve_cid_with_range(&state, &cid, headers, false, false, Some("clip.mp4"), false).await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(
         response
@@ -1594,7 +1597,8 @@ async fn serve_cid_with_range_streams_large_explicit_ranges() {
         header::HeaderValue::from_str(&format!("bytes=0-{}", data.len() - 1)).unwrap(),
     );
 
-    let response = serve_cid_with_range(&state, &cid, headers, true, false, Some("clip.mp4")).await;
+    let response =
+        serve_cid_with_range(&state, &cid, headers, true, false, Some("clip.mp4"), false).await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
 
     let mut body = response.into_body();
@@ -1607,6 +1611,88 @@ async fn serve_cid_with_range_streams_large_explicit_ranges() {
         .into_data()
         .expect("first frame should contain bytes");
     assert_eq!(first_chunk.len(), CID_RANGE_STREAM_CHUNK_SIZE as usize);
+}
+
+#[tokio::test]
+async fn serve_cid_with_range_head_returns_metadata_without_body() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let data: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+
+    let response = serve_cid_with_range(
+        &state,
+        &cid,
+        axum::http::HeaderMap::new(),
+        true,
+        false,
+        Some("release.tar.gz"),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let expected_len = data.len().to_string();
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_len.as_str())
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn serve_cid_with_range_streams_large_full_gets() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let data: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+
+    let response = serve_cid_with_range(
+        &state,
+        &cid,
+        axum::http::HeaderMap::new(),
+        true,
+        false,
+        Some("release.tar.gz"),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let expected_len = data.len().to_string();
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_len.as_str())
+    );
+
+    let mut body = response.into_body();
+    let first_frame = timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("first body frame should arrive quickly")
+        .expect("body should yield a frame")
+        .expect("body frame should be ok");
+    let first_chunk = first_frame
+        .into_data()
+        .expect("first frame should contain bytes");
+    assert!(!first_chunk.is_empty());
+    assert!(
+        first_chunk.len() < data.len(),
+        "full GET should stream chunks instead of one huge frame"
+    );
+    assert_eq!(first_chunk.as_ref(), &data[..first_chunk.len()]);
 }
 
 fn copy_blob_between_stores(
@@ -1689,6 +1775,7 @@ async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
         Query(HashMap::new()),
         headers,
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
     )
     .await;
 
@@ -1768,6 +1855,7 @@ async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream(
         Query(HashMap::new()),
         headers,
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
     )
     .await;
 
@@ -1834,6 +1922,7 @@ async fn htree_npub_path_uses_original_uri_for_encoded_tree_names() {
             "v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip".to_string(),
         )),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
     )
@@ -1936,6 +2025,7 @@ async fn htree_npub_rejects_unapproved_plaintext_reads_when_public_reads_disable
         Query(HashMap::new()),
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
     )
     .await;
 
@@ -2023,6 +2113,7 @@ async fn serve_content_or_blob_honors_raw_blob_ranges() {
         State(state),
         Path(format!("{hash_hex}.bin")),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         headers,
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
     )
@@ -2065,6 +2156,7 @@ async fn serve_content_or_blob_redirects_extensionless_cdn_hash_to_bin() {
         State(state),
         Path(hash_hex.clone()),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         headers,
         axum::extract::ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 43123))),
     )
@@ -2106,6 +2198,7 @@ async fn serve_content_or_blob_keeps_extensionless_upload_hash_compatible() {
         State(state),
         Path(hash_hex),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         headers,
         axum::extract::ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 43123))),
     )
@@ -2168,6 +2261,7 @@ async fn raw_blob_miss_allows_short_edge_negative_cache() {
         State(state),
         Path(format!("{missing_hash}.bin")),
         Query(HashMap::new()),
+        axum::http::Method::GET,
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
     )
@@ -2663,6 +2757,7 @@ async fn htree_npub_path_refreshes_stale_cached_root_before_serving_file() {
         Query(HashMap::new()),
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
     )
     .await;
 
@@ -2829,6 +2924,7 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
         Query(HashMap::new()),
         axum::http::HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
     )
     .await;
 

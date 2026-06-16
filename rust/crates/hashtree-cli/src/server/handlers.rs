@@ -12,7 +12,7 @@ use crate::socialgraph;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, OriginalUri, Path, Query, State},
-    http::{header, HeaderMap, Response, StatusCode},
+    http::{header, HeaderMap, Method, Response, StatusCode},
     response::{IntoResponse, Json},
 };
 use bytes::Bytes;
@@ -73,6 +73,7 @@ pub async fn serve_root() -> impl IntoResponse {
 pub async fn serve_root_or_virtual_host(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -80,8 +81,16 @@ pub async fn serve_root_or_virtual_host(
         return serve_root().await.into_response();
     };
 
-    serve_virtual_tree_host_request(&state, &virtual_root, None, params, headers, connect_info)
-        .await
+    serve_virtual_tree_host_request(
+        &state,
+        &virtual_root,
+        None,
+        params,
+        headers,
+        connect_info,
+        method == Method::HEAD,
+    )
+    .await
 }
 
 pub async fn htree_test() -> impl IntoResponse {
@@ -302,6 +311,7 @@ async fn serve_virtual_tree_host_request(
     params: HashMap<String, String>,
     headers: axum::http::HeaderMap,
     connect_info: ConnectInfo<std::net::SocketAddr>,
+    head_only: bool,
 ) -> Response<Body> {
     let Some(root) = parse_virtual_tree_root(virtual_root) else {
         return not_found_response("Not found");
@@ -316,6 +326,7 @@ async fn serve_virtual_tree_host_request(
                 Query(params.clone()),
                 headers.clone(),
                 ConnectInfo(connect_info.0),
+                head_only,
             )
             .await
         }
@@ -328,6 +339,7 @@ async fn serve_virtual_tree_host_request(
                 Query(params.clone()),
                 headers.clone(),
                 ConnectInfo(connect_info.0),
+                head_only,
             )
             .await
         }
@@ -348,6 +360,7 @@ async fn serve_virtual_tree_host_request(
                 Query(params),
                 headers,
                 connect_info,
+                head_only,
             )
             .await
         }
@@ -360,6 +373,7 @@ async fn serve_virtual_tree_host_request(
                 Query(params),
                 headers,
                 connect_info,
+                head_only,
             )
             .await
         }
@@ -370,6 +384,7 @@ pub async fn serve_virtual_host_fallback(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -384,6 +399,7 @@ pub async fn serve_virtual_host_fallback(
         params,
         headers,
         connect_info,
+        method == Method::HEAD,
     )
     .await
 }
@@ -661,6 +677,7 @@ async fn htree_nhash_impl(
     Query(params): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+    head_only: bool,
 ) -> Response<Body> {
     let is_localhost = connect_info.0.ip().is_loopback();
 
@@ -686,13 +703,14 @@ async fn htree_nhash_impl(
         }
     }
 
-    serve_tree_root_response(&state, cid, path, headers, true, is_localhost).await
+    serve_tree_root_response(&state, cid, path, headers, true, is_localhost, head_only).await
 }
 
 pub async fn htree_nhash(
     State(state): State<AppState>,
     Path(nhash): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -704,6 +722,7 @@ pub async fn htree_nhash(
         Query(params),
         headers,
         connect_info,
+        method == Method::HEAD,
     )
     .await
 }
@@ -712,6 +731,7 @@ pub async fn htree_nhash_path(
     State(state): State<AppState>,
     Path((nhash, path)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -723,6 +743,7 @@ pub async fn htree_nhash_path(
         Query(params),
         headers,
         connect_info,
+        method == Method::HEAD,
     )
     .await
 }
@@ -734,6 +755,7 @@ async fn serve_tree_root_response(
     headers: axum::http::HeaderMap,
     is_immutable: bool,
     is_localhost: bool,
+    head_only: bool,
 ) -> Response<Body> {
     let store = state.store.store_arc();
     let tree = HashTree::new(HashTreeConfig::new(store).public());
@@ -778,6 +800,7 @@ async fn serve_tree_root_response(
                     is_immutable,
                     is_localhost,
                     Some(&path),
+                    head_only,
                 )
                 .await;
             }
@@ -813,6 +836,7 @@ async fn serve_tree_root_response(
         is_immutable,
         is_localhost,
         effective_path.as_deref(),
+        head_only,
     )
     .await
 }
@@ -825,6 +849,7 @@ async fn htree_npub_impl(
     Query(params): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+    head_only: bool,
 ) -> Response<Body> {
     let is_localhost = connect_info.0.ip().is_loopback();
     let key = format!("{}/{}", npub, treename);
@@ -891,7 +916,7 @@ async fn htree_npub_impl(
         }
     }
 
-    serve_tree_root_response(&state, cid, path, headers, false, is_localhost).await
+    serve_tree_root_response(&state, cid, path, headers, false, is_localhost, head_only).await
 }
 
 pub async fn htree_npub(
@@ -899,6 +924,7 @@ pub async fn htree_npub(
     OriginalUri(uri): OriginalUri,
     Path((npub, treename)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -919,6 +945,7 @@ pub async fn htree_npub(
         Query(params),
         headers,
         connect_info,
+        method == Method::HEAD,
     )
     .await
 }
@@ -928,6 +955,7 @@ pub async fn htree_npub_path(
     OriginalUri(uri): OriginalUri,
     Path((npub, treename, path)): Path<(String, String, String)>,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -949,6 +977,7 @@ pub async fn htree_npub_path(
         Query(params),
         headers,
         connect_info,
+        method == Method::HEAD,
     )
     .await
 }
@@ -1085,27 +1114,27 @@ async fn serve_cid_with_range(
     is_immutable: bool,
     is_localhost: bool,
     filename_hint: Option<&str>,
+    head_only: bool,
 ) -> Response<Body> {
     let store = state.store.store_arc();
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let content_type = content_type_for_path(filename_hint);
+    let total_size = match get_size_cid_with_fetch(state, &tree, cid).await {
+        Ok(Some(size)) => size,
+        Ok(None) => {
+            return not_found_response("Not found");
+        }
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from(format!("Error: {}", e)))
+                .unwrap();
+        }
+    };
 
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     if let Some(range_str) = range_header {
-        let total_size = match get_size_cid_with_fetch(state, &tree, cid).await {
-            Ok(Some(size)) => size,
-            Ok(None) => {
-                return not_found_response("Not found");
-            }
-            Err(e) => {
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(format!("Error: {}", e)))
-                    .unwrap();
-            }
-        };
-
         if let Some(parsed_range) = parse_byte_range(range_str, total_size) {
             let (start, end_inclusive) = match parsed_range {
                 ParsedByteRange::Satisfiable {
@@ -1125,12 +1154,16 @@ async fn serve_cid_with_range(
             let end_exclusive = end_inclusive.saturating_add(1);
             let content_length = end_exclusive.saturating_sub(start) as usize;
             let content_range = format!("bytes {}-{}/{}", start, end_inclusive, total_size);
-            let body = Body::from_stream(stream_file_range_cid_with_fetch(
-                state.clone(),
-                cid.clone(),
-                start,
-                end_inclusive,
-            ));
+            let body = if head_only {
+                Body::empty()
+            } else {
+                Body::from_stream(stream_file_range_cid_with_fetch(
+                    state.clone(),
+                    cid.clone(),
+                    start,
+                    end_inclusive,
+                ))
+            };
 
             let mut builder = Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
@@ -1150,24 +1183,10 @@ async fn serve_cid_with_range(
         }
     }
 
-    let data = match get_cid_with_fetch(state, &tree, cid).await {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-            return not_found_response("Not found");
-        }
-        Err(e) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from(format!("Error: {}", e)))
-                .unwrap();
-        }
-    };
-
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, data.len())
+        .header(header::CONTENT_LENGTH, total_size)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
@@ -1178,7 +1197,17 @@ async fn serve_cid_with_range(
         builder = builder.header("X-Source", "local");
     }
 
-    builder.body(Body::from(data)).unwrap()
+    let body = if head_only || total_size == 0 {
+        Body::empty()
+    } else {
+        Body::from_stream(stream_file_range_cid_with_fetch(
+            state.clone(),
+            cid.clone(),
+            0,
+            total_size.saturating_sub(1),
+        ))
+    };
+    builder.body(body).unwrap()
 }
 
 /// Internal content serving (shared by CID and blossom routes)
@@ -1381,6 +1410,7 @@ pub async fn serve_content_or_blob(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -1392,6 +1422,7 @@ pub async fn serve_content_or_blob(
             params,
             headers,
             connect_info,
+            method == Method::HEAD,
         )
         .await
         .into_response();
@@ -1590,6 +1621,7 @@ pub async fn serve_npub(
     OriginalUri(uri): OriginalUri,
     Path(params): Path<HashMap<String, String>>,
     Query(query): Query<HashMap<String, String>>,
+    method: Method,
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -1629,6 +1661,7 @@ pub async fn serve_npub(
         Query(query),
         headers,
         connect_info,
+        method == Method::HEAD,
     )
     .await
     .into_response()
