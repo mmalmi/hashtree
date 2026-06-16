@@ -4,6 +4,9 @@ use crate::server::blob_read::{
     acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY,
 };
 use crate::webrtc::WebRTCState;
+use hashtree_core::{Link, TreeNode};
+
+const DEFAULT_COLD_READ_PREFETCH_CONCURRENCY: usize = 32;
 
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
     fetch_and_cache_blob_with_source(state, hash)
@@ -518,6 +521,10 @@ pub(super) async fn get_cid_with_fetch<S: Store>(
             return Ok(None);
         }
 
+        if let Err(err) = prefetch_file_range_chunks_with_fetch(state, tree, cid, 0, None).await {
+            tracing::debug!("file chunk prefetch skipped: {}", err);
+        }
+
         match tree.get(cid, None).await {
             Ok(data) => return Ok(data),
             Err(HashTreeError::MissingChunk(missing)) => {
@@ -544,6 +551,11 @@ pub(super) async fn read_file_range_cid_with_fetch<S: Store>(
             return Ok(None);
         }
 
+        if let Err(err) = prefetch_file_range_chunks_with_fetch(state, tree, cid, start, end).await
+        {
+            tracing::debug!("file range chunk prefetch skipped: {}", err);
+        }
+
         match tree.read_file_range_cid(cid, start, end).await {
             Ok(data) => return Ok(data),
             Err(HashTreeError::MissingChunk(missing)) => {
@@ -553,6 +565,132 @@ pub(super) async fn read_file_range_cid_with_fetch<S: Store>(
             }
             Err(err) => return Err(err.to_string()),
         }
+    }
+}
+
+async fn prefetch_file_range_chunks_with_fetch<S: Store>(
+    state: &AppState,
+    tree: &HashTree<S>,
+    cid: &Cid,
+    start: u64,
+    end: Option<u64>,
+) -> Result<(), String> {
+    let Some(node) = tree.get_node(cid).await.map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    if node.node_type != LinkType::File {
+        return Ok(());
+    }
+
+    let total_size: u64 = node.links.iter().map(|link| link.size).sum();
+    let actual_end = end.unwrap_or(total_size).min(total_size);
+    if start >= actual_end {
+        return Ok(());
+    }
+
+    let mut hashes = Vec::new();
+    let mut seen = HashSet::new();
+    collect_range_leaf_hashes(
+        state,
+        tree,
+        &node,
+        start,
+        actual_end,
+        0,
+        &mut hashes,
+        &mut seen,
+    )
+    .await?;
+
+    if hashes.is_empty() {
+        return Ok(());
+    }
+
+    let concurrency = cold_read_prefetch_concurrency();
+    let mut fetches = stream::iter(
+        hashes
+            .into_iter()
+            .map(|hash| async move { ensure_blob_available(state, &hash).await }),
+    )
+    .buffer_unordered(concurrency);
+
+    while let Some(result) = fetches.next().await {
+        result?;
+    }
+
+    Ok(())
+}
+
+fn cold_read_prefetch_concurrency() -> usize {
+    std::env::var("HTREE_COLD_READ_PREFETCH_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 256))
+        .unwrap_or(DEFAULT_COLD_READ_PREFETCH_CONCURRENCY)
+}
+
+async fn collect_range_leaf_hashes<S: Store>(
+    state: &AppState,
+    tree: &HashTree<S>,
+    node: &TreeNode,
+    start: u64,
+    end: u64,
+    base_offset: u64,
+    hashes: &mut Vec<[u8; 32]>,
+    seen: &mut HashSet<[u8; 32]>,
+) -> Result<(), String> {
+    let mut current_offset = base_offset;
+
+    for link in &node.links {
+        let child_start = current_offset;
+        let child_end = child_start.saturating_add(link.size);
+        current_offset = child_end;
+
+        if child_end <= start {
+            continue;
+        }
+        if child_start >= end {
+            break;
+        }
+
+        if link.link_type == LinkType::File {
+            if ensure_blob_available(state, &link.hash).await? {
+                let child_cid = link_to_cid(link);
+                if let Some(child_node) = tree
+                    .get_node(&child_cid)
+                    .await
+                    .map_err(|err| err.to_string())?
+                {
+                    if child_node.node_type == LinkType::File {
+                        Box::pin(collect_range_leaf_hashes(
+                            state,
+                            tree,
+                            &child_node,
+                            start,
+                            end,
+                            child_start,
+                            hashes,
+                            seen,
+                        ))
+                        .await?;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if seen.insert(link.hash) {
+            hashes.push(link.hash);
+        }
+    }
+
+    Ok(())
+}
+
+fn link_to_cid(link: &Link) -> Cid {
+    Cid {
+        hash: link.hash,
+        key: link.key,
     }
 }
 

@@ -51,6 +51,25 @@ struct UpstreamBlobTestState {
     requested_ids: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+#[derive(Clone)]
+struct DelayedUpstreamBlobTestState {
+    store: Arc<HashtreeStore>,
+    requested_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    max_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct InFlightRequest {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for InFlightRequest {
+    fn drop(&mut self) {
+        self.in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 async fn serve_blob_for_test(
     AxumState(store): AxumState<Arc<HashtreeStore>>,
     AxumPath(id): AxumPath<String>,
@@ -64,6 +83,60 @@ async fn serve_blob_for_test(
     };
 
     match store.get_blob(&hash) {
+        Ok(Some(data)) => Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(data))
+            .unwrap(),
+        Ok(None) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("missing"))
+            .unwrap(),
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn serve_delayed_blob_with_request_log_for_test(
+    AxumState(state): AxumState<DelayedUpstreamBlobTestState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response<Body> {
+    let active = state
+        .in_flight
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    let _guard = InFlightRequest {
+        in_flight: state.in_flight.clone(),
+    };
+
+    let mut observed = state
+        .max_in_flight
+        .load(std::sync::atomic::Ordering::SeqCst);
+    while active > observed {
+        match state.max_in_flight.compare_exchange(
+            observed,
+            active,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => break,
+            Err(next) => observed = next,
+        }
+    }
+
+    state.requested_ids.lock().unwrap().push(id.clone());
+    tokio::time::sleep(Duration::from_millis(75)).await;
+
+    let id = id.strip_suffix(".bin").unwrap_or(&id).to_string();
+    let Ok(hash) = from_hex(&id) else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from("invalid hash"))
+            .unwrap();
+    };
+
+    match state.store.get_blob(&hash) {
         Ok(Some(data)) => Response::builder()
             .status(StatusCode::OK)
             .body(Body::from(data))
@@ -905,6 +978,63 @@ async fn fetch_missing_chunk_coalesces_concurrent_upstream_fetches() {
         .get_blob(&from_hex(&hash_hex).unwrap())
         .unwrap()
         .is_some());
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn get_cid_with_fetch_prefetches_missing_file_chunks_concurrently() {
+    let source_dir = TempDir::new().unwrap();
+    let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
+    let source_tree =
+        HashTree::new(HashTreeConfig::new(source_store.store_arc()).with_chunk_size(64 * 1024));
+    let data: Vec<u8> = (0..(512 * 1024 + 17)).map(|i| (i % 251) as u8).collect();
+    let (cid, _) = source_tree.put(&data).await.unwrap();
+
+    let requested_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream_router = Router::new()
+        .route("/:id", get(serve_delayed_blob_with_request_log_for_test))
+        .with_state(DelayedUpstreamBlobTestState {
+            store: source_store.clone(),
+            requested_ids: requested_ids.clone(),
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_server =
+        tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
+
+    let local_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
+    let encrypted_file_node = source_store
+        .get_blob(&cid.hash)
+        .unwrap()
+        .expect("source file node");
+    local_store.put_blob(&encrypted_file_node).unwrap();
+
+    let state = test_app_state(
+        local_store.clone(),
+        vec![format!("http://{}", upstream_addr)],
+    );
+    let local_tree = HashTree::new(HashTreeConfig::new(local_store.store_arc()).public());
+
+    let fetched = get_cid_with_fetch(&state, &local_tree, &cid)
+        .await
+        .unwrap()
+        .expect("fetched file");
+
+    assert_eq!(fetched, data);
+    assert!(
+        requested_ids.lock().unwrap().len() > 1,
+        "expected multiple missing leaf chunks to be fetched"
+    );
+    assert!(
+        max_in_flight.load(std::sync::atomic::Ordering::SeqCst) > 1,
+        "missing file chunks should be fetched concurrently"
+    );
 
     upstream_server.abort();
 }
