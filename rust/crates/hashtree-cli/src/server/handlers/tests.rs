@@ -836,6 +836,63 @@ async fn ensure_blob_available_coalesces_concurrent_upstream_fetches() {
 }
 
 #[tokio::test]
+async fn fetch_missing_chunk_coalesces_concurrent_upstream_fetches() {
+    let source_dir = TempDir::new().unwrap();
+    let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
+    let requested_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let data = b"shared-missing-child-chunk";
+    source_store.put_blob(data).unwrap();
+    let hash_hex = hex::encode(sha2::Sha256::digest(data));
+
+    let upstream_router = Router::new()
+        .route("/:id", get(serve_blob_with_request_log_for_test))
+        .with_state(UpstreamBlobTestState {
+            store: source_store.clone(),
+            requested_ids: requested_ids.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_server =
+        tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
+
+    let local_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
+    let state = test_app_state(
+        local_store.clone(),
+        vec![format!("http://{}", upstream_addr)],
+    );
+
+    let (first, second, third) = tokio::join!(
+        async {
+            let mut seen = HashSet::new();
+            fetch_missing_chunk(&state, &mut seen, &hash_hex).await
+        },
+        async {
+            let mut seen = HashSet::new();
+            fetch_missing_chunk(&state, &mut seen, &hash_hex).await
+        },
+        async {
+            let mut seen = HashSet::new();
+            fetch_missing_chunk(&state, &mut seen, &hash_hex).await
+        },
+    );
+
+    assert_eq!(first.unwrap(), true);
+    assert_eq!(second.unwrap(), true);
+    assert_eq!(third.unwrap(), true);
+    assert_eq!(
+        requested_ids.lock().unwrap().as_slice(),
+        &[format!("{}.bin", hash_hex)]
+    );
+    assert!(local_store
+        .get_blob(&from_hex(&hash_hex).unwrap())
+        .unwrap()
+        .is_some());
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
 async fn resolve_thumbnail_path_prefers_root_thumbnail() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());

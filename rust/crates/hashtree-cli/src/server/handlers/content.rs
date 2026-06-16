@@ -399,7 +399,7 @@ pub(super) async fn fetch_missing_chunk(
 
     let hash =
         from_hex(missing).map_err(|e| format!("Invalid missing chunk hash {}: {}", missing, e))?;
-    Ok(fetch_and_cache_blob(state, &hash).await)
+    ensure_blob_available(state, &hash).await
 }
 
 pub(super) async fn list_directory_with_fetch<S: Store>(
