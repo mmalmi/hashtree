@@ -1,7 +1,7 @@
 //! LMDB-backed content-addressed blob storage.
 
 use async_trait::async_trait;
-use hashtree_core::store::{Store, StoreError, StoreStats};
+use hashtree_core::store::{PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{to_hex, types::Hash};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
@@ -32,6 +32,7 @@ const STORE_TOTALS_BYTES: usize = 32;
 const STORE_TOTALS_KEY: &[u8] = b"totals";
 const EXTERNAL_BLOB_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-blob-v1\0";
 const EXTERNAL_PACK_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-v1\0";
+const EXTERNAL_PACK_RESERVED_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-reserved-v1\0";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
 const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
@@ -92,20 +93,6 @@ struct ExternalPackRef {
     name: String,
     offset: u64,
     len: u64,
-}
-
-enum PreparedBlob<'a> {
-    Inline(&'a [u8]),
-    External(Vec<u8>),
-}
-
-impl PreparedBlob<'_> {
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Inline(data) => data,
-            Self::External(marker) => marker,
-        }
-    }
 }
 
 /// LMDB-backed blob store implementing hashtree's Store trait.
@@ -461,25 +448,6 @@ impl LmdbBlobStore {
         self.env.info().map_size
     }
 
-    fn evict_before_write(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
-        let max = self.max_bytes.load(Ordering::Relaxed);
-        if max == 0 {
-            return Ok(0);
-        }
-
-        let current = self.current_bytes.load(Ordering::Relaxed);
-        if current.saturating_add(incoming_bytes) <= max {
-            return Ok(0);
-        }
-
-        let target = if incoming_bytes >= max {
-            0
-        } else {
-            (max.saturating_mul(9) / 10).min(max.saturating_sub(incoming_bytes))
-        };
-        self.evict_to_target(current, target)
-    }
-
     fn evict_for_write_pressure(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
         let current = self.current_bytes.load(Ordering::Relaxed);
         if current == 0 {
@@ -491,92 +459,59 @@ impl LmdbBlobStore {
         self.evict_to_target(current, target)
     }
 
-    fn put_sync_attempt(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
-        let prepared = self.prepare_blob_for_write(&hash, data)?;
-        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
-        let inserted = match self.blobs.put_with_flags(
-            &mut wtxn,
-            PutFlags::NO_OVERWRITE,
-            &hash,
-            prepared.bytes(),
-        ) {
-            Ok(()) => true,
-            Err(HeedError::Mdb(MdbError::KeyExist)) => false,
-            Err(err) => return Err(map_heed_error(err)),
-        };
-
-        if inserted {
-            let order = self.next_order.fetch_add(1, Ordering::Relaxed);
-            let meta = Self::encode_blob_meta(BlobMeta {
-                order,
-                size: data.len() as u64,
-                last_accessed_at: unix_timestamp_now(),
-            });
-            let order_key = Self::encode_order_key(order, &hash);
-            self.metadata
-                .put(&mut wtxn, &hash, &meta)
-                .map_err(map_heed_error)?;
-            self.eviction_order
-                .put(&mut wtxn, &order_key, &())
-                .map_err(map_heed_error)?;
-            let pin_count = self
-                .read_pin_count_lossy(&wtxn, &hash)
-                .map_err(map_heed_error)?;
-            self.increment_totals_in_txn(
-                &mut wtxn,
-                1,
-                data.len() as u64,
-                u64::from(pin_count > 0),
-                if pin_count > 0 { data.len() as u64 } else { 0 },
-            )
-            .map_err(map_heed_error)?;
+    fn enforce_max_bytes_after_insert(&self, inserted_bytes: u64) -> Result<u64, StoreError> {
+        let max = self.max_bytes.load(Ordering::Relaxed);
+        if max == 0 || inserted_bytes == 0 {
+            return Ok(0);
         }
 
-        wtxn.commit().map_err(map_heed_error)?;
-        Ok(inserted)
+        let current = self.current_bytes.load(Ordering::Relaxed);
+        if current <= max {
+            return Ok(0);
+        }
+
+        let target = if inserted_bytes >= max {
+            inserted_bytes
+        } else {
+            max.saturating_mul(9)
+                .saturating_div(10)
+                .saturating_add(inserted_bytes)
+                .min(max)
+        };
+        self.evict_to_target(current, target)
     }
 
-    fn put_many_sync_attempt(&self, items: &[(Hash, &[u8])]) -> Result<(usize, u64), StoreError> {
-        let prepared = self.prepare_blobs_for_write(items)?;
-        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
-        let mut inserted = 0usize;
+    fn write_metadata_for_inserted_blobs(
+        &self,
+        wtxn: &mut heed::RwTxn,
+        inserted_entries: &[(Hash, u64)],
+    ) -> Result<(), StoreError> {
+        if inserted_entries.is_empty() {
+            return Ok(());
+        }
+
+        let now = unix_timestamp_now();
         let mut inserted_bytes = 0u64;
         let mut inserted_pinned = 0u64;
         let mut inserted_pinned_bytes = 0u64;
 
-        for (hash, data_len, prepared) in &prepared {
-            let inserted_blob = match self.blobs.put_with_flags(
-                &mut wtxn,
-                PutFlags::NO_OVERWRITE,
-                hash,
-                prepared.bytes(),
-            ) {
-                Ok(()) => true,
-                Err(HeedError::Mdb(MdbError::KeyExist)) => false,
-                Err(err) => return Err(map_heed_error(err)),
-            };
-
-            if !inserted_blob {
-                continue;
-            }
-
+        for (hash, data_len) in inserted_entries {
             let order = self.next_order.fetch_add(1, Ordering::Relaxed);
             let meta = Self::encode_blob_meta(BlobMeta {
                 order,
                 size: *data_len,
-                last_accessed_at: unix_timestamp_now(),
+                last_accessed_at: now,
             });
             let order_key = Self::encode_order_key(order, hash);
             self.metadata
-                .put(&mut wtxn, hash, &meta)
+                .put(wtxn, hash, &meta)
                 .map_err(map_heed_error)?;
             self.eviction_order
-                .put(&mut wtxn, &order_key, &())
+                .put(wtxn, &order_key, &())
                 .map_err(map_heed_error)?;
-            inserted += 1;
             inserted_bytes = inserted_bytes.saturating_add(*data_len);
             if self
-                .read_pin_count_lossy(&wtxn, hash)
+                .read_pin_count_lossy(wtxn, hash)
                 .map_err(map_heed_error)?
                 > 0
             {
@@ -585,19 +520,122 @@ impl LmdbBlobStore {
             }
         }
 
-        if inserted > 0 {
-            self.increment_totals_in_txn(
-                &mut wtxn,
-                inserted as u64,
-                inserted_bytes,
-                inserted_pinned,
-                inserted_pinned_bytes,
-            )
-            .map_err(map_heed_error)?;
+        self.increment_totals_in_txn(
+            wtxn,
+            inserted_entries.len() as u64,
+            inserted_bytes,
+            inserted_pinned,
+            inserted_pinned_bytes,
+        )
+        .map_err(map_heed_error)?;
+        Ok(())
+    }
+
+    fn put_sync_attempt(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        let external_config = self
+            .external_blobs
+            .as_ref()
+            .filter(|config| data.len() >= config.min_bytes);
+        let external_marker = external_config.map(|_| Self::external_blob_ref(&hash));
+        let value = external_marker.as_deref().unwrap_or(data);
+
+        match self
+            .blobs
+            .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, &hash, value)
+        {
+            Ok(()) => {}
+            Err(HeedError::Mdb(MdbError::KeyExist)) => return Ok(false),
+            Err(err) => return Err(map_heed_error(err)),
         }
 
+        if let Some(config) = external_config {
+            self.write_external_blob(&hash, data, config)?;
+        }
+        self.write_metadata_for_inserted_blobs(&mut wtxn, &[(hash, data.len() as u64)])?;
         wtxn.commit().map_err(map_heed_error)?;
-        Ok((inserted, inserted_bytes))
+        Ok(true)
+    }
+
+    fn put_many_sync_attempt(
+        &self,
+        total: usize,
+        items: &[(Hash, &[u8])],
+    ) -> Result<PutManyReport, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        let mut report = PutManyReport {
+            total,
+            ..PutManyReport::default()
+        };
+        let mut inserted_entries: Vec<(Hash, u64)> = Vec::new();
+        let mut external_blobs: Vec<(Hash, &[u8])> = Vec::new();
+        let mut external_pack_entries: Vec<(usize, Hash, &[u8])> = Vec::new();
+        let external_config = self.external_blobs.as_ref();
+
+        for (hash, data) in items {
+            let external = external_config.filter(|config| data.len() >= config.min_bytes);
+            let pack_external = external.is_some_and(|config| config.pack_target_bytes.is_some());
+            let reserved_marker;
+            let external_marker;
+            let value = if pack_external {
+                reserved_marker = Self::external_pack_reserved_ref(hash);
+                reserved_marker.as_slice()
+            } else if external.is_some() {
+                external_marker = Self::external_blob_ref(hash);
+                external_marker.as_slice()
+            } else {
+                *data
+            };
+
+            match self
+                .blobs
+                .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, hash, value)
+            {
+                Ok(()) => {}
+                Err(HeedError::Mdb(MdbError::KeyExist)) => continue,
+                Err(err) => return Err(map_heed_error(err)),
+            }
+
+            let inserted_index = inserted_entries.len();
+            let data_len = data.len() as u64;
+            inserted_entries.push((*hash, data_len));
+            report.inserted = report.inserted.saturating_add(1);
+            report.inserted_bytes = report.inserted_bytes.saturating_add(data_len);
+            report.inserted_hashes.push(*hash);
+
+            if pack_external {
+                external_pack_entries.push((inserted_index, *hash, *data));
+            } else if external.is_some() {
+                external_blobs.push((*hash, *data));
+            }
+        }
+
+        if inserted_entries.is_empty() {
+            return Ok(report);
+        }
+
+        if let Some(config) = external_config {
+            for (hash, data) in external_blobs {
+                self.write_external_blob(&hash, data, config)?;
+            }
+            if let Some(pack_target_bytes) = config.pack_target_bytes {
+                for (inserted_index, marker) in self.write_external_blob_packs(
+                    &external_pack_entries,
+                    config,
+                    pack_target_bytes,
+                )? {
+                    let hash = inserted_entries[inserted_index].0;
+                    self.blobs
+                        .put(&mut wtxn, &hash, &marker)
+                        .map_err(map_heed_error)?;
+                }
+            }
+        }
+
+        self.write_metadata_for_inserted_blobs(&mut wtxn, &inserted_entries)?;
+
+        wtxn.commit().map_err(map_heed_error)?;
+        Ok(report)
     }
 
     /// Get storage statistics.
@@ -652,7 +690,6 @@ impl LmdbBlobStore {
     /// Sync put operation (for use in sync contexts).
     pub fn put_sync(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
         let incoming_bytes = data.len() as u64;
-        self.evict_before_write(incoming_bytes)?;
 
         let mut retried_after_eviction = false;
         loop {
@@ -661,8 +698,7 @@ impl LmdbBlobStore {
                     if inserted {
                         self.current_bytes
                             .fetch_add(incoming_bytes, Ordering::Relaxed);
-                    } else {
-                        self.touch_accessed_sync(&hash, unix_timestamp_now())?;
+                        self.enforce_max_bytes_after_insert(incoming_bytes)?;
                     }
                     return Ok(inserted);
                 }
@@ -678,51 +714,42 @@ impl LmdbBlobStore {
         }
     }
 
-    /// Sync batch put operation (for use in sync contexts).
-    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+    /// Sync batch put operation with exact insert accounting.
+    pub fn put_many_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
+        let total = items.len();
         if items.is_empty() {
-            return Ok(0);
+            return Ok(PutManyReport::default());
         }
 
-        let mut sorted_hashes: Vec<Hash> = items.iter().map(|(hash, _)| *hash).collect();
-        sorted_hashes.sort_unstable();
-        sorted_hashes.dedup();
-        let existing = self.existing_hashes_in_sorted_candidates(&sorted_hashes)?;
-        let existing_hashes: HashSet<Hash> = sorted_hashes
-            .into_iter()
-            .zip(existing)
-            .filter_map(|(hash, exists)| exists.then_some(hash))
-            .collect();
         let mut seen_missing = HashSet::new();
         let write_items = items
             .iter()
             .filter_map(|(hash, data)| {
-                if existing_hashes.contains(hash) || !seen_missing.insert(*hash) {
+                if !seen_missing.insert(*hash) {
                     None
                 } else {
                     Some((*hash, data.as_slice()))
                 }
             })
             .collect::<Vec<_>>();
-        if write_items.is_empty() {
-            return Ok(0);
-        }
-
         let incoming_bytes = write_items
             .iter()
             .map(|(_, data)| data.len() as u64)
             .fold(0u64, |total, size| total.saturating_add(size));
-        self.evict_before_write(incoming_bytes)?;
 
         let mut retried_after_eviction = false;
         loop {
-            match self.put_many_sync_attempt(&write_items) {
-                Ok((inserted, inserted_bytes)) => {
-                    if inserted_bytes > 0 {
+            match self.put_many_sync_attempt(total, &write_items) {
+                Ok(report) => {
+                    if report.inserted_bytes > 0 {
                         self.current_bytes
-                            .fetch_add(inserted_bytes, Ordering::Relaxed);
+                            .fetch_add(report.inserted_bytes, Ordering::Relaxed);
+                        self.enforce_max_bytes_after_insert(report.inserted_bytes)?;
                     }
-                    return Ok(inserted);
+                    return Ok(report);
                 }
                 Err(err) if is_map_full_store_error(&err) && !retried_after_eviction => {
                     let freed = self.evict_for_write_pressure(incoming_bytes)?;
@@ -734,6 +761,12 @@ impl LmdbBlobStore {
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    /// Sync batch put operation (for use in sync contexts).
+    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_report_sync(items)
+            .map(|report| report.inserted)
     }
 
     /// Sync get operation (for use in sync contexts).
@@ -1241,90 +1274,17 @@ impl LmdbBlobStore {
         Some(u32::from_be_bytes(bytes.try_into().ok()?))
     }
 
-    fn prepare_blob_for_write<'a>(
-        &self,
-        hash: &Hash,
-        data: &'a [u8],
-    ) -> Result<PreparedBlob<'a>, StoreError> {
-        let Some(config) = &self.external_blobs else {
-            return Ok(PreparedBlob::Inline(data));
-        };
-        if data.len() < config.min_bytes {
-            return Ok(PreparedBlob::Inline(data));
-        }
-
-        self.write_external_blob(hash, data, config)?;
-        Ok(PreparedBlob::External(Self::external_blob_ref(hash)))
-    }
-
-    fn prepare_blobs_for_write<'a>(
-        &self,
-        items: &[(Hash, &'a [u8])],
-    ) -> Result<Vec<(Hash, u64, PreparedBlob<'a>)>, StoreError> {
-        let Some(config) = &self.external_blobs else {
-            return Ok(items
-                .iter()
-                .map(|(hash, data)| (*hash, data.len() as u64, PreparedBlob::Inline(*data)))
-                .collect());
-        };
-        let Some(pack_target_bytes) = config.pack_target_bytes else {
-            return items
-                .iter()
-                .map(|(hash, data)| {
-                    self.prepare_blob_for_write(hash, data)
-                        .map(|prepared| (*hash, data.len() as u64, prepared))
-                })
-                .collect();
-        };
-
-        let mut prepared = Vec::with_capacity(items.len());
-        prepared.resize_with(items.len(), || None);
-        let mut pack_entries: Vec<(usize, Hash, &'a [u8])> = Vec::new();
-        let mut pack_bytes = 0usize;
-
-        for (index, (hash, data)) in items.iter().enumerate() {
-            if data.len() < config.min_bytes {
-                prepared[index] = Some((*hash, data.len() as u64, PreparedBlob::Inline(*data)));
-                continue;
-            }
-
-            let would_exceed_target = !pack_entries.is_empty()
-                && pack_bytes.saturating_add(data.len()) > pack_target_bytes;
-            if would_exceed_target {
-                for (entry_index, marker) in self.write_external_blob_pack(&pack_entries, config)? {
-                    let (hash, data) = &items[entry_index];
-                    prepared[entry_index] =
-                        Some((*hash, data.len() as u64, PreparedBlob::External(marker)));
-                }
-                pack_entries.clear();
-                pack_bytes = 0;
-            }
-
-            pack_entries.push((index, *hash, *data));
-            pack_bytes = pack_bytes.saturating_add(data.len());
-        }
-
-        if !pack_entries.is_empty() {
-            for (entry_index, marker) in self.write_external_blob_pack(&pack_entries, config)? {
-                let (hash, data) = &items[entry_index];
-                prepared[entry_index] =
-                    Some((*hash, data.len() as u64, PreparedBlob::External(marker)));
-            }
-        }
-
-        prepared
-            .into_iter()
-            .map(|prepared| {
-                prepared.ok_or_else(|| {
-                    StoreError::Other("internal error preparing packed LMDB blobs".to_string())
-                })
-            })
-            .collect()
-    }
-
     fn external_blob_ref(hash: &Hash) -> Vec<u8> {
         let mut marker = Vec::with_capacity(EXTERNAL_BLOB_MARKER_PREFIX.len() + hash.len());
         marker.extend_from_slice(EXTERNAL_BLOB_MARKER_PREFIX);
+        marker.extend_from_slice(hash);
+        marker
+    }
+
+    fn external_pack_reserved_ref(hash: &Hash) -> Vec<u8> {
+        let mut marker =
+            Vec::with_capacity(EXTERNAL_PACK_RESERVED_MARKER_PREFIX.len() + hash.len());
+        marker.extend_from_slice(EXTERNAL_PACK_RESERVED_MARKER_PREFIX);
         marker.extend_from_slice(hash);
         marker
     }
@@ -1486,6 +1446,37 @@ impl LmdbBlobStore {
             File::open(parent)?.sync_all()?;
         }
         Ok(())
+    }
+
+    fn write_external_blob_packs(
+        &self,
+        entries: &[(usize, Hash, &[u8])],
+        config: &ExternalBlobConfig,
+        pack_target_bytes: usize,
+    ) -> Result<Vec<(usize, Vec<u8>)>, StoreError> {
+        let mut markers = Vec::with_capacity(entries.len());
+        let mut pack_entries = Vec::new();
+        let mut pack_bytes = 0usize;
+
+        for entry in entries {
+            let data_len = entry.2.len();
+            let would_exceed_target =
+                !pack_entries.is_empty() && pack_bytes.saturating_add(data_len) > pack_target_bytes;
+            if would_exceed_target {
+                markers.extend(self.write_external_blob_pack(&pack_entries, config)?);
+                pack_entries.clear();
+                pack_bytes = 0;
+            }
+
+            pack_entries.push(*entry);
+            pack_bytes = pack_bytes.saturating_add(data_len);
+        }
+
+        if !pack_entries.is_empty() {
+            markers.extend(self.write_external_blob_pack(&pack_entries, config)?);
+        }
+
+        Ok(markers)
     }
 
     fn write_external_blob_pack(
@@ -2120,17 +2111,95 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_put_refreshes_blob_last_accessed() -> Result<(), StoreError> {
+    fn duplicate_put_is_noop_and_preserves_blob_last_accessed() -> Result<(), StoreError> {
         let temp = TempDir::new().unwrap();
         let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
 
         let data = b"already here";
         let hash = sha256(data);
         assert!(store.put_sync(hash, data)?);
-        store.touch_accessed_sync(&hash, 1)?;
+        let accessed = store.last_accessed_at_sync(&hash)?;
 
         assert!(!store.put_sync(hash, data)?);
-        assert!(store.last_accessed_at_sync(&hash)?.unwrap_or(0) > 1);
+        assert_eq!(store.last_accessed_at_sync(&hash)?, accessed);
+
+        let stats = store.stats()?;
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.total_bytes, data.len() as u64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn put_many_report_counts_only_new_hashes_and_bytes() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+
+        let existing = b"existing";
+        let existing_hash = sha256(existing);
+        assert!(store.put_sync(existing_hash, existing)?);
+
+        let new_one = b"new one";
+        let new_two = b"new two";
+        let new_one_hash = sha256(new_one);
+        let new_two_hash = sha256(new_two);
+        let items = vec![
+            (existing_hash, existing.to_vec()),
+            (new_one_hash, new_one.to_vec()),
+            (new_one_hash, new_one.to_vec()),
+            (new_two_hash, new_two.to_vec()),
+        ];
+
+        let report = store.put_many_report_sync(&items)?;
+
+        assert_eq!(report.total, 4);
+        assert_eq!(report.inserted, 2);
+        assert_eq!(
+            report.inserted_bytes,
+            (new_one.len() + new_two.len()) as u64
+        );
+        assert_eq!(report.inserted_hashes, vec![new_one_hash, new_two_hash]);
+        assert_eq!(store.put_many_sync(&items)?, 0);
+        assert_eq!(
+            store.stats()?.total_bytes,
+            (existing.len() + new_one.len() + new_two.len()) as u64
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_heavy_batch_does_not_evict_by_candidate_bytes() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+        store.set_max_bytes(35);
+
+        let first = [1u8; 10];
+        let second = [2u8; 10];
+        let third = [3u8; 10];
+        let new = [4u8; 5];
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let third_hash = sha256(&third);
+        let new_hash = sha256(&new);
+        assert!(store.put_sync(first_hash, &first)?);
+        assert!(store.put_sync(second_hash, &second)?);
+        assert!(store.put_sync(third_hash, &third)?);
+        assert_eq!(store.stats()?.total_bytes, 30);
+
+        let report = store.put_many_report_sync(&[
+            (first_hash, first.to_vec()),
+            (second_hash, second.to_vec()),
+            (new_hash, new.to_vec()),
+        ])?;
+
+        assert_eq!(report.inserted, 1);
+        assert_eq!(report.inserted_bytes, 5);
+        assert_eq!(store.stats()?.total_bytes, 35);
+        assert!(store.exists(&first_hash)?);
+        assert!(store.exists(&second_hash)?);
+        assert!(store.exists(&third_hash)?);
+        assert!(store.exists(&new_hash)?);
 
         Ok(())
     }

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures::executor::block_on as sync_block_on;
 use futures::StreamExt;
 use hashtree_config::StorageBackend;
-use hashtree_core::store::{Store, StoreError};
+use hashtree_core::store::{PutManyReport, Store, StoreError};
 use hashtree_core::{
     from_hex, sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, TreeNode,
 };
@@ -53,7 +53,6 @@ const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
 const DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT: usize = 64;
 const ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT_ENV: &str = "HTREE_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT";
-const CACHED_BLOB_BATCH_EXISTING_PRECHECK_ENV: &str = "HTREE_CACHED_BLOB_BATCH_EXISTING_PRECHECK";
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
 const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
 #[cfg(feature = "lmdb")]
@@ -80,11 +79,6 @@ fn access_update_background_batch_limit() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT)
-}
-
-fn cached_blob_batch_existing_precheck() -> bool {
-    std::env::var(CACHED_BLOB_BATCH_EXISTING_PRECHECK_ENV)
-        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -418,22 +412,37 @@ impl LocalStore {
     }
 
     /// Sync batch put operation.
-    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+    pub fn put_many_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
         match self {
             LocalStore::Fs(store) => {
-                let mut inserted = 0usize;
+                let mut report = PutManyReport {
+                    total: items.len(),
+                    ..PutManyReport::default()
+                };
                 for (hash, data) in items {
                     if store.put_sync(*hash, data.as_slice())? {
-                        inserted += 1;
+                        report.inserted = report.inserted.saturating_add(1);
+                        report.inserted_bytes =
+                            report.inserted_bytes.saturating_add(data.len() as u64);
+                        report.inserted_hashes.push(*hash);
                     }
                 }
-                Ok(inserted)
+                Ok(report)
             }
             #[cfg(feature = "lmdb")]
-            LocalStore::Lmdb(store) => store.put_many_sync(items),
+            LocalStore::Lmdb(store) => store.put_many_report_sync(items),
             #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => primary.put_many_sync(items),
+            LocalStore::TieredLmdb { primary, .. } => primary.put_many_report_sync(items),
         }
+    }
+
+    /// Sync batch put operation.
+    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_report_sync(items)
+            .map(|report| report.inserted)
     }
 
     /// Sync get operation
@@ -1050,32 +1059,37 @@ impl StorageRouter {
     }
 
     /// Store multiple blobs with a single local batch write when supported.
-    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
-        #[cfg(feature = "s3")]
-        let pending_uploads = if self.sync_tx.is_some() {
-            let mut pending = Vec::new();
-            for (hash, data) in items {
-                if !self.local.exists(hash)? {
-                    pending.push((*hash, data.clone()));
-                }
-            }
-            pending
-        } else {
-            Vec::new()
-        };
-
-        let inserted = self.local.put_many_sync(items)?;
+    pub fn put_many_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
+        let report = self.local.put_many_report_sync(items)?;
 
         #[cfg(feature = "s3")]
         if let Some(ref tx) = self.sync_tx {
-            for (hash, data) in pending_uploads {
-                if let Err(e) = tx.send(S3SyncMessage::Upload { hash, data }) {
-                    tracing::error!("Failed to queue S3 upload: {}", e);
+            if !report.inserted_hashes.is_empty() {
+                let inserted: HashSet<Hash> = report.inserted_hashes.iter().copied().collect();
+                let mut queued = HashSet::new();
+                for (hash, data) in items {
+                    if inserted.contains(hash) && queued.insert(*hash) {
+                        if let Err(e) = tx.send(S3SyncMessage::Upload {
+                            hash: *hash,
+                            data: data.clone(),
+                        }) {
+                            tracing::error!("Failed to queue S3 upload: {}", e);
+                        }
+                    }
                 }
             }
         }
 
-        Ok(inserted)
+        Ok(report)
+    }
+
+    /// Store multiple blobs with a single local batch write when supported.
+    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_report_sync(items)
+            .map(|report| report.inserted)
     }
 
     /// Get data - tries LMDB first, falls back to S3
@@ -1678,48 +1692,46 @@ impl HashtreeStore {
     /// Store an owned Blossom blob under the configured durable storage limit.
     pub fn put_owned_blob(&self, data: &[u8], pubkey: &[u8; 32]) -> Result<String> {
         let hash = sha256(data);
-        if !self
-            .router
-            .exists(&hash)
-            .map_err(|e| anyhow::anyhow!("Failed to check blob: {}", e))?
-        {
-            self.make_room_for_durable_blob(data.len() as u64)?;
-            self.router
-                .put_sync(hash, data)
-                .map_err(|e| anyhow::anyhow!("Failed to store blob: {}", e))?;
-        } else {
+        let incoming_bytes = data.len() as u64;
+        let mut retried_after_cleanup = false;
+        let inserted = loop {
+            match self.router.put_sync(hash, data) {
+                Ok(inserted) => break inserted,
+                Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
+                    let freed = self.make_room_for_durable_blob(incoming_bytes)?;
+                    if freed == 0 {
+                        return Err(anyhow::anyhow!("Failed to store blob: {}", err));
+                    }
+                    retried_after_cleanup = true;
+                }
+                Err(err) => return Err(anyhow::anyhow!("Failed to store blob: {}", err)),
+            }
+        };
+
+        if !inserted {
             self.record_blob_access_now(&hash);
         }
-        self.set_blob_owner_with_size(&hash, pubkey, data.len() as u64)?;
+
+        self.set_blob_owner_with_size(&hash, pubkey, incoming_bytes)?;
+        if inserted {
+            if let Err(err) = self.enforce_durable_blob_budget_after_insert(incoming_bytes) {
+                let _ = self.delete_blossom_blob(&hash, pubkey);
+                return Err(err);
+            }
+        }
+
         Ok(to_hex(&hash))
     }
 
-    /// Store multiple owned Blossom blobs, batching raw blob and owner-index writes.
-    pub fn put_owned_blobs(&self, items: &[(Hash, Vec<u8>)], pubkey: &[u8; 32]) -> Result<usize> {
-        let started_at = Instant::now();
-        let slow_log_ms = slow_owned_blob_batch_log_ms();
-        if items.is_empty() {
-            return Ok(0);
-        }
-        let incoming_bytes = items.iter().fold(0u64, |total, (_, data)| {
-            total.saturating_add(data.len() as u64)
-        });
-        let count = items.len();
-        let room_started = Instant::now();
-        self.make_room_for_durable_blob(incoming_bytes)?;
-        let make_room_ms = room_started.elapsed().as_millis();
-        let raw_started = Instant::now();
-        let inserted = self
-            .router
-            .put_many_sync(items)
-            .map_err(|e| anyhow::anyhow!("Failed to store blob batch: {}", e))?;
-        let raw_write_ms = raw_started.elapsed().as_millis();
-
+    fn put_blob_owners_for_batch(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+        pubkey: &[u8; 32],
+    ) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let owner_started = Instant::now();
         let mut wtxn = self.env.write_txn()?;
         for (hash, data) in items {
             let owner_key = Self::blob_owner_key(hash, pubkey);
@@ -1741,21 +1753,73 @@ impl HashtreeStore {
             }
         }
         wtxn.commit()?;
+        Ok(())
+    }
+
+    fn put_many_durable_blob_bodies(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+        incoming_bytes: u64,
+    ) -> Result<PutManyReport> {
+        let mut retried_after_cleanup = false;
+        loop {
+            match self.router.put_many_report_sync(items) {
+                Ok(report) => return Ok(report),
+                Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
+                    let freed = self.make_room_for_durable_blob(incoming_bytes)?;
+                    if freed == 0 {
+                        return Err(anyhow::anyhow!("Failed to store blob batch: {}", err));
+                    }
+                    retried_after_cleanup = true;
+                }
+                Err(err) => return Err(anyhow::anyhow!("Failed to store blob batch: {}", err)),
+            }
+        }
+    }
+
+    /// Store multiple owned Blossom blobs, batching raw blob and owner-index writes.
+    pub fn put_owned_blobs(&self, items: &[(Hash, Vec<u8>)], pubkey: &[u8; 32]) -> Result<usize> {
+        let started_at = Instant::now();
+        let slow_log_ms = slow_owned_blob_batch_log_ms();
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let incoming_bytes = items.iter().fold(0u64, |total, (_, data)| {
+            total.saturating_add(data.len() as u64)
+        });
+        let count = items.len();
+        let raw_started = Instant::now();
+        let report = self.put_many_durable_blob_bodies(items, incoming_bytes)?;
+        let raw_write_ms = raw_started.elapsed().as_millis();
+
+        let owner_started = Instant::now();
+        self.put_blob_owners_for_batch(items, pubkey)?;
         let owner_index_ms = owner_started.elapsed().as_millis();
+        let quota_started = Instant::now();
+        if report.inserted_bytes > 0 {
+            if let Err(err) = self.enforce_durable_blob_budget_after_insert(report.inserted_bytes) {
+                for hash in &report.inserted_hashes {
+                    let _ = self.delete_blossom_blob(hash, pubkey);
+                }
+                return Err(err);
+            }
+        }
+        let quota_ms = quota_started.elapsed().as_millis();
         let total_ms = started_at.elapsed().as_millis();
         if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
             tracing::warn!(
                 blobs = count,
-                inserted,
+                inserted = report.inserted,
                 incoming_bytes,
+                inserted_bytes = report.inserted_bytes,
                 total_ms,
-                make_room_ms,
                 raw_write_ms,
                 owner_index_ms,
+                quota_ms,
                 "slow owned Blossom blob batch write"
             );
         }
-        Ok(inserted)
+        Ok(report.inserted)
     }
 
     /// Store an opportunistically cached blob.
@@ -1766,7 +1830,6 @@ impl HashtreeStore {
     pub fn put_cached_blob(&self, data: &[u8]) -> Result<String> {
         let hash = sha256(data);
         let incoming_bytes = data.len() as u64;
-        let _ = self.make_room_for_cached_blob(incoming_bytes);
 
         let mut retried_after_cleanup = false;
         loop {
@@ -1774,6 +1837,10 @@ impl HashtreeStore {
                 Ok(inserted) => {
                     if !inserted {
                         self.record_blob_access_now(&hash);
+                    } else if let Err(err) =
+                        self.enforce_cached_blob_budget_after_insert(incoming_bytes)
+                    {
+                        tracing::debug!("Failed to enforce cached blob budget: {}", err);
                     }
                     return Ok(to_hex(&hash));
                 }
@@ -1797,62 +1864,42 @@ impl HashtreeStore {
             return Ok(0);
         }
 
-        let missing_items;
-        let write_items: &[(Hash, Vec<u8>)] = if cached_blob_batch_existing_precheck() {
-            let mut sorted_hashes: Vec<Hash> = items.iter().map(|(hash, _)| *hash).collect();
-            sorted_hashes.sort_unstable();
-            sorted_hashes.dedup();
-            let existing = self
-                .router
-                .existing_local_hashes_in_sorted_candidates(&sorted_hashes)
-                .map_err(|e| anyhow::anyhow!("Failed to check cached blob batch: {}", e))?;
-            let existing_hashes: HashSet<Hash> = sorted_hashes
-                .into_iter()
-                .zip(existing)
-                .filter_map(|(hash, exists)| exists.then_some(hash))
-                .collect();
-            missing_items = items
-                .iter()
-                .filter(|(hash, _)| !existing_hashes.contains(hash))
-                .cloned()
-                .collect::<Vec<_>>();
-            if missing_items.is_empty() {
-                return Ok(0);
-            }
-            missing_items.as_slice()
-        } else {
-            items
-        };
-
-        let incoming_bytes = write_items.iter().fold(0u64, |total, (_, data)| {
+        let candidate_bytes = items.iter().fold(0u64, |total, (_, data)| {
             total.saturating_add(data.len() as u64)
         });
-        let room_started = Instant::now();
-        let _ = self.make_room_for_cached_blob(incoming_bytes);
-        let make_room_ms = room_started.elapsed().as_millis();
 
         let mut retried_after_cleanup = false;
         loop {
             let raw_started = Instant::now();
-            match self.router.put_many_sync(write_items) {
-                Ok(inserted) => {
+            match self.router.put_many_report_sync(items) {
+                Ok(report) => {
                     let raw_write_ms = raw_started.elapsed().as_millis();
+                    let quota_started = Instant::now();
+                    if report.inserted_bytes > 0 {
+                        if let Err(err) =
+                            self.enforce_cached_blob_budget_after_insert(report.inserted_bytes)
+                        {
+                            tracing::debug!("Failed to enforce cached blob budget: {}", err);
+                        }
+                    }
+                    let quota_ms = quota_started.elapsed().as_millis();
                     let total_ms = started_at.elapsed().as_millis();
                     if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
                         tracing::warn!(
-                            blobs = write_items.len(),
-                            inserted,
-                            incoming_bytes,
+                            blobs = items.len(),
+                            inserted = report.inserted,
+                            candidate_bytes,
+                            inserted_bytes = report.inserted_bytes,
                             total_ms,
-                            make_room_ms,
                             raw_write_ms,
+                            quota_ms,
                             "slow cached Blossom blob batch write"
                         );
                     }
-                    return Ok(inserted);
+                    return Ok(report.inserted);
                 }
                 Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
-                    let freed = self.relieve_cached_blob_write_pressure(incoming_bytes)?;
+                    let freed = self.relieve_cached_blob_write_pressure(candidate_bytes)?;
                     if freed == 0 {
                         return Err(anyhow::anyhow!(
                             "Failed to store cached blob batch: {}",
@@ -3137,6 +3184,48 @@ mod tests {
         store.put_owned_blobs(&batch, &owner)?;
         let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
         assert_eq!(owned_blobs.len(), 3);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn duplicate_heavy_cached_batch_uses_actual_inserted_bytes_for_quota() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = HashtreeStore::with_options_and_backend(
+            temp.path(),
+            None,
+            35,
+            true,
+            &StorageBackend::Lmdb,
+        )?;
+
+        let first = [1u8; 10];
+        let second = [2u8; 10];
+        let third = [3u8; 10];
+        let new = [4u8; 5];
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let third_hash = sha256(&third);
+        let new_hash = sha256(&new);
+
+        store.put_cached_blob(&first)?;
+        store.put_cached_blob(&second)?;
+        store.put_cached_blob(&third)?;
+        assert_eq!(store.router.writable_stats()?.total_bytes, 30);
+
+        let inserted = store.put_cached_blobs(&[
+            (first_hash, first.to_vec()),
+            (second_hash, second.to_vec()),
+            (new_hash, new.to_vec()),
+        ])?;
+
+        assert_eq!(inserted, 1);
+        assert_eq!(store.router.writable_stats()?.total_bytes, 35);
+        assert!(store.blob_exists(&first_hash)?);
+        assert!(store.blob_exists(&second_hash)?);
+        assert!(store.blob_exists(&third_hash)?);
+        assert!(store.blob_exists(&new_hash)?);
 
         Ok(())
     }

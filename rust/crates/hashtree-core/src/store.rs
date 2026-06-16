@@ -19,6 +19,19 @@ pub struct StoreStats {
     pub pinned_bytes: u64,
 }
 
+/// Result of a batch insert.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PutManyReport {
+    /// Number of candidate items passed by the caller, including duplicates.
+    pub total: usize,
+    /// Number of blobs newly inserted into the store.
+    pub inserted: usize,
+    /// Logical bytes newly inserted into the store.
+    pub inserted_bytes: u64,
+    /// Hashes that were newly inserted, in insertion order.
+    pub inserted_hashes: Vec<Hash>,
+}
+
 /// Content-addressed key-value store interface
 #[async_trait]
 pub trait Store: Send + Sync {

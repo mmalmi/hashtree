@@ -360,6 +360,29 @@ impl HashtreeStore {
         self.evict_disposable_orphans_to_target(target)
     }
 
+    pub fn enforce_cached_blob_budget_after_insert(&self, inserted_bytes: u64) -> Result<u64> {
+        if self.max_size_bytes == 0 || inserted_bytes == 0 {
+            return Ok(0);
+        }
+
+        let stats = self
+            .router
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
+        if stats.total_bytes <= self.max_size_bytes {
+            return Ok(0);
+        }
+
+        let target = if inserted_bytes >= self.max_size_bytes {
+            inserted_bytes
+        } else {
+            (self.max_size_bytes.saturating_mul(9) / 10)
+                .saturating_add(inserted_bytes)
+                .min(self.max_size_bytes)
+        };
+        self.evict_disposable_orphans_to_target(target)
+    }
+
     pub fn make_room_for_durable_blob(&self, incoming_bytes: u64) -> Result<u64> {
         if self.max_size_bytes == 0 || incoming_bytes == 0 {
             return Ok(0);
@@ -394,6 +417,48 @@ impl HashtreeStore {
                 "storage limit exceeded: {} bytes used, {} byte incoming blob, {} byte limit",
                 next_stats.total_bytes,
                 incoming_bytes,
+                self.max_size_bytes
+            );
+        }
+
+        Ok(freed)
+    }
+
+    pub fn enforce_durable_blob_budget_after_insert(&self, inserted_bytes: u64) -> Result<u64> {
+        if self.max_size_bytes == 0 || inserted_bytes == 0 {
+            return Ok(0);
+        }
+
+        if inserted_bytes > self.max_size_bytes {
+            anyhow::bail!(
+                "storage limit exceeded: inserted blobs are {} bytes but limit is {} bytes",
+                inserted_bytes,
+                self.max_size_bytes
+            );
+        }
+
+        let stats = self
+            .router
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
+        if stats.total_bytes <= self.max_size_bytes {
+            return Ok(0);
+        }
+
+        let target = (self.max_size_bytes.saturating_mul(9) / 10)
+            .saturating_add(inserted_bytes)
+            .min(self.max_size_bytes);
+        let freed = self.evict_with_policy_to_target(stats.total_bytes, target)?;
+
+        let next_stats = self
+            .router
+            .writable_stats()
+            .map_err(|e| anyhow::anyhow!("Failed to get writable stats after eviction: {}", e))?;
+        if next_stats.total_bytes > self.max_size_bytes {
+            anyhow::bail!(
+                "storage limit exceeded: {} bytes used after inserting {} bytes, {} byte limit",
+                next_stats.total_bytes,
+                inserted_bytes,
                 self.max_size_bytes
             );
         }

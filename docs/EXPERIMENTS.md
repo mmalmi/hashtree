@@ -1124,3 +1124,69 @@ Interpretation:
   as disposable cache. This is a prerequisite for routing public uploads to an
   Osiris hot origin while keeping Vader's large store as cold/read-through data
   and replication target.
+
+### 2026-06-16: LMDB insert-if-absent batch reports
+
+Question: can duplicate-heavy Blossom/git upload retries avoid read-before-write
+checks, duplicate metadata writes, and quota eviction based on candidate bytes?
+
+Change:
+- Added an exact `PutManyReport` for local batch writes. The old `put_many`
+  count API remains as a wrapper.
+- LMDB single and batch writes now let `MDB_NOOVERWRITE` decide insert
+  membership. Duplicate puts return false and do not touch access metadata,
+  eviction order, stats, or external blob files.
+- Batch writes deduplicate only repeated hashes inside the request, then use one
+  LMDB write transaction and report only newly inserted hashes/bytes.
+- External packed blobs are written only after LMDB accepts the hash. The batch
+  first reserves accepted hashes in the transaction, writes pack files for those
+  accepted entries, then replaces reservations with final pack markers before
+  commit.
+- Cached and durable Blossom batch quota now runs after the raw write and uses
+  exact inserted bytes. Map-full cleanup remains a separate physical
+  map-pressure retry path.
+- Durable owned uploads roll back newly inserted bodies if post-insert quota
+  enforcement rejects the write.
+
+Local storage benchmark setup:
+- Release `storage_write_bench` example on a local temp LMDB store.
+- External blobs enabled for values >=64 KiB, 64 MiB pack target, sync enabled.
+- Candidate throughput counts all candidate bytes, so duplicate replay has a
+  visible throughput even when `inserted=0`.
+
+Results:
+
+| Shape | Batch | Payload | Inserted | Wall | Candidate throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unique | 1 | 256 x 256 KiB | 256 | 4142 ms | 15.45 MiB/s |
+| Duplicate replay | 1 | 256 x 256 KiB | 0 | 374 ms | 171.11 MiB/s |
+| Unique | 16 | 256 x 256 KiB | 256 | 622 ms | 102.77 MiB/s |
+| Duplicate replay | 16 | 256 x 256 KiB | 0 | 366 ms | 174.62 MiB/s |
+| Unique | 256 | 256 x 256 KiB | 256 | 424 ms | 150.66 MiB/s |
+| Duplicate replay | 256 | 256 x 256 KiB | 0 | 371 ms | 172.17 MiB/s |
+| Unique | 4096 | 4096 x 64 KiB | 4096 | 1645 ms | 155.60 MiB/s |
+| Duplicate replay | 4096 | 4096 x 64 KiB | 0 | 1475 ms | 173.53 MiB/s |
+| 90/10 replay/new | 256 | 256 x 256 KiB | 26 | 384 ms | 166.59 MiB/s |
+| Unique, 128 MiB logical max | 256 | 256 x 256 KiB | 256 | 414 ms | 154.56 MiB/s |
+| Duplicate, 128 MiB logical max | 256 | 256 x 256 KiB | 0 | 365 ms | 175.28 MiB/s |
+
+Verification:
+- `cargo fmt --check`
+- `cargo test -p hashtree-lmdb --lib`
+- `cargo test -p hashtree-cli --lib server::blossom::tests::owned_blossom_uploads_are_rejected_when_storage_limit_is_full`
+- `cargo test -p hashtree-cli --lib`
+- `cargo build -p hashtree-cli --release --example storage_write_bench`
+
+Interpretation:
+- Duplicate-heavy local writes are now metadata-bound and avoid external pack
+  creation, duplicate access-time writes, and candidate-byte eviction.
+- Batch sizes >=16 are the useful local write shape for 256 KiB blobs. Batch 1
+  is still much slower because request/batch overhead dominates; 256 and 4096
+  are similar on this local store.
+- Logical quota checks no longer punish duplicate-heavy batches. The measured
+  128 MiB logical-max case stayed in the same performance band as the unbounded
+  case.
+- This fixes the local LMDB/write-path waste. If public `upload.iris.to`
+  remains far below these local numbers, the remaining bottleneck is ingress
+  transport/body forwarding or remote deployment shape, not LMDB insert
+  membership.

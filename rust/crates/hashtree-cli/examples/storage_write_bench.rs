@@ -63,11 +63,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let wall = started.elapsed();
-    let total_mib = inserted as f64 * config.size as f64 / 1024.0 / 1024.0;
-    let throughput_mib_s = if wall.as_secs_f64() > 0.0 {
-        total_mib / wall.as_secs_f64()
+    let candidate_mib = config.requests as f64 * config.size as f64 / 1024.0 / 1024.0;
+    let inserted_mib = inserted as f64 * config.size as f64 / 1024.0 / 1024.0;
+    let (candidate_throughput_mib_s, inserted_throughput_mib_s) = if wall.as_secs_f64() > 0.0 {
+        (
+            candidate_mib / wall.as_secs_f64(),
+            inserted_mib / wall.as_secs_f64(),
+        )
     } else {
-        0.0
+        (0.0, 0.0)
     };
     samples.sort_unstable();
 
@@ -77,10 +81,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.mode, config.requests, config.batch_size, config.size, config.max_bytes, config.seed
     );
     println!(
-        "inserted={} wall_ms={} throughput_mib_s={:.2}",
+        "inserted={} wall_ms={} candidate_throughput_mib_s={:.2} inserted_throughput_mib_s={:.2}",
         inserted,
         wall.as_millis(),
-        throughput_mib_s
+        candidate_throughput_mib_s,
+        inserted_throughput_mib_s
     );
     if !samples.is_empty() {
         println!(
