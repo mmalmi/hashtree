@@ -2134,3 +2134,43 @@ Interpretation:
 - Keep public git-push defaults conservative: the default Blossom
   `upload_concurrency` is 4, while private/local origins can explicitly raise it
   after measuring their path.
+
+### 2026-06-16: Large local add against live LMDB store
+
+Question: why can `htree add` of a large local map file be far slower than raw
+disk reads, even when no Blossom upload is involved?
+
+Setup:
+- Large local plaintext file, about 80 GiB.
+- Live LMDB-backed blob store with about 3.6 TiB stored objects and external
+  local blob packs enabled for large blobs.
+- The source file read alone reached about 230-250 MB/s.
+- The host was under heavy memory and I/O pressure during tests; swap was full,
+  so these are stressed-system measurements rather than hardware ceilings.
+
+Results:
+
+| Shape | Result |
+| --- | ---: |
+| Local add without service LMDB env | Stalled at 0 B for 90s; stack in LMDB mmap `filemap_fault` |
+| Service LMDB env, default 2 MiB content chunks, external pack fsync enabled | 704 MiB in 90s, about 7.8 MiB/s |
+| Same env, default content chunks, external pack fsync disabled | 1.3 GiB in 90s, about 15 MiB/s after writeback pressure |
+| Patched plain `--local`, default content chunks, no manual env | 1.2 GiB in 90s, about 14.4 MiB/s |
+| Same env, explicit 256 MiB content chunks, external pack fsync disabled | 6.5 GiB in 90s, about 74 MiB/s sustained |
+
+Interpretation:
+- LMDB itself was not the only issue. Missing `HTREE_LMDB_NO_READ_AHEAD=1` on
+  an ad-hoc local command caused a cold huge-mmap stall before file bytes were
+  processed.
+- With the service LMDB env, the bottleneck moved to local external pack writes.
+  Per-pack `fsync` caused XFS log waits and single-digit MiB/s throughput.
+- Disabling per-pack fsync is appropriate only for trusted local bulk ingest
+  where the source file still exists and the import can be rerun after a crash.
+  Public/server upload paths should keep stronger durability by default.
+- Larger content chunks reduce per-pack metadata and sync overhead and were the
+  biggest measured local-add improvement in this run, but they intentionally
+  change CIDs for large files.
+- `htree add --local` should use this fast local-ingest profile by default:
+  local-only, LMDB no-readahead, relaxed external-pack fsync, and larger
+  stream store batches. It should not silently change the content chunk size,
+  because that would change CIDs relative to non-local adds.

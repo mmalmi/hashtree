@@ -30,6 +30,9 @@ const ORDER_KEY_BYTES: usize = 40;
 const PIN_COUNT_BYTES: usize = 4;
 const STORE_TOTALS_BYTES: usize = 32;
 const STORE_TOTALS_KEY: &[u8] = b"totals";
+const NEXT_ORDER_BYTES: usize = 8;
+const NEXT_ORDER_KEY: &[u8] = b"next_order";
+const NEXT_ORDER_MIGRATION_FLOOR: u64 = 1 << 48;
 const EXTERNAL_BLOB_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-blob-v1\0";
 const EXTERNAL_PACK_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-v1\0";
 const EXTERNAL_PACK_RESERVED_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-reserved-v1\0";
@@ -233,22 +236,8 @@ impl LmdbBlobStore {
             .map_err(map_heed_error)?;
         wtxn.commit().map_err(map_heed_error)?;
 
-        let next_order = {
-            let rtxn = env.read_txn().map_err(map_heed_error)?;
-            let next = eviction_order
-                .iter(&rtxn)
-                .map_err(map_heed_error)?
-                .last()
-                .transpose()
-                .map_err(map_heed_error)?
-                .map(|(key, _)| {
-                    Self::decode_order_from_order_key(key).map(|order| order.saturating_add(1))
-                })
-                .transpose()?
-                .unwrap_or(0);
-            next
-        };
         let totals = Self::load_or_rebuild_totals(&env, metadata, pins, stats)?;
+        let next_order = Self::load_or_initialize_next_order(&env, stats, totals.count > 0)?;
 
         Ok(Self {
             env,
@@ -307,6 +296,41 @@ impl LmdbBlobStore {
         Ok(totals)
     }
 
+    fn load_or_initialize_next_order(
+        env: &heed::Env,
+        stats: Database<Bytes, Bytes>,
+        has_existing_blobs: bool,
+    ) -> Result<u64, StoreError> {
+        {
+            let rtxn = env.read_txn().map_err(map_heed_error)?;
+            if let Some(next_order) = Self::read_next_order(stats, &rtxn)? {
+                return Ok(next_order);
+            }
+        }
+
+        let next_order = if has_existing_blobs {
+            Self::legacy_next_order_floor()
+        } else {
+            0
+        };
+        let mut wtxn = env.write_txn().map_err(map_heed_error)?;
+        let next_order = Self::read_next_order_lossy(stats, &wtxn)
+            .map_err(map_heed_error)?
+            .unwrap_or(next_order);
+        Self::write_next_order(stats, &mut wtxn, next_order).map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        Ok(next_order)
+    }
+
+    fn legacy_next_order_floor() -> u64 {
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+            .unwrap_or(NEXT_ORDER_MIGRATION_FLOOR);
+        micros.max(NEXT_ORDER_MIGRATION_FLOOR)
+    }
+
     fn read_store_totals(
         stats: Database<Bytes, Bytes>,
         txn: &heed::RoTxn,
@@ -335,6 +359,48 @@ impl LmdbBlobStore {
     ) -> std::result::Result<(), HeedError> {
         let encoded = Self::encode_store_totals(totals);
         stats.put(txn, STORE_TOTALS_KEY, &encoded)
+    }
+
+    fn read_next_order(
+        stats: Database<Bytes, Bytes>,
+        txn: &heed::RoTxn,
+    ) -> Result<Option<u64>, StoreError> {
+        stats
+            .get(txn, NEXT_ORDER_KEY)
+            .map_err(map_heed_error)?
+            .map(Self::decode_next_order)
+            .transpose()
+    }
+
+    fn read_next_order_lossy(
+        stats: Database<Bytes, Bytes>,
+        txn: &heed::RoTxn,
+    ) -> std::result::Result<Option<u64>, HeedError> {
+        Ok(stats
+            .get(txn, NEXT_ORDER_KEY)?
+            .and_then(Self::decode_next_order_lossy))
+    }
+
+    fn write_next_order(
+        stats: Database<Bytes, Bytes>,
+        txn: &mut heed::RwTxn,
+        next_order: u64,
+    ) -> std::result::Result<(), HeedError> {
+        let encoded = Self::encode_next_order(next_order);
+        stats.put(txn, NEXT_ORDER_KEY, &encoded)
+    }
+
+    fn allocate_order_range_in_txn(
+        &self,
+        txn: &mut heed::RwTxn,
+        count: usize,
+    ) -> std::result::Result<u64, HeedError> {
+        let start = Self::read_next_order_lossy(self.stats, txn)?
+            .unwrap_or_else(|| self.next_order.load(Ordering::Relaxed));
+        let end = start.saturating_add(count as u64);
+        Self::write_next_order(self.stats, txn, end)?;
+        self.next_order.store(end, Ordering::Relaxed);
+        Ok(start)
     }
 
     fn increment_totals_in_txn(
@@ -494,15 +560,18 @@ impl LmdbBlobStore {
         let mut inserted_bytes = 0u64;
         let mut inserted_pinned = 0u64;
         let mut inserted_pinned_bytes = 0u64;
+        let mut order = self
+            .allocate_order_range_in_txn(wtxn, inserted_entries.len())
+            .map_err(map_heed_error)?;
 
         for (hash, data_len) in inserted_entries {
-            let order = self.next_order.fetch_add(1, Ordering::Relaxed);
             let meta = Self::encode_blob_meta(BlobMeta {
                 order,
                 size: *data_len,
                 last_accessed_at: now,
             });
             let order_key = Self::encode_order_key(order, hash);
+            order = order.saturating_add(1);
             self.metadata
                 .put(wtxn, hash, &meta)
                 .map_err(map_heed_error)?;
@@ -842,7 +911,7 @@ impl LmdbBlobStore {
             .env
             .write_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
-        let mut updated = 0usize;
+        let mut to_touch = Vec::new();
 
         for hash in hashes {
             let meta = self
@@ -851,31 +920,45 @@ impl LmdbBlobStore {
                 .map_err(|e| StoreError::Other(e.to_string()))?
                 .map(Self::decode_blob_meta)
                 .transpose()?;
-            let Some(mut meta) = meta else {
+            let Some(meta) = meta else {
                 continue;
             };
 
             if meta.last_accessed_at >= now {
                 continue;
             }
+            to_touch.push((*hash, meta));
+        }
 
-            let old_order_key = Self::encode_order_key(meta.order, hash);
+        let updated = to_touch.len();
+        if updated == 0 {
+            wtxn.commit()
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            return Ok(0);
+        }
+
+        let mut order = self
+            .allocate_order_range_in_txn(&mut wtxn, updated)
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+
+        for (hash, mut meta) in to_touch {
+            let old_order_key = Self::encode_order_key(meta.order, &hash);
             let _ = self
                 .eviction_order
                 .delete(&mut wtxn, &old_order_key)
                 .map_err(|e| StoreError::Other(e.to_string()))?;
 
-            meta.order = self.next_order.fetch_add(1, Ordering::Relaxed);
+            meta.order = order;
+            order = order.saturating_add(1);
             meta.last_accessed_at = now;
             let meta_bytes = Self::encode_blob_meta(meta);
-            let new_order_key = Self::encode_order_key(meta.order, hash);
+            let new_order_key = Self::encode_order_key(meta.order, &hash);
             self.metadata
-                .put(&mut wtxn, hash, &meta_bytes)
+                .put(&mut wtxn, &hash, &meta_bytes)
                 .map_err(|e| StoreError::Other(e.to_string()))?;
             self.eviction_order
                 .put(&mut wtxn, &new_order_key, &())
                 .map_err(|e| StoreError::Other(e.to_string()))?;
-            updated += 1;
         }
 
         wtxn.commit()
@@ -1221,6 +1304,22 @@ impl LmdbBlobStore {
         })
     }
 
+    fn encode_next_order(next_order: u64) -> [u8; NEXT_ORDER_BYTES] {
+        next_order.to_be_bytes()
+    }
+
+    fn decode_next_order(bytes: &[u8]) -> Result<u64, StoreError> {
+        Self::decode_next_order_lossy(bytes)
+            .ok_or_else(|| StoreError::Other(format!("invalid next order length: {}", bytes.len())))
+    }
+
+    fn decode_next_order_lossy(bytes: &[u8]) -> Option<u64> {
+        if bytes.len() != NEXT_ORDER_BYTES {
+            return None;
+        }
+        Some(u64::from_be_bytes(bytes.try_into().ok()?))
+    }
+
     fn encode_order_key(order: u64, hash: &Hash) -> [u8; ORDER_KEY_BYTES] {
         let mut key = [0u8; ORDER_KEY_BYTES];
         key[..8].copy_from_slice(&order.to_be_bytes());
@@ -1250,16 +1349,6 @@ impl LmdbBlobStore {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&bytes[8..]);
         Ok(hash)
-    }
-
-    fn decode_order_from_order_key(bytes: &[u8]) -> Result<u64, StoreError> {
-        if bytes.len() != ORDER_KEY_BYTES {
-            return Err(StoreError::Other(format!(
-                "invalid order key length: {}",
-                bytes.len()
-            )));
-        }
-        Self::decode_order(&bytes[..8])
     }
 
     fn decode_pin_count(bytes: &[u8]) -> Result<u32, StoreError> {
@@ -1837,6 +1926,31 @@ mod tests {
         Ok(count)
     }
 
+    fn persisted_next_order(store: &LmdbBlobStore) -> Result<u64, StoreError> {
+        let rtxn = store.env.read_txn().map_err(map_heed_error)?;
+        LmdbBlobStore::read_next_order(store.stats, &rtxn)?
+            .ok_or_else(|| StoreError::Other("missing persisted next_order".to_string()))
+    }
+
+    fn metadata_order(store: &LmdbBlobStore, hash: &Hash) -> Result<u64, StoreError> {
+        let rtxn = store.env.read_txn().map_err(map_heed_error)?;
+        let meta = store
+            .metadata
+            .get(&rtxn, hash)
+            .map_err(map_heed_error)?
+            .ok_or_else(|| StoreError::Other("missing blob metadata".to_string()))?;
+        LmdbBlobStore::decode_blob_meta(meta).map(|meta| meta.order)
+    }
+
+    fn delete_persisted_next_order(store: &LmdbBlobStore) -> Result<(), StoreError> {
+        let mut wtxn = store.env.write_txn().map_err(map_heed_error)?;
+        store
+            .stats
+            .delete(&mut wtxn, NEXT_ORDER_KEY)
+            .map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)
+    }
+
     #[cfg(unix)]
     fn run_helper(mode: &str, path: &Path, marker: &Path) {
         let output = Command::new(std::env::current_exe().expect("test binary path"))
@@ -2119,13 +2233,75 @@ mod tests {
         let hash = sha256(data);
         assert!(store.put_sync(hash, data)?);
         let accessed = store.last_accessed_at_sync(&hash)?;
+        let next_order = persisted_next_order(&store)?;
 
         assert!(!store.put_sync(hash, data)?);
         assert_eq!(store.last_accessed_at_sync(&hash)?, accessed);
+        assert_eq!(persisted_next_order(&store)?, next_order);
 
         let stats = store.stats()?;
         assert_eq!(stats.count, 1);
         assert_eq!(stats.total_bytes, data.len() as u64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn next_order_persists_across_reopen_and_counts_only_new_blobs() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blobs");
+        let first = sha256(b"order first");
+        let second = sha256(b"order second");
+        let third = sha256(b"order third");
+
+        {
+            let store = LmdbBlobStore::new(&path)?;
+            assert!(store.put_sync(first, b"order first")?);
+            assert!(store.put_sync(second, b"order second")?);
+            assert_eq!(metadata_order(&store, &first)?, 0);
+            assert_eq!(metadata_order(&store, &second)?, 1);
+            assert_eq!(persisted_next_order(&store)?, 2);
+
+            assert!(!store.put_sync(first, b"order first")?);
+            assert_eq!(
+                store.put_many_sync(&[(second, b"order second".to_vec())])?,
+                0
+            );
+            assert_eq!(persisted_next_order(&store)?, 2);
+        }
+
+        let reopened = LmdbBlobStore::new(&path)?;
+        assert_eq!(persisted_next_order(&reopened)?, 2);
+        assert!(reopened.put_sync(third, b"order third")?);
+        assert_eq!(metadata_order(&reopened, &third)?, 2);
+        assert_eq!(persisted_next_order(&reopened)?, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_store_without_next_order_seeds_high_counter_without_tail_scan(
+    ) -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blobs");
+        let existing = sha256(b"legacy existing");
+        let new = sha256(b"legacy new");
+
+        {
+            let store = LmdbBlobStore::new(&path)?;
+            assert!(store.put_sync(existing, b"legacy existing")?);
+            delete_persisted_next_order(&store)?;
+        }
+
+        let reopened = LmdbBlobStore::new(&path)?;
+        let migrated_next_order = persisted_next_order(&reopened)?;
+        assert!(migrated_next_order >= NEXT_ORDER_MIGRATION_FLOOR);
+        assert!(reopened.put_sync(new, b"legacy new")?);
+        assert_eq!(metadata_order(&reopened, &new)?, migrated_next_order);
+        assert_eq!(
+            persisted_next_order(&reopened)?,
+            migrated_next_order.saturating_add(1)
+        );
 
         Ok(())
     }

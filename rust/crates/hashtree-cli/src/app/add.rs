@@ -8,6 +8,7 @@ use hashtree_core::{
     from_hex, key_from_hex, nhash_encode, nhash_encode_full, Cid, HashTree, HashTreeConfig,
     NHashData,
 };
+use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -21,6 +22,10 @@ use super::util::format_bytes;
 
 const IRIS_FILES_WEB_BASE_URL: &str = "https://files.iris.to";
 const IRIS_SITES_WEB_BASE_URL: &str = "https://sites.iris.to";
+const LOCAL_ADD_STREAM_BATCH_TARGET_BYTES: &str = "268435456";
+const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
+const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
+const STREAM_PUT_BATCH_TARGET_BYTES_ENV: &str = "HTREE_STREAM_PUT_BATCH_TARGET_BYTES";
 
 pub(crate) async fn run_add(
     data_dir: PathBuf,
@@ -32,6 +37,7 @@ pub(crate) async fn run_add(
     chunk_size: Option<usize>,
     local: bool,
 ) -> Result<()> {
+    let _local_add_env = local.then(apply_local_add_env);
     let is_dir = path.is_dir();
     let show_progress = add_progress_enabled();
 
@@ -292,6 +298,40 @@ pub(crate) async fn run_add(
     }
 
     Ok(())
+}
+
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &'static str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.as_ref() {
+            std::env::set_var(self.name, value);
+        } else {
+            std::env::remove_var(self.name);
+        }
+    }
+}
+
+fn apply_local_add_env() -> Vec<EnvVarGuard> {
+    vec![
+        EnvVarGuard::set(LMDB_NO_READ_AHEAD_ENV, "1"),
+        EnvVarGuard::set(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0"),
+        EnvVarGuard::set(
+            STREAM_PUT_BATCH_TARGET_BYTES_ENV,
+            LOCAL_ADD_STREAM_BATCH_TARGET_BYTES,
+        ),
+    ]
 }
 
 fn add_progress_enabled() -> bool {

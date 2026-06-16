@@ -21,7 +21,8 @@ use crate::types::{to_hex, Cid, DirEntry, Hash, Link, LinkType, TreeNode};
 
 use crate::crypto::{decrypt_chk, encrypt_chk, EncryptionKey};
 
-const STREAM_PUT_BATCH_TARGET_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_STREAM_PUT_BATCH_TARGET_BYTES: usize = 64 * 1024 * 1024;
+const STREAM_PUT_BATCH_TARGET_BYTES_ENV: &str = "HTREE_STREAM_PUT_BATCH_TARGET_BYTES";
 const STREAM_PUT_BATCH_MAX_ITEMS: usize = 128;
 
 #[path = "hashtree/stream.rs"]
@@ -254,6 +255,7 @@ impl<S: Store> HashTree<S> {
         let mut consistent_key: Option<[u8; 32]> = None;
         let mut pending_store_items = Vec::new();
         let mut pending_store_bytes = 0usize;
+        let batch_target_bytes = stream_put_batch_target_bytes();
 
         loop {
             let mut chunk = Vec::new();
@@ -299,7 +301,7 @@ impl<S: Store> HashTree<S> {
 
             pending_store_bytes = pending_store_bytes.saturating_add(data.len());
             pending_store_items.push((hash, data, chunk_len));
-            if pending_store_bytes >= STREAM_PUT_BATCH_TARGET_BYTES
+            if pending_store_bytes >= batch_target_bytes
                 || pending_store_items.len() >= STREAM_PUT_BATCH_MAX_ITEMS
             {
                 Self::flush_stream_store_batch(
@@ -1740,6 +1742,14 @@ impl<S: Store> HashTree<S> {
     pub fn max_links(&self) -> usize {
         self.max_links
     }
+}
+
+fn stream_put_batch_target_bytes() -> usize {
+    std::env::var(STREAM_PUT_BATCH_TARGET_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_STREAM_PUT_BATCH_TARGET_BYTES)
 }
 
 /// Verify tree integrity - checks that all referenced hashes exist
