@@ -265,6 +265,9 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
         blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
         blossom_upload_replica_keys: None,
+        blossom_upload_replica_scheduler: Arc::new(
+            crate::server::blossom::BlossomUploadReplicaScheduler::new(),
+        ),
         social_graph: None,
         social_graph_store: None,
         social_graph_root: None,

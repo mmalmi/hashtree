@@ -245,6 +245,9 @@ pub struct AppState {
     pub blossom_upload_replica_queue: Arc<Semaphore>,
     /// Signing key used for server-side write-behind replication auth.
     pub blossom_upload_replica_keys: Option<Arc<Keys>>,
+    /// Per-server scheduler that can merge adjacent write-behind replica uploads.
+    pub blossom_upload_replica_scheduler:
+        Arc<crate::server::blossom::BlossomUploadReplicaScheduler>,
     /// Social graph access control
     pub social_graph: Option<Arc<socialgraph::SocialGraphAccessControl>>,
     /// Social graph store handle for snapshot export

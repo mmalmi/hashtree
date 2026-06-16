@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 use super::auth::AppState;
 use super::blob_read::{
@@ -57,6 +57,14 @@ const BLOSSOM_REPLICA_UPLOAD_CONCURRENCY_ENV: &str = "HTREE_BLOSSOM_REPLICA_UPLO
 const DEFAULT_BLOSSOM_REPLICA_UPLOAD_CONCURRENCY: usize = 4;
 const BLOSSOM_REPLICA_UPLOAD_ATTEMPTS_ENV: &str = "HTREE_BLOSSOM_REPLICA_UPLOAD_ATTEMPTS";
 const DEFAULT_BLOSSOM_REPLICA_UPLOAD_ATTEMPTS: usize = 3;
+const BLOSSOM_REPLICA_COALESCE_MAX_BLOBS_ENV: &str = "HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BLOBS";
+const DEFAULT_BLOSSOM_REPLICA_COALESCE_MAX_BLOBS: usize = 64;
+const BLOSSOM_REPLICA_COALESCE_MAX_BYTES_ENV: &str = "HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BYTES";
+const DEFAULT_BLOSSOM_REPLICA_COALESCE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const BLOSSOM_REPLICA_COALESCE_FLUSH_MS_ENV: &str = "HTREE_BLOSSOM_REPLICA_COALESCE_FLUSH_MS";
+const DEFAULT_BLOSSOM_REPLICA_COALESCE_FLUSH_MS: u64 = 25;
+const BLOSSOM_REPLICA_COALESCE_QUEUE_JOBS_ENV: &str = "HTREE_BLOSSOM_REPLICA_COALESCE_QUEUE_JOBS";
+const DEFAULT_BLOSSOM_REPLICA_COALESCE_QUEUE_JOBS: usize = 1024;
 
 fn slow_batch_upload_log_ms() -> Option<u128> {
     std::env::var(SLOW_BATCH_UPLOAD_LOG_MS_ENV)
@@ -79,6 +87,40 @@ fn blossom_replica_upload_attempts() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_BLOSSOM_REPLICA_UPLOAD_ATTEMPTS)
+}
+
+fn blossom_replica_coalesce_max_blobs() -> usize {
+    std::env::var(BLOSSOM_REPLICA_COALESCE_MAX_BLOBS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOSSOM_REPLICA_COALESCE_MAX_BLOBS)
+        .min(MAX_BATCH_UPLOAD_BLOBS)
+}
+
+fn blossom_replica_coalesce_max_bytes() -> usize {
+    std::env::var(BLOSSOM_REPLICA_COALESCE_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOSSOM_REPLICA_COALESCE_MAX_BYTES)
+        .min(MAX_BATCH_UPLOAD_BYTES)
+}
+
+fn blossom_replica_coalesce_flush_delay() -> Duration {
+    let millis = std::env::var(BLOSSOM_REPLICA_COALESCE_FLUSH_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BLOSSOM_REPLICA_COALESCE_FLUSH_MS);
+    Duration::from_millis(millis)
+}
+
+fn blossom_replica_coalesce_queue_jobs() -> usize {
+    std::env::var(BLOSSOM_REPLICA_COALESCE_QUEUE_JOBS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOSSOM_REPLICA_COALESCE_QUEUE_JOBS)
 }
 
 fn blossom_replica_upload_semaphore() -> Arc<Semaphore> {
@@ -112,6 +154,133 @@ struct PreparedBlossomUploadReplication {
     keys: Arc<Keys>,
     permit: OwnedSemaphorePermit,
     total_bytes: usize,
+}
+
+struct BlossomReplicaUploadJob {
+    prepared: PreparedBlossomUploadReplication,
+    items: Vec<BatchUploadItem>,
+}
+
+struct BlossomReplicaUploadBatch {
+    servers: Vec<String>,
+    keys: Arc<Keys>,
+    permits: Vec<OwnedSemaphorePermit>,
+    total_bytes: usize,
+    data_bytes: usize,
+    items: Vec<BatchUploadItem>,
+}
+
+impl BlossomReplicaUploadBatch {
+    fn from_job(job: BlossomReplicaUploadJob) -> Self {
+        let PreparedBlossomUploadReplication {
+            servers,
+            keys,
+            permit,
+            total_bytes,
+        } = job.prepared;
+        let data_bytes = job.items.iter().map(|item| item.data.len()).sum();
+        Self {
+            servers,
+            keys,
+            permits: vec![permit],
+            total_bytes,
+            data_bytes,
+            items: job.items,
+        }
+    }
+
+    fn can_append(
+        &self,
+        job: &BlossomReplicaUploadJob,
+        max_blobs: usize,
+        max_bytes: usize,
+    ) -> bool {
+        if self.servers != job.prepared.servers || !Arc::ptr_eq(&self.keys, &job.prepared.keys) {
+            return false;
+        }
+        let job_bytes = job.items.iter().map(|item| item.data.len()).sum::<usize>();
+        self.items.len().saturating_add(job.items.len()) <= max_blobs
+            && self.data_bytes.saturating_add(job_bytes) <= max_bytes
+    }
+
+    fn append(&mut self, job: BlossomReplicaUploadJob) {
+        let PreparedBlossomUploadReplication {
+            permit,
+            total_bytes,
+            ..
+        } = job.prepared;
+        self.permits.push(permit);
+        self.total_bytes = self.total_bytes.saturating_add(total_bytes);
+        self.data_bytes = self
+            .data_bytes
+            .saturating_add(job.items.iter().map(|item| item.data.len()).sum::<usize>());
+        self.items.extend(job.items);
+    }
+
+    fn reached_limits(&self, max_blobs: usize, max_bytes: usize) -> bool {
+        self.items.len() >= max_blobs || self.data_bytes >= max_bytes
+    }
+}
+
+/// Per-server write-behind scheduler for merging adjacent replica uploads.
+pub struct BlossomUploadReplicaScheduler {
+    sender: Mutex<Option<mpsc::Sender<BlossomReplicaUploadJob>>>,
+}
+
+impl BlossomUploadReplicaScheduler {
+    pub fn new() -> Self {
+        Self {
+            sender: Mutex::new(None),
+        }
+    }
+
+    fn schedule(&self, job: BlossomReplicaUploadJob) -> Result<(), BlossomReplicaUploadJob> {
+        let max_blobs = blossom_replica_coalesce_max_blobs();
+        let flush_delay = blossom_replica_coalesce_flush_delay();
+        if max_blobs <= 1 || flush_delay.is_zero() {
+            return Err(job);
+        }
+
+        let mut job = job;
+        for _ in 0..2 {
+            let sender = self.sender();
+            match sender.try_send(job) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(returned)) => return Err(returned),
+                Err(mpsc::error::TrySendError::Closed(returned)) => {
+                    self.clear_sender();
+                    job = returned;
+                }
+            }
+        }
+        Err(job)
+    }
+
+    fn sender(&self) -> mpsc::Sender<BlossomReplicaUploadJob> {
+        let mut guard = self.sender.lock().unwrap_or_else(|err| err.into_inner());
+        if guard.as_ref().is_some_and(|sender| sender.is_closed()) {
+            *guard = None;
+        }
+        if let Some(sender) = guard.as_ref() {
+            return sender.clone();
+        }
+
+        let (sender, receiver) = mpsc::channel(blossom_replica_coalesce_queue_jobs());
+        tokio::spawn(blossom_replica_coalescer_worker(receiver));
+        *guard = Some(sender.clone());
+        sender
+    }
+
+    fn clear_sender(&self) {
+        let mut guard = self.sender.lock().unwrap_or_else(|err| err.into_inner());
+        *guard = None;
+    }
+}
+
+impl Default for BlossomUploadReplicaScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub(super) fn blossom_upload_replica_queue_snapshot(
@@ -1182,6 +1351,7 @@ fn prepare_blossom_upload_replication(
 }
 
 fn schedule_prepared_blossom_upload_replication(
+    state: &AppState,
     prepared: PreparedBlossomUploadReplication,
     items: Vec<BatchUploadItem>,
 ) {
@@ -1189,8 +1359,55 @@ fn schedule_prepared_blossom_upload_replication(
         return;
     }
 
+    let job = BlossomReplicaUploadJob { prepared, items };
+    let job = match state.blossom_upload_replica_scheduler.schedule(job) {
+        Ok(()) => return,
+        Err(job) => job,
+    };
+    spawn_blossom_replica_upload_batch(BlossomReplicaUploadBatch::from_job(job));
+}
+
+async fn blossom_replica_coalescer_worker(mut receiver: mpsc::Receiver<BlossomReplicaUploadJob>) {
+    let max_blobs = blossom_replica_coalesce_max_blobs();
+    let max_bytes = blossom_replica_coalesce_max_bytes();
+    let flush_delay = blossom_replica_coalesce_flush_delay();
+
+    while let Some(job) = receiver.recv().await {
+        let mut batch = BlossomReplicaUploadBatch::from_job(job);
+        loop {
+            if batch.reached_limits(max_blobs, max_bytes) {
+                break;
+            }
+            match tokio::time::timeout(flush_delay, receiver.recv()).await {
+                Ok(Some(next_job)) => {
+                    if batch.can_append(&next_job, max_blobs, max_bytes) {
+                        batch.append(next_job);
+                    } else {
+                        spawn_blossom_replica_upload_batch(batch);
+                        batch = BlossomReplicaUploadBatch::from_job(next_job);
+                    }
+                }
+                Ok(None) => {
+                    spawn_blossom_replica_upload_batch(batch);
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+        spawn_blossom_replica_upload_batch(batch);
+    }
+}
+
+fn spawn_blossom_replica_upload_batch(batch: BlossomReplicaUploadBatch) {
     tokio::spawn(async move {
-        let _permit = prepared.permit;
+        let BlossomReplicaUploadBatch {
+            servers,
+            keys,
+            permits: _permits,
+            total_bytes,
+            data_bytes: _,
+            items,
+        } = batch;
         let upload_limit = blossom_replica_upload_semaphore();
         let _upload_permit = match upload_limit.acquire().await {
             Ok(permit) => permit,
@@ -1203,9 +1420,8 @@ fn schedule_prepared_blossom_upload_replication(
             }
         };
         let attempts = blossom_replica_upload_attempts();
-        let client = BlossomClient::new((*prepared.keys).clone())
-            .with_write_servers(prepared.servers.clone());
-        for server in prepared.servers {
+        let client = BlossomClient::new((*keys).clone()).with_write_servers(servers.clone());
+        for server in servers {
             for attempt in 1..=attempts {
                 match client.upload_batch_to_server(&server, &items).await {
                     Ok(Some(result)) => {
@@ -1214,19 +1430,13 @@ fn schedule_prepared_blossom_upload_replication(
                             accepted = result.accepted,
                             uploaded = result.uploaded,
                             total = items.len(),
-                            bytes = prepared.total_bytes,
+                            bytes = total_bytes,
                             "Replicated Blossom upload batch"
                         );
                         break;
                     }
                     Ok(None) => {
-                        replicate_items_individually(
-                            &client,
-                            &server,
-                            &items,
-                            prepared.total_bytes,
-                        )
-                        .await;
+                        replicate_items_individually(&client, &server, &items, total_bytes).await;
                         break;
                     }
                     Err(error) if attempt < attempts => {
@@ -1236,7 +1446,7 @@ fn schedule_prepared_blossom_upload_replication(
                             attempt,
                             attempts,
                             total = items.len(),
-                            bytes = prepared.total_bytes,
+                            bytes = total_bytes,
                             "Blossom write-behind replication retrying"
                         );
                         tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
@@ -1248,7 +1458,7 @@ fn schedule_prepared_blossom_upload_replication(
                             attempt,
                             attempts,
                             total = items.len(),
-                            bytes = prepared.total_bytes,
+                            bytes = total_bytes,
                             "Blossom write-behind replication failed"
                         );
                         break;
@@ -1514,6 +1724,7 @@ pub async fn upload_blob(
                                     replica_content_type,
                                 );
                                 schedule_prepared_blossom_upload_replication(
+                                    &state_for_write,
                                     replication,
                                     vec![replication_item],
                                 );
@@ -1590,6 +1801,7 @@ pub async fn upload_blob(
                         descriptor.mime_type.clone(),
                     );
                     schedule_prepared_blossom_upload_replication(
+                        &state,
                         replication,
                         vec![replication_item],
                     );
@@ -1907,7 +2119,11 @@ async fn upload_decoded_blob_batch(
                             prepare_blossom_upload_replication(&state, inserted_bytes)
                         });
                 if let Some(replication) = replication {
-                    schedule_prepared_blossom_upload_replication(replication, replica_items);
+                    schedule_prepared_blossom_upload_replication(
+                        &state,
+                        replication,
+                        replica_items,
+                    );
                 }
             }
             if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
@@ -2306,6 +2522,7 @@ mod tests {
             blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
             blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
             blossom_upload_replica_keys: None,
+            blossom_upload_replica_scheduler: Arc::new(BlossomUploadReplicaScheduler::new()),
             social_graph: None,
             social_graph_store: None,
             social_graph_root: None,
@@ -2794,6 +3011,108 @@ mod tests {
                 .await
                 .is_err(),
             "duplicate blob should not trigger a second replication batch"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_replication_coalesces_adjacent_binary_batches() {
+        let _lock = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let config_dir = TempDir::new().expect("config dir");
+        let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
+        let _flush_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_FLUSH_MS", "200");
+        let _blobs_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BLOBS", "8");
+        let _bytes_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BYTES", "1048576");
+
+        let first_a = b"coalesced-replication-first-a".to_vec();
+        let first_b = b"coalesced-replication-first-b".to_vec();
+        let second_a = b"coalesced-replication-second-a".to_vec();
+        let second_b = b"coalesced-replication-second-b".to_vec();
+        let expected_hashes = [&first_a, &first_b, &second_a, &second_b]
+            .into_iter()
+            .map(|data| hex::encode(sha256(data)))
+            .collect::<HashSet<_>>();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+        let replica_router = Router::new().route(
+            "/upload/batch-binary",
+            post(move |body: Bytes| {
+                let tx = tx.clone();
+                async move {
+                    let blobs = parse_binary_batch_upload(&body).expect("parse replica batch");
+                    let hashes = blobs
+                        .iter()
+                        .map(|blob| blob.sha256.clone())
+                        .collect::<Vec<_>>();
+                    let _ = tx.send(hashes.clone());
+                    Json(serde_json::json!({
+                        "uploaded": hashes.len(),
+                        "blobs": hashes.into_iter().map(|sha256| serde_json::json!({ "sha256": sha256 })).collect::<Vec<_>>(),
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replica");
+        let replica_addr = listener.local_addr().expect("replica addr");
+        let _server_task =
+            tokio::spawn(async move { axum::serve(listener, replica_router).await.unwrap() });
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let mut state = test_app_state(store);
+        state.require_random_untrusted_ingest = false;
+        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/vnd.hashtree.blossom.batch.v1"
+                .parse()
+                .expect("content type header value"),
+        );
+        let first_body = binary_batch_body(&[
+            (&first_a, Some("application/octet-stream")),
+            (&first_b, Some("application/octet-stream")),
+        ]);
+        let second_body = binary_batch_body(&[
+            (&second_a, Some("application/octet-stream")),
+            (&second_b, Some("application/octet-stream")),
+        ]);
+
+        let first_response =
+            upload_blob_batch_binary(State(state.clone()), headers.clone(), first_body)
+                .await
+                .into_response();
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let second_response = upload_blob_batch_binary(State(state), headers, second_body)
+            .await
+            .into_response();
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let replicated = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("replication request timed out")
+            .expect("replication channel closed");
+        let replicated_hashes = replicated.into_iter().collect::<HashSet<_>>();
+        assert_eq!(replicated_hashes, expected_hashes);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), rx.recv())
+                .await
+                .is_err(),
+            "adjacent batches should be merged into one replica request"
         );
     }
 

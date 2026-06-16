@@ -1279,6 +1279,9 @@ mod tests {
             blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
             blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
             blossom_upload_replica_keys: None,
+            blossom_upload_replica_scheduler: Arc::new(
+                super::super::blossom::BlossomUploadReplicaScheduler::new(),
+            ),
             social_graph: None,
             social_graph_store: None,
             social_graph_root: None,

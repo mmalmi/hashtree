@@ -163,6 +163,9 @@ impl HashtreeServer {
                     DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
                 )),
                 blossom_upload_replica_keys: None,
+                blossom_upload_replica_scheduler: Arc::new(
+                    blossom::BlossomUploadReplicaScheduler::new(),
+                ),
                 social_graph: None,
                 social_graph_store: None,
                 social_graph_root: None,
