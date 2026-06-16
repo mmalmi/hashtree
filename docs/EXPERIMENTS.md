@@ -2,6 +2,69 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Batch Blob Read-Through
+
+Question: can cold immutable tree reads avoid one upstream HTTP GET per missing
+chunk without adding S3/R2/bucket storage or a second source of truth?
+
+Change:
+- Added a small hashtree read extension: `POST /blob/batch`.
+- The request is JSON containing content hashes. The response is a compact
+  binary frame containing only local blobs the server already has.
+- The hot origin verifies every returned blob hash before caching it. Missing,
+  unsupported, truncated, or invalid batch responses fall back to the existing
+  single-blob path.
+- Cold file prefetch now batches unknown range-overlapping child blobs before
+  the normal `ensure_blob_available` fallback. Cached batch fills use the
+  existing `put_cached_blobs_report` batch insert path, so the read optimization
+  does not become one LMDB write transaction per returned blob.
+
+Verification:
+- `cargo fmt --manifest-path rust/Cargo.toml --all --check`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  blob_batch_download_serves_present_hashes_in_binary_frame -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  get_cid_with_fetch_uses_upstream_blob_batch_for_missing_file_chunks -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  get_cid_with_fetch_prefetches_missing_file_chunks_concurrently -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  fetch_missing_chunk_coalesces_concurrent_upstream_fetches -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  server::handlers::tests -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib -- --nocapture`
+
+Live deployment:
+- Deployed non-S3 build `48fec5c0` to the public hot origin and the deep
+  upstream store.
+- The deep store's local `/blob/batch` probe returned the expected empty binary
+  frame.
+- The hot origin stayed healthy with no recent 5xx during cold-read and
+  write-smoke traffic.
+
+Live public samples:
+
+| Shape | Before prefetch | Concurrent prefetch | Batch read-through |
+| --- | ---: | ---: | ---: |
+| 4 concurrent cold reads of one fresh 5 MiB / 64 KiB-chunk encrypted file | about 34 s | about 12.4 s | 0.61-0.64 s |
+| Same file, immediate warm read | about 0.19 s | about 0.18 s | 0.18 s |
+
+Write sanity after deploy:
+
+| Shape | Result |
+| --- | ---: |
+| Public `upload.iris.to` binary batch write, 128 x 256 KiB, 16 blobs/request, c8 | 8.50 MiB/s, 0 failures |
+
+Interpretation:
+- Cold read-through fanout was the read bottleneck for this tree shape. Batching
+  upstream blobs reduced the public cold read from seconds to sub-second without
+  adding a cloud object store or changing local storage semantics.
+- The remaining cold-read cost is mostly metadata/root fetches, public network
+  latency, and the first upstream batch response, not LMDB.
+- Public writes remain in the previously measured 7-10 MiB/s band for this
+  shape. The batch read change did not move the write ceiling; that still needs
+  a better ingress path or a long-lived/framed upload shape if the target is
+  modern bulk-write throughput.
+
 ## 2026-06-16 - Cold Read-Through Chunk Prefetch
 
 Question: why was a hot origin with a deep read-through source still slow on

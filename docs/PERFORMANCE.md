@@ -56,6 +56,13 @@ Cache Rule explicitly covers it. Cache Rules are suitable for read hostnames whe
 their match condition is limited to immutable content-addressed blob paths and
 does not include mutable tree, API, or status routes.
 
+Cold read-through from a deep upstream should use hashtree's batch blob read
+extension when both sides support it. The hot origin asks for many missing
+content hashes with one `POST /blob/batch`, verifies every returned blob, caches
+the accepted blobs locally, and falls back to ordinary single-hash GETs for
+unsupported or missing blobs. This is a transport optimization over the same
+local content-addressed stores; it is not an R2/S3/bucket admission layer.
+
 ## Write path fixes
 
 Useful write-side improvements reduce bytes, object fanout, or repeated request
