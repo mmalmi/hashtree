@@ -37,6 +37,8 @@ const EXTERNAL_BLOB_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-blob-v1\0"
 const EXTERNAL_PACK_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-v1\0";
 const EXTERNAL_PACK_RESERVED_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-reserved-v1\0";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
+const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
+const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
 const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
 const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
 const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
@@ -512,6 +514,10 @@ impl LmdbBlobStore {
 
     pub fn map_size_bytes(&self) -> usize {
         self.env.info().map_size
+    }
+
+    pub fn force_sync(&self) -> Result<(), StoreError> {
+        self.env.force_sync().map_err(map_heed_error)
     }
 
     fn evict_for_write_pressure(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
@@ -1770,9 +1776,23 @@ fn env_bool(name: &str) -> Option<bool> {
 }
 
 fn env_flags_from_env() -> EnvFlags {
+    env_flags_from_bools(
+        env_bool(LMDB_NO_READ_AHEAD_ENV).unwrap_or(false),
+        env_bool(LMDB_NO_SYNC_ENV).unwrap_or(false),
+        env_bool(LMDB_NO_META_SYNC_ENV).unwrap_or(false),
+    )
+}
+
+fn env_flags_from_bools(no_read_ahead: bool, no_sync: bool, no_meta_sync: bool) -> EnvFlags {
     let mut flags = EnvFlags::empty();
-    if env_bool(LMDB_NO_READ_AHEAD_ENV).unwrap_or(false) {
+    if no_read_ahead {
         flags |= EnvFlags::NO_READ_AHEAD;
+    }
+    if no_sync {
+        flags |= EnvFlags::NO_SYNC;
+    }
+    if no_meta_sync {
+        flags |= EnvFlags::NO_META_SYNC;
     }
     flags
 }
@@ -1977,6 +1997,15 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn env_flags_from_bools_enables_bulk_ingest_flags() {
+        let flags = env_flags_from_bools(true, true, true);
+
+        assert!(flags.contains(EnvFlags::NO_READ_AHEAD));
+        assert!(flags.contains(EnvFlags::NO_SYNC));
+        assert!(flags.contains(EnvFlags::NO_META_SYNC));
     }
 
     #[tokio::test]

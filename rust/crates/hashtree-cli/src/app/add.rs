@@ -22,9 +22,16 @@ use super::util::format_bytes;
 
 const IRIS_DRIVE_WEB_BASE_URL: &str = "https://drive.iris.to";
 const IRIS_SITES_WEB_BASE_URL: &str = "https://sites.iris.to";
+const LOCAL_ADD_EXTERNAL_BLOB_MIN_BYTES: &str = "65536";
+const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
 const LOCAL_ADD_STREAM_BATCH_TARGET_BYTES: &str = "268435456";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
+const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
+const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
+const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
+const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
 const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
+const LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES";
 const STREAM_PUT_BATCH_TARGET_BYTES_ENV: &str = "HTREE_STREAM_PUT_BATCH_TARGET_BYTES";
 
 pub(crate) async fn run_add(
@@ -37,7 +44,7 @@ pub(crate) async fn run_add(
     chunk_size: Option<usize>,
     local: bool,
 ) -> Result<()> {
-    let _local_add_env = local.then(apply_local_add_env);
+    let _local_add_env = local.then(|| apply_local_add_env(&data_dir));
     let is_dir = path.is_dir();
     let show_progress = add_progress_enabled();
 
@@ -217,6 +224,9 @@ pub(crate) async fn run_add(
     ) {
         tracing::warn!("Failed to index tree: {}", e);
     }
+    if local {
+        store.force_sync().context("Failed to sync local store")?;
+    }
 
     let mut write_servers = Vec::new();
     if !local {
@@ -306,10 +316,19 @@ struct EnvVarGuard {
 }
 
 impl EnvVarGuard {
-    fn set(name: &'static str, value: &'static str) -> Self {
+    fn set(name: &'static str, value: impl Into<OsString>) -> Self {
         let previous = std::env::var_os(name);
+        let value = value.into();
         std::env::set_var(name, value);
         Self { name, previous }
+    }
+
+    fn set_if_missing(name: &'static str, value: impl Into<OsString>) -> Option<Self> {
+        if std::env::var_os(name).is_some() {
+            None
+        } else {
+            Some(Self::set(name, value))
+        }
     }
 }
 
@@ -323,15 +342,38 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn apply_local_add_env() -> Vec<EnvVarGuard> {
-    vec![
+fn apply_local_add_env(data_dir: &Path) -> Vec<EnvVarGuard> {
+    let mut guards = vec![
         EnvVarGuard::set(LMDB_NO_READ_AHEAD_ENV, "1"),
+        EnvVarGuard::set(LMDB_NO_SYNC_ENV, "1"),
+        EnvVarGuard::set(LMDB_NO_META_SYNC_ENV, "1"),
         EnvVarGuard::set(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0"),
         EnvVarGuard::set(
             STREAM_PUT_BATCH_TARGET_BYTES_ENV,
             LOCAL_ADD_STREAM_BATCH_TARGET_BYTES,
         ),
-    ]
+    ];
+    if let Some(guard) = EnvVarGuard::set_if_missing(
+        LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV,
+        LOCAL_ADD_EXTERNAL_BLOB_MIN_BYTES,
+    ) {
+        guards.push(guard);
+    }
+    if let Some(guard) = EnvVarGuard::set_if_missing(
+        LMDB_EXTERNAL_BLOB_DIR_ENV,
+        data_dir
+            .join(LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME)
+            .into_os_string(),
+    ) {
+        guards.push(guard);
+    }
+    if let Some(guard) = EnvVarGuard::set_if_missing(
+        LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV,
+        LOCAL_ADD_STREAM_BATCH_TARGET_BYTES,
+    ) {
+        guards.push(guard);
+    }
+    guards
 }
 
 fn add_progress_enabled() -> bool {

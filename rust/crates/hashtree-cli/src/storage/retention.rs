@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::executor::block_on as sync_block_on;
 use hashtree_core::store::Store;
-use hashtree_core::{to_hex, types::Hash, HashTree, HashTreeConfig};
+use hashtree_core::{to_hex, types::Hash, HashTree, HashTreeConfig, LinkType};
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -630,10 +630,8 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        // Walk tree and collect all blob hashes + compute total size
-        let (_blob_hashes, total_size) =
-            sync_block_on(async { self.collect_tree_blobs(&tree, root_hash).await })?;
-        let tracked_hashes = sync_block_on(self.collect_tree_hashes(&tree, root_hash))?;
+        let (tracked_hashes, total_size) =
+            sync_block_on(async { self.collect_tree_index(&tree, root_hash).await })?;
 
         let mut wtxn = self.env.write_txn()?;
 
@@ -677,48 +675,57 @@ impl HashtreeStore {
         Ok(())
     }
 
-    /// Collect all blob hashes in a tree and compute total size
-    async fn collect_tree_blobs<S: Store>(
+    async fn collect_tree_index<S: Store>(
         &self,
         tree: &HashTree<S>,
         root: &Hash,
-    ) -> Result<(Vec<Hash>, u64)> {
-        let mut blobs = Vec::new();
+    ) -> Result<(HashSet<Hash>, u64)> {
+        let mut hashes = HashSet::new();
         let mut total_size = 0u64;
-        let mut stack = vec![*root];
+        let mut stack = vec![(*root, true)];
 
-        while let Some(hash) = stack.pop() {
-            // Check if it's a tree node
-            let is_tree = tree
-                .is_tree(&hash)
+        while let Some((hash, count_bytes)) = stack.pop() {
+            hashes.insert(hash);
+
+            let Some(node) = tree
+                .get_tree_node(&hash)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to check tree: {}", e))?;
-
-            if is_tree {
-                // Get tree node and add children to stack
-                if let Some(node) = tree
-                    .get_tree_node(&hash)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))?
-                {
-                    for link in &node.links {
-                        stack.push(link.hash);
+                .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))?
+            else {
+                if count_bytes {
+                    if let Some(size) = self
+                        .router
+                        .blob_size_sync(&hash)
+                        .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
+                    {
+                        total_size = total_size.saturating_add(size);
                     }
                 }
-            } else {
-                // It's a blob - get its size
-                if let Some(size) = self
-                    .router
-                    .blob_size_sync(&hash)
-                    .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
-                {
-                    total_size += size;
-                    blobs.push(hash);
+                continue;
+            };
+
+            for link in &node.links {
+                hashes.insert(link.hash);
+                match link.link_type {
+                    LinkType::Blob => {
+                        if count_bytes {
+                            total_size = total_size.saturating_add(link.size);
+                        }
+                    }
+                    LinkType::File => {
+                        if count_bytes {
+                            total_size = total_size.saturating_add(link.size);
+                        }
+                        stack.push((link.hash, false));
+                    }
+                    LinkType::Dir => {
+                        stack.push((link.hash, count_bytes));
+                    }
                 }
             }
         }
 
-        Ok((blobs, total_size))
+        Ok((hashes, total_size))
     }
 
     /// Unindex a tree - removes blob-tree mappings and deletes orphaned blobs
@@ -1069,6 +1076,37 @@ mod tests {
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].name, "npub1example/playlist");
         assert!(pins[0].size_bytes > 0);
+    }
+
+    #[test]
+    fn index_tree_records_multilevel_file_size_from_links() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024 * 1024).expect("store");
+        let tree = HashTree::new(
+            HashTreeConfig::new(store.store_arc())
+                .public()
+                .with_chunk_size(4)
+                .with_max_links(2),
+        );
+        let data = (0u8..31).collect::<Vec<_>>();
+        let (cid, size) = sync_block_on(tree.put(&data)).expect("put file");
+
+        store
+            .index_tree(
+                &cid.hash,
+                "npub1example",
+                Some("large-file"),
+                PRIORITY_OTHER,
+                Some("npub1example/large-file"),
+            )
+            .expect("index tree");
+
+        let meta = store
+            .get_tree_meta(&cid.hash)
+            .expect("tree meta")
+            .expect("indexed meta");
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(meta.total_size, data.len() as u64);
     }
 
     #[test]

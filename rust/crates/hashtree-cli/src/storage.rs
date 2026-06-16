@@ -59,6 +59,9 @@ const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LO
 const LMDB_HOT_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_DIR";
 #[cfg(feature = "lmdb")]
 const LMDB_HOT_BLOB_LEGACY_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_LEGACY_DIR";
+const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
+const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
+const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
 
 fn slow_owned_blob_batch_log_ms() -> Option<u128> {
     std::env::var(SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV)
@@ -79,6 +82,36 @@ fn access_update_background_batch_limit() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_ACCESS_UPDATE_BACKGROUND_BATCH_LIMIT)
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| {
+        let value = value.trim();
+        if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") {
+            Some(true)
+        } else if value == "0"
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("no")
+        {
+            Some(false)
+        } else {
+            None
+        }
+    })
+}
+
+fn lmdb_env_flags_from_env() -> EnvFlags {
+    let mut flags = EnvFlags::empty();
+    if env_bool(LMDB_NO_READ_AHEAD_ENV).unwrap_or(false) {
+        flags |= EnvFlags::NO_READ_AHEAD;
+    }
+    if env_bool(LMDB_NO_SYNC_ENV).unwrap_or(false) {
+        flags |= EnvFlags::NO_SYNC;
+    }
+    if env_bool(LMDB_NO_META_SYNC_ENV).unwrap_or(false) {
+        flags |= EnvFlags::NO_META_SYNC;
+    }
+    flags
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -397,6 +430,19 @@ impl LocalStore {
             LocalStore::Fs(_) => StorageBackend::Fs,
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(_) | LocalStore::TieredLmdb { .. } => StorageBackend::Lmdb,
+        }
+    }
+
+    pub fn force_sync(&self) -> Result<(), StoreError> {
+        match self {
+            LocalStore::Fs(_) => Ok(()),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.force_sync(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::TieredLmdb { primary, legacy } => {
+                primary.force_sync()?;
+                legacy.force_sync()
+            }
         }
     }
 
@@ -875,6 +921,10 @@ impl StorageRouter {
             #[cfg(feature = "s3")]
             sync_tx: None,
         }
+    }
+
+    pub fn force_sync(&self) -> Result<(), StoreError> {
+        self.local.force_sync()
     }
 
     /// Create router with local storage + S3 backup
@@ -1483,6 +1533,7 @@ impl HashtreeStore {
         backend: &hashtree_config::StorageBackend,
         env_flags: EnvFlags,
     ) -> Result<Self> {
+        let env_flags = env_flags | lmdb_env_flags_from_env();
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
         let metadata_map_size = lmdb_map_size_for_existing_env(
@@ -1591,6 +1642,13 @@ impl HashtreeStore {
     /// All writes through this go to both LMDB and S3
     pub fn store_arc(&self) -> Arc<StorageRouter> {
         Arc::clone(&self.router)
+    }
+
+    pub fn force_sync(&self) -> Result<()> {
+        self.env.force_sync()?;
+        self.router
+            .force_sync()
+            .map_err(|err| anyhow::anyhow!("Failed to sync blob store: {}", err))
     }
 
     fn access_tracking_tree(&self) -> (HashTree<AccessRecordingStore>, AccessRecordingStore) {
