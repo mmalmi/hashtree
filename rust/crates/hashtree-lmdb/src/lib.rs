@@ -68,6 +68,28 @@ struct ExternalBlobConfig {
     pack_target_bytes: Option<usize>,
 }
 
+/// Options for storing larger LMDB blobs in normal files.
+#[derive(Debug, Clone)]
+pub struct ExternalBlobOptions {
+    pub base_path: PathBuf,
+    pub min_bytes: usize,
+    pub sync: bool,
+    pub pack_target_bytes: Option<usize>,
+}
+
+impl ExternalBlobOptions {
+    /// Build external-blob options from the standard hashtree LMDB environment.
+    pub fn from_env(env_path: &Path) -> Option<Self> {
+        ExternalBlobConfig::from_env(env_path).map(Into::into)
+    }
+
+    /// Override only the base directory, keeping the remaining env-derived knobs.
+    pub fn with_base_path(mut self, base_path: PathBuf) -> Self {
+        self.base_path = base_path;
+        self
+    }
+}
+
 impl ExternalBlobConfig {
     fn from_env(env_path: &Path) -> Option<Self> {
         let min_bytes = std::env::var(LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV)
@@ -90,6 +112,28 @@ impl ExternalBlobConfig {
             sync,
             pack_target_bytes,
         })
+    }
+}
+
+impl From<ExternalBlobConfig> for ExternalBlobOptions {
+    fn from(config: ExternalBlobConfig) -> Self {
+        Self {
+            base_path: config.base_path,
+            min_bytes: config.min_bytes,
+            sync: config.sync,
+            pack_target_bytes: config.pack_target_bytes,
+        }
+    }
+}
+
+impl From<ExternalBlobOptions> for ExternalBlobConfig {
+    fn from(options: ExternalBlobOptions) -> Self {
+        Self {
+            base_path: options.base_path,
+            min_bytes: options.min_bytes,
+            sync: options.sync,
+            pack_target_bytes: options.pack_target_bytes,
+        }
     }
 }
 
@@ -127,6 +171,23 @@ impl LmdbBlobStore {
 
     /// Open or create with a maximum logical storage size.
     pub fn with_max_bytes<P: AsRef<Path>>(path: P, max_bytes: u64) -> Result<Self, StoreError> {
+        Self::with_max_bytes_and_external_blob_options(
+            path,
+            max_bytes,
+            ExternalBlobOptions::from_env,
+        )
+    }
+
+    /// Open or create with a maximum logical storage size and custom external-blob options.
+    pub fn with_max_bytes_and_external_blob_options<P, F>(
+        path: P,
+        max_bytes: u64,
+        external_blobs: F,
+    ) -> Result<Self, StoreError>
+    where
+        P: AsRef<Path>,
+        F: FnOnce(&Path) -> Option<ExternalBlobOptions>,
+    {
         let path_ref = path.as_ref();
         let existing_map_size = std::fs::metadata(path_ref.join("data.mdb"))
             .map(|metadata| metadata.len())
@@ -145,7 +206,12 @@ impl LmdbBlobStore {
         ))
         .unwrap_or(usize::MAX)
         .max(DEFAULT_MAP_SIZE);
-        let store = Self::with_map_size(path_ref, requested_map_size)?;
+        let external_blobs = external_blobs(path_ref);
+        let store = Self::with_map_size_and_external_blob_options(
+            path_ref,
+            requested_map_size,
+            external_blobs,
+        )?;
         store.max_bytes.store(max_bytes, Ordering::Relaxed);
         let current = store.current_bytes.load(Ordering::Relaxed);
         if max_bytes > 0 && current > max_bytes {
@@ -153,6 +219,14 @@ impl LmdbBlobStore {
             store.evict_to_target(current, target)?;
         }
         Ok(store)
+    }
+
+    /// Open or create with the default map size and explicit external-blob options.
+    pub fn with_external_blob_options<P: AsRef<Path>>(
+        path: P,
+        external_blobs: Option<ExternalBlobOptions>,
+    ) -> Result<Self, StoreError> {
+        Self::with_map_size_and_external_blob_options(path, DEFAULT_MAP_SIZE, external_blobs)
     }
 
     fn align_map_size_bytes(bytes: u64) -> u64 {
@@ -176,6 +250,17 @@ impl LmdbBlobStore {
             env_flags_from_env(),
             ExternalBlobConfig::from_env,
         )
+    }
+
+    /// Open or create with custom map size and explicit external-blob options.
+    pub fn with_map_size_and_external_blob_options<P: AsRef<Path>>(
+        path: P,
+        map_size: usize,
+        external_blobs: Option<ExternalBlobOptions>,
+    ) -> Result<Self, StoreError> {
+        Self::with_map_size_and_settings(path, map_size, env_flags_from_env(), |_| {
+            external_blobs.map(Into::into)
+        })
     }
 
     fn with_map_size_and_settings<P, F>(

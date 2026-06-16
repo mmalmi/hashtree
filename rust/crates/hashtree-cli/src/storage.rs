@@ -9,7 +9,7 @@ use hashtree_core::{
 };
 use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
-use hashtree_lmdb::LmdbBlobStore;
+use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobStore};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
 use serde::{Deserialize, Serialize};
@@ -59,9 +59,21 @@ const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LO
 const LMDB_HOT_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_DIR";
 #[cfg(feature = "lmdb")]
 const LMDB_HOT_BLOB_LEGACY_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_LEGACY_DIR";
+#[cfg(feature = "lmdb")]
+const LMDB_HOT_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR";
+#[cfg(feature = "lmdb")]
+const LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
 const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
+#[cfg(all(test, feature = "lmdb"))]
+const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
+#[cfg(all(test, feature = "lmdb"))]
+const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
+#[cfg(all(test, feature = "lmdb"))]
+const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
+#[cfg(all(test, feature = "lmdb"))]
+const LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES";
 
 fn slow_owned_blob_batch_log_ms() -> Option<u128> {
     std::env::var(SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV)
@@ -288,15 +300,44 @@ fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(feature = "lmdb")]
+fn external_blob_options_for(
+    store_path: &Path,
+    override_dir_env: Option<&str>,
+) -> Option<ExternalBlobOptions> {
+    let options = ExternalBlobOptions::from_env(store_path)?;
+    override_dir_env
+        .and_then(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| options.clone().with_base_path(path))
+        .or(Some(options))
+}
+
+#[cfg(feature = "lmdb")]
 fn open_lmdb_blob_store<P: AsRef<Path>>(
     path: P,
     map_size_bytes: Option<u64>,
 ) -> Result<LmdbBlobStore, StoreError> {
+    open_lmdb_blob_store_with_external_dir_env(path, map_size_bytes, None)
+}
+
+#[cfg(feature = "lmdb")]
+fn open_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
+    path: P,
+    map_size_bytes: Option<u64>,
+    external_dir_env: Option<&str>,
+) -> Result<LmdbBlobStore, StoreError> {
     std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
     remove_stale_fs_blob_shards(path.as_ref())?;
+    let external_blobs = external_blob_options_for(path.as_ref(), external_dir_env);
     match map_size_bytes {
-        Some(map_size_bytes) => LmdbBlobStore::with_max_bytes(path, map_size_bytes),
-        None => LmdbBlobStore::new(path),
+        Some(map_size_bytes) => {
+            LmdbBlobStore::with_max_bytes_and_external_blob_options(path, map_size_bytes, |_| {
+                external_blobs
+            })
+        }
+        None => LmdbBlobStore::with_external_blob_options(path, external_blobs),
     }
 }
 
@@ -305,15 +346,25 @@ fn open_unbounded_lmdb_blob_store<P: AsRef<Path>>(
     path: P,
     map_size_bytes: Option<u64>,
 ) -> Result<LmdbBlobStore, StoreError> {
+    open_unbounded_lmdb_blob_store_with_external_dir_env(path, map_size_bytes, None)
+}
+
+#[cfg(feature = "lmdb")]
+fn open_unbounded_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
+    path: P,
+    map_size_bytes: Option<u64>,
+    external_dir_env: Option<&str>,
+) -> Result<LmdbBlobStore, StoreError> {
     std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
     remove_stale_fs_blob_shards(path.as_ref())?;
+    let external_blobs = external_blob_options_for(path.as_ref(), external_dir_env);
     match map_size_bytes {
         Some(map_size_bytes) => {
             let map_size = usize::try_from(align_lmdb_map_size(map_size_bytes))
                 .map_err(|_| StoreError::Other("LMDB map size exceeds usize".to_string()))?;
-            LmdbBlobStore::with_map_size(path, map_size)
+            LmdbBlobStore::with_map_size_and_external_blob_options(path, map_size, external_blobs)
         }
-        None => LmdbBlobStore::new(path),
+        None => LmdbBlobStore::with_external_blob_options(path, external_blobs),
     }
 }
 
@@ -343,8 +394,16 @@ impl LocalStore {
                 if let Some(hot_path) = lmdb_hot_blob_dir_for(path.as_ref()) {
                     let legacy_path = path.as_ref().to_path_buf();
                     if hot_path != legacy_path {
-                        let primary = open_lmdb_blob_store(&hot_path, _map_size_bytes)?;
-                        let legacy = open_lmdb_blob_store(&legacy_path, _map_size_bytes)?;
+                        let primary = open_lmdb_blob_store_with_external_dir_env(
+                            &hot_path,
+                            _map_size_bytes,
+                            Some(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV),
+                        )?;
+                        let legacy = open_lmdb_blob_store_with_external_dir_env(
+                            &legacy_path,
+                            _map_size_bytes,
+                            Some(LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV),
+                        )?;
                         tracing::info!(
                             "Using tiered LMDB blob storage: primary={}, legacy={}",
                             hot_path.display(),
@@ -397,8 +456,16 @@ impl LocalStore {
                 if let Some(hot_path) = lmdb_hot_blob_dir_for(path.as_ref()) {
                     let legacy_path = path.as_ref().to_path_buf();
                     if hot_path != legacy_path {
-                        let primary = open_unbounded_lmdb_blob_store(&hot_path, _map_size_bytes)?;
-                        let legacy = open_unbounded_lmdb_blob_store(&legacy_path, _map_size_bytes)?;
+                        let primary = open_unbounded_lmdb_blob_store_with_external_dir_env(
+                            &hot_path,
+                            _map_size_bytes,
+                            Some(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV),
+                        )?;
+                        let legacy = open_unbounded_lmdb_blob_store_with_external_dir_env(
+                            &legacy_path,
+                            _map_size_bytes,
+                            Some(LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV),
+                        )?;
                         tracing::info!(
                             "Using tiered LMDB blob storage: primary={}, legacy={}",
                             hot_path.display(),
@@ -2915,6 +2982,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn set_value(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
     }
 
     #[cfg(feature = "lmdb")]
@@ -2926,6 +2999,22 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    #[cfg(feature = "lmdb")]
+    fn count_files_under(path: &Path) -> Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let mut count = 0usize;
+        for entry in walkdir::WalkDir::new(path) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
     }
 
     #[test]
@@ -3114,6 +3203,66 @@ mod tests {
 
         let local = store.router.local_store();
         assert!(matches!(local.as_ref(), LocalStore::TieredLmdb { .. }));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn tiered_lmdb_uses_distinct_external_blob_dirs() -> Result<()> {
+        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let data_dir = temp.path().join("store");
+        let hot = temp.path().join("hot-main-blobs");
+        let legacy = data_dir.join("blobs");
+        let hot_external = temp.path().join("hot-external");
+        let legacy_external = temp.path().join("legacy-external");
+        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
+        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
+        let _global_external_guard = EnvGuard::set(LMDB_EXTERNAL_BLOB_DIR_ENV, &legacy_external);
+        let _hot_external_guard = EnvGuard::set(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV, &hot_external);
+        let _min_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV, "1");
+        let _sync_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0");
+        let _pack_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV, "1024");
+
+        let store = HashtreeStore::with_options_and_backend(
+            &data_dir,
+            None,
+            128 * 1024 * 1024,
+            true,
+            &StorageBackend::Lmdb,
+        )?;
+        let hot_data = b"hot blob written through primary tier".repeat(4);
+        let hot_hash = sha256(&hot_data);
+        assert_eq!(store.put_cached_blobs(&[(hot_hash, hot_data.clone())])?, 1);
+        assert!(
+            count_files_under(&hot_external.join("packs"))? > 0,
+            "primary hot writes should create external packs under hot external dir"
+        );
+        assert_eq!(
+            count_files_under(&legacy_external.join("packs"))?,
+            0,
+            "hot writes must not spill into the legacy external dir"
+        );
+
+        let legacy_data = b"legacy blob already stored on the old tier".repeat(4);
+        let legacy_hash = sha256(&legacy_data);
+        match store.router.local_store().as_ref() {
+            LocalStore::TieredLmdb { legacy, .. } => {
+                assert_eq!(
+                    legacy.put_many_sync(&[(legacy_hash, legacy_data.clone())])?,
+                    1
+                );
+            }
+            _ => panic!("expected tiered LMDB local store"),
+        }
+        assert!(
+            count_files_under(&legacy_external.join("packs"))? > 0,
+            "legacy writes should keep using the legacy external dir"
+        );
+
+        assert_eq!(store.router().get_sync(&hot_hash)?, Some(hot_data));
+        assert_eq!(store.router().get_sync(&legacy_hash)?, Some(legacy_data));
 
         Ok(())
     }

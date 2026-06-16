@@ -2,6 +2,47 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Tiered LMDB External Pack Roots for Hot Storage
+
+Question: when a large hashtree store uses tiered LMDB, can new hot writes place
+external pack files on a fast filesystem while legacy reads keep resolving old
+pack files from the existing deep store?
+
+Finding:
+- The existing tiered LMDB abstraction could route new hash/index records to a
+  hot primary store and read misses from a legacy store.
+- External pack files were configured through one global
+  `HTREE_LMDB_EXTERNAL_BLOB_DIR`, so moving only the hot tier to faster storage
+  would either keep writing blob bytes to the slow path or make legacy pack
+  markers resolve against the wrong directory.
+
+Change:
+- Added explicit external-blob options to `hashtree-lmdb` constructors.
+- Added tier-scoped external pack directory overrides:
+  `HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR` for the primary hot tier and
+  `HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR` for the legacy tier. Without those
+  overrides, existing global-env behavior remains unchanged.
+
+Storage samples from one host, fresh temp stores, 1024 x 256 KiB batch writes:
+
+| Shape | Result |
+| --- | ---: |
+| Fast local filesystem, external pack fsync on | 329.84 MiB/s |
+| Fast local filesystem, external pack fsync off | 417.53 MiB/s |
+| HDD mirror via zvol-backed filesystem, external pack fsync on | 54.51 MiB/s |
+| HDD mirror via zvol-backed filesystem, external pack fsync off | 189.81 MiB/s |
+
+Interpretation:
+- The raw sequential write path was not the main issue; the same zvol stack could
+  stream a simple 1 GiB file near 900 MB/s. The hashtree object pattern with
+  external pack fsyncs showed the real gap.
+- The safe near-term migration is not a full disk detach. First deploy
+  tier-scoped external pack roots, put the hot primary and its packs on the fast
+  filesystem, keep the legacy tier and old packs in place, then verify reads and
+  writes before any cold-store disk migration.
+- This keeps local filesystems as the hot path and does not add R2/S3/object
+  storage.
+
 ## 2026-06-16 - Edge Nginx Connection Headroom and CDN Read Check
 
 Question: is the current public reverse proxy leaving obvious read/write
