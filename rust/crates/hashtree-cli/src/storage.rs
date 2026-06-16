@@ -1778,11 +1778,15 @@ impl HashtreeStore {
     }
 
     /// Store multiple owned Blossom blobs, batching raw blob and owner-index writes.
-    pub fn put_owned_blobs(&self, items: &[(Hash, Vec<u8>)], pubkey: &[u8; 32]) -> Result<usize> {
+    pub fn put_owned_blobs_report(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+        pubkey: &[u8; 32],
+    ) -> Result<PutManyReport> {
         let started_at = Instant::now();
         let slow_log_ms = slow_owned_blob_batch_log_ms();
         if items.is_empty() {
-            return Ok(0);
+            return Ok(PutManyReport::default());
         }
         let incoming_bytes = items.iter().fold(0u64, |total, (_, data)| {
             total.saturating_add(data.len() as u64)
@@ -1819,7 +1823,13 @@ impl HashtreeStore {
                 "slow owned Blossom blob batch write"
             );
         }
-        Ok(report.inserted)
+        Ok(report)
+    }
+
+    /// Store multiple owned Blossom blobs, returning only the number of new blobs.
+    pub fn put_owned_blobs(&self, items: &[(Hash, Vec<u8>)], pubkey: &[u8; 32]) -> Result<usize> {
+        self.put_owned_blobs_report(items, pubkey)
+            .map(|report| report.inserted)
     }
 
     /// Store an opportunistically cached blob.
@@ -1857,11 +1867,11 @@ impl HashtreeStore {
     }
 
     /// Store multiple opportunistically cached blobs in one raw storage batch.
-    pub fn put_cached_blobs(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize> {
+    pub fn put_cached_blobs_report(&self, items: &[(Hash, Vec<u8>)]) -> Result<PutManyReport> {
         let started_at = Instant::now();
         let slow_log_ms = slow_cached_blob_batch_log_ms();
         if items.is_empty() {
-            return Ok(0);
+            return Ok(PutManyReport::default());
         }
 
         let candidate_bytes = items.iter().fold(0u64, |total, (_, data)| {
@@ -1896,7 +1906,7 @@ impl HashtreeStore {
                             "slow cached Blossom blob batch write"
                         );
                     }
-                    return Ok(report.inserted);
+                    return Ok(report);
                 }
                 Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
                     let freed = self.relieve_cached_blob_write_pressure(candidate_bytes)?;
@@ -1916,6 +1926,12 @@ impl HashtreeStore {
                 }
             }
         }
+    }
+
+    /// Store multiple opportunistically cached blobs, returning only the number of new blobs.
+    pub fn put_cached_blobs(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize> {
+        self.put_cached_blobs_report(items)
+            .map(|report| report.inserted)
     }
 
     /// Get a raw blob by SHA256 hash (raw bytes).

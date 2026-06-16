@@ -1833,16 +1833,6 @@ async fn upload_decoded_blob_batch(
         items.push((actual_hash, data));
     }
     let prepare_ms = started_at.elapsed().as_millis();
-    let replication = prepare_blossom_upload_replication(&state, total_bytes);
-    let replica_items = replication.as_ref().map(|_| {
-        replica_specs
-            .iter()
-            .zip(items.iter())
-            .map(|((sha256_hex, content_type), (_hash, data))| {
-                replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
-            })
-            .collect::<Vec<_>>()
-    });
 
     let permit = match acquire_blob_write().await {
         Ok(permit) => permit,
@@ -1852,11 +1842,12 @@ async fn upload_decoded_blob_batch(
     let store_started = Instant::now();
     let stored = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        if is_allowed_author {
-            store.put_owned_blobs(&items, &pubkey_bytes)
+        let report = if is_allowed_author {
+            store.put_owned_blobs_report(&items, &pubkey_bytes)
         } else {
-            store.put_cached_blobs(&items)
-        }
+            store.put_cached_blobs_report(&items)
+        }?;
+        Ok::<_, anyhow::Error>((report, items))
     })
     .await
     .map_err(|error| anyhow::anyhow!("blob batch write task failed: {}", error));
@@ -1864,9 +1855,28 @@ async fn upload_decoded_blob_batch(
     let total_ms = started_at.elapsed().as_millis();
 
     match stored {
-        Ok(Ok(uploaded)) => {
-            if let (Some(replication), Some(replica_items)) = (replication, replica_items) {
-                schedule_prepared_blossom_upload_replication(replication, replica_items);
+        Ok(Ok((report, items))) => {
+            let uploaded = report.inserted;
+            if uploaded > 0 {
+                let inserted: HashSet<_> = report.inserted_hashes.iter().copied().collect();
+                let replica_items = replica_specs
+                    .iter()
+                    .zip(items.iter())
+                    .filter_map(|((sha256_hex, content_type), (hash, data))| {
+                        inserted.contains(hash).then(|| {
+                            replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let replication =
+                    usize::try_from(report.inserted_bytes)
+                        .ok()
+                        .and_then(|inserted_bytes| {
+                            prepare_blossom_upload_replication(&state, inserted_bytes)
+                        });
+                if let Some(replication) = replication {
+                    schedule_prepared_blossom_upload_replication(replication, replica_items);
+                }
             }
             if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
                 tracing::warn!(
@@ -2550,6 +2560,101 @@ mod tests {
         assert_eq!(parsed.blobs[1].sha256, hex::encode(second_hash));
         assert!(store.blob_exists(&first_hash).expect("first exists"));
         assert!(store.blob_exists(&second_hash).expect("second exists"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_blob_batch_binary_replicates_only_new_blobs() {
+        let _lock = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let config_dir = TempDir::new().expect("config dir");
+        let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
+
+        let first = (0u8..=255).collect::<Vec<_>>();
+        let second = (0u8..=255).map(|byte| byte ^ 0x55).collect::<Vec<_>>();
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let second_hash_hex = hex::encode(second_hash);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+        let replica_router = Router::new().route(
+            "/upload/batch-binary",
+            post(move |body: Bytes| {
+                let tx = tx.clone();
+                async move {
+                    let blobs = parse_binary_batch_upload(&body).expect("parse replica batch");
+                    let hashes = blobs
+                        .iter()
+                        .map(|blob| blob.sha256.clone())
+                        .collect::<Vec<_>>();
+                    let _ = tx.send(hashes.clone());
+                    Json(serde_json::json!({
+                        "uploaded": hashes.len(),
+                        "blobs": hashes.into_iter().map(|sha256| serde_json::json!({ "sha256": sha256 })).collect::<Vec<_>>(),
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replica");
+        let replica_addr = listener.local_addr().expect("replica addr");
+        let _server_task =
+            tokio::spawn(async move { axum::serve(listener, replica_router).await.unwrap() });
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        store
+            .put_cached_blobs(&[(first_hash, first.clone())])
+            .expect("prestore first blob");
+        let mut state = test_app_state(Arc::clone(&store));
+        state.require_random_untrusted_ingest = false;
+        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/vnd.hashtree.blossom.batch.v1"
+                .parse()
+                .expect("content type header value"),
+        );
+        let body = binary_batch_body(&[
+            (&first, Some("application/octet-stream")),
+            (&second, Some("application/octet-stream")),
+        ]);
+
+        let response = upload_blob_batch_binary(State(state), headers, body)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read batch response");
+        let parsed: BatchUploadResponse =
+            serde_json::from_slice(&body).expect("parse batch response");
+        assert_eq!(parsed.uploaded, 1);
+        let replicated = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("replication request timed out")
+            .expect("replication channel closed");
+        assert_eq!(replicated, vec![second_hash_hex]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "duplicate blob should not trigger a second replication batch"
+        );
     }
 
     #[test]

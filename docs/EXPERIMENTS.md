@@ -2,6 +2,43 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Replicate Only Inserted Batch Blobs
+
+Question: with the front node acting as the hot origin, is write-behind
+replication doing unnecessary work for duplicate-heavy public pushes and retries?
+
+Findings:
+- The public path is no longer primarily a Worker/Tunnel problem. A temporary
+  direct-origin probe from the same outside client reached about 8.56 MiB/s at
+  c4 and 9.84 MiB/s at c8 for 16-blob binary batches, close to the
+  Cloudflare-proxied 9.40 MiB/s best sample.
+- Local hot-origin capacity is much higher than the public path: direct htree
+  loopback reached about 99.80 MiB/s at c4 and 72.95 MiB/s at c8 for the same
+  request shape. Local nginx-to-htree reached about 44.93 MiB/s at c4 and 78.48
+  MiB/s at c8. So the remaining public write ceiling is before local storage
+  and mostly before local nginx/daemon CPU.
+- Driving the hot origin locally at high throughput can grow the bounded
+  write-behind queue while the background replica link drains more slowly. That
+  makes duplicate/retry replication waste important even though the queue does
+  not grow unbounded.
+
+Change:
+- Blossom batch upload storage now returns the exact inserted-hash report to the
+  upload handler. Write-behind replication is reserved and scheduled only after
+  storage succeeds, only when `inserted_bytes > 0`, and only for hashes newly
+  inserted by that batch.
+- Duplicate-heavy batch retries still return accepted descriptors and the
+  correct `uploaded` count, but duplicate candidates no longer clone bodies into
+  the replica queue or send duplicate write-behind batches.
+
+Verification:
+- `cargo fmt --check`
+- `cargo test -p hashtree-cli --lib
+  server::blossom::tests::upload_blob_batch_binary -- --nocapture`
+- `cargo test -p hashtree-cli --lib
+  server::blossom::tests::upload_blob_replicates_to_configured_blossom_target -- --nocapture`
+- `cargo test -p hashtree-cli --lib`
+
 ## 2026-06-16 - Public Write Sweep and Adaptive Git Batch Split
 
 Question: after moving public writes to the hot origin with background
