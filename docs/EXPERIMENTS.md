@@ -2,6 +2,54 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Current Ingress and Replica Drain Check
+
+Question: after duplicate-aware LMDB writes, binary batches, hot-origin storage,
+and git pack admission fixes, where is the current write bottleneck?
+
+Checks:
+- Audited the current LMDB batch path. It already uses `NO_OVERWRITE`, reports
+  exact inserted hashes/bytes, treats duplicate single puts as no-ops, and
+  enforces logical quota from actual inserted bytes rather than candidate batch
+  bytes.
+- Ran bounded `upload_queue_bench` samples with 256 KiB blobs and 16
+  blobs/request. Public outside-client duplicate replay was intentionally the
+  same body upload again, so it still measures request-body ingress rather than
+  duplicate insert speed.
+- Checked hot-origin and replica service health. The old storage-write
+  healthcheck timer on the deep store remained masked/inactive, and no active
+  benchmark process was running there.
+- Tuned the live hot-origin write-behind replica upload concurrency from 4 to
+  8 after a direct c4/c8/c16 sweep showed c8 was the best tested point. The
+  c16 sample raised tail latency and did not improve throughput.
+
+Live samples:
+
+| Path / shape | Result |
+| --- | ---: |
+| Public outside client, first write, 128 x 256 KiB, b16 c8 | 7.49 MiB/s |
+| Public outside client, duplicate replay, same payloads | 7.66 MiB/s |
+| Hot-origin host direct to daemon, same shape | 96.67 MiB/s |
+| Hot-origin host through public hostname, same shape | 31.57 MiB/s before tuning; 19.36 MiB/s post-tuning smoke |
+| Hot-origin host to configured replica, 64 x 256 KiB, b16 c4 | 4.07 MiB/s |
+| Hot-origin host to configured replica, 64 x 256 KiB, b16 c8 | 5.56 MiB/s before tuning; 5.39 MiB/s post-tuning smoke |
+| Hot-origin host to configured replica, 128 x 256 KiB, b16 c16 | 5.12 MiB/s |
+
+Interpretation:
+- The outside-client public write ceiling is still before LMDB. Direct daemon
+  writes on the hot-origin host are an order of magnitude faster than the public
+  path, and duplicate replay through the public path is not meaningfully faster
+  because the full request body still has to cross the public ingress path.
+- Nginx timing for the public binary batches showed request time and upstream
+  time moving together, which is consistent with streaming the client body to
+  the daemon as it arrives rather than spending extra time after upload in local
+  storage.
+- Replica write-behind is a separate drain-capacity concern. Concurrency 8 was
+  the best tested point for the configured replica link, so it reduces sustained
+  backlog risk compared with 4, but it does not change client-visible public
+  upload ingress. This remains a local-fileserver/hot-origin architecture, not
+  an R2/S3/bucket admission path.
+
 ## 2026-06-16 - Git Pack Admission Uses Actual Loose Upload Bytes
 
 Question: when deciding whether to keep an underfull git pack/tail-pack
