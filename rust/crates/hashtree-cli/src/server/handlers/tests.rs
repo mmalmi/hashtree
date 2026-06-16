@@ -275,6 +275,9 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(
             crate::server::new_lookup_cache(),
         )),
+        upstream_blossom_fetch_metrics: Arc::new(
+            crate::server::auth::UpstreamBlossomFetchMetrics::default(),
+        ),
         blossom_upload_replicas: Vec::new(),
         blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
         blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
@@ -670,6 +673,11 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     assert_eq!(json["relay"]["bytes_sent"], 512);
     assert_eq!(json["relay"]["bytes_received"], 1024);
     assert_eq!(json["upstream"]["nostr_relays"], 2);
+    assert_eq!(json["upstream"]["blossom_fetch"]["lookup_attempts"], 0);
+    assert_eq!(json["upstream"]["blossom_fetch"]["hits"], 0);
+    assert_eq!(json["upstream"]["blossom_fetch"]["explicit_misses"], 0);
+    assert_eq!(json["upstream"]["blossom_fetch"]["indeterminate_misses"], 0);
+    assert_eq!(json["upstream"]["blossom_fetch"]["miss_cache_hits"], 0);
     assert_eq!(json["mode"], "normal");
     assert_eq!(json["capabilities"]["hash_get"], true);
     assert_eq!(json["capabilities"]["http_webrtc_fetch"], true);
@@ -1070,6 +1078,13 @@ async fn ensure_blob_available_coalesces_concurrent_upstream_fetches() {
         &[format!("{}.bin", hex::encode(hash))]
     );
     assert!(local_store.get_blob(&hash).unwrap().is_some());
+    let fetch_metrics = state.upstream_blossom_fetch_metrics.snapshot();
+    assert_eq!(fetch_metrics.lookup_attempts, 1);
+    assert_eq!(fetch_metrics.hits, 1);
+    assert_eq!(fetch_metrics.hit_bytes, data.len() as u64);
+    assert_eq!(fetch_metrics.explicit_misses, 0);
+    assert_eq!(fetch_metrics.indeterminate_misses, 0);
+    assert_eq!(fetch_metrics.miss_cache_hits, 0);
 
     upstream_server.abort();
 }
@@ -1108,6 +1123,13 @@ async fn ensure_blob_available_caches_sequential_explicit_upstream_misses() {
         requested_ids.lock().unwrap().as_slice(),
         &[format!("{}.bin", hex::encode(missing_hash))]
     );
+    let fetch_metrics = state.upstream_blossom_fetch_metrics.snapshot();
+    assert_eq!(fetch_metrics.lookup_attempts, 1);
+    assert_eq!(fetch_metrics.hits, 0);
+    assert_eq!(fetch_metrics.hit_bytes, 0);
+    assert_eq!(fetch_metrics.explicit_misses, 1);
+    assert_eq!(fetch_metrics.indeterminate_misses, 0);
+    assert_eq!(fetch_metrics.miss_cache_hits, 1);
 
     upstream_server.abort();
 }
@@ -1144,6 +1166,13 @@ async fn ensure_blob_available_retries_indeterminate_upstream_misses() {
             format!("{}.bin", hex::encode(missing_hash)),
         ]
     );
+    let fetch_metrics = state.upstream_blossom_fetch_metrics.snapshot();
+    assert_eq!(fetch_metrics.lookup_attempts, 2);
+    assert_eq!(fetch_metrics.hits, 0);
+    assert_eq!(fetch_metrics.hit_bytes, 0);
+    assert_eq!(fetch_metrics.explicit_misses, 0);
+    assert_eq!(fetch_metrics.indeterminate_misses, 2);
+    assert_eq!(fetch_metrics.miss_cache_hits, 0);
 
     upstream_server.abort();
 }

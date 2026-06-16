@@ -235,8 +235,17 @@ pub(super) async fn daemon_status(
         })
     };
 
+    let upstream_blossom_fetch = state.upstream_blossom_fetch_metrics.snapshot();
     let upstream = json!({
         "blossom_servers": state.upstream_blossom.len(),
+        "blossom_fetch": {
+            "lookup_attempts": upstream_blossom_fetch.lookup_attempts,
+            "hits": upstream_blossom_fetch.hits,
+            "hit_bytes": upstream_blossom_fetch.hit_bytes,
+            "explicit_misses": upstream_blossom_fetch.explicit_misses,
+            "indeterminate_misses": upstream_blossom_fetch.indeterminate_misses,
+            "miss_cache_hits": upstream_blossom_fetch.miss_cache_hits,
+        },
         "nostr_relays": state.nostr_relay_urls.len(),
     });
     let fips = if let Some(ref transport) = state.fips_transport {

@@ -308,6 +308,18 @@ fn test_daemon_status_formats_queue_and_http_counters() {
                 "skipped_jobs": 2
             }
         },
+        "upstream": {
+            "blossom_servers": 2,
+            "nostr_relays": 3,
+            "blossom_fetch": {
+                "lookup_attempts": 11,
+                "hits": 4,
+                "hit_bytes": 2 * 1024 * 1024u64,
+                "explicit_misses": 5,
+                "indeterminate_misses": 2,
+                "miss_cache_hits": 9
+            }
+        },
         "http": {
             "status_classes": {
                 "window_seconds": 60,
@@ -334,6 +346,10 @@ fn test_daemon_status_formats_queue_and_http_counters() {
     ));
     assert!(rendered.contains(
         "Upload replication: enabled, 1 target(s), 1.0 MiB/512.0 MiB reserved, 2 queued, 1 in flight, accepted 3 batch(es)/96 blob(s) (24.0 MiB), failed 1, skipped 2"
+    ));
+    assert!(rendered.contains("Blossom servers: 2, Nostr relays: 3"));
+    assert!(rendered.contains(
+        "Blossom fetch: 11 lookup(s), 4 hit(s) (2.0 MiB), 5 explicit miss(es), 2 indeterminate miss(es), 9 cache hit(s)"
     ));
     assert!(rendered.contains("Last 60s: 42 total, 1 1xx, 30 2xx, 2 3xx, 8 4xx, 1 5xx, 1 other"));
 }

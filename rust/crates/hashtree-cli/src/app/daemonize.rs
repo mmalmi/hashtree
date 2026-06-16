@@ -122,6 +122,34 @@ fn append_http_status(lines: &mut Vec<String>, status: &serde_json::Value) {
     ));
 }
 
+fn append_upstream_status(lines: &mut Vec<String>, status: &serde_json::Value) {
+    let Some(upstream) = status.get("upstream") else {
+        return;
+    };
+
+    let blossom_servers = json_u64(upstream, "blossom_servers").unwrap_or(0);
+    let nostr_relays = json_u64(upstream, "nostr_relays").unwrap_or(0);
+    let fetch = upstream.get("blossom_fetch");
+
+    lines.push(String::new());
+    lines.push("Upstream:".to_string());
+    lines.push(format!(
+        "  Blossom servers: {blossom_servers}, Nostr relays: {nostr_relays}"
+    ));
+
+    if let Some(fetch) = fetch {
+        lines.push(format!(
+            "  Blossom fetch: {} lookup(s), {} hit(s) ({}), {} explicit miss(es), {} indeterminate miss(es), {} cache hit(s)",
+            json_u64(fetch, "lookup_attempts").unwrap_or(0),
+            json_u64(fetch, "hits").unwrap_or(0),
+            format_bytes(json_u64(fetch, "hit_bytes").unwrap_or(0)),
+            json_u64(fetch, "explicit_misses").unwrap_or(0),
+            json_u64(fetch, "indeterminate_misses").unwrap_or(0),
+            json_u64(fetch, "miss_cache_hits").unwrap_or(0),
+        ));
+    }
+}
+
 pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: bool) -> String {
     let mut lines = Vec::new();
     if include_header {
@@ -180,6 +208,7 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
     if let Some(queues) = status.get("queues") {
         append_queue_status(&mut lines, queues);
     }
+    append_upstream_status(&mut lines, status);
     append_http_status(&mut lines, status);
 
     if let Some(webrtc) = status.get("webrtc") {

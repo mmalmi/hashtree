@@ -140,6 +140,60 @@ pub struct UpstreamNostrSubscription {
     pub tasks: Vec<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UpstreamBlossomFetchSnapshot {
+    pub lookup_attempts: u64,
+    pub hits: u64,
+    pub hit_bytes: u64,
+    pub explicit_misses: u64,
+    pub indeterminate_misses: u64,
+    pub miss_cache_hits: u64,
+}
+
+#[derive(Default)]
+pub struct UpstreamBlossomFetchMetrics {
+    lookup_attempts: AtomicU64,
+    hits: AtomicU64,
+    hit_bytes: AtomicU64,
+    explicit_misses: AtomicU64,
+    indeterminate_misses: AtomicU64,
+    miss_cache_hits: AtomicU64,
+}
+
+impl UpstreamBlossomFetchMetrics {
+    pub fn note_lookup_attempt(&self) {
+        self.lookup_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_hit(&self, bytes: usize) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.hit_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn note_explicit_miss(&self) {
+        self.explicit_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_indeterminate_miss(&self) {
+        self.indeterminate_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_miss_cache_hit(&self) {
+        self.miss_cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> UpstreamBlossomFetchSnapshot {
+        UpstreamBlossomFetchSnapshot {
+            lookup_attempts: self.lookup_attempts.load(Ordering::Relaxed),
+            hits: self.hits.load(Ordering::Relaxed),
+            hit_bytes: self.hit_bytes.load(Ordering::Relaxed),
+            explicit_misses: self.explicit_misses.load(Ordering::Relaxed),
+            indeterminate_misses: self.indeterminate_misses.load(Ordering::Relaxed),
+            miss_cache_hits: self.miss_cache_hits.load(Ordering::Relaxed),
+        }
+    }
+}
+
 pub struct WsRelayState {
     pub clients: Mutex<HashMap<u64, mpsc::UnboundedSender<Message>>>,
     pub pending: Mutex<HashMap<(u64, u32), PendingRequest>>,
@@ -241,6 +295,8 @@ pub struct AppState {
     /// HTTP absence from configured Blossom upstreams; peer timeouts are not
     /// treated as absence.
     pub upstream_blossom_miss_cache: Arc<StdMutex<TimedLruCache<String, ()>>>,
+    /// Counters for upstream Blossom read-through decisions.
+    pub upstream_blossom_fetch_metrics: Arc<UpstreamBlossomFetchMetrics>,
     /// Write-behind Blossom servers for blobs accepted by this server.
     pub blossom_upload_replicas: Vec<String>,
     /// Background replication queue byte budget. Each queued body holds one

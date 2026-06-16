@@ -1278,6 +1278,9 @@ mod tests {
             upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(
                 super::super::auth::new_lookup_cache(),
             )),
+            upstream_blossom_fetch_metrics: Arc::new(
+                super::super::auth::UpstreamBlossomFetchMetrics::default(),
+            ),
             blossom_upload_replicas: Vec::new(),
             blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
             blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),

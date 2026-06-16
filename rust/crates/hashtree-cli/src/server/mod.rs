@@ -158,6 +158,9 @@ impl HashtreeServer {
                 upstream_blossom: Vec::new(),
                 upstream_http_client: new_upstream_http_client(),
                 upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
+                upstream_blossom_fetch_metrics: Arc::new(
+                    auth::UpstreamBlossomFetchMetrics::default(),
+                ),
                 blossom_upload_replicas: Vec::new(),
                 blossom_upload_replica_queue_bytes: DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
                 blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(

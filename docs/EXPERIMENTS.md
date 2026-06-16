@@ -2,6 +2,30 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-17 - Upstream Blossom Read-Through Counters
+
+Question: after adding an explicit upstream Blossom miss cache, can operators
+tell whether read-through misses are still amplifying origin work?
+
+Change:
+- `/api/status` now reports `upstream.blossom_fetch` counters for lookup
+  attempts, verified hits/bytes, explicit all-upstream 404 misses,
+  indeterminate misses, and explicit-miss cache hits.
+- `htree status` renders the same counters in its human-readable output.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib ensure_blob_available_ -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib daemon_status -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli test_daemon_status_formats_queue_and_http_counters -- --nocapture`
+- `cargo fmt --manifest-path rust/Cargo.toml --all --check`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib -- --test-threads=8`
+
+Interpretation:
+- This does not move bandwidth by itself. It makes the next production check
+  sharper: if public writes are slow but these counters are quiet, the culprit
+  is still ingress/routing; if explicit misses or indeterminate misses climb,
+  cold-read routing needs attention.
+
 ## 2026-06-16 - Upstream Blossom Explicit-Miss Cache
 
 Question: even when public upload ingress is the largest bottleneck, are there

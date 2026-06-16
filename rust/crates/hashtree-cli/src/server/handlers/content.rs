@@ -100,6 +100,7 @@ pub(super) async fn fetch_and_cache_blob_with_source(
             .is_some();
 
         if upstream_miss_cached {
+            state.upstream_blossom_fetch_metrics.note_miss_cache_hit();
             tracing::debug!(
                 "[htree-fetch] Skipping Blossom upstream for recent explicit miss {}",
                 &hash_hex[..16.min(hash_hex.len())]
@@ -114,8 +115,10 @@ pub(super) async fn fetch_and_cache_blob_with_source(
             let upstream_http_client = state.upstream_http_client.clone();
             let upstream_hash_hex = hash_hex.clone();
             let upstream_miss_cache = state.upstream_blossom_miss_cache.clone();
+            let upstream_metrics = state.upstream_blossom_fetch_metrics.clone();
             fetches.push(
                 async move {
+                    upstream_metrics.note_lookup_attempt();
                     let query_hash_hex = upstream_hash_hex.clone();
                     let miss_cache_hash_hex = query_hash_hex.clone();
                     await_fetch_task("upstream", &upstream_hash_hex, async move {
@@ -131,15 +134,20 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                     .await
                     .and_then(|result| match result {
                         UpstreamBlossomQueryResult::Hit { data, server } => {
+                            upstream_metrics.note_hit(data.len());
                             Some(FetchResult::Upstream { data, server })
                         }
                         UpstreamBlossomQueryResult::DefiniteMiss => {
+                            upstream_metrics.note_explicit_miss();
                             if let Ok(mut cache) = upstream_miss_cache.lock() {
                                 cache.put(miss_cache_hash_hex, (), UPSTREAM_BLOSSOM_MISS_TTL);
                             }
                             None
                         }
-                        UpstreamBlossomQueryResult::Indeterminate => None,
+                        UpstreamBlossomQueryResult::Indeterminate => {
+                            upstream_metrics.note_indeterminate_miss();
+                            None
+                        }
                     })
                 }
                 .boxed(),
@@ -1258,6 +1266,7 @@ enum UpstreamBlossomServerResult {
 /// Query upstream Blossom servers for content by hash.
 /// Returns the first successful response with server URL, or None if no server
 /// provided verified bytes.
+#[cfg(test)]
 pub(super) async fn query_upstream_blossom(
     client: reqwest::Client,
     servers: &[String],
