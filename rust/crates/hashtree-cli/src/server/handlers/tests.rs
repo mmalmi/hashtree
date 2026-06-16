@@ -1696,7 +1696,7 @@ async fn serve_cid_with_range_streams_large_full_gets() {
 }
 
 #[tokio::test]
-async fn serve_cid_with_range_materializes_keyed_full_gets() {
+async fn serve_cid_with_range_streams_keyed_full_gets() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
     let state = test_app_state(store.clone(), Vec::new());
@@ -1726,12 +1726,25 @@ async fn serve_cid_with_range_materializes_keyed_full_gets() {
             .and_then(|value| value.to_str().ok()),
         Some(expected_len.as_str())
     );
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), data.as_slice());
+    let mut body = response.into_body();
+    let first_frame = timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("first keyed body frame should arrive quickly")
+        .expect("keyed body should yield a frame")
+        .expect("keyed body frame should be ok");
+    let first_chunk = first_frame
+        .into_data()
+        .expect("first keyed frame should contain bytes");
+    assert!(!first_chunk.is_empty());
+    assert!(
+        first_chunk.len() < data.len(),
+        "keyed full GET should stream chunks instead of one huge frame"
+    );
+    assert_eq!(first_chunk.as_ref(), &data[..first_chunk.len()]);
 }
 
 #[tokio::test]
-async fn serve_cid_with_range_materializes_keyed_ranges() {
+async fn serve_cid_with_range_serves_keyed_ranges() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
     let state = test_app_state(store.clone(), Vec::new());
