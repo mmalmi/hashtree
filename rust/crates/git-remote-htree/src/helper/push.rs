@@ -1,5 +1,5 @@
 use super::progress::emit_upload_progress;
-use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir, queue_hash_if_new};
+use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir};
 use super::{fetch_progress_interval, upload_progress, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
@@ -9,7 +9,7 @@ use crate::nostr_client::{
 use crate::runtime::{block_on_result, new_multi_thread_runtime};
 use anyhow::{bail, Context, Result};
 use flate2::{write::ZlibEncoder, Compression};
-use hashtree_core::{HashTree, Store};
+use hashtree_core::{HashTree, LinkType, Store, DEFAULT_CHUNK_SIZE};
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -54,6 +54,57 @@ impl Write for ByteCountWriter {
 struct ServerUploadPresence {
     present: HashSet<[u8; 32]>,
     complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct UploadQueueItem {
+    pub(super) hash: [u8; 32],
+    pub(super) key: Option<[u8; 32]>,
+    pub(super) link_type: Option<LinkType>,
+    pub(super) size: u64,
+}
+
+impl UploadQueueItem {
+    fn root(hash: [u8; 32], key: Option<[u8; 32]>) -> Self {
+        Self {
+            hash,
+            key,
+            link_type: None,
+            size: 0,
+        }
+    }
+
+    fn from_link(link: &hashtree_core::Link) -> Self {
+        Self {
+            hash: link.hash,
+            key: link.key,
+            link_type: Some(link.link_type),
+            size: link.size,
+        }
+    }
+
+    pub(super) fn needs_tree_decode(&self) -> bool {
+        match self.link_type {
+            None | Some(LinkType::File | LinkType::Dir) => true,
+            // Size 0 is ambiguous in older trees that may not have recorded sizes.
+            // Positive-size Blob links at or below the default chunk size are
+            // definite leaves for git-remote's default hashtree writer.
+            Some(LinkType::Blob) => self.size == 0 || self.size > DEFAULT_CHUNK_SIZE as u64,
+        }
+    }
+}
+
+fn queue_upload_item_if_new(
+    queue: &mut Vec<UploadQueueItem>,
+    queued: &mut HashSet<[u8; 32]>,
+    item: UploadQueueItem,
+) -> bool {
+    if queued.insert(item.hash) {
+        queue.push(item);
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -243,7 +294,7 @@ fn unique_git_pack_temp_dir() -> std::path::PathBuf {
 }
 
 pub(super) fn queue_links_for_diff_upload(
-    queue: &mut Vec<([u8; 32], Option<[u8; 32]>)>,
+    queue: &mut Vec<UploadQueueItem>,
     queued: &mut HashSet<[u8; 32]>,
     links: &[hashtree_core::Link],
     old_hashes: &HashSet<[u8; 32]>,
@@ -256,7 +307,7 @@ pub(super) fn queue_links_for_diff_upload(
         if prune_known_subtrees && old_hashes.contains(&link.hash) {
             continue;
         }
-        if queue_hash_if_new(queue, queued, link.hash, link.key) {
+        if queue_upload_item_if_new(queue, queued, UploadQueueItem::from_link(link)) {
             discovered_total.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -2932,10 +2983,14 @@ impl RemoteHelper {
 
             let mut visited: HashSet<[u8; 32]> = HashSet::new();
             let mut queued: HashSet<[u8; 32]> = HashSet::new();
-            let mut queue: Vec<([u8; 32], Option<[u8; 32]>)> = Vec::new();
+            let mut queue: Vec<UploadQueueItem> = Vec::new();
             let mut pending_uploads = Vec::with_capacity(UPLOAD_CHECK_BATCH_SIZE.min(1024));
             let mut upload_check_supported = true;
-            let _ = queue_hash_if_new(&mut queue, &mut queued, root_bytes, encryption_key.copied());
+            let _ = queue_upload_item_if_new(
+                &mut queue,
+                &mut queued,
+                UploadQueueItem::root(root_bytes, encryption_key.copied()),
+            );
 
             let (progress_done_tx, progress_done_rx) = tokio::sync::watch::channel(false);
             let progress_handle = spawn_periodic_upload_progress(
@@ -2950,7 +3005,8 @@ impl RemoteHelper {
                 has_old_tree,
             ));
 
-            while let Some((hash, key)) = queue.pop() {
+            while let Some(item) = queue.pop() {
+                let hash = item.hash;
                 if visited.contains(&hash) {
                     continue;
                 }
@@ -2986,24 +3042,26 @@ impl RemoteHelper {
                     }
                 };
 
-                let plaintext = if let Some(k) = key {
-                    match decrypt_chk(&data, &k) {
-                        Ok(p) => p,
-                        Err(_) => data.clone(),
-                    }
-                } else {
-                    data.clone()
-                };
+                if item.needs_tree_decode() {
+                    let plaintext = if let Some(k) = item.key {
+                        match decrypt_chk(&data, &k) {
+                            Ok(p) => p,
+                            Err(_) => data.clone(),
+                        }
+                    } else {
+                        data.clone()
+                    };
 
-                if let Some(node) = try_decode_tree_node(&plaintext) {
-                    queue_links_for_diff_upload(
-                        &mut queue,
-                        &mut queued,
-                        &node.links,
-                        &old_hashes,
-                        prune_known_subtrees,
-                        &discovered_total,
-                    );
+                    if let Some(node) = try_decode_tree_node(&plaintext) {
+                        queue_links_for_diff_upload(
+                            &mut queue,
+                            &mut queued,
+                            &node.links,
+                            &old_hashes,
+                            prune_known_subtrees,
+                            &discovered_total,
+                        );
+                    }
                 }
 
                 pending_uploads.push(PendingUpload {

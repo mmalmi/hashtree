@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -5,6 +6,7 @@ pub(super) fn get_hashtree_data_dir() -> PathBuf {
     hashtree_config::get_data_dir()
 }
 
+#[cfg(test)]
 pub(super) fn queue_hash_if_new(
     queue: &mut Vec<([u8; 32], Option<[u8; 32]>)>,
     queued: &mut HashSet<[u8; 32]>,

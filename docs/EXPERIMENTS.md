@@ -2,6 +2,36 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Git Upload Traversal Skips Definite Leaf Blobs
+
+Question: can git push upload discovery avoid spending CPU decrypting and
+trying to decode every leaf Git object as a possible hashtree directory?
+
+Finding:
+- Process samples from a large git push showed visible time in decrypt/decode
+  work while traversing upload candidates.
+- The queue only carried hash/key pairs, so `git-remote-htree` could not tell a
+  definite leaf blob from a directory/file root when deciding whether to decode.
+
+Change:
+- Upload traversal now queues link metadata alongside hash/key.
+- Positive-size `Blob` links at or below the default content chunk size are
+  treated as leaves and skip tree decode. Roots, directories, files,
+  zero-size blobs, and oversized blob links still decode, preserving legacy
+  ambiguous tree shapes.
+
+Verification:
+- `cargo test -p git-remote-htree --lib -- --test-threads=8`
+- `cargo test -p git-remote-htree -- --test-threads=8`
+- Focused tests cover both the decode policy and a raw blob whose bytes look
+  like an encoded tree node.
+
+Interpretation:
+- This trims local CPU work during git upload discovery, especially for
+  duplicate-heavy or encrypted pushes with many small Git object blobs.
+- It does not raise the public upload bandwidth ceiling; public writes can
+  still be ingress-limited before LMDB or local storage.
+
 ## 2026-06-16 - Tiered LMDB External Pack Roots for Hot Storage
 
 Question: when a large hashtree store uses tiered LMDB, can new hot writes place

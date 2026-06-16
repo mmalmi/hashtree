@@ -2702,6 +2702,65 @@ fn test_push_to_file_servers_with_diff_retries_transient_batch_before_split() {
 }
 
 #[test]
+fn test_push_to_file_servers_respects_blob_link_type_for_tree_shaped_leaf() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::new();
+    write_test_config(home.path(), fake_blossom.base_url(), false);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (root_cid, leaf_hash, missing_child) = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()).public());
+        let missing_child = [0x7bu8; 32];
+        let tree_shaped_leaf = hashtree_core::encode_tree_node(&hashtree_core::TreeNode::dir(
+            vec![Link::new(missing_child)
+                .with_name("missing")
+                .with_size(5)
+                .with_link_type(LinkType::Blob)],
+        ))
+        .expect("encode synthetic tree-shaped blob");
+        let leaf_hash = tree
+            .put_blob(&tree_shaped_leaf)
+            .await
+            .expect("write raw leaf");
+        let root_cid = tree
+            .put_directory(vec![DirEntry::new("ambiguous.bin", leaf_hash)
+                .with_size(tree_shaped_leaf.len() as u64)
+                .with_link_type(LinkType::Blob)])
+            .await
+            .expect("write root");
+        (root_cid, leaf_hash, missing_child)
+    });
+
+    let result =
+        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+
+    assert!(
+        result.failed.is_empty(),
+        "blob leaf that looks like a tree node must not enqueue missing children: {:?}",
+        result.failed
+    );
+    assert!(fake_blossom.has_blob(&root_cid.hash));
+    assert!(fake_blossom.has_blob(&leaf_hash));
+    assert!(
+        !fake_blossom.has_blob(&missing_child),
+        "missing child from raw blob payload should not be traversed"
+    );
+}
+
+#[test]
 fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
@@ -2878,11 +2937,60 @@ fn test_queue_links_for_diff_upload_prunes_known_subtrees() {
     );
 
     assert_eq!(queue.len(), 1, "known old subtrees should not be queued");
-    assert_eq!(queue[0].0, new_hash);
+    assert_eq!(queue[0].hash, new_hash);
     assert_eq!(
         discovered.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "only the new child should count as discovered work"
+    );
+}
+
+#[test]
+fn test_upload_queue_item_decode_policy_skips_only_definite_leaf_blobs() {
+    let small_blob = super::push::UploadQueueItem {
+        hash: [1u8; 32],
+        key: Some([2u8; 32]),
+        link_type: Some(LinkType::Blob),
+        size: 128,
+    };
+    assert!(
+        !small_blob.needs_tree_decode(),
+        "positive-size single-chunk Blob links are definite leaves"
+    );
+
+    let zero_size_blob = super::push::UploadQueueItem {
+        size: 0,
+        ..small_blob
+    };
+    assert!(
+        zero_size_blob.needs_tree_decode(),
+        "zero-size Blob links remain legacy-ambiguous"
+    );
+
+    let large_blob = super::push::UploadQueueItem {
+        size: (hashtree_core::DEFAULT_CHUNK_SIZE as u64) + 1,
+        ..small_blob
+    };
+    assert!(
+        large_blob.needs_tree_decode(),
+        "large Blob links may be legacy chunked-file roots"
+    );
+
+    let dir = super::push::UploadQueueItem {
+        link_type: Some(LinkType::Dir),
+        size: 0,
+        ..small_blob
+    };
+    assert!(dir.needs_tree_decode(), "directory links must be traversed");
+
+    let root = super::push::UploadQueueItem {
+        link_type: None,
+        size: 0,
+        ..small_blob
+    };
+    assert!(
+        root.needs_tree_decode(),
+        "root type is unknown at queue time"
     );
 }
 
