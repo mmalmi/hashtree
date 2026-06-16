@@ -47,6 +47,7 @@ const UPLOAD_REDIRECT_OPT_IN_HEADER: &str = "x-hashtree-upload-redirect";
 pub const BATCH_UPLOAD_MAX_BLOBS: usize = 1024;
 pub const BATCH_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const BATCH_UPLOAD_BINARY_CONTENT_TYPE: &str = "application/vnd.hashtree.blossom.batch.v1";
+pub const BATCH_UPLOAD_HASH_LIST_AUTH_TAG: &str = "x-batch";
 const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
 const BINARY_BATCH_UPLOAD_MAX_CONTENT_TYPE_BYTES: usize = 1024;
 
@@ -234,6 +235,26 @@ fn encode_binary_batch_upload(items: &[BatchUploadItem]) -> Result<Vec<u8>, Blos
     }
 
     Ok(body)
+}
+
+/// Return the compact authorization digest for an ordered batch upload hash list.
+pub fn batch_upload_hash_list_digest<'a, I>(hashes: I) -> Result<String, BlossomError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-blossom-batch-v1\n");
+    for hash in hashes {
+        let hash_bytes = hex::decode(hash)
+            .map_err(|_| BlossomError::UploadFailed("invalid batch blob hash".to_string()))?;
+        if hash_bytes.len() != 32 {
+            return Err(BlossomError::UploadFailed(
+                "invalid batch blob hash".to_string(),
+            ));
+        }
+        hasher.update(hash_bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn default_http_client(timeout: Duration) -> reqwest::Client {
@@ -1249,6 +1270,7 @@ impl BlossomClient {
     where
         I: IntoIterator<Item = &'a str>,
     {
+        let hashes: Vec<String> = hashes.into_iter().map(|hash| hash.to_lowercase()).collect();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1259,11 +1281,20 @@ impl BlossomClient {
             TagKind::custom("t"),
             vec!["upload".to_string()],
         )];
-        tags.extend(
-            hashes
-                .into_iter()
-                .map(|hash| Tag::custom(TagKind::custom("x"), vec![hash.to_string()])),
-        );
+        if hashes.len() <= 1 {
+            tags.extend(
+                hashes
+                    .iter()
+                    .map(|hash| Tag::custom(TagKind::custom("x"), vec![hash.to_string()])),
+            );
+        } else {
+            tags.push(Tag::custom(
+                TagKind::custom(BATCH_UPLOAD_HASH_LIST_AUTH_TAG),
+                vec![batch_upload_hash_list_digest(
+                    hashes.iter().map(String::as_str),
+                )?],
+            ));
+        }
         tags.push(Tag::custom(
             TagKind::custom("expiration"),
             vec![expiration.to_string()],
@@ -1938,6 +1969,91 @@ mod tests {
             &body[header_len + 42 + content_type.len()..],
             data.as_slice()
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_upload_auth_uses_compact_hash_list_digest() {
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let hashes = (0..128)
+            .map(|index| {
+                let mut data = vec![0u8; 32];
+                data[0] = index as u8;
+                hex::encode(data)
+            })
+            .collect::<Vec<_>>();
+
+        let auth = client
+            .create_upload_auth_for_hashes(hashes.iter().map(String::as_str))
+            .await
+            .expect("compact upload auth");
+        let encoded = auth.strip_prefix("Nostr ").expect("nostr auth scheme");
+        let event_bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode auth event");
+        let event: serde_json::Value =
+            serde_json::from_slice(&event_bytes).expect("parse auth event");
+        let tags = event["tags"].as_array().expect("event tags");
+        let x_tags = tags
+            .iter()
+            .filter(|tag| tag.get(0).and_then(|value| value.as_str()) == Some("x"))
+            .count();
+        let batch_tags = tags
+            .iter()
+            .filter(|tag| {
+                tag.get(0).and_then(|value| value.as_str()) == Some(BATCH_UPLOAD_HASH_LIST_AUTH_TAG)
+            })
+            .collect::<Vec<_>>();
+        let expected_digest = batch_upload_hash_list_digest(hashes.iter().map(String::as_str))
+            .expect("expected digest");
+
+        assert_eq!(x_tags, 0);
+        assert_eq!(batch_tags.len(), 1);
+        assert_eq!(
+            batch_tags[0].get(1).and_then(|value| value.as_str()),
+            Some(expected_digest.as_str())
+        );
+        assert!(
+            auth.len() < 1_500,
+            "compact auth header should stay small, got {} bytes",
+            auth.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_upload_auth_keeps_legacy_x_tag() {
+        let keys = Keys::generate();
+        let client = BlossomClient::new_empty(keys);
+        let hash = "11".repeat(32);
+
+        let auth = client
+            .create_upload_auth_for_hashes(std::iter::once(hash.as_str()))
+            .await
+            .expect("single upload auth");
+        let encoded = auth.strip_prefix("Nostr ").expect("nostr auth scheme");
+        let event_bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode auth event");
+        let event: serde_json::Value =
+            serde_json::from_slice(&event_bytes).expect("parse auth event");
+        let tags = event["tags"].as_array().expect("event tags");
+        let x_tags = tags
+            .iter()
+            .filter(|tag| tag.get(0).and_then(|value| value.as_str()) == Some("x"))
+            .collect::<Vec<_>>();
+        let batch_tags = tags
+            .iter()
+            .filter(|tag| {
+                tag.get(0).and_then(|value| value.as_str()) == Some(BATCH_UPLOAD_HASH_LIST_AUTH_TAG)
+            })
+            .count();
+
+        assert_eq!(x_tags.len(), 1);
+        assert_eq!(
+            x_tags[0].get(1).and_then(|value| value.as_str()),
+            Some(hash.as_str())
+        );
+        assert_eq!(batch_tags, 0);
     }
 
     #[tokio::test]

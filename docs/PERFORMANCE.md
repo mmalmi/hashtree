@@ -65,6 +65,9 @@ setup before traffic reaches the public ingress ceiling:
   hundreds of loose Git objects; underfull packs are byte-gated so tiny-object
   edge cases do not install a pack+idx that is larger than the loose content it
   replaces.
+- Use compact `x-batch` authorization for multi-blob binary batches. Signing
+  one digest for the ordered blob-hash list keeps Authorization headers small
+  while the origin still verifies every uploaded blob hash from the body.
 - Keep batch bodies large enough to amortize per-request overhead, but do not
   expect larger batches to beat saturated public ingress by themselves. Current
   public measurements make 4-16 MiB binary batch bodies the safe operating

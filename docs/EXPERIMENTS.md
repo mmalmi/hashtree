@@ -2,6 +2,36 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Compact Batch Upload Authorization
+
+Question: why did larger binary batch uploads fail at the public edge even when
+the body size was within the hashtree batch decoder limit?
+
+Finding:
+- Batch upload auth signed one `x` tag per blob hash. At 128 blobs, that made
+  the Nostr Authorization header large enough for proxy/header limits to fail
+  the request before the origin handled the body.
+- Smaller 4-16 MiB batch bodies remained reliable, but the header shape made
+  larger controlled experiments noisy and prevented using bigger request bodies
+  to amortize public ingress overhead.
+
+Change:
+- Multi-blob batch upload auth now signs one `x-batch` tag containing a SHA-256
+  digest of the ordered uploaded blob-hash list. Single-blob uploads keep the
+  existing `x` tag shape for compatibility.
+- The server recomputes each uploaded blob hash from the request body, hashes
+  that ordered list, and rejects the batch if it does not match the signed
+  `x-batch` digest. Duplicate or mismatched bodies are not accepted by this
+  compact auth path.
+- This is still a local hashtree/Blossom upload path. It does not add R2, S3,
+  bucket admission, or a separate cloud storage tier.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-blossom
+  compact_hash_list -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli
+  compact_batch_auth -- --nocapture`
+
 ## 2026-06-16 - Public Host Versus Origin-Local Upload Ceiling
 
 Question: after removing Worker/Tunnel upload handling from the active public

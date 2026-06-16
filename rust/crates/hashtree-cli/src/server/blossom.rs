@@ -11,7 +11,9 @@ use axum::{
     Json,
 };
 use base64::Engine;
-use hashtree_blossom::{BatchUploadItem, BlossomClient};
+use hashtree_blossom::{
+    batch_upload_hash_list_digest, BatchUploadItem, BlossomClient, BATCH_UPLOAD_HASH_LIST_AUTH_TAG,
+};
 use hashtree_core::from_hex;
 use nostr::Keys;
 use serde::{Deserialize, Serialize};
@@ -332,9 +334,10 @@ pub struct BlossomAuth {
     pub kind: u16,
     pub created_at: u64,
     pub expiration: Option<u64>,
-    pub action: Option<String>,   // "upload", "delete", "list", "get"
-    pub blob_hashes: Vec<String>, // x tags
-    pub server: Option<String>,   // server tag
+    pub action: Option<String>,    // "upload", "delete", "list", "get"
+    pub blob_hashes: Vec<String>,  // x tags
+    pub batch_hashes: Vec<String>, // x-batch tags
+    pub server: Option<String>,    // server tag
 }
 
 /// Parse and verify Nostr authorization from header
@@ -401,6 +404,7 @@ pub fn verify_blossom_auth(
     let mut expiration: Option<u64> = None;
     let mut action: Option<String> = None;
     let mut blob_hashes: Vec<String> = Vec::new();
+    let mut batch_hashes: Vec<String> = Vec::new();
     let mut server: Option<String> = None;
 
     for tag in tags {
@@ -413,6 +417,7 @@ pub fn verify_blossom_auth(
                 match tag_name {
                     "t" => action = Some(tag_value.to_string()),
                     "x" => blob_hashes.push(tag_value.to_lowercase()),
+                    BATCH_UPLOAD_HASH_LIST_AUTH_TAG => batch_hashes.push(tag_value.to_lowercase()),
                     "expiration" => expiration = tag_value.parse().ok(),
                     "server" => server = Some(tag_value.to_string()),
                     _ => {}
@@ -461,6 +466,7 @@ pub fn verify_blossom_auth(
         expiration,
         action,
         blob_hashes,
+        batch_hashes,
         server,
     })
 }
@@ -1777,6 +1783,24 @@ async fn upload_decoded_blob_batch(
     let mut decode_hash_ms = 0u128;
     let mut validate_ms = 0u128;
 
+    if auth.blob_hashes.is_empty() && !auth.batch_hashes.is_empty() {
+        let batch_hashes = blobs
+            .iter()
+            .map(|blob| blob.sha256.to_lowercase())
+            .collect::<Vec<_>>();
+        let batch_digest =
+            match batch_upload_hash_list_digest(batch_hashes.iter().map(String::as_str)) {
+                Ok(digest) => digest,
+                Err(_) => return blossom_json_error(StatusCode::BAD_REQUEST, "Invalid blob hash"),
+            };
+        if !auth.batch_hashes.contains(&batch_digest) {
+            return blossom_json_error(
+                StatusCode::FORBIDDEN,
+                "Batch hash list does not match authorization",
+            );
+        }
+    }
+
     for blob in blobs {
         let decode_started = Instant::now();
         let sha256_hex = blob.sha256.to_lowercase();
@@ -2324,6 +2348,35 @@ mod tests {
         )
     }
 
+    fn create_batch_upload_auth_header(keys: &nostr::Keys, hashes: &[String]) -> String {
+        use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
+
+        let now = Timestamp::now();
+        let event = EventBuilder::new(Kind::Custom(BLOSSOM_AUTH_KIND), "")
+            .tags(vec![
+                Tag::custom(TagKind::Custom("t".into()), vec!["upload".to_string()]),
+                Tag::custom(
+                    TagKind::Custom(BATCH_UPLOAD_HASH_LIST_AUTH_TAG.into()),
+                    vec![
+                        batch_upload_hash_list_digest(hashes.iter().map(String::as_str))
+                            .expect("batch hash list digest"),
+                    ],
+                ),
+                Tag::custom(
+                    TagKind::Custom("expiration".into()),
+                    vec![(now.as_secs() + 300).to_string()],
+                ),
+            ])
+            .custom_created_at(now)
+            .sign_with_keys(keys)
+            .expect("sign blossom batch auth");
+        let json = serde_json::to_vec(&event).expect("serialize batch auth event");
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(json)
+        )
+    }
+
     fn create_list_auth_header(keys: &nostr::Keys) -> String {
         use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
 
@@ -2568,6 +2621,84 @@ mod tests {
         assert_eq!(parsed.blobs[1].sha256, hex::encode(second_hash));
         assert!(store.blob_exists(&first_hash).expect("first exists"));
         assert!(store.blob_exists(&second_hash).expect("second exists"));
+    }
+
+    #[tokio::test]
+    async fn upload_blob_batch_binary_accepts_compact_batch_auth() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(Arc::clone(&store));
+        let keys = nostr::Keys::generate();
+        let first = (0u8..=255).collect::<Vec<_>>();
+        let second = (0u8..=255).map(|byte| byte ^ 0xaa).collect::<Vec<_>>();
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let hashes = vec![hex::encode(first_hash), hex::encode(second_hash)];
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_batch_upload_auth_header(&keys, &hashes)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/vnd.hashtree.blossom.batch.v1"
+                .parse()
+                .expect("content type header value"),
+        );
+        let body = binary_batch_body(&[
+            (&first, Some("application/octet-stream")),
+            (&second, Some("application/octet-stream")),
+        ]);
+
+        let response = upload_blob_batch_binary(State(state), headers, body)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(store.blob_exists(&first_hash).expect("first exists"));
+        assert!(store.blob_exists(&second_hash).expect("second exists"));
+    }
+
+    #[tokio::test]
+    async fn upload_blob_batch_binary_rejects_mismatched_compact_batch_auth() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(Arc::clone(&store));
+        let keys = nostr::Keys::generate();
+        let first = (0u8..=255).collect::<Vec<_>>();
+        let second = (0u8..=255).map(|byte| byte ^ 0xaa).collect::<Vec<_>>();
+        let wrong_hashes = vec![hex::encode(sha256(&first)), "00".repeat(32)];
+        let mut headers = hosted_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_batch_upload_auth_header(&keys, &wrong_hashes)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/vnd.hashtree.blossom.batch.v1"
+                .parse()
+                .expect("content type header value"),
+        );
+        let body = binary_batch_body(&[
+            (&first, Some("application/octet-stream")),
+            (&second, Some("application/octet-stream")),
+        ]);
+
+        let response = upload_blob_batch_binary(State(state), headers, body)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!store.blob_exists(&sha256(&first)).expect("first absent"));
+        assert!(!store.blob_exists(&sha256(&second)).expect("second absent"));
     }
 
     #[tokio::test(flavor = "current_thread")]
