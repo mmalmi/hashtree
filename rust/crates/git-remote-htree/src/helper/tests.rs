@@ -32,6 +32,7 @@ struct CountingBlossomState {
     support_upload_check: bool,
     support_batch_upload: bool,
     max_batch_body_bytes: Option<usize>,
+    transient_batch_upload_failures: usize,
 }
 
 struct CountingBlossomServer {
@@ -61,6 +62,16 @@ impl CountingBlossomServer {
             .lock()
             .expect("state lock")
             .max_batch_body_bytes = Some(max_batch_body_bytes);
+        server
+    }
+
+    fn with_transient_batch_upload_failures(failures: usize) -> Self {
+        let server = Self::with_options(false, true, true);
+        server
+            .state
+            .lock()
+            .expect("state lock")
+            .transient_batch_upload_failures = failures;
         server
     }
 
@@ -341,6 +352,13 @@ async fn upload_blob_batch_binary(
         if state.fail_uploads {
             return Response::builder()
                 .status(StatusCode::FORBIDDEN)
+                .body(Body::empty())
+                .unwrap();
+        }
+        if state.transient_batch_upload_failures > 0 {
+            state.transient_batch_upload_failures -= 1;
+            return Response::builder()
+                .status(StatusCode::from_u16(520).unwrap())
                 .body(Body::empty())
                 .unwrap();
         }
@@ -2508,6 +2526,71 @@ fn test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body() {
         fake_blossom.get_upload_request_count(),
         0,
         "batch-capable servers should not fall back to per-blob PUTs"
+    );
+    for hash in hashes {
+        assert!(
+            fake_blossom.has_blob(&hash),
+            "missing {}",
+            hex::encode(hash)
+        );
+    }
+}
+
+#[test]
+fn test_push_to_file_servers_with_diff_retries_transient_batch_before_split() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _batch_target = EnvGuard::set("HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES", "16777216");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::with_transient_batch_upload_failures(1);
+    write_test_config(home.path(), fake_blossom.base_url(), false);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
+
+    let helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (root_cid, hashes) = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let mut entries = Vec::new();
+        for index in 0..6 {
+            let data = vec![index as u8; 512];
+            let (file_cid, file_size) = tree.put_file(&data).await.expect("write file");
+            entries.push(
+                DirEntry::from_cid(format!("file-{index}.bin"), &file_cid).with_size(file_size),
+            );
+        }
+        let root_cid = tree.put_directory(entries).await.expect("write root");
+        let hashes = collect_hashes(&tree, &root_cid, 32)
+            .await
+            .expect("collect hashes");
+        (root_cid, hashes)
+    });
+
+    let result =
+        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+
+    assert!(
+        result.failed.is_empty(),
+        "transient batch failure should recover without splitting: {:?}",
+        result.failed
+    );
+    assert_eq!(
+        fake_blossom.get_batch_upload_request_count(),
+        2,
+        "one transient edge failure should retry the original batch once, not split it"
+    );
+    assert_eq!(
+        fake_blossom.get_upload_request_count(),
+        0,
+        "batch-capable transient recovery should not fall back to per-blob PUTs"
     );
     for hash in hashes {
         assert!(

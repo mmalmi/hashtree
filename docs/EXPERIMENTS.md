@@ -2,6 +2,39 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Git Batch Retries Before Adaptive Split
+
+Question: when `git-remote-htree` sees a transient public-edge batch upload
+failure, should it immediately split the batch or retry the same efficient
+request shape first?
+
+Finding:
+- Adaptive splitting recovered from persistent oversized request bodies, but it
+  split a multi-blob batch after the first failed attempt. For public ingress
+  where a one-off 520 can happen under load, that turns a transient hiccup into
+  smaller follow-up batches and lowers effective throughput.
+
+Change:
+- Multi-blob batch uploads now get a short retry window before adaptive split:
+  one retry of the same batch shape, then split only if the failure persists.
+- Single-blob fallback still uses the existing fuller retry budget.
+- Unsupported batch endpoints still fall back without retrying.
+
+Verification:
+- Added a fake Blossom edge test with one transient binary-batch failure. It now
+  succeeds with exactly two batch requests: the failed original request and a
+  successful retry of the same original batch, with no per-blob PUT fallback.
+- Existing persistent oversized-body test still passes and proves adaptive
+  splitting remains available.
+- `cargo fmt --manifest-path rust/Cargo.toml --all --check`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree
+  test_push_to_file_servers_with_diff_retries_transient_batch_before_split -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree
+  test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree
+  helper::tests -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree -- --nocapture`
+
 ## 2026-06-16 - Raw Duplicate Uploads Do Not Replicate
 
 Question: after batch duplicate replication was fixed, do raw `PUT /upload`

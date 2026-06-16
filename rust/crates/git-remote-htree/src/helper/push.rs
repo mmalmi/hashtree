@@ -26,6 +26,7 @@ const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
 const DEFAULT_GIT_BATCH_UPLOAD_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const GIT_BATCH_UPLOAD_TARGET_BYTES_ENV: &str = "HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES";
 const BATCH_UPLOAD_RETRIES: u32 = 4;
+const BATCH_UPLOAD_RETRIES_BEFORE_SPLIT: u32 = 2;
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
 const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
 const DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS: usize = 256;
@@ -400,8 +401,26 @@ async fn upload_one_pending_batch_to_server(
     server: &str,
     counters: &UploadCounters,
 ) -> Result<Option<()>> {
+    upload_one_pending_batch_to_server_with_retries(
+        batch,
+        blossom,
+        server,
+        counters,
+        BATCH_UPLOAD_RETRIES,
+    )
+    .await
+}
+
+async fn upload_one_pending_batch_to_server_with_retries(
+    batch: &[PendingUpload],
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+    max_attempts: u32,
+) -> Result<Option<()>> {
     let mut last_error = String::new();
-    for attempt in 0..BATCH_UPLOAD_RETRIES {
+    let max_attempts = max_attempts.max(1);
+    for attempt in 0..max_attempts {
         if attempt > 0 {
             tokio::time::sleep(batch_upload_retry_delay(attempt - 1)).await;
         }
@@ -413,7 +432,7 @@ async fn upload_one_pending_batch_to_server(
                 debug!(
                     "Blossom batch upload attempt {}/{} failed on {}: {}",
                     attempt + 1,
-                    BATCH_UPLOAD_RETRIES,
+                    max_attempts,
                     server,
                     last_error
                 );
@@ -424,7 +443,7 @@ async fn upload_one_pending_batch_to_server(
     Err(anyhow::anyhow!(
         "Blossom batch upload failed on {} after {} attempts: {}",
         server,
-        BATCH_UPLOAD_RETRIES,
+        max_attempts,
         last_error
     ))
 }
@@ -471,7 +490,15 @@ async fn upload_pending_batch_adaptive_to_server(
             continue;
         }
 
-        match upload_one_pending_batch_attempt_to_server(&batch, blossom, server, counters).await {
+        match upload_one_pending_batch_to_server_with_retries(
+            &batch,
+            blossom,
+            server,
+            counters,
+            BATCH_UPLOAD_RETRIES_BEFORE_SPLIT,
+        )
+        .await
+        {
             Ok(Some(())) => {}
             Ok(None) => unsupported.append(&mut batch),
             Err(err) => {
