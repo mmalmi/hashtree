@@ -378,7 +378,7 @@ const NETWORK_MODELS: [NetworkModel; 3] = [
 fn test_open_social_graph_store() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     assert_eq!(Arc::strong_count(&graph_store), 1);
 }
 
@@ -386,7 +386,7 @@ fn test_open_social_graph_store() {
 fn test_set_root_and_get_follow_distance() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let root_pk = [1u8; 32];
     set_social_graph_root(&graph_store, &root_pk);
     assert_eq!(get_follow_distance(&graph_store, &root_pk), Some(0));
@@ -396,7 +396,7 @@ fn test_set_root_and_get_follow_distance() {
 fn test_ingest_event_updates_follows_and_mutes() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
 
     let root_keys = Keys::generate();
     let alice_keys = Keys::generate();
@@ -441,7 +441,7 @@ fn test_ingest_event_updates_follows_and_mutes() {
 fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let older = event_builder!(
@@ -528,7 +528,7 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
 fn test_profile_search_entries_include_follow_distance() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let root_keys = Keys::generate();
     let alice_keys = Keys::generate();
     let stranger_keys = Keys::generate();
@@ -595,7 +595,7 @@ fn test_profile_search_entries_include_follow_distance() {
 fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let profile = event_builder!(
@@ -632,7 +632,7 @@ fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
 fn test_metadata_ingest_splits_compound_profile_terms_without_losing_whole_token() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let profile = event_builder!(
@@ -687,7 +687,7 @@ fn test_profile_search_index_persists_across_reopen() {
     let pubkey = keys.public_key().to_hex();
 
     {
-        let graph_store = open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
         let profile = event_builder!(
             Kind::Metadata,
             serde_json::json!({
@@ -703,7 +703,7 @@ fn test_profile_search_index_persists_across_reopen() {
         assert!(graph_store.profile_search_root().unwrap().is_some());
     }
 
-    let reopened = open_social_graph_store(tmp.path()).unwrap();
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
     assert!(reopened.profile_search_root().unwrap().is_some());
     assert_eq!(
         reopened
@@ -726,9 +726,10 @@ fn test_profile_search_index_with_shared_hashtree_storage() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
     let store =
-        crate::storage::HashtreeStore::with_options(tmp.path(), None, 1024 * 1024 * 1024).unwrap();
+        crate::storage::HashtreeStore::with_embedded_options(tmp.path(), None, 1024 * 1024 * 1024)
+            .unwrap();
     let graph_store =
-        open_social_graph_store_with_storage(tmp.path(), store.store_arc(), None).unwrap();
+        open_test_social_graph_store_with_storage(tmp.path(), store.store_arc(), None).unwrap();
     let keys = Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
@@ -768,7 +769,7 @@ fn test_profile_search_index_with_shared_hashtree_storage() {
 fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadata() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let public_keys = Keys::generate();
     let ambient_keys = Keys::generate();
     let public_pubkey = public_keys.public_key().to_hex();
@@ -850,7 +851,7 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
 fn test_rebuild_profile_index_excludes_overmuted_users() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let root_keys = Keys::generate();
     let muted_keys = Keys::generate();
     let muted_pubkey = muted_keys.public_key().to_hex();
@@ -906,7 +907,7 @@ fn test_rebuild_profile_index_excludes_overmuted_users() {
 fn test_query_events_by_author() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let older = event_builder!(Kind::TextNote, "older")
@@ -932,7 +933,7 @@ fn test_query_events_by_author() {
 fn test_query_events_by_multiple_authors_and_kinds() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let first_keys = Keys::generate();
     let second_keys = Keys::generate();
     let other_keys = Keys::generate();
@@ -974,7 +975,7 @@ fn test_query_events_by_multiple_authors_and_kinds() {
 fn test_query_events_by_kind() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let first_keys = Keys::generate();
     let second_keys = Keys::generate();
 
@@ -1006,7 +1007,7 @@ fn test_query_events_by_kind() {
 fn test_query_events_by_id() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let first = event_builder!(Kind::TextNote, "first")
@@ -1031,7 +1032,7 @@ fn test_query_events_by_id() {
 fn test_query_events_search_is_case_insensitive() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
     let other_keys = Keys::generate();
 
@@ -1057,7 +1058,7 @@ fn test_query_events_search_is_case_insensitive() {
 fn test_query_events_since_until_are_inclusive() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let before = event_builder!(Kind::TextNote, "before")
@@ -1095,7 +1096,7 @@ fn test_query_events_since_until_are_inclusive() {
 fn test_query_events_replaceable_kind_returns_latest_winner() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let older = event_builder!(Kind::Custom(10_000), "older mute list")
@@ -1122,7 +1123,7 @@ fn test_query_events_replaceable_kind_returns_latest_winner() {
 fn test_query_events_kind_41_replaceable_returns_latest_winner() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let older = event_builder!(Kind::Custom(41), "older channel metadata")
@@ -1149,7 +1150,7 @@ fn test_query_events_kind_41_replaceable_returns_latest_winner() {
 fn test_public_and_ambient_indexes_stay_separate() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let public_keys = Keys::generate();
     let ambient_keys = Keys::generate();
 
@@ -1194,7 +1195,7 @@ fn test_public_and_ambient_indexes_stay_separate() {
 fn test_default_ingest_classifies_root_author_as_public() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let root_keys = Keys::generate();
     let other_keys = Keys::generate();
     set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
@@ -1234,7 +1235,7 @@ fn test_query_events_survives_reopen() {
     let other_keys = Keys::generate();
 
     {
-        let graph_store = open_social_graph_store_at_path(&db_dir, None).unwrap();
+        let graph_store = open_test_social_graph_store_at_path(&db_dir, None).unwrap();
         let older = event_builder!(Kind::TextNote, "older")
             .custom_created_at(Timestamp::from_secs(5))
             .sign_with_keys(&keys)
@@ -1253,7 +1254,7 @@ fn test_query_events_survives_reopen() {
         ingest_parsed_event(&graph_store, &latest).unwrap();
     }
 
-    let reopened = open_social_graph_store_at_path(&db_dir, None).unwrap();
+    let reopened = open_test_social_graph_store_at_path(&db_dir, None).unwrap();
 
     let author_filter = Filter::new().author(keys.public_key()).kind(Kind::TextNote);
     let author_events = query_events(&reopened, &author_filter, 10);
@@ -1272,7 +1273,7 @@ fn test_query_events_survives_reopen() {
 fn test_query_events_parameterized_replaceable_by_d_tag() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
 
     let older = event_builder!(
@@ -1329,7 +1330,7 @@ fn test_query_events_parameterized_replaceable_by_d_tag() {
 fn test_query_events_by_hashtag_uses_tag_index() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
     let other_keys = Keys::generate();
 
@@ -1373,7 +1374,7 @@ fn test_query_events_by_hashtag_uses_tag_index() {
 fn test_query_events_combines_indexes_then_applies_search_filter() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
     let keys = Keys::generate();
     let other_keys = Keys::generate();
 
@@ -1881,7 +1882,7 @@ fn benchmark_query_events_large_dataset() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
     let graph_store =
-        open_social_graph_store_with_mapsize(tmp.path(), Some(512 * 1024 * 1024)).unwrap();
+        open_test_social_graph_store_with_mapsize(tmp.path(), Some(512 * 1024 * 1024)).unwrap();
     set_nostr_profile_enabled(true);
     reset_nostr_profile();
 
@@ -2167,7 +2168,7 @@ fn test_ensure_social_graph_mapsize_rounds_and_applies() {
 fn test_ingest_events_batches_graph_updates() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
 
     let root_keys = Keys::generate();
     let alice_keys = Keys::generate();
@@ -2219,7 +2220,7 @@ fn test_ingest_events_batches_graph_updates() {
 fn test_ingest_graph_events_updates_graph_without_indexing_events() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
 
     let root_keys = Keys::generate();
     let alice_keys = Keys::generate();

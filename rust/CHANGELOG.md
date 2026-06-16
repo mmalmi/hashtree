@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.2.69 - 2026-06-16
 
 ### Changed
 
 - Added an underfull first-publish Git pack checkpoint for medium repos so
   `git-remote-htree` avoids hundreds of loose Git-object uploads below the
   normal deterministic checkpoint interval.
+- Improved `htree add --local` on large LMDB stores by using bulk local ingest,
+  link-aware indexing, relaxed per-blob fsyncs, and one final store sync,
+  roughly doubling the measured 4 GiB local-add throughput versus the prior
+  optimized path while preserving the default chunk size.
 
 ### Fixed
 

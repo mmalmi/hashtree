@@ -826,7 +826,7 @@ mod tests {
         let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
         let graph_store = {
             let _guard = crate::socialgraph::test_lock();
-            crate::socialgraph::open_social_graph_store_with_mapsize(
+            crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 &temp_dir.path().join("relay-db"),
                 Some(128 * 1024 * 1024),
             )?

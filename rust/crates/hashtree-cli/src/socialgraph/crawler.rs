@@ -745,10 +745,12 @@ mod tests {
     async fn test_crawler_routes_untrusted_to_spambox() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
-        let spambox =
-            crate::socialgraph::open_social_graph_store_at_path(&tmp.path().join("spambox"), None)
-                .unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
+        let spambox = crate::socialgraph::open_test_social_graph_store_at_path(
+            &tmp.path().join("spambox"),
+            None,
+        )
+        .unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -781,7 +783,7 @@ mod tests {
     async fn test_crawler_batches_graph_fetches_by_author_chunk() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -853,7 +855,7 @@ mod tests {
     async fn test_crawler_expands_from_existing_graph_without_root_refetch() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -931,7 +933,7 @@ mod tests {
     async fn test_crawler_full_recrawl_refetches_root() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -987,7 +989,7 @@ mod tests {
     async fn test_crawler_revisits_known_authors_with_since_cursor() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -1070,7 +1072,7 @@ mod tests {
     async fn test_crawler_warm_once_completes_initial_sync_without_shutdown() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -1120,7 +1122,7 @@ mod tests {
     async fn test_crawler_warm_once_accepts_large_contact_list_events() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -1172,7 +1174,7 @@ mod tests {
     async fn test_spawned_social_graph_tasks_sync_local_contacts_on_startup() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();
@@ -1224,7 +1226,7 @@ mod tests {
     async fn test_spawned_social_graph_tasks_refresh_when_contacts_change() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
 
         let root_keys = nostr::Keys::generate();
         let root_pk = root_keys.public_key().to_bytes();

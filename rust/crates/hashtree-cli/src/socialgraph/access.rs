@@ -58,7 +58,7 @@ mod tests {
     fn test_allowed_pubkey_passes() {
         let _guard = crate::socialgraph::test_lock();
         let tmp = TempDir::new().unwrap();
-        let graph_store = crate::socialgraph::open_social_graph_store(tmp.path()).unwrap();
+        let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
         let pk_hex = "aa".repeat(32);
         let mut allowed = HashSet::new();
         allowed.insert(pk_hex.clone());

@@ -204,6 +204,36 @@ pub fn open_social_graph_store_with_storage(
     open_social_graph_store_at_path_with_storage(&db_dir, store, mapsize_bytes)
 }
 
+#[cfg(test)]
+pub fn open_test_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>> {
+    open_test_social_graph_store_with_mapsize(data_dir, None)
+}
+
+#[cfg(test)]
+pub fn open_test_social_graph_store_with_mapsize(
+    data_dir: &Path,
+    mapsize_bytes: Option<u64>,
+) -> Result<Arc<SocialGraphStore>> {
+    open_test_social_graph_store_at_path(&data_dir.join("socialgraph"), mapsize_bytes)
+}
+
+#[cfg(test)]
+pub fn open_test_social_graph_store_with_storage(
+    data_dir: &Path,
+    store: Arc<StorageRouter>,
+    mapsize_bytes: Option<u64>,
+) -> Result<Arc<SocialGraphStore>> {
+    open_embedded_social_graph_store_with_storage(data_dir, store, mapsize_bytes)
+}
+
+#[cfg(test)]
+pub fn open_test_social_graph_store_at_path(
+    db_dir: &Path,
+    mapsize_bytes: Option<u64>,
+) -> Result<Arc<SocialGraphStore>> {
+    open_embedded_social_graph_store_at_path(db_dir, mapsize_bytes)
+}
+
 pub fn open_embedded_social_graph_store_with_storage(
     data_dir: &Path,
     store: Arc<StorageRouter>,
