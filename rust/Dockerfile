@@ -15,7 +15,7 @@ COPY crates ./crates
 RUN --mount=type=cache,id=hashtree-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=hashtree-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=hashtree-target,target=/app/target,sharing=locked \
-    cargo build --locked --release --package hashtree-cli --features s3 && \
+    cargo build --locked --release --package hashtree-cli && \
     if [ "$BUILD_CASHU" = "1" ]; then \
         cargo build --locked --release --package hashtree-cashu-cli; \
     fi && \
