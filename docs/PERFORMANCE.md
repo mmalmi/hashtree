@@ -31,12 +31,12 @@ Blossom traffic. Detailed measurements belong in `docs/EXPERIMENTS.md`.
 Public bulk upload throughput is currently limited before LMDB and the local
 blob writer. Origin-local release-mode writes have reached roughly 100 MiB/s
 for public-shaped binary batches, while public request-body uploads from an
-outside client have clustered around 6-10 MiB/s. A same-host probe through the
-public hostname reached about 24 MiB/s, so the current gap is split between the
-Cloudflare/public-origin path and the outside client's path to that edge. In the
-current deployment this is not explained by Worker logic or an active
-cloudflared tunnel; the remaining limit is the client-to-public-origin network
-path plus Cloudflare proxy/TLS/body handling.
+outside client have ranged from roughly 3-10 MiB/s depending on edge/client load.
+A same-host probe through the public hostname reached about 24 MiB/s, so the
+current gap is split between the Cloudflare/public-origin path and the outside
+client's path to that edge. In the current deployment this is not explained by
+Worker logic or an active cloudflared tunnel; the remaining limit is the
+client-to-public-origin network path plus Cloudflare proxy/TLS/body handling.
 
 Raising the local blob write queue is therefore not the main fix once the origin
 queue is idle. Higher client concurrency mostly increases tail latency when the
@@ -53,6 +53,12 @@ connection headroom for websocket traffic plus upload/CDN bursts. A container
 default such as 1024 open files or 1024 worker connections is unnecessarily low
 for this role; tune nginx worker limits and keep access-log timing enabled so
 connection pressure is visible before it becomes an upload/read symptom.
+
+For Cloudflare-to-origin HTTP/2 uploads, keep request-body buffers large enough
+to avoid tiny default preread behavior: a tested nginx baseline uses
+`http2_body_preread_size 1m` and `client_body_buffer_size 1m` on the upload
+server, plus modern origin TLS (`TLSv1.2 TLSv1.3`). This improved one saturated
+c12 binary-batch probe, but did not remove the public ingress ceiling.
 
 ## Read path
 

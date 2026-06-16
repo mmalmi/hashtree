@@ -1936,3 +1936,45 @@ Interpretation:
 - This keeps the public design simpler: writes stream through the local origin,
   reads use immutable content-addressed cache behavior, and no R2/S3/bucket hot
   path is involved.
+
+### 2026-06-16: Upload nginx HTTP/2 body buffer tuning
+
+Question: is the current public write ceiling caused by nginx/hashtree storage,
+or by slow request-body ingress from Cloudflare/client into the upload origin?
+
+Setup:
+- Live public upload origin was still the non-S3 hot-origin image.
+- The disruptive storage healthcheck timer on the large replica remained
+  masked/inactive.
+- The upload reverse proxy already had raised worker connection and file
+  descriptor limits. This pass changed only origin TLS/body handling:
+  `ssl_protocols TLSv1.2 TLSv1.3`, `http2_body_preread_size 1m`, and
+  `client_body_buffer_size 1m` on the upload server.
+- A temporary per-vhost attempt to disable HTTP/2 for `upload.iris.to` validated
+  but did not change logged request protocol on the shared 443 listener, so it
+  was reverted.
+
+Results:
+
+| Shape | Before body-buffer tuning | After body-buffer tuning |
+| --- | ---: | ---: |
+| Public writes, 64 x 256 KiB, batch 16, c8 | 3.96 MiB/s | 3.37 MiB/s |
+| Public writes, 128 x 256 KiB, batch 16, c12 | 2.94 MiB/s | 4.02 MiB/s |
+| Public CDN reads, same 64 x 256 KiB set, c16 | 29.13 MiB/s first pass, 34.77 MiB/s repeat | unchanged path |
+| Public upload-host reads, same 64 x 256 KiB set, c16 | 28.81 MiB/s first pass, 38.13 MiB/s repeat | unchanged path |
+
+Reverse-proxy timing:
+- Before body-buffer tuning, the c12 run logged 4 MiB `POST /upload/batch-binary`
+  requests with request/upstream times around 6.9-8.6 s.
+- After body-buffer tuning, the same request shape logged about 4.3-5.7 s.
+- Hashtree CPU stayed low and no slow Blossom batch, queue-full, or storage
+  warning stream appeared during the probes.
+
+Interpretation:
+- The body-buffer/TLS modernization is worth keeping, but it is not a complete
+  fix. The unstable c8/c12 numbers and matching request/upstream times still
+  point to public request-body ingress before LMDB.
+- Do not chase larger LMDB write queues for this symptom. The next step-function
+  write improvement is topology/protocol: a better public ingress route, a true
+  hot edge that accepts locally before private replication, or fewer bytes/bodies
+  per git push.
