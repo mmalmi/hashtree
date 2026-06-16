@@ -2292,3 +2292,41 @@ Interpretation:
   fsync, relaxed LMDB commit sync with one explicit final store sync, and larger
   stream store batches. It should not silently change the content chunk size,
   because that would change CIDs relative to non-local adds.
+
+### 2026-06-16: Current hot-origin redeploy and status counters
+
+Question: after adding upload-replication counters and git upload traversal
+optimizations, can the public hot origin be updated without regressing write
+throughput, and do the new counters prove write-behind behavior?
+
+Setup:
+- Built and installed current master on the deep replica's systemd daemon.
+- Built a no-S3 hot-origin container from current master using the reproducible
+  `rust/Dockerfile.hot-origin` context shape: `hashtree-rust/`,
+  `cashu-service/`, and `fips/`.
+- The hot-origin image needed `pkg-config`, `libdbus-1-dev`, and `libclang-dev`
+  in the builder stage for FIPS dependencies, plus runtime `libdbus-1-3`.
+- The container was recreated with the existing local data volume, config
+  volume, proxy network, and upload replication settings.
+
+Results:
+
+| Shape | Result |
+| --- | ---: |
+| Deep replica daemon after restart | active, new upload-replication counters visible |
+| Hot origin container-local binary batch, 128 x 256 KiB, c4, batch 16 | 152.44 MiB/s |
+| Hot origin replication counters after local sample | 4 accepted batches, 64 uploaded blobs, 16 MiB replicated, 0 failures |
+| Public upload hostname from this client, 64 x 256 KiB, c4, batch 16 | 8.78 MiB/s |
+| Hot origin queue state after public sample | blob writes idle, replication queue empty, 0 failed/fallback/skipped jobs |
+
+Interpretation:
+- The current hot-origin local write path remains fast after the redeploy; the
+  new status counters show accepted/coalesced replication work draining cleanly.
+- Public writes are still in the same single-digit MiB/s band from this client,
+  so the current bottleneck is still public ingress/client-to-hot-host network
+  rather than LMDB, queue limits, or local write-behind.
+- Recent live traffic after the redeploy had no 5xx, no htree WARN/ERROR logs,
+  and negligible htree CPU. The visible request mix was normal upload/hash/Nostr
+  traffic, not an obvious sustained DDoS.
+- Keep the hot path local-fileserver based. This deploy did not add R2/S3,
+  buckets, or an external object-store admission layer.
