@@ -41,6 +41,8 @@ if [ -z "$PATH_ARG" ] || [ -z "$BASE_URL" ]; then
     exit 1
 fi
 
+CACHE_BUSTER="${BASE_URL##*/}"
+
 mkdir -p "$(dirname "$PATH_ARG")"
 
 cat >"$PATH_ARG" <<EOF
@@ -49,6 +51,7 @@ set -eu
 
 BASE_URL="${BASE_URL}"
 ASSET_BASE_URL="\${BASE_URL}/assets"
+ASSET_URL_SUFFIX="?v=${CACHE_BUSTER}"
 
 # This bootstrap is the trust root for curl|sh installs. Same-origin checksum
 # files would not improve security here, so it downloads the release archive
@@ -175,7 +178,7 @@ archive="hashtree-\${target}.tar.gz"
 tmpdir=\$(mktemp -d 2>/dev/null || mktemp -d -t hashtree-install) || die "failed to create temporary directory"
 [ -d "\$tmpdir" ] || die "temporary directory was not created"
 
-url="\${ASSET_BASE_URL}/\${archive}"
+url="\${ASSET_BASE_URL}/\${archive}\${ASSET_URL_SUFFIX}"
 archive_path="\${tmpdir}/\${archive}"
 
 log "downloading \${url}"

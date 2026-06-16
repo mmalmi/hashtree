@@ -97,18 +97,32 @@ checksum_for_target() {
     fi
 }
 
+asset_url_for_target() {
+    local target="$1"
+    local separator="?"
+
+    if [[ "$RELEASE_BASE_URL" == *\?* ]]; then
+        separator="&"
+    fi
+
+    escape_ruby_string "${RELEASE_BASE_URL}/hashtree-${target}.tar.gz${separator}v=${VERSION}"
+}
+
 write_formula() {
     local output_file="$1"
     local class_name="$2"
     local formula_version="${VERSION#v}"
     local homepage_escaped desc_escaped license_escaped
-    local release_base_url_escaped
+    local url_macos_arm url_macos_x86 url_linux_arm url_linux_x86
     local sha_macos_arm sha_macos_x86 sha_linux_arm sha_linux_x86
 
     homepage_escaped="$(escape_ruby_string "$HOMEPAGE")"
     desc_escaped="$(escape_ruby_string "$DESC")"
     license_escaped="$(escape_ruby_string "$LICENSE_ID")"
-    release_base_url_escaped="$(escape_ruby_string "$RELEASE_BASE_URL")"
+    url_macos_arm="$(asset_url_for_target "aarch64-apple-darwin")"
+    url_macos_x86="$(asset_url_for_target "x86_64-apple-darwin")"
+    url_linux_arm="$(asset_url_for_target "aarch64-unknown-linux-musl")"
+    url_linux_x86="$(asset_url_for_target "x86_64-unknown-linux-musl")"
     sha_macos_arm="$(checksum_for_target "aarch64-apple-darwin")"
     sha_macos_x86="$(checksum_for_target "x86_64-apple-darwin")"
     sha_linux_arm="$(checksum_for_target "aarch64-unknown-linux-musl")"
@@ -123,20 +137,20 @@ class ${class_name} < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "${release_base_url_escaped}/hashtree-aarch64-apple-darwin.tar.gz"
+      url "${url_macos_arm}"
       sha256 "${sha_macos_arm}"
     else
-      url "${release_base_url_escaped}/hashtree-x86_64-apple-darwin.tar.gz"
+      url "${url_macos_x86}"
       sha256 "${sha_macos_x86}"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "${release_base_url_escaped}/hashtree-aarch64-unknown-linux-musl.tar.gz"
+      url "${url_linux_arm}"
       sha256 "${sha_linux_arm}"
     else
-      url "${release_base_url_escaped}/hashtree-x86_64-unknown-linux-musl.tar.gz"
+      url "${url_linux_x86}"
       sha256 "${sha_linux_x86}"
     end
   end

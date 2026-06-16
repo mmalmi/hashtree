@@ -91,7 +91,7 @@ printf '%s\n' "$output" >"$STDOUT_FILE"
 git clone -b master "$DEST_REPO" "$CLONE_DIR" >/dev/null
 test -f "${CLONE_DIR}/Formula/htree.rb"
 test -L "${CLONE_DIR}/Aliases/hashtree"
-grep -F 'http://127.0.0.1:18082/assets/hashtree-aarch64-apple-darwin.tar.gz' "${CLONE_DIR}/Formula/htree.rb" >/dev/null
+grep -F 'http://127.0.0.1:18082/assets/hashtree-aarch64-apple-darwin.tar.gz?v=v0.0.1' "${CLONE_DIR}/Formula/htree.rb" >/dev/null
 grep -F 'https://upload.iris.to/npub1test/homebrew-htree-test/.git' "$STDOUT_FILE" >/dev/null
 grep -F 'brew install htree' "$STDOUT_FILE" >/dev/null
 grep -F 'brew install hashtree' "$STDOUT_FILE" >/dev/null
