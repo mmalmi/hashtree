@@ -2,6 +2,60 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Cold Read-Through Chunk Prefetch
+
+Question: why was a hot origin with a deep read-through source still slow on
+cold immutable tree reads?
+
+Finding:
+- A fresh upstream-only encrypted tree with a 5 MiB file split into 64 KiB
+  chunks exposed a read-through bottleneck. Four concurrent public reads through
+  the hot origin took about 34 seconds before the file was cached, while the
+  warm read immediately after took about 0.18 seconds.
+- Reusing one upstream HTTP client per server state did not materially change
+  this result, so per-blob `reqwest::Client` construction was not the dominant
+  bottleneck.
+- The actual hot path was one missing chunk at a time: after the file node was
+  local, the server still discovered and fetched leaf blobs sequentially through
+  `HashTree::get`/`read_file_range_cid` missing-chunk retries.
+
+Change:
+- Server state now carries a shared upstream Blossom HTTP client so cold-miss
+  reads can reuse connections.
+- Full-file and range reads now best-effort prefetch range-overlapping file
+  leaf chunks concurrently after the file node is local. The normal exact
+  missing-chunk retry loop remains as the fallback for internal nodes, failed
+  prefetches, or unusual tree shapes.
+- The default cold-read prefetch concurrency is 32 and can be capped with
+  `HTREE_COLD_READ_PREFETCH_CONCURRENCY`.
+
+Verification:
+- `cargo fmt --manifest-path rust/Cargo.toml --all --check`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  get_cid_with_fetch_prefetches_missing_file_chunks_concurrently -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  fetch_missing_chunk_coalesces_concurrent_upstream_fetches -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  server::handlers::tests -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib -- --nocapture`
+
+Live public samples:
+
+| Shape | Before | Shared client only | Concurrent prefetch |
+| --- | ---: | ---: | ---: |
+| 4 concurrent cold reads of one fresh 5 MiB / 64 KiB-chunk file | about 34 s | about 33 s | about 12.4 s |
+| Same file, immediate warm read | about 0.19 s | about 0.18 s | about 0.18 s |
+| Fetch completion log count during cold pass | about 122 | about 120 | about 86 |
+
+Interpretation:
+- This is a real cold-read improvement and removes most duplicate/sequential
+  leaf-fetch waste for this shape.
+- It is still not modern cold-cache throughput for small-chunk trees. The
+  remaining bottleneck is object fanout over the upstream read path, not LMDB.
+- The next step for large cold reads should be a batch blob fetch/read-through
+  endpoint or a pack/framed read shape, so the hot origin can fetch many missing
+  blobs from the deep store in one request instead of one HTTP GET per leaf.
+
 ## 2026-06-16 - Compact Batch Upload Authorization
 
 Question: why did larger binary batch uploads fail at the public edge even when
