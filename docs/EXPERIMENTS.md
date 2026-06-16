@@ -2011,3 +2011,53 @@ Interpretation:
   negotiation.
 - This is a client/git-push improvement, not a server storage fix. LMDB and
   hashtree CPU stayed below the public write ceiling during the probes.
+
+### 2026-06-16: LMDB duplicate-write hot path audit
+
+Question: is LMDB being used incorrectly on duplicate-heavy Blossom writes, or
+is the remaining public upload ceiling above the local storage layer?
+
+Setup:
+- Current LMDB write paths use one write transaction per batch and
+  `PutFlags::NO_OVERWRITE` as the exact insert-if-absent primitive. Duplicate
+  single puts return `false`; duplicate batch items are skipped by LMDB and do
+  not write blob metadata, eviction-order records, or logical byte counters.
+- Batch writes return `PutManyReport { total, inserted, inserted_bytes,
+  inserted_hashes }`; quota enforcement uses exact inserted bytes after the
+  write attempt, not the total candidate byte count.
+- Local release-mode storage bench used cached-batch writes with 256 KiB blobs
+  and a 1 GiB logical max. A separate public sample used
+  `upload_queue_bench` against the upload hostname with binary batches, 64 x
+  256 KiB, 16 blobs/request, concurrency 12, HTTP/1.1 upload bodies.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-lmdb --lib -- --nocapture`
+  passed: duplicate single put is a no-op, batch reports only new hashes/bytes,
+  and duplicate-heavy batches do not evict by candidate bytes.
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli duplicate -- --nocapture`
+  passed: Blossom duplicate writes do not refresh blob access time, cached
+  duplicate-heavy quota uses actual inserted bytes, and duplicate uploads do
+  not trigger write-behind replication.
+
+Results:
+
+| Shape | Batch size | Inserted | Candidate throughput | Inserted throughput |
+| --- | ---: | ---: | ---: | ---: |
+| Unique local cached batch, 256 x 256 KiB | 1 | 256 | 30.95 MiB/s | 30.95 MiB/s |
+| 100% duplicate replay, same candidates | 1 | 0 | 176.13 MiB/s | 0.00 MiB/s |
+| Unique local cached batch, 256 x 256 KiB | 16 | 256 | 115.47 MiB/s | 115.47 MiB/s |
+| 100% duplicate replay, same candidates | 16 | 0 | 176.47 MiB/s | 0.00 MiB/s |
+| Unique local cached batch, 256 x 256 KiB | 256 | 256 | 153.30 MiB/s | 153.30 MiB/s |
+| 100% duplicate replay, same candidates | 256 | 0 | 176.01 MiB/s | 0.00 MiB/s |
+| 90/10 duplicate replay, 256 x 256 KiB | 256 | 26 | 172.90 MiB/s | 17.56 MiB/s |
+| Public upload sample, binary batch, c12 | 16 | 64 | 7.12 MiB/s | 7.12 MiB/s |
+
+Interpretation:
+- LMDB duplicate handling is not the reason public writes are in the
+  single-digit MiB/s range. Local duplicate replay processes candidate bytes at
+  about 176 MiB/s, and unique local batches are tens to hundreds of MiB/s
+  depending on batch size.
+- The public upload sample remains an order of magnitude below the local
+  duplicate-aware write path. Continue prioritizing public ingress/topology,
+  request-body transport, and git object fanout before adding probabilistic
+  duplicate filters or cloud object-store admission layers.

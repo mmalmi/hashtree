@@ -66,6 +66,14 @@ HTTP/1.1-only uploads matched or slightly beat HTTP/2-auto in the stable part of
 the sweep, and avoided at least one bad HTTP/2-auto sample. Reads still use the
 normal HTTP client and may negotiate HTTP/2.
 
+LMDB duplicate handling is already exact enough for the hot Blossom write path:
+single puts and batch puts rely on LMDB `NO_OVERWRITE`, duplicate writes do not
+refresh blob access metadata, and quota uses actual inserted bytes. A local
+release-mode cached-batch replay processed duplicate-heavy candidates at roughly
+170 MiB/s, far above the public upload ceiling. Do not add Bloom filters,
+probabilistic admission checks, or R2/S3 bucket layers for this symptom without
+new evidence that local storage has become the bottleneck.
+
 ## Read path
 
 Cloudflare's default cache behavior is extension-based, not MIME-type based.
