@@ -2,6 +2,61 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Coalesced Blossom Write-Behind Replication
+
+Question: can the hot origin keep public writes bounded under load by sending
+fewer, fatter write-behind requests to the configured replica, without adding an
+R2/S3/object-store admission layer?
+
+Change:
+- Added a per-server Blossom upload replica scheduler. Accepted local writes
+  still reserve the existing bounded replica queue bytes before body cloning.
+- The scheduler holds those existing byte permits while it coalesces adjacent
+  raw or binary-batch replication jobs with the same target/key configuration.
+- Defaults are intentionally small: up to 64 blobs, up to 16 MiB, or a 25 ms
+  flush delay. Operators can tune with
+  `HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BLOBS`,
+  `HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BYTES`,
+  `HTREE_BLOSSOM_REPLICA_COALESCE_FLUSH_MS`, and
+  `HTREE_BLOSSOM_REPLICA_COALESCE_QUEUE_JOBS`.
+- If the coalescer queue is full, closed, or disabled, the old immediate
+  write-behind upload path is used as the fallback.
+
+Verification:
+- `cargo fmt --manifest-path rust/Cargo.toml --all --check`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  server::blossom::tests::upload_replication_coalesces_adjacent_binary_batches -- --nocapture`
+- Existing focused write-behind tests for binary-batch replication, raw
+  replication, raw duplicate suppression, and optimistic duplicate suppression.
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib
+  server::blossom::tests -- --nocapture`
+
+Live deployment:
+- Deployed non-S3 build `23ccb874` to the public hot origin.
+- The hot origin stayed healthy. `/api/status` showed no recent 5xx during the
+  live public write/read sweeps.
+
+Live public samples:
+
+| Shape | Result |
+| --- | ---: |
+| Public `upload.iris.to` write, 512 x 256 KiB, 16 blobs/request, c8 | 8.83 MiB/s, 0 failures |
+| Same run, sampled replica queue reservation | peaked around 21 MiB of 512 MiB, then drained |
+| Public `upload.iris.to` write, 1024 x 256 KiB, 16 blobs/request, c16 | 10.38 MiB/s, 0 failures |
+| Same run, sampled replica queue reservation | peaked around 46 MiB of 512 MiB, then drained |
+| Public `upload.iris.to` read of the fresh 1024-blob sample, c16 | 60.24 MiB/s, 0 failures |
+
+Interpretation:
+- Coalescing write-behind replication does not move the public request-body
+  ingress ceiling by itself. The public write path is still around the previously
+  measured 7-10 MiB/s band for 4 MiB binary batch bodies.
+- It does improve the under-load shape behind the hot origin: the replica queue
+  stayed shallow, bounded, and drained instead of accumulating an unbounded
+  backlog while public writes were accepted.
+- The remaining large write-performance win still needs a better public bulk
+  ingress shape or fewer uploaded objects/bytes per operation, not LMDB
+  queue-size tuning and not R2/S3/bucket admission.
+
 ## 2026-06-16 - Batch Blob Read-Through
 
 Question: can cold immutable tree reads avoid one upstream HTTP GET per missing

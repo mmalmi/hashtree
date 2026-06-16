@@ -75,6 +75,10 @@ setup before traffic reaches the public ingress ceiling:
 - Use compact `x-batch` authorization for multi-blob binary batches. Signing
   one digest for the ordered blob-hash list keeps Authorization headers small
   while the origin still verifies every uploaded blob hash from the body.
+- Keep hot-origin write-behind replication bounded and coalesced. The public
+  hot store should durably accept and serve blobs first, then merge adjacent
+  replica jobs into larger batch-binary uploads so the deep store link is not
+  forced to process one replica request per accepted client request.
 - Keep batch bodies large enough to amortize per-request overhead, but do not
   expect larger batches to beat saturated public ingress by themselves. Current
   public measurements make 4-16 MiB binary batch bodies the safe operating
