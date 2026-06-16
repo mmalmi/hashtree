@@ -17,6 +17,7 @@ const BLOB_BATCH_DOWNLOAD_MIN_BYTES: usize = 1024 * 1024;
 const BLOB_BATCH_DOWNLOAD_MAX_BYTES: usize = 512 * 1024 * 1024;
 const BLOB_BATCH_DOWNLOAD_MAX_HASHES_ENV: &str = "HTREE_BLOB_BATCH_DOWNLOAD_MAX_HASHES";
 const BLOB_BATCH_DOWNLOAD_MAX_BYTES_ENV: &str = "HTREE_BLOB_BATCH_DOWNLOAD_MAX_BYTES";
+const UPSTREAM_BLOSSOM_MISS_TTL: Duration = Duration::from_secs(10);
 
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
     fetch_and_cache_blob_with_source(state, hash)
@@ -91,26 +92,59 @@ pub(super) async fn fetch_and_cache_blob_with_source(
     }
 
     if !state.upstream_blossom.is_empty() {
-        tracing::info!(
-            "[htree-fetch] Querying {} Blossom servers for {}",
-            state.upstream_blossom.len(),
-            &hash_hex[..16.min(hash_hex.len())]
-        );
-        let upstream_blossom = state.upstream_blossom.clone();
-        let upstream_http_client = state.upstream_http_client.clone();
-        let upstream_hash_hex = hash_hex.clone();
-        fetches.push(
-            async move {
-                let query_hash_hex = upstream_hash_hex.clone();
-                await_fetch_task("upstream", &upstream_hash_hex, async move {
-                    query_upstream_blossom(upstream_http_client, &upstream_blossom, &query_hash_hex)
-                        .await
-                })
-                .await
-                .map(|(data, server)| FetchResult::Upstream { data, server })
-            }
-            .boxed(),
-        );
+        let upstream_miss_cached = state
+            .upstream_blossom_miss_cache
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get_cloned(&hash_hex))
+            .is_some();
+
+        if upstream_miss_cached {
+            tracing::debug!(
+                "[htree-fetch] Skipping Blossom upstream for recent explicit miss {}",
+                &hash_hex[..16.min(hash_hex.len())]
+            );
+        } else {
+            tracing::info!(
+                "[htree-fetch] Querying {} Blossom servers for {}",
+                state.upstream_blossom.len(),
+                &hash_hex[..16.min(hash_hex.len())]
+            );
+            let upstream_blossom = state.upstream_blossom.clone();
+            let upstream_http_client = state.upstream_http_client.clone();
+            let upstream_hash_hex = hash_hex.clone();
+            let upstream_miss_cache = state.upstream_blossom_miss_cache.clone();
+            fetches.push(
+                async move {
+                    let query_hash_hex = upstream_hash_hex.clone();
+                    let miss_cache_hash_hex = query_hash_hex.clone();
+                    await_fetch_task("upstream", &upstream_hash_hex, async move {
+                        Some(
+                            query_upstream_blossom_result(
+                                upstream_http_client,
+                                &upstream_blossom,
+                                &query_hash_hex,
+                            )
+                            .await,
+                        )
+                    })
+                    .await
+                    .and_then(|result| match result {
+                        UpstreamBlossomQueryResult::Hit { data, server } => {
+                            Some(FetchResult::Upstream { data, server })
+                        }
+                        UpstreamBlossomQueryResult::DefiniteMiss => {
+                            if let Ok(mut cache) = upstream_miss_cache.lock() {
+                                cache.put(miss_cache_hash_hex, (), UPSTREAM_BLOSSOM_MISS_TTL);
+                            }
+                            None
+                        }
+                        UpstreamBlossomQueryResult::Indeterminate => None,
+                    })
+                }
+                .boxed(),
+            );
+        }
     } else {
         tracing::info!("[htree-fetch] No upstream Blossom servers configured");
     }
@@ -1209,14 +1243,44 @@ pub(super) async fn query_webrtc_peers(
     None
 }
 
-/// Query upstream Blossom servers for content by hash
-/// Returns the first successful response with server URL, or None if not found
+enum UpstreamBlossomQueryResult {
+    Hit { data: Vec<u8>, server: String },
+    DefiniteMiss,
+    Indeterminate,
+}
+
+enum UpstreamBlossomServerResult {
+    Hit { data: Vec<u8>, server: String },
+    NotFound,
+    Indeterminate,
+}
+
+/// Query upstream Blossom servers for content by hash.
+/// Returns the first successful response with server URL, or None if no server
+/// provided verified bytes.
 pub(super) async fn query_upstream_blossom(
     client: reqwest::Client,
     servers: &[String],
     hash_hex: &str,
 ) -> Option<(Vec<u8>, String)> {
+    match query_upstream_blossom_result(client, servers, hash_hex).await {
+        UpstreamBlossomQueryResult::Hit { data, server } => Some((data, server)),
+        UpstreamBlossomQueryResult::DefiniteMiss | UpstreamBlossomQueryResult::Indeterminate => {
+            None
+        }
+    }
+}
+
+async fn query_upstream_blossom_result(
+    client: reqwest::Client,
+    servers: &[String],
+    hash_hex: &str,
+) -> UpstreamBlossomQueryResult {
     use sha2::{Digest, Sha256};
+
+    if servers.is_empty() {
+        return UpstreamBlossomQueryResult::Indeterminate;
+    }
 
     let mut pending = FuturesUnordered::new();
     for server in servers {
@@ -1241,7 +1305,10 @@ pub(super) async fn query_upstream_blossom(
                                 server,
                                 &hash_hex[..16.min(hash_hex.len())]
                             );
-                            Some((bytes.to_vec(), server))
+                            UpstreamBlossomServerResult::Hit {
+                                data: bytes.to_vec(),
+                                server,
+                            }
                         } else {
                             tracing::warn!(
                                 "Hash mismatch from {}: expected {}, got {}",
@@ -1249,33 +1316,48 @@ pub(super) async fn query_upstream_blossom(
                                 &hash_hex[..16.min(hash_hex.len())],
                                 &computed[..16.min(computed.len())]
                             );
-                            None
+                            UpstreamBlossomServerResult::Indeterminate
                         }
                     }
                     Err(err) => {
                         tracing::debug!("Upstream {} body read error: {}", server, err);
-                        None
+                        UpstreamBlossomServerResult::Indeterminate
                     }
                 },
                 Ok(resp) => {
                     tracing::debug!("Upstream {} returned {}", server, resp.status());
-                    None
+                    if resp.status() == StatusCode::NOT_FOUND {
+                        UpstreamBlossomServerResult::NotFound
+                    } else {
+                        UpstreamBlossomServerResult::Indeterminate
+                    }
                 }
                 Err(e) => {
                     tracing::debug!("Upstream {} error: {}", server, e);
-                    None
+                    UpstreamBlossomServerResult::Indeterminate
                 }
             }
         });
     }
 
+    let mut all_explicit_not_found = true;
     while let Some(result) = pending.next().await {
-        if result.is_some() {
-            return result;
+        match result {
+            UpstreamBlossomServerResult::Hit { data, server } => {
+                return UpstreamBlossomQueryResult::Hit { data, server };
+            }
+            UpstreamBlossomServerResult::NotFound => {}
+            UpstreamBlossomServerResult::Indeterminate => {
+                all_explicit_not_found = false;
+            }
         }
     }
 
-    None
+    if all_explicit_not_found {
+        UpstreamBlossomQueryResult::DefiniteMiss
+    } else {
+        UpstreamBlossomQueryResult::Indeterminate
+    }
 }
 
 /// Query upstream hashtree/Blossom servers for multiple content hashes.

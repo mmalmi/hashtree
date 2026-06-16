@@ -2,6 +2,40 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Upstream Blossom Explicit-Miss Cache
+
+Question: even when public upload ingress is the largest bottleneck, are there
+smaller origin-side bottlenecks worth fixing under load?
+
+Finding:
+- Live hot-origin writes from inside the origin network were already much
+  faster than public-client uploads, so the write ceiling is still before local
+  storage for the tested upload shape.
+- Logs nevertheless showed repeated read-through misses for the same absent
+  hashes. Those misses do not explain the public upload ceiling, but they waste
+  upstream HTTP requests and can amplify tail latency during cold-read bursts.
+
+Change:
+- Added a short in-process cache for explicit upstream Blossom `404 Not Found`
+  misses.
+- The cache is intentionally narrow: it only records a miss when every queried
+  Blossom upstream answers 404. Timeouts, 5xx, hash mismatches, and FIPS/WebRTC
+  peer non-responses stay indeterminate and are retried, so slow peers are not
+  converted into fake absence.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib ensure_blob_available_ -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib server::handlers::tests -- --nocapture`
+- `cargo fmt --manifest-path rust/Cargo.toml --all --check`
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --lib -- --nocapture`
+
+Interpretation:
+- This is not a bandwidth fix; it is an amplification and stability fix. Public
+  writes still need ingress/routing improvements for major throughput gains.
+- The next useful software targets remain bounded upload-replication backlog
+  behavior, git remote traversal costs for duplicate-heavy pushes, and hot/cold
+  storage placement for huge local imports or random cold reads.
+
 ## 2026-06-16 - Git Upload Traversal Skips Definite Leaf Blobs
 
 Question: can git push upload discovery avoid spending CPU decrypting and

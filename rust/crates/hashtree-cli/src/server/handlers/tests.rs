@@ -189,6 +189,17 @@ async fn serve_blob_with_request_log_for_test(
     }
 }
 
+async fn serve_error_with_request_log_for_test(
+    AxumState(requested_ids): AxumState<Arc<std::sync::Mutex<Vec<String>>>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response<Body> {
+    requested_ids.lock().unwrap().push(id);
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from("upstream error"))
+        .unwrap()
+}
+
 async fn serve_blob_with_batch_state_for_test(
     AxumState(state): AxumState<UpstreamBlobBatchTestState>,
     AxumPath(id): AxumPath<String>,
@@ -261,6 +272,9 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         allowed_pubkeys: HashSet::new(),
         upstream_blossom,
         upstream_http_client: crate::server::new_upstream_http_client(),
+        upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(
+            crate::server::new_lookup_cache(),
+        )),
         blossom_upload_replicas: Vec::new(),
         blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
         blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
@@ -1056,6 +1070,80 @@ async fn ensure_blob_available_coalesces_concurrent_upstream_fetches() {
         &[format!("{}.bin", hex::encode(hash))]
     );
     assert!(local_store.get_blob(&hash).unwrap().is_some());
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn ensure_blob_available_caches_sequential_explicit_upstream_misses() {
+    let source_dir = TempDir::new().unwrap();
+    let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
+    let requested_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let missing_hash = sha256(b"not in upstream");
+
+    let upstream_router = Router::new()
+        .route("/:id", get(serve_blob_with_request_log_for_test))
+        .with_state(UpstreamBlobTestState {
+            store: source_store.clone(),
+            requested_ids: requested_ids.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_server =
+        tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
+
+    let local_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
+    let state = test_app_state(local_store, vec![format!("http://{}", upstream_addr)]);
+
+    assert_eq!(
+        ensure_blob_available(&state, &missing_hash).await.unwrap(),
+        false
+    );
+    assert_eq!(
+        ensure_blob_available(&state, &missing_hash).await.unwrap(),
+        false
+    );
+    assert_eq!(
+        requested_ids.lock().unwrap().as_slice(),
+        &[format!("{}.bin", hex::encode(missing_hash))]
+    );
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn ensure_blob_available_retries_indeterminate_upstream_misses() {
+    let requested_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let missing_hash = sha256(b"upstream errored before answering");
+
+    let upstream_router = Router::new()
+        .route("/:id", get(serve_error_with_request_log_for_test))
+        .with_state(requested_ids.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_server =
+        tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
+
+    let local_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
+    let state = test_app_state(local_store, vec![format!("http://{}", upstream_addr)]);
+
+    assert_eq!(
+        ensure_blob_available(&state, &missing_hash).await.unwrap(),
+        false
+    );
+    assert_eq!(
+        ensure_blob_available(&state, &missing_hash).await.unwrap(),
+        false
+    );
+    assert_eq!(
+        requested_ids.lock().unwrap().as_slice(),
+        &[
+            format!("{}.bin", hex::encode(missing_hash)),
+            format!("{}.bin", hex::encode(missing_hash)),
+        ]
+    );
 
     upstream_server.abort();
 }

@@ -237,6 +237,10 @@ pub struct AppState {
     /// Shared HTTP client for upstream Blossom reads, so cold cache misses can
     /// reuse connections instead of rebuilding a client per blob.
     pub upstream_http_client: reqwest::Client,
+    /// Short cache for explicit upstream Blossom 404 misses. This only records
+    /// HTTP absence from configured Blossom upstreams; peer timeouts are not
+    /// treated as absence.
+    pub upstream_blossom_miss_cache: Arc<StdMutex<TimedLruCache<String, ()>>>,
     /// Write-behind Blossom servers for blobs accepted by this server.
     pub blossom_upload_replicas: Vec<String>,
     /// Background replication queue byte budget. Each queued body holds one
