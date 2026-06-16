@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
@@ -163,6 +163,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let wall = started.elapsed();
+    let planned_http_requests =
+        planned_http_requests(config.mode, config.requests, config.batch_size);
+    let planned_mib = config.requests as f64 * config.size as f64 / 1024.0 / 1024.0;
     let successes: usize = samples
         .iter()
         .filter(|sample| sample.error.is_none())
@@ -189,10 +192,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("server={}", config.server);
     println!(
-        "mode={:?} requests={} batch_size={} concurrency={} size={} timeout_secs={} upload_http1_only={} resolve_overrides={} danger_accept_invalid_certs={} seed={}",
+        "mode={:?} requests={} batch_size={} planned_http_requests={} planned_mib={:.2} concurrency={} size={} timeout_secs={} upload_http1_only={} resolve_overrides={} danger_accept_invalid_certs={} seed={}",
         config.mode,
         config.requests,
         config.batch_size,
+        planned_http_requests,
+        planned_mib,
         config.concurrency,
         config.size,
         config.timeout_secs,
@@ -234,6 +239,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 impl Config {
     fn parse() -> Result<Self, Box<dyn Error>> {
+        Self::parse_from(std::env::args().skip(1))
+    }
+
+    fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self, Box<dyn Error>> {
         let mut config = Self {
             server: "http://127.0.0.1:8080".to_string(),
             requests: 128,
@@ -248,7 +257,7 @@ impl Config {
             mode: Mode::Raw,
         };
 
-        let mut args = std::env::args().skip(1);
+        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--server" => config.server = required_value(&mut args, "--server")?,
@@ -263,6 +272,7 @@ impl Config {
                 }
                 "--size" => config.size = required_value(&mut args, "--size")?.parse()?,
                 "--seed" => config.seed = required_value(&mut args, "--seed")?,
+                "--fresh-seed" => config.seed = fresh_seed(),
                 "--timeout-secs" => {
                     config.timeout_secs = required_value(&mut args, "--timeout-secs")?.parse()?
                 }
@@ -322,8 +332,24 @@ fn required_value(
 fn print_usage() {
     println!(
         "usage: cargo run -p hashtree-blossom --example upload_queue_bench -- \\
-  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary --requests 128 --concurrency 32 --size 262144 [--upload-http1-only|--upload-http2-auto] [--resolve host=ip:port] [--danger-accept-invalid-certs]"
+  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary \\
+  --requests 128 --concurrency 32 --size 262144 [--batch-size 32] \\
+  [--seed text|--fresh-seed] [--upload-http1-only|--upload-http2-auto] \\
+  [--resolve host=ip:port] [--danger-accept-invalid-certs]
+
+Notes:
+  --requests is the total blob/read item count. Batch modes group those items
+  into ceil(requests / batch-size) HTTP requests. The default seed is stable for
+  duplicate/replay tests; use --fresh-seed or a unique --seed for fresh writes."
     );
+}
+
+fn fresh_seed() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos();
+    format!("upload-queue-bench-{nanos}-{}", std::process::id())
 }
 
 fn parse_resolve_override(value: &str) -> Result<(String, Vec<SocketAddr>), Box<dyn Error>> {
@@ -363,7 +389,45 @@ fn deterministic_payload(seed: &str, index: usize, size: usize) -> Vec<u8> {
     output
 }
 
+fn planned_http_requests(mode: Mode, requests: usize, batch_size: usize) -> usize {
+    match mode {
+        Mode::Raw | Mode::Read => requests,
+        Mode::Batch | Mode::BatchJson | Mode::BatchBinary => requests.div_ceil(batch_size),
+    }
+}
+
 fn percentile_ms(sorted: &[Duration], percentile: usize) -> u128 {
     let index = ((sorted.len() - 1) * percentile).div_ceil(100);
     sorted[index].as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Config {
+        Config::parse_from(args.iter().map(|arg| arg.to_string())).expect("parse config")
+    }
+
+    #[test]
+    fn parses_explicit_seed() {
+        let config = parse(&["--seed", "fresh-run-1"]);
+
+        assert_eq!(config.seed, "fresh-run-1");
+    }
+
+    #[test]
+    fn fresh_seed_replaces_default_seed() {
+        let config = parse(&["--fresh-seed"]);
+
+        assert_ne!(config.seed, "upload-queue-bench");
+        assert!(config.seed.starts_with("upload-queue-bench-"));
+    }
+
+    #[test]
+    fn reports_batch_http_request_count_separately_from_blob_count() {
+        assert_eq!(planned_http_requests(Mode::Raw, 33, 16), 33);
+        assert_eq!(planned_http_requests(Mode::Read, 33, 16), 33);
+        assert_eq!(planned_http_requests(Mode::BatchBinary, 33, 16), 3);
+    }
 }

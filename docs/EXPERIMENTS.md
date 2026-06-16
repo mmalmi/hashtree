@@ -2,6 +2,36 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-17 - Upload Benchmark Fresh Seed Controls
+
+Question: can the upload benchmark avoid confusing fresh-write tests with
+deterministic duplicate replays?
+
+Finding:
+- `upload_queue_bench` already generated deterministic payloads from a seed and
+  per-item index, but the CLI help did not expose `--seed`.
+- In batch modes, `--requests` is the total blob/item count, while the actual
+  HTTP request count is `ceil(requests / batch-size)`. The old output did not
+  make that distinction obvious, which made replication byte expectations easy
+  to overestimate.
+
+Change:
+- Added `--fresh-seed` to generate a reproducible seed string for fresh writes;
+  the benchmark prints the generated seed.
+- Updated help text to document `--seed`, `--fresh-seed`, and the
+  request-count semantics.
+- Added `planned_http_requests` and `planned_mib` to benchmark output.
+
+Verification:
+- `cargo test --manifest-path rust/Cargo.toml -p hashtree-blossom --example upload_queue_bench -- --nocapture`
+- `cargo build --manifest-path rust/Cargo.toml -p hashtree-blossom --release --example upload_queue_bench`
+- Smoke: `upload_queue_bench --server https://upload.iris.to --mode batch-binary --requests 4 --batch-size 2 --concurrency 1 --size 1024 --fresh-seed --timeout-secs 30 --upload-http1-only` printed `planned_http_requests=2`, a generated seed, and `success=4`.
+
+Interpretation:
+- This is measurement tooling, not a daemon throughput improvement. It should
+  make future public-write, duplicate-write, and write-behind replication tests
+  less error-prone.
+
 ## 2026-06-17 - Home Uplink vs Replica Downlink Direction Check
 
 Question: if the deep replica sits behind a 1 Gbps home downlink, can public
