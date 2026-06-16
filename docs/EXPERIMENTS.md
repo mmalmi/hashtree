@@ -2459,3 +2459,37 @@ Interpretation:
   traffic, not an obvious sustained DDoS.
 - Keep the hot path local-fileserver based. This deploy did not add R2/S3,
   buckets, or an external object-store admission layer.
+
+### 2026-06-17: Home downlink is not the upload ceiling
+
+Question: if the home connection reports a fast downlink, why can public
+Blossom uploads from the home client still be slow?
+
+Setup:
+- Same home client and public upload hostname as the previous public write
+  checks.
+- Fresh-seed benchmark data to avoid duplicate replay.
+- Same 32 MiB planned binary batch shape for public and hot-origin-local
+  checks: 128 x 256 KiB blobs, batch 16, concurrency 4.
+
+Results:
+
+| Shape | Result |
+| --- | ---: |
+| Home client network quality uplink | 69.762 Mbps |
+| Home client network quality downlink | 771.461 Mbps |
+| Home client to public upload hostname, fresh binary batch | 1.36 MiB/s |
+| Hot-origin local binary batch, same fresh workload | 107.86 MiB/s |
+| Hot-origin write-behind state after local sample | 0 queued, 0 in flight, 0 failed |
+
+Interpretation:
+- The reported fast home downlink does not bound upload throughput from the
+  home client. This sample's measured uplink was about 70 Mbps, or roughly
+  8.7 MB/s before protocol overhead.
+- The fresh public upload was worse than raw uplink capacity in this run, which
+  points at public edge/origin/request-body behavior or transient congestion on
+  top of ISP uplink asymmetry.
+- The same fresh workload reached more than 100 MiB/s locally on the hot
+  origin, and replication drained without backlog. That keeps LMDB, local
+  storage, and the hashtree write queue out of the primary-cause box for this
+  public-client sample.
