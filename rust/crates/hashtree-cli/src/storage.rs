@@ -11,7 +11,7 @@ use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::LmdbBlobStore;
 use heed::types::*;
-use heed::{Database, EnvFlags, EnvOpenOptions};
+use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "s3")]
@@ -1643,12 +1643,6 @@ impl HashtreeStore {
         }
     }
 
-    fn record_blob_access_now(&self, hash: &Hash) {
-        if let Err(err) = self.router.touch_accessed_sync(hash, unix_timestamp_now()) {
-            tracing::debug!("Failed to update blob access metadata: {}", err);
-        }
-    }
-
     pub fn blob_last_accessed_at(&self, hash: &Hash) -> Result<Option<u64>> {
         self.router
             .last_accessed_at_sync(hash)
@@ -1679,18 +1673,18 @@ impl HashtreeStore {
     /// Store a raw blob, returns SHA256 hash as hex.
     pub fn put_blob(&self, data: &[u8]) -> Result<String> {
         let hash = sha256(data);
-        let inserted = self
-            .router
+        self.router
             .put_sync(hash, data)
             .map_err(|e| anyhow::anyhow!("Failed to store blob: {}", e))?;
-        if !inserted {
-            self.record_blob_access_now(&hash);
-        }
         Ok(to_hex(&hash))
     }
 
     /// Store an owned Blossom blob under the configured durable storage limit.
-    pub fn put_owned_blob(&self, data: &[u8], pubkey: &[u8; 32]) -> Result<String> {
+    pub fn put_owned_blob_with_inserted(
+        &self,
+        data: &[u8],
+        pubkey: &[u8; 32],
+    ) -> Result<(String, bool)> {
         let hash = sha256(data);
         let incoming_bytes = data.len() as u64;
         let mut retried_after_cleanup = false;
@@ -1708,10 +1702,6 @@ impl HashtreeStore {
             }
         };
 
-        if !inserted {
-            self.record_blob_access_now(&hash);
-        }
-
         self.set_blob_owner_with_size(&hash, pubkey, incoming_bytes)?;
         if inserted {
             if let Err(err) = self.enforce_durable_blob_budget_after_insert(incoming_bytes) {
@@ -1720,7 +1710,12 @@ impl HashtreeStore {
             }
         }
 
-        Ok(to_hex(&hash))
+        Ok((to_hex(&hash), inserted))
+    }
+
+    pub fn put_owned_blob(&self, data: &[u8], pubkey: &[u8; 32]) -> Result<String> {
+        self.put_owned_blob_with_inserted(data, pubkey)
+            .map(|(hash, _)| hash)
     }
 
     fn put_blob_owners_for_batch(
@@ -1735,22 +1730,29 @@ impl HashtreeStore {
         let mut wtxn = self.env.write_txn()?;
         for (hash, data) in items {
             let owner_key = Self::blob_owner_key(hash, pubkey);
-            self.blob_owners.put(&mut wtxn, &owner_key[..], &())?;
+            match self.blob_owners.put_with_flags(
+                &mut wtxn,
+                PutFlags::NO_OVERWRITE,
+                &owner_key[..],
+                &(),
+            ) {
+                Ok(()) => {}
+                Err(HeedError::Mdb(MdbError::KeyExist)) => continue,
+                Err(error) => return Err(error.into()),
+            }
 
             let index_key = Self::pubkey_blob_key(pubkey, hash);
-            if self.pubkey_blob_index.get(&wtxn, &index_key[..])?.is_none() {
-                let metadata = BlobMetadata {
-                    sha256: to_hex(hash),
-                    size: data.len() as u64,
-                    mime_type: "application/octet-stream".to_string(),
-                    uploaded: now,
-                };
-                self.pubkey_blob_index.put(
-                    &mut wtxn,
-                    &index_key[..],
-                    &serde_json::to_vec(&metadata)?,
-                )?;
-            }
+            let metadata = BlobMetadata {
+                sha256: to_hex(hash),
+                size: data.len() as u64,
+                mime_type: "application/octet-stream".to_string(),
+                uploaded: now,
+            };
+            self.pubkey_blob_index.put(
+                &mut wtxn,
+                &index_key[..],
+                &serde_json::to_vec(&metadata)?,
+            )?;
         }
         wtxn.commit()?;
         Ok(())
@@ -1837,7 +1839,7 @@ impl HashtreeStore {
     /// Unlike durable `put_blob` writes, this path may evict disposable orphaned
     /// blobs to make room under storage pressure. It intentionally avoids touching
     /// indexed trees, social-graph roots, explicit pins, and owned Blossom blobs.
-    pub fn put_cached_blob(&self, data: &[u8]) -> Result<String> {
+    pub fn put_cached_blob_with_inserted(&self, data: &[u8]) -> Result<(String, bool)> {
         let hash = sha256(data);
         let incoming_bytes = data.len() as u64;
 
@@ -1845,14 +1847,14 @@ impl HashtreeStore {
         loop {
             match self.router.put_sync(hash, data) {
                 Ok(inserted) => {
-                    if !inserted {
-                        self.record_blob_access_now(&hash);
-                    } else if let Err(err) =
-                        self.enforce_cached_blob_budget_after_insert(incoming_bytes)
-                    {
-                        tracing::debug!("Failed to enforce cached blob budget: {}", err);
+                    if inserted {
+                        if let Err(err) =
+                            self.enforce_cached_blob_budget_after_insert(incoming_bytes)
+                        {
+                            tracing::debug!("Failed to enforce cached blob budget: {}", err);
+                        }
                     }
-                    return Ok(to_hex(&hash));
+                    return Ok((to_hex(&hash), inserted));
                 }
                 Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
                     let freed = self.relieve_cached_blob_write_pressure(incoming_bytes)?;
@@ -1864,6 +1866,11 @@ impl HashtreeStore {
                 Err(err) => return Err(anyhow::anyhow!("Failed to store cached blob: {}", err)),
             }
         }
+    }
+
+    pub fn put_cached_blob(&self, data: &[u8]) -> Result<String> {
+        self.put_cached_blob_with_inserted(data)
+            .map(|(hash, _)| hash)
     }
 
     /// Store multiple opportunistically cached blobs in one raw storage batch.
@@ -2015,26 +2022,30 @@ impl HashtreeStore {
         let index_key = Self::pubkey_blob_key(pubkey, sha256);
         let mut wtxn = self.env.write_txn()?;
 
-        // Add ownership entry (idempotent - put overwrites)
-        self.blob_owners.put(&mut wtxn, &key[..], &())?;
-
-        if self.pubkey_blob_index.get(&wtxn, &index_key[..])?.is_none() {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let metadata = BlobMetadata {
-                sha256: to_hex(sha256),
-                size,
-                mime_type: "application/octet-stream".to_string(),
-                uploaded: now,
-            };
-            self.pubkey_blob_index.put(
-                &mut wtxn,
-                &index_key[..],
-                &serde_json::to_vec(&metadata)?,
-            )?;
+        match self
+            .blob_owners
+            .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, &key[..], &())
+        {
+            Ok(()) => {}
+            Err(HeedError::Mdb(MdbError::KeyExist)) => {
+                wtxn.commit()?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
         }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let metadata = BlobMetadata {
+            sha256: to_hex(sha256),
+            size,
+            mime_type: "application/octet-stream".to_string(),
+            uploaded: now,
+        };
+        self.pubkey_blob_index
+            .put(&mut wtxn, &index_key[..], &serde_json::to_vec(&metadata)?)?;
 
         wtxn.commit()?;
         Ok(())
@@ -3142,7 +3153,7 @@ mod tests {
 
     #[cfg(feature = "lmdb")]
     #[test]
-    fn duplicate_blossom_writes_refresh_blob_last_accessed() -> Result<()> {
+    fn duplicate_blossom_writes_do_not_refresh_blob_last_accessed() -> Result<()> {
         let temp = TempDir::new()?;
         let store = HashtreeStore::with_options_and_backend(
             temp.path(),
@@ -3152,12 +3163,19 @@ mod tests {
             &StorageBackend::Lmdb,
         )?;
 
+        let raw = b"raw duplicate";
+        let raw_hash = sha256(raw);
+        store.put_blob(raw)?;
+        let raw_accessed = store.blob_last_accessed_at(&raw_hash)?;
+        store.put_blob(raw)?;
+        assert_eq!(store.blob_last_accessed_at(&raw_hash)?, raw_accessed);
+
         let data = b"cached blossom duplicate";
         let hash = sha256(data);
         store.put_cached_blob(data)?;
-        store.router.touch_accessed_sync(&hash, 1)?;
+        let cached_accessed = store.blob_last_accessed_at(&hash)?;
         store.put_cached_blob(data)?;
-        assert!(store.blob_last_accessed_at(&hash)?.unwrap_or(0) > 1);
+        assert_eq!(store.blob_last_accessed_at(&hash)?, cached_accessed);
 
         let cached_batch = [
             (
@@ -3180,12 +3198,19 @@ mod tests {
         let owned_hash = sha256(owned);
         let owner = [7u8; 32];
         store.put_owned_blob(owned, &owner)?;
-        store.router.touch_accessed_sync(&owned_hash, 1)?;
+        let owned_accessed = store.blob_last_accessed_at(&owned_hash)?;
         store.put_owned_blob(owned, &owner)?;
-        assert!(store.blob_last_accessed_at(&owned_hash)?.unwrap_or(0) > 1);
+        assert_eq!(store.blob_last_accessed_at(&owned_hash)?, owned_accessed);
         let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
         assert_eq!(owned_blobs.len(), 1);
         assert_eq!(owned_blobs[0].sha256, to_hex(&owned_hash));
+
+        let other_owner = [8u8; 32];
+        store.put_owned_blob(owned, &other_owner)?;
+        assert_eq!(store.blob_last_accessed_at(&owned_hash)?, owned_accessed);
+        let other_owned_blobs = store.list_blobs_by_pubkey(&other_owner)?;
+        assert_eq!(other_owned_blobs.len(), 1);
+        assert_eq!(other_owned_blobs[0].sha256, to_hex(&owned_hash));
 
         let batch = [
             (
@@ -3198,6 +3223,7 @@ mod tests {
             ),
         ];
         store.put_owned_blobs(&batch, &owner)?;
+        assert_eq!(store.put_owned_blobs(&batch, &owner)?, 0);
         let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
         assert_eq!(owned_blobs.len(), 3);
 

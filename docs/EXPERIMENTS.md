@@ -2,6 +2,43 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-16 - Raw Duplicate Uploads Do Not Replicate
+
+Question: after batch duplicate replication was fixed, do raw `PUT /upload`
+duplicates still create avoidable write-behind queue pressure?
+
+Findings:
+- The raw upload handler prepared the replica queue reservation and cloned the
+  request body before it knew whether storage had inserted a new blob. The
+  explicit "already exists" branch also scheduled write-behind replication for
+  duplicates.
+- The live public endpoint had steady raw `PUT /upload` traffic from a known
+  local crawler. That traffic is acceptable, but duplicate raw uploads should
+  not consume replica queue bytes or send duplicate bodies to the deep replica.
+
+Change:
+- Single cached/owned Blossom storage now exposes an inserted flag while keeping
+  the existing hash-returning API for older callers.
+- Raw upload write-behind replication is prepared only after storage reports a
+  newly inserted blob. Existing-blob responses still return `200 OK`, and newly
+  inserted raw uploads still replicate.
+- Duplicate raw/cached/owned writes no longer refresh blob access metadata by
+  default. Same-owner duplicate ownership writes use LMDB `NO_OVERWRITE`; a
+  different owner can still claim an existing owned blob explicitly.
+
+Verification:
+- `cargo fmt --check`
+- `cargo test -p hashtree-cli --lib
+  server::blossom::tests::upload_blob_replicates_to_configured_blossom_target -- --nocapture`
+- `cargo test -p hashtree-cli --lib
+  server::blossom::tests::upload_blob_duplicate_does_not_replicate_to_configured_blossom_target -- --nocapture`
+- `cargo test -p hashtree-cli --lib
+  server::blossom::tests::optimistic_upload_existing_blob_does_not_replicate_duplicate -- --nocapture`
+- `cargo test -p hashtree-cli --lib
+  storage::tests::duplicate_blossom_writes_do_not_refresh_blob_last_accessed -- --nocapture`
+- `cargo test -p hashtree-lmdb --lib -- --nocapture`
+- `cargo test -p hashtree-cli --lib`
+
 ## 2026-06-16 - Replicate Only Inserted Batch Blobs
 
 Question: with the front node acting as the hot origin, is write-behind

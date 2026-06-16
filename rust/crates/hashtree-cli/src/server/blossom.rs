@@ -850,21 +850,21 @@ async fn store_blossom_blob_without_blocking_runtime(
     data: axum::body::Bytes,
     pubkey: [u8; 32],
     track_ownership: bool,
-) -> Result<(), BlobWriteError> {
+) -> Result<bool, BlobWriteError> {
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let hash_hex = hex::encode(hasher.finalize());
     let data_for_cache = data.clone();
     let permit = acquire_blob_write().await.map_err(blob_write_queue_error)?;
     let store = state.store.clone();
-    tokio::task::spawn_blocking(move || {
+    let inserted = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        if track_ownership {
-            store.put_owned_blob(&data, &pubkey)?;
+        let inserted = if track_ownership {
+            store.put_owned_blob_with_inserted(&data, &pubkey)?.1
         } else {
-            store.put_cached_blob(&data)?;
-        }
-        Ok::<(), anyhow::Error>(())
+            store.put_cached_blob_with_inserted(&data)?.1
+        };
+        Ok::<_, anyhow::Error>(inserted)
     })
     .await
     .map_err(|err| anyhow::anyhow!("blob write task failed: {}", err))??;
@@ -872,7 +872,7 @@ async fn store_blossom_blob_without_blocking_runtime(
         .blob_cache
         .put_size(hash_hex.clone(), Some(data_for_cache.len() as u64));
     state.blob_cache.put_body(hash_hex, &data_for_cache);
-    Ok(())
+    Ok(inserted)
 }
 
 fn upload_descriptor_response(status: StatusCode, descriptor: &BlobDescriptor) -> Response<Body> {
@@ -1461,15 +1461,6 @@ pub async fn upload_blob(
         return upload_descriptor_response(StatusCode::ACCEPTED, &descriptor);
     }
 
-    let replication = prepare_blossom_upload_replication(&state, body.len());
-    let replication_item = replication.as_ref().map(|_| {
-        replica_item(
-            sha256_hex.clone(),
-            body.to_vec(),
-            descriptor.mime_type.clone(),
-        )
-    });
-
     // Store public-write blobs in cache storage unless the writer is explicitly
     // allowed, so untrusted public uploads do not become protected owned data.
     if state.optimistic_blossom_uploads {
@@ -1493,6 +1484,8 @@ pub async fn upload_blob(
             };
             let state_for_write = state.clone();
             let hash_for_log = sha256_hex.clone();
+            let replica_body = body.clone();
+            let replica_content_type = descriptor.mime_type.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 match store_blossom_blob_without_blocking_runtime(
@@ -1503,14 +1496,22 @@ pub async fn upload_blob(
                 )
                 .await
                 {
-                    Ok(()) => {
-                        if let (Some(replication), Some(replication_item)) =
-                            (replication, replication_item)
-                        {
-                            schedule_prepared_blossom_upload_replication(
-                                replication,
-                                vec![replication_item],
-                            );
+                    Ok(inserted) => {
+                        if inserted {
+                            if let Some(replication) = prepare_blossom_upload_replication(
+                                &state_for_write,
+                                replica_body.len(),
+                            ) {
+                                let replication_item = replica_item(
+                                    hash_for_log.clone(),
+                                    replica_body.to_vec(),
+                                    replica_content_type,
+                                );
+                                schedule_prepared_blossom_upload_replication(
+                                    replication,
+                                    vec![replication_item],
+                                );
+                            }
                         }
                     }
                     Err(error) => {
@@ -1553,9 +1554,6 @@ pub async fn upload_blob(
                         .unwrap();
                 }
             }
-            if let (Some(replication), Some(replication_item)) = (replication, replication_item) {
-                schedule_prepared_blossom_upload_replication(replication, vec![replication_item]);
-            }
             return upload_descriptor_response(StatusCode::OK, &descriptor);
         }
         Ok(false) => {}
@@ -1577,9 +1575,19 @@ pub async fn upload_blob(
     .await;
 
     match store_result {
-        Ok(()) => {
-            if let (Some(replication), Some(replication_item)) = (replication, replication_item) {
-                schedule_prepared_blossom_upload_replication(replication, vec![replication_item]);
+        Ok(inserted) => {
+            if inserted {
+                if let Some(replication) = prepare_blossom_upload_replication(&state, body.len()) {
+                    let replication_item = replica_item(
+                        sha256_hex.clone(),
+                        body.to_vec(),
+                        descriptor.mime_type.clone(),
+                    );
+                    schedule_prepared_blossom_upload_replication(
+                        replication,
+                        vec![replication_item],
+                    );
+                }
             }
             upload_descriptor_response(StatusCode::CREATED, &descriptor)
         }
@@ -2795,6 +2803,69 @@ mod tests {
         assert_eq!(expected_hash.len(), 64);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_blob_duplicate_does_not_replicate_to_configured_blossom_target() {
+        let _lock = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let config_dir = TempDir::new().expect("config dir");
+        let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
+
+        let data = Bytes::from_static(b"write-behind-duplicate-raw-data");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        let response_hash = hex::encode(sha256(data.as_ref()));
+        let replica_router = Router::new().route(
+            "/upload/batch-binary",
+            post(move |body: Bytes| {
+                let tx = tx.clone();
+                let response_hash = response_hash.clone();
+                async move {
+                    let _ = tx.send(body.len());
+                    Json(serde_json::json!({
+                        "uploaded": 1,
+                        "blobs": [{"sha256": response_hash}],
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replica");
+        let replica_addr = listener.local_addr().expect("replica addr");
+        let _server_task =
+            tokio::spawn(async move { axum::serve(listener, replica_router).await.unwrap() });
+
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(HashtreeStore::new(temp.path()).expect("store"));
+        store.put_cached_blob(&data).expect("seed duplicate blob");
+        let mut state = test_app_state(store);
+        state.require_random_untrusted_ingest = false;
+        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys).parse().unwrap(),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream".parse().unwrap(),
+        );
+
+        let response = upload_blob(State(state), headers, data)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "duplicate raw upload should not trigger write-behind replication"
+        );
+    }
+
     #[tokio::test]
     async fn list_blobs_returns_public_descriptor_urls_with_extensions() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -2966,6 +3037,87 @@ mod tests {
 
         clear_optimistic_upload_inflight(&hash_hex);
         panic!("optimistic upload in-flight marker was not cleared");
+    }
+
+    #[tokio::test]
+    async fn optimistic_upload_existing_blob_does_not_replicate_duplicate() {
+        let _lock = test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let config_dir = TempDir::new().expect("config dir");
+        let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let body = axum::body::Bytes::from((0u8..=255).map(|byte| byte ^ 0xaa).collect::<Vec<_>>());
+        let hash_hex = hex::encode(sha256(&body));
+        store.put_cached_blob(&body).expect("seed blob");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        let response_hash = hash_hex.clone();
+        let replica_router = Router::new().route(
+            "/upload/batch-binary",
+            post(move |body: Bytes| {
+                let tx = tx.clone();
+                let response_hash = response_hash.clone();
+                async move {
+                    let _ = tx.send(body.len());
+                    Json(serde_json::json!({
+                        "uploaded": 1,
+                        "blobs": [{"sha256": response_hash}],
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replica");
+        let replica_addr = listener.local_addr().expect("replica addr");
+        let _server_task =
+            tokio::spawn(async move { axum::serve(listener, replica_router).await.unwrap() });
+
+        let mut state = test_app_state(store);
+        state.optimistic_blossom_uploads = true;
+        state.require_random_untrusted_ingest = false;
+        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
+
+        let keys = nostr::Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            create_upload_auth_header(&keys)
+                .parse()
+                .expect("auth header value"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream"
+                .parse()
+                .expect("content type header value"),
+        );
+
+        let response = upload_blob(State(state), headers, body)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..50 {
+            if !optimistic_upload_is_inflight(&hash_hex) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        clear_optimistic_upload_inflight(&hash_hex);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "optimistic duplicate upload should not trigger write-behind replication"
+        );
     }
 
     #[tokio::test]
