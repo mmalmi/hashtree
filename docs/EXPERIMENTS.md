@@ -38,6 +38,13 @@ Verification:
 - `cargo test -p hashtree-cli --lib
   server::blossom::tests::upload_blob_replicates_to_configured_blossom_target -- --nocapture`
 - `cargo test -p hashtree-cli --lib`
+- Deployed a bookworm-compatible `htree` binary from commit `95e3c06d`
+  (`93039881c78bd9c94666ef1096540d1b11ce07f21356ec917782621d9a1073a3`) to
+  the hot origin and large replica.
+- Live public duplicate test: first 64 x 256 KiB binary batch write reached 8.78
+  MiB/s and queued about 12 MiB for write-behind before draining to zero. A
+  duplicate replay did not queue the full 16 MiB candidate batch, and a second
+  replay after drain reserved 0 replica queue bytes.
 
 ## 2026-06-16 - Public Write Sweep and Adaptive Git Batch Split
 
