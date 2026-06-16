@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 ARG BUILD_CASHU=0
 
 WORKDIR /app
