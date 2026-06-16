@@ -56,7 +56,9 @@ Useful write-side improvements reduce bytes, object fanout, or repeated request
 setup before traffic reaches the public ingress ceiling:
 
 - Use packed Git checkpoints and tail packs for medium git pushes instead of
-  hundreds of loose Git objects.
+  hundreds of loose Git objects; underfull packs are byte-gated so tiny-object
+  edge cases do not install a pack+idx that is larger than the loose content it
+  replaces.
 - Keep batch bodies large enough to amortize per-request overhead, but do not
   expect larger batches to beat a saturated tunnel by themselves.
 - Prefer long-lived upload streams or pack/tail-pack admission for future

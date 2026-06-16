@@ -28,9 +28,10 @@ const GIT_BATCH_UPLOAD_TARGET_BYTES_ENV: &str = "HTREE_GIT_BATCH_UPLOAD_TARGET_B
 const BATCH_UPLOAD_RETRIES: u32 = 4;
 const BATCH_UPLOAD_RETRIES_BEFORE_SPLIT: u32 = 2;
 const DEFAULT_GIT_PACK_CHECKPOINT_MIN_OBJECTS: usize = 4_096;
-const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str = "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
+pub(super) const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str =
+    "HTREE_GIT_PACK_CHECKPOINT_MIN_OBJECTS";
 const DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS: usize = 256;
-const GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV: &str =
+pub(super) const GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV: &str =
     "HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS";
 
 struct ServerUploadPresence {
@@ -71,6 +72,7 @@ struct UploadCounters {
 pub(super) struct GitPackCheckpointPlan {
     pub(super) packs: Vec<GitPackCheckpointPackPlan>,
     pub(super) covered_objects: HashSet<String>,
+    pub(super) require_byte_savings: bool,
 }
 
 pub(super) struct GitPackCheckpointPackPlan {
@@ -1829,7 +1831,7 @@ impl RemoteHelper {
         Ok(())
     }
 
-    fn prepare_git_pack_checkpoint(
+    pub(super) fn prepare_git_pack_checkpoint(
         &self,
         sha: &str,
         object_count: usize,
@@ -1867,6 +1869,22 @@ impl RemoteHelper {
         }
         let total_bytes: usize = pack_files.values().map(Vec::len).sum();
         let file_count = pack_files.len();
+        if plan.require_byte_savings {
+            let (worth_uploading, loose_bytes) =
+                Self::underfull_pack_checkpoint_is_worth_uploading(
+                    &plan.covered_objects,
+                    total_bytes,
+                )?;
+            if !worth_uploading {
+                if self.is_slow() {
+                    eprintln!(
+                        " skipped; git pack checkpoint is {} bytes versus {} bytes of loose Git content",
+                        total_bytes, loose_bytes
+                    );
+                }
+                return Ok(None);
+            }
+        }
         let covered_objects = plan.covered_objects;
         let returned_covered_objects = covered_objects.clone();
         self.storage
@@ -1902,6 +1920,7 @@ impl RemoteHelper {
                         exclude_tip: None,
                     }],
                     covered_objects: Self::reachable_git_object_ids(sha)?,
+                    require_byte_savings: true,
                 }));
             }
             if let Some(base) = delta_base.filter(|_| !rebuild_checkpoint_from_first_bucket) {
@@ -1967,6 +1986,7 @@ impl RemoteHelper {
         let mut plan = GitPackCheckpointPlan {
             packs,
             covered_objects: Self::reachable_git_object_ids(&covered_tip)?,
+            require_byte_savings: false,
         };
         if delta_base.is_some() && !rebuild_checkpoint_from_first_bucket {
             Self::append_underfull_delta_tail_checkpoint(
@@ -2054,6 +2074,7 @@ impl RemoteHelper {
                 exclude_tip: Some(exclude_tip.to_string()),
             }],
             covered_objects,
+            require_byte_savings: true,
         }))
     }
 
@@ -2072,6 +2093,77 @@ impl RemoteHelper {
         plan.packs.extend(tail_plan.packs);
         plan.covered_objects.extend(tail_plan.covered_objects);
         Ok(())
+    }
+
+    fn underfull_pack_checkpoint_is_worth_uploading(
+        covered_objects: &HashSet<String>,
+        pack_bytes: usize,
+    ) -> Result<(bool, usize)> {
+        let loose_bytes = Self::git_object_content_bytes(covered_objects)?;
+        Ok((pack_bytes < loose_bytes, loose_bytes))
+    }
+
+    fn git_object_content_bytes(object_ids: &HashSet<String>) -> Result<usize> {
+        if object_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut sorted_ids: Vec<_> = object_ids.iter().map(String::as_str).collect();
+        sorted_ids.sort_unstable();
+
+        let mut child = Command::new("git")
+            .args(["cat-file", "--batch-check=%(objectsize)"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn git cat-file for object sizes")?;
+
+        {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .context("open git cat-file size stdin")?;
+            for oid in &sorted_ids {
+                writeln!(stdin, "{}", oid)?;
+            }
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("wait for git cat-file object sizes")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git cat-file failed while measuring checkpoint object sizes{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = stdout.lines();
+        let mut total = 0usize;
+        for oid in &sorted_ids {
+            let line = lines.next().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "git cat-file did not report a size for {}",
+                    &oid[..12.min(oid.len())]
+                )
+            })?;
+            let size = line.trim().parse::<usize>().with_context(|| {
+                format!("parse git object size for {}", &oid[..12.min(oid.len())])
+            })?;
+            total = total.saturating_add(size);
+        }
+        if lines.next().is_some() {
+            bail!("git cat-file reported more object sizes than requested");
+        }
+
+        Ok(total)
     }
 
     fn rev_list_first_parent_commits(sha: &str) -> Result<Vec<String>> {

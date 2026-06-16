@@ -1269,6 +1269,32 @@ Verification:
 - `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree --lib`
 - `cargo test --manifest-path rust/Cargo.toml -p hashtree-blossom`
 
+### 2026-06-16: Byte-gated underfull Git pack checkpoints
+
+Question: can the underfull pack optimization avoid adding complexity or bytes
+for tiny-object pushes while still packing source-like histories that actually
+benefit?
+
+Change:
+- Underfull first-publish and pure delta tail-pack plans now require byte
+  savings before their generated pack+idx is installed into the push tree. The
+  helper compares generated pack bytes with the raw Git object content bytes the
+  pack would cover, and falls back to the ordinary loose-object path if the pack
+  would be larger.
+- The normal large-repo deterministic checkpoint interval is unchanged, and the
+  existing object-count threshold remains tunable with
+  `HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS`.
+- This is only a `git-remote-htree` push-shape optimization. It does not add any
+  bucket, R2, S3, or external object-store admission path.
+
+Verification:
+- `cargo fmt --manifest-path rust/Cargo.toml -p git-remote-htree -- --check`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree underfull_initial -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree git_pack_checkpoint -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree tail_pack -- --nocapture`
+- `cargo test --manifest-path rust/Cargo.toml -p git-remote-htree -- --nocapture`
+- `cargo install --path rust/crates/git-remote-htree --force`
+
 ### 2026-06-16: CDN extensionless hash redirect
 
 Question: can the public read hostname avoid Cloudflare's extensionless-cache

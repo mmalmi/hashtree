@@ -1,4 +1,7 @@
 use super::*;
+use crate::helper::push::{
+    GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV, GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV,
+};
 use axum::{
     body::{Body, Bytes},
     extract::{Json, Path as AxumPath, State},
@@ -705,6 +708,51 @@ fn create_repo_with_linear_history(commit_count: usize) -> (TempDir, TempDir, Ve
                 .status
                 .success()
         );
+        shas.push(
+            String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string(),
+        );
+    }
+
+    (home, repo, shas)
+}
+
+fn create_repo_with_repetitive_text_history(
+    commit_count: usize,
+    lines_per_file: usize,
+) -> (TempDir, TempDir, Vec<String>) {
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+
+    let repo = TempDir::new().expect("temp repo");
+    assert!(git(repo.path(), &["init", "-b", "master"]).status.success());
+    assert!(
+        git(repo.path(), &["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(repo.path(), &["config", "user.name", "Test User"])
+        .status
+        .success());
+
+    let mut shas = Vec::new();
+    for index in 0..commit_count {
+        let line = format!("source-like repeated line {index}\n");
+        std::fs::write(
+            repo.path().join(format!("large-{index:02}.txt")),
+            line.repeat(lines_per_file),
+        )
+        .unwrap();
+        assert!(git(repo.path(), &["add", &format!("large-{index:02}.txt")])
+            .status
+            .success());
+        assert!(git(
+            repo.path(),
+            &["commit", "-m", &format!("Large commit {index}")]
+        )
+        .status
+        .success());
         shas.push(
             String::from_utf8_lossy(&git(repo.path(), &["rev-parse", "HEAD"]).stdout)
                 .trim()
@@ -1686,6 +1734,53 @@ fn test_underfull_initial_push_gets_single_head_checkpoint_pack() {
     assert!(
         plan.covered_objects.contains(head),
         "head commit should be covered by the underfull initial pack"
+    );
+}
+
+#[test]
+fn test_underfull_initial_push_skips_pack_when_it_increases_bytes() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _min_objects = EnvGuard::set(GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV, "4096");
+    let _underfull_min = EnvGuard::set(GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV, "1");
+    let (home, repo, shas) = create_repo_with_linear_history(3);
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let head = shas.last().expect("head sha");
+
+    let helper = create_test_helper().expect("helper");
+    let total_objects =
+        RemoteHelper::reachable_git_object_count(head).expect("count current reachable objects");
+    let covered = helper
+        .prepare_git_pack_checkpoint(head, total_objects, None, false)
+        .expect("prepare checkpoint");
+
+    assert!(
+        covered.is_none(),
+        "underfull pack should be skipped when pack+idx is larger than loose Git content"
+    );
+}
+
+#[test]
+fn test_underfull_initial_push_keeps_pack_when_it_saves_bytes() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _min_objects = EnvGuard::set(GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV, "4096");
+    let _underfull_min = EnvGuard::set(GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV, "1");
+    let (home, repo, shas) = create_repo_with_repetitive_text_history(3, 512);
+    let _home_guard = HomeGuard::set(home.path());
+    let _cwd_guard = CwdGuard::set(repo.path());
+    let head = shas.last().expect("head sha");
+
+    let helper = create_test_helper().expect("helper");
+    let total_objects =
+        RemoteHelper::reachable_git_object_count(head).expect("count current reachable objects");
+    let covered = helper
+        .prepare_git_pack_checkpoint(head, total_objects, None, false)
+        .expect("prepare checkpoint")
+        .expect("byte-saving underfull pack should be installed");
+
+    assert!(
+        covered.contains(head),
+        "head commit should remain covered when the underfull pack saves bytes"
     );
 }
 
