@@ -234,6 +234,9 @@ pub struct AppState {
     pub allowed_pubkeys: HashSet<String>,
     /// Upstream Blossom servers for cascade fetching
     pub upstream_blossom: Vec<String>,
+    /// Shared HTTP client for upstream Blossom reads, so cold cache misses can
+    /// reuse connections instead of rebuilding a client per blob.
+    pub upstream_http_client: reqwest::Client,
     /// Write-behind Blossom servers for blobs accepted by this server.
     pub blossom_upload_replicas: Vec<String>,
     /// Background replication queue byte budget. Each queued body holds one
@@ -272,6 +275,13 @@ pub struct AppState {
     pub thumbnail_path_cache: Arc<StdMutex<TimedLruCache<String, LookupResult<String>>>>,
     /// Immutable file sizes keyed by CID
     pub cid_size_cache: Arc<StdMutex<TimedLruCache<String, LookupResult<u64>>>>,
+}
+
+pub fn new_upstream_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("build upstream Blossom HTTP client")
 }
 
 #[derive(Clone)]

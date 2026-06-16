@@ -129,6 +129,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
         allowed_pubkeys: HashSet::new(),
         upstream_blossom,
+        upstream_http_client: crate::server::new_upstream_http_client(),
         blossom_upload_replicas: Vec::new(),
         blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
         blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
@@ -389,7 +390,12 @@ async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>) -> String {
 #[tokio::test]
 async fn test_query_upstream_blossom_no_servers() {
     let servers: Vec<String> = vec![];
-    let result = query_upstream_blossom(&servers, "abc123").await;
+    let result = query_upstream_blossom(
+        crate::server::new_upstream_http_client(),
+        &servers,
+        "abc123",
+    )
+    .await;
     assert!(result.is_none());
 }
 
@@ -685,7 +691,12 @@ async fn serve_content_or_blob_fetches_raw_blob_over_fips() {
 #[tokio::test]
 async fn test_query_upstream_blossom_invalid_server() {
     let servers = vec!["http://localhost:99999".to_string()];
-    let result = query_upstream_blossom(&servers, "abc123").await;
+    let result = query_upstream_blossom(
+        crate::server::new_upstream_http_client(),
+        &servers,
+        "abc123",
+    )
+    .await;
     assert!(result.is_none());
 }
 
@@ -694,7 +705,8 @@ async fn test_query_upstream_blossom_hash_format() {
     // Test with valid SHA256 hash format but non-existent server
     let servers = vec!["http://localhost:99999".to_string()];
     let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let result = query_upstream_blossom(&servers, hash).await;
+    let result =
+        query_upstream_blossom(crate::server::new_upstream_http_client(), &servers, hash).await;
     assert!(result.is_none());
 }
 
@@ -719,9 +731,13 @@ async fn test_query_upstream_blossom_uses_bin_suffix() {
     let upstream_server =
         tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
 
-    let result = query_upstream_blossom(&[format!("http://{}", upstream_addr)], &hash_hex)
-        .await
-        .expect("fetch blob");
+    let result = query_upstream_blossom(
+        crate::server::new_upstream_http_client(),
+        &[format!("http://{}", upstream_addr)],
+        &hash_hex,
+    )
+    .await
+    .expect("fetch blob");
     assert_eq!(result.0, data);
     assert_eq!(result.1, format!("http://{}", upstream_addr));
     assert_eq!(
@@ -768,6 +784,7 @@ async fn query_upstream_blossom_uses_first_server_that_responds() {
     let result = timeout(
         Duration::from_secs(3),
         query_upstream_blossom(
+            crate::server::new_upstream_http_client(),
             &[
                 format!("http://{}", slow_addr),
                 format!("http://{}", fast_addr),

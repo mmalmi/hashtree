@@ -1274,6 +1274,7 @@ mod tests {
             optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
             allowed_pubkeys: HashSet::new(),
             upstream_blossom: Vec::new(),
+            upstream_http_client: super::super::new_upstream_http_client(),
             blossom_upload_replicas: Vec::new(),
             blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
             blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),

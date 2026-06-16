@@ -47,7 +47,9 @@ use tower::{Service, ServiceExt as _};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, trace};
 
-pub use auth::{new_lookup_cache, AppState, AuthCredentials, CachedTreeRootEntry};
+pub use auth::{
+    new_lookup_cache, new_upstream_http_client, AppState, AuthCredentials, CachedTreeRootEntry,
+};
 
 static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 512 * 1024 * 1024;
@@ -154,6 +156,7 @@ impl HashtreeServer {
                 )),
                 allowed_pubkeys: HashSet::new(), // No pubkeys allowed by default (use public_writes)
                 upstream_blossom: Vec::new(),
+                upstream_http_client: new_upstream_http_client(),
                 blossom_upload_replicas: Vec::new(),
                 blossom_upload_replica_queue_bytes: DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
                 blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(

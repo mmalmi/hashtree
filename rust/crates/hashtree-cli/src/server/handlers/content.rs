@@ -84,12 +84,14 @@ pub(super) async fn fetch_and_cache_blob_with_source(
             &hash_hex[..16.min(hash_hex.len())]
         );
         let upstream_blossom = state.upstream_blossom.clone();
+        let upstream_http_client = state.upstream_http_client.clone();
         let upstream_hash_hex = hash_hex.clone();
         fetches.push(
             async move {
                 let query_hash_hex = upstream_hash_hex.clone();
                 await_fetch_task("upstream", &upstream_hash_hex, async move {
-                    query_upstream_blossom(&upstream_blossom, &query_hash_hex).await
+                    query_upstream_blossom(upstream_http_client, &upstream_blossom, &query_hash_hex)
+                        .await
                 })
                 .await
                 .map(|(data, server)| FetchResult::Upstream { data, server })
@@ -769,15 +771,11 @@ pub(super) async fn query_webrtc_peers(
 /// Query upstream Blossom servers for content by hash
 /// Returns the first successful response with server URL, or None if not found
 pub(super) async fn query_upstream_blossom(
+    client: reqwest::Client,
     servers: &[String],
     hash_hex: &str,
 ) -> Option<(Vec<u8>, String)> {
     use sha2::{Digest, Sha256};
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
 
     let mut pending = FuturesUnordered::new();
     for server in servers {
