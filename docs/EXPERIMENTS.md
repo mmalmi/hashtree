@@ -2,6 +2,47 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-06-17 - Home Uplink vs Replica Downlink Direction Check
+
+Question: if the deep replica sits behind a 1 Gbps home downlink, can public
+upload slowness still be a network bottleneck?
+
+Deployment:
+- Deployed current master with upstream Blossom fetch counters to the public hot
+  origin and deep replica.
+- Both daemons reported `htree 0.2.69`; `htree status` on both showed the new
+  `Upstream / Blossom fetch` counters.
+
+Samples:
+
+| Path / shape | Result |
+| --- | ---: |
+| Home client to public upload hostname, binary batch, 32 requests, b16, c4, 256 KiB | 7.77 MiB/s |
+| Home client to deep replica over nVPN, same binary batch shape | 4.03 MiB/s |
+| Home client to public hot-origin host over uncompressed SSH stream | 11.18 MiB/s / 93.8 Mbit/s |
+| Public hot-origin host to home client over uncompressed SSH stream | 85.81 MiB/s / 719.8 Mbit/s |
+| Hot-origin host to local hot-origin container, duplicate binary batch replay | 209.98 MiB/s |
+| Hot-origin raw uploads, 256 x 263177-byte blobs, c16 | 10.84 MiB/s accepted |
+| Same hot-origin raw run, write-behind replication drain to deep replica | 64.25 MiB in 1.299s, about 49 MiB/s |
+
+Status after the samples:
+- Hot-origin upload-replication queue was empty: 0 queued, 0 in flight, 0 failed,
+  0 reserved bytes.
+- Deep replica queues were empty and recent status counters had no 5xx.
+- Hot-origin read-through counters showed indeterminate upstream misses from
+  background/hash traffic, but no explicit-miss cache hits during the write
+  samples; this was not the write bottleneck.
+
+Interpretation:
+- The 1 Gbps home downlink is not contradicted by the slow public upload sample:
+  home-client uploads primarily depend on the home uplink and public route to
+  the hot origin.
+- The deep-replica receive path drained a fresh write-behind sample far faster
+  than the public upload plateau, so the deep replica's home downlink was not
+  the active bottleneck in this run.
+- The remaining public write ceiling for this client is before local hashtree
+  storage: likely home uplink, public routing, or edge/origin ingress behavior.
+
 ## 2026-06-17 - Upstream Blossom Read-Through Counters
 
 Question: after adding an explicit upstream Blossom miss cache, can operators
