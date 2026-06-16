@@ -1978,3 +1978,36 @@ Interpretation:
   write improvement is topology/protocol: a better public ingress route, a true
   hot edge that accepts locally before private replication, or fewer bytes/bodies
   per git push.
+
+### 2026-06-16: Client upload HTTP/1.1 transport sweep
+
+Question: does the client-to-Cloudflare upload protocol choice explain part of
+the public write variance?
+
+Setup:
+- `hashtree-blossom` now has separate upload transport selection. Upload bodies
+  default to HTTP/1.1-only, while reads keep the ordinary HTTP client. The
+  `upload_queue_bench` example can opt back into HTTP/2 negotiation with
+  `--upload-http2-auto`.
+- Benchmarks used public `upload.iris.to`, binary batches, 128 x 256 KiB,
+  16 blobs/request, concurrency 12.
+
+Results:
+
+| Client upload transport | Result |
+| --- | ---: |
+| HTTP/2-auto, first comparison | 4.39 MiB/s |
+| HTTP/1.1-only, first comparison | 7.99 MiB/s |
+| HTTP/1.1-only, after default change | 8.03 MiB/s |
+| HTTP/2-auto opt-out, after default change | 8.44 MiB/s |
+| Alternating sweep HTTP/2-auto | 8.04 MiB/s, 8.49 MiB/s |
+| Alternating sweep HTTP/1.1-only | 8.30 MiB/s, 8.73 MiB/s |
+
+Interpretation:
+- The first comparison showed a large HTTP/1.1 win, but the alternating sweep
+  showed both transports can reach about 8 MiB/s once the edge path is behaving.
+  HTTP/1.1-only was still slightly ahead in that sweep and is safer for upload
+  bodies because it avoids bad HTTP/2-auto samples without affecting read
+  negotiation.
+- This is a client/git-push improvement, not a server storage fix. LMDB and
+  hashtree CPU stayed below the public write ceiling during the probes.

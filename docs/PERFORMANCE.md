@@ -60,6 +60,12 @@ to avoid tiny default preread behavior: a tested nginx baseline uses
 server, plus modern origin TLS (`TLSv1.2 TLSv1.3`). This improved one saturated
 c12 binary-batch probe, but did not remove the public ingress ceiling.
 
+Client upload transports should prefer HTTP/1.1 for request bodies unless a
+specific target proves HTTP/2 is better. Public `upload.iris.to` benchmarks found
+HTTP/1.1-only uploads matched or slightly beat HTTP/2-auto in the stable part of
+the sweep, and avoided at least one bad HTTP/2-auto sample. Reads still use the
+normal HTTP client and may negotiate HTTP/2.
+
 ## Read path
 
 Cloudflare's default cache behavior is extension-based, not MIME-type based.

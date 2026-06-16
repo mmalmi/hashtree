@@ -15,6 +15,7 @@ struct Config {
     size: usize,
     seed: String,
     timeout_secs: u64,
+    upload_http1_only: bool,
     mode: Mode,
 }
 
@@ -37,11 +38,15 @@ struct UploadSample {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::parse()?;
-    let client = Arc::new(
-        BlossomClient::new_empty(Keys::generate())
-            .with_servers(vec![config.server.clone()])
-            .with_timeout(Duration::from_secs(config.timeout_secs)),
-    );
+    let mut client = BlossomClient::new_empty(Keys::generate())
+        .with_servers(vec![config.server.clone()])
+        .with_timeout(Duration::from_secs(config.timeout_secs));
+    if config.upload_http1_only {
+        client = client.with_upload_http1_only();
+    } else {
+        client = client.with_upload_http2_auto();
+    }
+    let client = Arc::new(client);
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
     let started = Instant::now();
     let mut handles = Vec::new();
@@ -175,13 +180,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("server={}", config.server);
     println!(
-        "mode={:?} requests={} batch_size={} concurrency={} size={} timeout_secs={} seed={}",
+        "mode={:?} requests={} batch_size={} concurrency={} size={} timeout_secs={} upload_http1_only={} seed={}",
         config.mode,
         config.requests,
         config.batch_size,
         config.concurrency,
         config.size,
         config.timeout_secs,
+        config.upload_http1_only,
         config.seed
     );
     println!(
@@ -225,6 +231,7 @@ impl Config {
             size: 256 * 1024,
             seed: "upload-queue-bench".to_string(),
             timeout_secs: 120,
+            upload_http1_only: true,
             mode: Mode::Raw,
         };
 
@@ -246,6 +253,8 @@ impl Config {
                 "--timeout-secs" => {
                     config.timeout_secs = required_value(&mut args, "--timeout-secs")?.parse()?
                 }
+                "--upload-http1-only" => config.upload_http1_only = true,
+                "--upload-http2-auto" => config.upload_http1_only = false,
                 "--mode" => {
                     config.mode = match required_value(&mut args, "--mode")?.as_str() {
                         "raw" => Mode::Raw,
@@ -291,7 +300,7 @@ fn required_value(
 fn print_usage() {
     println!(
         "usage: cargo run -p hashtree-blossom --example upload_queue_bench -- \\
-  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary --requests 128 --concurrency 32 --size 262144"
+  --server http://127.0.0.1:8080 --mode raw|read|batch|batch-json|batch-binary --requests 128 --concurrency 32 --size 262144 [--upload-http1-only|--upload-http2-auto]"
     );
 }
 

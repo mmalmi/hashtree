@@ -90,6 +90,7 @@ pub struct BlossomClient {
     write_servers: Vec<String>,
     http: reqwest::Client,
     upload_http: reqwest::Client,
+    upload_http1_only: bool,
     timeout: Duration,
 }
 
@@ -261,12 +262,14 @@ fn default_http_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder().timeout(timeout).build().unwrap()
 }
 
-fn upload_http_client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
+fn upload_http_client(timeout: Duration, http1_only: bool) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
         .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap()
+        .redirect(reqwest::redirect::Policy::none());
+    if http1_only {
+        builder = builder.http1_only();
+    }
+    builder.build().unwrap()
 }
 
 fn same_origin(left: &Url, right: &Url) -> bool {
@@ -397,7 +400,8 @@ impl BlossomClient {
             read_servers,
             write_servers: config.blossom.all_write_servers(),
             http: default_http_client(Duration::from_secs(30)),
-            upload_http: upload_http_client(Duration::from_secs(30)),
+            upload_http: upload_http_client(Duration::from_secs(30), true),
+            upload_http1_only: true,
             timeout: Duration::from_secs(30),
         }
     }
@@ -410,7 +414,8 @@ impl BlossomClient {
             read_servers: vec![],
             write_servers: vec![],
             http: default_http_client(Duration::from_secs(30)),
-            upload_http: upload_http_client(Duration::from_secs(30)),
+            upload_http: upload_http_client(Duration::from_secs(30), true),
+            upload_http1_only: true,
             timeout: Duration::from_secs(30),
         }
     }
@@ -422,7 +427,8 @@ impl BlossomClient {
             read_servers: vec![],
             write_servers: vec![],
             http: default_http_client(Duration::from_secs(30)),
-            upload_http: upload_http_client(Duration::from_secs(30)),
+            upload_http: upload_http_client(Duration::from_secs(30), true),
+            upload_http1_only: true,
             timeout: Duration::from_secs(30),
         }
     }
@@ -450,7 +456,21 @@ impl BlossomClient {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self.http = default_http_client(timeout);
-        self.upload_http = upload_http_client(timeout);
+        self.upload_http = upload_http_client(timeout, self.upload_http1_only);
+        self
+    }
+
+    /// Force upload requests to use HTTP/1.1 while leaving read requests unchanged.
+    pub fn with_upload_http1_only(mut self) -> Self {
+        self.upload_http1_only = true;
+        self.upload_http = upload_http_client(self.timeout, true);
+        self
+    }
+
+    /// Allow the HTTP client to negotiate HTTP/2 for uploads.
+    pub fn with_upload_http2_auto(mut self) -> Self {
+        self.upload_http1_only = false;
+        self.upload_http = upload_http_client(self.timeout, false);
         self
     }
 
@@ -1457,6 +1477,24 @@ mod tests {
         saw_redirect_opt_in: Arc<std::sync::atomic::AtomicBool>,
         saw_authorization: Arc<std::sync::atomic::AtomicBool>,
         done: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    #[test]
+    fn upload_transport_preference_survives_timeout_rebuild() {
+        let default_client = BlossomClient::new_empty(Keys::generate());
+        assert!(default_client.upload_http1_only);
+
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_upload_http1_only()
+            .with_timeout(Duration::from_secs(60));
+
+        assert!(client.upload_http1_only);
+
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_upload_http2_auto()
+            .with_timeout(Duration::from_secs(60));
+
+        assert!(!client.upload_http1_only);
     }
 
     impl TestUploadServer {
