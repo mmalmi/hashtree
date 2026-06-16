@@ -649,6 +649,53 @@ fn test_cli_parses_release_publish_draft_flag() {
 }
 
 #[test]
+fn test_cli_parses_push_force_flag() {
+    let cli = Cli::parse_from([
+        "htree",
+        "push",
+        "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh",
+        "--server",
+        "https://upload.example",
+        "--force",
+    ]);
+
+    match cli.command {
+        Commands::Push {
+            cid,
+            server,
+            force,
+            shallow,
+        } => {
+            assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
+            assert_eq!(server.as_deref(), Some("https://upload.example"));
+            assert!(force);
+            assert!(!shallow);
+        }
+        _ => panic!("expected push command"),
+    }
+}
+
+#[test]
+fn test_cli_parses_push_shallow_flag() {
+    let cli = Cli::parse_from(["htree", "push", "abc123", "--shallow"]);
+
+    match cli.command {
+        Commands::Push {
+            cid,
+            server,
+            force,
+            shallow,
+        } => {
+            assert_eq!(cid, "abc123");
+            assert_eq!(server, None);
+            assert!(!force);
+            assert!(shallow);
+        }
+        _ => panic!("expected push command"),
+    }
+}
+
+#[test]
 fn test_cli_parses_mirror_commands() {
     let cli = Cli::parse_from([
         "htree",

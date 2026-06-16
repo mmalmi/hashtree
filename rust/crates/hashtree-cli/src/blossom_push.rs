@@ -182,6 +182,7 @@ async fn upload_cids_with_client(
     fetcher: Option<Arc<Fetcher>>,
     client: hashtree_blossom::BlossomClient,
     cids_to_push: Vec<Cid>,
+    force_upload: bool,
 ) -> Result<(usize, usize, usize, Option<String>)> {
     let total = cids_to_push.len();
     let mut total_uploaded = 0usize;
@@ -199,10 +200,18 @@ async fn upload_cids_with_client(
             let data = store
                 .get_blob(&cid.hash)?
                 .ok_or_else(|| anyhow::anyhow!("missing local blob while uploading {}", cid))?;
-            client
-                .upload_if_missing(&data)
-                .await
-                .map_err(|error| anyhow::anyhow!(error.to_string()))
+            if force_upload {
+                client
+                    .upload_to_selected_servers(&data, client.write_servers())
+                    .await
+                    .map(|(hash, _successes)| (hash, true))
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            } else {
+                client
+                    .upload_if_missing(&data)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            }
         }
     }))
     .buffer_unordered(BLOSSOM_PUSH_CONCURRENCY);
@@ -239,6 +248,8 @@ pub async fn push_to_blossom(
     data_dir: &Path,
     cid_str: &str,
     server_override: Option<String>,
+    force_upload: bool,
+    shallow: bool,
 ) -> Result<()> {
     use hashtree_blossom::BlossomClient;
     use nostr::Keys;
@@ -261,14 +272,18 @@ pub async fn push_to_blossom(
     let store = Arc::new(HashtreeStore::new(data_dir)?);
     let fetcher = Arc::new(Fetcher::new(FetchConfig::default()));
 
-    println!("Collecting blocks...");
     let root_cid = parse_root_cid(cid_str)?;
-    let cids_to_push =
-        collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?;
+    let cids_to_push = if shallow {
+        ensure_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &root_cid).await?;
+        vec![root_cid]
+    } else {
+        println!("Collecting blocks...");
+        collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?
+    };
 
     println!("Found {} blocks to push", cids_to_push.len());
     let (uploaded, skipped, errors, last_error) =
-        upload_cids_with_client(store, Some(fetcher), client, cids_to_push).await?;
+        upload_cids_with_client(store, Some(fetcher), client, cids_to_push, force_upload).await?;
 
     println!(
         "\nUploaded: {}, Skipped: {}, Errors: {}",
@@ -347,7 +362,7 @@ pub async fn background_blossom_push_incremental_with_store(
         BlossomClient::new(keys).with_write_servers(servers.to_vec())
     };
     let (_total_uploaded, _total_skipped, total_errors, last_error) =
-        upload_cids_with_client(store, Some(fetcher), client, cids_to_push).await?;
+        upload_cids_with_client(store, Some(fetcher), client, cids_to_push, false).await?;
 
     if total_errors > 0 {
         let detail = last_error

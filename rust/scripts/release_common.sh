@@ -88,7 +88,11 @@ urlencode_path() {
 gateway_tree_base_url() {
     local npub="$1"
     local tree_name="$2"
-    printf 'https://upload.iris.to/%s/%s\n' "$npub" "$(urlencode_path_segment "$tree_name")"
+    printf '%s/%s/%s\n' "$(release_upload_server_url)" "$npub" "$(urlencode_path_segment "$tree_name")"
+}
+
+release_upload_server_url() {
+    printf '%s\n' "${HTREE_RELEASE_UPLOAD_SERVER:-https://upload.iris.to}"
 }
 
 gateway_release_base_url() {

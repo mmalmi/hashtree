@@ -342,6 +342,8 @@ if [ -z "$release_cid" ]; then
 fi
 
 echo "Release CID: ${release_cid}"
+echo "Seeding release DAG to public file server..."
+htree push "$release_cid" --server "$(release_upload_server_url)" --force
 "${SCRIPT_DIR}/publish_release.sh" "$VERSION_PATH" "$release_cid" "$TREE_NAME"
 
 refresh_gateway_release_root_cache() {

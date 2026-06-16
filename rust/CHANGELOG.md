@@ -19,6 +19,10 @@
 - Served tree-host `HEAD` requests from metadata and streamed full-file `GET`
   responses so large release assets do not require full blob reads before the
   first byte is sent.
+- Added force and shallow file-server push modes, and made release publishing
+  seed both artifact DAGs and mutable release roots to the public upload host.
+- Recovered release publishing when a mutable release tree had previously been
+  pointed directly at a release directory instead of the versioned parent tree.
 
 ## 0.2.68 - 2026-06-12
 

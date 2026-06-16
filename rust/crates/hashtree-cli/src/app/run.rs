@@ -1362,6 +1362,7 @@ pub(crate) async fn run() -> Result<()> {
                     "Published release: htree://{}/{}/{}",
                     published.npub, published.tree_name, published.version_path
                 );
+                println!("Release tree root: {}", published.root);
                 if let Some(latest_path) = published.latest_path {
                     println!(
                         "Latest release:    htree://{}/{}/{}",
@@ -1547,11 +1548,13 @@ pub(crate) async fn run() -> Result<()> {
         Commands::Push {
             cid: cid_input,
             server,
+            force,
+            shallow,
         } => {
             // Resolve npub/repo or htree:// URLs to CID
             let resolved = resolve_cid_input(&cid_input).await?;
             let cid = resolved.cid.to_string();
-            push_to_blossom(&data_dir, &cid, server).await?;
+            push_to_blossom(&data_dir, &cid, server, force, shallow).await?;
         }
         Commands::Storage { command } => {
             // Load config

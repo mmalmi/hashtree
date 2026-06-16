@@ -40,7 +40,15 @@ else
     latest_path="latest"
 fi
 
-htree release publish "$tree_name" "$version_path" "$release_cid"
+publish_output="$(htree release publish "$tree_name" "$version_path" "$release_cid")"
+printf '%s\n' "$publish_output"
+release_tree_root="$(printf '%s\n' "$publish_output" | awk -F': ' '/^Release tree root: / {print $2; exit}')"
+if [ -n "$release_tree_root" ]; then
+    echo "Seeding release tree root to public file server..."
+    htree push "$release_tree_root" --server "$(release_upload_server_url)" --force --shallow
+else
+    echo "Warning: could not determine release tree root for public file-server seed." >&2
+fi
 
 if [ -z "$npub" ]; then
     echo "Warning: release published, but current npub could not be determined for printed URLs." >&2

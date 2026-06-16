@@ -18,6 +18,7 @@ pub(crate) struct PublishedRelease {
     pub(crate) version_path: String,
     pub(crate) latest_path: Option<String>,
     pub(crate) draft_path: Option<String>,
+    pub(crate) root: Cid,
 }
 
 fn parse_release_path(path: &str) -> Result<Vec<String>> {
@@ -169,11 +170,15 @@ async fn publish_release_root<S: Store>(
     let parent_segments = &version_segments[..version_segments.len() - 1];
 
     let mut root = match current_root {
-        Some(root) => root,
+        Some(root) if root.hash != release_cid.hash => root,
         None => tree
             .put_directory(Vec::new())
             .await
             .context("Failed to create initial release root")?,
+        Some(_) => tree
+            .put_directory(Vec::new())
+            .await
+            .context("Failed to create replacement release root")?,
     };
 
     root = ensure_directory_path(tree, root, parent_segments)
@@ -322,6 +327,7 @@ pub(crate) async fn publish_release_version(
         version_path: version_path.to_string(),
         latest_path,
         draft_path,
+        root: new_root,
     })
 }
 
@@ -347,6 +353,42 @@ mod tests {
         .with_size(size)])
             .await
             .expect("put release dir")
+    }
+
+    #[tokio::test]
+    async fn publish_release_root_wraps_existing_release_directory() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store));
+        let asset = tree.put_blob(b"asset").await.expect("asset");
+        let release = tree
+            .put_directory(vec![DirEntry::new("release.json", asset).with_size(5)])
+            .await
+            .expect("release directory");
+
+        let root = publish_release_root(&tree, Some(release.clone()), "v0.2.69", &release, false)
+            .await
+            .expect("publish release root");
+
+        assert_ne!(root.hash, release.hash);
+        let version = tree
+            .resolve_path(&root, "v0.2.69")
+            .await
+            .expect("resolve version")
+            .expect("version entry");
+        assert_eq!(version.hash, release.hash);
+        assert_eq!(
+            tree.resolve_path(&root, "latest")
+                .await
+                .expect("resolve latest")
+                .expect("latest entry")
+                .hash,
+            release.hash
+        );
+        let root_entries = tree.list_directory(&root).await.expect("list root");
+        assert_eq!(root_entries.len(), 2);
+        assert!(root_entries
+            .iter()
+            .all(|entry| entry.link_type == LinkType::Dir));
     }
 
     #[test]

@@ -272,6 +272,12 @@ pub(crate) enum Commands {
         /// File server URL (overrides config)
         #[arg(long, short)]
         server: Option<String>,
+        /// Send blob bodies even when the server's preflight says they exist
+        #[arg(long)]
+        force: bool,
+        /// Push only the root blob, not the full reachable DAG
+        #[arg(long)]
+        shallow: bool,
     },
 
     /// Get information about a CID
