@@ -2517,6 +2517,7 @@ Results:
 | --- | ---: |
 | Live pre-cache daemon, same host load | avg 62.210 ms, p50 62.266 ms, p95 100.037 ms, wall 14.931 s |
 | Patched side daemon, same host load | avg 3.802 ms, p50 1.927 ms, p95 3.860 ms, wall 0.913 s |
+| Patched live daemon after controlled restart | avg 4.855 ms, p50 3.439 ms, p95 13.359 ms, wall 1.166 s |
 | Full threaded `hashtree-cli --lib` test suite | 293 passed, 0 failed, 7 ignored |
 
 Interpretation:
@@ -2532,6 +2533,10 @@ Interpretation:
   starts uniform-chunk range iteration at the overlapping chunk. This removes
   the observed repeated CPU work without changing on-disk format, CIDs, LMDB,
   or the storage topology.
+- The patched binary was installed on Vader and activated with a controlled
+  `hashtree.service` restart while the map-index job kept running. The live
+  daemon came back healthy, served 0 recent 5xx responses, and reproduced the
+  range-latency improvement on the real `8080` path.
 - Do not migrate away from the ZFS zvol for this specific bottleneck. ZFS may
   still matter for separate bulk-write or durability policy decisions, but this
   live load is better addressed in hashtree's range-serving path.
