@@ -38,6 +38,7 @@ use tokio::io::AsyncWriteExt;
 mod content;
 mod resolve;
 
+pub(in crate::server) use content::download_blob_batch;
 use content::*;
 use resolve::*;
 

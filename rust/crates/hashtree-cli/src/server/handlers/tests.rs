@@ -11,7 +11,7 @@ use axum::{
     body::{to_bytes, Body},
     extract::{Path as AxumPath, State as AxumState},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use futures::{SinkExt, StreamExt};
@@ -49,6 +49,14 @@ macro_rules! event_builder {
 struct UpstreamBlobTestState {
     store: Arc<HashtreeStore>,
     requested_ids: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[derive(Clone)]
+struct UpstreamBlobBatchTestState {
+    store: Arc<HashtreeStore>,
+    requested_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    batch_requests: Arc<std::sync::atomic::AtomicUsize>,
+    batch_requested_hashes: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 #[derive(Clone)]
@@ -181,6 +189,56 @@ async fn serve_blob_with_request_log_for_test(
     }
 }
 
+async fn serve_blob_with_batch_state_for_test(
+    AxumState(state): AxumState<UpstreamBlobBatchTestState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response<Body> {
+    state.requested_ids.lock().unwrap().push(id.clone());
+    let id = id.strip_suffix(".bin").unwrap_or(&id).to_string();
+    let Ok(hash) = from_hex(&id) else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from("invalid hash"))
+            .unwrap();
+    };
+
+    match state.store.get_blob(&hash) {
+        Ok(Some(data)) => Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(data))
+            .unwrap(),
+        Ok(None) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("missing"))
+            .unwrap(),
+        Err(err) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn serve_blob_batch_with_request_log_for_test(
+    AxumState(state): AxumState<UpstreamBlobBatchTestState>,
+    Json(request): Json<BlobBatchDownloadRequest>,
+) -> Response<Body> {
+    state
+        .batch_requests
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state
+        .batch_requested_hashes
+        .lock()
+        .unwrap()
+        .push(request.hashes.clone());
+
+    download_blob_batch(
+        AxumState(test_app_state(state.store.clone(), Vec::new())),
+        Json(request),
+    )
+    .await
+    .into_response()
+}
+
 fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> AppState {
     AppState {
         store,
@@ -283,6 +341,51 @@ async fn native_store_endpoint_rejects_hash_mismatch() {
     .into_response();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn blob_batch_download_serves_present_hashes_in_binary_frame() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), vec![]);
+
+    let first = b"batch-first".to_vec();
+    let second = b"batch-second".to_vec();
+    let first_hash = hashtree_core::sha256(&first);
+    let second_hash = hashtree_core::sha256(&second);
+    store.put_blob(&first).unwrap();
+    store.put_blob(&second).unwrap();
+
+    let missing_hash = [9u8; 32];
+    let response = download_blob_batch(
+        AxumState(state),
+        Json(BlobBatchDownloadRequest {
+            hashes: vec![
+                to_hex(&first_hash),
+                to_hex(&missing_hash),
+                to_hex(&second_hash),
+            ],
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/vnd.hashtree.blob-batch.v1+octet-stream")
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let entries = decode_blob_batch_download_response(&body).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].hash, first_hash);
+    assert_eq!(entries[0].data, first);
+    assert_eq!(entries[1].hash, second_hash);
+    assert_eq!(entries[1].data, second);
 }
 
 fn allow_plaintext_read_author(state: &mut AppState, keys: &Keys) -> String {
@@ -1034,6 +1137,75 @@ async fn get_cid_with_fetch_prefetches_missing_file_chunks_concurrently() {
     assert!(
         max_in_flight.load(std::sync::atomic::Ordering::SeqCst) > 1,
         "missing file chunks should be fetched concurrently"
+    );
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn get_cid_with_fetch_uses_upstream_blob_batch_for_missing_file_chunks() {
+    let source_dir = TempDir::new().unwrap();
+    let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
+    let source_tree =
+        HashTree::new(HashTreeConfig::new(source_store.store_arc()).with_chunk_size(64 * 1024));
+    let data: Vec<u8> = (0..(512 * 1024 + 17)).map(|i| (i % 251) as u8).collect();
+    let (cid, _) = source_tree.put(&data).await.unwrap();
+
+    let requested_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let batch_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let batch_requested_hashes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let upstream_router = Router::new()
+        .route(
+            "/blob/batch",
+            post(serve_blob_batch_with_request_log_for_test),
+        )
+        .route("/:id", get(serve_blob_with_batch_state_for_test))
+        .with_state(UpstreamBlobBatchTestState {
+            store: source_store.clone(),
+            requested_ids: requested_ids.clone(),
+            batch_requests: batch_requests.clone(),
+            batch_requested_hashes: batch_requested_hashes.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_server =
+        tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
+
+    let local_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
+    let encrypted_file_node = source_store
+        .get_blob(&cid.hash)
+        .unwrap()
+        .expect("source file node");
+    local_store.put_blob(&encrypted_file_node).unwrap();
+
+    let state = test_app_state(
+        local_store.clone(),
+        vec![format!("http://{}", upstream_addr)],
+    );
+    let local_tree = HashTree::new(HashTreeConfig::new(local_store.store_arc()).public());
+
+    let fetched = get_cid_with_fetch(&state, &local_tree, &cid)
+        .await
+        .unwrap()
+        .expect("fetched file");
+
+    assert_eq!(fetched, data);
+    assert!(
+        batch_requests.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "expected read-through to use the blob batch endpoint"
+    );
+    assert!(
+        requested_ids.lock().unwrap().is_empty(),
+        "batch-capable upstream should not need per-blob GET fallback"
+    );
+    assert!(
+        batch_requested_hashes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|hashes| hashes.len() > 1),
+        "expected at least one multi-blob batch request"
     );
 
     upstream_server.abort();

@@ -418,6 +418,10 @@ impl HashtreeServer {
                 post(blossom::upload_check).options(blossom::cors_preflight),
             )
             .route(
+                "/blob/batch",
+                post(handlers::download_blob_batch).options(blossom::cors_preflight),
+            )
+            .route(
                 "/list/:pubkey",
                 get(blossom::list_blobs).options(blossom::cors_preflight),
             )
