@@ -31,6 +31,29 @@ Verification:
   compact_hash_list -- --nocapture`
 - `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli
   compact_batch_auth -- --nocapture`
+- Deployed a non-S3 hot-origin image built from the compact-auth commit range.
+  Public health stayed OK and the daemon reported an idle write-behind queue
+  after benchmark traffic.
+
+Post-deploy public samples:
+
+| Shape | Result |
+| --- | ---: |
+| 128 x 256 KiB, 128 blobs/request, c1 | edge 520 before a successful upload |
+| 64 x 256 KiB, 64 blobs/request, c1 | 2.62 MiB/s |
+| 128 x 256 KiB, 16 blobs/request, c8 | 7.59 MiB/s |
+| Warm read of the 16-blob batch sample through CDN, c8 | 52.07 MiB/s |
+| Warm read of the same sample through upload hostname, c8 | 48.38 MiB/s |
+
+Interpretation:
+- Compact auth keeps Authorization headers small and is deployed, but it does
+  not by itself make 32 MiB public request bodies reliable through the current
+  edge path.
+- The practical write path remains the 4 MiB batch target. Larger 16 MiB bodies
+  succeed but are slower in this sample. Public reads remain healthy once warm.
+- To exceed the current 7-10 MiB/s public write band, the next step is still a
+  better ingress path or a long-lived/framed upload shape, not LMDB tuning and
+  not cloud bucket admission.
 
 ## 2026-06-16 - Public Host Versus Origin-Local Upload Ceiling
 

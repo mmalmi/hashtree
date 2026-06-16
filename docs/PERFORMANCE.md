@@ -71,7 +71,8 @@ setup before traffic reaches the public ingress ceiling:
 - Keep batch bodies large enough to amortize per-request overhead, but do not
   expect larger batches to beat saturated public ingress by themselves. Current
   public measurements make 4-16 MiB binary batch bodies the safe operating
-  range; 32 MiB bodies have produced edge 520 failures before reaching origin.
+  range; 32 MiB bodies have produced edge 520 failures before reaching origin
+  even after compact batch authorization removed per-blob auth-header growth.
 - Prefer long-lived upload streams or pack/tail-pack admission for future
   protocol work.
 - For a large step-function improvement, provide direct public TCP ingress to the
