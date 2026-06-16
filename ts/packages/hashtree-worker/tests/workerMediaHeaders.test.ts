@@ -397,6 +397,72 @@ describe('worker media headers', () => {
     });
   });
 
+  it('sends explicit download headers before the first non-media chunk finishes loading', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    workerState.isDirectory = true;
+    workerState.resolvePathImpl.mockResolvedValue({
+      cid: { hash: new Uint8Array([3, 3, 3]) },
+      type: 1,
+    });
+    let resolveRange: ((data: Uint8Array | null) => void) | null = null;
+    workerState.readFileRangeImpl.mockImplementation(() => new Promise((resolve) => {
+      resolveRange = resolve;
+    }));
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-download',
+      config: {
+        relays: [],
+        blossomServers: [],
+      },
+    });
+    await flush();
+
+    const mediaPort = new FakeMessagePort();
+    ctx.dispatch({
+      type: 'registerMediaPort',
+      id: 'register-download-port',
+      port: mediaPort,
+    });
+    await flush();
+
+    mediaPort.dispatch({
+      type: 'hashtree-file',
+      requestId: 'download-1',
+      nhash: 'nhash1download',
+      path: 'iris-drive.dmg',
+      start: 0,
+      mimeType: 'application/octet-stream',
+      download: true,
+    });
+    await flush();
+
+    expect(mediaPort.messages).toContainEqual(expect.objectContaining({
+      type: 'headers',
+      requestId: 'download-1',
+      status: 200,
+      headers: expect.objectContaining({
+        'content-disposition': 'attachment; filename="iris-drive.dmg"',
+      }),
+    }));
+    expect(mediaPort.messages).not.toContainEqual(expect.objectContaining({
+      type: 'chunk',
+      requestId: 'download-1',
+    }));
+
+    resolveRange?.(new Uint8Array([5, 6, 7, 8]));
+    await vi.waitFor(() => {
+      expect(mediaPort.messages).toContainEqual(expect.objectContaining({
+        type: 'done',
+        requestId: 'download-1',
+      }));
+    });
+  });
+
   it('retries transient directory path misses before failing an image request', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;

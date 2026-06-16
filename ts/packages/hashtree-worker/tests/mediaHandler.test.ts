@@ -19,6 +19,7 @@ const getBlob = vi.fn();
 const getTreeNode = vi.fn();
 const readFile = vi.fn();
 const readFileRange = vi.fn();
+const readFileStream = vi.fn();
 
 function sameHash(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
   if (!a || !b || a.length !== b.length) return false;
@@ -33,6 +34,7 @@ function makeTree(): HashTree {
     getTreeNode,
     readFile,
     readFileRange,
+    readFileStream,
   } as unknown as HashTree;
 }
 
@@ -44,6 +46,7 @@ describe('mediaHandler thumbnail aliases', () => {
     getTreeNode.mockReset();
     readFile.mockReset();
     readFileRange.mockReset();
+    readFileStream.mockReset();
     initMediaHandler(makeTree());
   });
 
@@ -461,6 +464,82 @@ describe('mediaHandler thumbnail aliases', () => {
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'done',
       requestId: 'req_2',
+    }));
+  });
+
+  it('streams unknown-size release downloads without buffering the full file first', async () => {
+    const rootNhash = nhashEncode(ROOT);
+    const firstChunk = new Uint8Array([1, 2, 3, 4]);
+    const postMessage = vi.fn();
+    const port = {
+      onmessage: null,
+      postMessage,
+      start: vi.fn(),
+    } as unknown as MessagePort;
+
+    listDirectory.mockImplementation(async (cid: CID) => {
+      if (sameHash(cid.hash, ROOT.hash)) {
+        return [{ name: 'iris-drive.dmg', cid: ROOT_THUMB, size: 0 }];
+      }
+      return null;
+    });
+    getTreeNode.mockResolvedValue(null);
+    getBlob.mockResolvedValue(null);
+    readFile.mockResolvedValue(firstChunk);
+
+    let resolveStream: ((data: Uint8Array | null) => void) | null = null;
+    readFileStream.mockImplementation(async function* () {
+      const chunk = await new Promise<Uint8Array | null>((resolve) => {
+        resolveStream = resolve;
+      });
+      if (chunk) {
+        yield chunk;
+      }
+    });
+
+    registerMediaPort(port);
+
+    const request = port.onmessage?.({
+      data: {
+        type: 'hashtree-file',
+        requestId: 'req_download',
+        nhash: rootNhash,
+        path: 'iris-drive.dmg',
+        start: 0,
+        mimeType: 'application/octet-stream',
+        download: true,
+      },
+    } as MessageEvent);
+
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'headers',
+        requestId: 'req_download',
+        status: 200,
+        headers: expect.objectContaining({
+          'Content-Disposition': 'attachment; filename="iris-drive.dmg"',
+          'Content-Type': 'application/octet-stream',
+        }),
+        totalSize: 0,
+      }));
+    });
+    expect(readFile).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'chunk',
+      requestId: 'req_download',
+    }), expect.anything());
+
+    resolveStream?.(firstChunk);
+    await request;
+
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'chunk',
+      requestId: 'req_download',
+      data: firstChunk,
+    }), [firstChunk.buffer]);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'done',
+      requestId: 'req_download',
     }));
   });
 

@@ -746,7 +746,8 @@ async function handleMediaFileRequest(port, request) {
             totalSize: 0,
             headers: responseHeaders,
         };
-        const sendHeadersBeforeStartupChunk = shouldSendMediaHeadersBeforeFirstChunk(request.mimeType);
+        const sendHeadersBeforeStartupChunk = request.download === true
+            || shouldSendMediaHeadersBeforeFirstChunk(request.mimeType);
         if (sendHeadersBeforeStartupChunk) {
             port.postMessage(headersMessage);
             emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
@@ -903,7 +904,7 @@ async function handleMediaFileRequest(port, request) {
         headers: responseHeaders,
     };
     const sendHeadersBeforeFirstChunk = !request.head
-        && shouldSendMediaHeadersBeforeFirstChunk(request.mimeType);
+        && (request.download === true || shouldSendMediaHeadersBeforeFirstChunk(request.mimeType));
     const shouldBufferStartupRange = !request.head
         && parsedRange.kind === 'range'
         && isOpenEndedHttpByteRange(request.rangeHeader)

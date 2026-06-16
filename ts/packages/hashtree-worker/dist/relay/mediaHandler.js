@@ -470,6 +470,20 @@ async function handleSwFileRequest(req) {
             : mimeType;
         const totalSize = knownSize ?? await getFileSize(resolvedEntry.cid);
         if (totalSize === null) {
+            const canStreamUnknownSizeDownload = !!download
+                && !rangeHeader
+                && start === 0
+                && end === undefined
+                && (typeof tree.readFileStream === 'function' || typeof tree.readFileRange === 'function');
+            if (canStreamUnknownSizeDownload) {
+                await streamUnknownSizeSwResponse(requestId, resolvedEntry.cid, {
+                    npub,
+                    path: effectivePath,
+                    mimeType: effectiveMimeType,
+                    download,
+                });
+                return;
+            }
             const canBufferWholeFile = !rangeHeader && start === 0 && end === undefined;
             if (!canBufferWholeFile || typeof tree.readFile !== 'function') {
                 sendSwError(requestId, 404, 'File data not found');
@@ -1188,6 +1202,58 @@ async function streamSwResponse(requestId, cid, totalSize, options) {
         offset = chunkEnd + 1;
     }
     // Signal done
+    mediaPort.postMessage({ type: 'done', requestId });
+}
+async function streamUnknownSizeSwResponse(requestId, cid, options) {
+    if (!tree || !mediaPort)
+        return;
+    const { npub, path, mimeType = 'application/octet-stream', download } = options;
+    const isNpubRequest = !!npub;
+    const isImage = mimeType.startsWith('image/');
+    let cacheControl;
+    if (!isNpubRequest) {
+        cacheControl = 'public, max-age=31536000, immutable';
+    }
+    else if (isImage) {
+        cacheControl = 'public, max-age=60, stale-while-revalidate=86400';
+    }
+    else {
+        cacheControl = 'no-cache, no-store, must-revalidate';
+    }
+    const headers = {
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': cacheControl,
+    };
+    if (download) {
+        headers['Content-Disposition'] = `attachment; filename="${path || 'file'}"`;
+    }
+    mediaPort.postMessage({
+        type: 'headers',
+        requestId,
+        status: 200,
+        headers,
+        totalSize: 0,
+    });
+    if (typeof tree.readFileStream === 'function') {
+        for await (const chunk of tree.readFileStream(cid)) {
+            if (!chunk || chunk.byteLength === 0)
+                continue;
+            mediaPort.postMessage({ type: 'chunk', requestId, data: chunk }, [chunk.buffer]);
+        }
+    }
+    else {
+        let offset = 0;
+        while (true) {
+            const chunk = await tree.readFileRange(cid, offset, offset + MEDIA_CHUNK_SIZE);
+            if (!chunk || chunk.byteLength === 0)
+                break;
+            mediaPort.postMessage({ type: 'chunk', requestId, data: chunk }, [chunk.buffer]);
+            offset += chunk.byteLength;
+            if (chunk.byteLength < MEDIA_CHUNK_SIZE)
+                break;
+        }
+    }
     mediaPort.postMessage({ type: 'done', requestId });
 }
 function sendBufferedSwResponse(requestId, data, options) {
