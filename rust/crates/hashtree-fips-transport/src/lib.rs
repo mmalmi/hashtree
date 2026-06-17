@@ -122,6 +122,9 @@ pub trait FipsEndpointIo: Send + Sync {
     async fn relay_statuses(&self) -> Vec<FipsRelayStatus> {
         Vec::new()
     }
+    async fn shutdown(&self) -> Result<(), FipsTransportError> {
+        Ok(())
+    }
     fn local_peer_id(&self) -> Option<String> {
         None
     }
@@ -373,6 +376,12 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    async fn shutdown(&self) -> Result<(), FipsTransportError> {
+        fips_core::FipsEndpoint::shutdown(self)
+            .await
+            .map_err(|err| FipsTransportError::Endpoint(err.to_string()))
     }
 
     async fn set_peer_ids(&self, peer_ids: Vec<String>) -> Result<(), FipsTransportError> {
@@ -847,6 +856,10 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
                 let _ = this.handle_packet(packet).await;
             }
         })
+    }
+
+    pub async fn shutdown(&self) -> Result<(), FipsTransportError> {
+        self.endpoint.shutdown().await
     }
 
     pub async fn get_from_peers(
@@ -1628,6 +1641,7 @@ mod tests {
         peer_statuses: Mutex<Vec<FipsPeerStatus>>,
         sent: AtomicUsize,
         drop_next: AtomicUsize,
+        shutdown_count: AtomicUsize,
     }
 
     impl FakeEndpoint {
@@ -1646,6 +1660,7 @@ mod tests {
                 peer_statuses: Mutex::new(Vec::new()),
                 sent: AtomicUsize::new(0),
                 drop_next: AtomicUsize::new(0),
+                shutdown_count: AtomicUsize::new(0),
             })
         }
 
@@ -1655,6 +1670,10 @@ mod tests {
 
         fn drop_next_sends(&self, count: usize) {
             self.drop_next.store(count, Ordering::Relaxed);
+        }
+
+        fn shutdown_count(&self) -> usize {
+            self.shutdown_count.load(Ordering::Relaxed)
         }
     }
 
@@ -1724,6 +1743,11 @@ mod tests {
 
         async fn peer_statuses(&self) -> Vec<FipsPeerStatus> {
             self.peer_statuses.lock().await.clone()
+        }
+
+        async fn shutdown(&self) -> Result<(), FipsTransportError> {
+            self.shutdown_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
 
         fn local_peer_id(&self) -> Option<String> {
@@ -1811,6 +1835,17 @@ mod tests {
             &["remote".to_string()]
         );
         assert_eq!(transport.configured_peer_ids().await, vec!["remote"]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_delegates_to_underlying_fips_endpoint() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        let transport = HashtreeFipsTransport::new(endpoint.clone(), Arc::new(MemoryStore::new()));
+
+        transport.shutdown().await.unwrap();
+
+        assert_eq!(endpoint.shutdown_count(), 1);
     }
 
     #[tokio::test]
