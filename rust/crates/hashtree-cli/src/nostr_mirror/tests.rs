@@ -15,7 +15,7 @@ use std::net::TcpListener;
 use std::sync::Mutex;
 use tempfile::TempDir;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Notify};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::socialgraph::{open_social_graph_store_with_storage, set_social_graph_root};
@@ -123,84 +123,110 @@ impl Drop for TestRelay {
 struct TestBlossom {
     base_url: String,
     uploaded_hashes: Arc<Mutex<HashSet<String>>>,
-    put_delays: Arc<Mutex<HashMap<String, Duration>>>,
+    put_holds: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    put_started: Arc<Mutex<HashSet<String>>>,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl TestBlossom {
     async fn new() -> Self {
         let uploaded_hashes = Arc::new(Mutex::new(HashSet::new()));
-        let put_delays = Arc::new(Mutex::new(HashMap::new()));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind blossom");
-        let port = listener.local_addr().expect("blossom addr").port();
+        let put_holds = Arc::new(Mutex::new(HashMap::new()));
+        let put_started = Arc::new(Mutex::new(HashSet::new()));
+        let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind blossom");
+        let port = std_listener.local_addr().expect("blossom addr").port();
+        std_listener
+            .set_nonblocking(true)
+            .expect("blossom listener nonblocking");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let state = Arc::clone(&uploaded_hashes);
-        let delays = Arc::clone(&put_delays);
+        let holds = Arc::clone(&put_holds);
+        let started = Arc::clone(&put_started);
 
-        tokio::spawn(async move {
-            let app = Router::new()
-                .route(
-                    "/upload",
-                    put(
-                        |State((uploaded_hashes, put_delays)): State<(
-                            Arc<Mutex<HashSet<String>>>,
-                            Arc<Mutex<HashMap<String, Duration>>>,
-                        )>,
-                         headers: axum::http::HeaderMap,
-                         _body: Bytes| async move {
-                            let Some(hash) = headers
-                                .get("x-sha-256")
-                                .and_then(|value| value.to_str().ok())
-                                .map(|value| value.to_lowercase())
-                            else {
-                                return StatusCode::BAD_REQUEST;
-                            };
-                            let delay = put_delays.lock().expect("put delays").get(&hash).copied();
-                            if let Some(delay) = delay {
-                                tokio::time::sleep(delay).await;
-                            }
-                            uploaded_hashes
-                                .lock()
-                                .expect("uploaded hashes")
-                                .insert(hash);
-                            StatusCode::CREATED
-                        },
-                    ),
-                )
-                .route(
-                    "/:hash.bin",
-                    head(
-                        |State((uploaded_hashes, _put_delays)): State<(
-                            Arc<Mutex<HashSet<String>>>,
-                            Arc<Mutex<HashMap<String, Duration>>>,
-                        )>,
-                         Path(hash): Path<String>| async move {
-                            if uploaded_hashes
-                                .lock()
-                                .expect("uploaded hashes")
-                                .contains(&hash.to_lowercase())
-                            {
-                                StatusCode::OK
-                            } else {
-                                StatusCode::NOT_FOUND
-                            }
-                        },
-                    ),
-                )
-                .with_state((state, delays));
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("build blossom test runtime");
+            runtime.block_on(async move {
+                let listener =
+                    tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
+                let app =
+                    Router::new()
+                        .route(
+                            "/upload",
+                            put(
+                                |State(state): State<TestBlossomState>,
+                                 headers: axum::http::HeaderMap,
+                                 _body: Bytes| async move {
+                                    let Some(hash) = headers
+                                        .get("x-sha-256")
+                                        .and_then(|value| value.to_str().ok())
+                                        .map(|value| value.to_lowercase())
+                                    else {
+                                        return StatusCode::BAD_REQUEST;
+                                    };
+                                    state
+                                        .put_started
+                                        .lock()
+                                        .expect("put started")
+                                        .insert(hash.clone());
+                                    let hold = state
+                                        .put_holds
+                                        .lock()
+                                        .expect("put holds")
+                                        .get(&hash)
+                                        .cloned();
+                                    if let Some(hold) = hold {
+                                        hold.notified().await;
+                                    }
+                                    state
+                                        .uploaded_hashes
+                                        .lock()
+                                        .expect("uploaded hashes")
+                                        .insert(hash);
+                                    StatusCode::CREATED
+                                },
+                            ),
+                        )
+                        .route(
+                            "/:hash.bin",
+                            head(
+                                |State(state): State<TestBlossomState>,
+                                 Path(hash): Path<String>| async move {
+                                    if state
+                                        .uploaded_hashes
+                                        .lock()
+                                        .expect("uploaded hashes")
+                                        .contains(&hash.to_lowercase())
+                                    {
+                                        StatusCode::OK
+                                    } else {
+                                        StatusCode::NOT_FOUND
+                                    }
+                                },
+                            ),
+                        )
+                        .with_state(TestBlossomState {
+                            uploaded_hashes: state,
+                            put_holds: holds,
+                            put_started: started,
+                        });
 
-            let server = axum::serve(listener, app).with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
+                let server = axum::serve(listener, app).with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                });
+                let _ = server.await;
             });
-            let _ = server.await;
         });
+        std::thread::sleep(Duration::from_millis(100));
 
         Self {
             base_url: format!("http://127.0.0.1:{port}"),
             uploaded_hashes,
-            put_delays,
+            put_holds,
+            put_started,
             shutdown: Some(shutdown),
         }
     }
@@ -216,12 +242,37 @@ impl TestBlossom {
             .contains(&hash.to_lowercase())
     }
 
-    fn set_put_delay(&self, hash: &str, delay: Duration) {
-        self.put_delays
+    fn hold_put(&self, hash: &str) {
+        self.put_holds
             .lock()
-            .expect("put delays")
-            .insert(hash.to_lowercase(), delay);
+            .expect("put holds")
+            .insert(hash.to_lowercase(), Arc::new(Notify::new()));
     }
+
+    fn put_started(&self, hash: &str) -> bool {
+        self.put_started
+            .lock()
+            .expect("put started")
+            .contains(&hash.to_lowercase())
+    }
+
+    fn release_put(&self, hash: &str) {
+        if let Some(hold) = self
+            .put_holds
+            .lock()
+            .expect("put holds")
+            .remove(&hash.to_lowercase())
+        {
+            hold.notify_waiters();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TestBlossomState {
+    uploaded_hashes: Arc<Mutex<HashSet<String>>>,
+    put_holds: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    put_started: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Drop for TestBlossom {
@@ -371,18 +422,28 @@ async fn handle_connection(
     }
 }
 
-async fn wait_until<F>(label: &str, timeout: Duration, mut condition: F)
+async fn wait_until<F>(label: &str, timeout: Duration, condition: F)
+where
+    F: FnMut() -> bool,
+{
+    if wait_until_bool(timeout, condition).await {
+        return;
+    }
+    panic!("{label}: condition not met within {:?}", timeout);
+}
+
+async fn wait_until_bool<F>(timeout: Duration, mut condition: F) -> bool
 where
     F: FnMut() -> bool,
 {
     let started = std::time::Instant::now();
     while started.elapsed() < timeout {
         if condition() {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("{label}: condition not met within {:?}", timeout);
+    false
 }
 
 #[tokio::test]
@@ -768,9 +829,8 @@ async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Re
             .into_iter()
             .map(|cid| hex::encode(cid.hash))
             .collect::<Vec<_>>();
-    let delayed_upload_timeout = Duration::from_millis(250);
     for hash in &delayed_hashes {
-        blossom.set_put_delay(hash, delayed_upload_timeout);
+        blossom.hold_put(hash);
     }
     let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
         .context("parse mirror publish keys")?;
@@ -806,6 +866,16 @@ async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Re
     );
 
     mirror.apply_history_root(root.as_ref()).await?;
+    wait_until("event DAG upload task", Duration::from_secs(5), || {
+        mirror
+            .event_publish_state
+            .lock()
+            .expect("event root publish state")
+            .upload_in_progress_root
+            .as_ref()
+            == root.as_ref()
+    })
+    .await;
     let profile_publish_started = std::time::Instant::now();
     while profile_publish_started.elapsed() < Duration::from_secs(5) {
         mirror.maybe_publish_profile_search_root(false).await?;
@@ -827,6 +897,27 @@ async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Re
     assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
     assert_eq!(published_root_event_count(&relay, "nostr-event-index"), 0);
 
+    if !wait_until_bool(Duration::from_secs(30), || {
+        delayed_hashes.iter().all(|hash| blossom.put_started(hash))
+    })
+    .await
+    {
+        let state = mirror
+            .event_publish_state
+            .lock()
+            .expect("event root publish state");
+        panic!(
+            "event DAG upload PUTs: condition not met within 30s; in_progress={:?} last_error={:?}",
+            state
+                .upload_in_progress_root
+                .as_ref()
+                .map(|root| hex::encode(root.hash)),
+            state.last_upload_error
+        );
+    }
+    for hash in &delayed_hashes {
+        blossom.release_put(hash);
+    }
     wait_until("event DAG upload", Duration::from_secs(5), || {
         delayed_hashes.iter().all(|hash| blossom.has_hash(hash))
     })

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.70 - 2026-06-17
+
+### Changed
+
+- Cached immutable file chunk metadata and seek directly to overlapping uniform
+  chunks for range reads, cutting hot PMTiles range latency from roughly 62 ms
+  average to roughly 5 ms average in the live origin benchmark.
+
+### Fixed
+
+- Replaced a timing-based Nostr mirror upload test delay with an explicit
+  fake-server hold/release gate so threaded Rust test runs no longer depend on
+  a lucky 250 ms scheduling window.
+
 ## 0.2.69 - 2026-06-16
 
 ### Changed
