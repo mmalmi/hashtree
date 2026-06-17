@@ -414,6 +414,7 @@ async fn serve_configured_immutable_tree_host_request(
         headers,
         true,
         is_localhost,
+        false,
         head_only,
     )
     .await
@@ -663,9 +664,14 @@ pub async fn nostr_profile(
 async fn list_directory_json(
     state: &AppState,
     cid: &Cid,
+    allow_decryption_keys: bool,
     is_immutable: bool,
     is_localhost: bool,
 ) -> Response<Body> {
+    if cid.key.is_some() && !allow_decryption_keys {
+        return decryption_key_forbidden_response();
+    }
+
     let store = state.store.store_arc();
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let entries = match list_directory_with_fetch(state, &tree, cid).await {
@@ -793,9 +799,10 @@ async fn serve_tree_root_response(
     headers: axum::http::HeaderMap,
     is_immutable: bool,
     is_localhost: bool,
+    allow_decryption_keys: bool,
     head_only: bool,
 ) -> Response<Body> {
-    if cid.key.is_some() {
+    if cid.key.is_some() && !allow_decryption_keys {
         return decryption_key_forbidden_response();
     }
 
@@ -841,13 +848,21 @@ async fn serve_tree_root_response(
                     headers,
                     is_immutable,
                     is_localhost,
+                    allow_decryption_keys,
                     Some(&path),
                     head_only,
                 )
                 .await;
             }
             Ok(Some(DirectoryTarget::DirectoryListing { cid: listing_cid })) => {
-                return list_directory_json(state, &listing_cid, is_immutable, is_localhost).await;
+                return list_directory_json(
+                    state,
+                    &listing_cid,
+                    allow_decryption_keys,
+                    is_immutable,
+                    is_localhost,
+                )
+                .await;
             }
             Ok(None) => {
                 return not_found_response("File not found");
@@ -877,6 +892,7 @@ async fn serve_tree_root_response(
         headers,
         is_immutable,
         is_localhost,
+        allow_decryption_keys,
         effective_path.as_deref(),
         head_only,
     )
@@ -961,6 +977,7 @@ async fn htree_npub_impl(
         headers,
         false,
         is_localhost,
+        true,
         head_only,
     )
     .await
@@ -1321,10 +1338,11 @@ async fn serve_cid_with_range(
     headers: axum::http::HeaderMap,
     is_immutable: bool,
     is_localhost: bool,
+    allow_decryption_keys: bool,
     filename_hint: Option<&str>,
     head_only: bool,
 ) -> Response<Body> {
-    if cid.key.is_some() {
+    if cid.key.is_some() && !allow_decryption_keys {
         return decryption_key_forbidden_response();
     }
 

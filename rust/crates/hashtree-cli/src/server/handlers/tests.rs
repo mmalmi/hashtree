@@ -1797,8 +1797,17 @@ async fn serve_cid_with_range_honors_suffix_ranges() {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=-4"));
 
-    let response =
-        serve_cid_with_range(&state, &cid, headers, false, false, Some("clip.mp4"), false).await;
+    let response = serve_cid_with_range(
+        &state,
+        &cid,
+        headers,
+        false,
+        false,
+        false,
+        Some("clip.mp4"),
+        false,
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(
         response
@@ -1828,8 +1837,17 @@ async fn serve_cid_with_range_streams_large_explicit_ranges() {
         header::HeaderValue::from_str(&format!("bytes=0-{}", data.len() - 1)).unwrap(),
     );
 
-    let response =
-        serve_cid_with_range(&state, &cid, headers, true, false, Some("clip.mp4"), false).await;
+    let response = serve_cid_with_range(
+        &state,
+        &cid,
+        headers,
+        true,
+        false,
+        false,
+        Some("clip.mp4"),
+        false,
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
 
     let mut body = response.into_body();
@@ -1860,6 +1878,7 @@ async fn serve_cid_with_range_head_returns_metadata_without_body() {
         &cid,
         axum::http::HeaderMap::new(),
         true,
+        false,
         false,
         Some("release.tar.gz"),
         true,
@@ -1894,6 +1913,7 @@ async fn serve_cid_with_range_streams_large_full_gets() {
         &cid,
         axum::http::HeaderMap::new(),
         true,
+        false,
         false,
         Some("release.tar.gz"),
         false,
@@ -1944,6 +1964,7 @@ async fn serve_cid_with_range_streams_keyed_full_gets() {
         axum::http::HeaderMap::new(),
         true,
         false,
+        false,
         Some("release.tar.gz"),
         false,
     )
@@ -1976,6 +1997,7 @@ async fn serve_cid_with_range_rejects_keyed_ranges() {
         &cid,
         headers,
         true,
+        false,
         false,
         Some("release.tar.gz"),
         false,
@@ -2245,6 +2267,74 @@ async fn bare_npub_route_serves_encoded_tree_name_suffix_paths() {
         ])
         .await
         .unwrap();
+
+    let keys = Keys::generate();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    let npub = allow_plaintext_read_author(&mut state, &keys);
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, "releases/hashtree", None),
+        root_cid,
+        "cache",
+        None,
+    );
+
+    let app = Router::new()
+        .route("/npub1:rest", get(serve_npub))
+        .route("/npub1:rest/*path", get(serve_npub))
+        .with_state(state);
+
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/{npub}/releases%2Fhashtree/latest/install.sh"))
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            43123,
+        ))));
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), install_bytes.as_slice());
+}
+
+#[tokio::test]
+async fn bare_npub_route_serves_encrypted_cached_release_tree_for_allowed_author() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+
+    let install_bytes = b"#!/bin/sh\necho encrypted install\n".to_vec();
+    let (install_cid, _) = tree.put(&install_bytes).await.unwrap();
+    assert!(
+        install_cid.key.is_some(),
+        "test must cover encrypted file CIDs"
+    );
+    let latest_dir = tree
+        .put_directory(vec![
+            DirEntry::from_cid("install.sh", &install_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+    assert!(
+        latest_dir.key.is_some(),
+        "test must cover encrypted directory CIDs"
+    );
+    let root_cid = tree
+        .put_directory(vec![
+            DirEntry::from_cid("latest", &latest_dir).with_link_type(LinkType::Dir)
+        ])
+        .await
+        .unwrap();
+    assert!(
+        root_cid.key.is_some(),
+        "test must cover encrypted root CIDs"
+    );
 
     let keys = Keys::generate();
     let mut state = test_app_state(store, Vec::new());

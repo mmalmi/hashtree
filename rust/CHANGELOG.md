@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.71 - 2026-06-17
+
+### Fixed
+
+- Restored explicitly allowed mutable `npub` plaintext release routes for
+  encrypted hashtree roots while keeping public-supplied decryption keys
+  forbidden on HTTP content-serving routes.
+
 ## 0.2.70 - 2026-06-17
 
 ### Changed

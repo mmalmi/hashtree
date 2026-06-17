@@ -20,12 +20,12 @@ required-features = ["git-remote-wrapper"]
 
 [dependencies]
 # Git remote helper
-git-remote-htree = { version = "0.2.70", path = "../git-remote-htree" }
+git-remote-htree = { version = "0.2.71", path = "../git-remote-htree" }
 
 # Core hashtree crates
 hashtree-core.workspace = true
 hashtree-fs.workspace = true
-hashtree-fuse = { version = "0.2.70", path = "../fuse", optional = true, features = ["fuse"] }
+hashtree-fuse = { version = "0.2.71", path = "../fuse", optional = true, features = ["fuse"] }
 hashtree-lmdb = { workspace = true, optional = true }
 hashtree-blossom.workspace = true
 hashtree-config.workspace = true
