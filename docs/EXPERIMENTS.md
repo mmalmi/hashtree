@@ -2540,3 +2540,31 @@ Interpretation:
 - Do not migrate away from the ZFS zvol for this specific bottleneck. ZFS may
   still matter for separate bulk-write or durability policy decisions, but this
   live load is better addressed in hashtree's range-serving path.
+
+### 2026-06-17: v0.2.71 public upload/read smoke after route hotfix
+
+Question: after restoring allowed encrypted `npub` release serving and
+redeploying the public origin, are public Blossom writes and reads healthy?
+
+Setup:
+- Public upload hostname through the normal Cloudflare-facing path.
+- Fresh deterministic 32 MiB workload: 128 x 256 KiB blobs.
+- Upload shape: binary batch, batch size 16, concurrency 4, HTTP/1 upload
+  transport.
+- Read shape: same hashes, individual reads, concurrency 8.
+
+Results:
+
+| Shape | Result |
+| --- | ---: |
+| Fresh public binary-batch upload | 9.97 MiB/s, 128/128 succeeded |
+| Public reads of the same blobs | 22.72 MiB/s, 128/128 succeeded |
+| Hot-origin upload replication queue after sample | 0 queued, 0 in flight, 0 failed |
+
+Interpretation:
+- The public path is no longer in the pathological sub-MiB/s state seen during
+  the earlier incident, and the origin accepted the batch workload without
+  queue buildup.
+- This sample is still far below origin-local write throughput observed in the
+  same runbook period, so it should not be treated as storage-engine capacity.
+  It is a public ingress/path measurement.
