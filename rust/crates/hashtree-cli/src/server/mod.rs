@@ -364,8 +364,8 @@ impl HashtreeServer {
         let local_addr = listener.local_addr()?;
 
         // Public endpoints (no auth required)
-        // Note: /:id serves both CID and blossom SHA256 hash lookups
-        // The handler differentiates based on hash format (64 char hex = blossom)
+        // Note: /:id serves raw SHA256 blobs only. Logical tree/file assembly
+        // stays on explicitly configured mutable routes such as approved npub.
         let state = self.state.clone();
         let public_routes = Router::new()
             .route("/", get(handlers::serve_root_or_virtual_host))

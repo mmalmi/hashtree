@@ -1436,7 +1436,7 @@ async fn resolve_thumbnail_path_falls_back_to_subdir() {
 async fn resolve_thumbnail_path_fetches_missing_subdir_from_upstream() {
     let source_dir = TempDir::new().unwrap();
     let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
-    let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()));
+    let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()).public());
 
     let (thumb_cid, _size) = source_tree.put(b"thumb").await.unwrap();
     let subdir_cid = source_tree
@@ -1574,7 +1574,7 @@ fn content_type_for_path_uses_extension() {
 }
 
 #[tokio::test]
-async fn htree_nhash_path_fetches_nested_assets_from_upstream_tree() {
+async fn htree_nhash_path_rejects_logical_asset_serving() {
     let source_dir = TempDir::new().unwrap();
     let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
 
@@ -1625,20 +1625,13 @@ async fn htree_nhash_path_fetches_nested_assets_from_upstream_tree() {
     .await
     .into_response();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(CROSS_ORIGIN_RESOURCE_POLICY_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(CORP_CROSS_ORIGIN)
-    );
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), main_js.as_bytes());
+    assert_eq!(body.as_ref(), b"Logical file paths are client-side");
 }
 
 #[tokio::test]
-async fn htree_nhash_path_resolves_thumbnail_alias() {
+async fn htree_nhash_path_rejects_thumbnail_alias_serving() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
     let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
@@ -1666,9 +1659,102 @@ async fn htree_nhash_path_resolves_thumbnail_alias() {
     .await
     .into_response();
 
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"Logical file paths are client-side");
+}
+
+#[tokio::test]
+async fn htree_nhash_serves_raw_root_blob_not_logical_index() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    let (index_cid, _) = tree
+        .put(b"<!doctype html><title>raw please</title>")
+        .await
+        .unwrap();
+    let root_cid = tree
+        .put_directory(vec![
+            DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+    let raw_root = store
+        .get_blob(&root_cid.hash)
+        .unwrap()
+        .expect("directory root blob exists");
+    let nhash = hashtree_core::nhash_encode(&root_cid.hash).expect("encode nhash");
+    let route_nhash = nhash.strip_prefix("nhash1").expect("nhash prefix");
+
+    let response = htree_nhash(
+        State(test_app_state(store, Vec::new())),
+        Path(route_nhash.to_string()),
+        Query(HashMap::new()),
+        axum::http::Method::GET,
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), thumb_bytes.as_slice());
+    assert_eq!(body.as_ref(), raw_root.as_slice());
+    assert_ne!(body.as_ref(), b"<!doctype html><title>raw please</title>");
+}
+
+#[tokio::test]
+async fn htree_nhash_rejects_embedded_decryption_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let hash = [0x42; 32];
+    let key = [0x99; 32];
+    let nhash = hashtree_core::nhash_encode_full(&hashtree_core::NHashData {
+        hash,
+        decrypt_key: Some(key),
+    })
+    .expect("encode keyed nhash");
+    let route_nhash = nhash.strip_prefix("nhash1").expect("nhash prefix");
+
+    let response = htree_nhash(
+        State(test_app_state(store, Vec::new())),
+        Path(route_nhash.to_string()),
+        Query(HashMap::new()),
+        axum::http::Method::GET,
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn htree_nhash_rejects_query_decryption_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let payload = b"actual-secret-payload";
+    let hash_hex = store.put_blob(payload).unwrap();
+    let hash = from_hex(&hash_hex).unwrap();
+    let nhash = hashtree_core::nhash_encode(&hash).expect("encode nhash");
+    let route_nhash = nhash.strip_prefix("nhash1").expect("nhash prefix");
+
+    let response = htree_nhash(
+        State(test_app_state(store, Vec::new())),
+        Path(route_nhash.to_string()),
+        Query(HashMap::from([("k".to_string(), "aa".repeat(32))])),
+        axum::http::Method::GET,
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body.windows(payload.len()).any(|window| window == payload));
 }
 
 #[test]
@@ -1862,34 +1948,13 @@ async fn serve_cid_with_range_streams_keyed_full_gets() {
         false,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let expected_len = data.len().to_string();
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()),
-        Some(expected_len.as_str())
-    );
-    let mut body = response.into_body();
-    let first_frame = timeout(Duration::from_secs(1), body.frame())
-        .await
-        .expect("first keyed body frame should arrive quickly")
-        .expect("keyed body should yield a frame")
-        .expect("keyed body frame should be ok");
-    let first_chunk = first_frame
-        .into_data()
-        .expect("first keyed frame should contain bytes");
-    assert!(!first_chunk.is_empty());
-    assert!(
-        first_chunk.len() < data.len(),
-        "keyed full GET should stream chunks instead of one huge frame"
-    );
-    assert_eq!(first_chunk.as_ref(), &data[..first_chunk.len()]);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body.windows(data.len()).any(|window| window == data));
 }
 
 #[tokio::test]
-async fn serve_cid_with_range_serves_keyed_ranges() {
+async fn serve_cid_with_range_rejects_keyed_ranges() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
     let state = test_app_state(store.clone(), Vec::new());
@@ -1916,17 +1981,9 @@ async fn serve_cid_with_range_serves_keyed_ranges() {
         false,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-    let expected_range = format!("bytes 1024-4095/{}", data.len());
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok()),
-        Some(expected_range.as_str())
-    );
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), &data[1024..4096]);
+    assert!(!body.windows(3072).any(|window| window == &data[1024..4096]));
 }
 
 fn copy_blob_between_stores(
@@ -1945,7 +2002,7 @@ fn copy_blob_between_stores(
 async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
     let source_dir = TempDir::new().unwrap();
     let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
-    let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()));
+    let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()).public());
 
     let video_data: Vec<u8> = (0..(3 * 1024 * 1024 + 137))
         .map(|i| (i % 251) as u8)
@@ -2024,7 +2081,7 @@ async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
 async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream() {
     let source_dir = TempDir::new().unwrap();
     let source_store = Arc::new(HashtreeStore::new(source_dir.path().join("source-db")).unwrap());
-    let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()));
+    let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()).public());
 
     let video_data: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
         .map(|i| 255 - (i % 251) as u8)
@@ -2056,7 +2113,7 @@ async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream(
     let local_dir = TempDir::new().unwrap();
     let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
 
-    // Simulate a warmer cache: the file tree is local, but its encrypted chunks are not.
+    // Simulate a warmer cache: the file tree is local, but its chunks are not.
     copy_blob_between_stores(&source_store, &local_store, &root_cid.hash);
     copy_blob_between_stores(&source_store, &local_store, &child_dir_cid.hash);
     copy_blob_between_stores(&source_store, &local_store, &video_cid.hash);
@@ -2271,6 +2328,52 @@ async fn htree_npub_rejects_unapproved_plaintext_reads_when_public_reads_disable
 }
 
 #[tokio::test]
+async fn htree_npub_rejects_query_decryption_key_even_when_author_allowed() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    let secret_bytes = b"allowed plaintext should still not accept k".to_vec();
+    let (secret_cid, _) = tree.put(&secret_bytes).await.unwrap();
+    let root_cid = tree
+        .put_directory(vec![
+            DirEntry::from_cid("secret.txt", &secret_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+
+    let keys = Keys::generate();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    let npub = allow_plaintext_read_author(&mut state, &keys);
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, "shared", None),
+        root_cid,
+        "cache",
+        None,
+    );
+
+    let response = htree_npub_impl(
+        State(state),
+        npub,
+        "shared".to_string(),
+        Some("secret.txt".to_string()),
+        Query(HashMap::from([("k".to_string(), "aa".repeat(32))])),
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body
+        .windows(secret_bytes.len())
+        .any(|window| window == secret_bytes));
+}
+
+#[tokio::test]
 async fn resolve_and_serve_rejects_unapproved_plaintext_reads_when_public_reads_disabled() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
@@ -2295,6 +2398,49 @@ async fn resolve_and_serve_rejects_unapproved_plaintext_reads_when_public_reads_
         State(state),
         OriginalUri(format!("/n/{npub}/shared").parse().unwrap()),
         Path((npub, "shared".to_string())),
+        Query(HashMap::new()),
+        axum::http::HeaderMap::new(),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body
+        .windows(secret_bytes.len())
+        .any(|window| window == secret_bytes));
+}
+
+#[tokio::test]
+async fn resolve_and_serve_rejects_query_decryption_key_even_when_author_allowed() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+    let secret_bytes = b"n route allowed plaintext should not accept k".to_vec();
+    let (secret_cid, _) = tree.put(&secret_bytes).await.unwrap();
+
+    let keys = Keys::generate();
+    let mut state = test_app_state(store, Vec::new());
+    state.public_plaintext_reads = false;
+    let npub = allow_plaintext_read_author(&mut state, &keys);
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, "shared", None),
+        secret_cid,
+        "cache",
+        None,
+    );
+
+    let response = resolve_and_serve(
+        State(state),
+        OriginalUri(
+            format!("/n/{npub}/shared?k={}", "aa".repeat(32))
+                .parse()
+                .unwrap(),
+        ),
+        Path((npub, "shared".to_string())),
+        Query(HashMap::from([("k".to_string(), "aa".repeat(32))])),
         axum::http::HeaderMap::new(),
     )
     .await
@@ -2371,6 +2517,39 @@ async fn serve_content_or_blob_honors_raw_blob_ranges() {
     );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), b"blob");
+}
+
+#[tokio::test]
+async fn serve_content_or_blob_does_not_assemble_file_roots() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let data: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+    let raw_root = store
+        .get_blob(&cid.hash)
+        .unwrap()
+        .expect("file root blob exists");
+    assert_ne!(raw_root, data, "test must use a chunked logical file root");
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(to_hex(&cid.hash)),
+        Query(HashMap::new()),
+        axum::http::Method::GET,
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), raw_root.as_slice());
+    assert_ne!(body.as_ref(), data.as_slice());
 }
 
 #[tokio::test]
@@ -3166,7 +3345,7 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
 }
 
 #[tokio::test]
-async fn cache_tree_root_public_chk_uses_plain_mutable_cache_key() {
+async fn cache_tree_root_rejects_decryption_key() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
     let state = test_app_state(store, Vec::new());
@@ -3186,16 +3365,8 @@ async fn cache_tree_root_public_chk_uses_plain_mutable_cache_key() {
     .await
     .into_response();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let cached = get_cached_tree_root(&state, "npub1example/video").expect("cached cid");
-    assert_eq!(
-        to_hex(&cached.cid.hash),
-        "be8f5da537f62d02d3ff113d213a7058116f790a8d0e158c2766543deda10e35"
-    );
-    assert_eq!(
-        cached.cid.key.map(|key| to_hex(&key)).as_deref(),
-        Some("34e24fadaddc60da2e761501aae44c1c2b6b8706b73dff736eb0fc7d803133bb")
-    );
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(get_cached_tree_root(&state, "npub1example/video").is_none());
     assert!(get_cached_tree_root(
         &state,
         "npub1example/video?k=34e24fadaddc60da2e761501aae44c1c2b6b8706b73dff736eb0fc7d803133bb"
@@ -3238,6 +3409,29 @@ async fn clear_tree_root_cache_removes_seeded_mutable_root_cache() {
 
     assert_eq!(clear_response.status(), StatusCode::OK);
     assert!(get_cached_tree_root(&state, "npub1example/video").is_none());
+}
+
+#[tokio::test]
+async fn clear_tree_root_cache_rejects_decryption_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let state = test_app_state(store, Vec::new());
+
+    let response = clear_tree_root_cache(
+        State(state),
+        Json(ClearTreeRootCacheRequest {
+            npub: "npub1example".to_string(),
+            tree_name: "video".to_string(),
+            key: Some(
+                "34e24fadaddc60da2e761501aae44c1c2b6b8706b73dff736eb0fc7d803133bb".to_string(),
+            ),
+            visibility: Some("public".to_string()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

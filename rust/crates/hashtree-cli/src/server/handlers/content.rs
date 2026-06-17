@@ -1182,7 +1182,7 @@ pub(super) enum BlobSource {
 }
 
 impl BlobSource {
-    fn to_header_value(&self) -> String {
+    pub(super) fn to_header_value(&self) -> String {
         match self {
             BlobSource::Local => "local".to_string(),
             BlobSource::WebRtc(peer_id) => format!("webrtc:{peer_id}"),
@@ -1190,28 +1190,6 @@ impl BlobSource {
             BlobSource::Upstream(server) => format!("upstream:{server}"),
         }
     }
-}
-
-/// Build a blob response with optional X-Source header (only for localhost)
-pub(super) fn build_blob_response(
-    data: Vec<u8>,
-    source: BlobSource,
-    is_localhost: bool,
-) -> Response<Body> {
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, data.len())
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
-
-    if is_localhost {
-        builder = builder.header("X-Source", source.to_header_value());
-    }
-
-    builder.body(Body::from(data)).unwrap()
 }
 
 pub(super) async fn query_fips_peers(

@@ -815,11 +815,11 @@ impl NostrClient {
             return;
         };
 
-        let key = match encryption_key {
-            Some((key, false, false)) => Some(hex::encode(key)),
+        match encryption_key {
+            Some((_key, false, false)) => {}
             Some((_key, _is_link_visible, _is_self_private)) => return,
-            None => None,
-        };
+            None => {}
+        }
 
         let url = format!("{}/api/cache-tree-root", base.trim_end_matches('/'));
         let pubkey = self.daemon_pubkey_identifier();
@@ -827,7 +827,6 @@ impl NostrClient {
             "npub": pubkey,
             "treeName": repo_name,
             "hash": root_hash,
-            "key": key,
             "visibility": "public",
         });
 

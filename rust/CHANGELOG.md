@@ -7,6 +7,10 @@
 - Cached immutable file chunk metadata and seek directly to overlapping uniform
   chunks for range reads, cutting hot PMTiles range latency from roughly 62 ms
   average to roughly 5 ms average in the live origin benchmark.
+- Made public content-addressed HTTP routes serve raw blobs/ciphertext only:
+  direct hashes and `nhash` no longer assemble logical files or accept
+  decryption keys, while explicitly configured virtual hosts and approved
+  mutable `npub` routes remain the plaintext-serving exceptions.
 
 ### Fixed
 

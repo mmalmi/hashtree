@@ -12,7 +12,7 @@ use crate::socialgraph;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, OriginalUri, Path, Query, State},
-    http::{header, HeaderMap, Method, Response, StatusCode},
+    http::{self, header, HeaderMap, Method, Response, StatusCode},
     response::{IntoResponse, Json},
 };
 use bytes::Bytes;
@@ -319,13 +319,13 @@ async fn serve_virtual_tree_host_request(
 
     let initial_response = match &root {
         VirtualTreeRoot::Immutable { nhash } => {
-            htree_nhash_impl(
-                State(state.clone()),
-                nhash.clone(),
+            serve_configured_immutable_tree_host_request(
+                state,
+                nhash,
                 requested_path.clone().filter(|path| !path.is_empty()),
-                Query(params.clone()),
+                &params,
                 headers.clone(),
-                ConnectInfo(connect_info.0),
+                connect_info.0.ip().is_loopback(),
                 head_only,
             )
             .await
@@ -353,13 +353,13 @@ async fn serve_virtual_tree_host_request(
 
     match root {
         VirtualTreeRoot::Immutable { nhash } => {
-            htree_nhash_impl(
-                State(state.clone()),
-                nhash,
+            serve_configured_immutable_tree_host_request(
+                state,
+                &nhash,
                 None,
-                Query(params),
+                &params,
                 headers,
-                connect_info,
+                connect_info.0.ip().is_loopback(),
                 head_only,
             )
             .await
@@ -378,6 +378,45 @@ async fn serve_virtual_tree_host_request(
             .await
         }
     }
+}
+
+async fn serve_configured_immutable_tree_host_request(
+    state: &AppState,
+    nhash: &str,
+    path: Option<String>,
+    params: &HashMap<String, String>,
+    headers: axum::http::HeaderMap,
+    is_localhost: bool,
+    head_only: bool,
+) -> Response<Body> {
+    let nhash_data = match nhash_decode(nhash) {
+        Ok(data) => data,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from(format!("Invalid nhash: {}", e)))
+                .unwrap();
+        }
+    };
+
+    if params.contains_key("k") || nhash_data.decrypt_key.is_some() {
+        return decryption_key_forbidden_response();
+    }
+
+    serve_tree_root_response(
+        state,
+        Cid {
+            hash: nhash_data.hash,
+            key: None,
+        },
+        path,
+        headers,
+        true,
+        is_localhost,
+        head_only,
+    )
+    .await
 }
 
 pub async fn serve_virtual_host_fallback(
@@ -429,6 +468,10 @@ pub async fn cache_tree_root(
     State(state): State<AppState>,
     Json(request): Json<CacheTreeRootRequest>,
 ) -> impl IntoResponse {
+    if request.key.is_some() {
+        return decryption_key_forbidden_response();
+    }
+
     let hash = match from_hex(&request.hash) {
         Ok(value) => value,
         Err(error) => {
@@ -440,21 +483,7 @@ pub async fn cache_tree_root(
         }
     };
 
-    let key = match request.key {
-        Some(value) => match from_hex(&value) {
-            Ok(decoded) => Some(decoded),
-            Err(error) => {
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(format!("Invalid key: {}", error)))
-                    .unwrap();
-            }
-        },
-        None => None,
-    };
-
-    let cid = Cid { hash, key };
+    let cid = Cid { hash, key: None };
     let cache_key = cache_tree_root_key(
         &request.npub,
         &request.tree_name,
@@ -474,25 +503,15 @@ pub async fn clear_tree_root_cache(
     State(state): State<AppState>,
     Json(request): Json<ClearTreeRootCacheRequest>,
 ) -> impl IntoResponse {
-    let key = match request.key {
-        Some(value) => match from_hex(&value) {
-            Ok(decoded) => Some(decoded),
-            Err(error) => {
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(format!("Invalid key: {}", error)))
-                    .unwrap();
-            }
-        },
-        None => None,
-    };
+    if request.key.is_some() {
+        return decryption_key_forbidden_response();
+    }
 
     let cache_key = cache_tree_root_key(
         &request.npub,
         &request.tree_name,
         request.visibility.as_deref(),
-        key,
+        None,
     );
     remove_cached_tree_root(&state, &cache_key);
 
@@ -538,6 +557,20 @@ fn plaintext_read_forbidden_response(pubkey: &str) -> Response<Body> {
             json!({
                 "error": "Plaintext read access denied. Pubkey is not approved.",
                 "pubkey": pubkey,
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+fn decryption_key_forbidden_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::from(
+            json!({
+                "error": "HTTP content serving does not accept decryption keys. Fetch ciphertext blobs and assemble/decrypt logical files client-side.",
             })
             .to_string(),
         ))
@@ -654,7 +687,6 @@ async fn list_directory_json(
             json!({
                 "name": entry.name,
                 "hash": to_hex(&entry.hash),
-                "key": entry.key.map(|key| to_hex(&key)),
                 "size": entry.size,
                 "type": match entry.link_type {
                     LinkType::Blob => "blob",
@@ -692,18 +724,24 @@ async fn htree_nhash_impl(
         }
     };
 
-    let mut cid = Cid {
-        hash: nhash_data.hash,
-        key: nhash_data.decrypt_key,
-    };
-
-    if cid.key.is_none() {
-        if let Some(k) = parse_hex_key(params.get("k")) {
-            cid.key = Some(k);
-        }
+    if params.contains_key("k") || nhash_data.decrypt_key.is_some() {
+        return decryption_key_forbidden_response();
     }
 
-    serve_tree_root_response(&state, cid, path, headers, true, is_localhost, head_only).await
+    if path.as_ref().is_some_and(|value| !value.is_empty()) {
+        return not_found_response("Logical file paths are client-side");
+    }
+
+    serve_raw_blob_with_range(
+        &state,
+        nhash_data.hash,
+        headers,
+        true,
+        is_localhost,
+        head_only,
+        true,
+    )
+    .await
 }
 
 pub async fn htree_nhash(
@@ -757,6 +795,10 @@ async fn serve_tree_root_response(
     is_localhost: bool,
     head_only: bool,
 ) -> Response<Body> {
+    if cid.key.is_some() {
+        return decryption_key_forbidden_response();
+    }
+
     let store = state.store.store_arc();
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let mut effective_path = path.filter(|value| !value.is_empty());
@@ -857,9 +899,12 @@ async fn htree_npub_impl(
         return plaintext_read_forbidden_response(&npub);
     }
 
-    let link_key = parse_hex_key(params.get("k"));
+    if params.contains_key("k") {
+        return decryption_key_forbidden_response();
+    }
+
     let resolved = if let Some(resolved) =
-        resolve_root_for_mutable_request(&state, &npub, &treename, link_key).await
+        resolve_root_for_mutable_request(&state, &npub, &treename, None).await
     {
         resolved.cid
     } else {
@@ -876,7 +921,7 @@ async fn htree_npub_impl(
 
         let cid = match tokio::time::timeout(
             HTTP_RESOLVER_TIMEOUT,
-            resolve_npub_root(&key, &resolver, link_key),
+            resolve_npub_root(&key, &resolver, None),
         )
         .await
         {
@@ -901,7 +946,7 @@ async fn htree_npub_impl(
         let _ = resolver.stop().await;
         put_cached_tree_root(
             &state,
-            tree_root_cache_key(&npub, &treename, link_key),
+            tree_root_cache_key(&npub, &treename, None),
             cid.clone(),
             "nostr",
             None,
@@ -909,14 +954,16 @@ async fn htree_npub_impl(
         cid
     };
 
-    let mut cid = resolved;
-    if cid.key.is_none() {
-        if let Some(k) = link_key {
-            cid.key = Some(k);
-        }
-    }
-
-    serve_tree_root_response(&state, cid, path, headers, false, is_localhost, head_only).await
+    serve_tree_root_response(
+        &state,
+        resolved,
+        path,
+        headers,
+        false,
+        is_localhost,
+        head_only,
+    )
+    .await
 }
 
 pub async fn htree_npub(
@@ -988,14 +1035,6 @@ const CORP_CROSS_ORIGIN: &str = "cross-origin";
 const CROSS_ORIGIN_RESOURCE_POLICY_HEADER: &str = "cross-origin-resource-policy";
 const DEFAULT_CDN_HOST: &str = "cdn.iris.to";
 
-fn parse_hex_key(value: Option<&String>) -> Option<[u8; 32]> {
-    let hex = value?;
-    if hex.len() != 64 {
-        return None;
-    }
-    from_hex(hex).ok()
-}
-
 fn content_type_for_path(path: Option<&str>) -> &'static str {
     let filename = path.and_then(|p| p.rsplit('/').next()).unwrap_or("");
     if filename.is_empty() {
@@ -1019,6 +1058,175 @@ fn request_host(headers: &HeaderMap) -> Option<&str> {
                 .map(|(host, _)| host)
                 .unwrap_or(value)
         })
+}
+
+async fn serve_raw_blob_with_range(
+    state: &AppState,
+    hash: [u8; 32],
+    headers: axum::http::HeaderMap,
+    is_immutable: bool,
+    is_localhost: bool,
+    head_only: bool,
+    allow_fetch: bool,
+) -> Response<Body> {
+    let mut source = BlobSource::Local;
+    let mut total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
+        Ok(size) => size,
+        Err(error) if error == blob_read_busy_error() => {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                .header("Retry-After", "1")
+                .body(Body::from("Blob read queue is full"))
+                .unwrap();
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to read local blob size {}: {}",
+                to_hex(&hash),
+                error
+            );
+            None
+        }
+    };
+
+    if total_size.is_none() && allow_fetch {
+        if let Some(fetch_source) = fetch_and_cache_blob_with_source(state, &hash).await {
+            source = fetch_source;
+            total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
+                Ok(size) => size,
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to read fetched blob size {}: {}",
+                        to_hex(&hash),
+                        error
+                    );
+                    None
+                }
+            };
+        }
+    }
+
+    let Some(total_size) = total_size else {
+        return if is_immutable {
+            immutable_not_found_response("Not found")
+        } else {
+            not_found_response("Not found")
+        };
+    };
+
+    let add_common_headers = |mut builder: http::response::Builder, content_length: usize| {
+        builder = builder
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, content_length)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
+        if is_immutable {
+            builder = builder.header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL);
+        }
+        if is_localhost {
+            builder = builder.header("X-Source", source.to_header_value());
+        }
+        builder
+    };
+
+    if let Some(range_str) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        if let Some(parsed_range) = parse_byte_range(range_str, total_size) {
+            let (start, end_inclusive) = match parsed_range {
+                ParsedByteRange::Satisfiable {
+                    start,
+                    end_inclusive,
+                } => (start, end_inclusive),
+                ParsedByteRange::Unsatisfiable => {
+                    return Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .header(header::CONTENT_RANGE, format!("bytes */{}", total_size))
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .body(Body::from("Range not satisfiable"))
+                        .unwrap();
+                }
+            };
+
+            let content_length = end_inclusive.saturating_sub(start).saturating_add(1) as usize;
+            let content_range = format!("bytes {}-{}/{}", start, end_inclusive, total_size);
+            let body = if head_only {
+                Body::empty()
+            } else {
+                match get_blob_range_without_blocking_runtime(state, hash, start, end_inclusive)
+                    .await
+                {
+                    Ok(Some(data)) => Body::from(data),
+                    Ok(None) => {
+                        return not_found_response("Not found");
+                    }
+                    Err(error) if error == blob_read_busy_error() => {
+                        return Response::builder()
+                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                            .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                            .header("Retry-After", "1")
+                            .body(Body::from("Blob read queue is full"))
+                            .unwrap();
+                    }
+                    Err(error) => {
+                        tracing::warn!("Failed to read blob range {}: {}", to_hex(&hash), error);
+                        return Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                            .body(Body::from("Blob range read failed"))
+                            .unwrap();
+                    }
+                }
+            };
+
+            return add_common_headers(
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_RANGE, content_range),
+                content_length,
+            )
+            .body(body)
+            .unwrap();
+        }
+    }
+
+    let body = if head_only {
+        Body::empty()
+    } else {
+        match get_blob_without_blocking_runtime(state, hash).await {
+            Ok(Some(data)) => Body::from(data),
+            Ok(None) => {
+                return not_found_response("Not found");
+            }
+            Err(error) if error == blob_read_busy_error() => {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                    .header("Retry-After", "1")
+                    .body(Body::from("Blob read queue is full"))
+                    .unwrap();
+            }
+            Err(error) => {
+                tracing::warn!("Failed to read blob {}: {}", to_hex(&hash), error);
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .body(Body::from("Blob read failed"))
+                    .unwrap();
+            }
+        }
+    };
+
+    add_common_headers(
+        Response::builder().status(StatusCode::OK),
+        total_size as usize,
+    )
+    .body(body)
+    .unwrap()
 }
 
 fn should_redirect_extensionless_cdn_blob(headers: &HeaderMap, ext: Option<&str>) -> bool {
@@ -1116,6 +1324,10 @@ async fn serve_cid_with_range(
     filename_hint: Option<&str>,
     head_only: bool,
 ) -> Response<Body> {
+    if cid.key.is_some() {
+        return decryption_key_forbidden_response();
+    }
+
     let store = state.store.store_arc();
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let content_type = content_type_for_path(filename_hint);
@@ -1210,10 +1422,10 @@ async fn serve_cid_with_range(
     builder.body(body).unwrap()
 }
 
-/// Internal content serving (shared by CID and blossom routes)
+/// Logical plaintext file serving for explicitly allowed mutable routes.
 ///
 /// `is_immutable`: if true, adds Cache-Control: immutable header.
-/// Use true for content-addressed routes (hash, nhash, blossom SHA256).
+/// Use true only for configured logical routes whose content cannot change.
 /// Use false for mutable routes (npub/ref_name) where the reference can change.
 /// `is_localhost`: if true, adds X-Source header for debugging.
 async fn serve_content_internal(
@@ -1403,8 +1615,8 @@ async fn serve_content_internal(
     }
 }
 
-/// Serve content by CID or blossom SHA256 hash
-/// Tries CID first, then falls back to blossom lookup if input looks like SHA256
+/// Serve raw blob/ciphertext by blossom SHA256 hash.
+/// Logical file assembly is intentionally not available on direct hash routes.
 /// If not found locally, queries connected WebSocket/WebRTC peers
 pub async fn serve_content_or_blob(
     State(state): State<AppState>,
@@ -1445,164 +1657,25 @@ pub async fn serve_content_or_blob(
     // Check if it looks like a SHA256 hash (64 hex chars)
     let is_sha256 = hash_part.len() == 64 && hash_part.chars().all(|c| c.is_ascii_hexdigit());
 
-    // Try raw blob lookup first (for hashtree chunks / git objects)
-    // This takes priority over file tree serving to avoid returning reassembled
-    // file content when the caller expects raw chunk data
+    // Direct hash routes always return the raw stored blob/ciphertext. Clients
+    // assemble logical files and decrypt CHK content themselves.
     if is_sha256 && state.hash_get_enabled {
         let hash_hex = hash_part.to_lowercase();
         if should_redirect_extensionless_cdn_blob(&headers, ext) {
             return extensionful_blob_redirect(&hash_hex).into_response();
         }
         if let Ok(hash_bytes) = from_hex(&hash_hex) {
-            if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-                match get_blob_size_without_blocking_runtime(&state, hash_bytes).await {
-                    Ok(Some(total_size)) => match parse_byte_range(range_header, total_size) {
-                        Some(ParsedByteRange::Satisfiable {
-                            start,
-                            end_inclusive,
-                        }) => {
-                            match get_blob_range_without_blocking_runtime(
-                                &state,
-                                hash_bytes,
-                                start,
-                                end_inclusive,
-                            )
-                            .await
-                            {
-                                Ok(Some(data)) => {
-                                    let content_range =
-                                        format!("bytes {}-{}/{}", start, end_inclusive, total_size);
-                                    let mut builder = Response::builder()
-                                        .status(StatusCode::PARTIAL_CONTENT)
-                                        .header(header::CONTENT_TYPE, "application/octet-stream")
-                                        .header(header::CONTENT_LENGTH, data.len())
-                                        .header(header::CONTENT_RANGE, content_range)
-                                        .header(header::ACCEPT_RANGES, "bytes")
-                                        .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
-                                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                                        .header(
-                                            CROSS_ORIGIN_RESOURCE_POLICY_HEADER,
-                                            CORP_CROSS_ORIGIN,
-                                        );
-                                    if is_localhost {
-                                        builder = builder.header("X-Source", "local");
-                                    }
-                                    return builder.body(Body::from(data)).unwrap().into_response();
-                                }
-                                Ok(None) => {}
-                                Err(error) if error == blob_read_busy_error() => {
-                                    return Response::builder()
-                                        .status(StatusCode::SERVICE_UNAVAILABLE)
-                                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                                        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
-                                        .header("Retry-After", "1")
-                                        .body(Body::from("Blob read queue is full"))
-                                        .unwrap()
-                                        .into_response();
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "Failed to read local blob range {}: {}",
-                                        hash_hex,
-                                        error
-                                    );
-                                    return Response::builder()
-                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                                        .body(Body::from("Blob range read failed"))
-                                        .unwrap()
-                                        .into_response();
-                                }
-                            }
-                        }
-                        Some(ParsedByteRange::Unsatisfiable) => {
-                            return Response::builder()
-                                .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                                .header(header::CONTENT_TYPE, "text/plain")
-                                .header(header::CONTENT_RANGE, format!("bytes */{}", total_size))
-                                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                                .body(Body::from("Range not satisfiable"))
-                                .unwrap()
-                                .into_response();
-                        }
-                        None => {}
-                    },
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!("Failed to read local blob size {}: {}", hash_hex, error);
-                    }
-                }
-            }
-
-            match get_blob_without_blocking_runtime(&state, hash_bytes).await {
-                Ok(Some(data)) => {
-                    return build_blob_response(data, BlobSource::Local, is_localhost)
-                        .into_response();
-                }
-                Ok(None) => {}
-                Err(error) if error == blob_read_busy_error() => {
-                    return Response::builder()
-                        .status(StatusCode::SERVICE_UNAVAILABLE)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
-                        .header("Retry-After", "1")
-                        .body(Body::from("Blob read queue is full"))
-                        .unwrap()
-                        .into_response();
-                }
-                Err(error) => {
-                    tracing::warn!("Failed to read local blob {}: {}", hash_hex, error);
-                }
-            }
-        }
-    }
-
-    // Try file tree lookup (serves reassembled file content)
-    // (hashtree hashes are 64 hex chars, same as blossom SHA256)
-    if let Ok(hash) = from_hex(&id) {
-        if state
-            .store
-            .get_file_chunk_metadata(&hash)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return serve_content_internal(&state, &hash, headers, true, is_localhost).await;
-        }
-    }
-
-    // Not found locally - try the shared daemon fetch path. This includes
-    // FIPS, legacy mesh peers, and configured Blossom fallback sources.
-    if is_sha256 && state.hash_get_enabled {
-        let hash_hex = hash_part.to_lowercase();
-        if let Ok(hash_bytes) = from_hex(&hash_hex) {
-            if let Some(source) = fetch_and_cache_blob_with_source(&state, &hash_bytes).await {
-                match get_blob_without_blocking_runtime(&state, hash_bytes).await {
-                    Ok(Some(data)) => {
-                        return build_blob_response(data, source, is_localhost).into_response();
-                    }
-                    Ok(None) => {}
-                    Err(error) if error == blob_read_busy_error() => {
-                        return Response::builder()
-                            .status(StatusCode::SERVICE_UNAVAILABLE)
-                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                            .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
-                            .header("Retry-After", "1")
-                            .body(Body::from("Blob read queue is full"))
-                            .unwrap()
-                            .into_response();
-                    }
-                    Err(error) => {
-                        tracing::warn!("Failed to read fetched blob {}: {}", hash_hex, error);
-                        return Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                            .body(Body::from("Blob read failed"))
-                            .unwrap()
-                            .into_response();
-                    }
-                }
-            }
+            return serve_raw_blob_with_range(
+                &state,
+                hash_bytes,
+                headers,
+                true,
+                is_localhost,
+                false,
+                true,
+            )
+            .await
+            .into_response();
         }
     }
 
@@ -2014,6 +2087,7 @@ pub async fn resolve_and_serve(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
     Path(params): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let (fallback_pubkey, fallback_treename) = params;
@@ -2029,6 +2103,10 @@ pub async fn resolve_and_serve(
     let key = format!("{}/{}", pubkey, treename);
     if !is_allowed_plaintext_read_author(&state, &pubkey) {
         return plaintext_read_forbidden_response(&pubkey).into_response();
+    }
+
+    if query.contains_key("k") {
+        return decryption_key_forbidden_response().into_response();
     }
 
     if let Some(resolved) = resolve_root_for_mutable_request(&state, &pubkey, &treename, None).await

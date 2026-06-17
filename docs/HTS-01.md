@@ -121,10 +121,15 @@ Mutable references SHOULD use path form:
 
 - `<npub>/<tree_or_repo_path>`
 
-For link-visible access, a link secret MAY be passed:
+For link-visible access, a link secret MAY be carried in a URL fragment or
+client-local state:
 
-- `?k=<64-hex>`
+- `#k=<64-hex>`
 - Key recovery rule: `root_key = encryptedKey XOR k`
+
+HTTP servers MUST NOT accept decryption keys in query strings or request bodies
+for public content serving. Clients fetch ciphertext blobs and assemble/decrypt
+logical trees locally.
 
 `hashtree:` URI prefix MAY appear before `nhash` and decoders MUST ignore it.
 
@@ -167,7 +172,7 @@ If multiple events match author + `d`:
 
 - Share secret `S` is 32 bytes.
 - Event stores `encryptedKey = root_key XOR S`.
-- Share URL carries `?k=<hex(S)>`.
+- Share URL carries `#k=<hex(S)>` or stores `S` in client-local state.
 - Client derives `root_key = encryptedKey XOR k`.
 
 ### 8.4 Private
