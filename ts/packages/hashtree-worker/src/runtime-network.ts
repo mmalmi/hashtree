@@ -31,6 +31,7 @@ function normalizeBlossomServer(server: BlossomServerConfig): BlossomServerConfi
     url,
     read: server.read ?? true,
     write: server.write ?? false,
+    ...(server.preferBatchReads === true ? { preferBatchReads: true } : {}),
   };
 }
 
@@ -109,10 +110,12 @@ export function getRuntimeBlossomServers(
 
     const existing = merged.get(normalized.url);
     if (existing) {
+      const preferBatchReads = existing.preferBatchReads || normalized.preferBatchReads;
       merged.set(normalized.url, {
         url: normalized.url,
         read: existing.read || normalized.read,
         write: existing.write || normalized.write,
+        ...(preferBatchReads ? { preferBatchReads: true } : {}),
       });
       continue;
     }

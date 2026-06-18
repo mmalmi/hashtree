@@ -13,6 +13,7 @@ function normalizeBlossomServer(server) {
         url,
         read: server.read ?? true,
         write: server.write ?? false,
+        ...(server.preferBatchReads === true ? { preferBatchReads: true } : {}),
     };
 }
 function uniqueRelayUrls(relays) {
@@ -84,10 +85,12 @@ export function getRuntimeBlossomServers(servers, options = {}) {
             continue;
         const existing = merged.get(normalized.url);
         if (existing) {
+            const preferBatchReads = existing.preferBatchReads || normalized.preferBatchReads;
             merged.set(normalized.url, {
                 url: normalized.url,
                 read: existing.read || normalized.read,
                 write: existing.write || normalized.write,
+                ...(preferBatchReads ? { preferBatchReads: true } : {}),
             });
             continue;
         }

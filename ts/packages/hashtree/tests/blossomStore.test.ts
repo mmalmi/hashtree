@@ -26,6 +26,17 @@ function makeResponse(status: number, body?: Uint8Array, jsonBody?: unknown): Re
   } as Response;
 }
 
+function makeBatchResponse(hash: Hash, data: Uint8Array): Response {
+  const body = new Uint8Array(8 + 4 + 32 + 8 + data.length);
+  body.set(new Uint8Array([72, 84, 66, 68, 86, 49, 0, 0]), 0); // HTBDV1\0\0
+  const view = new DataView(body.buffer);
+  view.setUint32(8, 1, false);
+  body.set(hash, 12);
+  view.setBigUint64(44, BigInt(data.length), false);
+  body.set(data, 52);
+  return makeResponse(200, body);
+}
+
 const signer: BlossomSigner = async () => ({
   kind: 24242,
   created_at: 1,
@@ -110,7 +121,64 @@ describe('BlossomStore', () => {
     await expect(readPromise).resolves.toEqual(DATA);
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       expect.stringContaining('https://aaa-missing.example/'),
+      'https://aaa-missing.example/blob/batch',
       expect.stringContaining('https://zzz-later.example/'),
+    ]);
+  });
+
+  it('falls back to blob batch download when hash URLs are blocked', async () => {
+    const hash = await makeHash();
+    const hashHex = toHex(hash);
+
+    const fetchMock = vi.fn((input: string | URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === `https://cdn.example/${hashHex}.bin`) {
+        return Promise.reject(new TypeError('Blocked by client'));
+      }
+      if (url === 'https://cdn.example/blob/batch') {
+        expect(init?.method).toBe('POST');
+        expect(init?.body).toBe(JSON.stringify({ hashes: [hashHex] }));
+        return Promise.resolve(makeBatchResponse(hash, DATA));
+      }
+      return Promise.resolve(makeResponse(404));
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://cdn.example', read: true }],
+    });
+
+    await expect(store.get(hash)).resolves.toEqual(DATA);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      `https://cdn.example/${hashHex}.bin`,
+      'https://cdn.example/blob/batch',
+    ]);
+  });
+
+  it('can prefer blob batch downloads before raw hash URLs', async () => {
+    const hash = await makeHash();
+    const hashHex = toHex(hash);
+
+    const fetchMock = vi.fn((input: string | URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://cdn.example/blob/batch') {
+        expect(init?.method).toBe('POST');
+        expect(init?.body).toBe(JSON.stringify({ hashes: [hashHex] }));
+        return Promise.resolve(makeBatchResponse(hash, DATA));
+      }
+      return Promise.resolve(makeResponse(404));
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://cdn.example', read: true, preferBatchReads: true }],
+    });
+
+    await expect(store.get(hash)).resolves.toEqual(DATA);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://cdn.example/blob/batch',
     ]);
   });
 

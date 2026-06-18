@@ -42,6 +42,19 @@ describe('runtime network helpers', () => {
     ]);
   });
 
+  it('preserves batch-first read preferences through blossom endpoint normalization', () => {
+    installWindow();
+
+    expect(resolveRuntimeEndpoints({
+      blossomServers: [
+        { url: 'https://cdn.example/', read: true, write: false, preferBatchReads: true },
+        { url: 'https://cdn.example', read: false, write: true },
+      ],
+    }).blossomServers).toEqual([
+      { url: 'https://cdn.example', read: true, write: true, preferBatchReads: true },
+    ]);
+  });
+
   it('keeps normalized upstream relays when no embedded daemon runtime exists', () => {
     installWindow();
 

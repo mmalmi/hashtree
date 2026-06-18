@@ -15,6 +15,8 @@ export interface BlossomServer {
   read?: boolean;
   /** Whether this server accepts writes */
   write?: boolean;
+  /** Prefer POST /blob/batch over raw /{hash}.bin reads for browser clients. */
+  preferBatchReads?: boolean;
 }
 
 /**
@@ -112,6 +114,8 @@ const DEFAULT_GET_TIMEOUT_MS = 60_000;
 const PUT_TIMEOUT_MS = 120_000;
 const GET_HEDGE_INTERVAL_MS = 75;
 const READ_SCORE_TIE_DELTA = 0.12;
+const BLOB_BATCH_DOWNLOAD_MAGIC = new Uint8Array([72, 84, 66, 68, 86, 49, 0, 0]); // HTBDV1\0\0
+const BLOB_BATCH_DOWNLOAD_CONTENT_TYPE = 'application/vnd.hashtree.blob-batch.v1+octet-stream';
 
 /** Per-hash failure tracking */
 interface HashAttempts {
@@ -331,16 +335,92 @@ export class BlossomStore implements StoreWithMeta {
     return false;
   }
 
+  private async getFromBatchEndpoint(
+    server: BlossomServer,
+    hashHex: string,
+    signal: AbortSignal
+  ): Promise<Uint8Array | null> {
+    const response = await fetch(`${server.url}/blob/batch`, {
+      method: 'POST',
+      headers: {
+        'Accept': BLOB_BATCH_DOWNLOAD_CONTENT_TYPE,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ hashes: [hashHex] }),
+      signal,
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length < 12) {
+      return null;
+    }
+    for (let i = 0; i < BLOB_BATCH_DOWNLOAD_MAGIC.length; i += 1) {
+      if (bytes[i] !== BLOB_BATCH_DOWNLOAD_MAGIC[i]) {
+        return null;
+      }
+    }
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const count = view.getUint32(8, false);
+    let offset = 12;
+    for (let i = 0; i < count; i += 1) {
+      if (bytes.length - offset < 40) {
+        return null;
+      }
+      const entryHash = bytes.slice(offset, offset + 32);
+      offset += 32;
+      const len = Number(view.getBigUint64(offset, false));
+      offset += 8;
+      if (!Number.isSafeInteger(len) || bytes.length - offset < len) {
+        return null;
+      }
+      const data = bytes.slice(offset, offset + len);
+      offset += len;
+      if (toHex(entryHash) !== hashHex) {
+        continue;
+      }
+      const computed = await sha256(data);
+      if (toHex(computed) === hashHex) {
+        return data;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
   private createInFlightReadRequest(server: BlossomServer, hashHex: string): InFlightReadRequest {
     const startedAt = Date.now();
     this.recordReadRequest(server.url);
+    const signal = AbortSignal.timeout(this.getTimeoutMs);
+    let attemptedBatch = false;
+    const tryBatchRead = async (): Promise<Uint8Array | null> => {
+      attemptedBatch = true;
+      return this.getFromBatchEndpoint(server, hashHex, signal).catch(() => null);
+    };
     return {
       server,
       settled: false,
-      promise: fetch(`${server.url}/${hashHex}.bin`, {
-        signal: AbortSignal.timeout(this.getTimeoutMs),
-      })
-        .then(async (response) => {
+      promise: (server.preferBatchReads ? tryBatchRead() : Promise.resolve(null))
+        .then(async (preferredBatchData) => {
+          if (preferredBatchData) {
+            this.log({ operation: 'get', server: server.url, hash: hashHex, success: true, bytes: preferredBatchData.length });
+            this.recordReadSuccess(server.url, Math.max(1, Date.now() - startedAt));
+            return { serverUrl: server.url, data: preferredBatchData };
+          }
+
+          return fetch(`${server.url}/${hashHex}.bin`, {
+            signal,
+          });
+        })
+        .then(async (responseOrResult) => {
+          if ('serverUrl' in responseOrResult) {
+            return responseOrResult;
+          }
+          const response = responseOrResult;
           const elapsedMs = Math.max(1, Date.now() - startedAt);
           if (response.ok) {
             const data = new Uint8Array(await response.arrayBuffer());
@@ -355,6 +435,13 @@ export class BlossomStore implements StoreWithMeta {
             return { serverUrl: server.url, data: null };
           }
 
+          const batchData = attemptedBatch ? null : await tryBatchRead();
+          if (batchData) {
+            this.log({ operation: 'get', server: server.url, hash: hashHex, success: true, bytes: batchData.length });
+            this.recordReadSuccess(server.url, Math.max(1, Date.now() - startedAt));
+            return { serverUrl: server.url, data: batchData };
+          }
+
           if (response.status === 404) {
             this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: '404' });
             this.recordReadMiss(server.url);
@@ -365,7 +452,13 @@ export class BlossomStore implements StoreWithMeta {
           this.recordReadFailure(server.url);
           return { serverUrl: server.url, data: null };
         })
-        .catch((error) => {
+        .catch(async (error) => {
+          const batchData = attemptedBatch ? null : await tryBatchRead();
+          if (batchData) {
+            this.log({ operation: 'get', server: server.url, hash: hashHex, success: true, bytes: batchData.length });
+            this.recordReadSuccess(server.url, Math.max(1, Date.now() - startedAt));
+            return { serverUrl: server.url, data: batchData };
+          }
           this.log({
             operation: 'get',
             server: server.url,

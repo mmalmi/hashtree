@@ -4,6 +4,7 @@ export interface BlossomServerConfig {
   url: string;
   read?: boolean;
   write?: boolean;
+  preferBatchReads?: boolean;
 }
 
 export interface WorkerConfig {

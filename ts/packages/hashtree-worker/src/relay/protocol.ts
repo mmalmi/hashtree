@@ -162,6 +162,7 @@ export interface BlossomServerConfig {
   url: string;
   read?: boolean;  // Whether to read from this server (default true)
   write?: boolean; // Whether to write to this server
+  preferBatchReads?: boolean; // Prefer POST /blob/batch over raw /{hash}.bin reads
 }
 
 export interface ForwardRateLimitConfig {
