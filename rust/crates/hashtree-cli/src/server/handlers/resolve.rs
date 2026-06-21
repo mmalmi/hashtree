@@ -96,21 +96,36 @@ pub(super) async fn resolve_root_for_mutable_request(
     link_key: Option<[u8; 32]>,
 ) -> Option<ResolvedRoot> {
     let cache_key = tree_root_cache_key(pubkey, treename, link_key);
-    let cached = get_cached_tree_root(state, &cache_key);
-    if let Some(cached_root) = cached.clone() {
+    if let Some(cached_root) = get_cached_tree_root(state, &cache_key) {
         if cached_tree_root_is_fresh(&cached_root) {
             return Some(resolved_cached_tree_root(cached_root, link_key, "cache"));
         }
-    }
-
-    if let Some(resolved) = resolve_root_without_cache(state, pubkey, treename, link_key).await {
-        return Some(resolved);
-    }
-
-    cached.map(|cached_root| {
         touch_cached_tree_root(state, &cache_key);
-        resolved_cached_tree_root(cached_root, link_key, "stale-cache")
-    })
+        refresh_tree_root_cache_in_background(
+            state.clone(),
+            pubkey.to_string(),
+            treename.to_string(),
+            link_key,
+        );
+        return Some(resolved_cached_tree_root(
+            cached_root,
+            link_key,
+            "stale-cache",
+        ));
+    }
+
+    resolve_root_without_cache(state, pubkey, treename, link_key).await
+}
+
+fn refresh_tree_root_cache_in_background(
+    state: AppState,
+    pubkey: String,
+    treename: String,
+    link_key: Option<[u8; 32]>,
+) {
+    tokio::spawn(async move {
+        let _ = resolve_root_without_cache(&state, &pubkey, &treename, link_key).await;
+    });
 }
 
 pub(super) async fn resolve_root_without_cache(

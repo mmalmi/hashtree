@@ -302,6 +302,22 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
     }
 }
 
+async fn wait_for_cached_tree_root_hash(state: &AppState, cache_key: &str, expected_hash: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(cached) = get_cached_tree_root(state, cache_key) {
+            if to_hex(&cached.cid.hash) == expected_hash {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for cached root {cache_key} to refresh to {expected_hash}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn native_store_endpoint_round_trips_raw_blob() {
     let temp = TempDir::new().unwrap();
@@ -3043,7 +3059,7 @@ async fn resolve_to_hash_refresh_uses_local_relay_before_relays() {
 }
 
 #[tokio::test]
-async fn mutable_root_request_refreshes_stale_cached_root_from_local_relay() {
+async fn mutable_root_request_serves_stale_cached_root_and_refreshes_in_background() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
     let keys = Keys::generate();
@@ -3091,18 +3107,12 @@ async fn mutable_root_request_refreshes_stale_cached_root_from_local_relay() {
 
     let resolved = resolve_root_for_mutable_request(&state, &npub, tree_name, None)
         .await
-        .expect("stale root should refresh from local relay");
+        .expect("stale root should resolve immediately");
 
-    assert_eq!(to_hex(&resolved.cid.hash), refreshed_hash);
-    assert_eq!(resolved.source, "local-relay");
-    let event_id = event.id.to_hex();
-    assert_eq!(
-        resolved
-            .root_event
-            .as_ref()
-            .map(|root| root.event_id.as_str()),
-        Some(event_id.as_str())
-    );
+    assert_eq!(to_hex(&resolved.cid.hash), cached_hash);
+    assert_eq!(resolved.source, "stale-cache");
+
+    wait_for_cached_tree_root_hash(&state, &cache_key, &refreshed_hash).await;
 }
 
 #[tokio::test]
@@ -3184,7 +3194,7 @@ async fn mutable_root_request_serves_stale_cached_root_when_refresh_misses() {
 }
 
 #[tokio::test]
-async fn htree_npub_path_refreshes_stale_cached_root_before_serving_file() {
+async fn htree_npub_path_serves_stale_cached_root_and_refreshes_in_background() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
     let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
@@ -3265,10 +3275,89 @@ async fn htree_npub_path_refreshes_stale_cached_root_before_serving_file() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
+    let old_release_etag = format!("\"{}\"", to_hex(&old_release_cid.hash));
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(MUTABLE_TREE_CACHE_CONTROL)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(old_release_etag.as_str())
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), new_release);
-    let cached = get_cached_tree_root(&state, &cache_key).expect("refreshed root should be cached");
-    assert_eq!(cached.cid.hash, new_root.hash);
+    assert_eq!(body.as_ref(), br#"{"version":"old"}"#);
+
+    wait_for_cached_tree_root_hash(&state, &cache_key, &to_hex(&new_root.hash)).await;
+}
+
+#[tokio::test]
+async fn htree_npub_path_returns_304_for_matching_mutable_file_etag() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32().unwrap();
+    let tree_name = "maps";
+
+    let (file_cid, _) = tree.put(b"cached app js").await.unwrap();
+    let root = tree
+        .put_directory(vec![
+            DirEntry::from_cid("app.js", &file_cid).with_link_type(LinkType::File)
+        ])
+        .await
+        .unwrap();
+
+    let state = test_app_state(store, Vec::new());
+    put_cached_tree_root(
+        &state,
+        tree_root_cache_key(&npub, tree_name, None),
+        root,
+        "cache",
+        None,
+    );
+
+    let etag = format!("\"{}\"", to_hex(&file_cid.hash));
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        header::IF_NONE_MATCH,
+        axum::http::HeaderValue::from_str(&etag).unwrap(),
+    );
+
+    let response = htree_npub_impl(
+        State(state),
+        npub,
+        tree_name.to_string(),
+        Some("app.js".to_string()),
+        Query(HashMap::new()),
+        headers,
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
+        false,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(MUTABLE_TREE_CACHE_CONTROL)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(etag.as_str())
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(body.is_empty());
 }
 
 #[tokio::test]

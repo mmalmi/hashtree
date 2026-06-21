@@ -1048,9 +1048,29 @@ pub async fn htree_npub_path(
 
 /// Cache-Control header for immutable content-addressed data (1 year)
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const MUTABLE_TREE_CACHE_CONTROL: &str = "public, max-age=60, stale-while-revalidate=300";
 const CORP_CROSS_ORIGIN: &str = "cross-origin";
 const CROSS_ORIGIN_RESOURCE_POLICY_HEADER: &str = "cross-origin-resource-policy";
 const DEFAULT_CDN_HOST: &str = "cdn.iris.to";
+
+fn tree_response_cache_control(is_immutable: bool) -> &'static str {
+    if is_immutable {
+        IMMUTABLE_CACHE_CONTROL
+    } else {
+        MUTABLE_TREE_CACHE_CONTROL
+    }
+}
+
+fn etag_for_cid(cid: &Cid) -> String {
+    format!("\"{}\"", to_hex(&cid.hash))
+}
+
+fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|part| part.trim() == etag))
+}
 
 fn content_type_for_path(path: Option<&str>) -> &'static str {
     let filename = path.and_then(|p| p.rsplit('/').next()).unwrap_or("");
@@ -1362,8 +1382,23 @@ async fn serve_cid_with_range(
                 .unwrap();
         }
     };
+    let etag = etag_for_cid(cid);
+    let cache_control = tree_response_cache_control(is_immutable);
 
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    if range_header.is_none() && if_none_match_matches(&headers, &etag) {
+        let mut builder = Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, cache_control)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
+        if is_localhost {
+            builder = builder.header("X-Source", "local");
+        }
+        return builder.body(Body::empty()).unwrap();
+    }
+
     if let Some(range_str) = range_header {
         if let Some(parsed_range) = parse_byte_range(range_str, total_size) {
             let (start, end_inclusive) = match parsed_range {
@@ -1402,10 +1437,9 @@ async fn serve_cid_with_range(
                 .header(header::CONTENT_RANGE, content_range)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
-            if is_immutable {
-                builder = builder.header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL);
-            }
+                .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN)
+                .header(header::ETAG, etag.clone())
+                .header(header::CACHE_CONTROL, cache_control);
             if is_localhost {
                 builder = builder.header("X-Source", "local");
             }
@@ -1419,10 +1453,9 @@ async fn serve_cid_with_range(
         .header(header::CONTENT_LENGTH, total_size)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
-    if is_immutable {
-        builder = builder.header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL);
-    }
+        .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, cache_control);
     if is_localhost {
         builder = builder.header("X-Source", "local");
     }
