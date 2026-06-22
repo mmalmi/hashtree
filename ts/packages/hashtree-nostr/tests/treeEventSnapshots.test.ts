@@ -9,6 +9,7 @@ import {
   watchLatestTreeEventSnapshot,
   type TreeEventSnapshotInfo,
 } from '../src/treeEventSnapshots.js';
+import { HASHTREE_ROOT_KIND } from '../src/snapshot.js';
 import type { StoredNostrEvent } from '../src/events.js';
 import type { Nip19Like } from '../src/resolver/nostr.js';
 
@@ -29,7 +30,7 @@ function makeEvent(overrides: Partial<StoredNostrEvent> = {}): StoredNostrEvent 
     id: '1'.repeat(64),
     pubkey: '2'.repeat(64),
     created_at: 1_700_000_000,
-    kind: 30078,
+    kind: HASHTREE_ROOT_KIND,
     tags: [
       ['d', 'videos/demo'],
       ['l', 'hashtree'],

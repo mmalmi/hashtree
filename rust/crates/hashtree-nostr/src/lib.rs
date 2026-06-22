@@ -37,7 +37,8 @@ use nostr_sdk::{
 use serde::{Deserialize, Serialize};
 
 pub const NOSTR_EVENT_ENVELOPE_VERSION: u8 = 1;
-pub const HASHTREE_ROOT_KIND: u32 = 30078;
+pub const HASHTREE_ROOT_KIND: u32 = 30064;
+pub const HASHTREE_LEGACY_ROOT_KIND: u32 = 30078;
 pub const HASHTREE_LABEL: &str = "hashtree";
 pub const TAG_HASH: &str = "hash";
 pub const TAG_KEY: &str = "key";
@@ -57,6 +58,10 @@ const EVENT_BLOB_WRITE_CONCURRENCY: usize = 64;
 const NOSTR_EVENT_ITEM_FORMAT: &str = "nostr/event@1";
 const NOSTR_EVENT_PROJECTION_FORMAT: &str = "hashtree/nostr-event-index@1";
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
+
+pub fn is_hashtree_root_kind(kind: u32) -> bool {
+    kind == HASHTREE_ROOT_KIND || kind == HASHTREE_LEGACY_ROOT_KIND
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredNostrEvent {
@@ -429,7 +434,7 @@ pub fn parse_hashtree_root_event(
     event: &StoredNostrEvent,
 ) -> Result<Option<ParsedHashtreeRootEvent>, NostrEventStoreError> {
     let normalized = normalize_signed_event(event.clone())?;
-    if normalized.kind != HASHTREE_ROOT_KIND {
+    if !is_hashtree_root_kind(normalized.kind) {
         return Ok(None);
     }
 

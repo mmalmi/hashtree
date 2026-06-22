@@ -1,5 +1,9 @@
 import { MemoryStore, nhashDecode, toHex } from '@hashtree/core';
-import { readTreeEventSnapshot as readStoredTreeEventSnapshot } from '@hashtree/nostr';
+import {
+  HASHTREE_LEGACY_ROOT_KIND,
+  HASHTREE_ROOT_KIND,
+  readTreeEventSnapshot as readStoredTreeEventSnapshot,
+} from '@hashtree/nostr';
 import { nip19 } from 'nostr-tools';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SignedEvent } from '../src/relay/protocol';
@@ -10,7 +14,7 @@ function buildEvent(overrides: Partial<SignedEvent>): SignedEvent {
   return {
     id: 'evt1',
     pubkey: 'f'.repeat(64),
-    kind: 30078,
+    kind: HASHTREE_ROOT_KIND,
     content: '',
     tags: [],
     created_at: 1_700_000_000,
@@ -87,6 +91,21 @@ describe('parseTreeRootEvent', () => {
     expect(parsed?.hash).toBe(hash);
     expect(parsed?.selfEncryptedKey).toBe(selfEncryptedKey);
     expect(parsed?.visibility).toBe('private');
+  });
+
+  it('parses legacy NIP-78 root events', () => {
+    const hash = 'f'.repeat(64);
+    const event = buildEvent({
+      kind: HASHTREE_LEGACY_ROOT_KIND,
+      tags: [
+        ['d', 'legacy/root'],
+        ['l', 'hashtree'],
+        ['hash', hash],
+      ],
+    });
+
+    const parsed = parseTreeRootEvent(event);
+    expect(parsed?.hash).toBe(hash);
   });
 
   it('keeps discovery labels from l tags', () => {

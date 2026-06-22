@@ -84,8 +84,9 @@ pub use relay_bridge::{
     MeshEventStore, MeshRelayClient, SharedMeshEventStore, SharedMeshRelayClient,
 };
 pub use root_events::{
-    build_root_filter, hashtree_event_identifier, is_hashtree_labeled_event, pick_latest_event,
-    root_event_from_peer, PeerRootEvent, HASHTREE_KIND, HASHTREE_LABEL,
+    build_root_filter, hashtree_event_identifier, hashtree_root_kinds, is_hashtree_labeled_event,
+    is_hashtree_root_kind, pick_latest_event, root_event_from_peer, PeerRootEvent, HASHTREE_KIND,
+    HASHTREE_LABEL, HASHTREE_LEGACY_KIND,
 };
 pub use runtime_control::{
     can_track_source_peer, cleanup_stale_peers, create_signaling_event, dispatch_signaling_message,

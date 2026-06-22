@@ -22,7 +22,7 @@ println!("Root hash: {}", entry.root_hash);
 
 ## Event Format
 
-Trees are published as **kind 30078** (parameterized replaceable with label):
+Trees are published as **kind 30064** (parameterized replaceable with label). Readers also accept legacy **kind 30078** roots for compatibility:
 
 ```
 npub1abc.../treename/path/to/file.ext

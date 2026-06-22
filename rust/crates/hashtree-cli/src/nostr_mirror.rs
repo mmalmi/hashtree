@@ -8,6 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use hashtree_nostr::{
     CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
+    HASHTREE_ROOT_KIND,
 };
 use nostr::{
     Alphabet, Event, EventBuilder, Filter, Kind, PublicKey, SingleLetterTag, Tag, TagKind,
@@ -2136,7 +2137,7 @@ impl BackgroundNostrMirror {
             ));
         }
 
-        EventBuilder::new(Kind::Custom(30078), "")
+        EventBuilder::new(Kind::Custom(HASHTREE_ROOT_KIND as u16), "")
             .tags(tags)
             .custom_created_at(created_at)
     }

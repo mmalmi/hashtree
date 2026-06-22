@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HashTree, MemoryStore, nhashEncode, toHex, type CID, type HashTree } from '@hashtree/core';
 import { nip19 } from 'nostr-tools';
-import { storeTreeEventSnapshot } from '@hashtree/nostr';
+import { HASHTREE_ROOT_KIND, storeTreeEventSnapshot } from '@hashtree/nostr';
 import { __test__, initMediaHandler, registerMediaPort } from '../src/relay/mediaHandler';
 
 const ROOT: CID = { hash: Uint8Array.from({ length: 32 }, (_, i) => i), key: undefined };
@@ -554,7 +554,7 @@ describe('mediaHandler thumbnail aliases', () => {
     const snapshot = await storeTreeEventSnapshot(store, nip19, {
       id: '8'.repeat(64),
       pubkey: '9'.repeat(64),
-      kind: 30078,
+      kind: HASHTREE_ROOT_KIND,
       content: '',
       tags: [
         ['d', 'sites/snapshot'],

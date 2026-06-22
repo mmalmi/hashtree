@@ -5,7 +5,7 @@ use hashtree_core::{from_hex, nhash_encode, xor_keys, Cid, MemoryStore};
 use hashtree_nostr::{
     parse_tree_event_snapshot_permalink, read_tree_event_snapshot, resolve_snapshot_root_cid,
     serialize_tree_event_snapshot_permalink, store_tree_event_snapshot, StoredNostrEvent,
-    TreeEventSnapshotInfo, TreeEventSnapshotPermalink,
+    TreeEventSnapshotInfo, TreeEventSnapshotPermalink, HASHTREE_ROOT_KIND,
 };
 use nostr_sdk::{PublicKey, ToBech32};
 
@@ -14,7 +14,7 @@ fn event(overrides: Option<Vec<Vec<String>>>) -> StoredNostrEvent {
         id: "1".repeat(64),
         pubkey: "2".repeat(64),
         created_at: 1_700_000_000,
-        kind: 30078,
+        kind: HASHTREE_ROOT_KIND,
         tags: overrides.unwrap_or_else(|| {
             vec![
                 vec!["d".to_string(), "videos/demo".to_string()],

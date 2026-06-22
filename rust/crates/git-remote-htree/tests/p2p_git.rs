@@ -7,6 +7,7 @@ mod common;
 
 use common::create_test_repo;
 use common::test_relay::TestRelay;
+use git_remote_htree::nostr_client::KIND_HASHTREE_ROOT;
 use nostr::{Keys, ToBech32};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -359,7 +360,7 @@ fn matching_root_events(relay: &TestRelay, pubkey: &str, repo: &str) -> Vec<serd
         .stored_events()
         .into_iter()
         .filter(|event| {
-            event.get("kind").and_then(|value| value.as_u64()) == Some(30078)
+            event.get("kind").and_then(|value| value.as_u64()) == Some(KIND_HASHTREE_ROOT as u64)
                 && event.get("pubkey").and_then(|value| value.as_str()) == Some(pubkey)
                 && event
                     .get("tags")

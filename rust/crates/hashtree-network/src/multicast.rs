@@ -16,8 +16,8 @@ use tracing::{debug, warn};
 use crate::local_bus::LocalNostrBus;
 use crate::relay_bridge::SharedMeshEventStore;
 use crate::root_events::{
-    build_root_filter, is_hashtree_labeled_event, pick_latest_event, root_event_from_peer,
-    PeerRootEvent, HASHTREE_KIND, HASHTREE_LABEL,
+    build_root_filter, hashtree_root_kinds, is_hashtree_labeled_event, is_hashtree_root_kind,
+    pick_latest_event, root_event_from_peer, PeerRootEvent, HASHTREE_LABEL,
 };
 
 #[derive(Debug, Clone)]
@@ -250,7 +250,7 @@ impl MulticastNostrBus {
                 return;
             }
 
-            if event.kind == nostr_sdk::nostr::Kind::Custom(HASHTREE_KIND)
+            if is_hashtree_root_kind(event.kind)
                 && is_hashtree_labeled_event(&event)
                 && event.verify().is_ok()
             {
@@ -291,7 +291,7 @@ impl MulticastNostrBus {
                     subscription_id,
                     event,
                 } => {
-                    if event.kind == nostr_sdk::nostr::Kind::Custom(HASHTREE_KIND)
+                    if is_hashtree_root_kind(event.kind)
                         && is_hashtree_labeled_event(event)
                         && event.verify().is_ok()
                     {
@@ -328,7 +328,7 @@ impl MulticastNostrBus {
 
     async fn broadcast_known_root_updates(&self) -> Result<()> {
         let filter = Filter::new()
-            .kind(nostr_sdk::nostr::Kind::Custom(HASHTREE_KIND))
+            .kinds(hashtree_root_kinds())
             .author(self.keys.public_key())
             .custom_tag(
                 SingleLetterTag::lowercase(nostr_sdk::nostr::Alphabet::L),
@@ -351,6 +351,7 @@ impl MulticastNostrBus {
 mod tests {
     use super::*;
     use crate::relay_bridge::MeshEventStore;
+    use crate::root_events::HASHTREE_KIND;
     use anyhow::Result;
     use nostr_sdk::nostr::{Alphabet, EventBuilder, Kind, Tag, TagKind};
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -23,6 +23,11 @@ import {
   generateLinkKey,
   type TreeVisibility,
 } from '@hashtree/core';
+import {
+  HASHTREE_LABEL,
+  HASHTREE_ROOT_KIND,
+  HASHTREE_ROOT_KINDS,
+} from '../snapshot.js';
 
 // Nostr event structure (minimal)
 export interface NostrEvent {
@@ -344,14 +349,14 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
 
         const unsubscribe = nostrSubscribe(
           {
-            kinds: [30078],
+            kinds: [...HASHTREE_ROOT_KINDS],
             authors: [pubkey],
             '#d': [treeName],
           },
           (event) => {
             const dTag = event.tags.find(t => t[0] === 'd')?.[1];
             if (dTag !== treeName) return;
-            if (hasAnyLabel(event) && !hasLabel(event, 'hashtree')) return;
+            if (hasAnyLabel(event) && !hasLabel(event, HASHTREE_LABEL)) return;
 
             const hashAndKey = parseHashAndKey(event);
             if (!hashAndKey) return;
@@ -443,14 +448,14 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
         // Create new subscription for live updates
         const unsubscribe = nostrSubscribe(
           {
-            kinds: [30078],
+            kinds: [...HASHTREE_ROOT_KINDS],
             authors: [pubkey],
             '#d': [treeName],
           },
           (event) => {
             const dTag = event.tags.find(t => t[0] === 'd')?.[1];
             if (dTag !== treeName) return;
-            if (hasAnyLabel(event) && !hasLabel(event, 'hashtree')) return;
+            if (hasAnyLabel(event) && !hasLabel(event, HASHTREE_LABEL)) return;
 
             const subEntry = subscriptions.get(key);
             if (!subEntry) return;
@@ -613,7 +618,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
       // Build nostr event tags
       const tags: string[][] = [
         ['d', treeName],
-        ['l', 'hashtree'],
+        ['l', HASHTREE_LABEL],
         ['hash', hashHex],
       ];
 
@@ -787,7 +792,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
       // 2. Publish to network
       try {
         const success = await nostrPublish({
-          kind: 30078,
+          kind: HASHTREE_ROOT_KIND,
           content: '',
           tags,
           created_at: publishCreatedAt,
@@ -915,9 +920,9 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
 
       const unsubscribe = nostrSubscribe(
         {
-          kinds: [30078],
+          kinds: [...HASHTREE_ROOT_KINDS],
           authors: [pubkey],
-          '#l': ['hashtree'],
+          '#l': [HASHTREE_LABEL],
         },
         (event) => {
           const dTag = event.tags.find(t => t[0] === 'd')?.[1];
@@ -1089,11 +1094,11 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
       // Use now + 1 to ensure delete timestamp is strictly higher than any create event
       // This is critical for NIP-33: when timestamps are equal, event ID breaks the tie (random)
       nostrPublish({
-        kind: 30078,
+        kind: HASHTREE_ROOT_KIND,
         content: '',
         tags: [
           ['d', treeName],
-          ['l', 'hashtree'],
+          ['l', HASHTREE_LABEL],
           // No hash tag = deleted
         ],
         created_at: deleteCreatedAt,

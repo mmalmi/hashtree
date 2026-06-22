@@ -135,7 +135,7 @@ logical trees locally.
 
 ## 7. Mutable Roots via Nostr
 
-Root events use kind `30078` with NIP-33 replaceable semantics (`d` tag).
+Root events use kind `30064` with NIP-33 replaceable semantics (`d` tag). Readers SHOULD also accept legacy kind `30078` root events for compatibility.
 
 Required tags:
 

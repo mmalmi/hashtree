@@ -13,8 +13,20 @@ pub struct PeerRootEvent {
     pub peer_id: String,
 }
 
-pub const HASHTREE_KIND: u16 = 30078;
+pub const HASHTREE_KIND: u16 = 30064;
+pub const HASHTREE_LEGACY_KIND: u16 = 30078;
 pub const HASHTREE_LABEL: &str = "hashtree";
+
+pub fn hashtree_root_kinds() -> Vec<Kind> {
+    vec![
+        Kind::Custom(HASHTREE_KIND),
+        Kind::Custom(HASHTREE_LEGACY_KIND),
+    ]
+}
+
+pub fn is_hashtree_root_kind(kind: Kind) -> bool {
+    kind == Kind::Custom(HASHTREE_KIND) || kind == Kind::Custom(HASHTREE_LEGACY_KIND)
+}
 
 pub fn build_root_filter(owner_pubkey: &str, tree_name: &str) -> Option<Filter> {
     let author = PublicKey::from_hex(owner_pubkey)
@@ -22,7 +34,7 @@ pub fn build_root_filter(owner_pubkey: &str, tree_name: &str) -> Option<Filter> 
         .ok()?;
     Some(
         Filter::new()
-            .kind(Kind::Custom(HASHTREE_KIND))
+            .kinds(hashtree_root_kinds())
             .author(author)
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),

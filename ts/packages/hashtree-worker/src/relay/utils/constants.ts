@@ -43,8 +43,11 @@ export const KIND_ZAP_RECEIPT = 9735
 export const KIND_MUTE_LIST = 10000 // Mute list (deprecated, use 30000)
 export const KIND_FLAG_LIST = 16463 // Flagged/reported users list
 
-// NIP-78: App-specific data
+// NIP-78: App-specific data. Used as a legacy hashtree root kind.
 export const KIND_APP_DATA = 30078
+export const KIND_HASHTREE_ROOT = 30064
+export const KIND_HASHTREE_LEGACY_ROOT = KIND_APP_DATA
+export const KIND_HASHTREE_ROOTS = [KIND_HASHTREE_ROOT, KIND_HASHTREE_LEGACY_ROOT] as const
 
 // Long-form content
 export const KIND_LONG_FORM_CONTENT = 30023

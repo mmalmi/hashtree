@@ -1,7 +1,7 @@
 /**
  * Tree Root Subscription Handler
  *
- * Worker subscribes directly to tree root events (kind 30078 with #l=hashtree).
+ * Worker subscribes directly to tree root events (kind 30064 with legacy 30078 support).
  * Updates local cache and notifies main thread of changes.
  */
 import type { CID } from '@hashtree/core';

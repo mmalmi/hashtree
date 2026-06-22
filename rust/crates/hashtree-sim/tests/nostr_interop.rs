@@ -7,6 +7,9 @@ mod nostr_interop {
     use nostr_sdk::prelude::*;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    const HASHTREE_ROOT_KIND: u16 = 30064;
+    const HASHTREE_LEGACY_ROOT_KIND: u16 = 30078;
+
     fn unique_tree_name(prefix: &str) -> String {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -18,6 +21,7 @@ mod nostr_interop {
     async fn publish_event(
         relay_url: &str,
         keys: &Keys,
+        kind: u16,
         tags: Vec<Tag>,
         content: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +30,7 @@ mod nostr_interop {
         client.connect().await;
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            let event = EventBuilder::new(Kind::Custom(30078), content).tags(tags.clone());
+            let event = EventBuilder::new(Kind::Custom(kind), content).tags(tags.clone());
             match client.send_event_builder(event).await {
                 Ok(_) => break,
                 Err(err) if Instant::now() < deadline => {
@@ -72,7 +76,7 @@ mod nostr_interop {
             Tag::custom(TagKind::Custom("hash".into()), vec![hash_hex.clone()]),
         ];
 
-        publish_event(&relay_url, &keys, tags, "")
+        publish_event(&relay_url, &keys, HASHTREE_ROOT_KIND, tags, "")
             .await
             .expect("publish");
         wait_for_relay_events(&relay, 1).await;
@@ -108,7 +112,7 @@ mod nostr_interop {
 
         let tags = vec![Tag::identifier(tree_name.clone())];
 
-        publish_event(&relay_url, &keys, tags, &content)
+        publish_event(&relay_url, &keys, HASHTREE_LEGACY_ROOT_KIND, tags, &content)
             .await
             .expect("publish");
         wait_for_relay_events(&relay, 1).await;

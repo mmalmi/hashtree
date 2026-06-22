@@ -2,7 +2,8 @@
 //! Provides minimal types to allow code to compile without webrtc dependencies
 
 use anyhow::Result;
-use nostr::{nips::nip19::FromBech32, Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
+use git_remote_htree::nostr_client::hashtree_root_kinds;
+use nostr::{nips::nip19::FromBech32, Alphabet, Event, Filter, PublicKey, SingleLetterTag};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -236,7 +237,7 @@ pub fn build_root_filter(owner_pubkey: &str, tree_name: &str) -> Option<Filter> 
         .ok()?;
     Some(
         Filter::new()
-            .kind(Kind::Custom(30078))
+            .kinds(hashtree_root_kinds())
             .author(author)
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),

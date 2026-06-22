@@ -8,6 +8,7 @@ import {
 import type { StoredNostrEvent } from './events.js';
 import type { Nip19Like, NostrFilter } from './resolver/nostr.js';
 import {
+  HASHTREE_ROOT_KINDS,
   parseHashtreeRootEvent,
   readSignedNostrEventSnapshot,
   storeSignedNostrEventSnapshot,
@@ -196,7 +197,7 @@ export async function fetchLatestTreeEventSnapshot(
   }
 
   const events = await config.fetchEvents({
-    kinds: [30078],
+    kinds: [...HASHTREE_ROOT_KINDS],
     authors: [decoded.data],
     '#d': [treeName],
     limit: config.snapshotFetchLimit ?? DEFAULT_SNAPSHOT_FETCH_LIMIT,
@@ -269,7 +270,7 @@ export function watchLatestTreeEventSnapshot(
 
   const unsubscribe = config.subscribeEvents(
     {
-      kinds: [30078],
+      kinds: [...HASHTREE_ROOT_KINDS],
       authors: [pubkey],
       '#d': [treeName],
     },

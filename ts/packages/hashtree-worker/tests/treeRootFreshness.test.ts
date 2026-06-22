@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nip19 } from 'nostr-tools';
+import { HASHTREE_ROOT_KIND, HASHTREE_ROOT_KINDS } from '@hashtree/nostr';
 
 const getNdk = vi.fn();
 const ndkSubscribe = vi.fn();
@@ -46,7 +47,7 @@ describe('tree root freshness', () => {
     const fetchEvents = vi.fn().mockResolvedValue(new Set([{
       id: 'evt1',
       pubkey,
-      kind: 30078,
+      kind: HASHTREE_ROOT_KIND,
       content: '',
       tags: [
         ['d', treeName],
@@ -81,7 +82,7 @@ describe('tree root freshness', () => {
 
     expect(fetchEvents).toHaveBeenCalledWith(
       expect.objectContaining({
-        kinds: [30078],
+        kinds: [...HASHTREE_ROOT_KINDS],
         authors: [pubkey],
         '#d': [treeName],
       }),
@@ -100,7 +101,7 @@ describe('tree root freshness', () => {
     expect(ndkSubscribe).toHaveBeenCalledWith(
       `tree-${pubkey.slice(0, 8)}`,
       [{
-        kinds: [30078],
+        kinds: [...HASHTREE_ROOT_KINDS],
         authors: [pubkey],
       }],
       expect.objectContaining({

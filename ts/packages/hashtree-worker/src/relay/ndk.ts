@@ -19,6 +19,7 @@ import NDK, {
 } from 'ndk';
 import NDKCacheAdapterDexie from 'ndk-cache';
 import { verifyEvent, matchFilter } from 'nostr-tools';
+import { HASHTREE_LABEL, HASHTREE_ROOT_KIND, HASHTREE_ROOT_KINDS } from '@hashtree/nostr';
 import { NostrWasm } from './nostr-wasm';
 import { resolveWorkerPublicAssetUrl } from './publicAssetUrl';
 import type { SignedEvent, NostrFilter } from './protocol';
@@ -473,9 +474,9 @@ export async function republishTrees(
 
   // Fetch user's hashtree events from cache and relays
   const filter: NDKFilter = {
-    kinds: [30078],
+    kinds: [...HASHTREE_ROOT_KINDS],
     authors: [pubkey],
-    '#l': ['hashtree'],
+    '#l': [HASHTREE_LABEL],
   };
 
   // Fetch events (will check cache first)
@@ -522,7 +523,7 @@ export async function republishTrees(
         console.log('[Worker NDK] Signing:', dTag);
 
         const template = {
-          kind: 30078,
+          kind: HASHTREE_ROOT_KIND,
           created_at: Math.floor(Date.now() / 1000),
           content: event.content || '',
           tags: event.tags,
@@ -595,10 +596,10 @@ export async function republishTree(pubkey: string, treeName: string): Promise<b
 
   // Fetch the specific event
   const filter: NDKFilter = {
-    kinds: [30078],
+    kinds: [...HASHTREE_ROOT_KINDS],
     authors: [pubkey],
     '#d': [treeName],
-    '#l': ['hashtree'],
+    '#l': [HASHTREE_LABEL],
   };
 
   const events = await ndk.fetchEvents(filter);

@@ -290,7 +290,7 @@ fn published_root_event_count(relay: &TestRelay, tree_name: &str) -> usize {
         .expect("relay events")
         .iter()
         .filter(|event| {
-            event.kind == Kind::Custom(30078)
+            event.kind == Kind::Custom(HASHTREE_ROOT_KIND as u16)
                 && event.tags.iter().any(|tag| {
                     let values = tag.as_slice();
                     values.first().is_some_and(|value| value == "d")
@@ -307,7 +307,7 @@ fn latest_published_root_event(relay: &TestRelay, tree_name: &str) -> Option<Eve
         .expect("relay events")
         .iter()
         .filter(|event| {
-            event.kind == Kind::Custom(30078)
+            event.kind == Kind::Custom(HASHTREE_ROOT_KIND as u16)
                 && event.tags.iter().any(|tag| {
                     let values = tag.as_slice();
                     values.first().is_some_and(|value| value == "d")

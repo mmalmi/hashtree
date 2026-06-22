@@ -1,13 +1,10 @@
 use anyhow::{Context, Result};
-use git_remote_htree::nostr_client::resolve_identity;
-use nostr::{
-    Alphabet, Event, EventId, Filter, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32,
-};
+use git_remote_htree::nostr_client::{hashtree_root_kinds, resolve_identity};
+use nostr::{Alphabet, Event, EventId, Filter, PublicKey, SingleLetterTag, Timestamp, ToBech32};
 use nostr_sdk::Client;
 use std::collections::HashMap;
 use std::time::Duration;
 
-const KIND_APP_DATA: u16 = 30078;
 const LABEL_HASHTREE: &str = "hashtree";
 const LABEL_GIT: &str = "git";
 
@@ -53,7 +50,7 @@ async fn fetch_git_repos(author: PublicKey, relays: &[String]) -> Result<Vec<Str
     wait_for_connected_relay(&client).await?;
 
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_APP_DATA))
+        .kinds(hashtree_root_kinds())
         .author(author)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::L), LABEL_GIT)
         .limit(500);

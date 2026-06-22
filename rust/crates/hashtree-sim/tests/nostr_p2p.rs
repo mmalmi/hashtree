@@ -1,6 +1,6 @@
 #[cfg(feature = "nostr")]
 mod nostr_p2p {
-    use hashtree_network::{SignalingMessage, NOSTR_KIND_HASHTREE};
+    use hashtree_network::{SignalingMessage, HASHTREE_KIND, NOSTR_KIND_HASHTREE};
     use hashtree_sim::nostr_mesh::NostrMesh;
     use nostr::{Alphabet, Filter, Kind, SingleLetterTag};
 
@@ -21,7 +21,7 @@ mod nostr_p2p {
 
         let filter = Filter::new()
             .authors(vec![a_pub])
-            .kinds(vec![Kind::Custom(30078)])
+            .kinds(vec![Kind::Custom(HASHTREE_KIND)])
             .custom_tag(SingleLetterTag::lowercase(Alphabet::D), tree_name)
             .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree")
             .limit(10);

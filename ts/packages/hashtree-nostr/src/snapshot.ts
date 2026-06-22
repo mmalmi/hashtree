@@ -7,6 +7,15 @@ const MAX_SNAPSHOT_BYTES = 256 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+export const HASHTREE_ROOT_KIND = 30064;
+export const HASHTREE_LEGACY_ROOT_KIND = 30078;
+export const HASHTREE_ROOT_KINDS = [HASHTREE_ROOT_KIND, HASHTREE_LEGACY_ROOT_KIND] as const;
+export const HASHTREE_LABEL = 'hashtree';
+
+export function isHashtreeRootKind(kind: number): boolean {
+  return kind === HASHTREE_ROOT_KIND || kind === HASHTREE_LEGACY_ROOT_KIND;
+}
+
 export interface ParsedHashtreeRootEvent {
   event: StoredNostrEvent;
   treeName: string;
@@ -155,7 +164,7 @@ function hasAnyLabel(event: Pick<StoredNostrEvent, 'tags'>): boolean {
 
 export function parseHashtreeRootEvent(event: StoredNostrEvent): ParsedHashtreeRootEvent | null {
   const normalized = normalizeSignedNostrEvent(event);
-  if (normalized.kind !== 30078) {
+  if (!isHashtreeRootKind(normalized.kind)) {
     return null;
   }
 
@@ -165,7 +174,7 @@ export function parseHashtreeRootEvent(event: StoredNostrEvent): ParsedHashtreeR
     return null;
   }
 
-  if (hasAnyLabel(normalized) && !hasLabel(normalized, 'hashtree')) {
+  if (hasAnyLabel(normalized) && !hasLabel(normalized, HASHTREE_LABEL)) {
     return null;
   }
 

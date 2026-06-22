@@ -1,8 +1,8 @@
 //! Nostr client for publishing and fetching git repository references
 //!
-//! Uses kind 30078 (application-specific data) with hashtree structure:
+//! Uses kind 30064 hashtree root events, while still reading legacy kind 30078 roots:
 //! {
-//!   "kind": 30078,
+//!   "kind": 30064,
 //!   "tags": [
 //!     ["d", "<repo-name>"],
 //!     ["l", "hashtree"]
@@ -69,7 +69,10 @@ use repo_metadata::{
     validate_repo_publish_relays,
 };
 
-/// Event kind for application-specific data (NIP-78)
+/// Event kind for hashtree roots.
+pub const KIND_HASHTREE_ROOT: u16 = 30064;
+
+/// Legacy event kind for hashtree roots originally stored as NIP-78 app data.
 pub const KIND_APP_DATA: u16 = 30078;
 
 /// NIP-34 event kinds
@@ -79,6 +82,17 @@ pub const KIND_STATUS_APPLIED: u16 = 1631;
 pub const KIND_STATUS_CLOSED: u16 = 1632;
 pub const KIND_STATUS_DRAFT: u16 = 1633;
 pub const KIND_REPO_ANNOUNCEMENT: u16 = 30617;
+
+pub fn hashtree_root_kinds() -> Vec<Kind> {
+    vec![
+        Kind::Custom(KIND_HASHTREE_ROOT),
+        Kind::Custom(KIND_APP_DATA),
+    ]
+}
+
+pub fn is_hashtree_root_kind(kind: Kind) -> bool {
+    kind == Kind::Custom(KIND_HASHTREE_ROOT) || kind == Kind::Custom(KIND_APP_DATA)
+}
 
 /// Label for hashtree events
 pub const LABEL_HASHTREE: &str = "hashtree";
@@ -885,7 +899,7 @@ impl NostrClient {
 
         let start = std::time::Instant::now();
 
-        // Build filter for kind 30078 events from this author with matching d-tag
+        // Build filter for hashtree root events from this author with matching d-tag
         let author = PublicKey::from_hex(&self.pubkey)
             .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
 
@@ -1458,9 +1472,9 @@ impl NostrClient {
             .unwrap_or_else(|| self.pubkey.clone())
     }
 
-    /// Publish repository to nostr as kind 30078 event
+    /// Publish repository to nostr as kind 30064 event
     /// Format:
-    ///   kind: 30078
+    ///   kind: 30064
     ///   tags: [["d", repo_name], ["l", "hashtree"], ["hash", root_hash], ["key"|"encryptedKey", encryption_key]]
     ///   content: <merkle-root-hash>
     /// Returns: (npub URL, relay result with connected/failed details)
@@ -1582,7 +1596,7 @@ impl NostrClient {
         append_repo_discovery_labels(&mut tags, repo_name);
 
         // Sign the event
-        let event = EventBuilder::new(Kind::Custom(KIND_APP_DATA), root_hash)
+        let event = EventBuilder::new(Kind::Custom(KIND_HASHTREE_ROOT), root_hash)
             .tags(tags)
             .custom_created_at(publish_created_at)
             .sign_with_keys(keys)

@@ -1,4 +1,4 @@
-import { parseHashtreeRootEvent } from '@hashtree/nostr';
+import { HASHTREE_ROOT_KINDS, parseHashtreeRootEvent } from '@hashtree/nostr';
 import { nip19 } from 'nostr-tools';
 import { getCachedRootInfo, setCachedRoot } from '../relay/treeRootCache.js';
 export const DEFAULT_ROOT_RESOLVE_TIMEOUT_MS = 15_000;
@@ -227,7 +227,7 @@ async function queryLatestTreeRoot(relays, npub, treeName, timeoutMs, settleMs) 
         let settleTimer = null;
         let timeoutId = null;
         const subscription = openRelaySubscriptions(relays, {
-            kinds: [30078],
+            kinds: [...HASHTREE_ROOT_KINDS],
             authors: [pubkey],
             '#d': [treeName],
             limit: MAX_TREE_ROOT_EVENTS,
@@ -369,7 +369,7 @@ export async function watchRootPathFromRelays(tree, relays, npub, path, onUpdate
         }, timeoutMs);
     }
     subscription = openRelaySubscriptions(relayList, {
-        kinds: [30078],
+        kinds: [...HASHTREE_ROOT_KINDS],
         authors: [pubkey],
         '#d': [treeName],
         limit: MAX_TREE_ROOT_EVENTS,

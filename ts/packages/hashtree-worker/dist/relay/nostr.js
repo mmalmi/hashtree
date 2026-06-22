@@ -7,7 +7,7 @@
  *
  * Used for:
  * - WebRTC signaling (kind 25050 ephemeral)
- * - Tree root resolution (kind 30078)
+ * - Tree root resolution (kind 30064, with legacy 30078 support)
  */
 import { SimplePool } from 'nostr-tools';
 export class NostrManager {

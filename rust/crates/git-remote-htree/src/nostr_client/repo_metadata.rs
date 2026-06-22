@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::{
-    Event, KIND_APP_DATA, KIND_REPO_ANNOUNCEMENT, KIND_STATUS_APPLIED, LABEL_GIT, LABEL_HASHTREE,
+    hashtree_root_kinds, Event, KIND_REPO_ANNOUNCEMENT, KIND_STATUS_APPLIED, LABEL_GIT,
+    LABEL_HASHTREE,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +108,7 @@ pub(super) fn list_git_repo_announcements(events: &[Event]) -> Vec<GitRepoAnnoun
 
 pub(super) fn build_git_repo_list_filter(author: PublicKey) -> Filter {
     Filter::new()
-        .kind(Kind::Custom(KIND_APP_DATA))
+        .kinds(hashtree_root_kinds())
         .author(author)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::L), LABEL_GIT)
         .limit(500)
@@ -115,7 +116,7 @@ pub(super) fn build_git_repo_list_filter(author: PublicKey) -> Filter {
 
 pub(super) fn build_repo_event_filter(author: PublicKey, repo_name: &str) -> Filter {
     Filter::new()
-        .kind(Kind::Custom(KIND_APP_DATA))
+        .kinds(hashtree_root_kinds())
         .author(author)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), repo_name)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::L), LABEL_HASHTREE)

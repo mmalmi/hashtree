@@ -1,7 +1,7 @@
 mod common;
 
 use common::test_relay::{TestRelay, TestRelayOptions};
-use git_remote_htree::nostr_client::NostrClient;
+use git_remote_htree::nostr_client::{NostrClient, KIND_HASHTREE_ROOT};
 use hashtree_config::Config;
 use nostr::prelude::Keys;
 use std::io::{Read, Write};
@@ -17,8 +17,8 @@ fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
     let hanging_relay = TestRelay::with_options(
         19631,
         TestRelayOptions {
-            // Simulate a relay that never answers kind 30078 REQ.
-            ignore_req_kinds: vec![30078],
+            // Simulate a relay that never answers hashtree-root REQ.
+            ignore_req_kinds: vec![KIND_HASHTREE_ROOT as u64],
             ..Default::default()
         },
     );
@@ -70,7 +70,7 @@ fn test_fetch_refs_retries_after_empty_repo_lookup_before_reporting_not_found() 
         TestRelayOptions {
             // First repo lookup returns EOSE without the historical event, so the
             // client needs to retry discovery instead of surfacing a false "not found".
-            respond_empty_req_kinds_once: vec![30078],
+            respond_empty_req_kinds_once: vec![KIND_HASHTREE_ROOT as u64],
             ..Default::default()
         },
     );

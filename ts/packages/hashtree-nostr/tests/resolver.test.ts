@@ -10,6 +10,7 @@ import { join } from 'path';
 import NDK, { NDKEvent, NDKPrivateKeySigner, type NDKFilter, type NDKSubscriptionOptions } from '@nostr-dev-kit/ndk';
 import { nip19, generateSecretKey, getPublicKey } from 'nostr-tools';
 import { createNostrRefResolver, type NostrFilter, type NostrEvent } from '../src/resolver/nostr.js';
+import { HASHTREE_LEGACY_ROOT_KIND, HASHTREE_ROOT_KIND } from '../src/snapshot.js';
 import { toHex, fromHex, cid } from '@hashtree/core';
 
 // NDK requires WebSocket to be available globally in Node.js
@@ -131,7 +132,7 @@ function createNostrFunctions(ndk: NDK) {
         onEvent({
           id: e.id,
           pubkey: e.pubkey,
-          kind: e.kind ?? 30078,
+          kind: e.kind ?? HASHTREE_ROOT_KIND,
           content: e.content,
           tags: e.tags,
           created_at: e.created_at ?? 0,
@@ -309,7 +310,7 @@ describe('NostrRefResolver', () => {
     await new Promise(r => setTimeout(r, 100));
 
     const legacyEvent = new NDKEvent(ndk);
-    legacyEvent.kind = 30078;
+    legacyEvent.kind = HASHTREE_LEGACY_ROOT_KIND;
     legacyEvent.content = JSON.stringify({ hash: legacyHash });
     legacyEvent.tags = [['d', treeName]];
     await legacyEvent.publish();
@@ -344,7 +345,7 @@ describe('NostrRefResolver', () => {
     await new Promise(r => setTimeout(r, 100));
 
     const event = new NDKEvent(ndk);
-    event.kind = 30078;
+    event.kind = HASHTREE_ROOT_KIND;
     event.content = '';
     event.tags = [
       ['d', treeName],
@@ -481,7 +482,7 @@ describe('NostrRefResolver', () => {
     await new Promise(r => setTimeout(r, 100));
 
     const newerEvent = new NDKEvent(ndk);
-    newerEvent.kind = 30078;
+    newerEvent.kind = HASHTREE_ROOT_KIND;
     newerEvent.created_at = newerCreatedAt;
     newerEvent.content = '';
     newerEvent.tags = [
@@ -494,7 +495,7 @@ describe('NostrRefResolver', () => {
     await new Promise(r => setTimeout(r, 500));
 
     const olderEvent = new NDKEvent(ndk);
-    olderEvent.kind = 30078;
+    olderEvent.kind = HASHTREE_ROOT_KIND;
     olderEvent.created_at = olderCreatedAt;
     olderEvent.content = '';
     olderEvent.tags = [
@@ -544,7 +545,7 @@ describe('NostrRefResolver', () => {
     await new Promise(r => setTimeout(r, 100));
 
     const eventA = new NDKEvent(ndk);
-    eventA.kind = 30078;
+    eventA.kind = HASHTREE_ROOT_KIND;
     eventA.created_at = createdAt;
     eventA.content = '';
     eventA.tags = [
@@ -555,7 +556,7 @@ describe('NostrRefResolver', () => {
     await eventA.sign();
 
     const eventB = new NDKEvent(ndk);
-    eventB.kind = 30078;
+    eventB.kind = HASHTREE_ROOT_KIND;
     eventB.created_at = createdAt;
     eventB.content = '';
     eventB.tags = [

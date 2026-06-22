@@ -7,7 +7,7 @@
 //! Uses WebRTC peers first, falls back to Blossom HTTP servers
 
 use anyhow::Result;
-use git_remote_htree::nostr_client::load_keys;
+use git_remote_htree::nostr_client::{hashtree_root_kinds, is_hashtree_root_kind, load_keys};
 use hashtree_core::{from_hex, to_hex, Cid};
 use nostr_sdk::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -111,7 +111,7 @@ fn build_exact_tree_filter(key: &str) -> Result<Filter> {
         .map_err(|_| anyhow::anyhow!("Invalid npub in pinned ref key: {}", key))?;
 
     Ok(Filter::new()
-        .kind(Kind::Custom(30078))
+        .kinds(hashtree_root_kinds())
         .author(author)
         .custom_tag(
             SingleLetterTag::lowercase(Alphabet::D),
@@ -122,7 +122,7 @@ fn build_exact_tree_filter(key: &str) -> Result<Filter> {
 
 fn build_author_tree_filter(author: PublicKey) -> Filter {
     Filter::new()
-        .kind(Kind::Custom(30078))
+        .kinds(hashtree_root_kinds())
         .author(author)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree")
 }
@@ -653,7 +653,7 @@ impl BackgroundSync {
         Ok(())
     }
 
-    /// Subscribe to own trees (kind 30078 events from our pubkey)
+    /// Subscribe to own trees from our pubkey.
     async fn subscribe_own_trees(&self) -> Result<()> {
         let filter = build_author_tree_filter(self.my_pubkey);
 
@@ -708,7 +708,7 @@ impl BackgroundSync {
 
         // Subscribe to all followed users' hashtree events
         let filter = Filter::new()
-            .kind(Kind::Custom(30078))
+            .kinds(hashtree_root_kinds())
             .authors(pubkeys.clone())
             .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "hashtree");
 
@@ -740,7 +740,7 @@ impl BackgroundSync {
             v.len() >= 2 && v[0] == "l" && v[1] == "hashtree"
         });
 
-        if !has_hashtree_tag || event.kind != Kind::Custom(30078) {
+        if !has_hashtree_tag || !is_hashtree_root_kind(event.kind) {
             return;
         }
 
@@ -885,6 +885,7 @@ pub struct SyncStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_remote_htree::nostr_client::KIND_HASHTREE_ROOT;
     use nostr_sdk::Keys;
     use std::fs;
     use tempfile::TempDir;
@@ -957,7 +958,7 @@ mod tests {
             nip44::Version::V2,
         )
         .expect("encrypt private root key");
-        let event = EventBuilder::new(Kind::Custom(30078), "")
+        let event = EventBuilder::new(Kind::Custom(KIND_HASHTREE_ROOT), "")
             .tags(vec![
                 Tag::identifier("backup".to_string()),
                 Tag::custom(

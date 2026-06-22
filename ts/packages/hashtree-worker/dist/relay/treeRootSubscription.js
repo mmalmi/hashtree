@@ -2,11 +2,11 @@
 /**
  * Tree Root Subscription Handler
  *
- * Worker subscribes directly to tree root events (kind 30078 with #l=hashtree).
+ * Worker subscribes directly to tree root events (kind 30064 with legacy 30078 support).
  * Updates local cache and notifies main thread of changes.
  */
 import { SimplePool } from 'nostr-tools';
-import { storeTreeEventSnapshot } from '@hashtree/nostr';
+import { HASHTREE_LABEL, HASHTREE_ROOT_KINDS, isHashtreeRootKind, storeTreeEventSnapshot, } from '@hashtree/nostr';
 import { getNdk, subscribe as ndkSubscribe, unsubscribe as ndkUnsubscribe } from './ndk';
 import { getCachedRoot, getTreeRootCacheStore, setCachedRoot } from './treeRootCache';
 import { nip19 } from 'nostr-tools';
@@ -177,7 +177,7 @@ async function fetchTreeRootEventsFromNdk(pubkeyHex, treeName, timeoutMs) {
         return [];
     try {
         const events = await withTimeout(ndk.fetchEvents({
-            kinds: [30078],
+            kinds: [...HASHTREE_ROOT_KINDS],
             authors: [pubkeyHex],
             '#d': [treeName],
             limit: MAX_HISTORICAL_TREE_ROOT_EVENTS,
@@ -200,7 +200,7 @@ async function fetchTreeRootEventsFromRelays(pubkeyHex, treeName, timeoutMs) {
     const pool = new SimplePool();
     try {
         const events = await withTimeout(pool.querySync(relayUrls, {
-            kinds: [30078],
+            kinds: [...HASHTREE_ROOT_KINDS],
             authors: [pubkeyHex],
             '#d': [treeName],
             limit: MAX_HISTORICAL_TREE_ROOT_EVENTS,
@@ -387,7 +387,7 @@ export function subscribeToTreeRoots(pubkeyHex) {
     const subId = `tree-${pubkeyHex.slice(0, 8)}`;
     activeSubscriptions.set(pubkeyHex, subId);
     ndkSubscribe(subId, [{
-            kinds: [30078],
+            kinds: [...HASHTREE_ROOT_KINDS],
             authors: [pubkeyHex],
         }], {
         cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY,
@@ -405,7 +405,7 @@ export function unsubscribeFromTreeRoots(pubkeyHex) {
     }
 }
 /**
- * Handle incoming tree root event (kind 30078 with #l=hashtree)
+ * Handle incoming tree root event.
  * Called from worker.ts event router
  */
 function hasLabel(event, label) {
@@ -421,7 +421,7 @@ export async function handleTreeRootEvent(event) {
         return;
     const treeName = dTag[1];
     // Accept unlabeled legacy events, ignore other labeled apps.
-    if (hasAnyLabel(event) && !hasLabel(event, 'hashtree'))
+    if (hasAnyLabel(event) && !hasLabel(event, HASHTREE_LABEL))
         return;
     const parsed = parseTreeRootEvent(event);
     if (!parsed)
@@ -455,9 +455,9 @@ export async function handleTreeRootEvent(event) {
  * Check if an event is a tree root event
  */
 export function isTreeRootEvent(event) {
-    if (event.kind !== 30078)
+    if (!isHashtreeRootKind(event.kind))
         return false;
-    if (hasLabel(event, 'hashtree'))
+    if (hasLabel(event, HASHTREE_LABEL))
         return true;
     return !hasAnyLabel(event);
 }

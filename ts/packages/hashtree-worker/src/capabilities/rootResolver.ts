@@ -1,5 +1,5 @@
 import type { CID, HashTree } from '@hashtree/core';
-import { parseHashtreeRootEvent, type NostrEvent } from '@hashtree/nostr';
+import { HASHTREE_ROOT_KINDS, parseHashtreeRootEvent, type NostrEvent } from '@hashtree/nostr';
 import { nip19 } from 'nostr-tools';
 import { getCachedRootInfo, setCachedRoot } from '../relay/treeRootCache.js';
 
@@ -306,7 +306,7 @@ async function queryLatestTreeRoot(
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const subscription = openRelaySubscriptions(relays, {
-      kinds: [30078],
+      kinds: [...HASHTREE_ROOT_KINDS],
       authors: [pubkey],
       '#d': [treeName],
       limit: MAX_TREE_ROOT_EVENTS,
@@ -471,7 +471,7 @@ export async function watchRootPathFromRelays(
   }
 
   subscription = openRelaySubscriptions(relayList, {
-    kinds: [30078],
+    kinds: [...HASHTREE_ROOT_KINDS],
     authors: [pubkey],
     '#d': [treeName],
     limit: MAX_TREE_ROOT_EVENTS,

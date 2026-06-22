@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryStore, fromHex, toHex, type CID } from '@hashtree/core';
+import { HASHTREE_ROOT_KIND } from '@hashtree/nostr';
 
 const decodeMock = vi.hoisted(() => vi.fn());
 const socketPlanMock = vi.hoisted(() => vi.fn());
@@ -59,7 +60,7 @@ function makeEvent(treeName: string, hash: string, createdAt = 1_700_000_000, ke
   return {
     id: `${hash}${hash}`.slice(0, 64),
     pubkey: PUBKEY,
-    kind: 30078,
+    kind: HASHTREE_ROOT_KIND,
     content: '',
     tags: [
       ['d', treeName],

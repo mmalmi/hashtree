@@ -12,6 +12,7 @@
 import NDK, { NDKEvent, NDKPrivateKeySigner, NDKSubscriptionCacheUsage, } from 'ndk';
 import NDKCacheAdapterDexie from 'ndk-cache';
 import { verifyEvent, matchFilter } from 'nostr-tools';
+import { HASHTREE_LABEL, HASHTREE_ROOT_KIND, HASHTREE_ROOT_KINDS } from '@hashtree/nostr';
 import { NostrWasm } from './nostr-wasm';
 import { resolveWorkerPublicAssetUrl } from './publicAssetUrl';
 // NDK instance - initialized lazily
@@ -393,9 +394,9 @@ export async function republishTrees(pubkey, signFn, pushToBlossomFn, prefix) {
     console.log('[Worker NDK] Republishing trees for', pubkey, decodedPrefix ? `with prefix: ${decodedPrefix}` : '');
     // Fetch user's hashtree events from cache and relays
     const filter = {
-        kinds: [30078],
+        kinds: [...HASHTREE_ROOT_KINDS],
         authors: [pubkey],
-        '#l': ['hashtree'],
+        '#l': [HASHTREE_LABEL],
     };
     // Fetch events (will check cache first)
     const events = await ndk.fetchEvents(filter);
@@ -434,7 +435,7 @@ export async function republishTrees(pubkey, signFn, pushToBlossomFn, prefix) {
                 // Unsigned event - sign it using worker's signing flow
                 console.log('[Worker NDK] Signing:', dTag);
                 const template = {
-                    kind: 30078,
+                    kind: HASHTREE_ROOT_KIND,
                     created_at: Math.floor(Date.now() / 1000),
                     content: event.content || '',
                     tags: event.tags,
@@ -500,10 +501,10 @@ export async function republishTree(pubkey, treeName) {
     console.log('[Worker NDK] Republishing single tree:', pubkey, treeName);
     // Fetch the specific event
     const filter = {
-        kinds: [30078],
+        kinds: [...HASHTREE_ROOT_KINDS],
         authors: [pubkey],
         '#d': [treeName],
-        '#l': ['hashtree'],
+        '#l': [HASHTREE_LABEL],
     };
     const events = await ndk.fetchEvents(filter);
     if (events.size === 0) {

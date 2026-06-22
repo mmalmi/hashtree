@@ -3,6 +3,7 @@
 mod common;
 
 use common::{htree_bin, write_keys_file};
+use git_remote_htree::nostr_client::{KIND_APP_DATA, KIND_HASHTREE_ROOT};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind, Timestamp, ToBech32};
 use serde_json::Value;
 use std::fs;
@@ -19,8 +20,6 @@ macro_rules! event_builder {
         EventBuilder::new($kind, $content).tags($tags)
     };
 }
-
-const KIND_APP_DATA: u16 = 30078;
 
 fn publish_event(relay_url: &str, event: &Event) {
     use futures::{SinkExt, StreamExt};
@@ -49,9 +48,14 @@ fn publish_event(relay_url: &str, event: &Event) {
     });
 }
 
-fn build_repo_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Event {
+fn build_repo_event_with_kind(
+    author: &Keys,
+    repo_name: &str,
+    created_at_secs: u64,
+    kind: u16,
+) -> Event {
     event_builder!(
-        Kind::Custom(KIND_APP_DATA),
+        Kind::Custom(kind),
         "ab".repeat(32),
         [
             Tag::custom(TagKind::custom("d"), vec![repo_name.to_string()]),
@@ -65,9 +69,17 @@ fn build_repo_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Eve
     .expect("build repo event")
 }
 
+fn build_repo_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Event {
+    build_repo_event_with_kind(author, repo_name, created_at_secs, KIND_HASHTREE_ROOT)
+}
+
+fn build_legacy_repo_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Event {
+    build_repo_event_with_kind(author, repo_name, created_at_secs, KIND_APP_DATA)
+}
+
 fn build_non_git_event(author: &Keys, repo_name: &str, created_at_secs: u64) -> Event {
     event_builder!(
-        Kind::Custom(KIND_APP_DATA),
+        Kind::Custom(KIND_HASHTREE_ROOT),
         "cd".repeat(32),
         [
             Tag::custom(TagKind::custom("d"), vec![repo_name.to_string()]),
@@ -144,7 +156,7 @@ fn setup_fixture() -> ReposFixture {
 fn test_repos_lists_git_repos_for_explicit_owner() {
     let fixture = setup_fixture();
 
-    fixture.publish(&build_repo_event(
+    fixture.publish(&build_legacy_repo_event(
         &fixture.owner_keys,
         "zeta/tools",
         1_700_300_000,

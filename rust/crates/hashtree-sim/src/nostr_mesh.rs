@@ -4,15 +4,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use hashtree_network::{
-    decrement_htl_with_policy, should_forward_htl, validate_mesh_frame, MeshNostrFrame,
-    PeerHTLConfig, SignalingMessage, MESH_EVENT_POLICY, MESH_MAX_HTL, NOSTR_KIND_HASHTREE,
+    decrement_htl_with_policy, is_hashtree_root_kind, should_forward_htl, validate_mesh_frame,
+    MeshNostrFrame, PeerHTLConfig, SignalingMessage, HASHTREE_KIND, MESH_EVENT_POLICY,
+    MESH_MAX_HTL, NOSTR_KIND_HASHTREE,
 };
 use nostr::{
     Alphabet, Event, EventBuilder, EventId, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag,
     TagKind,
 };
-
-const HASHTREE_KIND: u16 = 30078;
 
 #[derive(Debug, Default, Clone)]
 pub struct MeshStats {
@@ -282,7 +281,7 @@ impl NostrMesh {
     pub fn resolve_hashtree_hash(&self, node_id: &str, tree_name: &str) -> Option<String> {
         let node = self.nodes.get(node_id)?;
         for event in &node.received {
-            if event.kind != Kind::Custom(HASHTREE_KIND) {
+            if !is_hashtree_root_kind(event.kind) {
                 continue;
             }
             if !has_tag_value(event, "d", tree_name) {

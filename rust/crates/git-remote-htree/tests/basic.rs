@@ -8,6 +8,7 @@
 mod common;
 
 use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
+use git_remote_htree::nostr_client::KIND_HASHTREE_ROOT;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -280,7 +281,7 @@ fn test_public_push_publishes_nip34_repo_announcement() {
     assert_git_push_ok(&push);
 
     let root_commit = git_root_commit(repo.path(), "HEAD");
-    let root_event = wait_for_event_by_kind_and_d(&relay, 30078, repo_name);
+    let root_event = wait_for_event_by_kind_and_d(&relay, KIND_HASHTREE_ROOT as u64, repo_name);
     assert!(event_has_tag(&root_event, &["l", "hashtree"]));
     assert!(event_has_tag(&root_event, &["l", "git"]));
 

@@ -6,6 +6,8 @@ import {
   parseHashtreeRootEvent,
   readSignedNostrEventSnapshot,
   storeSignedNostrEventSnapshot,
+  HASHTREE_LEGACY_ROOT_KIND,
+  HASHTREE_ROOT_KIND,
   type ParsedHashtreeRootEvent,
 } from '../src/snapshot.js';
 import type { StoredNostrEvent } from '../src/events.js';
@@ -15,7 +17,7 @@ function makeEvent(overrides: Partial<StoredNostrEvent> = {}): StoredNostrEvent 
     id: '1'.repeat(64),
     pubkey: '2'.repeat(64),
     created_at: 1_700_000_000,
-    kind: 30078,
+    kind: HASHTREE_ROOT_KIND,
     tags: [
       ['d', 'videos/demo'],
       ['l', 'hashtree'],
@@ -78,6 +80,12 @@ describe('Nostr event snapshots', () => {
     expect(parsed.visibility).toBe('public');
     expect(parsed.labels).toEqual(['hashtree']);
     expect(parsed.rootCid.key).toBeDefined();
+  });
+
+  it('parses legacy NIP-78 hashtree root events', () => {
+    const parsed = parseHashtreeRootEvent(makeEvent({ kind: HASHTREE_LEGACY_ROOT_KIND }));
+
+    expect(parsed?.treeName).toBe('videos/demo');
   });
 
   it('parses link-visible root events without exposing the CHK directly', () => {

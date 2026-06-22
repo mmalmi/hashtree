@@ -4,7 +4,7 @@
 //!
 //! Key format: "npub1.../treename"
 //!
-//! Uses kind 30078 (APP_DATA) events with:
+//! Uses kind 30064 hashtree root events with legacy kind 30078 read compatibility:
 //! - d-tag: tree name (NIP-33 replaceable)
 //! - l-tag: "hashtree" (for filtering)
 //! - hash-tag: content hash (always present)
@@ -28,7 +28,8 @@ use tokio::task::JoinSet;
 
 use hashtree_core::{decrypt, xor_keys};
 
-const HASHTREE_KIND: u16 = 30078;
+const HASHTREE_KIND: u16 = 30064;
+const HASHTREE_LEGACY_KIND: u16 = 30078;
 const HASHTREE_LABEL: &str = "hashtree";
 const DEFAULT_SUCCESSFUL_RELAY_QUORUM: usize = 2;
 const DEFAULT_SOFT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -81,6 +82,17 @@ fn has_any_label(event: &Event) -> bool {
 
 fn is_hashtree_event(event: &Event) -> bool {
     has_label(event, HASHTREE_LABEL) || !has_any_label(event)
+}
+
+fn hashtree_kinds() -> Vec<Kind> {
+    vec![
+        Kind::Custom(HASHTREE_KIND),
+        Kind::Custom(HASHTREE_LEGACY_KIND),
+    ]
+}
+
+fn is_hashtree_kind(kind: Kind) -> bool {
+    kind == Kind::Custom(HASHTREE_KIND) || kind == Kind::Custom(HASHTREE_LEGACY_KIND)
 }
 
 fn event_identifier(event: &Event) -> Option<String> {
@@ -193,7 +205,9 @@ where
 
 fn is_matching_tree_event(event: &VerifiedEvent, tree_name: &str) -> bool {
     let event = event.as_event();
-    event_identifier(event).as_deref() == Some(tree_name) && is_hashtree_event(event)
+    is_hashtree_kind(event.kind)
+        && event_identifier(event).as_deref() == Some(tree_name)
+        && is_hashtree_event(event)
 }
 
 async fn await_publish_result<F, T, E>(future: F) -> Result<T, ResolverError>
@@ -326,7 +340,7 @@ impl NostrRootResolver {
 
     fn build_tree_filter(pubkey: PublicKey, tree_name: &str) -> Filter {
         Filter::new()
-            .kind(Kind::Custom(HASHTREE_KIND))
+            .kinds(hashtree_kinds())
             .author(pubkey)
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
@@ -946,7 +960,7 @@ impl RootResolver for NostrRootResolver {
 
         // Filter for all hashtree events from this author
         let filter = Filter::new()
-            .kind(Kind::Custom(HASHTREE_KIND))
+            .kinds(hashtree_kinds())
             .author(pubkey)
             .custom_tag(SingleLetterTag::lowercase(Alphabet::L), HASHTREE_LABEL);
 

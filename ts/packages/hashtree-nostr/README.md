@@ -49,7 +49,7 @@ Resolve `npub/treename` references to merkle root hashes via Nostr events.
 
 ### Event Format
 
-Trees are published as **kind 30078** (parameterized replaceable with label):
+Trees are published as **kind 30064** (parameterized replaceable with label). Readers also accept legacy **kind 30078** roots for compatibility:
 
 ```
 npub1abc.../treename/path/to/file.ext
@@ -96,6 +96,7 @@ When app code signs replaceable events directly, publishing several updates insi
 ```typescript
 import {
   createReplaceablePublishQueue,
+  HASHTREE_ROOT_KIND,
   replaceableEventCoordinateFromTemplate,
 } from '@hashtree/nostr';
 
@@ -103,12 +104,12 @@ const publishQueue = createReplaceablePublishQueue();
 
 await publishQueue.publish({
   coordinate: replaceableEventCoordinateFromTemplate(pubkey, {
-    kind: 30078,
+    kind: HASHTREE_ROOT_KIND,
     tags: [['d', treeName]],
   }),
   publish: async (createdAt) => {
     const signed = await signEvent({
-      kind: 30078,
+      kind: HASHTREE_ROOT_KIND,
       created_at: createdAt,
       tags: [['d', treeName], ['hash', rootHash]],
       content: '',
@@ -120,7 +121,7 @@ await publishQueue.publish({
 
 ## Signed Tree Snapshots
 
-For immutable permalinks, store a copy of the signed kind `30078` root event as a plain hashtree blob. The snapshot gives you one signed root even when relays do not answer, and you can still watch for newer events later.
+For immutable permalinks, store a copy of the signed root event as a plain hashtree blob. The snapshot gives you one signed root even when relays do not answer, and you can still watch for newer events later.
 
 For live mutable app data, prefer resolving the current root from relays first. Snapshots are for permalinks, offline reuse, and signed historical captures, not for replacing a live source lookup.
 

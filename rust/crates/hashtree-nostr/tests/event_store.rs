@@ -11,7 +11,7 @@ use hashtree_nostr::{
     parse_verified_hashtree_root_event, read_signed_event_snapshot,
     resolve_self_encrypted_root_cid, store_signed_event_snapshot,
     stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventStore, StoredNostrEvent,
-    VerifiedEvent, VerifiedStoredNostrEvent,
+    VerifiedEvent, VerifiedStoredNostrEvent, HASHTREE_LEGACY_ROOT_KIND, HASHTREE_ROOT_KIND,
 };
 use nostr_sdk::{EventBuilder, JsonUtil, Keys, Kind};
 
@@ -522,7 +522,7 @@ fn stores_and_reads_public_signed_event_snapshots() {
                 "1195275911eb877e6687b4f8a3495de1e0719280e7fc1fb229a9de37b2d87bea",
                 &"a".repeat(64),
                 10,
-                30078,
+                HASHTREE_ROOT_KIND,
                 "",
                 &"2".repeat(128),
             )
@@ -554,7 +554,7 @@ fn parses_hashtree_root_events_from_signed_snapshots() {
             "1195275911eb877e6687b4f8a3495de1e0719280e7fc1fb229a9de37b2d87bea",
             &"a".repeat(64),
             10,
-            30078,
+            HASHTREE_ROOT_KIND,
             "",
             &"2".repeat(128),
         )
@@ -571,6 +571,29 @@ fn parses_hashtree_root_events_from_signed_snapshots() {
 }
 
 #[test]
+fn parses_legacy_hashtree_root_events() {
+    let event = StoredNostrEvent {
+        tags: vec![
+            vec!["d".to_string(), "videos/demo".to_string()],
+            vec!["l".to_string(), "hashtree".to_string()],
+            vec!["hash".to_string(), "3".repeat(64)],
+        ],
+        ..event(
+            "1195275911eb877e6687b4f8a3495de1e0719280e7fc1fb229a9de37b2d87bea",
+            &"a".repeat(64),
+            10,
+            HASHTREE_LEGACY_ROOT_KIND,
+            "",
+            &"2".repeat(128),
+        )
+    };
+
+    let parsed = parse_hashtree_root_event(&event).unwrap().unwrap();
+
+    assert_eq!(parsed.tree_name, "videos/demo");
+}
+
+#[test]
 fn builds_and_resolves_private_hashtree_root_events() {
     let owner = Keys::generate();
     let root_hash = [0x31; 32];
@@ -584,7 +607,7 @@ fn builds_and_resolves_private_hashtree_root_events() {
         .expect("hashtree root");
     let resolved = resolve_self_encrypted_root_cid(&parsed, &owner).expect("resolve private key");
 
-    assert_eq!(event.kind.as_u16(), 30078);
+    assert_eq!(u32::from(event.kind.as_u16()), HASHTREE_ROOT_KIND);
     assert_eq!(parsed.tree_name, "main");
     assert_eq!(parsed.visibility, TreeVisibility::Private);
     assert_eq!(parsed.root_cid.key, None);
