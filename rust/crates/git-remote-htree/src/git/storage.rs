@@ -2460,7 +2460,9 @@ mod tests {
             };
             let path = dst.join(&entry.name);
             match entry.link_type {
-                LinkType::Dir => export_tree_to_fs(runtime, tree, &entry_cid, &path),
+                LinkType::Dir | LinkType::Fanout => {
+                    export_tree_to_fs(runtime, tree, &entry_cid, &path)
+                }
                 LinkType::Blob | LinkType::File => {
                     let data = runtime
                         .block_on(tree.get(&entry_cid, None))

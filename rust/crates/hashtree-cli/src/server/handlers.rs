@@ -697,7 +697,7 @@ async fn list_directory_json(
                 "type": match entry.link_type {
                     LinkType::Blob => "blob",
                     LinkType::File => "file",
-                    LinkType::Dir => "dir",
+                    LinkType::Dir | LinkType::Fanout => "dir",
                 },
             })
         }).collect::<Vec<_>>(),

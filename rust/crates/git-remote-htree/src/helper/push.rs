@@ -85,7 +85,7 @@ impl UploadQueueItem {
 
     pub(super) fn needs_tree_decode(&self) -> bool {
         match self.link_type {
-            None | Some(LinkType::File | LinkType::Dir) => true,
+            None | Some(LinkType::File | LinkType::Dir | LinkType::Fanout) => true,
             // Size 0 is ambiguous in older trees that may not have recorded sizes.
             // Positive-size Blob links at or below the default chunk size are
             // definite leaves for git-remote's default hashtree writer.

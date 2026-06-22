@@ -718,7 +718,7 @@ impl HashtreeStore {
                         }
                         stack.push((link.hash, false));
                     }
-                    LinkType::Dir => {
+                    LinkType::Dir | LinkType::Fanout => {
                         stack.push((link.hash, count_bytes));
                     }
                 }
