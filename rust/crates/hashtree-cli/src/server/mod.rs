@@ -28,6 +28,7 @@ use axum::{
     Router,
 };
 use futures::{future::poll_fn, pin_mut, FutureExt};
+use hashtree_core::Cid;
 use hyper::body::Incoming;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
@@ -41,7 +42,7 @@ use std::future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tower::{Service, ServiceExt as _};
 use tower_http::cors::CorsLayer;
@@ -327,6 +328,25 @@ impl HashtreeServer {
     /// Set active upstream Nostr relays for HTTP resolver operations.
     pub fn with_nostr_relay_urls(mut self, relays: Vec<String>) -> Self {
         self.state.nostr_relay_urls = relays;
+        self
+    }
+
+    /// Seed mutable root cache entries before the server starts.
+    pub fn with_cached_tree_roots(self, roots: Vec<(String, Cid)>) -> Self {
+        if let Ok(mut cache) = self.state.tree_root_cache.lock() {
+            let now = Instant::now();
+            for (key, cid) in roots {
+                cache.insert(
+                    key,
+                    CachedTreeRootEntry {
+                        cid,
+                        source: "embedded-bootstrap",
+                        root_event: None,
+                        cached_at: now,
+                    },
+                );
+            }
+        }
         self
     }
 
@@ -681,6 +701,34 @@ mod tests {
         assert!(!is_resource_exhaustion_error(
             &io::Error::from_raw_os_error(libc::ECONNRESET)
         ));
+    }
+
+    #[test]
+    fn server_builder_seeds_initial_tree_roots() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let hash = from_hex("1111111111111111111111111111111111111111111111111111111111111111")?;
+        let key = from_hex("2222222222222222222222222222222222222222222222222222222222222222")?;
+        let cid = Cid {
+            hash,
+            key: Some(key),
+        };
+
+        let server = HashtreeServer::new(store, "127.0.0.1:0".to_string())
+            .with_cached_tree_roots(vec![("npub1example/sites".to_string(), cid.clone())]);
+        let cached = server
+            .state
+            .tree_root_cache
+            .lock()
+            .unwrap()
+            .get("npub1example/sites")
+            .cloned()
+            .expect("seeded root");
+
+        assert_eq!(cached.cid, cid);
+        assert_eq!(cached.source, "embedded-bootstrap");
+        assert!(cached.root_event.is_none());
+        Ok(())
     }
 
     #[tokio::test]

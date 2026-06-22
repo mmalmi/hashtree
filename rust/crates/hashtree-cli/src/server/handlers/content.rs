@@ -144,8 +144,8 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                             }
                             None
                         }
-                        UpstreamBlossomQueryResult::Indeterminate => {
-                            upstream_metrics.note_indeterminate_miss();
+                        UpstreamBlossomQueryResult::Indeterminate { reason } => {
+                            upstream_metrics.note_indeterminate_miss(reason);
                             None
                         }
                     })
@@ -1232,13 +1232,13 @@ pub(super) async fn query_webrtc_peers(
 enum UpstreamBlossomQueryResult {
     Hit { data: Vec<u8>, server: String },
     DefiniteMiss,
-    Indeterminate,
+    Indeterminate { reason: String },
 }
 
 enum UpstreamBlossomServerResult {
     Hit { data: Vec<u8>, server: String },
     NotFound,
-    Indeterminate,
+    Indeterminate { reason: String },
 }
 
 /// Query upstream Blossom servers for content by hash.
@@ -1252,9 +1252,8 @@ pub(super) async fn query_upstream_blossom(
 ) -> Option<(Vec<u8>, String)> {
     match query_upstream_blossom_result(client, servers, hash_hex).await {
         UpstreamBlossomQueryResult::Hit { data, server } => Some((data, server)),
-        UpstreamBlossomQueryResult::DefiniteMiss | UpstreamBlossomQueryResult::Indeterminate => {
-            None
-        }
+        UpstreamBlossomQueryResult::DefiniteMiss
+        | UpstreamBlossomQueryResult::Indeterminate { .. } => None,
     }
 }
 
@@ -1266,7 +1265,9 @@ async fn query_upstream_blossom_result(
     use sha2::{Digest, Sha256};
 
     if servers.is_empty() {
-        return UpstreamBlossomQueryResult::Indeterminate;
+        return UpstreamBlossomQueryResult::Indeterminate {
+            reason: "no upstream Blossom servers configured".to_string(),
+        };
     }
 
     let mut pending = FuturesUnordered::new();
@@ -1297,18 +1298,26 @@ async fn query_upstream_blossom_result(
                                 server,
                             }
                         } else {
+                            let reason = format!(
+                                "{} hash mismatch expected {} got {}",
+                                server,
+                                &hash_hex[..16.min(hash_hex.len())],
+                                &computed[..16.min(computed.len())]
+                            );
                             tracing::warn!(
                                 "Hash mismatch from {}: expected {}, got {}",
                                 server,
                                 &hash_hex[..16.min(hash_hex.len())],
                                 &computed[..16.min(computed.len())]
                             );
-                            UpstreamBlossomServerResult::Indeterminate
+                            UpstreamBlossomServerResult::Indeterminate { reason }
                         }
                     }
                     Err(err) => {
                         tracing::debug!("Upstream {} body read error: {}", server, err);
-                        UpstreamBlossomServerResult::Indeterminate
+                        UpstreamBlossomServerResult::Indeterminate {
+                            reason: format!("{server} body read error: {err}"),
+                        }
                     }
                 },
                 Ok(resp) => {
@@ -1316,26 +1325,32 @@ async fn query_upstream_blossom_result(
                     if resp.status() == StatusCode::NOT_FOUND {
                         UpstreamBlossomServerResult::NotFound
                     } else {
-                        UpstreamBlossomServerResult::Indeterminate
+                        UpstreamBlossomServerResult::Indeterminate {
+                            reason: format!("{server} returned {}", resp.status()),
+                        }
                     }
                 }
                 Err(e) => {
                     tracing::debug!("Upstream {} error: {}", server, e);
-                    UpstreamBlossomServerResult::Indeterminate
+                    UpstreamBlossomServerResult::Indeterminate {
+                        reason: format!("{server} request error: {e}"),
+                    }
                 }
             }
         });
     }
 
     let mut all_explicit_not_found = true;
+    let mut last_indeterminate_reason = None;
     while let Some(result) = pending.next().await {
         match result {
             UpstreamBlossomServerResult::Hit { data, server } => {
                 return UpstreamBlossomQueryResult::Hit { data, server };
             }
             UpstreamBlossomServerResult::NotFound => {}
-            UpstreamBlossomServerResult::Indeterminate => {
+            UpstreamBlossomServerResult::Indeterminate { reason } => {
                 all_explicit_not_found = false;
+                last_indeterminate_reason = Some(reason);
             }
         }
     }
@@ -1343,7 +1358,10 @@ async fn query_upstream_blossom_result(
     if all_explicit_not_found {
         UpstreamBlossomQueryResult::DefiniteMiss
     } else {
-        UpstreamBlossomQueryResult::Indeterminate
+        UpstreamBlossomQueryResult::Indeterminate {
+            reason: last_indeterminate_reason
+                .unwrap_or_else(|| "all upstream Blossom requests were indeterminate".to_string()),
+        }
     }
 }
 

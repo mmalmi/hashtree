@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.72 - 2026-06-22
+
+### Changed
+
+- Published mutable hashtree roots as Nostr kind `30064` while keeping legacy
+  kind `30078` read/query compatibility.
+- Added embedded daemon bootstrap roots for native hosts that need to serve
+  app-provided hashtree roots before relay resolution catches up.
+- Lowered browser embedded storage/social graph defaults and allowed explicit
+  browser settings to use smaller LMDB map sizes.
+
+### Fixed
+
+- Reported the last indeterminate upstream Blossom miss reason in daemon status
+  to make native/browser root and blob fetch diagnosis clearer.
+- Fixed chunked-file reads to follow explicit child link types so raw file
+  chunks that resemble MessagePack tree nodes are not mis-decoded.
+- Updated architecture docs to describe kind `30064` roots with legacy `30078`
+  compatibility.
+
 ## 0.2.71 - 2026-06-17
 
 ### Fixed

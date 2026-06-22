@@ -140,7 +140,7 @@ pub struct UpstreamNostrSubscription {
     pub tasks: Vec<JoinHandle<()>>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct UpstreamBlossomFetchSnapshot {
     pub lookup_attempts: u64,
     pub hits: u64,
@@ -148,6 +148,7 @@ pub struct UpstreamBlossomFetchSnapshot {
     pub explicit_misses: u64,
     pub indeterminate_misses: u64,
     pub miss_cache_hits: u64,
+    pub last_indeterminate_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -158,6 +159,7 @@ pub struct UpstreamBlossomFetchMetrics {
     explicit_misses: AtomicU64,
     indeterminate_misses: AtomicU64,
     miss_cache_hits: AtomicU64,
+    last_indeterminate_reason: StdMutex<Option<String>>,
 }
 
 impl UpstreamBlossomFetchMetrics {
@@ -174,8 +176,12 @@ impl UpstreamBlossomFetchMetrics {
         self.explicit_misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn note_indeterminate_miss(&self) {
+    pub fn note_indeterminate_miss(&self, reason: impl Into<String>) {
         self.indeterminate_misses.fetch_add(1, Ordering::Relaxed);
+        let reason = reason.into();
+        if let Ok(mut last_reason) = self.last_indeterminate_reason.lock() {
+            *last_reason = Some(reason.chars().take(512).collect());
+        }
     }
 
     pub fn note_miss_cache_hit(&self) {
@@ -190,6 +196,11 @@ impl UpstreamBlossomFetchMetrics {
             explicit_misses: self.explicit_misses.load(Ordering::Relaxed),
             indeterminate_misses: self.indeterminate_misses.load(Ordering::Relaxed),
             miss_cache_hits: self.miss_cache_hits.load(Ordering::Relaxed),
+            last_indeterminate_reason: self
+                .last_indeterminate_reason
+                .lock()
+                .ok()
+                .and_then(|reason| reason.clone()),
         }
     }
 }

@@ -221,7 +221,7 @@ impl<S: Store> HashTree<S> {
         }
 
         // Build tree from chunks
-        let (root_hash, root_key) = self.build_tree_internal(links, Some(size)).await?;
+        let (root_hash, root_key, _) = self.build_tree_internal(links, Some(size)).await?;
         Ok((
             Cid {
                 hash: root_hash,
@@ -349,7 +349,7 @@ impl<S: Store> HashTree<S> {
         .await?;
 
         // Build tree from chunks
-        let (root_hash, root_key) = self.build_tree_internal(links, Some(total_size)).await?;
+        let (root_hash, root_key, _) = self.build_tree_internal(links, Some(total_size)).await?;
         Ok((
             Cid {
                 hash: root_hash,
@@ -423,12 +423,12 @@ impl<S: Store> HashTree<S> {
         &self,
         links: Vec<Link>,
         total_size: Option<u64>,
-    ) -> Result<(Hash, Option<[u8; 32]>), HashTreeError> {
+    ) -> Result<(Hash, Option<[u8; 32]>, LinkType), HashTreeError> {
         // Single link with matching size - return directly
         if links.len() == 1 {
             if let Some(ts) = total_size {
                 if links[0].size == ts {
-                    return Ok((links[0].hash, links[0].key));
+                    return Ok((links[0].hash, links[0].key, links[0].link_type));
                 }
             }
         }
@@ -448,7 +448,7 @@ impl<S: Store> HashTree<S> {
                     .put(hash, encrypted)
                     .await
                     .map_err(|e| HashTreeError::Store(e.to_string()))?;
-                return Ok((hash, Some(key)));
+                return Ok((hash, Some(key), LinkType::File));
             }
 
             // Unencrypted path
@@ -457,21 +457,21 @@ impl<S: Store> HashTree<S> {
                 .put(hash, data)
                 .await
                 .map_err(|e| HashTreeError::Store(e.to_string()))?;
-            return Ok((hash, None));
+            return Ok((hash, None, LinkType::File));
         }
 
         // Too many links - create subtrees
         let mut sub_links = Vec::new();
         for batch in links.chunks(self.max_links) {
             let batch_size: u64 = batch.iter().map(|l| l.size).sum();
-            let (hash, key) =
+            let (hash, key, link_type) =
                 Box::pin(self.build_tree_internal(batch.to_vec(), Some(batch_size))).await?;
             sub_links.push(Link {
                 hash,
                 name: None,
                 size: batch_size,
                 key,
-                link_type: LinkType::File, // Internal tree node
+                link_type,
                 meta: None,
             });
         }
@@ -537,6 +537,30 @@ impl<S: Store> HashTree<S> {
         Ok(())
     }
 
+    fn decode_linked_file_node(
+        link: &Link,
+        data: &[u8],
+    ) -> Result<Option<TreeNode>, HashTreeError> {
+        match link.link_type {
+            LinkType::File => match decode_tree_node(data) {
+                Ok(node) => Ok(Some(node)),
+                Err(_) if link.size == data.len() as u64 => Ok(None),
+                Err(err) => Err(HashTreeError::Codec(err)),
+            },
+            LinkType::Blob => {
+                if link.size == data.len() as u64 {
+                    return Ok(None);
+                }
+
+                match decode_tree_node(data) {
+                    Ok(node) if node.node_type == LinkType::File => Ok(Some(node)),
+                    _ => Ok(None),
+                }
+            }
+            LinkType::Dir | LinkType::Fanout => Ok(None),
+        }
+    }
+
     /// Assemble encrypted chunks from tree
     async fn assemble_encrypted_chunks_limited(
         &self,
@@ -564,9 +588,8 @@ impl<S: Store> HashTree<S> {
             let decrypted = decrypt_chk(&encrypted_child, &chunk_key)
                 .map_err(|e| HashTreeError::Encryption(e.to_string()))?;
 
-            if is_tree_node(&decrypted) {
+            if let Some(child_node) = Self::decode_linked_file_node(link, &decrypted)? {
                 // Intermediate tree node - recurse
-                let child_node = decode_tree_node(&decrypted)?;
                 let child_data = Box::pin(self.assemble_encrypted_chunks_limited(
                     &child_node,
                     max_size,
@@ -638,7 +661,7 @@ impl<S: Store> HashTree<S> {
         }
 
         // Build tree from chunks (uses encryption if enabled)
-        let (root_hash, root_key) = self.build_tree_internal(links, Some(size)).await?;
+        let (root_hash, root_key, _) = self.build_tree_internal(links, Some(size)).await?;
         Ok((
             Cid {
                 hash: root_hash,
@@ -1098,8 +1121,7 @@ impl<S: Store> HashTree<S> {
             let decrypted_child = decrypt_chk(&encrypted_child, &chunk_key)
                 .map_err(|e| HashTreeError::Encryption(e.to_string()))?;
 
-            if is_tree_node(&decrypted_child) {
-                let child_node = decode_tree_node(&decrypted_child)?;
+            if let Some(child_node) = Self::decode_linked_file_node(link, &decrypted_child)? {
                 Box::pin(self.append_encrypted_range(&child_node, start, end, child_start, result))
                     .await?;
                 continue;
@@ -1214,9 +1236,8 @@ impl<S: Store> HashTree<S> {
                 .map_err(|e| HashTreeError::Store(e.to_string()))?
                 .ok_or_else(|| HashTreeError::MissingChunk(to_hex(&link.hash)))?;
 
-            if is_tree_node(&child_data) {
+            if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 // Intermediate node - recurse
-                let child_node = decode_tree_node(&child_data)?;
                 Box::pin(self.collect_chunk_offsets_recursive(&child_node, chunks, offset)).await?;
             } else {
                 // Leaf chunk
@@ -1248,8 +1269,7 @@ impl<S: Store> HashTree<S> {
                 .map_err(|e| HashTreeError::Store(e.to_string()))?
                 .ok_or_else(|| HashTreeError::MissingChunk(to_hex(&link.hash)))?;
 
-            if is_tree_node(&child_data) {
-                let child_node = decode_tree_node(&child_data)?;
+            if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 parts.push(
                     Box::pin(self.assemble_chunks_limited(&child_node, max_size, bytes_read))
                         .await?,
@@ -1303,8 +1323,7 @@ impl<S: Store> HashTree<S> {
                 .map_err(|e| HashTreeError::Store(e.to_string()))?
                 .ok_or_else(|| HashTreeError::MissingChunk(to_hex(&link.hash)))?;
 
-            if is_tree_node(&child_data) {
-                let child_node = decode_tree_node(&child_data)?;
+            if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 chunks.extend(Box::pin(self.collect_chunks(&child_node)).await?);
             } else {
                 chunks.push(child_data);

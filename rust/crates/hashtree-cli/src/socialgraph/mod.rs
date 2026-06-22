@@ -59,6 +59,7 @@ const PROFILE_SEARCH_ROOT_FILE: &str = "profile-search-root.msgpack";
 const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
 const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
 const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MIN_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const SOCIALGRAPH_MAX_DBS: u32 = 16;
 const PROFILE_SEARCH_INDEX_ORDER: usize = 64;
 const PROFILE_SEARCH_PREFIX: &str = "p:";
@@ -1798,9 +1799,10 @@ fn ensure_social_graph_mapsize_with_env_flags(
 }
 
 fn social_graph_map_size(requested_bytes: Option<u64>) -> Result<usize> {
-    let requested = requested_bytes
-        .unwrap_or(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES)
-        .max(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES);
+    let requested = match requested_bytes {
+        Some(bytes) => bytes.max(MIN_SOCIALGRAPH_MAP_SIZE_BYTES),
+        None => DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES,
+    };
     let page_size = page_size_bytes() as u64;
     let rounded = requested
         .checked_add(page_size.saturating_sub(1))

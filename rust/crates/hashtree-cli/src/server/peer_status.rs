@@ -244,6 +244,7 @@ pub(super) async fn daemon_status(
             "hit_bytes": upstream_blossom_fetch.hit_bytes,
             "explicit_misses": upstream_blossom_fetch.explicit_misses,
             "indeterminate_misses": upstream_blossom_fetch.indeterminate_misses,
+            "last_indeterminate_reason": upstream_blossom_fetch.last_indeterminate_reason,
             "miss_cache_hits": upstream_blossom_fetch.miss_cache_hits,
         },
         "nostr_relays": state.nostr_relay_urls.len(),

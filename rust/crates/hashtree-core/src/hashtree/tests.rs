@@ -10,6 +10,20 @@ fn make_tree() -> (Arc<MemoryStore>, HashTree<MemoryStore>) {
     (store, tree)
 }
 
+fn invalid_tree_shape_blob() -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct Shape {
+        l: Vec<()>,
+        t: u8,
+    }
+
+    rmp_serde::to_vec_named(&Shape {
+        l: Vec::new(),
+        t: 98,
+    })
+    .unwrap()
+}
+
 #[tokio::test]
 async fn test_put_and_read_blob() {
     let (_store, tree) = make_tree();
@@ -32,6 +46,34 @@ async fn test_put_and_read_file_small() {
 
     let read_data = tree.read_file(&cid.hash).await.unwrap();
     assert_eq!(read_data, Some(data.to_vec()));
+}
+
+#[tokio::test]
+async fn test_chunked_file_leaf_can_look_like_invalid_tree_node() {
+    let store = Arc::new(MemoryStore::new());
+    let mut data = invalid_tree_shape_blob();
+    let chunk_size = data.len();
+    data.extend_from_slice(b"tail");
+    let tree = HashTree::new(
+        HashTreeConfig::new(store)
+            .with_chunk_size(chunk_size)
+            .public(),
+    );
+
+    let (cid, size) = tree.put_file(&data).await.unwrap();
+
+    assert_eq!(size, data.len() as u64);
+    assert_eq!(tree.read_file(&cid.hash).await.unwrap(), Some(data.clone()));
+    assert_eq!(
+        tree.read_file_range(&cid.hash, 1, Some((data.len() - 1) as u64))
+            .await
+            .unwrap(),
+        Some(data[1..data.len() - 1].to_vec())
+    );
+    assert_eq!(
+        tree.read_file_chunks(&cid.hash).await.unwrap().concat(),
+        data
+    );
 }
 
 #[tokio::test]

@@ -86,6 +86,27 @@ impl<S: Store> TreeReader<S> {
         }
     }
 
+    fn decode_linked_file_node(link: &Link, data: &[u8]) -> Result<Option<TreeNode>, ReaderError> {
+        match link.link_type {
+            LinkType::File => match decode_tree_node(data) {
+                Ok(node) => Ok(Some(node)),
+                Err(_) if link.size == data.len() as u64 => Ok(None),
+                Err(err) => Err(ReaderError::Codec(err)),
+            },
+            LinkType::Blob => {
+                if link.size == data.len() as u64 {
+                    return Ok(None);
+                }
+
+                match decode_tree_node(data) {
+                    Ok(node) if node.node_type == LinkType::File => Ok(Some(node)),
+                    _ => Ok(None),
+                }
+            }
+            LinkType::Dir | LinkType::Fanout => Ok(None),
+        }
+    }
+
     pub fn new(store: Arc<S>) -> Self {
         Self { store }
     }
@@ -207,9 +228,8 @@ impl<S: Store> TreeReader<S> {
             let decrypted = decrypt_chk(&encrypted_child, &chunk_key)
                 .map_err(|e| ReaderError::Decryption(e.to_string()))?;
 
-            if is_tree_node(&decrypted) {
+            if let Some(child_node) = Self::decode_linked_file_node(link, &decrypted)? {
                 // Intermediate tree node - recurse
-                let child_node = decode_tree_node(&decrypted)?;
                 let child_data = Box::pin(self.assemble_encrypted_chunks(&child_node)).await?;
                 parts.push(child_data);
             } else {
@@ -383,9 +403,8 @@ impl<S: Store> TreeReader<S> {
                 .map_err(|e| ReaderError::Store(e.to_string()))?
                 .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
 
-            if is_tree_node(&child_data) {
+            if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 // Intermediate node - recurse
-                let child_node = decode_tree_node(&child_data).map_err(ReaderError::Codec)?;
                 Box::pin(self.collect_chunk_offsets_recursive(&child_node, chunks, offset)).await?;
             } else {
                 // Leaf chunk
@@ -409,9 +428,8 @@ impl<S: Store> TreeReader<S> {
                 .map_err(|e| ReaderError::Store(e.to_string()))?
                 .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
 
-            if is_tree_node(&child_data) {
+            if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 // Nested tree - recurse
-                let child_node = decode_tree_node(&child_data).map_err(ReaderError::Codec)?;
                 parts.push(Box::pin(self.assemble_chunks(&child_node)).await?);
             } else {
                 // Leaf blob
@@ -461,8 +479,7 @@ impl<S: Store> TreeReader<S> {
                 .map_err(|e| ReaderError::Store(e.to_string()))?
                 .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
 
-            if is_tree_node(&child_data) {
-                let child_node = decode_tree_node(&child_data).map_err(ReaderError::Codec)?;
+            if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 chunks.extend(Box::pin(self.collect_chunks(&child_node)).await?);
             } else {
                 chunks.push(child_data);
@@ -833,6 +850,20 @@ mod tests {
 
     fn make_store() -> Arc<MemoryStore> {
         Arc::new(MemoryStore::new())
+    }
+
+    fn invalid_tree_shape_blob() -> Vec<u8> {
+        #[derive(serde::Serialize)]
+        struct Shape {
+            l: Vec<()>,
+            t: u8,
+        }
+
+        rmp_serde::to_vec_named(&Shape {
+            l: Vec::new(),
+            t: 98,
+        })
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1230,6 +1261,35 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 50);
         assert_eq!(result, data[300..].to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_chunked_raw_leaf_can_look_like_invalid_tree_node() {
+        let store = make_store();
+        let mut data = invalid_tree_shape_blob();
+        let chunk_size = data.len();
+        data.extend_from_slice(b"tail");
+
+        let config = BuilderConfig::new(store.clone())
+            .with_chunk_size(chunk_size)
+            .public();
+        let builder = TreeBuilder::new(config);
+        let reader = TreeReader::new(store);
+
+        let (cid, _size) = builder.put(&data).await.unwrap();
+
+        let full = reader.read_file(&cid.hash).await.unwrap().unwrap();
+        assert_eq!(full, data);
+
+        let range = reader
+            .read_file_range(&cid.hash, 1, Some((data.len() - 1) as u64))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(range, data[1..data.len() - 1].to_vec());
+
+        let chunks = reader.read_file_chunks(&cid.hash).await.unwrap();
+        assert_eq!(chunks.concat(), data);
     }
 
     #[tokio::test]

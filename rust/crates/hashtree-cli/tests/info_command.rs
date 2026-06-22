@@ -137,6 +137,7 @@ async fn info_fetches_missing_hash_via_local_daemon() {
             config_dir: Some(config_dir.clone()),
             bind_address: "127.0.0.1:0".to_string(),
             relays: None,
+            initial_tree_roots: Vec::new(),
             extra_routes: None,
             cors: None,
         })

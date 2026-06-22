@@ -1,13 +1,19 @@
 use anyhow::{Context, Result};
 use hashtree_cli::daemon::{EmbeddedDaemonInfo, EmbeddedDaemonOptions};
 use hashtree_cli::Config;
+use hashtree_core::Cid;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+
+const BROWSER_STORAGE_MAX_SIZE_GB: u64 = 1;
+const BROWSER_SOCIAL_GRAPH_DB_MAX_SIZE_GB: u64 = 1;
+const BROWSER_SPAMBOX_DB_MAX_SIZE_GB: u64 = 0;
 
 #[derive(Debug, Clone)]
 pub struct HostDaemonOptions {
     pub state_root: PathBuf,
     pub bind_address: String,
+    pub initial_tree_roots: Vec<(String, Cid)>,
 }
 
 impl HostDaemonOptions {
@@ -15,7 +21,13 @@ impl HostDaemonOptions {
         Self {
             state_root: state_root.into(),
             bind_address: "127.0.0.1:0".to_string(),
+            initial_tree_roots: Vec::new(),
         }
+    }
+
+    pub fn with_initial_tree_roots(mut self, roots: Vec<(String, Cid)>) -> Self {
+        self.initial_tree_roots = roots;
+        self
     }
 }
 
@@ -31,6 +43,7 @@ pub struct HostDaemonRuntime {
     runtime: tokio::runtime::Runtime,
     info: Option<EmbeddedDaemonInfo>,
     bind_address: String,
+    initial_tree_roots: Vec<(String, Cid)>,
     config_dir: PathBuf,
     data_dir: PathBuf,
 }
@@ -39,6 +52,9 @@ pub struct HostDaemonRuntime {
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
 struct BrowserSettings {
+    storage_max_size_gb: Option<u64>,
+    social_graph_db_max_size_gb: Option<u64>,
+    spambox_db_max_size_gb: Option<u64>,
     nostr_relays: Option<Vec<String>>,
     blossom_read_servers: Option<Vec<String>>,
     blossom_write_servers: Option<Vec<String>>,
@@ -80,6 +96,7 @@ impl HostDaemonRuntime {
                     config_dir: Some(config_dir.clone()),
                     bind_address: options.bind_address,
                     relays: None,
+                    initial_tree_roots: options.initial_tree_roots.clone(),
                     extra_routes: None,
                     cors: None,
                 },
@@ -92,6 +109,7 @@ impl HostDaemonRuntime {
             runtime,
             info: Some(info),
             bind_address,
+            initial_tree_roots: options.initial_tree_roots,
             config_dir,
             data_dir,
         })
@@ -135,6 +153,7 @@ impl HostDaemonRuntime {
                     config_dir: Some(self.config_dir.clone()),
                     bind_address: self.bind_address.clone(),
                     relays: None,
+                    initial_tree_roots: self.initial_tree_roots.clone(),
                     extra_routes: None,
                     cors: None,
                 },
@@ -171,6 +190,18 @@ impl Drop for HostDaemonRuntime {
 fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
     let mut config = Config::default();
     let settings = load_browser_settings(config_dir).unwrap_or_else(default_browser_settings);
+
+    config.storage.max_size_gb = settings
+        .storage_max_size_gb
+        .unwrap_or(BROWSER_STORAGE_MAX_SIZE_GB)
+        .max(1);
+    config.nostr.db_max_size_gb = settings
+        .social_graph_db_max_size_gb
+        .unwrap_or(BROWSER_SOCIAL_GRAPH_DB_MAX_SIZE_GB)
+        .max(1);
+    config.nostr.spambox_max_size_gb = settings
+        .spambox_db_max_size_gb
+        .unwrap_or(BROWSER_SPAMBOX_DB_MAX_SIZE_GB);
 
     if let Some(nostr_relays) = settings.nostr_relays {
         config.nostr.relays = normalize_server_list(nostr_relays);
@@ -252,6 +283,9 @@ fn load_browser_settings(config_dir: &Path) -> Option<BrowserSettings> {
 
 fn default_browser_settings() -> BrowserSettings {
     BrowserSettings {
+        storage_max_size_gb: Some(BROWSER_STORAGE_MAX_SIZE_GB),
+        social_graph_db_max_size_gb: Some(BROWSER_SOCIAL_GRAPH_DB_MAX_SIZE_GB),
+        spambox_db_max_size_gb: Some(BROWSER_SPAMBOX_DB_MAX_SIZE_GB),
         nostr_relays: None,
         blossom_read_servers: None,
         blossom_write_servers: None,
@@ -288,9 +322,15 @@ fn normalize_server_list(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use base64::Engine;
+    use hashtree_cli::HashtreeStore;
+    use hashtree_core::{from_hex, DirEntry, HashTree, HashTreeConfig, LinkType};
     use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
     use reqwest::blocking::Client;
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::thread;
     use tempfile::TempDir;
 
     fn create_blossom_auth(keys: &Keys, action: &str) -> String {
@@ -309,6 +349,63 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD
             .encode(serde_json::to_string(&event).expect("serialize auth event"));
         format!("Nostr {encoded}")
+    }
+
+    fn start_blob_fixture_server(store: Arc<HashtreeStore>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture blob server");
+        let addr = listener.local_addr().expect("fixture blob server addr");
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let store = store.clone();
+                thread::spawn(move || handle_blob_fixture_request(stream, store));
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn handle_blob_fixture_request(mut stream: TcpStream, store: Arc<HashtreeStore>) {
+        let mut buffer = [0_u8; 2048];
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(_) => return,
+        };
+        let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+        let Some(hash_hex) = path
+            .trim_start_matches('/')
+            .strip_suffix(".bin")
+            .filter(|hash_hex| hash_hex.len() == 64)
+        else {
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
+        };
+        let Ok(hash) = from_hex(hash_hex) else {
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
+        };
+        let data = match store.get_blob(&hash) {
+            Ok(Some(data)) => data,
+            _ => {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                return;
+            }
+        };
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            data.len()
+        );
+        let _ = stream.write_all(header.as_bytes());
+        let _ = stream.write_all(&data);
     }
 
     #[test]
@@ -398,6 +495,76 @@ mod tests {
     }
 
     #[test]
+    fn host_runtime_serves_initial_keyed_root_from_upstream_blossom() {
+        let temp = TempDir::new().expect("temp dir");
+        let source_dir = TempDir::new().expect("source temp dir");
+        let source_store = Arc::new(
+            HashtreeStore::new(source_dir.path().join("source-db")).expect("source store"),
+        );
+        let setup_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("setup runtime");
+        let (root_cid, expected_body) = setup_runtime.block_on(async {
+            let source_tree = HashTree::new(HashTreeConfig::new(source_store.store_arc()));
+            let expected_body =
+                b"<!doctype html><title>Iris Apps</title><main>Drive Chat Contacts</main>".to_vec();
+            let (index_cid, _) = source_tree.put(&expected_body).await.expect("index cid");
+            let root_cid = source_tree
+                .put_directory(vec![
+                    DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File)
+                ])
+                .await
+                .expect("root directory cid");
+            (root_cid, expected_body)
+        });
+        assert!(
+            root_cid.key.is_some(),
+            "test must cover a keyed/private site root"
+        );
+
+        let upstream = start_blob_fixture_server(source_store);
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("browser_settings.json"),
+            serde_json::to_vec_pretty(&json!({
+                "nostrRelays": [],
+                "blossomReadServers": [upstream],
+                "blossomWriteServers": [],
+                "enableFips": false,
+                "enableFipsUdp": false,
+                "enableFipsWebrtc": false,
+                "fetchFromFipsPeers": false,
+                "socialGraphCrawlDepth": 0,
+                "syncEnabled": false
+            }))
+            .expect("serialize browser settings"),
+        )
+        .expect("write browser settings");
+
+        let npub = "npub1embeddedtest000000000000000000000000000000000000000000000000";
+        let mut runtime = HostDaemonRuntime::start(
+            HostDaemonOptions::new(temp.path())
+                .with_initial_tree_roots(vec![(format!("{npub}/sites"), root_cid)]),
+        )
+        .expect("start daemon");
+        let status = runtime.status();
+
+        let response = Client::new()
+            .get(format!("{}/htree/{npub}/sites/index.html", status.base_url))
+            .send()
+            .expect("fetch initial rooted site");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.bytes().expect("site body").as_ref(),
+            expected_body.as_slice()
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
     fn host_runtime_applies_browser_settings_overrides() {
         let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.path().join("config");
@@ -473,6 +640,50 @@ mod tests {
         assert!(!config.server.enable_fips_webrtc);
         assert!(!config.server.fetch_from_fips_peers);
         assert_eq!(config.nostr.social_graph_crawl_depth, 0);
+    }
+
+    #[test]
+    fn browser_config_uses_browser_sized_database_limits() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+        let config = browser_config(&data_dir, &config_dir);
+
+        assert_eq!(config.storage.max_size_gb, BROWSER_STORAGE_MAX_SIZE_GB);
+        assert_eq!(
+            config.nostr.db_max_size_gb,
+            BROWSER_SOCIAL_GRAPH_DB_MAX_SIZE_GB
+        );
+        assert_eq!(
+            config.nostr.spambox_max_size_gb,
+            BROWSER_SPAMBOX_DB_MAX_SIZE_GB
+        );
+    }
+
+    #[test]
+    fn browser_config_applies_database_limit_overrides() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("browser_settings.json"),
+            serde_json::to_vec_pretty(&json!({
+                "storageMaxSizeGb": 2,
+                "socialGraphDbMaxSizeGb": 2,
+                "spamboxDbMaxSizeGb": 1
+            }))
+            .expect("serialize browser settings"),
+        )
+        .expect("write browser settings");
+
+        let config = browser_config(&data_dir, &config_dir);
+
+        assert_eq!(config.storage.max_size_gb, 2);
+        assert_eq!(config.nostr.db_max_size_gb, 2);
+        assert_eq!(config.nostr.spambox_max_size_gb, 1);
     }
 
     #[test]

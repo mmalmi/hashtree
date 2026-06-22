@@ -177,7 +177,7 @@ impl<S: Store> TreeBuilder<S> {
         }
 
         // Build tree from chunks
-        let (root_hash, root_key) = self.build_tree_internal(links, Some(size)).await?;
+        let (root_hash, root_key, _) = self.build_tree_internal(links, Some(size)).await?;
 
         Ok((
             Cid {
@@ -194,12 +194,12 @@ impl<S: Store> TreeBuilder<S> {
         &self,
         links: Vec<Link>,
         total_size: Option<u64>,
-    ) -> Result<(Hash, Option<[u8; 32]>), BuilderError> {
+    ) -> Result<(Hash, Option<[u8; 32]>, LinkType), BuilderError> {
         // Single link with matching size - return directly
         if links.len() == 1 {
             if let Some(ts) = total_size {
                 if links[0].size == ts {
-                    return Ok((links[0].hash, links[0].key));
+                    return Ok((links[0].hash, links[0].key, links[0].link_type));
                 }
             }
         }
@@ -219,7 +219,7 @@ impl<S: Store> TreeBuilder<S> {
                     .put(hash, encrypted)
                     .await
                     .map_err(|e| BuilderError::Store(e.to_string()))?;
-                return Ok((hash, Some(key)));
+                return Ok((hash, Some(key), LinkType::File));
             }
 
             // Unencrypted path
@@ -228,21 +228,21 @@ impl<S: Store> TreeBuilder<S> {
                 .put(hash, data)
                 .await
                 .map_err(|e| BuilderError::Store(e.to_string()))?;
-            return Ok((hash, None));
+            return Ok((hash, None, LinkType::File));
         }
 
         // Too many links - create subtrees
         let mut sub_links = Vec::new();
         for batch in links.chunks(self.max_links) {
             let batch_size: u64 = batch.iter().map(|l| l.size).sum();
-            let (hash, key) =
+            let (hash, key, link_type) =
                 Box::pin(self.build_tree_internal(batch.to_vec(), Some(batch_size))).await?;
             sub_links.push(Link {
                 hash,
                 name: None,
                 size: batch_size,
                 key,
-                link_type: LinkType::File, // subtree
+                link_type,
                 meta: None,
             });
         }

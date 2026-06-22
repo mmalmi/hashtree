@@ -54,7 +54,7 @@
 
   <rect x="100" y="248" width="660" height="54" class="layer resolve"/>
   <text x="430" y="269" text-anchor="middle" class="label">Optional Publish + Resolve Layer</text>
-  <text x="430" y="284" text-anchor="middle" class="sub">NostrRootResolver, kind 30078 roots, published refs, tree-name lookup</text>
+  <text x="430" y="284" text-anchor="middle" class="sub">NostrRootResolver, kind 30064 roots, legacy 30078 reads, tree-name lookup</text>
   <text x="430" y="296" text-anchor="middle" class="sub">Only needed for mutable names; direct nhash or CID access bypasses this step</text>
 
   <line x1="430" y1="224" x2="430" y2="248" class="conn"/>

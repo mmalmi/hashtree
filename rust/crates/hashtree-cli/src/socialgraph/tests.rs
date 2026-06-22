@@ -2150,18 +2150,27 @@ fn benchmark_nostr_btree_query_tradeoffs() {
 fn test_ensure_social_graph_mapsize_rounds_and_applies() {
     let _guard = test_lock();
     let tmp = TempDir::new().unwrap();
-    ensure_social_graph_mapsize(tmp.path(), DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES).unwrap();
     let requested = 70 * 1024 * 1024;
     ensure_social_graph_mapsize(tmp.path(), requested).unwrap();
+    let map_size = social_graph_map_size(Some(requested)).unwrap();
     let env = unsafe {
         heed::EnvOpenOptions::new()
-            .map_size(DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES as usize)
+            .map_size(map_size)
             .max_dbs(SOCIALGRAPH_MAX_DBS)
             .open(tmp.path())
     }
     .unwrap();
     assert!(env.info().map_size >= requested as usize);
     assert_eq!(env.info().map_size % page_size_bytes(), 0);
+}
+
+#[test]
+fn test_social_graph_mapsize_honors_explicit_smaller_limit() {
+    let requested = 128 * 1024 * 1024;
+    let map_size = social_graph_map_size(Some(requested)).unwrap();
+    assert!(map_size >= requested as usize);
+    assert!(map_size < DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES as usize);
+    assert_eq!(map_size % page_size_bytes(), 0);
 }
 
 #[test]

@@ -59,6 +59,7 @@ async fn embedded_daemon_serves_htree_test() {
         config_dir: Some(dir.path().to_path_buf()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })
@@ -99,6 +100,7 @@ async fn embedded_daemon_respects_explicit_config_dir_without_env() {
         config_dir: Some(config_dir.clone()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })
@@ -159,6 +161,7 @@ async fn embedded_daemon_uses_default_blossom_servers_when_config_is_empty() {
         config_dir: Some(dir.path().to_path_buf()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })
@@ -208,6 +211,7 @@ async fn embedded_daemon_accepts_ws_route_with_trailing_slash() {
         config_dir: Some(dir.path().to_path_buf()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })
@@ -274,6 +278,7 @@ async fn embedded_daemon_reports_assist_mode_in_status() {
         config_dir: Some(dir.path().to_path_buf()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })
@@ -319,6 +324,7 @@ async fn embedded_daemon_socialgraph_snapshot_is_not_cors_readable() {
         config_dir: Some(dir.path().to_path_buf()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })
@@ -378,6 +384,7 @@ async fn embedded_daemon_background_services_follow_live_relay_settings() {
         config_dir: Some(dir.path().to_path_buf()),
         bind_address: "127.0.0.1:0".to_string(),
         relays: None,
+        initial_tree_roots: Vec::new(),
         extra_routes: None,
         cors: None,
     })

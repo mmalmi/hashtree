@@ -372,7 +372,9 @@ impl<S: Store> HashtreeFuse<S> {
             self.resolve_entry_at_root(old_root, path),
             self.resolve_entry_at_root(new_root, path),
         ) {
-            (Ok(old), Ok(new)) => old.link_type != LinkType::Dir || new.link_type != LinkType::Dir,
+            (Ok(old), Ok(new)) => {
+                !old.link_type.is_directory_like() || !new.link_type.is_directory_like()
+            }
             _ => true,
         }
     }
@@ -471,7 +473,7 @@ impl<S: Store> HashtreeFuse<S> {
             return Ok(Vec::new());
         }
         let entry = self.resolve_entry(&path)?;
-        if entry.link_type == LinkType::Dir {
+        if entry.link_type.is_directory_like() {
             return Err(FsError::IsDir);
         }
 
@@ -628,7 +630,7 @@ impl<S: Store> HashtreeFuse<S> {
         let mut child_path = parent_path.clone();
         child_path.push(name.to_string());
         let entry = self.resolve_entry(&child_path)?;
-        if entry.link_type == LinkType::Dir {
+        if entry.link_type.is_directory_like() {
             return Err(FsError::IsDir);
         }
 
@@ -659,7 +661,7 @@ impl<S: Store> HashtreeFuse<S> {
         let mut child_path = parent_path.clone();
         child_path.push(name.to_string());
         let entry = self.resolve_entry(&child_path)?;
-        if entry.link_type != LinkType::Dir {
+        if !entry.link_type.is_directory_like() {
             return Err(FsError::NotDir);
         }
 
@@ -916,7 +918,7 @@ impl<S: Store> HashtreeFuse<S> {
     }
 
     fn entry_size(&self, entry: &ResolvedEntry) -> Result<u64, FsError> {
-        if entry.link_type == LinkType::Dir {
+        if entry.link_type.is_directory_like() {
             return Ok(0);
         }
         if entry.size > 0 {
@@ -929,7 +931,7 @@ impl<S: Store> HashtreeFuse<S> {
 
     fn read_file_full(&self, path: &[String]) -> Result<Vec<u8>, FsError> {
         let entry = self.resolve_entry(path)?;
-        if entry.link_type == LinkType::Dir {
+        if entry.link_type.is_directory_like() {
             return Err(FsError::IsDir);
         }
         let data = block_on(self.tree.get(&entry.cid, None))?.ok_or(FsError::NotFound)?;
@@ -1108,7 +1110,7 @@ impl<S: Store> HashtreeFuse<S> {
 
     fn kind_from_link(link_type: LinkType) -> EntryKind {
         match link_type {
-            LinkType::Dir => EntryKind::Directory,
+            LinkType::Dir | LinkType::Fanout => EntryKind::Directory,
             LinkType::Blob | LinkType::File => EntryKind::File,
         }
     }
@@ -1983,6 +1985,50 @@ mod tests {
         let names: Vec<String> = new_entries.into_iter().map(|entry| entry.name).collect();
         assert!(names.contains(&"new.txt".to_string()));
         assert!(!names.contains(&"old.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_fanout_directory_entry_behaves_as_directory() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()).with_max_links(2));
+        let mut fanout_entries = Vec::new();
+        for index in 0..5 {
+            let body = format!("file-{index}");
+            let (cid, size) = tree.put(body.as_bytes()).await.unwrap();
+            fanout_entries.push(
+                hashtree_core::DirEntry::from_cid(format!("file-{index}.txt"), &cid)
+                    .with_size(size)
+                    .with_link_type(LinkType::Blob),
+            );
+        }
+        let fanout_dir = tree.put_directory(fanout_entries).await.unwrap();
+        let root = tree
+            .put_directory(vec![hashtree_core::DirEntry::from_cid("big", &fanout_dir)
+                .with_link_type(LinkType::Fanout)])
+            .await
+            .unwrap();
+        let fs = HashtreeFuse::new(store, root).unwrap();
+
+        let big = fs.lookup_child(ROOT_INODE, "big").unwrap();
+        assert_eq!(big.kind, EntryKind::Directory);
+        assert!(matches!(fs.read_file(big.inode, 0, 8), Err(FsError::IsDir)));
+        assert!(matches!(fs.unlink(ROOT_INODE, "big"), Err(FsError::IsDir)));
+        assert!(matches!(
+            fs.rmdir(ROOT_INODE, "big"),
+            Err(FsError::NotEmpty)
+        ));
+
+        let names: Vec<String> = fs
+            .read_dir(big.inode)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(names.contains(&"file-3.txt".to_string()));
+
+        let file = fs.lookup_child(big.inode, "file-3.txt").unwrap();
+        assert_eq!(file.kind, EntryKind::File);
+        assert_eq!(fs.read_file(file.inode, 0, 6).unwrap(), b"file-3");
     }
 
     #[cfg(feature = "fuse")]

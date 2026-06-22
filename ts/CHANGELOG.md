@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.13 - 2026-06-22
+
+Changes since the previous npm package publish.
+
+### Changed
+
+- Published `@hashtree/core@0.1.8`, `@hashtree/nostr@0.1.15`, and
+  `@hashtree/worker@0.2.17`.
+- Changed TypeScript hashtree root publishing to use Nostr kind `30064`, while
+  readers and subscriptions query both `30064` and legacy `30078` roots.
+- Upstreamed the browser Blossom batch-read/timeout knobs and worker media root
+  retry behavior so app repos no longer need version-specific patches for
+  those fixes.
+
 ## 0.2.12 - 2026-05-20
 
 Changes since the previous npm package publish.

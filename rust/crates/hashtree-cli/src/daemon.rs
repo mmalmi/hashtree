@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use axum::Router;
+use hashtree_core::Cid;
 use nostr::nips::nip19::ToBech32;
 use nostr::Keys;
 use std::collections::HashSet;
@@ -630,6 +631,7 @@ pub struct EmbeddedDaemonOptions {
     pub config_dir: Option<PathBuf>,
     pub bind_address: String,
     pub relays: Option<Vec<String>>,
+    pub initial_tree_roots: Vec<(String, Cid)>,
     pub extra_routes: Option<Router<AppState>>,
     pub cors: Option<CorsLayer>,
 }
@@ -873,6 +875,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
             keys.clone(),
         )
         .with_nostr_relay_urls(active_nostr_relays)
+        .with_cached_tree_roots(opts.initial_tree_roots)
         .with_social_graph(social_graph)
         .with_socialgraph_snapshot(
             Arc::clone(&social_graph_store),
