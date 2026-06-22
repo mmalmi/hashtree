@@ -42,6 +42,8 @@ export enum LinkType {
   File = 1,
   /** Directory tree (TreeNode with named links) */
   Dir = 2,
+  /** Directory fanout tree (TreeNode with unnamed internal links) */
+  Fanout = 3,
 }
 
 /**
@@ -56,7 +58,7 @@ export interface Link {
   size: number;
   /** CHK decryption key (content hash) for encrypted nodes */
   key?: Uint8Array;
-  /** Type of content this link points to: Blob, File, or Dir */
+  /** Type of content this link points to: Blob, File, Dir, or Fanout */
   type: LinkType;
   /** Optional metadata (for directory entries: createdAt, mimeType, thumbnail, etc.) */
   meta?: Record<string, unknown>;
@@ -68,10 +70,11 @@ export interface Link {
  *
  * For directories: type=Dir, links have names
  * For chunked files: type=File, links are ordered chunks
+ * For large directories: type=Fanout, links are unnamed internal children
  */
 export interface TreeNode {
-  /** Type of this node: File or Dir */
-  type: LinkType.File | LinkType.Dir;
+  /** Type of this node: File, Dir, or Fanout */
+  type: LinkType.File | LinkType.Dir | LinkType.Fanout;
   /** Links to child nodes */
   links: Link[];
 }
@@ -111,7 +114,7 @@ export interface DirEntry {
   name: string;
   hash: Hash;
   size: number;
-  /** Type of content this entry points to: Blob, File, or Dir */
+  /** Type of content this entry points to: Blob, File, Dir, or Fanout */
   type: LinkType;
 }
 

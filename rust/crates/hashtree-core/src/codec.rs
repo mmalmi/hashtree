@@ -12,10 +12,10 @@
 //! File-node link order is preserved because chunk order is semantic.
 //!
 //! Format uses short keys for compact encoding:
-//! - t: type (1 = File, 2 = Dir) - node type
+//! - t: type (1 = File, 2 = Dir, 3 = Fanout) - node type
 //! - l: links array
 //! - h: hash (in link)
-//! - t: type (in link, 0 = Blob, 1 = File, 2 = Dir)
+//! - t: type (in link, 0 = Blob, 1 = File, 2 = Dir, 3 = Fanout)
 //! - n: name (in link, optional)
 //! - s: size (in link)
 //! - m: metadata (optional)
@@ -31,6 +31,8 @@ use crate::types::{Hash, Link, LinkType, TreeNode};
 pub enum CodecError {
     #[error("Invalid node type: {0}")]
     InvalidNodeType(u8),
+    #[error("Invalid link type: {0}")]
+    InvalidLinkType(u8),
     #[error("Missing required field: {0}")]
     MissingField(&'static str),
     #[error("Invalid field type for {0}")]
@@ -65,7 +67,7 @@ struct WireLink {
     n: Option<String>,
     /// Size (required)
     s: u64,
-    /// Link type (0 = Blob, 1 = File, 2 = Dir)
+    /// Link type (0 = Blob, 1 = File, 2 = Dir, 3 = Fanout)
     #[serde(default)]
     t: u8,
 }
@@ -99,7 +101,24 @@ mod option_bytes {
 struct WireTreeNode {
     /// Links
     l: Vec<WireLink>,
-    /// Type (1 = File, 2 = Dir)
+    /// Type (1 = File, 2 = Dir, 3 = Fanout)
+    t: u8,
+}
+
+/// Loose tree shape used to distinguish raw blobs from unsupported tree types.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct WireLinkShape {
+    #[serde(with = "serde_bytes")]
+    h: Vec<u8>,
+    #[serde(default)]
+    t: u8,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct WireTreeShape {
+    l: Vec<WireLinkShape>,
     t: u8,
 }
 
@@ -149,7 +168,7 @@ pub fn decode_tree_node(data: &[u8]) -> Result<TreeNode, CodecError> {
     let wire: WireTreeNode =
         rmp_serde::from_slice(data).map_err(|e| CodecError::MsgpackDecode(e.to_string()))?;
 
-    // Validate node type (must be File=1 or Dir=2)
+    // Validate node type (must be File=1, Dir=2, or Fanout=3)
     let node_type = LinkType::from_u8(wire.t)
         .filter(|t| t.is_tree())
         .ok_or(CodecError::InvalidNodeType(wire.t))?;
@@ -171,8 +190,7 @@ pub fn decode_tree_node(data: &[u8]) -> Result<TreeNode, CodecError> {
             _ => None,
         };
 
-        // Link type defaults to Blob if not valid
-        let link_type = LinkType::from_u8(wl.t).unwrap_or(LinkType::Blob);
+        let link_type = LinkType::from_u8(wl.t).ok_or(CodecError::InvalidLinkType(wl.t))?;
 
         // Convert BTreeMap back to HashMap for the public API
         let meta = wl.m.map(|m| m.into_iter().collect::<HashMap<_, _>>());
@@ -204,7 +222,7 @@ pub fn try_decode_tree_node(data: &[u8]) -> Option<TreeNode> {
     decode_tree_node(data).ok()
 }
 
-/// Get the type of data (Blob, File, or Dir)
+/// Get the type of data (Blob, File, Dir, or Fanout)
 /// Returns LinkType::Blob for raw blobs that aren't tree nodes
 pub fn get_node_type(data: &[u8]) -> LinkType {
     try_decode_tree_node(data)
@@ -213,17 +231,23 @@ pub fn get_node_type(data: &[u8]) -> LinkType {
 }
 
 /// Check if data is a MessagePack-encoded tree node (vs raw blob)
-/// Tree nodes decode successfully with type = File or Dir
+/// Tree-shaped data with unsupported types still counts as a tree node so
+/// callers that subsequently decode it surface a codec error instead of
+/// reinterpreting the bytes as a raw blob.
 /// Note: Prefer try_decode_tree_node() to avoid double decoding
 pub fn is_tree_node(data: &[u8]) -> bool {
-    try_decode_tree_node(data).is_some()
+    if try_decode_tree_node(data).is_some() {
+        return true;
+    }
+
+    rmp_serde::from_slice::<WireTreeShape>(data).is_ok()
 }
 
-/// Check if data is a directory tree node (node_type == Dir)
+/// Check if data is a directory-like tree node (node_type == Dir or Fanout)
 /// Note: Prefer try_decode_tree_node() to avoid double decoding
 pub fn is_directory_node(data: &[u8]) -> bool {
     try_decode_tree_node(data)
-        .map(|n| n.node_type == LinkType::Dir)
+        .map(|n| n.node_type.is_directory_like())
         .unwrap_or(false)
 }
 
@@ -365,6 +389,39 @@ mod tests {
     }
 
     #[test]
+    fn test_is_tree_node_unknown_node_type() {
+        let bytes = rmp_serde::to_vec_named(&WireTreeNode { l: vec![], t: 99 }).unwrap();
+
+        assert!(is_tree_node(&bytes));
+        assert!(matches!(
+            decode_tree_node(&bytes),
+            Err(CodecError::InvalidNodeType(99))
+        ));
+    }
+
+    #[test]
+    fn test_is_tree_node_unknown_link_type() {
+        let bytes = rmp_serde::to_vec_named(&WireTreeNode {
+            l: vec![WireLink {
+                h: vec![1u8; 32],
+                k: None,
+                m: None,
+                n: None,
+                s: 1,
+                t: 99,
+            }],
+            t: LinkType::Dir as u8,
+        })
+        .unwrap();
+
+        assert!(is_tree_node(&bytes));
+        assert!(matches!(
+            decode_tree_node(&bytes),
+            Err(CodecError::InvalidLinkType(99))
+        ));
+    }
+
+    #[test]
     fn test_is_directory_node() {
         let node = TreeNode::dir(vec![Link {
             hash: [1u8; 32],
@@ -496,6 +553,44 @@ mod tests {
     }
 
     #[test]
+    fn test_bud17_directory_fanout_vector() {
+        let mut first_meta = HashMap::new();
+        first_meta.insert("count".to_string(), serde_json::json!(2));
+        first_meta.insert("first".to_string(), serde_json::json!("a.txt"));
+        first_meta.insert("last".to_string(), serde_json::json!("b.txt"));
+
+        let mut second_meta = HashMap::new();
+        second_meta.insert("count".to_string(), serde_json::json!(1));
+        second_meta.insert("first".to_string(), serde_json::json!("c.txt"));
+        second_meta.insert("last".to_string(), serde_json::json!("c.txt"));
+
+        let node = TreeNode::fanout(vec![
+            Link::new([0x11u8; 32])
+                .with_size(30)
+                .with_link_type(LinkType::Dir)
+                .with_meta(first_meta),
+            Link::new([0x22u8; 32])
+                .with_size(40)
+                .with_link_type(LinkType::Dir)
+                .with_meta(second_meta),
+        ]);
+
+        let encoded = encode_tree_node(&node).unwrap();
+        assert_eq!(
+            hex::encode(&encoded),
+            "82a16c9284a168c4201111111111111111111111111111111111111111111111111111111111111111a16d83a5636f756e7402a56669727374a5612e747874a46c617374a5622e747874a1731ea1740284a168c4202222222222222222222222222222222222222222222222222222222222222222a16d83a5636f756e7401a56669727374a5632e747874a46c617374a5632e747874a17328a17402a17403"
+        );
+        assert_eq!(
+            to_hex(&sha256(&encoded)),
+            "6626ab03b5468f417d888fa25fa22b48f5bcb7dfafb88eef34c638d167afc0a3"
+        );
+
+        let decoded = decode_tree_node(&encoded).unwrap();
+        assert_eq!(decoded.node_type, LinkType::Fanout);
+        assert!(decoded.links.iter().all(|link| link.name.is_none()));
+    }
+
+    #[test]
     fn test_link_meta_determinism() {
         // Test that link meta encoding is deterministic regardless of HashMap insertion order
         // We use BTreeMap internally to ensure sorted keys
@@ -545,6 +640,10 @@ mod tests {
         let file_node = TreeNode::file(vec![]);
         let file_encoded = encode_tree_node(&file_node).unwrap();
         assert_eq!(get_node_type(&file_encoded), LinkType::File);
+
+        let fanout_node = TreeNode::fanout(vec![]);
+        let fanout_encoded = encode_tree_node(&fanout_node).unwrap();
+        assert_eq!(get_node_type(&fanout_encoded), LinkType::Fanout);
 
         // Raw blob returns Blob type
         let blob = vec![1u8, 2, 3, 4, 5];

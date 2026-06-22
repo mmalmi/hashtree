@@ -170,7 +170,7 @@ export class HashTree {
         // Try to get the tree node (will decrypt and validate)
         const node = await getTreeNodeEncrypted(this.store, id.hash, id.key);
         if (!node) return false;
-        return node.type === LinkType.Dir;
+        return node.type === LinkType.Dir || node.type === LinkType.Fanout;
       } catch {
         return false;
       }

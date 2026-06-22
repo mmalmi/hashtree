@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::codec::{decode_tree_node, is_directory_node, is_tree_node, try_decode_tree_node};
+use crate::codec::{decode_tree_node, is_directory_node, is_tree_node};
 use crate::hash::sha256;
 use crate::store::Store;
 use crate::types::{to_hex, Cid, Hash, Link, LinkType, TreeNode};
@@ -18,7 +18,7 @@ pub struct TreeEntry {
     pub name: String,
     pub hash: Hash,
     pub size: u64,
-    /// Type of content this entry points to (Blob, File, or Dir)
+    /// Type of content this entry points to (Blob, File, Dir, or Fanout)
     pub link_type: LinkType,
     /// Optional decryption key (for encrypted content)
     pub key: Option<[u8; 32]>,
@@ -31,7 +31,7 @@ pub struct TreeEntry {
 pub struct WalkEntry {
     pub path: String,
     pub hash: Hash,
-    /// Type of content this entry points to (Blob, File, or Dir)
+    /// Type of content this entry points to (Blob, File, Dir, or Fanout)
     pub link_type: LinkType,
     pub size: u64,
     /// Optional decryption key (for encrypted content)
@@ -52,8 +52,9 @@ impl<S: Store> TreeReader<S> {
         suffix.parse().ok()
     }
 
-    fn node_uses_directory_fanout(node: &TreeNode) -> bool {
-        !node.links.is_empty()
+    fn node_uses_legacy_directory_fanout(node: &TreeNode) -> bool {
+        node.node_type == LinkType::Dir
+            && !node.links.is_empty()
             && node.links.iter().all(|link| {
                 let Some(name) = link.name.as_deref() else {
                     return false;
@@ -63,7 +64,11 @@ impl<S: Store> TreeReader<S> {
     }
 
     fn is_internal_directory_link(node: &TreeNode, link: &Link) -> bool {
-        if !Self::node_uses_directory_fanout(node) || link.link_type != LinkType::Dir {
+        if node.node_type == LinkType::Fanout {
+            return matches!(link.link_type, LinkType::Dir | LinkType::Fanout);
+        }
+
+        if !Self::node_uses_legacy_directory_fanout(node) || link.link_type != LinkType::Dir {
             return false;
         }
 
@@ -71,6 +76,14 @@ impl<S: Store> TreeReader<S> {
             return false;
         };
         Self::internal_chunk_start(name).is_some()
+    }
+
+    fn decode_node_or_blob(data: &[u8]) -> Result<Option<TreeNode>, ReaderError> {
+        match decode_tree_node(data) {
+            Ok(node) => Ok(Some(node)),
+            Err(err) if is_tree_node(data) => Err(ReaderError::Codec(err)),
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn new(store: Arc<S>) -> Self {
@@ -524,7 +537,7 @@ impl<S: Store> TreeReader<S> {
     fn find_link(&self, node: &TreeNode, name: &str) -> Option<Link> {
         node.links
             .iter()
-            .find(|l| l.name.as_deref() == Some(name))
+            .find(|l| !Self::is_internal_directory_link(node, l) && l.name.as_deref() == Some(name))
             .cloned()
     }
 
@@ -606,8 +619,8 @@ impl<S: Store> TreeReader<S> {
             None => return Ok(()),
         };
 
-        let node = match try_decode_tree_node(&data) {
-            Some(n) => n,
+        let node = match Self::decode_node_or_blob(&data)? {
+            Some(node) => node,
             None => {
                 entries.push(WalkEntry {
                     path: path.to_string(),

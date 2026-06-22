@@ -3,7 +3,7 @@
 //! Core principle: Every node is stored by SHA256(msgpack(node)) -> msgpack(node)
 //! This enables pure KV content-addressed storage.
 
-/// Link type - distinguishes blobs, chunked files, and directories
+/// Link type - distinguishes blobs, chunked files, directories, and directory fanout
 /// Uses small integer values for efficient MessagePack encoding
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -15,6 +15,8 @@ pub enum LinkType {
     File = 1,
     /// Directory (tree node with named links)
     Dir = 2,
+    /// Directory fanout (tree node with unnamed internal links)
+    Fanout = 3,
 }
 
 impl LinkType {
@@ -24,13 +26,19 @@ impl LinkType {
             0 => Some(LinkType::Blob),
             1 => Some(LinkType::File),
             2 => Some(LinkType::Dir),
+            3 => Some(LinkType::Fanout),
             _ => None,
         }
     }
 
-    /// Check if this type represents a tree node (File or Dir)
+    /// Check if this type represents a tree node (File, Dir, or Fanout)
     pub fn is_tree(&self) -> bool {
-        matches!(self, LinkType::File | LinkType::Dir)
+        matches!(self, LinkType::File | LinkType::Dir | LinkType::Fanout)
+    }
+
+    /// Check if this type represents a directory-like node.
+    pub fn is_directory_like(&self) -> bool {
+        matches!(self, LinkType::Dir | LinkType::Fanout)
     }
 }
 
@@ -69,7 +77,7 @@ pub struct Link {
     pub size: u64,
     /// Optional decryption key for encrypted links (CHK: content hash)
     pub key: Option<[u8; 32]>,
-    /// Type of content this link points to (Blob, File, or Dir)
+    /// Type of content this link points to (Blob, File, Dir, or Fanout)
     /// Always set explicitly - no probing needed during tree traversal
     pub link_type: LinkType,
     /// Optional metadata (for directory entries: createdAt, mimeType, thumbnail, etc.)
@@ -127,10 +135,10 @@ impl Link {
 ///
 /// For directories: links have names, node_type = Dir
 /// For chunked files: links are ordered chunks, node_type = File
-/// For large directories: links can be other tree nodes (fanout)
+/// For large directories: fanout nodes use node_type = Fanout and unnamed links
 #[derive(Debug, Clone, PartialEq)]
 pub struct TreeNode {
-    /// Type of this node (File or Dir)
+    /// Type of this node (File, Dir, or Fanout)
     pub node_type: LinkType,
     /// Links to child nodes
     pub links: Vec<Link>,
@@ -152,9 +160,14 @@ impl TreeNode {
         Self::new(LinkType::Dir, links)
     }
 
+    /// Create a Fanout node (large directory fanout)
+    pub fn fanout(links: Vec<Link>) -> Self {
+        Self::new(LinkType::Fanout, links)
+    }
+
     /// Check if this is a directory node
     pub fn is_dir(&self) -> bool {
-        self.node_type == LinkType::Dir
+        self.node_type.is_directory_like()
     }
 
     /// Check if this is a file node
@@ -258,7 +271,7 @@ pub struct DirEntry {
     pub hash: Hash,
     pub size: u64,
     pub key: Option<[u8; 32]>,
-    /// Type of content this entry points to (Blob, File, or Dir)
+    /// Type of content this entry points to (Blob, File, Dir, or Fanout)
     pub link_type: LinkType,
     /// Optional metadata (createdAt, mimeType, thumbnail, etc.)
     pub meta: Option<std::collections::HashMap<String, serde_json::Value>>,

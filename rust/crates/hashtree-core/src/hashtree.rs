@@ -3,6 +3,7 @@
 //! Single struct for creating, reading, and editing content-addressed merkle trees.
 //! Mirrors the hashtree-ts HashTree class API.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -11,9 +12,7 @@ use futures::stream::{self, Stream};
 use futures::AsyncReadExt;
 
 use crate::builder::{BuilderError, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_LINKS};
-use crate::codec::{
-    decode_tree_node, encode_and_hash, is_directory_node, is_tree_node, try_decode_tree_node,
-};
+use crate::codec::{decode_tree_node, encode_and_hash, is_directory_node, is_tree_node};
 use crate::hash::sha256;
 use crate::reader::{ReaderError, TreeEntry, WalkEntry};
 use crate::store::Store;
@@ -28,6 +27,26 @@ const STREAM_PUT_BATCH_MAX_ITEMS: usize = 128;
 #[path = "hashtree/stream.rs"]
 mod read_stream;
 mod walk;
+
+#[derive(Clone)]
+struct DirectoryFanoutSpan {
+    link: Link,
+    count: usize,
+    first: String,
+    last: String,
+}
+
+fn directory_fanout_meta(
+    count: usize,
+    first: &str,
+    last: &str,
+) -> HashMap<String, serde_json::Value> {
+    let mut meta = HashMap::new();
+    meta.insert("count".to_string(), serde_json::json!(count as u64));
+    meta.insert("first".to_string(), serde_json::json!(first));
+    meta.insert("last".to_string(), serde_json::json!(last));
+    meta
+}
 
 /// HashTree configuration
 #[derive(Clone)]
@@ -128,8 +147,9 @@ impl<S: Store> HashTree<S> {
         suffix.parse().ok()
     }
 
-    fn node_uses_directory_fanout(node: &TreeNode) -> bool {
-        !node.links.is_empty()
+    fn node_uses_legacy_directory_fanout(node: &TreeNode) -> bool {
+        node.node_type == LinkType::Dir
+            && !node.links.is_empty()
             && node.links.iter().all(|link| {
                 let Some(name) = link.name.as_deref() else {
                     return false;
@@ -138,8 +158,12 @@ impl<S: Store> HashTree<S> {
             })
     }
 
-    fn is_internal_directory_link_with_fanout(link: &Link, uses_fanout: bool) -> bool {
-        if !uses_fanout || link.link_type != LinkType::Dir {
+    fn is_internal_directory_link(node: &TreeNode, link: &Link) -> bool {
+        if node.node_type == LinkType::Fanout {
+            return matches!(link.link_type, LinkType::Dir | LinkType::Fanout);
+        }
+
+        if !Self::node_uses_legacy_directory_fanout(node) || link.link_type != LinkType::Dir {
             return false;
         }
 
@@ -147,10 +171,6 @@ impl<S: Store> HashTree<S> {
             return false;
         };
         Self::internal_chunk_start(name).is_some()
-    }
-
-    fn is_internal_directory_link(node: &TreeNode, link: &Link) -> bool {
-        Self::is_internal_directory_link_with_fanout(link, Self::node_uses_directory_fanout(node))
     }
 
     pub fn new(config: HashTreeConfig<S>) -> Self {
@@ -631,7 +651,7 @@ impl<S: Store> HashTree<S> {
     /// Build a directory from entries
     /// Returns Cid with key if encrypted
     ///
-    /// Large directories are split into BUD-17 `_chunk_<start>` fanout nodes.
+    /// Large directories are split into BUD-17 fanout nodes.
     pub async fn put_directory(&self, entries: Vec<DirEntry>) -> Result<Cid, HashTreeError> {
         // Sort entries by name for deterministic hashing
         let mut sorted = entries;
@@ -657,10 +677,15 @@ impl<S: Store> HashTree<S> {
     }
 
     async fn put_directory_node(&self, links: Vec<Link>) -> Result<Cid, HashTreeError> {
-        let node = TreeNode {
-            node_type: LinkType::Dir,
-            links,
-        };
+        self.put_tree_node_with_type(LinkType::Dir, links).await
+    }
+
+    async fn put_tree_node_with_type(
+        &self,
+        node_type: LinkType,
+        links: Vec<Link>,
+    ) -> Result<Cid, HashTreeError> {
+        let node = TreeNode { node_type, links };
         let (data, plain_hash) = encode_and_hash(&node)?;
 
         if self.encrypted {
@@ -688,45 +713,70 @@ impl<S: Store> HashTree<S> {
     }
 
     async fn build_directory_by_chunks(&self, links: Vec<Link>) -> Result<Cid, HashTreeError> {
-        let indexed_links: Vec<(usize, Link)> = links.into_iter().enumerate().collect();
-        self.build_indexed_directory_chunks(indexed_links).await
+        let spans = links
+            .into_iter()
+            .map(|link| {
+                let name = link.name.clone().unwrap_or_else(|| to_hex(&link.hash));
+                DirectoryFanoutSpan {
+                    link,
+                    count: 1,
+                    first: name.clone(),
+                    last: name,
+                }
+            })
+            .collect();
+        self.build_directory_fanout_level(spans, LinkType::Dir)
+            .await
     }
 
-    async fn build_indexed_directory_chunks(
+    async fn build_directory_fanout_level(
         &self,
-        links: Vec<(usize, Link)>,
+        spans: Vec<DirectoryFanoutSpan>,
+        child_node_type: LinkType,
     ) -> Result<Cid, HashTreeError> {
-        let mut sub_trees: Vec<(usize, Link)> = Vec::new();
+        let mut sub_trees: Vec<DirectoryFanoutSpan> = Vec::new();
 
-        for (i, batch) in links.chunks(self.max_links).enumerate() {
-            let start = batch
-                .first()
-                .map(|(start, _)| *start)
-                .unwrap_or(i * self.max_links);
-            let batch_size: u64 = batch.iter().map(|(_, link)| link.size).sum();
-            let child_links = batch.iter().map(|(_, link)| link.clone()).collect();
-            let child_cid = self.put_directory_node(child_links).await?;
+        for batch in spans.chunks(self.max_links) {
+            let Some(first_span) = batch.first() else {
+                continue;
+            };
+            let last_span = batch.last().expect("non-empty fanout batch");
+            let count: usize = batch.iter().map(|span| span.count).sum();
+            let batch_size: u64 = batch.iter().map(|span| span.link.size).sum();
+            let child_links = batch.iter().map(|span| span.link.clone()).collect();
+            let child_cid = self
+                .put_tree_node_with_type(child_node_type, child_links)
+                .await?;
 
-            sub_trees.push((
-                start,
-                Link {
+            sub_trees.push(DirectoryFanoutSpan {
+                link: Link {
                     hash: child_cid.hash,
-                    name: Some(format!("_chunk_{start}")),
+                    name: None,
                     size: batch_size,
                     key: child_cid.key,
-                    link_type: LinkType::Dir,
-                    meta: None,
+                    link_type: child_node_type,
+                    meta: Some(directory_fanout_meta(
+                        count,
+                        &first_span.first,
+                        &last_span.last,
+                    )),
                 },
-            ));
+                count,
+                first: first_span.first.clone(),
+                last: last_span.last.clone(),
+            });
         }
 
         if sub_trees.len() <= self.max_links {
             return self
-                .put_directory_node(sub_trees.into_iter().map(|(_, link)| link).collect())
+                .put_tree_node_with_type(
+                    LinkType::Fanout,
+                    sub_trees.into_iter().map(|span| span.link).collect(),
+                )
                 .await;
         }
 
-        Box::pin(self.build_indexed_directory_chunks(sub_trees)).await
+        Box::pin(self.build_directory_fanout_level(sub_trees, LinkType::Fanout)).await
     }
 
     /// Create a tree node with custom links
@@ -878,7 +928,7 @@ impl<S: Store> HashTree<S> {
     pub async fn is_dir(&self, cid: &Cid) -> Result<bool, HashTreeError> {
         Ok(matches!(
             self.get_directory_node(cid).await?,
-            Some(node) if node.node_type == LinkType::Dir
+            Some(node) if node.node_type.is_directory_like()
         ))
     }
 
@@ -1388,7 +1438,7 @@ impl<S: Store> HashTree<S> {
     fn find_link(&self, node: &TreeNode, name: &str) -> Option<Link> {
         node.links
             .iter()
-            .find(|l| l.name.as_deref() == Some(name))
+            .find(|l| !Self::is_internal_directory_link(node, l) && l.name.as_deref() == Some(name))
             .cloned()
     }
 

@@ -1,6 +1,14 @@
 use super::*;
 
 impl<S: Store> HashTree<S> {
+    fn decode_node_or_blob(data: &[u8]) -> Result<Option<TreeNode>, HashTreeError> {
+        match decode_tree_node(data) {
+            Ok(node) => Ok(Some(node)),
+            Err(err) if is_tree_node(data) => Err(HashTreeError::Codec(err)),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Walk entire tree depth-first (returns Vec)
     pub async fn walk(&self, cid: &Cid, path: &str) -> Result<Vec<WalkEntry>, HashTreeError> {
         let mut entries = Vec::new();
@@ -31,8 +39,8 @@ impl<S: Store> HashTree<S> {
             data
         };
 
-        let node = match try_decode_tree_node(&data) {
-            Some(n) => n,
+        let node = match Self::decode_node_or_blob(&data)? {
+            Some(node) => node,
             None => {
                 entries.push(WalkEntry {
                     path: path.to_string(),
@@ -173,8 +181,8 @@ impl<S: Store> HashTree<S> {
                     data
                 };
 
-                let node = match try_decode_tree_node(&data) {
-                    Some(n) => n,
+                let node = match Self::decode_node_or_blob(&data)? {
+                    Some(node) => node,
                     None => {
                         // It's a blob/file - this case only happens for root
                         entries.push(WalkEntry {
@@ -295,9 +303,9 @@ impl<S: Store> HashTree<S> {
                             data
                         };
 
-                        let node = match try_decode_tree_node(&data) {
-                            Some(n) => n,
-                            None => {
+                        let node = match Self::decode_node_or_blob(&data) {
+                            Ok(Some(node)) => node,
+                            Ok(None) => {
                                 // Blob data
                                 let entry = WalkEntry {
                                     path,
@@ -308,6 +316,7 @@ impl<S: Store> HashTree<S> {
                                 };
                                 return Some((Ok(entry), WalkStreamState::Done));
                             }
+                            Err(err) => return Some((Err(err), WalkStreamState::Done)),
                         };
 
                         let node_size: u64 = node.links.iter().map(|l| l.size).sum();
@@ -321,10 +330,8 @@ impl<S: Store> HashTree<S> {
 
                         // Create stack with children to process
                         let mut stack: Vec<WalkStackItem> = Vec::new();
-                        let uses_fanout = Self::node_uses_directory_fanout(&node);
-                        for link in node.links.into_iter().rev() {
-                            let is_internal =
-                                Self::is_internal_directory_link_with_fanout(&link, uses_fanout);
+                        for link in node.links.iter().rev() {
+                            let is_internal = Self::is_internal_directory_link(&node, link);
                             let child_path = match &link.name {
                                 Some(name) if !is_internal => {
                                     if path.is_empty() {
@@ -390,9 +397,9 @@ impl<S: Store> HashTree<S> {
                 data
             };
 
-            let node = match try_decode_tree_node(&data) {
-                Some(n) => n,
-                None => {
+            let node = match Self::decode_node_or_blob(&data) {
+                Ok(Some(node)) => node,
+                Ok(None) => {
                     // Blob data
                     let entry = WalkEntry {
                         path: item.path,
@@ -409,6 +416,7 @@ impl<S: Store> HashTree<S> {
                         },
                     ));
                 }
+                Err(err) => return Some((Err(err), WalkStreamState::Done)),
             };
 
             let node_size: u64 = node.links.iter().map(|l| l.size).sum();
@@ -421,9 +429,8 @@ impl<S: Store> HashTree<S> {
             };
 
             // Push children to stack
-            let uses_fanout = Self::node_uses_directory_fanout(&node);
-            for link in node.links.into_iter().rev() {
-                let is_internal = Self::is_internal_directory_link_with_fanout(&link, uses_fanout);
+            for link in node.links.iter().rev() {
+                let is_internal = Self::is_internal_directory_link(&node, link);
                 let child_path = match &link.name {
                     Some(name) if !is_internal => {
                         if item.path.is_empty() {

@@ -5,6 +5,7 @@
 //! - Supports streaming appends
 //! - Encryption enabled by default (CHK - Content Hash Key)
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::codec::encode_and_hash;
@@ -22,6 +23,26 @@ pub const BEP52_CHUNK_SIZE: usize = 16 * 1024;
 
 /// Default max links per tree node (fanout)
 pub const DEFAULT_MAX_LINKS: usize = 174;
+
+#[derive(Clone)]
+struct DirectoryFanoutSpan {
+    link: Link,
+    count: usize,
+    first: String,
+    last: String,
+}
+
+fn directory_fanout_meta(
+    count: usize,
+    first: &str,
+    last: &str,
+) -> HashMap<String, serde_json::Value> {
+    let mut meta = HashMap::new();
+    meta.insert("count".to_string(), serde_json::json!(count as u64));
+    meta.insert("first".to_string(), serde_json::json!(first));
+    meta.insert("last".to_string(), serde_json::json!(last));
+    meta
+}
 
 /// Builder configuration
 #[derive(Clone)]
@@ -326,28 +347,45 @@ impl<S: Store> TreeBuilder<S> {
         self.build_directory_by_chunks(links).await
     }
 
-    /// Split directories into canonical BUD-17 `_chunk_<start>` fanout nodes.
+    /// Split directories into canonical BUD-17 fanout nodes.
     async fn build_directory_by_chunks(&self, links: Vec<Link>) -> Result<Hash, BuilderError> {
-        let indexed_links: Vec<(usize, Link)> = links.into_iter().enumerate().collect();
-        self.build_indexed_directory_chunks(indexed_links).await
+        let spans = links
+            .into_iter()
+            .map(|link| {
+                let name = link
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| crate::types::to_hex(&link.hash));
+                DirectoryFanoutSpan {
+                    link,
+                    count: 1,
+                    first: name.clone(),
+                    last: name,
+                }
+            })
+            .collect();
+        self.build_directory_fanout_level(spans, LinkType::Dir)
+            .await
     }
 
-    async fn build_indexed_directory_chunks(
+    async fn build_directory_fanout_level(
         &self,
-        links: Vec<(usize, Link)>,
+        spans: Vec<DirectoryFanoutSpan>,
+        child_node_type: LinkType,
     ) -> Result<Hash, BuilderError> {
-        let mut sub_trees: Vec<(usize, Link)> = Vec::new();
+        let mut sub_trees: Vec<DirectoryFanoutSpan> = Vec::new();
 
-        for (i, batch) in links.chunks(self.max_links).enumerate() {
-            let start = batch
-                .first()
-                .map(|(start, _)| *start)
-                .unwrap_or(i * self.max_links);
-            let batch_size: u64 = batch.iter().map(|(_, link)| link.size).sum();
+        for batch in spans.chunks(self.max_links) {
+            let Some(first_span) = batch.first() else {
+                continue;
+            };
+            let last_span = batch.last().expect("non-empty fanout batch");
+            let count: usize = batch.iter().map(|span| span.count).sum();
+            let batch_size: u64 = batch.iter().map(|span| span.link.size).sum();
 
             let node = TreeNode {
-                node_type: LinkType::Dir,
-                links: batch.iter().map(|(_, link)| link.clone()).collect(),
+                node_type: child_node_type,
+                links: batch.iter().map(|span| span.link.clone()).collect(),
             };
             let (data, hash) = encode_and_hash(&node)?;
             self.store
@@ -355,23 +393,29 @@ impl<S: Store> TreeBuilder<S> {
                 .await
                 .map_err(|e| BuilderError::Store(e.to_string()))?;
 
-            sub_trees.push((
-                start,
-                Link {
+            sub_trees.push(DirectoryFanoutSpan {
+                link: Link {
                     hash,
-                    name: Some(format!("_chunk_{start}")),
+                    name: None,
                     size: batch_size,
                     key: None,
-                    link_type: LinkType::Dir,
-                    meta: None,
+                    link_type: child_node_type,
+                    meta: Some(directory_fanout_meta(
+                        count,
+                        &first_span.first,
+                        &last_span.last,
+                    )),
                 },
-            ));
+                count,
+                first: first_span.first.clone(),
+                last: last_span.last.clone(),
+            });
         }
 
         if sub_trees.len() <= self.max_links {
             let node = TreeNode {
-                node_type: LinkType::Dir,
-                links: sub_trees.into_iter().map(|(_, link)| link).collect(),
+                node_type: LinkType::Fanout,
+                links: sub_trees.into_iter().map(|span| span.link).collect(),
             };
             let (data, hash) = encode_and_hash(&node)?;
             self.store
@@ -382,7 +426,7 @@ impl<S: Store> TreeBuilder<S> {
         }
 
         // Recursively build more levels
-        Box::pin(self.build_indexed_directory_chunks(sub_trees)).await
+        Box::pin(self.build_directory_fanout_level(sub_trees, LinkType::Fanout)).await
     }
 
     /// Create a tree node

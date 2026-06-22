@@ -3,7 +3,7 @@ import { HashTree } from '../src/index.js';
 import { MemoryStore } from '../src/store/memory.js';
 import { toHex, cid, LinkType } from '../src/types.js';
 import { sha256 } from '../src/hash.js';
-import { decodeTreeNode } from '../src/codec.js';
+import { decodeTreeNode, encodeAndHash } from '../src/codec.js';
 import { compareNames } from '../src/compare.js';
 
 describe('HashTree write operations', () => {
@@ -177,9 +177,14 @@ describe('HashTree write operations', () => {
       const { cid: dirCid } = await smallTree.putDirectory(entries, { unencrypted: true });
 
       const root = await smallTree.getTreeNode(dirCid);
-      expect(root!.type).toBe(LinkType.Dir);
-      expect(root!.links.map(l => l.name)).toEqual(['_chunk_0', '_chunk_4', '_chunk_8']);
+      expect(root!.type).toBe(LinkType.Fanout);
+      expect(root!.links.map(l => l.name)).toEqual([undefined, undefined, undefined]);
       expect(root!.links.every(l => l.type === LinkType.Dir)).toBe(true);
+      expect(root!.links.map(l => l.meta)).toEqual([
+        { count: 4, first: 'file00.txt', last: 'file03.txt' },
+        { count: 4, first: 'file04.txt', last: 'file07.txt' },
+        { count: 2, first: 'file08.txt', last: 'file09.txt' },
+      ]);
 
       const firstChunkData = await store.get(root!.links[0].hash);
       const firstChunk = decodeTreeNode(firstChunkData!);
@@ -238,9 +243,14 @@ describe('HashTree write operations', () => {
       const { cid: dirCid } = await smallTree.putDirectory(entries);
 
       const root = await smallTree.getTreeNode(dirCid);
-      expect(root!.type).toBe(LinkType.Dir);
-      expect(root!.links.map(l => l.name)).toEqual(['_chunk_0', '_chunk_3', '_chunk_6']);
+      expect(root!.type).toBe(LinkType.Fanout);
+      expect(root!.links.map(l => l.name)).toEqual([undefined, undefined, undefined]);
       expect(root!.links.every(l => l.type === LinkType.Dir && l.key)).toBe(true);
+      expect(root!.links.map(l => l.meta)).toEqual([
+        { count: 3, first: 'file0.txt', last: 'file2.txt' },
+        { count: 3, first: 'file3.txt', last: 'file5.txt' },
+        { count: 2, first: 'file6.txt', last: 'file7.txt' },
+      ]);
 
       const listed = await smallTree.listDirectory(dirCid);
       expect(listed.map(e => e.name)).toEqual(entries.map(e => e.name));
@@ -249,6 +259,43 @@ describe('HashTree write operations', () => {
       expect(resolved).not.toBeNull();
       const data = await smallTree.readFile(resolved!.cid);
       expect(new TextDecoder().decode(data!)).toBe('encrypted-4');
+    });
+
+    it('should read legacy _chunk fanout directories', async () => {
+      const file0 = await tree.putFile(new TextEncoder().encode('legacy-0'), { unencrypted: true });
+      const file1 = await tree.putFile(new TextEncoder().encode('legacy-1'), { unencrypted: true });
+
+      const child0 = await encodeAndHash({
+        type: LinkType.Dir,
+        links: [{ hash: file0.cid.hash, name: 'file-0.txt', size: file0.size, type: LinkType.Blob }],
+      });
+      await store.put(child0.hash, child0.data);
+
+      const child1 = await encodeAndHash({
+        type: LinkType.Dir,
+        links: [{ hash: file1.cid.hash, name: 'file-1.txt', size: file1.size, type: LinkType.Blob }],
+      });
+      await store.put(child1.hash, child1.data);
+
+      const root = await encodeAndHash({
+        type: LinkType.Dir,
+        links: [
+          { hash: child0.hash, name: '_chunk_0', size: file0.size, type: LinkType.Dir },
+          { hash: child1.hash, name: '_chunk_1', size: file1.size, type: LinkType.Dir },
+        ],
+      });
+      await store.put(root.hash, root.data);
+
+      const rootCid = cid(root.hash);
+      const listed = await tree.listDirectory(rootCid);
+      expect(listed.map(e => e.name)).toEqual(['file-0.txt', 'file-1.txt']);
+
+      const resolved = await tree.resolvePath(rootCid, 'file-1.txt');
+      expect(resolved).not.toBeNull();
+      const data = await tree.readFile(resolved!.cid);
+      expect(new TextDecoder().decode(data!)).toBe('legacy-1');
+
+      await expect(tree.resolvePath(rootCid, '_chunk_0')).resolves.toBeNull();
     });
   });
 });

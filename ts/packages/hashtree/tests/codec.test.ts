@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { encode } from '@msgpack/msgpack';
 import { encodeTreeNode, decodeTreeNode, encodeAndHash, tryDecodeTreeNode } from '../src/codec.js';
 import { LinkType, TreeNode, toHex } from '../src/types.js';
 import { sha256 } from '../src/hash.js';
@@ -126,6 +127,19 @@ describe('codec', () => {
       const notTree = new TextEncoder().encode('hello');
       expect(tryDecodeTreeNode(notTree)).toBeNull();
     });
+
+    it('should reject unknown node types in tree-shaped objects', () => {
+      const unknownNodeType = encode({ l: [], t: 99 });
+      expect(() => tryDecodeTreeNode(unknownNodeType)).toThrow('Invalid node type: 99');
+    });
+
+    it('should reject unknown link types in tree-shaped objects', () => {
+      const unknownLinkType = encode({
+        l: [{ h: new Uint8Array(32).fill(1), s: 1, t: 99 }],
+        t: LinkType.Dir,
+      });
+      expect(() => tryDecodeTreeNode(unknownLinkType)).toThrow('Invalid link type: 99');
+    });
   });
 
   describe('determinism', () => {
@@ -214,6 +228,42 @@ describe('codec', () => {
       expect(decodeTreeNode(encodeTreeNode(reversedFile)).links.map(link => toHex(link.hash))).toEqual([
         toHex(second.hash),
         toHex(first.hash),
+      ]);
+    });
+
+    it('should match the BUD-17 directory fanout vector', async () => {
+      const node: TreeNode = {
+        type: LinkType.Fanout,
+        links: [
+          {
+            hash: new Uint8Array(32).fill(0x11),
+            size: 30,
+            type: LinkType.Dir,
+            meta: { count: 2, first: 'a.txt', last: 'b.txt' },
+          },
+          {
+            hash: new Uint8Array(32).fill(0x22),
+            size: 40,
+            type: LinkType.Dir,
+            meta: { count: 1, first: 'c.txt', last: 'c.txt' },
+          },
+        ],
+      };
+
+      const encoded = encodeTreeNode(node);
+      expect(toHex(encoded)).toBe(
+        '82a16c9284a168c4201111111111111111111111111111111111111111111111111111111111111111a16d83a5636f756e7402a56669727374a5612e747874a46c617374a5622e747874a1731ea1740284a168c4202222222222222222222222222222222222222222222222222222222222222222a16d83a5636f756e7401a56669727374a5632e747874a46c617374a5632e747874a17328a17402a17403'
+      );
+      expect(toHex(await sha256(encoded))).toBe(
+        '6626ab03b5468f417d888fa25fa22b48f5bcb7dfafb88eef34c638d167afc0a3'
+      );
+
+      const decoded = decodeTreeNode(encoded);
+      expect(decoded.type).toBe(LinkType.Fanout);
+      expect(decoded.links.map(link => link.name)).toEqual([undefined, undefined]);
+      expect(decoded.links.map(link => link.meta)).toEqual([
+        { count: 2, first: 'a.txt', last: 'b.txt' },
+        { count: 1, first: 'c.txt', last: 'c.txt' },
       ]);
     });
   });

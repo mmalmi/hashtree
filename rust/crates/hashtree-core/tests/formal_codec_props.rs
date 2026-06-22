@@ -33,6 +33,7 @@ fn arb_link_type() -> impl Strategy<Value = LinkType> {
         Just(LinkType::Blob),
         Just(LinkType::File),
         Just(LinkType::Dir),
+        Just(LinkType::Fanout),
     ]
 }
 
@@ -57,7 +58,11 @@ fn arb_link() -> impl Strategy<Value = Link> {
 
 fn arb_node() -> impl Strategy<Value = TreeNode> {
     (
-        prop_oneof![Just(LinkType::File), Just(LinkType::Dir)],
+        prop_oneof![
+            Just(LinkType::File),
+            Just(LinkType::Dir),
+            Just(LinkType::Fanout)
+        ],
         prop::collection::vec(arb_link(), 0..8),
     )
         .prop_map(|(node_type, links)| TreeNode { node_type, links })
@@ -197,7 +202,7 @@ fn test_invalid_node_type_rejected() {
 }
 
 #[test]
-fn test_unknown_link_type_defaults_to_blob() {
+fn test_unknown_link_type_is_rejected() {
     let raw = RawWireTreeNode {
         l: vec![RawWireLink {
             h: vec![1u8; 32],
@@ -208,8 +213,10 @@ fn test_unknown_link_type_defaults_to_blob() {
     };
 
     let bytes = rmp_serde::to_vec_named(&raw).unwrap();
-    let decoded = decode_tree_node(&bytes).unwrap();
-    assert_eq!(decoded.node_type, LinkType::Dir);
-    assert_eq!(decoded.links.len(), 1);
-    assert_eq!(decoded.links[0].link_type, LinkType::Blob);
+    let err = decode_tree_node(&bytes).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Invalid link type"),
+        "unexpected error message: {msg}"
+    );
 }

@@ -30,7 +30,7 @@ interface LinkMsgpack {
   s: number;
   /** CHK decryption key (optional) */
   k?: Uint8Array;
-  /** type - 0=Blob, 1=File, 2=Dir */
+  /** type - 0=Blob, 1=File, 2=Dir, 3=Fanout */
   t: number;
   /** metadata (optional) - keys must be sorted for determinism */
   m?: Record<string, unknown>;
@@ -40,7 +40,7 @@ interface LinkMsgpack {
  * Internal MessagePack representation of a tree node
  */
 interface TreeNodeMsgpack {
-  /** type - 1=File, 2=Dir */
+  /** type - 1=File, 2=Dir, 3=Fanout */
   t: number;
   /** links */
   l: LinkMsgpack[];
@@ -61,6 +61,23 @@ function linksForEncoding(node: TreeNode): Link[] {
   if (node.type !== LinkType.Dir) return node.links;
   return [...node.links].sort((left, right) =>
     compareNames(left.name ?? '', right.name ?? '')
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isKnownNodeType(type: unknown): type is LinkType.File | LinkType.Dir | LinkType.Fanout {
+  return type === LinkType.File || type === LinkType.Dir || type === LinkType.Fanout;
+}
+
+function isKnownLinkType(type: unknown): type is LinkType {
+  return (
+    type === LinkType.Blob ||
+    type === LinkType.File ||
+    type === LinkType.Dir ||
+    type === LinkType.Fanout
   );
 }
 
@@ -97,31 +114,50 @@ export function encodeTreeNode(node: TreeNode): Uint8Array {
 
 /**
  * Try to decode MessagePack data as a tree node
- * Returns null if data is not a valid tree node (i.e., it's a raw blob)
+ * Returns null for non-tree blobs and throws for unsupported tree-shaped data.
  */
 export function tryDecodeTreeNode(data: Uint8Array): TreeNode | null {
+  let msgpack: unknown;
   try {
-    const msgpack = decode(data) as TreeNodeMsgpack;
-
-    if (msgpack.t !== LinkType.File && msgpack.t !== LinkType.Dir) {
-      return null;
-    }
-
-    const node: TreeNode = {
-      type: msgpack.t as LinkType.File | LinkType.Dir,
-      links: msgpack.l.map(l => {
-        const link: Link = { hash: l.h, size: l.s ?? 0, type: l.t ?? LinkType.Blob };
-        if (l.n !== undefined) link.name = l.n;
-        if (l.k !== undefined) link.key = l.k;
-        if (l.m !== undefined) link.meta = l.m;
-        return link;
-      }),
-    };
-
-    return node;
+    msgpack = decode(data) as TreeNodeMsgpack;
   } catch {
     return null;
   }
+
+  if (!isRecord(msgpack)) return null;
+  if (!('t' in msgpack) || !('l' in msgpack)) return null;
+  const nodeType = msgpack.t;
+  if (!isKnownNodeType(nodeType)) {
+    throw new Error(`Invalid node type: ${String(nodeType)}`);
+  }
+  const links = msgpack.l;
+  if (!Array.isArray(links)) {
+    throw new Error('Invalid tree links');
+  }
+
+  const node: TreeNode = {
+    type: nodeType,
+    links: links.map(linkValue => {
+      if (!isRecord(linkValue)) {
+        throw new Error('Invalid link');
+      }
+      const linkType = linkValue.t ?? LinkType.Blob;
+      if (!isKnownLinkType(linkType)) {
+        throw new Error(`Invalid link type: ${String(linkType)}`);
+      }
+      const link: Link = {
+        hash: linkValue.h as Uint8Array,
+        size: (linkValue.s as number | undefined) ?? 0,
+        type: linkType,
+      };
+      if (linkValue.n !== undefined) link.name = linkValue.n as string;
+      if (linkValue.k !== undefined) link.key = linkValue.k as Uint8Array;
+      if (linkValue.m !== undefined) link.meta = linkValue.m as Record<string, unknown>;
+      return link;
+    }),
+  };
+
+  return node;
 }
 
 /**

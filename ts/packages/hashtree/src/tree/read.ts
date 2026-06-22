@@ -72,7 +72,11 @@ export async function isDirectory(store: Store, hash: Hash): Promise<boolean> {
   const data = await store.get(hash);
   if (!data) return false;
   const node = tryDecodeTreeNode(data);
-  return node?.type === LinkType.Dir;
+  return isDirectoryLikeNode(node);
+}
+
+function isDirectoryLikeNode(node: TreeNode | null): node is TreeNode {
+  return node?.type === LinkType.Dir || node?.type === LinkType.Fanout;
 }
 
 /**
@@ -395,8 +399,8 @@ async function getDirectoryNode(
     return null; // Not a tree node at all
   }
 
-  // Check if it's a directory (has named links) vs chunked blob (no names)
-  if (node.type === LinkType.Dir) {
+  // Check if it's a directory-like node vs chunked blob.
+  if (isDirectoryLikeNode(node)) {
     return node;
   }
 
@@ -405,7 +409,7 @@ async function getDirectoryNode(
   const assembled = await assembleChunks(store, node);
 
   const assembledNode = tryDecodeTreeNode(assembled);
-  if (assembledNode?.type === LinkType.Dir) {
+  if (isDirectoryLikeNode(assembledNode)) {
     return assembledNode;
   }
 
@@ -431,10 +435,9 @@ export async function listDirectory(
   if (!node) return [];
 
   const entries: TreeEntry[] = [];
-  const usesFanout = nodeUsesDirectoryFanout(node);
 
   for (const link of node.links) {
-    if (isInternalDirectoryLinkWithFanout(link, usesFanout)) {
+    if (isInternalDirectoryLink(node, link)) {
       entries.push(...await listDirectory(store, link.hash, signal));
       continue;
     }
@@ -553,16 +556,22 @@ function internalChunkStart(name: string): number | null {
   return Number.isSafeInteger(start) ? start : null;
 }
 
-function nodeUsesDirectoryFanout(node: TreeNode): boolean {
-  return node.links.length > 0 && node.links.every((link) => (
-    link.type === LinkType.Dir
+function nodeUsesLegacyDirectoryFanout(node: TreeNode): boolean {
+  return node.type === LinkType.Dir
+    && node.links.length > 0
+    && node.links.every((link) => (
+      link.type === LinkType.Dir
       && link.name !== undefined
       && internalChunkStart(link.name) !== null
-  ));
+    ));
 }
 
-function isInternalDirectoryLinkWithFanout(link: Link, usesFanout: boolean): boolean {
-  return usesFanout
+function isInternalDirectoryLink(node: TreeNode, link: Link): boolean {
+  if (node.type === LinkType.Fanout) {
+    return link.type === LinkType.Dir || link.type === LinkType.Fanout;
+  }
+
+  return nodeUsesLegacyDirectoryFanout(node)
     && link.type === LinkType.Dir
     && link.name !== undefined
     && internalChunkStart(link.name) !== null;

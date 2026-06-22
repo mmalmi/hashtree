@@ -229,9 +229,9 @@ async function getEncryptedDirectoryNode(
 ): Promise<TreeNode | null> {
   const decrypted = await loadRootNodeOrBlob(store, hash, key, signal);
 
-  // Check if it's directly a directory (small directory)
+  // Check if it's directly a directory-like node.
   const node = tryDecodeTreeNode(decrypted);
-  if (node?.type === LinkType.Dir) {
+  if (isDirectoryLikeNode(node)) {
     return node;
   }
 
@@ -241,7 +241,7 @@ async function getEncryptedDirectoryNode(
 
     // Check if assembled result is a directory
     const assembledNode = tryDecodeTreeNode(assembled);
-    if (assembledNode?.type === LinkType.Dir) {
+    if (isDirectoryLikeNode(assembledNode)) {
       return assembledNode;
     }
   }
@@ -563,7 +563,7 @@ export interface EncryptedDirEntry {
  * Store a directory with CHK encryption
  *
  * The directory node itself is encrypted. Child entries already have their own keys.
- * Large directories are split into canonical _chunk_<start> fanout directory nodes.
+ * Large directories are split into canonical BUD-17 fanout nodes.
  *
  * @param config - Tree configuration
  * @param entries - Directory entries (with keys for encrypted children)
@@ -595,10 +595,18 @@ async function putEncryptedDirectoryNode(
   config: EncryptedTreeConfig,
   links: Link[]
 ): Promise<EncryptedPutResult> {
+  return putEncryptedTreeNode(config, LinkType.Dir, links);
+}
+
+async function putEncryptedTreeNode(
+  config: EncryptedTreeConfig,
+  nodeType: LinkType.Dir | LinkType.Fanout,
+  links: Link[]
+): Promise<EncryptedPutResult> {
   const totalSize = links.reduce((sum, l) => sum + (l.size ?? 0), 0);
 
   const node: TreeNode = {
-    type: LinkType.Dir,
+    type: nodeType,
     links,
   };
   const { data } = await encodeAndHash(node);
@@ -610,48 +618,62 @@ async function putEncryptedDirectoryNode(
 }
 
 type IndexedEncryptedLink = {
-  start: number;
   link: Link;
+  count: number;
+  first: string;
+  last: string;
 };
+
+function fanoutMeta(count: number, first: string, last: string): Record<string, unknown> {
+  return { count, first, last };
+}
 
 async function buildEncryptedDirectoryByChunks(
   config: EncryptedTreeConfig,
   links: Link[]
 ): Promise<EncryptedPutResult> {
-  const indexedLinks = links.map((link, start) => ({ start, link }));
-  return buildIndexedEncryptedDirectoryChunks(config, indexedLinks);
+  const spans = links.map((link) => {
+    const name = link.name ?? toHex(link.hash);
+    return { link, count: 1, first: name, last: name };
+  });
+  return buildEncryptedDirectoryFanoutLevel(config, spans, LinkType.Dir);
 }
 
-async function buildIndexedEncryptedDirectoryChunks(
+async function buildEncryptedDirectoryFanoutLevel(
   config: EncryptedTreeConfig,
-  links: IndexedEncryptedLink[]
+  spans: IndexedEncryptedLink[],
+  childNodeType: LinkType.Dir | LinkType.Fanout
 ): Promise<EncryptedPutResult> {
   const maxLinks = getMaxLinks(config);
   const subTrees: IndexedEncryptedLink[] = [];
 
-  for (let offset = 0; offset < links.length; offset += maxLinks) {
-    const batch = links.slice(offset, offset + maxLinks);
-    const start = batch[0]?.start ?? offset;
+  for (let offset = 0; offset < spans.length; offset += maxLinks) {
+    const batch = spans.slice(offset, offset + maxLinks);
+    const firstSpan = batch[0];
+    const lastSpan = batch[batch.length - 1];
+    const count = batch.reduce((sum, span) => sum + span.count, 0);
     const batchLinks = batch.map(({ link }) => link);
-    const child = await putEncryptedDirectoryNode(config, batchLinks);
+    const child = await putEncryptedTreeNode(config, childNodeType, batchLinks);
 
     subTrees.push({
-      start,
       link: {
         hash: child.hash,
-        name: `_chunk_${start}`,
         size: child.size,
         key: child.key,
-        type: LinkType.Dir,
+        type: childNodeType,
+        meta: fanoutMeta(count, firstSpan.first, lastSpan.last),
       },
+      count,
+      first: firstSpan.first,
+      last: lastSpan.last,
     });
   }
 
   if (subTrees.length <= maxLinks) {
-    return putEncryptedDirectoryNode(config, subTrees.map(({ link }) => link));
+    return putEncryptedTreeNode(config, LinkType.Fanout, subTrees.map(({ link }) => link));
   }
 
-  return buildIndexedEncryptedDirectoryChunks(config, subTrees);
+  return buildEncryptedDirectoryFanoutLevel(config, subTrees, LinkType.Fanout);
 }
 
 /**
@@ -674,10 +696,9 @@ export async function listDirectoryEncrypted(
   const node = await getEncryptedDirectoryNode(store, hash, key, signal);
   if (!node) return [];
 
-  const usesFanout = nodeUsesDirectoryFanout(node);
   const entries: EncryptedDirEntry[] = [];
   for (const link of node.links) {
-    if (isInternalDirectoryLinkWithFanout(link, usesFanout)) {
+    if (isInternalDirectoryLink(node, link)) {
       if (!link.key) {
         throw new Error(`Missing decryption key for directory fanout: ${toHex(link.hash)}`);
       }
@@ -726,6 +747,10 @@ function getMaxLinks(config: EncryptedTreeConfig): number {
   return maxLinks;
 }
 
+function isDirectoryLikeNode(node: TreeNode | null): node is TreeNode {
+  return node?.type === LinkType.Dir || node?.type === LinkType.Fanout;
+}
+
 function internalChunkStart(name: string): number | null {
   const prefix = '_chunk_';
   if (!name.startsWith(prefix)) return null;
@@ -737,16 +762,22 @@ function internalChunkStart(name: string): number | null {
   return Number.isSafeInteger(start) ? start : null;
 }
 
-function nodeUsesDirectoryFanout(node: TreeNode): boolean {
-  return node.links.length > 0 && node.links.every((link) => (
-    link.type === LinkType.Dir
+function nodeUsesLegacyDirectoryFanout(node: TreeNode): boolean {
+  return node.type === LinkType.Dir
+    && node.links.length > 0
+    && node.links.every((link) => (
+      link.type === LinkType.Dir
       && link.name !== undefined
       && internalChunkStart(link.name) !== null
-  ));
+    ));
 }
 
-function isInternalDirectoryLinkWithFanout(link: Link, usesFanout: boolean): boolean {
-  return usesFanout
+function isInternalDirectoryLink(node: TreeNode, link: Link): boolean {
+  if (node.type === LinkType.Fanout) {
+    return link.type === LinkType.Dir || link.type === LinkType.Fanout;
+  }
+
+  return nodeUsesLegacyDirectoryFanout(node)
     && link.type === LinkType.Dir
     && link.name !== undefined
     && internalChunkStart(link.name) !== null;

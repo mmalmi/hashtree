@@ -2,7 +2,7 @@
  * Tree creation operations
  */
 
-import { Store, Hash, TreeNode, Link, LinkType, CID } from '../types.js';
+import { Store, Hash, TreeNode, Link, LinkType, CID, toHex } from '../types.js';
 import { sha256 } from '../hash.js';
 import { encodeAndHash } from '../codec.js';
 import { compareNames } from '../compare.js';
@@ -71,8 +71,8 @@ export async function putFile(
 /**
  * Build a directory from entries
  *
- * Directories with more than maxLinks entries are split into canonical
- * _chunk_<start> fanout directory nodes.
+ * Directories with more than maxLinks entries are split into canonical BUD-17
+ * fanout nodes.
  */
 export async function putDirectory(
   config: CreateConfig,
@@ -110,48 +110,76 @@ async function putDirectoryNode(
 }
 
 type IndexedLink = {
-  start: number;
   link: Link;
+  count: number;
+  first: string;
+  last: string;
 };
+
+function fanoutMeta(count: number, first: string, last: string): Record<string, unknown> {
+  return { count, first, last };
+}
 
 async function buildDirectoryByChunks(
   config: CreateConfig,
   links: Link[]
 ): Promise<Hash> {
-  const indexedLinks = links.map((link, start) => ({ start, link }));
-  return buildIndexedDirectoryChunks(config, indexedLinks);
+  const spans = links.map((link) => {
+    const name = link.name ?? toHex(link.hash);
+    return { link, count: 1, first: name, last: name };
+  });
+  return buildDirectoryFanoutLevel(config, spans, LinkType.Dir);
 }
 
-async function buildIndexedDirectoryChunks(
+async function buildDirectoryFanoutLevel(
   config: CreateConfig,
-  links: IndexedLink[]
+  spans: IndexedLink[],
+  childNodeType: LinkType.Dir | LinkType.Fanout
 ): Promise<Hash> {
   const maxLinks = getMaxLinks(config);
   const subTrees: IndexedLink[] = [];
 
-  for (let offset = 0; offset < links.length; offset += maxLinks) {
-    const batch = links.slice(offset, offset + maxLinks);
-    const start = batch[0]?.start ?? offset;
+  for (let offset = 0; offset < spans.length; offset += maxLinks) {
+    const batch = spans.slice(offset, offset + maxLinks);
+    const firstSpan = batch[0];
+    const lastSpan = batch[batch.length - 1];
+    const count = batch.reduce((sum, span) => sum + span.count, 0);
     const batchLinks = batch.map(({ link }) => link);
     const batchSize = batchLinks.reduce((sum, link) => sum + (link.size ?? 0), 0);
-    const hash = await putDirectoryNode(config, batchLinks);
+    const hash = await putTreeNode(config, childNodeType, batchLinks);
 
     subTrees.push({
-      start,
       link: {
         hash,
-        name: `_chunk_${start}`,
         size: batchSize,
-        type: LinkType.Dir,
+        type: childNodeType,
+        meta: fanoutMeta(count, firstSpan.first, lastSpan.last),
       },
+      count,
+      first: firstSpan.first,
+      last: lastSpan.last,
     });
   }
 
   if (subTrees.length <= maxLinks) {
-    return putDirectoryNode(config, subTrees.map(({ link }) => link));
+    return putTreeNode(config, LinkType.Fanout, subTrees.map(({ link }) => link));
   }
 
-  return buildIndexedDirectoryChunks(config, subTrees);
+  return buildDirectoryFanoutLevel(config, subTrees, LinkType.Fanout);
+}
+
+async function putTreeNode(
+  config: CreateConfig,
+  nodeType: LinkType.Dir | LinkType.Fanout,
+  links: Link[]
+): Promise<Hash> {
+  const node: TreeNode = {
+    type: nodeType,
+    links,
+  };
+  const { data, hash } = await encodeAndHash(node);
+  await config.store.put(hash, data);
+  return hash;
 }
 
 export async function buildTree(

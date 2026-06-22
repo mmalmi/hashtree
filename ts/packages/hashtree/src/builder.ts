@@ -6,7 +6,7 @@
  * - Supports streaming appends
  */
 
-import { Store, Hash, TreeNode, Link, LinkType } from './types.js';
+import { Store, Hash, TreeNode, Link, LinkType, toHex } from './types.js';
 import { sha256 } from './hash.js';
 import { encodeAndHash } from './codec.js';
 import { compareNames } from './compare.js';
@@ -66,6 +66,17 @@ export interface DirEntry {
   size: number;
   type: LinkType;
   meta?: Record<string, unknown>;
+}
+
+type DirectoryFanoutSpan = {
+  link: Link;
+  count: number;
+  first: string;
+  last: string;
+};
+
+function fanoutMeta(count: number, first: string, last: string): Record<string, unknown> {
+  return { count, first, last };
 }
 
 /**
@@ -171,8 +182,8 @@ export class TreeBuilder {
    * Build a directory from entries
    * Entries can be files or subdirectories
    *
-   * Directories with more than maxLinks entries are split into canonical
-   * _chunk_<start> fanout directory nodes.
+   * Directories with more than maxLinks entries are split into canonical BUD-17
+   * fanout nodes.
    *
    * @param entries Directory entries
    */
@@ -206,46 +217,54 @@ export class TreeBuilder {
   }
 
   private async buildDirectoryByChunks(links: Link[]): Promise<Hash> {
-    const indexedLinks = links.map((link, start) => ({ start, link }));
-    return this.buildIndexedDirectoryChunks(indexedLinks);
+    const spans = links.map((link) => {
+      const name = link.name ?? toHex(link.hash);
+      return { link, count: 1, first: name, last: name };
+    });
+    return this.buildDirectoryFanoutLevel(spans, LinkType.Dir);
   }
 
-  private async buildIndexedDirectoryChunks(
-    links: Array<{ start: number; link: Link }>
+  private async buildDirectoryFanoutLevel(
+    spans: DirectoryFanoutSpan[],
+    childNodeType: LinkType.Dir | LinkType.Fanout
   ): Promise<Hash> {
-    const subTrees: Array<{ start: number; link: Link }> = [];
+    const subTrees: DirectoryFanoutSpan[] = [];
 
-    for (let offset = 0; offset < links.length; offset += this.maxLinks) {
-      const batch = links.slice(offset, offset + this.maxLinks);
-      const start = batch[0]?.start ?? offset;
+    for (let offset = 0; offset < spans.length; offset += this.maxLinks) {
+      const batch = spans.slice(offset, offset + this.maxLinks);
+      const firstSpan = batch[0];
+      const lastSpan = batch[batch.length - 1];
+      const count = batch.reduce((sum, span) => sum + span.count, 0);
       const batchLinks = batch.map(({ link }) => link);
       const batchSize = batchLinks.reduce((sum, link) => sum + (link.size ?? 0), 0);
-      const hash = await this.putDirectoryNode(batchLinks);
+      const hash = await this.putTreeNode(childNodeType, batchLinks);
 
       subTrees.push({
-        start,
         link: {
           hash,
-          name: `_chunk_${start}`,
           size: batchSize,
-          type: LinkType.Dir,
+          type: childNodeType,
+          meta: fanoutMeta(count, firstSpan.first, lastSpan.last),
         },
+        count,
+        first: firstSpan.first,
+        last: lastSpan.last,
       });
     }
 
     if (subTrees.length <= this.maxLinks) {
-      return this.putDirectoryNode(subTrees.map(({ link }) => link));
+      return this.putTreeNode(LinkType.Fanout, subTrees.map(({ link }) => link));
     }
 
-    return this.buildIndexedDirectoryChunks(subTrees);
+    return this.buildDirectoryFanoutLevel(subTrees, LinkType.Fanout);
   }
 
   /**
    * Create a tree node
-   * @param nodeType - LinkType.File or LinkType.Dir
+   * @param nodeType - LinkType.File, LinkType.Dir, or LinkType.Fanout
    */
   async putTreeNode(
-    nodeType: LinkType.File | LinkType.Dir,
+    nodeType: LinkType.File | LinkType.Dir | LinkType.Fanout,
     links: Link[]
   ): Promise<Hash> {
     const node: TreeNode = {

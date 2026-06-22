@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use hashtree_core::{
-    to_hex, Cid, DirEntry, HashTree, HashTreeConfig, HashTreeError, Link, LinkType, MemoryStore,
-    Store,
+    encode_and_hash, to_hex, Cid, DirEntry, HashTree, HashTreeConfig, HashTreeError, Link,
+    LinkType, MemoryStore, Store, TreeNode,
 };
 
 fn make_tree() -> (Arc<MemoryStore>, HashTree<MemoryStore>) {
@@ -562,16 +562,18 @@ mod read {
             .unwrap()
             .expect("large directory root node");
 
-        let names: Vec<_> = root
-            .links
-            .iter()
-            .map(|link| link.name.as_deref().unwrap())
-            .collect();
-        assert_eq!(names, vec!["_chunk_0", "_chunk_4"]);
+        assert_eq!(root.node_type, LinkType::Fanout);
+        assert!(root.links.iter().all(|link| link.name.is_none()));
         assert!(root
             .links
             .iter()
-            .all(|link| link.link_type == LinkType::Dir));
+            .all(|link| link.link_type == LinkType::Fanout));
+        assert_eq!(root.links[0].meta.as_ref().unwrap()["count"], 4);
+        assert_eq!(root.links[0].meta.as_ref().unwrap()["first"], "file-0.txt");
+        assert_eq!(root.links[0].meta.as_ref().unwrap()["last"], "file-3.txt");
+        assert_eq!(root.links[1].meta.as_ref().unwrap()["count"], 1);
+        assert_eq!(root.links[1].meta.as_ref().unwrap()["first"], "file-4.txt");
+        assert_eq!(root.links[1].meta.as_ref().unwrap()["last"], "file-4.txt");
         assert!(root.links.len() <= 2);
 
         let first_child = tree
@@ -582,12 +584,21 @@ mod read {
             .await
             .unwrap()
             .expect("first fanout child");
-        let child_names: Vec<_> = first_child
+        assert_eq!(first_child.node_type, LinkType::Fanout);
+        assert!(first_child.links.iter().all(|link| link.name.is_none()));
+        assert!(first_child
             .links
             .iter()
-            .map(|link| link.name.as_deref().unwrap())
-            .collect();
-        assert_eq!(child_names, vec!["_chunk_0", "_chunk_2"]);
+            .all(|link| link.link_type == LinkType::Dir));
+        assert_eq!(first_child.links[0].meta.as_ref().unwrap()["count"], 2);
+        assert_eq!(
+            first_child.links[0].meta.as_ref().unwrap()["first"],
+            "file-0.txt"
+        );
+        assert_eq!(
+            first_child.links[0].meta.as_ref().unwrap()["last"],
+            "file-1.txt"
+        );
 
         let listed = tree.list_directory(&root_cid).await.unwrap();
         assert_eq!(listed.len(), 5);
@@ -601,6 +612,83 @@ mod read {
             .expect("resolve fanout entry");
         let data = tree.get(&resolved, None).await.unwrap().unwrap();
         assert_eq!(data, b"content-3");
+    }
+
+    #[tokio::test]
+    async fn test_legacy_chunk_named_directory_fanout_still_reads() {
+        let (store, tree) = make_tree();
+
+        let (file_0, size_0) = tree.put_file(b"legacy-0").await.unwrap();
+        let (file_1, size_1) = tree.put_file(b"legacy-1").await.unwrap();
+
+        let child_0 = TreeNode::dir(vec![Link {
+            hash: file_0.hash,
+            name: Some("file-0.txt".to_string()),
+            size: size_0,
+            key: file_0.key,
+            link_type: LinkType::Blob,
+            meta: None,
+        }]);
+        let (child_0_data, child_0_hash) = encode_and_hash(&child_0).unwrap();
+        store.put(child_0_hash, child_0_data).await.unwrap();
+
+        let child_1 = TreeNode::dir(vec![Link {
+            hash: file_1.hash,
+            name: Some("file-1.txt".to_string()),
+            size: size_1,
+            key: file_1.key,
+            link_type: LinkType::Blob,
+            meta: None,
+        }]);
+        let (child_1_data, child_1_hash) = encode_and_hash(&child_1).unwrap();
+        store.put(child_1_hash, child_1_data).await.unwrap();
+
+        let legacy_root = TreeNode::dir(vec![
+            Link {
+                hash: child_0_hash,
+                name: Some("_chunk_0".to_string()),
+                size: size_0,
+                key: None,
+                link_type: LinkType::Dir,
+                meta: None,
+            },
+            Link {
+                hash: child_1_hash,
+                name: Some("_chunk_1".to_string()),
+                size: size_1,
+                key: None,
+                link_type: LinkType::Dir,
+                meta: None,
+            },
+        ]);
+        let (root_data, root_hash) = encode_and_hash(&legacy_root).unwrap();
+        store.put(root_hash, root_data).await.unwrap();
+        let root_cid = Cid {
+            hash: root_hash,
+            key: None,
+        };
+
+        let listed = tree.list_directory(&root_cid).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "file-0.txt");
+        assert_eq!(listed[1].name, "file-1.txt");
+        assert!(listed
+            .iter()
+            .all(|entry| !entry.name.starts_with("_chunk_")));
+
+        let resolved = tree
+            .resolve_path(&root_cid, "file-1.txt")
+            .await
+            .unwrap()
+            .expect("legacy fanout file");
+        let data = tree.get(&resolved, None).await.unwrap().unwrap();
+        assert_eq!(data, b"legacy-1");
+
+        assert!(tree
+            .resolve_path(&root_cid, "_chunk_0")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
