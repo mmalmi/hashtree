@@ -95,6 +95,8 @@ function buildTopLevelAssetEntries(root, mapper, excludeNames = new Set()) {
   return listTopLevelFiles(root)
     .filter((fullPath) => !excludeNames.has(basename(fullPath)))
     .filter((fullPath) => !fullPath.endsWith('.sha256'))
+    .filter((fullPath) => basename(fullPath) !== 'SHA256SUMS')
+    .filter((fullPath) => basename(fullPath) !== 'SHA256SUMS.sig')
     .map((sourcePath) => mapper(sourcePath))
 }
 
@@ -190,10 +192,7 @@ export function renderReleaseNotes({ tag, commit, assetEntries, changelogEntry =
 
   lines.push('### htree CLI', '')
   if (installUrl && assets.installSh) {
-    lines.push(
-      'The `install.sh` asset verifies the signed release checksum manifest before extracting a platform archive.',
-      '',
-    )
+    lines.push('Install with shell:', '', '```bash', `curl -fsSL ${installUrl} | sh`, '```', '')
   } else if (assets.installSh) {
     lines.push('Install with the shell script asset below.', '')
   }

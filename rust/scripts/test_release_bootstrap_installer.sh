@@ -2,9 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WRITER="${SCRIPT_DIR}/write_release_bootstrap_installer.sh"
-SIGNER="${SCRIPT_DIR}/write_signed_release_checksums.sh"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -30,9 +28,17 @@ detect_os() {
 }
 
 require_command curl
-require_command openssl
 require_command python3
 require_command tar
+
+PORT="${HASHTREE_TEST_PORT:-$(python3 - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)}"
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
@@ -63,40 +69,24 @@ archive="hashtree-${target}.tar.gz"
     tar -czf "${ASSETS_DIR}/${archive}" hashtree
 )
 
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${TMP_DIR}/private.pem" >/dev/null 2>&1
-openssl pkey -in "${TMP_DIR}/private.pem" -pubout -out "${TMP_DIR}/public.pem" >/dev/null 2>&1
-"$SIGNER" --dir "$ASSETS_DIR" --private-key-file "${TMP_DIR}/private.pem"
-cp "${ASSETS_DIR}/SHA256SUMS.sig" "${TMP_DIR}/SHA256SUMS.sig.good"
-
 "$WRITER" \
     --path "${TMP_DIR}/install.sh" \
-    --base-url "http://127.0.0.1:8765" \
-    --asset-base-url "http://127.0.0.1:8765" \
-    --public-key-file "${TMP_DIR}/public.pem"
+    --base-url "http://127.0.0.1:${PORT}"
 
 (
-    cd "$ASSETS_DIR"
-    python3 -m http.server 8765 --bind 127.0.0.1 >"${TMP_DIR}/http.log" 2>&1
+    cd "$TMP_DIR"
+    python3 -m http.server "$PORT" --bind 127.0.0.1 >"${TMP_DIR}/http.log" 2>&1
 ) &
 SERVER_PID=$!
 
 for _ in $(seq 1 50); do
-    if curl -fsS "http://127.0.0.1:8765/SHA256SUMS" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:${PORT}/assets/${archive}" >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
 
-printf 'bad signature\n' >"${ASSETS_DIR}/SHA256SUMS.sig"
-if HASHTREE_TEST_MARKER="$MARKER" sh "${TMP_DIR}/install.sh" >"${TMP_DIR}/bad.out" 2>"${TMP_DIR}/bad.err"; then
-    echo "bootstrap accepted a bad release manifest signature" >&2
-    exit 1
-fi
-grep -F "signature verification failed" "${TMP_DIR}/bad.err" >/dev/null
-[ ! -e "$MARKER" ] || { echo "packaged installer ran after bad signature" >&2; exit 1; }
-
-cp "${TMP_DIR}/SHA256SUMS.sig.good" "${ASSETS_DIR}/SHA256SUMS.sig"
 HASHTREE_TEST_MARKER="$MARKER" sh "${TMP_DIR}/install.sh" >"${TMP_DIR}/good.out" 2>"${TMP_DIR}/good.err"
 grep -F "installed" "$MARKER" >/dev/null
 
-echo "test_release_bootstrap_signature.sh passed"
+echo "test_release_bootstrap_installer.sh passed"

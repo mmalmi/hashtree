@@ -427,12 +427,19 @@ impl HashtreeServer {
             .route(
                 "/upload",
                 put(blossom::upload_blob)
+                    .layer::<_, std::convert::Infallible>(middleware::from_fn(
+                        blossom::require_upload_auth_middleware,
+                    ))
+                    .layer(DefaultBodyLimit::max(blossom::MAX_SINGLE_UPLOAD_BODY_BYTES))
                     .head(blossom::head_upload)
                     .options(blossom::cors_preflight),
             )
             .route(
                 "/upload/batch",
                 post(blossom::upload_blob_batch)
+                    .layer::<_, std::convert::Infallible>(middleware::from_fn(
+                        blossom::require_upload_auth_middleware,
+                    ))
                     .options(blossom::cors_preflight)
                     .layer(DefaultBodyLimit::max(
                         blossom::MAX_BATCH_UPLOAD_JSON_BODY_BYTES,
@@ -441,6 +448,9 @@ impl HashtreeServer {
             .route(
                 "/upload/batch-binary",
                 post(blossom::upload_blob_batch_binary)
+                    .layer::<_, std::convert::Infallible>(middleware::from_fn(
+                        blossom::require_upload_auth_middleware,
+                    ))
                     .options(blossom::cors_preflight)
                     .layer(DefaultBodyLimit::max(
                         blossom::MAX_BATCH_UPLOAD_BINARY_BODY_BYTES,
@@ -860,6 +870,61 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_upload_batch_is_rejected_before_json_extraction() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let (port, handle) = spawn_test_server(store).await?;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/upload/batch"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("not valid json")
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_single_upload_is_rejected_before_body_limit() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let (port, handle) = spawn_test_server(store).await?;
+        let body = vec![0_u8; blossom::MAX_SINGLE_UPLOAD_BODY_BYTES + 1];
+
+        let response = reqwest::Client::new()
+            .put(format!("http://127.0.0.1:{port}/upload"))
+            .body(body)
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_options_preflight_does_not_require_auth() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let (port, handle) = spawn_test_server(store).await?;
+
+        let response = reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://127.0.0.1:{port}/upload"),
+            )
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         handle.abort();
         Ok(())
     }

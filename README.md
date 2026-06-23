@@ -11,7 +11,7 @@ Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots
 
 ### Prebuilt binaries (macOS/Linux)
 
-Download the archive for your platform from the release assets, extract it, and run `./install.sh`. Signed releases may also publish a top-level `install.sh` asset; that bootstrap verifies the signed release checksum manifest before extracting an archive. Do not pipe mutable installer URLs directly into `sh`.
+Download the archive for your platform from the release assets, extract it, and run `./install.sh`. Htree-published releases may also publish a top-level `install.sh` asset that downloads the matching platform archive from the same release root and delegates to the packaged installer.
 
 The installer places `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt release binaries omit optional FUSE mount support. Build from source with `cargo install hashtree-cli --no-default-features --features lmdb,fuse` if you need `htree mount`. For a system-wide install, pass a target directory, for example `./install.sh /usr/local/bin`.
 

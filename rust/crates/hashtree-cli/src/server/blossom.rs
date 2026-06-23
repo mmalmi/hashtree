@@ -5,8 +5,9 @@
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{header, HeaderMap, Response, StatusCode},
+    middleware::Next,
     response::IntoResponse,
     Json,
 };
@@ -49,6 +50,7 @@ const LEGACY_BLOSSOM_PUBLIC_BASE_URL_ENV: &str = "HASHTREE_BLOSSOM_PUBLIC_BASE_U
 
 /// Default maximum upload size in bytes (5 MB)
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
+pub const MAX_SINGLE_UPLOAD_BODY_BYTES: usize = 64 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
 pub const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
@@ -2101,6 +2103,13 @@ fn blossom_auth_error_response(status: StatusCode, reason: &'static str) -> Resp
 fn verify_upload_batch_auth(headers: &HeaderMap) -> Result<BlossomAuth, Response<Body>> {
     verify_blossom_auth(headers, "upload", None)
         .map_err(|(status, reason)| blossom_auth_error_response(status, reason))
+}
+
+pub async fn require_upload_auth_middleware(request: Request, next: Next) -> Response<Body> {
+    if let Err(response) = verify_upload_batch_auth(request.headers()) {
+        return response;
+    }
+    next.run(request).await
 }
 
 async fn upload_decoded_blob_batch(
