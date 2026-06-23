@@ -37,7 +37,7 @@
   },
   "dependencies": {
     "@hashtree/core": "workspace:*",
-    "dexie": "^4.2.1"
+    "dexie": "4.4.2"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
