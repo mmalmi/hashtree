@@ -5,13 +5,13 @@ usage() {
     cat <<'EOF'
 Usage: rust/scripts/test_install_matrix.sh [options]
 
-Smoke-test the README-advertised install flows on every platform this machine
-can reach: native host, Docker Linux targets, a running Windows VM, and
-Homebrew on the host when available.
+Smoke-test signed release install flows on every platform this machine can
+reach: native host, Docker Linux targets, a running Windows VM, and Homebrew on
+the host when available.
 
-By default the script extracts the canonical install command and Homebrew tap
-from README.md. It prints a per-platform PASS/FAIL/SKIP summary and exits nonzero
-if any attempted platform fails.
+Pass --install-cmd to test a shell bootstrap. Homebrew tap metadata is still
+read from README.md when not overridden. The script prints a per-platform
+PASS/FAIL/SKIP summary and exits nonzero if any attempted platform fails.
 
 Options:
   --readme <path>                 README to inspect (default: repo README.md)
@@ -32,7 +32,7 @@ Options:
 Examples:
   rust/scripts/test_install_matrix.sh
   rust/scripts/test_install_matrix.sh --platforms host,docker-arm64
-  rust/scripts/test_install_matrix.sh --install-cmd 'curl -fsSL https://example/install.sh | sh'
+  rust/scripts/test_install_matrix.sh --install-cmd 'tmpdir=$(mktemp -d) && cd "$tmpdir" && curl -fsSLO https://example/install.sh && sh install.sh'
 EOF
 }
 
@@ -233,10 +233,6 @@ with open(log_path, "wb") as log_file:
 PY
 }
 
-extract_install_cmd_from_readme() {
-    grep -F 'curl -fsSL https://upload.iris.to/' "$README_PATH" | grep 'install.sh' | head -n1
-}
-
 extract_brew_tap_from_readme() {
     grep -F 'brew tap ' "$README_PATH" | grep 'homebrew-hashtree.git' | head -n1
 }
@@ -353,6 +349,11 @@ run_host_smoke() {
     host_arch="$(uname -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
     label="host-${host_os}-${host_arch}"
 
+    if [ -z "$INSTALL_CMD" ]; then
+        record_result "$label" "SKIP" "no --install-cmd supplied for shell bootstrap smoke"
+        return 0
+    fi
+
     case "$host_os" in
         darwin|linux)
             ;;
@@ -375,6 +376,11 @@ run_docker_smoke() {
     local platform="$1"
     local label="$2"
     local log_path
+
+    if [ -z "$INSTALL_CMD" ]; then
+        record_result "$label" "SKIP" "no --install-cmd supplied for shell bootstrap smoke"
+        return 0
+    fi
 
     if ! command -v "$DOCKER_BIN" >/dev/null 2>&1; then
         record_result "$label" "SKIP" "docker not available"
@@ -456,6 +462,10 @@ run_windows_smoke() {
 
     zip_url="$(derive_windows_zip_url || true)"
     if [ -z "$zip_url" ]; then
+        if [ -z "$INSTALL_CMD" ]; then
+            record_result "$label" "SKIP" "no --windows-zip-url or --install-cmd supplied for Windows smoke"
+            return 0
+        fi
         record_result "$label" "FAIL" "could not determine the Windows release zip URL"
         return 0
     fi
@@ -681,14 +691,6 @@ run_brew_smoke() {
         HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew untap "$BREW_TAP_NAME" >/dev/null 2>&1 || true
     fi
 }
-
-if [ -z "$INSTALL_CMD" ]; then
-    INSTALL_CMD="$(extract_install_cmd_from_readme)"
-fi
-if [ -z "$INSTALL_CMD" ]; then
-    echo "Failed to extract the canonical install command from ${README_PATH}" >&2
-    exit 1
-fi
 
 if [ -z "$BREW_TAP_NAME" ] || [ -z "$BREW_TAP_URL" ]; then
     brew_tap_line="$(extract_brew_tap_from_readme)"

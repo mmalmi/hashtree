@@ -482,11 +482,25 @@ impl GitStorage {
     /// Import a raw git object (already in loose format, zlib compressed)
     /// Used when fetching existing objects from remote before push
     pub fn import_compressed_object(&self, oid: &str, compressed_data: Vec<u8>) -> Result<()> {
+        let expected_oid = ObjectId::from_hex(oid)
+            .ok_or_else(|| Error::InvalidObjectFormat(format!("invalid object id: {}", oid)))?;
+        let mut decoder = ZlibDecoder::new(compressed_data.as_slice());
+        let mut loose = Vec::new();
+        decoder.read_to_end(&mut loose)?;
+        let object = GitObject::from_loose_format(&loose)?;
+        let actual_oid = object.id();
+        if actual_oid != expected_oid {
+            return Err(Error::InvalidObjectFormat(format!(
+                "object id mismatch: expected {}, got {}",
+                expected_oid, actual_oid
+            )));
+        }
+
         let mut objects = self
             .objects
             .write()
             .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
-        objects.insert(oid.to_string(), compressed_data);
+        objects.insert(expected_oid.to_hex(), compressed_data);
 
         // Invalidate cached root
         if let Ok(mut root) = self.root_cid.write() {
@@ -498,6 +512,8 @@ impl GitStorage {
 
     /// Import a ref directly (used when loading existing refs from remote)
     pub fn import_ref(&self, name: &str, value: &str) -> Result<()> {
+        validate_ref_name(name)?;
+
         let mut refs = self
             .refs
             .write()
@@ -2547,6 +2563,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn import_ref_rejects_invalid_name() {
+        let (storage, _temp) = create_test_storage();
+
+        assert!(storage
+            .import_ref(
+                "refs/heads/../main",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .is_err());
+        assert!(!storage.has_ref("refs/heads/../main").unwrap());
+    }
+
     #[cfg(feature = "lmdb")]
     #[test]
     fn test_local_store_falls_back_to_fs_when_lmdb_open_returns_enosys() {
@@ -2642,15 +2671,30 @@ mod tests {
     fn test_import_compressed_object() {
         let (storage, _temp) = create_test_storage();
 
-        // Create a fake compressed object
-        let fake_compressed = vec![0x78, 0x9c, 0x01, 0x02, 0x03]; // fake zlib data
+        let obj = GitObject::new(ObjectType::Blob, b"imported bytes".to_vec());
+        let oid = obj.id().to_hex();
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&obj.to_loose_format()).unwrap();
+        let compressed = encoder.finish().unwrap();
 
-        storage
-            .import_compressed_object("abc123def456", fake_compressed.clone())
-            .unwrap();
+        storage.import_compressed_object(&oid, compressed).unwrap();
 
         // Check object count
         assert_eq!(storage.object_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn import_compressed_object_rejects_oid_mismatch() {
+        let (storage, _temp) = create_test_storage();
+        let obj = GitObject::new(ObjectType::Blob, b"trusted bytes".to_vec());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&obj.to_loose_format()).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        assert!(storage
+            .import_compressed_object("0123456789abcdef0123456789abcdef01234567", compressed,)
+            .is_err());
+        assert_eq!(storage.object_count().unwrap(), 0);
     }
 
     #[test]

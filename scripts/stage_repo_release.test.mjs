@@ -119,8 +119,8 @@ Changes since the previous release.
     )
 
     const notes = readFileSync(join(outputDir, 'notes.md'), 'utf8')
-    assert.match(notes, /curl -fsSL https:\/\/upload\.example\/releases%2Fhashtree\/latest\/install\.sh \| sh/)
-    assert.match(notes, /Install with shell:/)
+    assert.doesNotMatch(notes, /curl -fsSL .* \| sh/)
+    assert.match(notes, /verifies the signed release checksum manifest/)
     assert.match(notes, /Manual macOS\/Linux install: download the archive for your platform from the release assets below/)
     assert.match(notes, /## Changelog/)
     assert.match(notes, /### Improved/)
@@ -128,6 +128,45 @@ Changes since the previous release.
     assert.doesNotMatch(notes, /## Downloads/)
     assert.doesNotMatch(notes, /hashtree-aarch64-apple-darwin\.sha256/)
     assert.doesNotMatch(notes, /hashtree-aarch64-apple-darwin\.tar\.gz/)
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
+})
+
+test('stageRepoRelease includes signed checksum manifest assets', () => {
+  const tempDir = mkdtempSync(join(os.tmpdir(), 'stage-repo-release-signed-sums-'))
+
+  try {
+    const cliDir = join(tempDir, 'cli')
+    const outputDir = join(tempDir, 'out')
+
+    mkdirSync(cliDir, { recursive: true })
+    writeFileSync(join(cliDir, 'install.sh'), '#!/bin/sh\necho install\n')
+    writeFileSync(join(cliDir, 'hashtree-aarch64-apple-darwin.tar.gz'), 'cli-tar')
+    writeFileSync(join(cliDir, 'SHA256SUMS'), 'abc  hashtree-aarch64-apple-darwin.tar.gz\n')
+    writeFileSync(join(cliDir, 'SHA256SUMS.sig'), 'signature')
+
+    const result = stageRepoRelease({
+      tag: 'v0.2.16',
+      commit: '112233',
+      cliDir,
+      outputDir,
+    })
+
+    assert.equal(result.assetCount, 4)
+    assert.equal(existsSync(join(outputDir, 'assets', 'SHA256SUMS')), true)
+    assert.equal(existsSync(join(outputDir, 'assets', 'SHA256SUMS.sig')), true)
+
+    const manifest = JSON.parse(readFileSync(join(outputDir, 'release.json'), 'utf8'))
+    assert.deepEqual(
+      manifest.assets.map((asset) => asset.path),
+      [
+        'assets/hashtree-aarch64-apple-darwin.tar.gz',
+        'install.sh',
+        'assets/SHA256SUMS',
+        'assets/SHA256SUMS.sig',
+      ],
+    )
   } finally {
     rmSync(tempDir, { recursive: true, force: true })
   }

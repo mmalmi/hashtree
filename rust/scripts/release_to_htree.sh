@@ -288,6 +288,7 @@ require_full_platform_archives_for_release "$OUTPUT_DIR"
 npub="$(current_npub)"
 RELEASE_STAGE_SCRIPT="${REPO_DIR}/scripts/stage_repo_release.mjs"
 RELEASE_BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/write_release_bootstrap_installer.sh"
+RELEASE_CHECKSUM_SCRIPT="${SCRIPT_DIR}/write_signed_release_checksums.sh"
 
 if [ -n "$npub" ]; then
     if ! homebrew_archives_ready "$OUTPUT_DIR"; then
@@ -295,10 +296,26 @@ if [ -n "$npub" ]; then
     elif [ ! -x "$RELEASE_BOOTSTRAP_SCRIPT" ]; then
         echo "Missing release bootstrap helper: ${RELEASE_BOOTSTRAP_SCRIPT}" >&2
         exit 1
+    elif [ ! -x "$RELEASE_CHECKSUM_SCRIPT" ]; then
+        echo "Missing release checksum signing helper: ${RELEASE_CHECKSUM_SCRIPT}" >&2
+        exit 1
+    elif [ -z "${HASHTREE_RELEASE_SIGNING_PRIVATE_KEY_PEM:-}" ] || [ -z "${HASHTREE_RELEASE_VERIFY_PUBLIC_KEY_PEM:-}" ]; then
+        echo "Warning: release signing keys are not configured; skipping release installer generation." >&2
     else
+        signing_tmp="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-release-signing-XXXXXX")"
+        TEMP_DIRS+=("$signing_tmp")
+        private_key="${signing_tmp}/release-signing-private.pem"
+        public_key="${signing_tmp}/release-signing-public.pem"
+        printf '%s\n' "${HASHTREE_RELEASE_SIGNING_PRIVATE_KEY_PEM}" >"$private_key"
+        printf '%s\n' "${HASHTREE_RELEASE_VERIFY_PUBLIC_KEY_PEM}" >"$public_key"
+        chmod 600 "$private_key"
+        "${RELEASE_CHECKSUM_SCRIPT}" \
+            --dir "$OUTPUT_DIR" \
+            --private-key-file "$private_key"
         "${RELEASE_BOOTSTRAP_SCRIPT}" \
             --path "${OUTPUT_DIR}/install.sh" \
-            --base-url "$(gateway_release_base_url "$npub" "$TREE_NAME" "$VERSION_PATH")"
+            --base-url "$(gateway_release_base_url "$npub" "$TREE_NAME" "$VERSION_PATH")" \
+            --public-key-file "$public_key"
     fi
 else
     echo "Warning: Could not determine current npub; skipping release installer generation." >&2
@@ -471,8 +488,12 @@ run_post_publish_install_checks() {
 
     latest_path="$(latest_path_for_version_path "$VERSION_PATH")"
     latest_base_url="$(gateway_release_base_url "$npub" "$TREE_NAME" "$latest_path")"
+    if [ ! -f "${RELEASE_STAGE_DIR}/install.sh" ]; then
+        echo "Skipping post-publish install matrix because this release has no signed install.sh bootstrap."
+        return 0
+    fi
     matrix_args=(
-        --install-cmd "curl -fsSL ${latest_base_url}/install.sh | sh"
+        --install-cmd "tmpdir=\$(mktemp -d) && cd \"\$tmpdir\" && curl -fsSLO ${latest_base_url}/install.sh && sh install.sh"
         --windows-zip-url "${latest_base_url}/assets/hashtree-x86_64-pc-windows-msvc.zip"
     )
 

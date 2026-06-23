@@ -76,8 +76,9 @@ require_command() {
 target_release_features() {
     case "$1" in
         x86_64-unknown-linux-musl|aarch64-unknown-linux-musl)
-            # Linux release artifacts keep FUSE mount support.
-            printf '%s\n' "hashtree-cli/fuse"
+            # Release artifacts omit optional FUSE support; source builds can
+            # opt in with `--features lmdb,fuse` on systems with libfuse.
+            printf '%s\n' ""
             ;;
         x86_64-apple-darwin|aarch64-apple-darwin)
             # macOS release artifacts intentionally omit FUSE so `htree` still
@@ -94,9 +95,8 @@ resolve_linux_builder() {
     case "$LINUX_BUILDER" in
         auto)
             # Prefer target-native Alpine containers for Linux release artifacts.
-            # The FUSE-enabled CLI needs target-native libfuse headers/libs for
-            # pkg-config, which is exactly what broke the previous cross-based
-            # release path on both macOS and GitHub Actions.
+            # This keeps the release environment predictable without enabling
+            # optional platform integrations in published binaries.
             if command -v "$DOCKER_BIN" >/dev/null 2>&1; then
                 printf '%s\n' docker
             else
@@ -216,11 +216,9 @@ else
 fi
 
 echo "✓ Installed htree, htree-cashu, and git-remote-htree"
-if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
-  echo ""
-  echo "Note: macOS release binaries omit FUSE mount support so htree runs without macFUSE."
-  echo "Build from source with: cargo install hashtree-cli --no-default-features --features lmdb,fuse"
-fi
+echo ""
+echo "Note: release binaries omit optional FUSE mount support."
+echo "Build from source with: cargo install hashtree-cli --no-default-features --features lmdb,fuse"
 if ! path_contains "$INSTALL_DIR"; then
   echo ""
   echo "Add $INSTALL_DIR to your PATH, for example:"
@@ -262,6 +260,10 @@ Usage:
   git remote add htree htree://self/myrepo
   git push htree main
 
+FUSE note:
+  Release binaries omit optional FUSE mount support. Build from source with:
+    cargo install hashtree-cli --no-default-features --features lmdb,fuse
+
 More info: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
 EOF
 }
@@ -288,9 +290,8 @@ Usage:
   htree cashu balance                 # inspect Cashu wallet
   git clone htree://npub1.../repo     # clone git repo
 
-macOS note:
-  Prebuilt macOS release binaries omit FUSE mount support so htree still runs
-  without macFUSE installed. Build from source with:
+FUSE note:
+  Prebuilt release binaries omit optional FUSE mount support. Build from source with:
     cargo install hashtree-cli --no-default-features --features lmdb,fuse
 
 More info: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree

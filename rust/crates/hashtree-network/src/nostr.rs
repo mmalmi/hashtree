@@ -97,7 +97,7 @@ pub fn decode_signaling_event(
         return decode_seal_event(seal_event, my_peer_id, my_pubkey, keys);
     }
 
-    decode_legacy_directed_seal(seal, my_peer_id, my_pubkey)
+    decode_legacy_directed_seal(seal, my_peer_id, my_pubkey, &event.pubkey.to_hex())
 }
 
 fn decode_signed_inner_event(
@@ -159,8 +159,12 @@ fn decode_legacy_directed_seal(
     seal: serde_json::Value,
     my_peer_id: &str,
     my_pubkey: &str,
+    outer_pubkey: &str,
 ) -> Option<SignalingMessage> {
     let sender_pubkey = seal.get("pubkey").and_then(|v| v.as_str())?;
+    if sender_pubkey != outer_pubkey {
+        return None;
+    }
     if sender_pubkey == my_pubkey {
         return None;
     }
@@ -733,9 +737,8 @@ mod tests {
         });
         let recipient_pk =
             PublicKey::from_hex(&recipient_keys.public_key().to_hex()).expect("recipient pubkey");
-        let ephemeral_keys = Keys::generate();
         let ciphertext = nip44::encrypt(
-            ephemeral_keys.secret_key(),
+            sender_keys.secret_key(),
             &recipient_pk,
             seal.to_string(),
             nip44::Version::V2,
@@ -746,7 +749,7 @@ mod tests {
                 Tag::public_key(recipient_pk),
                 Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
             ])
-            .sign_with_keys(&ephemeral_keys)
+            .sign_with_keys(&sender_keys)
             .expect("build event");
 
         let decoded = decode_signaling_event(
@@ -757,6 +760,50 @@ mod tests {
         )
         .expect("decode legacy directed signaling");
         assert_eq!(decoded.peer_id(), sender_keys.public_key().to_hex());
+    }
+
+    #[test]
+    fn decoder_rejects_legacy_directed_seal_with_mismatched_outer_signer() {
+        let attacker_keys = Keys::generate();
+        let claimed_keys = Keys::generate();
+        let recipient_keys = Keys::generate();
+        let claimed_peer_id = claimed_keys.public_key().to_hex();
+        let recipient_peer_id = recipient_keys.public_key().to_hex();
+        let msg = SignalingMessage::Offer {
+            peer_id: claimed_peer_id.clone(),
+            target_peer_id: recipient_peer_id.clone(),
+            sdp: "spoofed-legacy-sdp".to_string(),
+        };
+        let seal = serde_json::json!({
+            "pubkey": claimed_peer_id,
+            "kind": NOSTR_KIND_HASHTREE,
+            "content": serde_json::to_string(&msg).expect("legacy message json"),
+            "tags": []
+        });
+        let recipient_pk =
+            PublicKey::from_hex(&recipient_keys.public_key().to_hex()).expect("recipient pubkey");
+        let ciphertext = nip44::encrypt(
+            attacker_keys.secret_key(),
+            &recipient_pk,
+            seal.to_string(),
+            nip44::Version::V2,
+        )
+        .expect("encrypt spoofed legacy message");
+        let event = EventBuilder::new(Kind::from_u16(NOSTR_KIND_HASHTREE), ciphertext)
+            .tags(vec![
+                Tag::public_key(recipient_pk),
+                Tag::expiration(Timestamp::now() + Duration::from_secs(300)),
+            ])
+            .sign_with_keys(&attacker_keys)
+            .expect("build spoofed event");
+
+        assert!(decode_signaling_event(
+            &event,
+            &recipient_peer_id,
+            &recipient_keys.public_key().to_hex(),
+            &recipient_keys,
+        )
+        .is_none());
     }
 
     #[test]

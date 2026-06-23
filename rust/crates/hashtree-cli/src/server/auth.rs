@@ -8,7 +8,7 @@ use axum::{
     body::Body,
     extract::ws::Message,
     extract::State,
-    http::{header, Request, Response, StatusCode},
+    http::{header, HeaderMap, Request, Response, StatusCode},
     middleware::Next,
 };
 use futures::future::{BoxFuture, Shared};
@@ -283,7 +283,7 @@ pub struct AppState {
     /// Allow anyone with valid Nostr auth to write (default: true)
     /// When false, only allowed_pubkeys can write
     pub public_writes: bool,
-    /// Allow public plaintext reads from mutable npub routes (default: true)
+    /// Allow public plaintext reads from mutable npub routes (default: false)
     /// When false, only allowed_pubkeys or social graph approved pubkeys can read.
     pub public_plaintext_reads: bool,
     /// Require untrusted cached blob ingress to look like encrypted CHK blobs.
@@ -364,6 +364,38 @@ pub struct AuthCredentials {
     pub password: String,
 }
 
+fn basic_auth_authorized(headers: &HeaderMap, auth: &AuthCredentials) -> bool {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let Some(header_value) = auth_header else {
+        return false;
+    };
+    let Some(credentials) = header_value.strip_prefix("Basic ") else {
+        return false;
+    };
+
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let Ok(decoded) = engine.decode(credentials) else {
+        return false;
+    };
+    let Ok(decoded_str) = String::from_utf8(decoded) else {
+        return false;
+    };
+    let expected = format!("{}:{}", auth.username, auth.password);
+    decoded_str == expected
+}
+
+fn unauthorized_basic_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::WWW_AUTHENTICATE, "Basic realm=\"hashtree\"")
+        .body(Body::from("Unauthorized"))
+        .unwrap()
+}
+
 /// Auth middleware - validates HTTP Basic Auth
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -375,40 +407,29 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     };
 
-    // Check Authorization header
-    let auth_header = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let authorized = if let Some(header_value) = auth_header {
-        if let Some(credentials) = header_value.strip_prefix("Basic ") {
-            use base64::Engine;
-            let engine = base64::engine::general_purpose::STANDARD;
-            if let Ok(decoded) = engine.decode(credentials) {
-                if let Ok(decoded_str) = String::from_utf8(decoded) {
-                    let expected = format!("{}:{}", auth.username, auth.password);
-                    decoded_str == expected
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if authorized {
+    if basic_auth_authorized(request.headers(), auth) {
         Ok(next.run(request).await)
     } else {
-        Ok(Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .header(header::WWW_AUTHENTICATE, "Basic realm=\"hashtree\"")
-            .body(Body::from("Unauthorized"))
-            .unwrap())
+        Ok(unauthorized_basic_response())
+    }
+}
+
+/// Strict internal auth middleware - requires configured HTTP Basic Auth.
+pub async fn require_auth_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response<Body>, StatusCode> {
+    let Some(auth) = &state.auth else {
+        return Ok(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Authentication is not configured"))
+            .unwrap());
+    };
+
+    if basic_auth_authorized(request.headers(), auth) {
+        Ok(next.run(request).await)
+    } else {
+        Ok(unauthorized_basic_response())
     }
 }

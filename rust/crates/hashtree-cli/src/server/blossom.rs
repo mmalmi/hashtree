@@ -51,9 +51,14 @@ const LEGACY_BLOSSOM_PUBLIC_BASE_URL_ENV: &str = "HASHTREE_BLOSSOM_PUBLIC_BASE_U
 pub const DEFAULT_MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024;
 const OPTIMISTIC_UPLOAD_MIN_QUEUE_CHARGE_BYTES: usize = 256 * 1024;
 const MAX_BATCH_UPLOAD_BLOBS: usize = 1024;
-const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_BATCH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_BATCH_UPLOAD_JSON_BODY_BYTES: usize = 96 * 1024 * 1024;
 const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
 const MAX_BINARY_BATCH_CONTENT_TYPE_BYTES: usize = 1024;
+pub const MAX_BATCH_UPLOAD_BINARY_BODY_BYTES: usize = MAX_BATCH_UPLOAD_BYTES
+    + BINARY_BATCH_UPLOAD_MAGIC.len()
+    + 4
+    + (MAX_BATCH_UPLOAD_BLOBS * (32 + 2 + MAX_BINARY_BATCH_CONTENT_TYPE_BYTES + 8));
 const MAX_UPLOAD_CHECK_HASHES: usize = 10_000;
 const SLOW_BATCH_UPLOAD_LOG_MS_ENV: &str = "HTREE_SLOW_BATCH_UPLOAD_LOG_MS";
 const BLOSSOM_REPLICA_UPLOAD_CONCURRENCY_ENV: &str = "HTREE_BLOSSOM_REPLICA_UPLOAD_CONCURRENCY";
@@ -2083,9 +2088,25 @@ fn parse_binary_batch_upload(
     Ok(blobs)
 }
 
+fn blossom_auth_error_response(status: StatusCode, reason: &'static str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header("X-Reason", reason)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
+        .unwrap()
+}
+
+fn verify_upload_batch_auth(headers: &HeaderMap) -> Result<BlossomAuth, Response<Body>> {
+    verify_blossom_auth(headers, "upload", None)
+        .map_err(|(status, reason)| blossom_auth_error_response(status, reason))
+}
+
 async fn upload_decoded_blob_batch(
     state: AppState,
     headers: HeaderMap,
+    auth: BlossomAuth,
     blobs: Vec<DecodedBatchUploadBlob>,
     started_at: Instant,
     encoding: &'static str,
@@ -2102,18 +2123,6 @@ async fn upload_decoded_blob_batch(
         );
     }
 
-    let auth = match verify_blossom_auth(&headers, "upload", None) {
-        Ok(a) => a,
-        Err((status, reason)) => {
-            return Response::builder()
-                .status(status)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header("X-Reason", reason)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(r#"{{"error":"{}"}}"#, reason)))
-                .unwrap();
-        }
-    };
     let auth_ms = started_at.elapsed().as_millis();
 
     let is_allowed_author = is_allowed_write_author(&state, &auth.pubkey);
@@ -2310,6 +2319,10 @@ pub async fn upload_blob_batch(
     Json(payload): Json<BatchUploadRequest>,
 ) -> impl IntoResponse {
     let started_at = Instant::now();
+    let auth = match verify_upload_batch_auth(&headers) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let mut blobs = Vec::with_capacity(payload.blobs.len());
     for blob in payload.blobs {
         let data = match base64::engine::general_purpose::STANDARD.decode(blob.data.as_bytes()) {
@@ -2322,7 +2335,7 @@ pub async fn upload_blob_batch(
             data,
         });
     }
-    upload_decoded_blob_batch(state, headers, blobs, started_at, "json").await
+    upload_decoded_blob_batch(state, headers, auth, blobs, started_at, "json").await
 }
 
 /// POST /upload/batch-binary - Upload a binary encoded blob batch.
@@ -2332,11 +2345,15 @@ pub async fn upload_blob_batch_binary(
     body: Bytes,
 ) -> impl IntoResponse {
     let started_at = Instant::now();
+    let auth = match verify_upload_batch_auth(&headers) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let blobs = match parse_binary_batch_upload(&body) {
         Ok(blobs) => blobs,
         Err((status, reason)) => return blossom_json_error(status, reason),
     };
-    upload_decoded_blob_batch(state, headers, blobs, started_at, "binary").await
+    upload_decoded_blob_batch(state, headers, auth, blobs, started_at, "binary").await
 }
 
 /// DELETE /<sha256> - Delete a blob (BUD-02)
@@ -3065,6 +3082,47 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!store.blob_exists(&sha256(&first)).expect("first absent"));
         assert!(!store.blob_exists(&sha256(&second)).expect("second absent"));
+    }
+
+    #[tokio::test]
+    async fn upload_blob_batch_rejects_missing_auth_before_decoding_payload() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(store);
+        let payload = BatchUploadRequest {
+            blobs: vec![BatchUploadBlob {
+                sha256: "00".repeat(32),
+                content_type: None,
+                data: "not-base64".to_string(),
+            }],
+        };
+
+        let response = upload_blob_batch(State(state), HeaderMap::new(), Json(payload))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn upload_blob_batch_binary_rejects_missing_auth_before_parsing_body() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(
+            HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
+        );
+        let state = test_app_state(store);
+
+        let response = upload_blob_batch_binary(
+            State(state),
+            HeaderMap::new(),
+            Bytes::from_static(b"not a binary batch"),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test(flavor = "current_thread")]

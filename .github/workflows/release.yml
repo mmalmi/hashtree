@@ -72,9 +72,8 @@ jobs:
       - name: Build and Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          # FUSE-enabled Linux release builds use Docker-native musl containers
-          # instead of cross because `fuser` needs target-native libfuse
-          # pkg-config metadata and headers.
+          # Linux release builds use Docker-native musl containers so the
+          # published binaries are built in a predictable target environment.
           if [ "${{ matrix.linux_docker }}" = "true" ]; then
             bash scripts/build_release_artifacts.sh \
               --version "${RELEASE_TAG}" \
@@ -166,13 +165,36 @@ jobs:
         shell: bash
         run: find artifacts -maxdepth 2 -type f | sort
 
-      - name: Write release install bootstrap
+      - name: Sign release archive manifest and write install bootstrap
         shell: bash
+        env:
+          HASHTREE_RELEASE_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.HASHTREE_RELEASE_SIGNING_PRIVATE_KEY_PEM }}
+          HASHTREE_RELEASE_VERIFY_PUBLIC_KEY_PEM: ${{ secrets.HASHTREE_RELEASE_VERIFY_PUBLIC_KEY_PEM }}
         run: |
           set -euo pipefail
+          if [ -z "${HASHTREE_RELEASE_SIGNING_PRIVATE_KEY_PEM:-}" ] || [ -z "${HASHTREE_RELEASE_VERIFY_PUBLIC_KEY_PEM:-}" ]; then
+            echo "Release signing keys are not configured; skipping install.sh bootstrap."
+            exit 0
+          fi
+
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+          private_key="${tmpdir}/release-signing-private.pem"
+          public_key="${tmpdir}/release-signing-public.pem"
+          printf '%s\n' "${HASHTREE_RELEASE_SIGNING_PRIVATE_KEY_PEM}" >"${private_key}"
+          printf '%s\n' "${HASHTREE_RELEASE_VERIFY_PUBLIC_KEY_PEM}" >"${public_key}"
+          chmod 600 "${private_key}"
+
+          bash rust/scripts/write_signed_release_checksums.sh \
+            --dir artifacts/hashtree \
+            --private-key-file "${private_key}"
+
+          release_base_url="https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"
           bash rust/scripts/write_release_bootstrap_installer.sh \
             --path artifacts/hashtree/install.sh \
-            --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"
+            --base-url "${release_base_url}" \
+            --asset-base-url "${release_base_url}" \
+            --public-key-file "${public_key}"
 
       - name: Prepare release assets and notes
         id: release_assets

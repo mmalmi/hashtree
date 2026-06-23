@@ -55,6 +55,7 @@ pub use auth::{
 static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 512 * 1024 * 1024;
 const DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES: usize = 512 * 1024 * 1024;
+const INTERNAL_JSON_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 #[cfg(not(test))]
 const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -148,7 +149,7 @@ impl HashtreeServer {
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
                 public_writes: true,               // Allow anyone with valid Nostr auth by default
-                public_plaintext_reads: true,
+                public_plaintext_reads: false,
                 require_random_untrusted_ingest: true,
                 optimistic_blossom_uploads: false,
                 optimistic_upload_queue_bytes: DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES,
@@ -393,10 +394,7 @@ impl HashtreeServer {
             .route("/ws/", get(ws_relay::ws_data))
             .route(
                 "/__iris/store/:hash",
-                get(handlers::iris_store_get)
-                    .head(handlers::iris_store_head)
-                    .put(handlers::iris_store_put)
-                    .delete(handlers::iris_store_delete),
+                get(handlers::iris_store_get).head(handlers::iris_store_head),
             )
             .route(
                 "/htree/test",
@@ -434,11 +432,19 @@ impl HashtreeServer {
             )
             .route(
                 "/upload/batch",
-                post(blossom::upload_blob_batch).options(blossom::cors_preflight),
+                post(blossom::upload_blob_batch)
+                    .options(blossom::cors_preflight)
+                    .layer(DefaultBodyLimit::max(
+                        blossom::MAX_BATCH_UPLOAD_JSON_BODY_BYTES,
+                    )),
             )
             .route(
                 "/upload/batch-binary",
-                post(blossom::upload_blob_batch_binary).options(blossom::cors_preflight),
+                post(blossom::upload_blob_batch_binary)
+                    .options(blossom::cors_preflight)
+                    .layer(DefaultBodyLimit::max(
+                        blossom::MAX_BATCH_UPLOAD_BINARY_BODY_BYTES,
+                    )),
             )
             .route(
                 "/upload/check",
@@ -478,11 +484,6 @@ impl HashtreeServer {
                 get(handlers::resolve_to_hash),
             )
             .route("/api/nostr/profile/:pubkey", get(handlers::nostr_profile))
-            .route("/api/cache-tree-root", post(handlers::cache_tree_root))
-            .route(
-                "/api/clear-tree-root-cache",
-                post(handlers::clear_tree_root_cache),
-            )
             .route("/api/trees/:pubkey", get(handlers::list_trees))
             .fallback(get(handlers::serve_virtual_host_fallback))
             .with_state(state.clone());
@@ -499,8 +500,34 @@ impl HashtreeServer {
             ))
             .with_state(state.clone());
 
+        // Internal mutating endpoints require configured Basic auth. These
+        // routes stay closed even when optional API auth is disabled.
+        let internal_routes = Router::new()
+            .route(
+                "/__iris/store/:hash",
+                put(handlers::iris_store_put)
+                    .delete(handlers::iris_store_delete)
+                    .layer(DefaultBodyLimit::max(blossom::MAX_BATCH_UPLOAD_BYTES)),
+            )
+            .route(
+                "/api/cache-tree-root",
+                post(handlers::cache_tree_root)
+                    .layer(DefaultBodyLimit::max(INTERNAL_JSON_BODY_LIMIT_BYTES)),
+            )
+            .route(
+                "/api/clear-tree-root-cache",
+                post(handlers::clear_tree_root_cache)
+                    .layer(DefaultBodyLimit::max(INTERNAL_JSON_BODY_LIMIT_BYTES)),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_auth_middleware,
+            ))
+            .with_state(state.clone());
+
         let mut app = public_routes
             .merge(protected_routes)
+            .merge(internal_routes)
             .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10GB limit
             .layer(middleware::from_fn(status_metrics::record_http_status));
 
@@ -685,7 +712,9 @@ mod tests {
     use super::*;
     use crate::nostr_relay::{NostrRelay, NostrRelayConfig};
     use crate::storage::HashtreeStore;
-    use hashtree_core::{from_hex, nhash_encode, DirEntry, HashTree, HashTreeConfig, LinkType};
+    use hashtree_core::{
+        from_hex, nhash_encode, sha256, to_hex, DirEntry, HashTree, HashTreeConfig, LinkType,
+    };
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use serde_json::json;
     use tempfile::TempDir;
@@ -790,6 +819,49 @@ mod tests {
         let handle =
             tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
         Ok((port, handle))
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_native_store_mutation_is_rejected() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let body = b"unauthorized native store write";
+        let hash = sha256(body);
+        let hash_hex = to_hex(&hash);
+        let (port, handle) = spawn_test_server(Arc::clone(&store)).await?;
+
+        let response = reqwest::Client::new()
+            .put(format!("http://127.0.0.1:{port}/__iris/store/{hash_hex}"))
+            .body(body.to_vec())
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        assert!(store.get_blob(&hash)?.is_none());
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_cache_tree_root_is_rejected() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let (port, handle) = spawn_test_server(store).await?;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/api/cache-tree-root"))
+            .json(&json!({
+                "npub": "npub1example",
+                "treeName": "video",
+                "hash": "988db3f24dc222715f1c1e1fa5876690d3147122243d72d85fd44283867cd61a",
+                "visibility": "public"
+            }))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        handle.abort();
+        Ok(())
     }
 
     #[tokio::test]

@@ -256,6 +256,7 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
         });
     }
 
+    #[cfg(feature = "webrtc")]
     if options.enable_webrtc {
         config.transports.webrtc = TransportInstances::Single(fips_core::WebRtcConfig {
             advertise_on_nostr: Some(true),
@@ -264,6 +265,12 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
             max_connections: Some(options.webrtc_max_connections.max(1)),
             ..Default::default()
         });
+    }
+    #[cfg(not(feature = "webrtc"))]
+    if options.enable_webrtc {
+        tracing::warn!(
+            "FIPS WebRTC transport requested but this binary was built without the webrtc feature"
+        );
     }
 
     // Some shared bootstrap peers expose tcp:443 for UDP-hostile networks.

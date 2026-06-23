@@ -3,16 +3,19 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: rust/scripts/write_release_bootstrap_installer.sh --path <path> --base-url <url>
+Usage: rust/scripts/write_release_bootstrap_installer.sh --path <path> --base-url <url> --public-key-file <path> [--asset-base-url <url>]
 
 Writes the top-level install.sh bootstrap used by release directories. The
-script downloads the platform archive from the same release origin and then
-delegates to the packaged installer inside the archive.
+script verifies the signed release checksum manifest, downloads the platform
+archive from the release origin, checks it against the signed manifest, and
+then delegates to the packaged installer inside the archive.
 EOF
 }
 
 PATH_ARG=""
 BASE_URL=""
+ASSET_BASE_URL=""
+PUBLIC_KEY_FILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -22,6 +25,14 @@ while [ $# -gt 0 ]; do
             ;;
         --base-url)
             BASE_URL="${2:-}"
+            shift 2
+            ;;
+        --asset-base-url)
+            ASSET_BASE_URL="${2:-}"
+            shift 2
+            ;;
+        --public-key-file)
+            PUBLIC_KEY_FILE="${2:-}"
             shift 2
             ;;
         -h|--help)
@@ -36,12 +47,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "$PATH_ARG" ] || [ -z "$BASE_URL" ]; then
+if [ -z "$PATH_ARG" ] || [ -z "$BASE_URL" ] || [ -z "$PUBLIC_KEY_FILE" ]; then
     usage >&2
     exit 1
 fi
 
+if [ ! -f "$PUBLIC_KEY_FILE" ]; then
+    echo "Missing public key file: $PUBLIC_KEY_FILE" >&2
+    exit 1
+fi
+
+if [ -z "$ASSET_BASE_URL" ]; then
+    ASSET_BASE_URL="${BASE_URL}/assets"
+fi
+
 CACHE_BUSTER="${BASE_URL##*/}"
+PUBLIC_KEY_PEM="$(cat "$PUBLIC_KEY_FILE")"
 
 mkdir -p "$(dirname "$PATH_ARG")"
 
@@ -50,12 +71,8 @@ cat >"$PATH_ARG" <<EOF
 set -eu
 
 BASE_URL="${BASE_URL}"
-ASSET_BASE_URL="\${BASE_URL}/assets"
+ASSET_BASE_URL="${ASSET_BASE_URL}"
 ASSET_URL_SUFFIX="?v=${CACHE_BUSTER}"
-
-# This bootstrap is the trust root for curl|sh installs. Same-origin checksum
-# files would not improve security here, so it downloads the release archive
-# directly and delegates to the packaged installer.
 
 log() {
     printf 'hashtree-install: %s\n' "\$*" >&2
@@ -168,10 +185,59 @@ fetch() {
 }
 
 require_command curl
+require_command openssl
 require_command tar
 require_command mktemp
 require_command uname
 require_command sed
+require_command awk
+
+write_public_key() {
+    cat >"\$1" <<'HASHTREE_RELEASE_PUBLIC_KEY'
+${PUBLIC_KEY_PEM}
+HASHTREE_RELEASE_PUBLIC_KEY
+}
+
+sha256_file() {
+    file_path=\$1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "\$file_path" | awk '{print \$1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "\$file_path" | awk '{print \$1}'
+    else
+        openssl dgst -sha256 -r "\$file_path" | awk '{print \$1}'
+    fi
+}
+
+verify_signed_manifest() {
+    sums_path=\$1
+    sig_path=\$2
+    pubkey_path=\$3
+
+    write_public_key "\$pubkey_path"
+    openssl dgst -sha256 -verify "\$pubkey_path" -signature "\$sig_path" "\$sums_path" >/dev/null 2>&1 \
+        || die "release checksum manifest signature verification failed"
+}
+
+verify_archive_checksum() {
+    sums_path=\$1
+    archive_name=\$2
+    archive_path=\$3
+
+    expected=\$(awk -v name="\$archive_name" '\$2 == name { print \$1; found = 1; exit } END { if (!found) exit 1 }' "\$sums_path") \
+        || die "signed checksum manifest does not list \$archive_name"
+    case "\$expected" in
+        *[!0123456789abcdefABCDEF]*|"")
+            die "signed checksum manifest has invalid digest for \$archive_name"
+            ;;
+    esac
+    if [ "\${#expected}" -ne 64 ]; then
+        die "signed checksum manifest has invalid digest length for \$archive_name"
+    fi
+
+    actual=\$(sha256_file "\$archive_path")
+    [ "\$actual" = "\$expected" ] || die "archive checksum mismatch for \$archive_name"
+}
 
 target="\$(detect_arch)-\$(detect_os)"
 archive="hashtree-\${target}.tar.gz"
@@ -180,11 +246,20 @@ tmpdir=\$(mktemp -d 2>/dev/null || mktemp -d -t hashtree-install) || die "failed
 
 url="\${ASSET_BASE_URL}/\${archive}\${ASSET_URL_SUFFIX}"
 archive_path="\${tmpdir}/\${archive}"
+sums_path="\${tmpdir}/SHA256SUMS"
+sig_path="\${tmpdir}/SHA256SUMS.sig"
+pubkey_path="\${tmpdir}/release-public-key.pem"
+
+log "downloading signed checksum manifest"
+fetch "\${ASSET_BASE_URL}/SHA256SUMS\${ASSET_URL_SUFFIX}" "\$sums_path"
+fetch "\${ASSET_BASE_URL}/SHA256SUMS.sig\${ASSET_URL_SUFFIX}" "\$sig_path"
+verify_signed_manifest "\$sums_path" "\$sig_path" "\$pubkey_path"
 
 log "downloading \${url}"
 fetch "\$url" "\$archive_path"
 
 [ -s "\$archive_path" ] || die "downloaded archive is empty or missing: \$archive_path"
+verify_archive_checksum "\$sums_path" "\$archive" "\$archive_path"
 tar -tzf "\$archive_path" >/dev/null 2>&1 || die "downloaded file is not a valid gzip tar archive: \$archive_path (download may be corrupt)"
 tar -xzf "\$archive_path" -C "\$tmpdir" || die "failed to extract archive: \$archive_path"
 

@@ -9,13 +9,11 @@ Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots
 
 ## Installation
 
-### Quick install (prebuilt binaries, macOS/Linux)
+### Prebuilt binaries (macOS/Linux)
 
-```bash
-curl -fsSL https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhashtree/latest/install.sh | sh
-```
+Download the archive for your platform from the release assets, extract it, and run `./install.sh`. Signed releases may also publish a top-level `install.sh` asset; that bootstrap verifies the signed release checksum manifest before extracting an archive. Do not pipe mutable installer URLs directly into `sh`.
 
-That installs `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Build from source with `cargo install hashtree-cli --no-default-features --features p2p,lmdb,fuse` if you need `htree mount` on macOS. Linux prebuilt binaries keep FUSE mount support. For a system-wide install, pass a target directory, for example `sh -s -- /usr/local/bin`.
+The installer places `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt release binaries omit optional FUSE mount support. Build from source with `cargo install hashtree-cli --no-default-features --features lmdb,fuse` if you need `htree mount`. For a system-wide install, pass a target directory, for example `./install.sh /usr/local/bin`.
 
 Windows note: the shell bootstrap is not supported there. Download the latest `hashtree-x86_64-pc-windows-msvc.zip` release asset, extract it, and add `htree.exe`, `htree-cashu.exe`, and `git-remote-htree.exe` to your PATH. The Windows release zip does not include FUSE mount support.
 
@@ -39,15 +37,14 @@ cargo install hashtree-cli
 cargo install hashtree-cli git-remote-htree hashtree-cashu-cli
 
 # Add FUSE mount support explicitly when you want it
-cargo install hashtree-cli --no-default-features --features p2p,lmdb,fuse
+cargo install hashtree-cli --no-default-features --features lmdb,fuse
 ```
 
 For cargo installs, `fuse` is opt-in. That keeps `cargo install hashtree-cli` working on machines that do not have platform FUSE headers/libs available.
 
 - Linux: install FUSE 3 development packages first, typically `pkg-config` plus `libfuse3-dev` (package names vary by distro).
-- macOS: install macFUSE before building with `--features p2p,lmdb,fuse`.
-- Prebuilt macOS release tarballs and the macOS Homebrew package omit FUSE mount support so `htree` works without macFUSE installed.
-- Linux release tarballs and Linux Homebrew installs keep FUSE mount support.
+- macOS: install macFUSE before building with `--features lmdb,fuse`.
+- Prebuilt release tarballs and Homebrew packages omit FUSE mount support.
 - The Windows release zip does not include FUSE mount support.
 
 ### Local install from this repo
@@ -58,7 +55,7 @@ cargo install --path rust/crates/git-remote-htree
 cargo install --path rust/crates/hashtree-cashu-cli
 
 # Local build with FUSE mount support
-cargo install --path rust/crates/hashtree-cli --no-default-features --features p2p,lmdb,fuse
+cargo install --path rust/crates/hashtree-cli --no-default-features --features lmdb,fuse
 ```
 
 ### Homebrew

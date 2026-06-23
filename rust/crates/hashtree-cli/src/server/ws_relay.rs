@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
-use hashtree_core::from_hex;
+use hashtree_core::{from_hex, sha256};
 use nostr::{
     ClientMessage as NostrClientMessage, Filter as NostrFilter, JsonUtil as NostrJsonUtil,
     RelayMessage as NostrRelayMessage, SubscriptionId,
@@ -771,40 +771,16 @@ async fn handle_response(
         let pending = state.ws_relay.pending.lock().await;
         pending
             .get(&(client_id, request_id))
-            .map(|p| (p.origin_id, p.hash.clone(), p.found, p.origin_protocol))
+            .map(|p| (p.origin_id, p.hash.clone(), p.origin_protocol))
     };
 
-    let Some((origin_id, pending_hash, already_found, origin_protocol)) = pending_entry else {
+    let Some((origin_id, pending_hash, origin_protocol)) = pending_entry else {
         return;
     };
-
-    if already_found && !found {
-        let mut pending = state.ws_relay.pending.lock().await;
-        pending.remove(&(client_id, request_id));
-        return;
-    }
 
     if found {
-        let mut pending = state.ws_relay.pending.lock().await;
-        for ((_, id), p) in pending.iter_mut() {
-            if *id == request_id && p.origin_id == origin_id {
-                p.found = true;
-            }
-        }
-        drop(pending);
-        if origin_protocol == WsProtocol::HashtreeJson {
-            send_json(
-                state,
-                origin_id,
-                WsResponse {
-                    kind: "res",
-                    id: request_id,
-                    hash: pending_hash,
-                    found: true,
-                },
-            )
-            .await;
-        }
+        // Legacy JSON peers send a `found` control message before sending the
+        // binary body. Do not forward success until the body hashes correctly.
         return;
     }
 
@@ -828,6 +804,10 @@ async fn handle_response(
         )
         .await;
     }
+}
+
+fn payload_matches_hash(hash: &[u8], data: &[u8]) -> bool {
+    hash.len() == 32 && sha256(data).as_slice() == hash
 }
 
 async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
@@ -878,15 +858,31 @@ async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
         return;
     };
 
+    let Ok(hash_bytes) = from_hex(&hash_hex) else {
+        return;
+    };
+    let payload = &data[4..];
+    if !payload_matches_hash(&hash_bytes, payload) {
+        return;
+    }
+
     match origin_protocol {
         WsProtocol::HashtreeJson => {
-            send_binary(state, origin_id, request_id, data[4..].to_vec()).await;
+            send_json(
+                state,
+                origin_id,
+                WsResponse {
+                    kind: "res",
+                    id: request_id,
+                    hash: hash_hex.clone(),
+                    found: true,
+                },
+            )
+            .await;
+            send_binary(state, origin_id, request_id, payload.to_vec()).await;
         }
         WsProtocol::HashtreeMsgpack => {
-            let Ok(hash_bytes) = from_hex(&hash_hex) else {
-                return;
-            };
-            send_msgpack_response(state, origin_id, &hash_bytes, &data[4..]).await;
+            send_msgpack_response(state, origin_id, &hash_bytes, payload).await;
         }
         WsProtocol::Unknown => {}
     }
@@ -1007,6 +1003,10 @@ async fn handle_msgpack_response(client_id: u64, res: DataResponse, state: &AppS
     let hash_hex = hex_encode(&res.h);
     let data = res.d.clone();
     let hash_bytes = res.h.clone();
+
+    if !payload_matches_hash(&hash_bytes, &data) {
+        return;
+    }
 
     let mut responses: Vec<(u64, u32, WsProtocol)> = Vec::new();
     let mut seen = HashSet::new();
@@ -1313,6 +1313,137 @@ mod tests {
             )),
             cid_size_cache: Arc::new(std::sync::Mutex::new(super::super::auth::new_lookup_cache())),
         })
+    }
+
+    fn ws_integrity_test_state(tmp: &TempDir) -> Result<AppState> {
+        let graph_store = {
+            let _guard = crate::socialgraph::test_lock();
+            crate::socialgraph::open_test_social_graph_store_with_mapsize(
+                tmp.path(),
+                Some(128 * 1024 * 1024),
+            )?
+        };
+        let backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = graph_store;
+        let relay = Arc::new(NostrRelay::new(
+            backend,
+            tmp.path().to_path_buf(),
+            HashSet::new(),
+            None,
+            NostrRelayConfig {
+                spambox_db_max_bytes: 0,
+                ..Default::default()
+            },
+        )?);
+        test_app_state(tmp, relay, String::new())
+    }
+
+    async fn seed_pending_json_blob_request(
+        state: &AppState,
+        peer_id: u64,
+        origin_id: u64,
+        request_id: u32,
+        hash_hex: String,
+    ) -> mpsc::UnboundedReceiver<Message> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.ws_relay.clients.lock().await.insert(origin_id, tx);
+        state.ws_relay.pending.lock().await.insert(
+            (peer_id, request_id),
+            PendingRequest {
+                origin_id,
+                hash: hash_hex,
+                found: false,
+                origin_protocol: WsProtocol::HashtreeJson,
+            },
+        );
+        rx
+    }
+
+    #[tokio::test]
+    async fn json_found_response_waits_for_valid_binary_payload() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let state = ws_integrity_test_state(&tmp)?;
+        let expected_hash = hex_encode(sha256(b"expected"));
+        let peer_id = 7;
+        let origin_id = 11;
+        let request_id = 42;
+        let mut rx = seed_pending_json_blob_request(
+            &state,
+            peer_id,
+            origin_id,
+            request_id,
+            expected_hash.clone(),
+        )
+        .await;
+
+        handle_response(peer_id, request_id, expected_hash, true, &state).await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_binary_response_with_wrong_hash_is_not_forwarded() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let state = ws_integrity_test_state(&tmp)?;
+        let expected_hash = hex_encode(sha256(b"expected"));
+        let peer_id = 7;
+        let origin_id = 11;
+        let request_id = 42;
+        let mut rx =
+            seed_pending_json_blob_request(&state, peer_id, origin_id, request_id, expected_hash)
+                .await;
+        let mut wire = request_id.to_le_bytes().to_vec();
+        wire.extend_from_slice(b"wrong bytes");
+
+        handle_binary(peer_id, wire, &state).await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn msgpack_response_with_wrong_hash_is_not_forwarded() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let state = ws_integrity_test_state(&tmp)?;
+        let expected_hash = sha256(b"expected");
+        let peer_id = 7;
+        let origin_id = 11;
+        let request_id = 42;
+        let mut rx = seed_pending_json_blob_request(
+            &state,
+            peer_id,
+            origin_id,
+            request_id,
+            hex_encode(expected_hash),
+        )
+        .await;
+
+        handle_msgpack_response(
+            peer_id,
+            DataResponse {
+                h: expected_hash.to_vec(),
+                d: b"wrong bytes".to_vec(),
+                i: None,
+                n: None,
+            },
+            &state,
+        )
+        .await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[tokio::test]

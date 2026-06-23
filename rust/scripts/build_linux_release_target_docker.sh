@@ -6,9 +6,8 @@ usage() {
 Usage: rust/scripts/build_linux_release_target_docker.sh --target <target> --target-dir <dir> [options]
 
 Build the Linux musl release binaries inside a target-native Alpine container.
-This is used for FUSE-enabled release artifacts because `fuser` needs target-
-native libfuse headers and pkg-config metadata, which the generic cross images
-do not provide reliably.
+This avoids relying on generic cross images for the release toolchain while
+keeping optional features such as FUSE out of the default published binaries.
 
 Options:
   --target <target>                Linux musl target triple to build
@@ -150,8 +149,7 @@ done
 read -r -d '' build_command <<EOF || true
 set -euo pipefail
 export PATH="\${CARGO_HOME:-/usr/local/cargo}/bin:\$PATH"
-apk add --no-cache build-base clang clang-dev lld musl-dev linux-headers pkgconf fuse3-dev cmake perl git >/dev/null
-apk add --no-cache fuse3-static >/dev/null
+apk add --no-cache build-base clang clang-dev lld musl-dev linux-headers pkgconf cmake perl git >/dev/null
 mkdir -p /target-dir/release /target-dir/${TARGET}/release
 locked_flag=""
 if [ -f /work/rust/Cargo.lock ]; then
@@ -162,7 +160,6 @@ cargo build --release --target ${TARGET} --target-dir /target-dir \\
     -p git-remote-htree \\
     -p hashtree-cashu-cli \\
     -p hashtree-cli \\
-    --features hashtree-cli/fuse \\
     \$locked_flag
 EOF
 

@@ -194,7 +194,7 @@ fn default_public_writes() -> bool {
 }
 
 fn default_public_plaintext_reads() -> bool {
-    true
+    false
 }
 
 fn default_socialgraph_snapshot_public() -> bool {
@@ -677,7 +677,7 @@ fn default_enable_fips_udp() -> bool {
 }
 
 fn default_enable_fips_webrtc() -> bool {
-    true
+    cfg!(feature = "fips-webrtc")
 }
 
 fn default_fetch_from_fips_peers() -> bool {
@@ -1111,7 +1111,7 @@ mod tests {
         assert_eq!(config.server.max_wifi_aware_peers, 0);
         assert!(!config.server.enable_bluetooth);
         assert_eq!(config.server.max_bluetooth_peers, 0);
-        assert!(config.server.public_plaintext_reads);
+        assert!(!config.server.public_plaintext_reads);
         assert_eq!(config.storage.max_size_gb, 10);
         assert!(config.storage.evict_orphans);
         assert!(config.nostr.enabled);
@@ -1442,7 +1442,7 @@ chunk_target_bytes = 65536
     }
 
     #[test]
-    fn server_defaults_enable_fips_udp_and_webrtc() {
+    fn server_defaults_enable_fips_udp_and_feature_gated_webrtc() {
         let server = ServerConfig::default();
 
         assert!(server.enable_fips);
@@ -1450,7 +1450,7 @@ chunk_target_bytes = 65536
         assert!(server.fips_udp_bind_addr.is_none());
         assert!(!server.fips_udp_public);
         assert!(server.fips_udp_external_addr.is_none());
-        assert!(server.enable_fips_webrtc);
+        assert_eq!(server.enable_fips_webrtc, cfg!(feature = "fips-webrtc"));
         assert!(server.fetch_from_fips_peers);
         assert!(server.fips_relays.is_empty());
         assert!(server.fips_peers.is_empty());

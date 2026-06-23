@@ -190,7 +190,10 @@ export function renderReleaseNotes({ tag, commit, assetEntries, changelogEntry =
 
   lines.push('### htree CLI', '')
   if (installUrl && assets.installSh) {
-    lines.push('Install with shell:', '', '```bash', `curl -fsSL ${installUrl} | sh`, '```', '')
+    lines.push(
+      'The `install.sh` asset verifies the signed release checksum manifest before extracting a platform archive.',
+      '',
+    )
   } else if (assets.installSh) {
     lines.push('Install with the shell script asset below.', '')
   }
