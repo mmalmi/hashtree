@@ -324,7 +324,7 @@ mod tests {
     use base64::Engine;
     use hashtree_cli::HashtreeStore;
     use hashtree_core::{from_hex, DirEntry, HashTree, HashTreeConfig, LinkType};
-    use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
+    use nostr::{nips::nip19::ToBech32, EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
     use reqwest::blocking::Client;
     use serde_json::json;
     use std::io::{Read, Write};
@@ -524,6 +524,8 @@ mod tests {
         );
 
         let upstream = start_blob_fixture_server(source_store);
+        let route_keys = Keys::generate();
+        let npub = route_keys.public_key().to_bech32().expect("encode npub");
         let config_dir = temp.path().join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
@@ -537,13 +539,13 @@ mod tests {
                 "enableFipsWebrtc": false,
                 "fetchFromFipsPeers": false,
                 "socialGraphCrawlDepth": 0,
-                "syncEnabled": false
+                "syncEnabled": false,
+                "allowedNpubs": [npub.clone()]
             }))
             .expect("serialize browser settings"),
         )
         .expect("write browser settings");
 
-        let npub = "npub1embeddedtest000000000000000000000000000000000000000000000000";
         let mut runtime = HostDaemonRuntime::start(
             HostDaemonOptions::new(temp.path())
                 .with_initial_tree_roots(vec![(format!("{npub}/sites"), root_cid)]),

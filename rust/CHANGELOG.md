@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.73 - 2026-06-23
+
+### Changed
+
+- Kept htree release bootstrap publishing as a top-level `install.sh` while
+  removing same-origin checksum/signature sidecar verification from that
+  bootstrap path.
+- Tightened release artifact defaults so prebuilt binaries omit optional
+  FUSE/WebRTC paths while source builds can still opt into them.
+
+### Fixed
+
+- Rejected Blossom uploads at the route layer before JSON/body extraction and
+  body-limit handling when upload auth is missing or invalid.
+- Hardened WebSocket relay and Git import paths against untrusted or mismatched
+  blobs reaching trusted storage or clients.
+- Preserved legacy Nostr contact closure behavior while avoiding fallback
+  default secret material.
+
 ## 0.2.72 - 2026-06-22
 
 ### Changed

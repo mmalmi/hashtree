@@ -2745,7 +2745,7 @@ mod tests {
         // Import refs and objects
         storage.import_ref("refs/heads/main", "sha_main").unwrap();
         storage
-            .import_compressed_object("obj1", vec![1, 2, 3])
+            .write_raw_object(ObjectType::Blob, b"clear me")
             .unwrap();
 
         // Clear
