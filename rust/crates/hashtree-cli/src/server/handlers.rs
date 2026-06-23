@@ -1048,7 +1048,7 @@ pub async fn htree_npub_path(
 
 /// Cache-Control header for immutable content-addressed data (1 year)
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
-const MUTABLE_TREE_CACHE_CONTROL: &str = "public, max-age=60, stale-while-revalidate=300";
+const MUTABLE_TREE_CACHE_CONTROL: &str = "public, max-age=60, stale-while-revalidate=86400";
 const CORP_CROSS_ORIGIN: &str = "cross-origin";
 const CROSS_ORIGIN_RESOURCE_POLICY_HEADER: &str = "cross-origin-resource-policy";
 const DEFAULT_CDN_HOST: &str = "cdn.iris.to";

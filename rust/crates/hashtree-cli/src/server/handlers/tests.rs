@@ -3281,7 +3281,7 @@ async fn htree_npub_path_serves_stale_cached_root_and_refreshes_in_background() 
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(MUTABLE_TREE_CACHE_CONTROL)
+        Some("public, max-age=60, stale-while-revalidate=86400")
     );
     assert_eq!(
         response
