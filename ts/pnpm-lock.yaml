@@ -319,8 +319,8 @@ importers:
         specifier: ^4.3.7
         version: 4.4.3(supports-color@8.1.1)
       dexie:
-        specifier: ^4.0.8
-        version: 4.2.1
+        specifier: 4.4.2
+        version: 4.4.2
       ndk:
         specifier: workspace:*
         version: link:../ndk
@@ -2362,9 +2362,6 @@ packages:
 
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
-
-  dexie@4.2.1:
-    resolution: {integrity: sha512-Ckej0NS6jxQ4Po3OrSQBFddayRhTCic2DoCAG5zacOfOVB9P2Q5Xc5uL/nVa7ZVs+HdMnvUPzLFCB/JwpB6Csg==}
 
   dexie@4.4.2:
     resolution: {integrity: sha512-zMtV8q79EFE5U8FKZvt0Y/77PCU/Hr/RDxv1EDeo228L+m/HTbeN2AjoQm674rhQCX8n3ljK87lajt7UQuZfvw==}
@@ -6505,8 +6502,6 @@ snapshots:
   devlop@1.1.0:
     dependencies:
       dequal: 2.0.3
-
-  dexie@4.2.1: {}
 
   dexie@4.4.2: {}
 

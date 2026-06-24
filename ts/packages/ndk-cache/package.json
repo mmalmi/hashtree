@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "debug": "^4.3.7",
-    "dexie": "^4.0.8",
+    "dexie": "4.4.2",
     "ndk": "workspace:*",
     "nostr-tools": "^2.18.2",
     "typescript-lru-cache": "^2.0.0"
