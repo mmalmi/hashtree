@@ -31,6 +31,7 @@ pub const FIPS_RESPONSE_FRAGMENT_SIZE: usize = 1024;
 pub const FIPS_APP_FRAGMENT_SIZE: usize = 768;
 pub const MAX_HTL: u8 = 10;
 pub const DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS: usize = 512;
+const APP_MESSAGE_BROADCAST_CAPACITY: usize = 4096;
 
 const MSG_TYPE_REQUEST: u8 = 0x00;
 const MSG_TYPE_RESPONSE: u8 = 0x01;
@@ -683,7 +684,7 @@ impl HashtreeFipsTransport<MemoryStore> {
 
 impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
     pub fn new(endpoint: Arc<dyn FipsEndpointIo>, local_store: Arc<S>) -> Self {
-        let (app_messages, _) = broadcast::channel(256);
+        let (app_messages, _) = broadcast::channel(APP_MESSAGE_BROADCAST_CAPACITY);
         Self {
             endpoint,
             local_store,
@@ -2050,6 +2051,42 @@ mod tests {
         assert_eq!(message.topic, "iris-drive/root/frame/v1");
         assert_eq!(message.data, data);
         assert!(endpoint_a.sent_count() > 1);
+    }
+
+    #[tokio::test]
+    async fn app_message_broadcast_retains_bursts_until_app_drain() {
+        let network = Arc::new(Mutex::new(HashMap::new()));
+        let endpoint = FakeEndpoint::new("local", network).await;
+        let transport = HashtreeFipsTransport::new(endpoint, Arc::new(MemoryStore::new()));
+        let mut app_messages = transport.subscribe_app_messages();
+
+        let burst = 512;
+        assert!(burst < APP_MESSAGE_BROADCAST_CAPACITY);
+        for index in 0..burst {
+            transport
+                .app_messages
+                .send(FipsAppMessage {
+                    peer_id: "peer".to_string(),
+                    topic: "iris-drive/root/frame/v1".to_string(),
+                    data: index.to_string().into_bytes(),
+                })
+                .unwrap();
+        }
+
+        let mut received = 0usize;
+        loop {
+            match app_messages.try_recv() {
+                Ok(_) => received += 1,
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    panic!("app message subscriber lagged by {skipped}");
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    panic!("app message channel closed");
+                }
+            }
+        }
+        assert_eq!(received, burst);
     }
 
     #[tokio::test]
