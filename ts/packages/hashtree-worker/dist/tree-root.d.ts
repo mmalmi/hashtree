@@ -57,6 +57,7 @@ declare class TreeRootRegistryImpl {
     private publishFn;
     private publishDelay;
     private retryDelay;
+    private lastLocalUpdatedAt;
     constructor(persistence?: RegistryPersistence);
     /**
      * Hydrate from persistence on startup
@@ -76,6 +77,7 @@ declare class TreeRootRegistryImpl {
     private notify;
     private shouldAcceptUpdate;
     private mergeSameHashMetadata;
+    private nextLocalUpdatedAt;
     /**
      * Sync lookup - returns cached record or null (no side effects)
      */

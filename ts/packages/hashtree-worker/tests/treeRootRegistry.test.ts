@@ -132,4 +132,27 @@ describe('tree root registry same-hash merges', () => {
     expect(record?.keyId).toBe('key-id-2');
     expect(record?.selfEncryptedLinkKey).toBe('bb'.repeat(32));
   });
+
+  it('orders rapid local writes when an older publish is already in flight', () => {
+    const npub = 'npub-test-local-order';
+    const treeName = 'boards/test-local-order';
+
+    treeRootRegistry.delete(npub, treeName);
+    treeRootRegistry.setLocal(npub, treeName, HASH_A, {
+      key: KEY_A,
+      visibility: 'private',
+    });
+    const staleInFlightRecord = treeRootRegistry.get(npub, treeName);
+    expect(staleInFlightRecord).not.toBeNull();
+
+    treeRootRegistry.setLocal(npub, treeName, HASH_B, {
+      key: KEY_B,
+      visibility: 'private',
+    });
+    const latestRecord = treeRootRegistry.get(npub, treeName);
+    expect(latestRecord).not.toBeNull();
+    expect(staleInFlightRecord!.updatedAt).toBeLessThan(latestRecord!.updatedAt);
+    expect(staleInFlightRecord?.hash && toHex(staleInFlightRecord.hash)).toBe(toHex(HASH_A));
+    expect(latestRecord?.hash && toHex(latestRecord.hash)).toBe(toHex(HASH_B));
+  });
 });

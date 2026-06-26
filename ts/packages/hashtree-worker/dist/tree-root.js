@@ -133,6 +133,7 @@ class TreeRootRegistryImpl {
     publishFn = null;
     publishDelay = 1000;
     retryDelay = 5000;
+    lastLocalUpdatedAt = new Map();
     constructor(persistence) {
         this.persistence = persistence ?? new LocalStoragePersistence();
         this.hydrate();
@@ -247,6 +248,13 @@ class TreeRootRegistryImpl {
         }
         return changed;
     }
+    nextLocalUpdatedAt(cacheKey, existing) {
+        const now = Math.floor(Date.now() / 1000);
+        const previous = Math.max(existing?.updatedAt ?? 0, this.lastLocalUpdatedAt.get(cacheKey) ?? 0);
+        const next = Math.max(now, previous + 1);
+        this.lastLocalUpdatedAt.set(cacheKey, next);
+        return next;
+    }
     /**
      * Sync lookup - returns cached record or null (no side effects)
      */
@@ -339,7 +347,7 @@ class TreeRootRegistryImpl {
             key: options?.key,
             visibility,
             labels: uniqueLabels(options?.labels) ?? existing?.labels,
-            updatedAt: Math.floor(Date.now() / 1000),
+            updatedAt: this.nextLocalUpdatedAt(cacheKey, existing),
             source: 'local-write',
             dirty: true,
             encryptedKey: options?.encryptedKey ?? existing?.encryptedKey,
