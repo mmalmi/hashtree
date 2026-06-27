@@ -1,7 +1,8 @@
 use super::add::{
     build_drive_iris_to_url_for_add_route, build_drive_iris_to_url_for_published_ref,
     build_drive_iris_to_url_for_published_target, build_sites_iris_to_url_for_add_route,
-    build_sites_iris_to_url_for_published_ref, detect_site_entry_for_path,
+    build_sites_iris_to_url_for_published_ref, detect_site_entry_for_path, render_add_output,
+    PublishedAddSummary,
 };
 use super::daemonize::{
     build_daemon_args, format_daemon_status, parse_pid, read_pid_file, write_pid_file,
@@ -522,6 +523,38 @@ fn test_build_sites_iris_to_url_for_published_ref_enables_auto_reload() {
         build_sites_iris_to_url_for_published_ref("npub1owner", "apps/iris ui", "index.html"),
         "https://sites.iris.to/#/npub1owner/apps%2Firis%20ui/index.html?reload=1"
     );
+}
+
+#[test]
+fn test_render_add_output_for_published_site_uses_single_mutable_link_block() {
+    let rendered = render_add_output(
+        "dist",
+        "nhash1immutable",
+        "nhash1immutable",
+        "abc123",
+        Some("def456"),
+        Some("index.html"),
+        Some(PublishedAddSummary {
+            nostr_key: "npub1owner/otus",
+            npub: "npub1owner",
+            ref_name: "otus",
+            identity_was_generated: false,
+        }),
+    );
+
+    assert_eq!(rendered.matches("  drive:").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches("  site:").count(), 1, "{rendered}");
+    assert!(
+        !rendered.contains("  drive: https://drive.iris.to/#/nhash1immutable"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("  url:   nhash1immutable\n"));
+    assert!(rendered.contains("  published: npub1owner/otus\n"));
+    assert!(rendered.contains("  drive: https://drive.iris.to/#/npub1owner/otus\n"));
+    assert!(
+        rendered.contains("  site:  https://sites.iris.to/#/npub1owner/otus/index.html?reload=1\n")
+    );
+    assert!(rendered.contains("  permalink: https://sites.iris.to/#/nhash1immutable/index.html\n"));
 }
 
 #[test]

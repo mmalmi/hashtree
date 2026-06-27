@@ -34,6 +34,79 @@ const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
 const LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES";
 const STREAM_PUT_BATCH_TARGET_BYTES_ENV: &str = "HTREE_STREAM_PUT_BATCH_TARGET_BYTES";
 
+pub(crate) struct PublishedAddSummary<'a> {
+    pub(crate) nostr_key: &'a str,
+    pub(crate) npub: &'a str,
+    pub(crate) ref_name: &'a str,
+    pub(crate) identity_was_generated: bool,
+}
+
+pub(crate) fn render_add_output(
+    path_display: &str,
+    display_route: &str,
+    display_root: &str,
+    hash_hex: &str,
+    key_hex: Option<&str>,
+    site_entry: Option<&str>,
+    published: Option<PublishedAddSummary<'_>>,
+) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("added {path_display}\n"));
+    output.push_str(&format!("  url:   {display_route}\n"));
+
+    if published.is_none() {
+        output.push_str(&format!(
+            "  drive: {}\n",
+            build_drive_iris_to_url_for_add_route(display_route)
+        ));
+        if let Some(entry_path) = site_entry {
+            let site_route = format!("{display_root}/{entry_path}");
+            output.push_str(&format!(
+                "  site:  {}\n",
+                build_sites_iris_to_url_for_add_route(&site_route)
+            ));
+        }
+    }
+
+    output.push_str(&format!("  hash:  {hash_hex}\n"));
+    if let Some(key_hex) = key_hex {
+        output.push_str(&format!("  key:   {key_hex}\n"));
+    }
+
+    if let Some(published) = published {
+        if published.identity_was_generated {
+            output.push_str(&format!("  identity: {} (new)\n", published.npub));
+        }
+        output.push_str(&format!("  published: {}\n", published.nostr_key));
+        output.push_str(&format!(
+            "  drive: {}\n",
+            build_drive_iris_to_url_for_published_ref(published.npub, published.ref_name)
+        ));
+        if let Some(entry_path) = site_entry {
+            output.push_str(&format!(
+                "  site:  {}\n",
+                build_sites_iris_to_url_for_published_ref(
+                    published.npub,
+                    published.ref_name,
+                    entry_path,
+                )
+            ));
+            let immutable_site_route = format!("{display_root}/{entry_path}");
+            output.push_str(&format!(
+                "  permalink: {}\n",
+                build_sites_iris_to_url_for_add_route(&immutable_site_route)
+            ));
+        } else {
+            output.push_str(&format!(
+                "  permalink: {}\n",
+                build_drive_iris_to_url_for_add_route(display_route)
+            ));
+        }
+    }
+
+    output
+}
+
 pub(crate) async fn run_add(
     data_dir: PathBuf,
     path: PathBuf,
@@ -180,7 +253,7 @@ pub(crate) async fn run_add(
             }
         })?;
 
-    println!("added {}", path.display());
+    let path_display = path.display().to_string();
     let display_route = if is_dir {
         display_root.clone()
     } else {
@@ -190,24 +263,22 @@ pub(crate) async fn run_add(
             .unwrap_or_default();
         format!("{display_root}/{filename}")
     };
-    println!("  url:   {}", display_route);
-    println!(
-        "  drive: {}",
-        build_drive_iris_to_url_for_add_route(&display_route)
-    );
-    if let Some(entry_path) = site_entry.as_deref() {
-        let site_route = format!("{display_root}/{entry_path}");
-        println!(
-            "  site:  {}",
-            build_sites_iris_to_url_for_add_route(&site_route)
+    if publish.is_none() {
+        print!(
+            "{}",
+            render_add_output(
+                &path_display,
+                &display_route,
+                &display_root,
+                &hash_hex,
+                key_hex.as_deref(),
+                site_entry.as_deref(),
+                None,
+            )
         );
     }
-    println!("  hash:  {}", hash_hex);
-    if let Some(ref k) = key_hex {
-        println!("  key:   {}", k);
-    }
 
-    let (nsec_str, _) = ensure_keys_string()?;
+    let (nsec_str, was_generated) = ensure_keys_string()?;
     let keys = NostrKeys::parse(&nsec_str).context("Failed to parse nsec")?;
     let npub = NostrToBech32::to_bech32(&keys.public_key()).context("Failed to encode npub")?;
 
@@ -244,14 +315,6 @@ pub(crate) async fn run_add(
 
     if let Some(ref_name) = publish.as_deref() {
         let config = Config::load()?;
-        let (nsec_str, was_generated) = ensure_keys_string()?;
-        let keys = NostrKeys::parse(&nsec_str).context("Failed to parse nsec")?;
-        let npub = NostrToBech32::to_bech32(&keys.public_key()).context("Failed to encode npub")?;
-
-        if was_generated {
-            println!("  identity: {} (new)", npub);
-        }
-
         let resolver_config = NostrResolverConfig {
             relays: config.nostr.relays.clone(),
             resolve_timeout: Duration::from_secs(5),
@@ -273,24 +336,40 @@ pub(crate) async fn run_add(
 
         match RootResolver::publish(&resolver, &nostr_key, &cid).await {
             Ok(_) => {
-                println!("  published: {}", nostr_key);
-                println!(
-                    "  drive: {}",
-                    build_drive_iris_to_url_for_published_ref(&npub, ref_name)
+                print!(
+                    "{}",
+                    render_add_output(
+                        &path_display,
+                        &display_route,
+                        &display_root,
+                        &hash_hex,
+                        key_hex.as_deref(),
+                        site_entry.as_deref(),
+                        Some(PublishedAddSummary {
+                            nostr_key: &nostr_key,
+                            npub: &npub,
+                            ref_name,
+                            identity_was_generated: was_generated,
+                        }),
+                    )
                 );
-                if let Some(entry_path) = site_entry.as_deref() {
-                    println!(
-                        "  site:  {}",
-                        build_sites_iris_to_url_for_published_ref(&npub, ref_name, entry_path)
-                    );
-                    let immutable_site_route = format!("{display_root}/{entry_path}");
-                    println!(
-                        "  permalink: {}",
-                        build_sites_iris_to_url_for_add_route(&immutable_site_route)
-                    );
-                }
             }
             Err(e) => {
+                print!(
+                    "{}",
+                    render_add_output(
+                        &path_display,
+                        &display_route,
+                        &display_root,
+                        &hash_hex,
+                        key_hex.as_deref(),
+                        site_entry.as_deref(),
+                        None,
+                    )
+                );
+                if was_generated {
+                    println!("  identity: {} (new)", npub);
+                }
                 eprintln!("  publish failed: {}", e);
             }
         }
