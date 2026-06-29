@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.76 - 2026-06-29
+
+### Fixed
+- Reuploaded a missing published git root from the local hashtree store when
+  push ref discovery resolves the root event but Blossom returns 404 for that
+  tree, then retried normal ref loading before deciding whether a push is stale.
+
 ## 0.2.75 - 2026-06-29
 
 ### Fixed

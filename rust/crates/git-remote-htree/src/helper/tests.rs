@@ -1123,6 +1123,7 @@ fn test_for_push_defers_unreadable_remote_state_and_normal_push_rejects() {
     };
     let root_error = "Failed to download root hash 424242424242: Not found at all servers";
     helper.nostr.force_fetch_refs_error_for_test(root_error);
+    helper.nostr.force_fetch_refs_error_for_test(root_error);
 
     let listed = helper
         .handle_command("list for-push")
@@ -1151,6 +1152,64 @@ fn test_for_push_defers_unreadable_remote_state_and_normal_push_rejects() {
         "normal push should be rejected when existing remote state is unreadable: {:?}",
         result
     );
+}
+
+#[test]
+fn test_for_push_reuploads_missing_cached_root_and_retries_ref_advertisement() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let fake_blossom = CountingBlossomServer::new();
+    write_test_config(home.path(), fake_blossom.base_url(), false);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
+    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
+
+    let mut helper = create_test_helper_with_config(config).expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let root_cid = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        tree.put_directory(vec![])
+            .await
+            .expect("write cached root tree")
+    });
+    let root_hash = hex::encode(root_cid.hash);
+    helper
+        .nostr
+        .cache_root_for_test("test-repo", root_hash.clone(), root_cid.key);
+    helper.nostr.force_fetch_refs_error_for_test(format!(
+        "Failed to download root hash {}: {} returned 404",
+        &root_hash[..12],
+        fake_blossom.base_url()
+    ));
+    let master_sha = "1".repeat(40);
+    let mut refs = HashMap::new();
+    refs.insert("refs/heads/master".to_string(), master_sha.clone());
+    helper
+        .nostr
+        .force_fetch_refs_success_for_test(refs, Some(root_hash), root_cid.key);
+
+    let listed = helper
+        .handle_command("list for-push")
+        .expect("root 404 should repair from local cache")
+        .expect("list for-push should return advertised refs");
+
+    assert!(
+        fake_blossom.has_blob(&root_cid.hash),
+        "missing cached root should be reuploaded to Blossom"
+    );
+    assert!(
+        listed.contains(&format!("{} refs/heads/master", master_sha)),
+        "ref advertisement should be retried after reupload: {:?}",
+        listed
+    );
+    assert_eq!(helper.push_ref_advertisement_error, None);
 }
 
 #[test]

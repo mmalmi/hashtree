@@ -863,6 +863,72 @@ impl RemoteHelper {
         })
     }
 
+    pub(super) fn reupload_cached_remote_root_after_missing_download(
+        &self,
+        error_message: &str,
+    ) -> Result<bool> {
+        if !Self::is_missing_root_download_error(error_message) {
+            return Ok(false);
+        }
+
+        let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() else {
+            return Ok(false);
+        };
+        let encryption_key = self
+            .nostr
+            .get_cached_encryption_key(&self.repo_name)
+            .copied();
+        let short_root = &root_hash[..12.min(root_hash.len())];
+        eprintln!(
+            "  Existing htree root {} is missing from Blossom; reuploading from local store...",
+            short_root
+        );
+
+        let result = self.push_to_file_servers_with_diff(
+            &root_hash,
+            encryption_key.as_ref(),
+            None,
+            None,
+            false,
+        );
+        ensure_blossom_publish_ready(&result)?;
+        self.verify_root_available_on_write_server(&root_hash)?;
+        eprintln!("  Reuploaded existing htree root {}", short_root);
+
+        Ok(true)
+    }
+
+    fn load_existing_remote_state_with_missing_root_repair(&mut self) -> Result<()> {
+        match self.load_existing_remote_state() {
+            Ok(()) => {
+                self.push_ref_advertisement_error = None;
+                Ok(())
+            }
+            Err(err) => {
+                let err_message = err.to_string();
+                if !Self::is_missing_root_download_error(&err_message) {
+                    return Err(err);
+                }
+
+                match self.reupload_cached_remote_root_after_missing_download(&err_message) {
+                    Ok(true) => {
+                        self.load_existing_remote_state()?;
+                        self.push_ref_advertisement_error = None;
+                        Ok(())
+                    }
+                    Ok(false) => Err(err),
+                    Err(repair_err) => {
+                        eprintln!(
+                            "  Warning: Could not reupload missing htree root from local store: {}",
+                            repair_err
+                        );
+                        Err(repair_err)
+                    }
+                }
+            }
+        }
+    }
+
     fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
         let progress = RepoTreeBuildProgress::new();
         let reporter = RepoTreeProgressReporter::start(label, progress.clone());
@@ -1157,7 +1223,7 @@ impl RemoteHelper {
             "About to call load_existing_remote_state"
         );
 
-        if let Err(e) = self.load_existing_remote_state() {
+        if let Err(e) = self.load_existing_remote_state_with_missing_root_repair() {
             let err_str = e.to_string();
             let is_access_error = err_str.contains("link-visible")
                 || err_str.contains("private")
@@ -1200,8 +1266,6 @@ impl RemoteHelper {
                 results.push(String::new());
                 return Ok(Some(results));
             }
-        } else {
-            self.push_ref_advertisement_error = None;
         }
 
         let mut results = Vec::new();

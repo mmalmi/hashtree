@@ -277,6 +277,15 @@ impl RemoteHelper {
         message.starts_with("Repository '") && message.contains("' not found")
     }
 
+    fn is_missing_root_download_error(message: &str) -> bool {
+        if !message.contains("Failed to download root hash") {
+            return false;
+        }
+
+        let lower = message.to_ascii_lowercase();
+        message.contains("404") || lower.contains("not found")
+    }
+
     pub fn new(
         pubkey: &str,
         repo_name: &str,
@@ -433,20 +442,53 @@ impl RemoteHelper {
                 HashMap::new()
             }
             Err(err) if for_push => {
-                let message = err.to_string();
-                warn!(
-                    "Could not read remote refs during push advertisement: {}",
-                    message
-                );
-                eprintln!(
-                    "  Warning: Could not read existing htree remote refs before push: {}",
-                    message
-                );
-                eprintln!(
-                    "  Ordinary pushes will be rejected unless remote state can be loaded; use --force only for explicit repair."
-                );
-                self.push_ref_advertisement_error = Some(message);
-                HashMap::new()
+                let mut message = err.to_string();
+                if Self::is_missing_root_download_error(&message) {
+                    match self.reupload_cached_remote_root_after_missing_download(&message) {
+                        Ok(true) => match self.nostr.fetch_refs(&self.repo_name) {
+                            Ok(refs) => {
+                                self.push_ref_advertisement_error = None;
+                                refs
+                            }
+                            Err(retry_err) => {
+                                message = retry_err.to_string();
+                                warn!(
+                                    "Could not read remote refs after root reupload repair: {}",
+                                    message
+                                );
+                                self.push_ref_advertisement_error = Some(message.clone());
+                                HashMap::new()
+                            }
+                        },
+                        Ok(false) => {
+                            self.push_ref_advertisement_error = Some(message.clone());
+                            HashMap::new()
+                        }
+                        Err(repair_err) => {
+                            eprintln!(
+                                "  Warning: Could not reupload missing htree root from local store: {}",
+                                repair_err
+                            );
+                            message = repair_err.to_string();
+                            self.push_ref_advertisement_error = Some(message.clone());
+                            HashMap::new()
+                        }
+                    }
+                } else {
+                    warn!(
+                        "Could not read remote refs during push advertisement: {}",
+                        message
+                    );
+                    eprintln!(
+                        "  Warning: Could not read existing htree remote refs before push: {}",
+                        message
+                    );
+                    eprintln!(
+                        "  Ordinary pushes will be rejected unless remote state can be loaded; use --force only for explicit repair."
+                    );
+                    self.push_ref_advertisement_error = Some(message);
+                    HashMap::new()
+                }
             }
             Err(err) => return Err(err),
         };

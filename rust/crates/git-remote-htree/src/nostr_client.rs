@@ -346,7 +346,7 @@ pub struct NostrClient {
     /// Local htree daemon URL for peer-assisted root discovery
     local_daemon_url: Option<String>,
     #[cfg(test)]
-    forced_fetch_refs_error: Option<String>,
+    forced_fetch_refs_results: std::collections::VecDeque<Result<FetchedRefs, String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -458,13 +458,71 @@ impl NostrClient {
             is_private,
             local_daemon_url,
             #[cfg(test)]
-            forced_fetch_refs_error: None,
+            forced_fetch_refs_results: std::collections::VecDeque::new(),
         })
     }
 
     #[cfg(test)]
     pub(crate) fn force_fetch_refs_error_for_test(&mut self, message: impl Into<String>) {
-        self.forced_fetch_refs_error = Some(message.into());
+        self.forced_fetch_refs_results
+            .push_back(Err(message.into()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_fetch_refs_success_for_test(
+        &mut self,
+        refs: HashMap<String, String>,
+        root_hash: Option<String>,
+        encryption_key: Option<[u8; 32]>,
+    ) {
+        self.forced_fetch_refs_results
+            .push_back(Ok((refs, root_hash, encryption_key)));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_root_for_test(
+        &mut self,
+        repo_name: &str,
+        root_hash: String,
+        encryption_key: Option<[u8; 32]>,
+    ) {
+        self.cached_root_hash
+            .insert(repo_name.to_string(), root_hash);
+        if let Some(key) = encryption_key {
+            self.cached_encryption_key
+                .insert(repo_name.to_string(), key);
+        } else {
+            self.cached_encryption_key.remove(repo_name);
+        }
+        self.cached_root_source
+            .insert(repo_name.to_string(), RootResolveSource::Relay);
+    }
+
+    #[cfg(test)]
+    fn pop_forced_fetch_refs_result(&mut self, repo_name: &str) -> Option<Result<FetchedRefs>> {
+        self.forced_fetch_refs_results
+            .pop_front()
+            .map(|result| match result {
+                Ok((refs, root_hash, encryption_key)) => {
+                    if let Some(root) = &root_hash {
+                        self.cached_root_hash
+                            .insert(repo_name.to_string(), root.clone());
+                    } else {
+                        self.cached_root_hash.remove(repo_name);
+                    }
+                    if let Some(key) = encryption_key {
+                        self.cached_encryption_key
+                            .insert(repo_name.to_string(), key);
+                    } else {
+                        self.cached_encryption_key.remove(repo_name);
+                    }
+                    self.cached_root_source
+                        .insert(repo_name.to_string(), RootResolveSource::Relay);
+                    self.cached_refs.insert(repo_name.to_string(), refs.clone());
+                    Ok((refs, root_hash, encryption_key))
+                }
+                Err(message) => Err(anyhow::anyhow!(message)),
+            })
     }
 
     fn format_repo_author(pubkey_hex: &str) -> String {
@@ -544,8 +602,9 @@ impl NostrClient {
     /// Returns refs parsed from the hashtree at the root hash
     pub fn fetch_refs(&mut self, repo_name: &str) -> Result<HashMap<String, String>> {
         #[cfg(test)]
-        if let Some(message) = &self.forced_fetch_refs_error {
-            anyhow::bail!("{}", message);
+        if let Some(result) = self.pop_forced_fetch_refs_result(repo_name) {
+            let (refs, _, _) = result?;
+            return Ok(refs);
         }
 
         let (refs, _, _) = self.fetch_refs_with_timeout(repo_name, 10)?;
@@ -565,8 +624,8 @@ impl NostrClient {
     #[allow(dead_code)]
     pub fn fetch_refs_with_root(&mut self, repo_name: &str) -> Result<FetchedRefs> {
         #[cfg(test)]
-        if let Some(message) = &self.forced_fetch_refs_error {
-            anyhow::bail!("{}", message);
+        if let Some(result) = self.pop_forced_fetch_refs_result(repo_name) {
+            return result;
         }
 
         self.fetch_refs_with_timeout(repo_name, 10)
