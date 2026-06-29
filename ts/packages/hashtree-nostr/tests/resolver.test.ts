@@ -718,6 +718,11 @@ describe('NostrRefResolver', () => {
     expect(typeof publishedEvents[0]?.created_at).toBe('number');
     expect(typeof publishedEvents[1]?.created_at).toBe('number');
     expect(publishedEvents[1]!.created_at!).toBeGreaterThan(publishedEvents[0]!.created_at!);
+    for (const event of publishedEvents) {
+      const msTag = event.tags.find(tag => tag[0] === 'ms')?.[1];
+      expect(msTag).toEqual(expect.stringMatching(/^\d+$/));
+      expect(Number(msTag)).toBeGreaterThanOrEqual(event.created_at! * 1000);
+    }
 
     resolver.stop?.();
   });

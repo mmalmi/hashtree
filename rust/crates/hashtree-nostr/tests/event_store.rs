@@ -612,6 +612,13 @@ fn builds_and_resolves_private_hashtree_root_events() {
     assert_eq!(parsed.visibility, TreeVisibility::Private);
     assert_eq!(parsed.root_cid.key, None);
     assert_eq!(resolved, root_cid);
+    assert!(event.tags.iter().any(|tag| {
+        let fields = tag.as_slice();
+        fields.first().is_some_and(|name| name == "ms")
+            && fields
+                .get(1)
+                .is_some_and(|value| value == "1700000000000")
+    }));
     assert!(!event.as_json().contains(&hex::encode(root_key)));
 }
 

@@ -597,6 +597,9 @@ pub fn build_private_hashtree_root_event(
     .map_err(|err| {
         NostrEventStoreError::Validation(format!("self-encrypted root key failed: {err}"))
     })?;
+    let created_at_ms = created_at
+        .and_then(|created_at| created_at.checked_mul(1000))
+        .unwrap_or_else(unix_now_millis);
     let builder = EventBuilder::new(Kind::from(HASHTREE_ROOT_KIND as u16), "").tags([
         Tag::identifier(tree_name.to_string()),
         Tag::custom(
@@ -611,6 +614,10 @@ pub fn build_private_hashtree_root_event(
             TagKind::Custom(TAG_SELF_ENCRYPTED_KEY.into()),
             vec![self_encrypted_key],
         ),
+        Tag::custom(
+            TagKind::Custom("ms".into()),
+            vec![created_at_ms.to_string()],
+        ),
     ]);
     let builder = if let Some(created_at) = created_at {
         builder.custom_created_at(nostr_sdk::Timestamp::from(created_at))
@@ -620,6 +627,12 @@ pub fn build_private_hashtree_root_event(
     builder.sign_with_keys(owner_keys).map_err(|err| {
         NostrEventStoreError::Validation(format!("build hashtree root event failed: {err}"))
     })
+}
+
+fn unix_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[derive(Debug, Clone, Default)]

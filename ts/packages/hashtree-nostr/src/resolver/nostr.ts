@@ -610,6 +610,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
       const now = Math.floor(Date.now() / 1000);
       const npubStr = key.split('/')[0];
       const publishCreatedAt = nextReplaceableCreatedAt(key, npubStr, treeName, now);
+      const publishMs = Math.max(Date.now(), publishCreatedAt * 1000);
 
       // Build visibility info for caches and tags
       const visibilityInfo: SubscribeVisibilityInfo = { visibility: visibilityType };
@@ -620,6 +621,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
         ['d', treeName],
         ['l', HASHTREE_LABEL],
         ['hash', hashHex],
+        ['ms', String(publishMs)],
       ];
 
       // Add directory prefix labels for discoverability
@@ -1022,6 +1024,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
       const now = Math.floor(Date.now() / 1000);
       const npubStr = key.split('/')[0];
       const deleteCreatedAt = nextReplaceableCreatedAt(key, npubStr, treeName, now + 1);
+      const deleteMs = Math.max(Date.now(), deleteCreatedAt * 1000);
 
       // Update local list cache with empty hash (marks as deleted)
       let npubCache = localListCache.get(npubStr);
@@ -1099,6 +1102,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
         tags: [
           ['d', treeName],
           ['l', HASHTREE_LABEL],
+          ['ms', String(deleteMs)],
           // No hash tag = deleted
         ],
         created_at: deleteCreatedAt,
