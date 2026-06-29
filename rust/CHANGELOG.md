@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.75 - 2026-06-29
+
+### Fixed
+- Rejected ordinary htree git pushes when existing remote state cannot be read,
+  keeping network/root-download failures from being treated like empty new
+  repositories. Use `git push --force` only for explicit root repair.
+
 ## 0.2.74 - 2026-06-29
 
 ### Changed

@@ -345,6 +345,8 @@ pub struct NostrClient {
     is_private: bool,
     /// Local htree daemon URL for peer-assisted root discovery
     local_daemon_url: Option<String>,
+    #[cfg(test)]
+    forced_fetch_refs_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -455,7 +457,14 @@ impl NostrClient {
             url_secret,
             is_private,
             local_daemon_url,
+            #[cfg(test)]
+            forced_fetch_refs_error: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_fetch_refs_error_for_test(&mut self, message: impl Into<String>) {
+        self.forced_fetch_refs_error = Some(message.into());
     }
 
     fn format_repo_author(pubkey_hex: &str) -> String {
@@ -534,6 +543,11 @@ impl NostrClient {
     /// Fetch refs for a repository from nostr
     /// Returns refs parsed from the hashtree at the root hash
     pub fn fetch_refs(&mut self, repo_name: &str) -> Result<HashMap<String, String>> {
+        #[cfg(test)]
+        if let Some(message) = &self.forced_fetch_refs_error {
+            anyhow::bail!("{}", message);
+        }
+
         let (refs, _, _) = self.fetch_refs_with_timeout(repo_name, 10)?;
         Ok(refs)
     }
@@ -550,6 +564,11 @@ impl NostrClient {
     /// Returns (refs, root_hash, encryption_key)
     #[allow(dead_code)]
     pub fn fetch_refs_with_root(&mut self, repo_name: &str) -> Result<FetchedRefs> {
+        #[cfg(test)]
+        if let Some(message) = &self.forced_fetch_refs_error {
+            anyhow::bail!("{}", message);
+        }
+
         self.fetch_refs_with_timeout(repo_name, 10)
     }
 

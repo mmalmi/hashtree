@@ -122,6 +122,9 @@ pub struct RemoteHelper {
     should_exit: bool,
     /// Refs advertised by remote
     remote_refs: HashMap<String, String>,
+    /// Error from `list for-push` ref advertisement, if the remote root existed
+    /// but could not be read before Git sent the actual push specs.
+    push_ref_advertisement_error: Option<String>,
     /// Objects to push
     push_specs: Vec<PushSpec>,
     /// Objects to fetch
@@ -302,6 +305,7 @@ impl RemoteHelper {
             config,
             should_exit: false,
             remote_refs: HashMap::new(),
+            push_ref_advertisement_error: None,
             push_specs: Vec::new(),
             fetch_specs: Vec::new(),
             url_secret,
@@ -410,15 +414,38 @@ impl RemoteHelper {
         if for_push && self.config.blossom.force_upload {
             debug!("Returning empty refs for push because force_upload is enabled");
             self.remote_refs.clear();
+            self.push_ref_advertisement_error = None;
             return Ok(Some(vec![String::new()]));
         }
 
         // Advertise refs for clone/pull and for ordinary pushes so Git can skip true no-ops.
         self.remote_refs.clear();
         let refs = match self.nostr.fetch_refs(&self.repo_name) {
-            Ok(refs) => refs,
+            Ok(refs) => {
+                if for_push {
+                    self.push_ref_advertisement_error = None;
+                }
+                refs
+            }
             Err(err) if for_push && Self::is_repo_not_found_error(&err) => {
                 debug!("Repository not found during push ref advertisement; treating as empty");
+                self.push_ref_advertisement_error = None;
+                HashMap::new()
+            }
+            Err(err) if for_push => {
+                let message = err.to_string();
+                warn!(
+                    "Could not read remote refs during push advertisement: {}",
+                    message
+                );
+                eprintln!(
+                    "  Warning: Could not read existing htree remote refs before push: {}",
+                    message
+                );
+                eprintln!(
+                    "  Ordinary pushes will be rejected unless remote state can be loaded; use --force only for explicit repair."
+                );
+                self.push_ref_advertisement_error = Some(message);
                 HashMap::new()
             }
             Err(err) => return Err(err),

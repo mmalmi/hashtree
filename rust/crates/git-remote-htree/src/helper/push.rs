@@ -1162,9 +1162,8 @@ impl RemoteHelper {
             let is_access_error = err_str.contains("link-visible")
                 || err_str.contains("private")
                 || err_str.contains("secret key");
-            let is_likely_new_repo = err_str.contains("No root hash")
-                || err_str.contains("not found")
-                || err_str.contains("timeout");
+            let is_likely_new_repo =
+                err_str.contains("No root hash") || Self::is_repo_not_found_error(&e);
 
             if is_access_error {
                 debug!("Cannot access existing repo (visibility change): {}", e);
@@ -1178,10 +1177,31 @@ impl RemoteHelper {
                     e
                 );
             } else {
-                eprintln!("  Warning: Could not load existing remote state: {}", e);
-                eprintln!("  Other branches may be lost. Use 'git push --force' to override.");
-                eprintln!("  Or check your network connection and try again.");
+                let reason = self
+                    .push_ref_advertisement_error
+                    .as_deref()
+                    .unwrap_or(&err_str);
+                eprintln!("  Rejected: Could not load existing htree remote state.");
+                eprintln!("  {}", reason);
+                eprintln!(
+                    "  Use 'git push --force' only if this local checkout should repair/replace the published htree root."
+                );
+
+                let mut results = self
+                    .push_specs
+                    .iter()
+                    .map(|spec| {
+                        format!(
+                            "error {} remote-state-unreadable (use --force to repair htree root)",
+                            spec.dst
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                results.push(String::new());
+                return Ok(Some(results));
             }
+        } else {
+            self.push_ref_advertisement_error = None;
         }
 
         let mut results = Vec::new();

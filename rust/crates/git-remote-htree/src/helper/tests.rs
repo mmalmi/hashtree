@@ -1117,6 +1117,43 @@ fn test_handle_list_for_push_command() {
 }
 
 #[test]
+fn test_for_push_defers_unreadable_remote_state_and_normal_push_rejects() {
+    let Some(mut helper) = create_test_helper() else {
+        return;
+    };
+    let root_error = "Failed to download root hash 424242424242: Not found at all servers";
+    helper.nostr.force_fetch_refs_error_for_test(root_error);
+
+    let listed = helper
+        .handle_command("list for-push")
+        .expect("unreadable refs should be deferred until push specs")
+        .expect("list for-push should still return an advertisement terminator");
+    assert_eq!(listed, vec![String::new()]);
+    assert_eq!(
+        helper.push_ref_advertisement_error.as_deref(),
+        Some(root_error)
+    );
+
+    helper.push_specs.push(PushSpec {
+        src: "HEAD".to_string(),
+        dst: "refs/heads/master".to_string(),
+        force: false,
+    });
+
+    let result = helper
+        .execute_push()
+        .expect("normal push rejection should be reported to git")
+        .expect("push should return status lines");
+    assert!(
+        result
+            .iter()
+            .any(|line| line.contains("remote-state-unreadable")),
+        "normal push should be rejected when existing remote state is unreadable: {:?}",
+        result
+    );
+}
+
+#[test]
 fn test_handle_option_command() {
     let Some(mut helper) = create_test_helper() else {
         return;
