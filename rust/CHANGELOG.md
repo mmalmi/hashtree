@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.74 - 2026-06-29
+
+### Changed
+
+- Ordered local tree-root publishes by write time so browser/runtime consumers
+  replay locally queued roots in the same order they were written.
+- Buffered FIPS app message bursts before forwarding them to the runtime so
+  startup-time peer traffic is less likely to be dropped.
+- Tidied `htree add --publish` output so mutable links and helper URLs are
+  grouped more clearly after a publish.
+
+### Fixed
+
+- Pinned shared Dexie package versions in the TypeScript workspace so downstream
+  consumers avoid unresolved workspace ranges.
+
 ## 0.2.73 - 2026-06-23
 
 ### Changed
