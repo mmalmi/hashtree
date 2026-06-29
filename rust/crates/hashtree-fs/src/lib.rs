@@ -411,6 +411,19 @@ impl Store for FsBlobStore {
         self.get_sync(hash)
     }
 
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_range_sync(hash, start, end_inclusive)
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.blob_size_sync(hash)
+    }
+
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
         Ok(self.exists(hash))
     }

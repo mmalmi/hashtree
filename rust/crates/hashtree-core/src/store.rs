@@ -6,6 +6,33 @@ use std::sync::{Arc, RwLock};
 
 use crate::types::{to_hex, Hash};
 
+/// Return a byte range from an in-memory blob.
+///
+/// `end_inclusive` follows HTTP/storage range conventions. Out-of-bounds ranges
+/// return an empty or clamped slice instead of an error.
+pub fn slice_blob_range(
+    data: &[u8],
+    start: u64,
+    end_inclusive: u64,
+) -> Result<Vec<u8>, StoreError> {
+    if data.is_empty() || end_inclusive < start {
+        return Ok(Vec::new());
+    }
+
+    let len = data.len() as u64;
+    if start >= len {
+        return Ok(Vec::new());
+    }
+
+    let actual_end = end_inclusive.min(len - 1);
+    let start = usize::try_from(start)
+        .map_err(|_| StoreError::Other("blob range start is too large".to_string()))?;
+    let end_exclusive = usize::try_from(actual_end.saturating_add(1))
+        .map_err(|_| StoreError::Other("blob range end is too large".to_string()))?;
+
+    Ok(data[start..end_exclusive].to_vec())
+}
+
 /// Storage statistics
 #[derive(Debug, Clone, Default)]
 pub struct StoreStats {
@@ -54,6 +81,31 @@ pub trait Store: Send + Sync {
     /// Retrieve data by hash
     /// Returns data or None if not found
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError>;
+
+    /// Retrieve a byte range from a blob by hash.
+    ///
+    /// `end_inclusive` is inclusive, matching HTTP range requests and the sync
+    /// filesystem/LMDB storage primitives. Implementations may override this to
+    /// avoid loading whole blobs.
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(data) = self.get(hash).await? else {
+            return Ok(None);
+        };
+        Ok(Some(slice_blob_range(&data, start, end_inclusive)?))
+    }
+
+    /// Return the stored blob size in bytes.
+    ///
+    /// The default implementation reads the blob. Backends with metadata should
+    /// override this to answer without loading payload bytes.
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        Ok(self.get(hash).await?.map(|data| data.len() as u64))
+    }
 
     /// Check if hash exists
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError>;
@@ -227,6 +279,40 @@ impl<S: Store> Store for BufferedStore<S> {
             return Ok(Some(data));
         }
         self.base.get(hash).await
+    }
+
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let pending = {
+            let inner = self.inner.read().unwrap();
+            inner
+                .pending
+                .get(hash)
+                .map(|data| slice_blob_range(data, start, end_inclusive))
+                .transpose()?
+        };
+        if pending.is_some() {
+            return Ok(pending);
+        }
+        self.base.get_range(hash, start, end_inclusive).await
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        if let Some(size) = self
+            .inner
+            .read()
+            .unwrap()
+            .pending
+            .get(hash)
+            .map(|data| data.len() as u64)
+        {
+            return Ok(Some(size));
+        }
+        self.base.blob_size(hash).await
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
@@ -433,6 +519,27 @@ impl Store for MemoryStore {
         let key = to_hex(hash);
         let inner = self.inner.read().unwrap();
         Ok(inner.data.get(&key).map(|e| e.data.clone()))
+    }
+
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let key = to_hex(hash);
+        let inner = self.inner.read().unwrap();
+        inner
+            .data
+            .get(&key)
+            .map(|entry| slice_blob_range(&entry.data, start, end_inclusive))
+            .transpose()
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let key = to_hex(hash);
+        let inner = self.inner.read().unwrap();
+        Ok(inner.data.get(&key).map(|entry| entry.data.len() as u64))
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {

@@ -8,6 +8,7 @@ use hashtree_cli::config::ensure_keys_string;
 use hashtree_cli::{
     Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver,
 };
+use hashtree_core::store::slice_blob_range;
 use hashtree_core::{Hash, HashTree, HashTreeConfig, Store, StoreError};
 use hashtree_updater::{
     install, AssetKind, DownloadEvent, DownloadOptions, HashtreeUpdater, InstallTarget,
@@ -50,6 +51,33 @@ impl Store for FetchingStore {
             Ok(data) => Ok(Some(data)),
             Err(_) => Ok(None),
         }
+    }
+
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Some(data) = self
+            .store
+            .store_arc()
+            .get_range(hash, start, end_inclusive)
+            .await?
+        {
+            return Ok(Some(data));
+        }
+        let Some(data) = self.get(hash).await? else {
+            return Ok(None);
+        };
+        Ok(Some(slice_blob_range(&data, start, end_inclusive)?))
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        if let Some(size) = self.store.store_arc().blob_size(hash).await? {
+            return Ok(Some(size));
+        }
+        Ok(self.get(hash).await?.map(|data| data.len() as u64))
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {

@@ -221,6 +221,27 @@ impl Store for LocalStore {
         }
     }
 
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.get_range(hash, start, end_inclusive).await,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.get_range(hash, start, end_inclusive).await,
+        }
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> std::result::Result<Option<u64>, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.blob_size(hash).await,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.blob_size(hash).await,
+        }
+    }
+
     async fn has(&self, hash: &Hash) -> std::result::Result<bool, StoreError> {
         match self {
             LocalStore::Fs(store) => store.has(hash).await,

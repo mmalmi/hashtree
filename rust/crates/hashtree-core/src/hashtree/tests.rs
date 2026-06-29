@@ -206,6 +206,19 @@ struct CountingStore {
     put_calls: AtomicUsize,
     put_many_calls: AtomicUsize,
     put_many_items: AtomicUsize,
+    get_calls: AtomicUsize,
+    get_range_calls: AtomicUsize,
+    get_range_bytes: AtomicUsize,
+    blob_size_calls: AtomicUsize,
+}
+
+impl CountingStore {
+    fn reset_reads(&self) {
+        self.get_calls.store(0, Ordering::Relaxed);
+        self.get_range_calls.store(0, Ordering::Relaxed);
+        self.get_range_bytes.store(0, Ordering::Relaxed);
+        self.blob_size_calls.store(0, Ordering::Relaxed);
+    }
 }
 
 #[async_trait]
@@ -223,7 +236,28 @@ impl Store for CountingStore {
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.get(hash).await
+    }
+
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_range_calls.fetch_add(1, Ordering::Relaxed);
+        let data = self.inner.get_range(hash, start, end_inclusive).await?;
+        if let Some(data) = data.as_ref() {
+            self.get_range_bytes
+                .fetch_add(data.len(), Ordering::Relaxed);
+        }
+        Ok(data)
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.blob_size_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.blob_size(hash).await
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
@@ -233,6 +267,31 @@ impl Store for CountingStore {
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.inner.delete(hash).await
     }
+}
+
+#[tokio::test]
+async fn test_public_chunked_range_uses_store_range_for_leaf_bytes() {
+    let store = Arc::new(CountingStore::default());
+    let tree = HashTree::new(
+        HashTreeConfig::new(store.clone())
+            .public()
+            .with_chunk_size(100),
+    );
+    let data = (0..350).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let (cid, _) = tree.put(&data).await.unwrap();
+
+    store.reset_reads();
+    let range = tree
+        .read_file_range(&cid.hash, 120, Some(180))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(range, data[120..180].to_vec());
+    assert_eq!(store.get_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.get_range_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.get_range_bytes.load(Ordering::Relaxed), 60);
+    assert_eq!(store.blob_size_calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

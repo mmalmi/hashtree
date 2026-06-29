@@ -334,41 +334,42 @@ impl<S: Store> TreeReader<S> {
 
         // Find chunks that overlap with [start, actual_end)
         let mut result = Vec::with_capacity((actual_end - start) as usize);
-        let mut current_offset = 0u64;
 
-        for (chunk_hash, _chunk_offset, chunk_size) in &chunks_info {
-            let chunk_start = current_offset;
-            let chunk_end = current_offset + chunk_size;
+        for (chunk_hash, chunk_start, chunk_size) in &chunks_info {
+            let chunk_start = *chunk_start;
+            let chunk_size = *chunk_size;
+            let chunk_end = chunk_start + chunk_size;
 
             // Check if this chunk overlaps with our range
             if chunk_end > start && chunk_start < actual_end {
-                // Fetch this chunk
+                let read_start = start.saturating_sub(chunk_start);
+                let read_end_exclusive = actual_end.min(chunk_end) - chunk_start;
+                if read_start >= read_end_exclusive {
+                    continue;
+                }
+
                 let chunk_data = self
                     .store
-                    .get(chunk_hash)
+                    .get_range(chunk_hash, read_start, read_end_exclusive - 1)
                     .await
                     .map_err(|e| ReaderError::Store(e.to_string()))?
                     .ok_or_else(|| ReaderError::MissingChunk(to_hex(chunk_hash)))?;
 
-                // Calculate slice bounds within this chunk
-                let slice_start = if start > chunk_start {
-                    (start - chunk_start) as usize
-                } else {
-                    0
-                };
-                let slice_end = if actual_end < chunk_end {
-                    (actual_end - chunk_start) as usize
-                } else {
-                    chunk_data.len()
-                };
+                let expected_len = (read_end_exclusive - read_start) as usize;
+                if chunk_data.len() != expected_len {
+                    return Err(ReaderError::Store(format!(
+                        "range read for {} returned {} bytes, expected {}",
+                        to_hex(chunk_hash),
+                        chunk_data.len(),
+                        expected_len
+                    )));
+                }
 
-                result.extend_from_slice(&chunk_data[slice_start..slice_end]);
+                result.extend_from_slice(&chunk_data);
             }
 
-            current_offset = chunk_end;
-
             // Early exit if we've passed the requested range
-            if current_offset >= actual_end {
+            if chunk_end >= actual_end {
                 break;
             }
         }
@@ -396,6 +397,12 @@ impl<S: Store> TreeReader<S> {
         offset: &mut u64,
     ) -> Result<(), ReaderError> {
         for link in &node.links {
+            if link.link_type == LinkType::Blob {
+                chunks.push((link.hash, *offset, link.size));
+                *offset += link.size;
+                continue;
+            }
+
             let child_data = self
                 .store
                 .get(&link.hash)

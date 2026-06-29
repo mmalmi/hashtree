@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures::executor::block_on as sync_block_on;
 use futures::StreamExt;
 use hashtree_config::StorageBackend;
-use hashtree_core::store::{PutManyReport, Store, StoreError};
+use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError};
 use hashtree_core::{
     from_hex, sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, TreeNode,
 };
@@ -890,6 +890,19 @@ impl Store for LocalStore {
         self.get_sync(hash)
     }
 
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_range_sync(hash, start, end_inclusive)
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.blob_size_sync(hash)
+    }
+
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.exists(hash)
     }
@@ -1436,6 +1449,23 @@ impl Store for AccessRecordingStore {
         Ok(data)
     }
 
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let data = self.inner.get_range(hash, start, end_inclusive).await?;
+        if data.is_some() {
+            self.record_access(hash);
+        }
+        Ok(data)
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.inner.blob_size(hash).await
+    }
+
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.inner.has(hash).await
     }
@@ -1459,6 +1489,28 @@ impl Store for StorageRouter {
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.get_sync(hash)
+    }
+
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Some(data) = self.get_range_sync(hash, start, end_inclusive)? {
+            return Ok(Some(data));
+        }
+        let Some(data) = self.get_sync(hash)? else {
+            return Ok(None);
+        };
+        Ok(Some(slice_blob_range(&data, start, end_inclusive)?))
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        if let Some(size) = self.blob_size_sync(hash)? {
+            return Ok(Some(size));
+        }
+        Ok(self.get_sync(hash)?.map(|data| data.len() as u64))
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
@@ -2565,13 +2617,11 @@ impl HashtreeStore {
             .unwrap_or(metadata.total_size - 1)
             .min(metadata.total_size - 1);
 
-        // For non-chunked files, load entire file
+        // For non-chunked files, read only the requested blob range.
         if !metadata.is_chunked {
-            let content = self.get_file(hash)?.unwrap_or_default();
-            let range_content = if start < content.len() as u64 {
-                content[start as usize..=(end as usize).min(content.len() - 1)].to_vec()
-            } else {
-                Vec::new()
+            let range_content = match self.get_blob_range(hash, start, end)? {
+                Some(content) => content,
+                None => return Ok(None),
             };
             return Ok(Some((range_content, metadata.total_size)));
         }
@@ -2586,26 +2636,37 @@ impl HashtreeStore {
 
             // Check if this chunk overlaps with requested range
             if chunk_end >= start && current_offset <= end {
-                let chunk_content = match self.get_chunk(chunk_hash)? {
-                    Some(content) => content,
-                    None => {
-                        return Err(anyhow::anyhow!("Chunk {} not found", to_hex(chunk_hash)));
-                    }
-                };
-
                 let chunk_read_start = if current_offset >= start {
                     0
                 } else {
-                    (start - current_offset) as usize
+                    start - current_offset
                 };
 
                 let chunk_read_end = if chunk_end <= end {
-                    chunk_size as usize - 1
+                    chunk_size - 1
                 } else {
-                    (end - current_offset) as usize
+                    end - current_offset
                 };
 
-                result.extend_from_slice(&chunk_content[chunk_read_start..=chunk_read_end]);
+                let chunk_content =
+                    match self.get_blob_range(chunk_hash, chunk_read_start, chunk_read_end)? {
+                        Some(content) => content,
+                        None => {
+                            return Err(anyhow::anyhow!("Chunk {} not found", to_hex(chunk_hash)));
+                        }
+                    };
+
+                let expected_len = chunk_read_end.saturating_sub(chunk_read_start) + 1;
+                if chunk_content.len() as u64 != expected_len {
+                    return Err(anyhow::anyhow!(
+                        "Chunk {} range returned {} bytes, expected {}",
+                        to_hex(chunk_hash),
+                        chunk_content.len(),
+                        expected_len
+                    ));
+                }
+
+                result.extend_from_slice(&chunk_content);
             }
 
             current_offset += chunk_size;
@@ -2980,32 +3041,46 @@ impl Iterator for FileRangeChunksOwned {
             return self.next();
         }
 
-        let chunk_content = match self.store.get_chunk(chunk_hash) {
-            Ok(Some(content)) => content,
-            Ok(None) => {
-                return Some(Err(anyhow::anyhow!(
-                    "Chunk {} not found",
-                    to_hex(chunk_hash)
-                )));
-            }
-            Err(e) => {
-                return Some(Err(e));
-            }
-        };
-
         let chunk_read_start = if self.current_offset >= self.start {
             0
         } else {
-            (self.start - self.current_offset) as usize
+            self.start - self.current_offset
         };
 
         let chunk_read_end = if chunk_end <= self.end {
-            chunk_size as usize - 1
+            chunk_size - 1
         } else {
-            (self.end - self.current_offset) as usize
+            self.end - self.current_offset
         };
 
-        let result = chunk_content[chunk_read_start..=chunk_read_end].to_vec();
+        let chunk_content =
+            match self
+                .store
+                .get_blob_range(chunk_hash, chunk_read_start, chunk_read_end)
+            {
+                Ok(Some(content)) => content,
+                Ok(None) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "Chunk {} not found",
+                        to_hex(chunk_hash)
+                    )));
+                }
+                Err(e) => {
+                    return Some(Err(e));
+                }
+            };
+
+        let expected_len = chunk_read_end.saturating_sub(chunk_read_start) + 1;
+        if chunk_content.len() as u64 != expected_len {
+            return Some(Err(anyhow::anyhow!(
+                "Chunk {} range returned {} bytes, expected {}",
+                to_hex(chunk_hash),
+                chunk_content.len(),
+                expected_len
+            )));
+        }
+
+        let result = chunk_content;
         self.current_offset += chunk_size;
 
         Some(Ok(result))

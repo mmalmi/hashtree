@@ -29,7 +29,7 @@
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
-use hashtree_core::store::{Store, StoreError};
+use hashtree_core::store::{slice_blob_range, Store, StoreError};
 use hashtree_core::types::{to_hex, Hash};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -312,6 +312,30 @@ impl<L: Store + 'static> Store for S3Store<L> {
                 Ok(None)
             }
         }
+    }
+
+    async fn get_range(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Some(data) = self.local.get_range(hash, start, end_inclusive).await? {
+            return Ok(Some(data));
+        }
+
+        let Some(data) = self.get(hash).await? else {
+            return Ok(None);
+        };
+        Ok(Some(slice_blob_range(&data, start, end_inclusive)?))
+    }
+
+    async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        if let Some(size) = self.local.blob_size(hash).await? {
+            return Ok(Some(size));
+        }
+
+        Ok(self.get(hash).await?.map(|data| data.len() as u64))
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
