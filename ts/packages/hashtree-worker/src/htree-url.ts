@@ -44,6 +44,17 @@ function normalizeRelativePath(path: string): string {
   return stripQueryAndHash(path).replace(/^\/+/, '');
 }
 
+function isLoopbackHttpBaseUrl(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && (hostname === '127.0.0.1' || hostname === 'localhost');
+  } catch {
+    return false;
+  }
+}
+
 function resolveMutableRequestStyle(
   windowLike: HtreeRuntimeWindowLike | undefined,
   baseUrl: string,
@@ -52,6 +63,7 @@ function resolveMutableRequestStyle(
   if (explicitStyle) return explicitStyle;
   if (!baseUrl) return 'htree';
   if (canUseInjectedHtreeServerUrl(windowLike)) return 'htree';
+  if (isLoopbackHttpBaseUrl(baseUrl)) return 'htree';
   return 'gateway';
 }
 

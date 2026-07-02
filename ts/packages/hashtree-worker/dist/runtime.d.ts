@@ -17,6 +17,7 @@ export interface ResolveRuntimeHtreeBaseUrlOptions {
 }
 export declare function getInjectedHtreeServerUrl(windowLike?: HtreeRuntimeWindowLike): string | null;
 export declare function shouldEagerLoadMediaInNativeChildRuntime(windowLike?: HtreeRuntimeWindowLike): boolean;
+export declare function canUseLocalHtreeRoutes(windowLike?: HtreeRuntimeWindowLike): boolean;
 export declare function shouldPreferSameOriginHtreeRoutes(windowLike?: HtreeRuntimeWindowLike): boolean;
 export declare function canUseInjectedHtreeServerUrl(windowLike?: HtreeRuntimeWindowLike): boolean;
 export declare function canUseSameOriginHtreeProtocolStreaming(windowLike?: HtreeRuntimeWindowLike): boolean;

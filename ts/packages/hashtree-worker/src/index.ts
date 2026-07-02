@@ -19,6 +19,7 @@ export type {
 } from './relay-client.js';
 export {
   canUseInjectedHtreeServerUrl,
+  canUseLocalHtreeRoutes,
   canUseSameOriginHtreeProtocolStreaming,
   getInjectedHtreeServerUrl,
   resolveRuntimeHtreeBaseUrl,

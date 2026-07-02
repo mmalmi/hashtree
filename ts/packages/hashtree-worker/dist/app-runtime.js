@@ -1,6 +1,6 @@
 import { appendHtreeClientId, appendHtreeQueryParam, getOrCreateHtreeClientId, } from './client-id.js';
 import { resolveHtreeRequestUrl } from './htree-url.js';
-import { canUseInjectedHtreeServerUrl, canUseSameOriginHtreeProtocolStreaming } from './runtime.js';
+import { canUseInjectedHtreeServerUrl, canUseLocalHtreeRoutes, canUseSameOriginHtreeProtocolStreaming, } from './runtime.js';
 import { resolveRuntimeEndpoints } from './runtime-network.js';
 const DEFAULT_FALLBACK_BASE_URL = '';
 const DEFAULT_MEDIA_PORT_ATTEMPTS = 3;
@@ -26,7 +26,8 @@ function getServiceWorkerContainer(serviceWorker) {
 }
 function isDirectMediaRuntime(windowLike) {
     return canUseInjectedHtreeServerUrl(windowLike)
-        || canUseSameOriginHtreeProtocolStreaming(windowLike);
+        || canUseSameOriginHtreeProtocolStreaming(windowLike)
+        || canUseLocalHtreeRoutes(windowLike);
 }
 function createMessageId(prefix) {
     return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;

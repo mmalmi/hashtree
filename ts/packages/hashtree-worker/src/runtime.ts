@@ -51,6 +51,20 @@ function getPageHostname(windowLike?: HtreeRuntimeWindowLike): string | null {
   return typeof hostname === 'string' ? hostname.toLowerCase() : null;
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === '127.0.0.1'
+    || hostname === 'localhost';
+}
+
+function isBridgeRuntimeHostname(hostname: string): boolean {
+  return hostname.endsWith('.htree.localhost')
+    || hostname.endsWith('.iris.localhost');
+}
+
+function isLocalRuntimeHostname(hostname: string): boolean {
+  return isLoopbackHostname(hostname) || isBridgeRuntimeHostname(hostname);
+}
+
 function hasCanonicalHtreeIdentity(windowLike?: HtreeRuntimeWindowLike): boolean {
   const runtimeWindow = getWindowLike(windowLike);
   const injectedCanonical = runtimeWindow?.__HTREE_CANONICAL_URL__;
@@ -64,9 +78,14 @@ function isLoopbackChildRuntime(windowLike?: HtreeRuntimeWindowLike): boolean {
   if (getPageProtocol(windowLike) !== 'http:') return false;
   const hostname = getPageHostname(windowLike);
   if (!hostname) return false;
-  return hostname === '127.0.0.1'
-    || hostname === 'localhost'
-    || hostname.endsWith('.htree.localhost');
+  return isLocalRuntimeHostname(hostname);
+}
+
+function isBridgeChildRuntime(windowLike?: HtreeRuntimeWindowLike): boolean {
+  if (getPageProtocol(windowLike) !== 'http:') return false;
+  const hostname = getPageHostname(windowLike);
+  if (!hostname) return false;
+  return isBridgeRuntimeHostname(hostname);
 }
 
 function getServerProtocol(serverUrl: string): string | null {
@@ -77,12 +96,20 @@ function getServerProtocol(serverUrl: string): string | null {
   }
 }
 
+function getServerHostname(serverUrl: string): string | null {
+  try {
+    return new URL(serverUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 function isLocalHttpServerUrl(serverUrl: string): boolean {
   try {
     const parsed = new URL(serverUrl);
     const hostname = parsed.hostname.toLowerCase();
     return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && (hostname === '127.0.0.1' || hostname === 'localhost' || hostname.endsWith('.htree.localhost'));
+      && isLocalRuntimeHostname(hostname);
   } catch {
     return false;
   }
@@ -105,6 +132,10 @@ export function getInjectedHtreeServerUrl(windowLike?: HtreeRuntimeWindowLike): 
 
 export function shouldEagerLoadMediaInNativeChildRuntime(windowLike?: HtreeRuntimeWindowLike): boolean {
   return isLoopbackChildRuntime(windowLike) && hasCanonicalHtreeIdentity(windowLike);
+}
+
+export function canUseLocalHtreeRoutes(windowLike?: HtreeRuntimeWindowLike): boolean {
+  return shouldEagerLoadMediaInNativeChildRuntime(windowLike) || isBridgeChildRuntime(windowLike);
 }
 
 export function shouldPreferSameOriginHtreeRoutes(windowLike?: HtreeRuntimeWindowLike): boolean {
@@ -137,16 +168,27 @@ export function resolveRuntimeHtreeBaseUrl(
 ): string {
   const { windowLike, fallbackBaseUrl } = options;
   const injectedServerUrl = getInjectedHtreeServerUrl(windowLike);
+  const windowBaseUrl = getWindowHtreeBaseUrl(windowLike);
+  const canUseLocalRoutes = canUseLocalHtreeRoutes(windowLike);
 
   if (injectedServerUrl && canUseInjectedHtreeServerUrl(windowLike)) {
     return injectedServerUrl;
   }
 
-  const windowBaseUrl = getWindowHtreeBaseUrl(windowLike);
   if (windowBaseUrl) {
-    if (!isLocalHttpServerUrl(windowBaseUrl) || canUseInjectedHtreeServerUrl(windowLike)) {
+    const windowBaseHostname = getServerHostname(windowBaseUrl);
+    if (!isLocalHttpServerUrl(windowBaseUrl)) {
       return windowBaseUrl;
     }
+    if (windowBaseHostname && isLoopbackHostname(windowBaseHostname)) {
+      return windowBaseUrl;
+    }
+    if (windowBaseHostname && isBridgeRuntimeHostname(windowBaseHostname) && isBridgeChildRuntime(windowLike)) {
+      return '';
+    }
+  }
+  if (canUseLocalRoutes || isBridgeChildRuntime(windowLike)) {
+    return '';
   }
 
   return normalizeBaseUrl(fallbackBaseUrl);

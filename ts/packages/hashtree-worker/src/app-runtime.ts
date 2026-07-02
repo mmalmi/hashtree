@@ -8,7 +8,11 @@ import {
   getOrCreateHtreeClientId,
 } from './client-id.js';
 import { resolveHtreeRequestUrl } from './htree-url.js';
-import { canUseInjectedHtreeServerUrl, canUseSameOriginHtreeProtocolStreaming } from './runtime.js';
+import {
+  canUseInjectedHtreeServerUrl,
+  canUseLocalHtreeRoutes,
+  canUseSameOriginHtreeProtocolStreaming,
+} from './runtime.js';
 import { resolveRuntimeEndpoints, type RuntimeEndpoints } from './runtime-network.js';
 
 export type RuntimeValueSource<T> = T | (() => T);
@@ -100,7 +104,8 @@ function getServiceWorkerContainer(
 
 function isDirectMediaRuntime(windowLike?: HtreeRuntimeWindowLike): boolean {
   return canUseInjectedHtreeServerUrl(windowLike)
-    || canUseSameOriginHtreeProtocolStreaming(windowLike);
+    || canUseSameOriginHtreeProtocolStreaming(windowLike)
+    || canUseLocalHtreeRoutes(windowLike);
 }
 
 function createMessageId(prefix: string): string {

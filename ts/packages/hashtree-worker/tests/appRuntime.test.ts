@@ -93,4 +93,25 @@ describe('createHtreeRuntime', () => {
       },
     })).resolves.toBe(true);
   });
+
+  it('treats iris.localhost bridge runtimes as direct /htree media runtimes', async () => {
+    const windowLike = {
+      location: {
+        protocol: 'http:',
+        hostname: 'audio.npub1example.iris.localhost',
+        search: '',
+      },
+      htree: {
+        htreeBaseUrl: 'http://audio.npub1example.iris.localhost:17321',
+      },
+    };
+    const runtime = createHtreeRuntime({ windowLike });
+
+    expect(runtime.urls.media('htree://nhash1example/track.mp3')).toBe('/htree/nhash1example/track.mp3');
+    await expect(runtime.media.ensureReady({
+      registerMediaPort: () => {
+        throw new Error('should not be called');
+      },
+    })).resolves.toBe(true);
+  });
 });
