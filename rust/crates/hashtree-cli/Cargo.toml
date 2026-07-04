@@ -31,6 +31,7 @@ hashtree-blossom.workspace = true
 hashtree-config.workspace = true
 hashtree-nostr.workspace = true
 hashtree-fips-transport.workspace = true
+hashtree-network = { workspace = true, optional = true }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-updater.workspace = true
 hashtree-index.workspace = true
@@ -109,7 +110,7 @@ lmdb = ["dep:hashtree-lmdb"]
 fuse = ["dep:hashtree-fuse", "dep:fuser"]
 fips-webrtc = ["hashtree-fips-transport/webrtc"]
 git-remote-wrapper = []
-experimental-decentralized-pubsub = []
+experimental-decentralized-pubsub = ["dep:hashtree-network"]
 
 [dev-dependencies]
 tempfile.workspace = true

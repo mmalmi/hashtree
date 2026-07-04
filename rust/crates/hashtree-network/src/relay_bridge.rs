@@ -26,7 +26,7 @@ pub trait MeshRelayClient: MeshEventStore {
 
     async fn unregister_client(&self, client_id: u64);
 
-    async fn handle_client_message(&self, client_id: u64, msg: ClientMessage);
+    async fn handle_client_message(&self, client_id: u64, msg: ClientMessage<'static>);
 
     async fn register_subscription_query(
         &self,

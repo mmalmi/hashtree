@@ -3860,6 +3860,7 @@ dependencies = [
  "hashtree-fuse",
  "hashtree-index",
  "hashtree-lmdb",
+ "hashtree-network",
  "hashtree-nostr",
  "hashtree-resolver",
  "hashtree-updater",

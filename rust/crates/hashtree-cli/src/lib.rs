@@ -16,6 +16,8 @@ pub mod fetch;
 pub mod fips_transport;
 pub mod ignore_rules;
 pub mod nostr_mirror;
+#[cfg(feature = "experimental-decentralized-pubsub")]
+pub mod nostr_pubsub;
 pub mod nostr_relay;
 pub mod pwa;
 pub mod server;

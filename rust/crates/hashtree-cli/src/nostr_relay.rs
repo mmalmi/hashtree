@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Mutex, Semaphore};
 
-#[cfg(feature = "p2p")]
+#[cfg(feature = "experimental-decentralized-pubsub")]
 use hashtree_network::{MeshEventStore, MeshRelayClient};
 use nostr::{ClientMessage as NostrClientMessage, JsonUtil, RelayMessage as NostrRelayMessage};
 use nostr::{Event, EventId, Filter as NostrFilter, SubscriptionId};
@@ -813,6 +813,31 @@ mod imp {
             self.ingest_trusted_event_inner(event, false).await
         }
 
+        pub async fn ingest_peer_event_silent(&self, event: Event) -> Result<bool> {
+            event
+                .verify()
+                .map_err(|e| anyhow::anyhow!("invalid signature: {}", e))?;
+
+            if !self.is_trusted_event_for_client(None, &event).await {
+                return Ok(false);
+            }
+
+            let is_ephemeral = event.kind.is_ephemeral();
+            {
+                let mut recent = self.recent_events.lock().await;
+                recent.insert(event.clone());
+            }
+            if !is_ephemeral {
+                let storage_class = self.event_storage_class(&event);
+                self.trusted
+                    .ingest_with_storage_class(event.clone(), storage_class)
+                    .await?;
+                self.append_historical_index(&event).await;
+            }
+
+            Ok(true)
+        }
+
         pub async fn bluetooth_received_events(
             &self,
             limit: usize,
@@ -836,11 +861,7 @@ mod imp {
                 self.trusted
                     .ingest_with_storage_class(event.clone(), storage_class)
                     .await?;
-                if let Some(index) = &self.historical_index {
-                    if let Err(err) = index.ingest(event.clone()).await {
-                        warn!("historical nostr index ingest failed: {}", err);
-                    }
-                }
+                self.append_historical_index(&event).await;
             }
 
             if broadcast {
@@ -1073,10 +1094,15 @@ mod imp {
             if !is_ephemeral {
                 let stored = if trusted {
                     let storage_class = self.event_storage_class(&event);
-                    self.trusted
+                    let stored = self
+                        .trusted
                         .ingest_with_storage_class(event.clone(), storage_class)
                         .await
-                        .is_ok()
+                        .is_ok();
+                    if stored {
+                        self.append_historical_index(&event).await;
+                    }
+                    stored
                 } else {
                     match self.spambox.as_ref() {
                         Some(spambox) => spambox.ingest(&event).await,
@@ -1170,12 +1196,19 @@ mod imp {
         }
 
         async fn is_trusted_event(&self, client_id: u64, event: &Event) -> bool {
+            self.is_trusted_event_for_client(Some(client_id), event)
+                .await
+        }
+
+        async fn is_trusted_event_for_client(&self, client_id: Option<u64>, event: &Event) -> bool {
             let event_pubkey = event.pubkey.to_hex();
             let client_pubkey = {
                 let clients = self.clients.lock().await;
-                clients
-                    .get(&client_id)
-                    .and_then(|state| state.pubkey.clone())
+                client_id.and_then(|client_id| {
+                    clients
+                        .get(&client_id)
+                        .and_then(|state| state.pubkey.clone())
+                })
             };
             if let Some(pubkey) = client_pubkey {
                 return pubkey == event_pubkey
@@ -1187,6 +1220,14 @@ mod imp {
                 return social_graph.check_write_access(&event_pubkey);
             }
             true
+        }
+
+        async fn append_historical_index(&self, event: &Event) {
+            if let Some(index) = &self.historical_index {
+                if let Err(err) = index.ingest(event.clone()).await {
+                    warn!("historical nostr index ingest failed: {}", err);
+                }
+            }
         }
 
         fn event_storage_class(&self, event: &Event) -> EventStorageClass {
@@ -1250,7 +1291,7 @@ mod imp {
 
 pub use imp::NostrRelay;
 
-#[cfg(feature = "p2p")]
+#[cfg(feature = "experimental-decentralized-pubsub")]
 #[async_trait::async_trait]
 impl MeshEventStore for NostrRelay {
     async fn ingest_trusted_event(&self, event: Event) -> anyhow::Result<()> {
@@ -1262,7 +1303,7 @@ impl MeshEventStore for NostrRelay {
     }
 }
 
-#[cfg(feature = "p2p")]
+#[cfg(feature = "experimental-decentralized-pubsub")]
 #[async_trait::async_trait]
 impl MeshRelayClient for NostrRelay {
     fn next_client_id(&self) -> u64 {
@@ -1282,7 +1323,7 @@ impl MeshRelayClient for NostrRelay {
         NostrRelay::unregister_client(self, client_id).await
     }
 
-    async fn handle_client_message(&self, client_id: u64, msg: NostrClientMessage) {
+    async fn handle_client_message(&self, client_id: u64, msg: NostrClientMessage<'static>) {
         NostrRelay::handle_client_message(self, client_id, msg).await
     }
 
