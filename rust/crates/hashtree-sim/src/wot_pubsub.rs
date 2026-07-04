@@ -81,7 +81,7 @@ pub struct WotRatingRecord {
     pub id: String,
     pub rater: String,
     pub subject: String,
-    #[serde(default, alias = "context", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     pub rating: i64,
     pub min_rating: i64,
