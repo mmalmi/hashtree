@@ -38,8 +38,8 @@ use super::mount_target::{
 };
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
-    run_nostr_index_query, run_socialgraph_index_from_cli, NostrIndexQueryOptions,
-    SocialGraphIndexOptions,
+    run_nostr_index_import, run_nostr_index_query, run_socialgraph_index_from_cli,
+    NostrIndexImportOptions, NostrIndexQueryOptions, SocialGraphIndexOptions,
 };
 use super::peers::list_peers;
 use super::pwa::run_export;
@@ -1162,6 +1162,21 @@ pub(crate) async fn run() -> Result<()> {
             }
         },
         Commands::NostrIndex { command } => match command {
+            NostrIndexCommands::Import {
+                root,
+                events_file,
+                out,
+            } => {
+                run_nostr_index_import(
+                    data_dir,
+                    NostrIndexImportOptions {
+                        root,
+                        events_file,
+                        out,
+                    },
+                )
+                .await?;
+            }
             NostrIndexCommands::Query {
                 root,
                 filter,

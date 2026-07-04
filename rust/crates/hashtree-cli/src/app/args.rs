@@ -858,6 +858,18 @@ pub(crate) enum SocialGraphCommands {
 
 #[derive(Subcommand)]
 pub(crate) enum NostrIndexCommands {
+    /// Import signed Nostr events into the local hashtree-backed index
+    Import {
+        /// Stored event index root to append to (nhash or raw CID; defaults to latest local index root)
+        #[arg(long)]
+        root: Option<String>,
+        /// JSON file containing an event array or object with an events array
+        #[arg(long = "events")]
+        events_file: PathBuf,
+        /// Output path for the import report (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Query stored events with normal Nostr filter JSON
     Query {
         /// Stored event index root (nhash or raw CID; defaults to latest local index root)

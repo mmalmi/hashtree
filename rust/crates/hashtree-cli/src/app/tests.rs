@@ -126,7 +126,10 @@ fn test_nostr_index_query_args() {
         filter_file,
         limit,
         out,
-    } = command;
+    } = command
+    else {
+        panic!("expected nostr-index query command");
+    };
     assert!(root.is_none());
     assert_eq!(
         filter.as_deref(),
@@ -135,6 +138,35 @@ fn test_nostr_index_query_args() {
     assert!(filter_file.is_none());
     assert_eq!(limit, 25);
     assert!(out.is_none());
+}
+
+#[test]
+fn test_nostr_index_import_args() {
+    let cli = Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "import",
+        "--events",
+        "ratings.json",
+        "--out",
+        "report.json",
+    ])
+    .unwrap();
+
+    let Commands::NostrIndex { command } = cli.command else {
+        panic!("expected nostr-index command");
+    };
+    let NostrIndexCommands::Import {
+        root,
+        events_file,
+        out,
+    } = command
+    else {
+        panic!("expected nostr-index import command");
+    };
+    assert!(root.is_none());
+    assert_eq!(events_file, PathBuf::from("ratings.json"));
+    assert_eq!(out, Some(PathBuf::from("report.json")));
 }
 
 #[test]

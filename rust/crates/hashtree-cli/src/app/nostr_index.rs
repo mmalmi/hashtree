@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use hashtree_core::{nhash_decode, nhash_encode_full, Cid, NHashData};
 use hashtree_nostr::{
     CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
-    StoredNostrEvent,
+    StoredNostrEvent, VerifiedEvent,
 };
 use nostr::{Event, JsonUtil, Keys};
-use nostr_sdk::Filter as NostrFilter;
+use nostr_sdk::{Event as NostrSdkEvent, Filter as NostrFilter};
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use tokio::sync::watch;
@@ -117,6 +117,19 @@ struct IndexedNostrCheckpointReport {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct NostrIndexImportOptions {
+    pub(crate) root: Option<String>,
+    pub(crate) events_file: PathBuf,
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct NostrIndexImportOutput {
+    pub(crate) root: String,
+    pub(crate) imported: usize,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct NostrIndexQueryOptions {
     pub(crate) root: Option<String>,
     pub(crate) filter_json: String,
@@ -129,6 +142,63 @@ pub(crate) struct NostrIndexQueryOutput {
     pub(crate) root: String,
     pub(crate) count: usize,
     pub(crate) events: Vec<StoredNostrEvent>,
+}
+
+pub(crate) async fn run_nostr_index_import(
+    data_dir: PathBuf,
+    options: NostrIndexImportOptions,
+) -> Result<NostrIndexImportOutput> {
+    let root = if let Some(root) = options.root.as_deref() {
+        Some(parse_root_text(root).context("parse --root")?)
+    } else {
+        load_existing_root(&data_dir)?
+    };
+    let value: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&options.events_file)
+            .with_context(|| format!("read {}", options.events_file.display()))?,
+    )
+    .with_context(|| {
+        format!(
+            "parse Nostr events JSON from {}",
+            options.events_file.display()
+        )
+    })?;
+    let events = parse_nostr_events_json(&value)?;
+    if events.is_empty() && root.is_none() {
+        anyhow::bail!("Nostr event import did not contain any events");
+    }
+    let stored = events
+        .into_iter()
+        .map(|event| {
+            VerifiedEvent::try_from(event)
+                .map(|verified| verified.to_stored_event().into_stored())
+                .map_err(anyhow::Error::from)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let imported = stored.len();
+
+    let config = Config::load()?;
+    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+    let store = Arc::new(HashtreeStore::with_options(
+        &data_dir,
+        config.storage.s3.as_ref(),
+        max_size_bytes,
+    )?);
+    let event_store = NostrEventStore::new(store.store_arc());
+    let next_root = event_store
+        .build(root.as_ref(), stored)
+        .await
+        .context("import signed Nostr events into local index")?
+        .or(root)
+        .context("Nostr event import did not produce an index root")?;
+    persist_latest_root(&data_dir, &next_root)?;
+
+    let output = NostrIndexImportOutput {
+        root: cid_to_nhash(&next_root)?,
+        imported,
+    };
+    write_nostr_index_import_output(&output, options.out.as_deref())?;
+    Ok(output)
 }
 
 pub(crate) async fn run_nostr_index_query(
@@ -564,6 +634,46 @@ fn parse_nostr_filter_value(value: serde_json::Value) -> Result<NostrFilter> {
     serde_json::from_value(value).context("decode Nostr filter")
 }
 
+fn parse_nostr_events_json(value: &serde_json::Value) -> Result<Vec<NostrSdkEvent>> {
+    let events = nostr_events_array(value)?;
+    events
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()).context("decode Nostr event"))
+        .collect()
+}
+
+fn nostr_events_array(value: &serde_json::Value) -> Result<&[serde_json::Value]> {
+    if let Some(events) = value.get("events").and_then(serde_json::Value::as_array) {
+        return Ok(events);
+    }
+    if let Some(data) = value.get("data") {
+        if let Some(events) = data.get("events").and_then(serde_json::Value::as_array) {
+            return Ok(events);
+        }
+    }
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .context("expected a Nostr event array or object with an events array")
+}
+
+fn write_nostr_index_import_output(
+    output: &NostrIndexImportOutput,
+    out: Option<&Path>,
+) -> Result<()> {
+    let json = serde_json::to_string_pretty(output).context("encode Nostr import output")?;
+    match out {
+        Some(path) if path != Path::new("-") => {
+            std::fs::write(path, format!("{json}\n"))
+                .with_context(|| format!("write Nostr import output to {}", path.display()))?;
+        }
+        _ => {
+            println!("{json}");
+        }
+    }
+    Ok(())
+}
+
 fn write_nostr_index_query_output(
     output: &NostrIndexQueryOutput,
     out: Option<&Path>,
@@ -616,6 +726,16 @@ fn persist_report(data_dir: &Path, report: &IndexedNostrReport) -> Result<()> {
         std::fs::remove_file(root_path)?;
     }
 
+    Ok(())
+}
+
+fn persist_latest_root(data_dir: &Path, root: &Cid) -> Result<()> {
+    let output_dir = data_dir.join(INDEX_DIR);
+    std::fs::create_dir_all(&output_dir)?;
+    std::fs::write(
+        output_dir.join(LATEST_ROOT_FILE),
+        format!("{}\n", cid_to_nhash(root)?),
+    )?;
     Ok(())
 }
 
@@ -888,6 +1008,75 @@ mod tests {
         let second = serde_json::to_value(&filters[1]).expect("serialize second filter");
         assert_eq!(first["#i"], serde_json::json!(["fips.peer"]));
         assert_eq!(second["kinds"], serde_json::json!([1]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nostr_index_import_stores_queryable_rating_fact_events() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let rater = Keys::generate();
+        let subject = Keys::generate().public_key().to_hex();
+        let event = signed_rating_fact_event(&rater, &subject, "fips.peer", 80, 70);
+        let events_path = temp_dir.path().join("ratings.json");
+        std::fs::write(
+            &events_path,
+            serde_json::to_vec_pretty(&serde_json::json!({ "events": [event] }))
+                .expect("encode rating event"),
+        )
+        .expect("write events file");
+
+        let import_output = run_nostr_index_import(
+            temp_dir.path().to_path_buf(),
+            NostrIndexImportOptions {
+                root: None,
+                events_file: events_path,
+                out: Some(temp_dir.path().join("import-report.json")),
+            },
+        )
+        .await
+        .expect("import rating event");
+
+        assert_eq!(import_output.imported, 1);
+        assert!(import_output.root.starts_with("nhash1"));
+
+        let query_output = run_nostr_index_query(
+            temp_dir.path().to_path_buf(),
+            NostrIndexQueryOptions {
+                root: None,
+                filter_json: r##"{"kinds":[7368],"#i":["fips.peer"]}"##.to_string(),
+                limit: 10,
+                out: Some(temp_dir.path().join("query-report.json")),
+            },
+        )
+        .await
+        .expect("query imported rating event");
+
+        assert_eq!(query_output.count, 1);
+        assert_eq!(query_output.events[0].id, event.id.to_hex());
+    }
+
+    fn signed_rating_fact_event(
+        keys: &Keys,
+        subject: &str,
+        scope: &str,
+        rating: i64,
+        created_at: u64,
+    ) -> Event {
+        let scope_index = scope.to_lowercase();
+        let rating = rating.to_string();
+        EventBuilder::new(Kind::from(7368_u16), "")
+            .tags(vec![
+                Tag::parse(["i", scope_index.as_str()]).expect("scope index tag"),
+                Tag::parse(["i", subject]).expect("subject index tag"),
+                Tag::parse(["type", "rating"]).expect("type fact tag"),
+                Tag::parse(["subject", subject]).expect("subject fact tag"),
+                Tag::parse(["scope", scope]).expect("scope fact tag"),
+                Tag::parse(["rating", rating.as_str()]).expect("rating fact tag"),
+                Tag::parse(["min_rating", "0"]).expect("min rating fact tag"),
+                Tag::parse(["max_rating", "100"]).expect("max rating fact tag"),
+            ])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign rating fact event")
     }
 
     struct TestRelay {
