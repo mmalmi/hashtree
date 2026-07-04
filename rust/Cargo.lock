@@ -3064,6 +3064,7 @@ dependencies = [
  "tokio-socks",
  "tracing",
  "tun",
+ "uuid",
  "webrtc",
  "wintun",
 ]
