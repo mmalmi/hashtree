@@ -8,7 +8,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::mesh_pubsub::{
-    compute_workload_peer_graph, run_mesh_pubsub_htl_baseline_on_graph, HtlBaselineMode,
+    compute_workload_peer_graph, run_mesh_pubsub_htl_baseline_on_graph,
+    run_mesh_pubsub_payload_delivery, HtlBaselineMode, MeshPubsubPayloadConfig,
     MeshPubsubWorkloadConfig,
 };
 use hashtree_core::{sha256, to_hex, Cid, MemoryStore};
@@ -103,6 +104,8 @@ pub struct WotPubsubSimReport {
     pub index_root_seek_events: u64,
     pub rating_pubsub_delivery_opportunities: u64,
     pub rating_pubsub_delivered_events: u64,
+    pub rating_pubsub_verified_events: u64,
+    pub rating_pubsub_history_lookup_events: u64,
     pub rating_pubsub_forwarded_bytes_sent: u64,
     pub rating_pubsub_flood_forwarded_bytes_sent: u64,
     pub latest_index_root: Option<String>,
@@ -333,6 +336,27 @@ impl WotRatingHistory {
         Ok(())
     }
 
+    async fn publish_stored_rating_event(
+        &mut self,
+        event: StoredNostrEvent,
+    ) -> Result<(), NostrEventStoreError> {
+        let scope = tag_values(&event, "scope").into_iter().next();
+        let created_at = tag_values(&event, "created_at")
+            .into_iter()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(event.created_at);
+        self.rating_root = Some(
+            self.event_store
+                .add(self.rating_root.as_ref(), event)
+                .await?,
+        );
+        if let Some(scope) = scope {
+            self.publish_index_root(&scope, created_at).await?;
+        }
+        Ok(())
+    }
+
     async fn publish_index_root(
         &mut self,
         scope: &str,
@@ -559,31 +583,44 @@ pub async fn run_wot_pubsub_simulation(
         report.latest_index_root = Some(root.to_string());
         report.index_root_seek_events = events.len() as u64;
     }
-    simulate_rating_pubsub_delivery(&config, &mut report).await;
+    simulate_rating_pubsub_delivery(&config, &scope, &raw_events, &mut report).await?;
 
     Ok(report)
 }
 
 async fn simulate_rating_pubsub_delivery(
     config: &WotPubsubSimConfig,
+    scope: &str,
+    rating_events: &[StoredNostrEvent],
     report: &mut WotPubsubSimReport,
-) {
+) -> Result<(), NostrEventStoreError> {
     if report.rating_events_published == 0
         || config.rating_pubsub_node_count < 2
         || config.rating_pubsub_subscribers == 0
         || config.rating_pubsub_publish_round_cap == 0
     {
-        return;
+        return Ok(());
     }
 
-    let publish_rounds = (report.rating_events_published as usize)
-        .min(config.rating_pubsub_publish_round_cap)
-        .max(1);
+    let payload_events = rating_events
+        .iter()
+        .take(config.rating_pubsub_publish_round_cap)
+        .cloned()
+        .collect::<Vec<_>>();
+    if payload_events.is_empty() {
+        return Ok(());
+    }
+    let payloads = payload_events
+        .iter()
+        .map(serde_json::to_vec)
+        .collect::<Result<Vec<_>, _>>()?;
+    let payload_bytes = payloads.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let publish_rounds = payloads.len();
     let subscriber_count = config
         .rating_pubsub_subscribers
         .min(config.rating_pubsub_node_count.saturating_sub(1));
     if subscriber_count == 0 {
-        return;
+        return Ok(());
     }
 
     let pubsub_config = MeshPubsubWorkloadConfig {
@@ -592,7 +629,7 @@ async fn simulate_rating_pubsub_delivery(
         author_count: 1,
         subscribers_per_author: subscriber_count,
         publish_rounds,
-        payload_bytes: config.rating_pubsub_payload_bytes.max(1),
+        payload_bytes,
         pool: PoolConfig {
             max_connections: 8,
             satisfied_connections: 4,
@@ -602,14 +639,42 @@ async fn simulate_rating_pubsub_delivery(
         spam_publish_rounds_per_round: 0,
         ..Default::default()
     };
+    let payload_report = run_mesh_pubsub_payload_delivery(MeshPubsubPayloadConfig {
+        seed: 20260705,
+        node_count: config.rating_pubsub_node_count,
+        subscriber_count,
+        stream_id: format!("nostr-ratings:{scope}"),
+        payloads,
+        pool: PoolConfig {
+            max_connections: 8,
+            satisfied_connections: 4,
+        },
+        pump_steps_after_setup: 192,
+        pump_steps_per_publish: 128,
+    })
+    .await;
+    report.rating_pubsub_delivery_opportunities = payload_report.delivery_opportunities;
+    report.rating_pubsub_delivered_events = payload_report.delivered_payloads.len() as u64;
+    report.rating_pubsub_forwarded_bytes_sent = payload_report.forwarded_bytes_sent;
+
+    let mut subscriber_history = WotRatingHistory::new();
+    let mut seen_event_ids = BTreeSet::new();
+    for delivery in payload_report.delivered_payloads {
+        let event: StoredNostrEvent = serde_json::from_slice(&delivery.payload)?;
+        let verified = VerifiedStoredNostrEvent::try_from(event)?;
+        if seen_event_ids.insert(verified.as_stored().id.clone()) {
+            subscriber_history
+                .publish_stored_rating_event(verified.into_stored())
+                .await?;
+        }
+    }
+    report.rating_pubsub_verified_events = seen_event_ids.len() as u64;
+    report.rating_pubsub_history_lookup_events = subscriber_history
+        .query_with_nostr_filter(RatingHistoryLookupMode::RawEvents, scope)
+        .await?
+        .len() as u64;
+
     let (graph, topology) = compute_workload_peer_graph(&pubsub_config).await;
-    let inv_want = run_mesh_pubsub_htl_baseline_on_graph(
-        &graph,
-        &topology,
-        &pubsub_config,
-        MESH_EVENT_POLICY.max_htl,
-        HtlBaselineMode::InvWant,
-    );
     let flood = run_mesh_pubsub_htl_baseline_on_graph(
         &graph,
         &topology,
@@ -618,10 +683,8 @@ async fn simulate_rating_pubsub_delivery(
         HtlBaselineMode::FloodPayload,
     );
 
-    report.rating_pubsub_delivery_opportunities = inv_want.delivery_opportunities;
-    report.rating_pubsub_delivered_events = inv_want.delivered_events;
-    report.rating_pubsub_forwarded_bytes_sent = inv_want.forwarded_bytes_sent;
     report.rating_pubsub_flood_forwarded_bytes_sent = flood.forwarded_bytes_sent;
+    Ok(())
 }
 
 async fn ingest_rating_candidates(
@@ -977,6 +1040,12 @@ mod tests {
             report.rating_pubsub_delivered_events,
             report.rating_pubsub_delivery_opportunities
         );
+        assert!(report.rating_pubsub_verified_events > 0);
+        assert!(report.rating_pubsub_verified_events <= report.rating_events_published);
+        assert_eq!(
+            report.rating_pubsub_history_lookup_events,
+            report.rating_pubsub_verified_events
+        );
         assert!(
             report.rating_pubsub_forwarded_bytes_sent
                 < report.rating_pubsub_flood_forwarded_bytes_sent,
@@ -1088,6 +1157,31 @@ mod tests {
             report.raw_rating_lookup_events
         );
         assert!(report.latest_index_root.is_some());
+    }
+
+    #[tokio::test]
+    async fn relayless_pubsub_delivered_rating_events_index_for_normal_filters() {
+        let report = run_wot_pubsub_simulation(WotPubsubSimConfig {
+            rounds: 1,
+            rating_pubsub_node_count: 10,
+            rating_pubsub_subscribers: 4,
+            rating_pubsub_publish_round_cap: 3,
+            ..WotPubsubSimConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert!(report.rating_pubsub_delivery_opportunities > 0);
+        assert_eq!(
+            report.rating_pubsub_delivered_events,
+            report.rating_pubsub_delivery_opportunities
+        );
+        assert_eq!(report.rating_pubsub_verified_events, 3);
+        assert_eq!(report.rating_pubsub_history_lookup_events, 3);
+        assert_eq!(
+            report.raw_rating_lookup_events,
+            report.rating_events_published
+        );
     }
 
     #[tokio::test]

@@ -151,6 +151,53 @@ pub struct MeshPubsubWorkloadReport {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct MeshPubsubPayloadConfig {
+    pub seed: u64,
+    pub node_count: usize,
+    pub subscriber_count: usize,
+    pub stream_id: String,
+    pub payloads: Vec<Vec<u8>>,
+    pub pool: PoolConfig,
+    pub pump_steps_after_setup: usize,
+    pub pump_steps_per_publish: usize,
+}
+
+impl Default for MeshPubsubPayloadConfig {
+    fn default() -> Self {
+        Self {
+            seed: 42,
+            node_count: 8,
+            subscriber_count: 3,
+            stream_id: "payload".to_string(),
+            payloads: Vec::new(),
+            pool: PoolConfig {
+                max_connections: 8,
+                satisfied_connections: 4,
+            },
+            pump_steps_after_setup: 128,
+            pump_steps_per_publish: 96,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MeshPubsubPayloadDelivery {
+    pub subscriber_id: String,
+    pub seq: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MeshPubsubPayloadReport {
+    pub delivery_opportunities: u64,
+    pub delivered_payloads: Vec<MeshPubsubPayloadDelivery>,
+    pub duplicate_deliveries: u64,
+    pub forwarded_bytes_sent: u64,
+    pub wire_bytes_received: u64,
+    pub useful_bytes_received: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct MeshPubsubSweepResult {
     pub config: MeshPubsubWorkloadConfig,
     pub report: MeshPubsubWorkloadReport,
@@ -1621,6 +1668,121 @@ pub async fn run_mesh_pubsub_workload(
 
     finalize_rates(&mut report, &mut latencies_ms);
     clear_channel_registry().await;
+    report
+}
+
+pub(crate) async fn run_mesh_pubsub_payload_delivery(
+    config: MeshPubsubPayloadConfig,
+) -> MeshPubsubPayloadReport {
+    if config.node_count < 2 || config.payloads.is_empty() || config.stream_id.trim().is_empty() {
+        return MeshPubsubPayloadReport::default();
+    }
+
+    let _mock_registry = crate::mock_registry::lock_mock_channel_registry().await;
+    clear_channel_registry().await;
+
+    let mut rng = StdRng::seed_from_u64(config.seed);
+    let workload_config = MeshPubsubWorkloadConfig {
+        seed: config.seed,
+        node_count: config.node_count,
+        author_count: 1,
+        subscribers_per_author: config.subscriber_count,
+        publish_rounds: config.payloads.len(),
+        payload_bytes: config.payloads.iter().map(Vec::len).max().unwrap_or(1),
+        pool: config.pool,
+        pump_steps_after_setup: config.pump_steps_after_setup,
+        pump_steps_per_publish_round: config.pump_steps_per_publish,
+        ..Default::default()
+    };
+    let node_ids = (0..config.node_count)
+        .map(|index| format!("node-{index:04}"))
+        .collect::<Vec<_>>();
+    let nodes = make_workload_nodes(&workload_config).await;
+    let nodes_by_id = nodes
+        .iter()
+        .map(|node| (node.id.clone(), node.store.clone()))
+        .collect::<HashMap<_, _>>();
+    let publisher_id = choose_publishers(&mut rng, &node_ids, 1)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| node_ids[0].clone());
+    let mut subscriber_ids = node_ids
+        .iter()
+        .filter(|node_id| *node_id != &publisher_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    subscriber_ids.shuffle(&mut rng);
+    subscriber_ids.truncate(
+        config
+            .subscriber_count
+            .min(config.node_count.saturating_sub(1)),
+    );
+
+    let mut subscriptions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for subscriber_id in &subscriber_ids {
+        if subscribe_stream(
+            &nodes_by_id,
+            &mut subscriptions,
+            subscriber_id,
+            &config.stream_id,
+        )
+        .await
+        {
+            pump_mesh(&nodes, 1).await;
+        }
+    }
+    pump_mesh(&nodes, config.pump_steps_after_setup).await;
+
+    let mut report = MeshPubsubPayloadReport {
+        delivery_opportunities: subscriber_ids.len() as u64 * config.payloads.len() as u64,
+        ..Default::default()
+    };
+    let expected_subscribers = subscriber_ids.into_iter().collect::<BTreeSet<_>>();
+    let mut seen = HashSet::<(String, u64)>::new();
+
+    for (index, payload) in config.payloads.into_iter().enumerate() {
+        let seq = (index + 1) as u64;
+        if let Some(store) = nodes_by_id.get(&publisher_id) {
+            store
+                .publish_pubsub(config.stream_id.clone(), seq, payload)
+                .await;
+        }
+        for _ in 0..config.pump_steps_per_publish {
+            pump_mesh(&nodes, 1).await;
+            for node in &nodes {
+                for event in node.store.drain_pubsub_events().await {
+                    if event.stream_id != config.stream_id
+                        || !expected_subscribers.contains(&node.id)
+                        || !seen.insert((node.id.clone(), event.seq))
+                    {
+                        report.duplicate_deliveries = report.duplicate_deliveries.saturating_add(1);
+                        continue;
+                    }
+                    report.delivered_payloads.push(MeshPubsubPayloadDelivery {
+                        subscriber_id: node.id.clone(),
+                        seq: event.seq,
+                        payload: event.payload,
+                    });
+                }
+            }
+        }
+    }
+
+    for node in &nodes {
+        for snapshot in node.store.peer_traffic_snapshots().await.values() {
+            report.forwarded_bytes_sent = report
+                .forwarded_bytes_sent
+                .saturating_add(snapshot.bytes_sent);
+            report.wire_bytes_received = report
+                .wire_bytes_received
+                .saturating_add(snapshot.bytes_received);
+            report.useful_bytes_received = report
+                .useful_bytes_received
+                .saturating_add(snapshot.useful_bytes_received);
+        }
+    }
+    clear_channel_registry().await;
+
     report
 }
 
