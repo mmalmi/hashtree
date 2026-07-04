@@ -37,6 +37,8 @@ pub struct WotPubsubSimConfig {
     pub event_capacity_per_round: usize,
     pub newcomer_probe_slots: usize,
     pub degradation_round: usize,
+    pub rating_ingest_capacity_per_round: usize,
+    pub spam_rating_events_per_round: usize,
 }
 
 impl Default for WotPubsubSimConfig {
@@ -50,6 +52,8 @@ impl Default for WotPubsubSimConfig {
             event_capacity_per_round: 5,
             newcomer_probe_slots: 1,
             degradation_round: 2,
+            rating_ingest_capacity_per_round: 16,
+            spam_rating_events_per_round: 24,
         }
     }
 }
@@ -59,6 +63,10 @@ pub struct WotPubsubSimReport {
     pub scope: String,
     pub rounds: usize,
     pub rating_events_published: u64,
+    pub trusted_rating_events_accepted: u64,
+    pub trusted_rating_events_deferred: u64,
+    pub spam_rating_events_seen: u64,
+    pub spam_rating_events_dropped: u64,
     pub good_delivered: u64,
     pub bad_delivered: u64,
     pub bad_events_limited: u64,
@@ -205,6 +213,34 @@ impl SimPeer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RatingCandidateTrust {
+    Trusted,
+    Untrusted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RatingCandidate {
+    trust: RatingCandidateTrust,
+    rating: WotRatingRecord,
+}
+
+impl RatingCandidate {
+    fn trusted(rating: WotRatingRecord) -> Self {
+        Self {
+            trust: RatingCandidateTrust::Trusted,
+            rating,
+        }
+    }
+
+    fn untrusted(rating: WotRatingRecord) -> Self {
+        Self {
+            trust: RatingCandidateTrust::Untrusted,
+            rating,
+        }
+    }
+}
+
 struct WotRatingHistory {
     event_store: NostrEventStore<MemoryStore>,
     rating_root: Option<Cid>,
@@ -333,6 +369,7 @@ pub async fn run_wot_pubsub_simulation(
     let mut scores = HashMap::<String, i64>::new();
     let mut history = WotRatingHistory::new();
     let mut rating_time = 1_u64;
+    let mut initial_ratings = Vec::new();
 
     for peer in &peers {
         let initial = match peer.role {
@@ -342,16 +379,31 @@ pub async fn run_wot_pubsub_simulation(
             PeerRole::Newcomer => None,
         };
         if let Some((score, reason)) = initial {
-            publish_rating(
-                &mut history,
-                &mut scores,
-                &mut report,
-                WotRatingRecord::new(LOCAL_RATER, &peer.id, &scope, score, rating_time, reason),
-            )
-            .await?;
-            rating_time = rating_time.saturating_add(1);
+            initial_ratings.push(RatingCandidate::trusted(WotRatingRecord::new(
+                LOCAL_RATER,
+                &peer.id,
+                &scope,
+                score,
+                take_rating_time(&mut rating_time),
+                reason,
+            )));
         }
     }
+    append_spam_rating_candidates(
+        &mut initial_ratings,
+        &scope,
+        "initial",
+        config.spam_rating_events_per_round,
+        &mut rating_time,
+    );
+    ingest_rating_candidates(
+        &mut history,
+        &mut scores,
+        &mut report,
+        initial_ratings,
+        config.rating_ingest_capacity_per_round,
+    )
+    .await?;
 
     for round in 0..config.rounds {
         let selected = select_publishers(
@@ -360,6 +412,7 @@ pub async fn run_wot_pubsub_simulation(
             config.event_capacity_per_round,
             config.newcomer_probe_slots,
         );
+        let mut pending_ratings = Vec::new();
 
         for peer in &peers {
             let selected_peer = selected.contains(&peer.id);
@@ -387,21 +440,14 @@ pub async fn run_wot_pubsub_simulation(
                             report.newcomer_delivered_before_rating.saturating_add(1);
                         report.newcomer_positive_ratings =
                             report.newcomer_positive_ratings.saturating_add(1);
-                        publish_rating(
-                            &mut history,
-                            &mut scores,
-                            &mut report,
-                            WotRatingRecord::new(
-                                LOCAL_RATER,
-                                &peer.id,
-                                &scope,
-                                75,
-                                rating_time,
-                                "newcomer served useful traffic",
-                            ),
-                        )
-                        .await?;
-                        rating_time = rating_time.saturating_add(1);
+                        pending_ratings.push(RatingCandidate::trusted(WotRatingRecord::new(
+                            LOCAL_RATER,
+                            &peer.id,
+                            &scope,
+                            75,
+                            take_rating_time(&mut rating_time),
+                            "newcomer served useful traffic",
+                        )));
                     }
                 }
                 PeerRole::Degrading => {
@@ -418,25 +464,34 @@ pub async fn run_wot_pubsub_simulation(
                             .saturating_add(1);
                         report.degraded_penalty_ratings =
                             report.degraded_penalty_ratings.saturating_add(1);
-                        publish_rating(
-                            &mut history,
-                            &mut scores,
-                            &mut report,
-                            WotRatingRecord::new(
-                                LOCAL_RATER,
-                                &peer.id,
-                                &scope,
-                                0,
-                                rating_time,
-                                "peer degraded after prior good history",
-                            ),
-                        )
-                        .await?;
-                        rating_time = rating_time.saturating_add(1);
+                        pending_ratings.push(RatingCandidate::trusted(WotRatingRecord::new(
+                            LOCAL_RATER,
+                            &peer.id,
+                            &scope,
+                            0,
+                            take_rating_time(&mut rating_time),
+                            "peer degraded after prior good history",
+                        )));
                     }
                 }
             }
         }
+
+        append_spam_rating_candidates(
+            &mut pending_ratings,
+            &scope,
+            &format!("round:{round}"),
+            config.spam_rating_events_per_round,
+            &mut rating_time,
+        );
+        ingest_rating_candidates(
+            &mut history,
+            &mut scores,
+            &mut report,
+            pending_ratings,
+            config.rating_ingest_capacity_per_round,
+        )
+        .await?;
     }
 
     let raw_events = history
@@ -455,6 +510,85 @@ pub async fn run_wot_pubsub_simulation(
     }
 
     Ok(report)
+}
+
+async fn ingest_rating_candidates(
+    history: &mut WotRatingHistory,
+    scores: &mut HashMap<String, i64>,
+    report: &mut WotPubsubSimReport,
+    candidates: Vec<RatingCandidate>,
+    capacity: usize,
+) -> Result<(), NostrEventStoreError> {
+    let mut trusted = Vec::new();
+    let mut untrusted = Vec::new();
+    for candidate in candidates {
+        match candidate.trust {
+            RatingCandidateTrust::Trusted => trusted.push(candidate),
+            RatingCandidateTrust::Untrusted => untrusted.push(candidate),
+        }
+    }
+
+    report.spam_rating_events_seen = report
+        .spam_rating_events_seen
+        .saturating_add(untrusted.len() as u64);
+
+    for (index, candidate) in trusted.into_iter().chain(untrusted).enumerate() {
+        if index >= capacity {
+            match candidate.trust {
+                RatingCandidateTrust::Trusted => {
+                    report.trusted_rating_events_deferred =
+                        report.trusted_rating_events_deferred.saturating_add(1);
+                }
+                RatingCandidateTrust::Untrusted => {
+                    report.spam_rating_events_dropped =
+                        report.spam_rating_events_dropped.saturating_add(1);
+                }
+            }
+            continue;
+        }
+
+        match candidate.trust {
+            RatingCandidateTrust::Trusted => {
+                publish_rating(history, scores, report, candidate.rating).await?;
+                report.trusted_rating_events_accepted =
+                    report.trusted_rating_events_accepted.saturating_add(1);
+            }
+            RatingCandidateTrust::Untrusted => {
+                report.spam_rating_events_dropped =
+                    report.spam_rating_events_dropped.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn append_spam_rating_candidates(
+    candidates: &mut Vec<RatingCandidate>,
+    scope: &str,
+    phase: &str,
+    count: usize,
+    rating_time: &mut u64,
+) {
+    for index in 0..count {
+        let subject = format!("peer:spam-subject:{phase}:{index:04}");
+        let mut rating = WotRatingRecord::new(
+            format!("peer:spam-rater:{phase}:{index:04}"),
+            subject,
+            scope,
+            100,
+            take_rating_time(rating_time),
+            "untrusted rating spam",
+        );
+        rating.tags.push("spam".to_string());
+        candidates.push(RatingCandidate::untrusted(rating));
+    }
+}
+
+fn take_rating_time(rating_time: &mut u64) -> u64 {
+    let current = (*rating_time).max(1);
+    *rating_time = current.saturating_add(1);
+    current
 }
 
 async fn publish_rating(
@@ -631,6 +765,40 @@ mod tests {
         assert_eq!(report.degraded_bad_deliveries_before_penalty, 1);
         assert_eq!(report.degraded_penalty_ratings, 1);
         assert_eq!(report.degraded_delivered_after_penalty, 0);
+        assert_eq!(
+            report.trusted_rating_events_accepted,
+            report.rating_events_published
+        );
+        assert_eq!(report.trusted_rating_events_deferred, 0);
+        assert!(report.spam_rating_events_seen > 0);
+        assert_eq!(
+            report.spam_rating_events_dropped,
+            report.spam_rating_events_seen
+        );
+    }
+
+    #[tokio::test]
+    async fn wot_rating_ingest_prioritizes_connected_authors_under_spam() {
+        let report = run_wot_pubsub_simulation(WotPubsubSimConfig {
+            good_peer_count: 1,
+            bad_peer_count: 0,
+            newcomer_count: 0,
+            rounds: 1,
+            event_capacity_per_round: 2,
+            rating_ingest_capacity_per_round: 2,
+            spam_rating_events_per_round: 50,
+            degradation_round: 10,
+            ..WotPubsubSimConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.rating_events_published, 2);
+        assert_eq!(report.trusted_rating_events_accepted, 2);
+        assert_eq!(report.trusted_rating_events_deferred, 0);
+        assert_eq!(report.spam_rating_events_seen, 100);
+        assert_eq!(report.spam_rating_events_dropped, 100);
+        assert_eq!(report.raw_rating_lookup_events, 2);
     }
 
     #[tokio::test]
