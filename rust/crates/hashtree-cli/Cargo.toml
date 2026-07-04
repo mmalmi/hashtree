@@ -109,6 +109,7 @@ lmdb = ["dep:hashtree-lmdb"]
 fuse = ["dep:hashtree-fuse", "dep:fuser"]
 fips-webrtc = ["hashtree-fips-transport/webrtc"]
 git-remote-wrapper = []
+experimental-decentralized-pubsub = []
 
 [dev-dependencies]
 tempfile.workspace = true

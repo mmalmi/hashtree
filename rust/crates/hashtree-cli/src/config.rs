@@ -330,6 +330,10 @@ pub struct NostrConfig {
     /// Set to 0 to skip the expensive startup text-note catch-up.
     #[serde(default = "default_nostr_full_text_note_history_max_relay_pages")]
     pub full_text_note_history_max_relay_pages: usize,
+    /// Enable experimental decentralized Nostr event pubsub when compiled with
+    /// the experimental-decentralized-pubsub feature.
+    #[serde(default, alias = "relayless_pubsub")]
+    pub decentralized_pubsub: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,6 +412,12 @@ impl NostrConfig {
         } else {
             Vec::new()
         }
+    }
+
+    pub fn decentralized_pubsub_enabled(&self) -> bool {
+        self.enabled
+            && self.decentralized_pubsub
+            && cfg!(feature = "experimental-decentralized-pubsub")
     }
 }
 
@@ -810,6 +820,7 @@ impl Default for NostrConfig {
                 default_nostr_full_text_note_history_follow_distance(),
             full_text_note_history_max_relay_pages:
                 default_nostr_full_text_note_history_max_relay_pages(),
+            decentralized_pubsub: false,
         }
     }
 }
@@ -1439,6 +1450,34 @@ chunk_target_bytes = 65536
         };
         assert!(blossom.all_read_servers().is_empty());
         assert!(blossom.all_write_servers().is_empty());
+    }
+
+    #[test]
+    fn nostr_decentralized_pubsub_requires_config_and_feature() {
+        let default_nostr = NostrConfig::default();
+        assert!(!default_nostr.decentralized_pubsub);
+        assert!(!default_nostr.decentralized_pubsub_enabled());
+
+        let enabled: NostrConfig = toml::from_str("decentralized_pubsub = true")
+            .expect("parse decentralized pubsub nostr config");
+        assert!(enabled.decentralized_pubsub);
+        assert_eq!(
+            enabled.decentralized_pubsub_enabled(),
+            cfg!(feature = "experimental-decentralized-pubsub")
+        );
+
+        let disabled: NostrConfig = toml::from_str(
+            r#"
+enabled = false
+decentralized_pubsub = true
+"#,
+        )
+        .expect("parse disabled relayless pubsub nostr config");
+        assert!(!disabled.decentralized_pubsub_enabled());
+
+        let alias: NostrConfig =
+            toml::from_str("relayless_pubsub = true").expect("parse relayless pubsub alias");
+        assert!(alias.decentralized_pubsub);
     }
 
     #[test]
