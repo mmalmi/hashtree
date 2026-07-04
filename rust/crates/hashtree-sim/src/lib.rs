@@ -17,6 +17,7 @@ pub mod mint_client;
 mod mock_registry;
 #[cfg(feature = "nostr")]
 pub mod nostr_mesh;
+pub mod wot_pubsub;
 pub mod ws_relay;
 
 // Re-export main types from mesh_sim
@@ -43,6 +44,10 @@ pub use mesh_sim::{
 pub use mint_client::{LocalMintClient, MintClient};
 #[cfg(feature = "nostr")]
 pub use nostr_mesh::NostrMesh;
+pub use wot_pubsub::{
+    run_wot_pubsub_simulation, RatingHistoryLookupMode, WotPubsubSimConfig, WotPubsubSimReport,
+    WotRatingRecord,
+};
 pub use ws_relay::WsRelay;
 
 // Re-export types from hashtree-network for convenience

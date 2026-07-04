@@ -13,6 +13,7 @@ publish = false
 # Core hashtree crates
 hashtree-core.workspace = true
 hashtree-network = { path = "../hashtree-network" }
+hashtree-nostr.workspace = true
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
