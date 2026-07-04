@@ -575,6 +575,8 @@ impl EmbeddedPeerRouterController {
 pub struct EmbeddedDaemonController {
     server_controller: Arc<EmbeddedServerController>,
     fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
+    #[cfg(feature = "experimental-decentralized-pubsub")]
+    nostr_pubsub_handle: Option<Arc<crate::fips_transport::DaemonNostrPubsubHandle>>,
     #[cfg(feature = "p2p")]
     peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
     background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
@@ -585,12 +587,17 @@ impl EmbeddedDaemonController {
     pub fn new(
         server_controller: Arc<EmbeddedServerController>,
         fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
+        #[cfg(feature = "experimental-decentralized-pubsub")] nostr_pubsub_handle: Option<
+            Arc<crate::fips_transport::DaemonNostrPubsubHandle>,
+        >,
         peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
         background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
     ) -> Self {
         Self {
             server_controller,
             fips_handle,
+            #[cfg(feature = "experimental-decentralized-pubsub")]
+            nostr_pubsub_handle,
             #[cfg(feature = "p2p")]
             peer_router_controller,
             background_services_controller,
@@ -601,17 +608,26 @@ impl EmbeddedDaemonController {
     pub fn new(
         server_controller: Arc<EmbeddedServerController>,
         fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
+        #[cfg(feature = "experimental-decentralized-pubsub")] nostr_pubsub_handle: Option<
+            Arc<crate::fips_transport::DaemonNostrPubsubHandle>,
+        >,
         background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
     ) -> Self {
         Self {
             server_controller,
             fips_handle,
+            #[cfg(feature = "experimental-decentralized-pubsub")]
+            nostr_pubsub_handle,
             background_services_controller,
         }
     }
 
     pub async fn shutdown(&self) {
         self.server_controller.shutdown().await;
+        #[cfg(feature = "experimental-decentralized-pubsub")]
+        if let Some(handle) = self.nostr_pubsub_handle.as_ref() {
+            handle.shutdown();
+        }
         if let Some(handle) = self.fips_handle.as_ref() {
             handle.shutdown();
         }
@@ -658,7 +674,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     config.server.bind_address = opts.bind_address.clone();
     if let Some(relays) = opts.relays {
         config.nostr.relays = relays;
-        config.nostr.enabled = !config.nostr.relays.is_empty();
+        config.nostr.enabled = embedded_nostr_enabled_after_relay_override(&config);
     }
 
     let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
@@ -860,6 +876,14 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     )
     .await?
     .map(Arc::new);
+    #[cfg(feature = "experimental-decentralized-pubsub")]
+    let nostr_pubsub_handle = crate::fips_transport::start_daemon_nostr_pubsub(
+        &config,
+        fips_handle.as_deref(),
+        Arc::clone(&store),
+        nostr_relay.clone(),
+    )
+    .await?;
 
     let mut server = HashtreeServer::new(Arc::clone(&store), opts.bind_address.clone())
         .with_server_mode(config.server.mode)
@@ -933,6 +957,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
         fips_handle.clone(),
+        #[cfg(feature = "experimental-decentralized-pubsub")]
+        nostr_pubsub_handle.clone(),
         peer_router_controller.clone(),
         Some(background_services_controller.clone()),
     ));
@@ -940,6 +966,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
         fips_handle.clone(),
+        #[cfg(feature = "experimental-decentralized-pubsub")]
+        nostr_pubsub_handle.clone(),
         Some(background_services_controller.clone()),
     ));
 
@@ -962,9 +990,15 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     })
 }
 
+fn embedded_nostr_enabled_after_relay_override(config: &Config) -> bool {
+    config.nostr.decentralized_pubsub || !config.nostr.relays.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::EmbeddedBackgroundServicesController;
+    use super::{
+        embedded_nostr_enabled_after_relay_override, EmbeddedBackgroundServicesController,
+    };
     use crate::config::Config;
 
     #[test]
@@ -1064,5 +1098,20 @@ mod tests {
         );
 
         assert_eq!(mirror_config.max_follow_distance, 6);
+    }
+
+    #[test]
+    fn embedded_empty_relays_keep_nostr_enabled_for_decentralized_pubsub() {
+        let mut config = Config::default();
+        config.nostr.relays = Vec::new();
+        config.nostr.decentralized_pubsub = false;
+        assert!(!embedded_nostr_enabled_after_relay_override(&config));
+
+        config.nostr.decentralized_pubsub = true;
+        assert!(embedded_nostr_enabled_after_relay_override(&config));
+
+        config.nostr.decentralized_pubsub = false;
+        config.nostr.relays = vec!["wss://relay.example".to_string()];
+        assert!(embedded_nostr_enabled_after_relay_override(&config));
     }
 }

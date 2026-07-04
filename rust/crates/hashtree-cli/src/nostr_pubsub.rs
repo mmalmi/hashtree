@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use hashtree_core::Store;
+use hashtree_fips_transport::FipsMeshPubsub;
 use hashtree_network::{
     MeshStoreCore, PeerLinkFactory, PubsubEvent, PubsubPublishStats, SignalingTransport,
 };
@@ -49,28 +50,58 @@ where
         .await)
 }
 
-pub async fn ingest_nostr_pubsub_event(
-    relay: &NostrRelay,
-    delivery: PubsubEvent,
-) -> Result<Option<Event>> {
-    if delivery.stream_id != NOSTR_EVENT_PUBSUB_STREAM {
-        anyhow::bail!("unexpected nostr pubsub stream {}", delivery.stream_id);
+pub async fn publish_fips_nostr_event<S>(
+    mesh: &FipsMeshPubsub<S>,
+    seq: u64,
+    event: &Event,
+) -> Result<PubsubPublishStats>
+where
+    S: Store + Send + Sync + 'static,
+{
+    event
+        .verify()
+        .map_err(|err| anyhow::anyhow!("invalid nostr event signature: {err}"))?;
+    let payload = event.as_json().into_bytes();
+    if payload.len() > MAX_NOSTR_PUBSUB_EVENT_BYTES {
+        anyhow::bail!(
+            "nostr pubsub event exceeds {} bytes",
+            MAX_NOSTR_PUBSUB_EVENT_BYTES
+        );
     }
-    if delivery.payload.len() > MAX_NOSTR_PUBSUB_EVENT_BYTES {
+    Ok(mesh
+        .publish_pubsub(NOSTR_EVENT_PUBSUB_STREAM, seq, payload)
+        .await)
+}
+
+pub async fn ingest_nostr_pubsub_payload(
+    relay: &NostrRelay,
+    stream_id: &str,
+    payload: &[u8],
+) -> Result<Option<Event>> {
+    if stream_id != NOSTR_EVENT_PUBSUB_STREAM {
+        anyhow::bail!("unexpected nostr pubsub stream {}", stream_id);
+    }
+    if payload.len() > MAX_NOSTR_PUBSUB_EVENT_BYTES {
         anyhow::bail!(
             "nostr pubsub event exceeds {} bytes",
             MAX_NOSTR_PUBSUB_EVENT_BYTES
         );
     }
 
-    let json =
-        std::str::from_utf8(&delivery.payload).context("nostr pubsub payload is not utf8")?;
+    let json = std::str::from_utf8(payload).context("nostr pubsub payload is not utf8")?;
     let event = Event::from_json(json).context("decode nostr pubsub event")?;
     if relay.ingest_peer_event_silent(event.clone()).await? {
         Ok(Some(event))
     } else {
         Ok(None)
     }
+}
+
+pub async fn ingest_nostr_pubsub_event(
+    relay: &NostrRelay,
+    delivery: PubsubEvent,
+) -> Result<Option<Event>> {
+    ingest_nostr_pubsub_payload(relay, &delivery.stream_id, &delivery.payload).await
 }
 
 pub async fn start_nostr_pubsub_ingest<S, R, F>(

@@ -1214,6 +1214,12 @@ pub struct FipsMeshPubsub<S: Store + Send + Sync + 'static> {
 }
 
 impl<S: Store + Send + Sync + 'static> FipsMeshPubsub<S> {
+    /// Stop background tasks owned by this FIPS-backed pubsub runtime.
+    pub fn shutdown(&self) {
+        self.demux_task.abort();
+        self.pump_task.abort();
+    }
+
     /// Subscribe this node to a mesh pubsub stream.
     pub async fn subscribe_pubsub(&self, stream_id: impl Into<String>) -> PubsubPublishStats {
         self.store.subscribe_pubsub(stream_id.into()).await
@@ -1291,8 +1297,7 @@ impl<S: Store + Send + Sync + 'static> Store for FipsMeshPubsub<S> {
 
 impl<S: Store + Send + Sync + 'static> Drop for FipsMeshPubsub<S> {
     fn drop(&mut self) {
-        self.demux_task.abort();
-        self.pump_task.abort();
+        self.shutdown();
     }
 }
 

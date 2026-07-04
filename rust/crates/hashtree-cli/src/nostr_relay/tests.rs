@@ -151,6 +151,76 @@ async fn relay_stores_and_serves_events() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "experimental-decentralized-pubsub")]
+#[tokio::test]
+async fn relay_enqueues_trusted_client_events_for_decentralized_pubsub() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let graph_store = {
+        let _guard = crate::socialgraph::test_lock();
+        crate::socialgraph::open_test_social_graph_store_with_mapsize(
+            tmp.path(),
+            Some(128 * 1024 * 1024),
+        )?
+    };
+    let keys = Keys::generate();
+    let untrusted_keys = Keys::generate();
+    let mut allowed = HashSet::new();
+    allowed.insert(keys.public_key().to_hex());
+    let backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = graph_store.clone();
+    let access = Arc::new(crate::socialgraph::SocialGraphAccessControl::new(
+        Arc::clone(&backend),
+        0,
+        allowed,
+    ));
+
+    let relay = NostrRelay::new(
+        Arc::clone(&backend),
+        tmp.path().to_path_buf(),
+        HashSet::from([keys.public_key().to_hex()]),
+        Some(access),
+        NostrRelayConfig {
+            spambox_db_max_bytes: 0,
+            ..Default::default()
+        },
+    )?;
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+    relay.register_client(1, client_tx, None).await;
+    let (pubsub_tx, mut pubsub_rx) = mpsc::unbounded_channel();
+    relay.set_decentralized_pubsub_sender(Some(pubsub_tx));
+
+    let trusted_event = event_builder!(Kind::TextNote, "trusted").sign_with_keys(&keys)?;
+    relay
+        .handle_client_message(1, NostrClientMessage::event(trusted_event.clone()))
+        .await;
+    match recv_relay_message(&mut client_rx).await? {
+        RelayMessage::Ok { status, .. } => assert!(status),
+        other => anyhow::bail!("expected OK, got {:?}", other),
+    }
+    let queued = pubsub_rx
+        .try_recv()
+        .map_err(|err| anyhow::anyhow!("missing pubsub event: {err}"))?;
+    assert_eq!(queued.id, trusted_event.id);
+
+    let untrusted_event =
+        event_builder!(Kind::TextNote, "untrusted").sign_with_keys(&untrusted_keys)?;
+    relay
+        .handle_client_message(1, NostrClientMessage::event(untrusted_event))
+        .await;
+    match recv_relay_message(&mut client_rx).await? {
+        RelayMessage::Ok {
+            status, message, ..
+        } => {
+            assert!(status);
+            assert_eq!(message, "spambox");
+        }
+        other => anyhow::bail!("expected OK, got {:?}", other),
+    }
+    assert!(pubsub_rx.try_recv().is_err());
+
+    relay.set_decentralized_pubsub_sender(None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn relay_req_serves_events_from_historical_nostr_index() -> Result<()> {
     let tmp = TempDir::new()?;
@@ -300,7 +370,7 @@ async fn trusted_ingest_appends_rating_fact_to_historical_nostr_index() -> Resul
     let (tx, mut rx) = mpsc::unbounded_channel();
     replay.register_client(1, tx, None).await;
 
-    let sub_id = SubscriptionId::new("relayless-ratings");
+    let sub_id = SubscriptionId::new("decentralized-ratings");
     let filter = Filter::new()
         .kind(Kind::Custom(7368))
         .custom_tag(SingleLetterTag::lowercase(Alphabet::I), "fips.peer")

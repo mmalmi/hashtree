@@ -4,6 +4,8 @@
 //! depend on or talk to an external FIPS daemon.
 
 use crate::config::Config;
+#[cfg(feature = "experimental-decentralized-pubsub")]
+use crate::nostr_relay::NostrRelay;
 use crate::storage::{HashtreeStore, StorageRouter};
 use anyhow::{Context, Result};
 use hashtree_fips_transport::{
@@ -15,6 +17,8 @@ use nostr::PublicKey;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "experimental-decentralized-pubsub")]
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub type DaemonFipsTransport = HashtreeFipsTransport<StorageRouter>;
@@ -29,6 +33,24 @@ pub struct DaemonFipsHandle {
 impl DaemonFipsHandle {
     pub fn shutdown(&self) {
         self.receiver_task.abort();
+    }
+}
+
+#[cfg(feature = "experimental-decentralized-pubsub")]
+pub struct DaemonNostrPubsubHandle {
+    mesh: Arc<hashtree_fips_transport::FipsMeshPubsub<StorageRouter>>,
+    relay: Arc<NostrRelay>,
+    ingest_task: JoinHandle<()>,
+    outbound_task: JoinHandle<()>,
+}
+
+#[cfg(feature = "experimental-decentralized-pubsub")]
+impl DaemonNostrPubsubHandle {
+    pub fn shutdown(&self) {
+        self.relay.set_decentralized_pubsub_sender(None);
+        self.ingest_task.abort();
+        self.outbound_task.abort();
+        self.mesh.shutdown();
     }
 }
 
@@ -83,6 +105,127 @@ pub async fn start_daemon_fips_transport(
         discovery_scope: endpoint.discovery_scope,
         receiver_task,
     }))
+}
+
+#[cfg(feature = "experimental-decentralized-pubsub")]
+pub async fn start_daemon_nostr_pubsub(
+    config: &Config,
+    fips_handle: Option<&DaemonFipsHandle>,
+    store: Arc<HashtreeStore>,
+    relay: Option<Arc<NostrRelay>>,
+) -> Result<Option<Arc<DaemonNostrPubsubHandle>>> {
+    if !daemon_decentralized_pubsub_ready(config, fips_handle.is_some(), relay.is_some()) {
+        return Ok(None);
+    }
+
+    let fips_handle = fips_handle.expect("checked by daemon_decentralized_pubsub_ready");
+    let relay = relay.expect("checked by daemon_decentralized_pubsub_ready");
+    let request_timeout = Duration::from_millis(config.server.fips_request_timeout_ms.max(1));
+    let mesh = Arc::new(
+        fips_handle
+            .transport
+            .start_mesh_pubsub(
+                store.store_arc(),
+                fips_handle.endpoint_npub.clone(),
+                request_timeout,
+            )
+            .await
+            .context("Failed to start decentralized Nostr pubsub over FIPS")?,
+    );
+    let _ = mesh
+        .subscribe_pubsub(crate::nostr_pubsub::NOSTR_EVENT_PUBSUB_STREAM)
+        .await;
+
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+    relay.set_decentralized_pubsub_sender(Some(outbound_tx));
+    let ingest_task = spawn_daemon_nostr_pubsub_ingest(Arc::clone(&mesh), Arc::clone(&relay));
+    let outbound_task = spawn_daemon_nostr_pubsub_outbound(Arc::clone(&mesh), outbound_rx);
+
+    Ok(Some(Arc::new(DaemonNostrPubsubHandle {
+        mesh,
+        relay,
+        ingest_task,
+        outbound_task,
+    })))
+}
+
+#[cfg(feature = "experimental-decentralized-pubsub")]
+fn daemon_decentralized_pubsub_ready(config: &Config, has_fips: bool, has_relay: bool) -> bool {
+    config.nostr.decentralized_pubsub_enabled() && has_fips && has_relay
+}
+
+#[cfg(feature = "experimental-decentralized-pubsub")]
+fn spawn_daemon_nostr_pubsub_ingest(
+    mesh: Arc<hashtree_fips_transport::FipsMeshPubsub<StorageRouter>>,
+    relay: Arc<NostrRelay>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let delivery = mesh.recv_pubsub_event().await;
+            let stream_id = delivery.stream_id.clone();
+            let origin_peer_id = delivery.origin_peer_id.clone();
+            match crate::nostr_pubsub::ingest_nostr_pubsub_payload(
+                &relay,
+                &delivery.stream_id,
+                &delivery.payload,
+            )
+            .await
+            {
+                Ok(Some(event)) => {
+                    tracing::debug!(
+                        stream_id,
+                        origin_peer_id,
+                        event_id = %event.id.to_hex(),
+                        "ingested decentralized Nostr pubsub event"
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        stream_id,
+                        origin_peer_id,
+                        "nostr decentralized pubsub ingest failed: {err:#}"
+                    );
+                }
+            }
+        }
+    })
+}
+
+#[cfg(feature = "experimental-decentralized-pubsub")]
+fn spawn_daemon_nostr_pubsub_outbound(
+    mesh: Arc<hashtree_fips_transport::FipsMeshPubsub<StorageRouter>>,
+    mut outbound_rx: mpsc::UnboundedReceiver<nostr::Event>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut seq = 1u64;
+        while let Some(event) = outbound_rx.recv().await {
+            let event_id = event.id.to_hex();
+            match crate::nostr_pubsub::publish_fips_nostr_event(mesh.as_ref(), seq, &event).await {
+                Ok(stats) => {
+                    tracing::debug!(
+                        event_id,
+                        seq,
+                        selected_peers = stats.selected_peers,
+                        sent_peers = stats.sent_peers,
+                        sent_bytes = stats.sent_bytes,
+                        "published Nostr event over decentralized pubsub"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        event_id,
+                        seq,
+                        "nostr decentralized pubsub publish failed: {err:#}"
+                    );
+                }
+            }
+            seq = seq.wrapping_add(1);
+            if seq == 0 {
+                seq = 1;
+            }
+        }
+    })
 }
 
 pub fn fips_peer_ids_from_pubkeys(pubkeys: Vec<[u8; 32]>) -> Vec<String> {
@@ -193,5 +336,20 @@ mod tests {
                 FipsPeerConfig::new("followed"),
             ]
         );
+    }
+
+    #[cfg(feature = "experimental-decentralized-pubsub")]
+    #[test]
+    fn daemon_decentralized_pubsub_requires_config_fips_and_relay() {
+        let mut config = Config::default();
+        assert!(!daemon_decentralized_pubsub_ready(&config, true, true));
+
+        config.nostr.decentralized_pubsub = true;
+        assert!(daemon_decentralized_pubsub_ready(&config, true, true));
+        assert!(!daemon_decentralized_pubsub_ready(&config, false, true));
+        assert!(!daemon_decentralized_pubsub_ready(&config, true, false));
+
+        config.nostr.enabled = false;
+        assert!(!daemon_decentralized_pubsub_ready(&config, true, true));
     }
 }

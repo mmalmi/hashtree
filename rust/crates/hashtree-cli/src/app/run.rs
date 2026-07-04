@@ -653,6 +653,14 @@ pub(crate) async fn run() -> Result<()> {
                 fips_peer_ids,
             )
             .await?;
+            #[cfg(feature = "experimental-decentralized-pubsub")]
+            let nostr_pubsub_handle = hashtree_cli::fips_transport::start_daemon_nostr_pubsub(
+                &config,
+                fips_handle.as_ref(),
+                Arc::clone(&store),
+                nostr_relay.clone(),
+            )
+            .await?;
 
             // Set up server with allowed pubkeys for blossom write access
             let mut server = HashtreeServer::new(Arc::clone(&store), bind_address.clone())
@@ -756,6 +764,14 @@ pub(crate) async fn run() -> Result<()> {
             } else if config.server.enable_fips {
                 println!("FIPS: disabled in this server mode");
             }
+            #[cfg(feature = "experimental-decentralized-pubsub")]
+            if nostr_pubsub_handle.is_some() {
+                println!("Nostr decentralized pubsub: enabled (FIPS mesh)");
+            } else if config.nostr.decentralized_pubsub {
+                println!(
+                    "Nostr decentralized pubsub: disabled (requires local Nostr relay and FIPS)"
+                );
+            }
             println!("Git remote: http://{}/git/<pubkey>/<repo>", bind_address);
             #[cfg(feature = "p2p")]
             if let Some(ref handle) = stun_handle {
@@ -845,6 +861,11 @@ pub(crate) async fn run() -> Result<()> {
             // Shutdown social graph crawler
             // Shutdown background eviction
             eviction_handle.abort();
+
+            #[cfg(feature = "experimental-decentralized-pubsub")]
+            if let Some(ref handle) = nostr_pubsub_handle {
+                handle.shutdown();
+            }
 
             if let Some(ref fips_handle) = fips_handle {
                 fips_handle.shutdown();

@@ -627,6 +627,8 @@ mod imp {
         recent_events: Mutex<RecentEvents>,
         next_client_id: AtomicU64,
         bluetooth_event_log: Arc<BluetoothEventLog>,
+        #[cfg(feature = "experimental-decentralized-pubsub")]
+        decentralized_pubsub_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<Event>>>,
     }
 
     impl NostrRelay {
@@ -779,6 +781,8 @@ mod imp {
                 recent_events: Mutex::new(RecentEvents::new(recent_size)),
                 next_client_id: AtomicU64::new(1),
                 bluetooth_event_log,
+                #[cfg(feature = "experimental-decentralized-pubsub")]
+                decentralized_pubsub_tx: std::sync::Mutex::new(None),
             })
         }
 
@@ -793,6 +797,38 @@ mod imp {
 
         pub fn next_client_id(&self) -> u64 {
             self.next_client_id.fetch_add(1, Ordering::SeqCst)
+        }
+
+        #[cfg(feature = "experimental-decentralized-pubsub")]
+        pub fn set_decentralized_pubsub_sender(
+            &self,
+            sender: Option<mpsc::UnboundedSender<Event>>,
+        ) {
+            match self.decentralized_pubsub_tx.lock() {
+                Ok(mut slot) => {
+                    *slot = sender;
+                }
+                Err(err) => {
+                    warn!("nostr decentralized pubsub sender lock poisoned: {}", err);
+                }
+            }
+        }
+
+        #[cfg(feature = "experimental-decentralized-pubsub")]
+        fn enqueue_decentralized_pubsub_event(&self, event: &Event) {
+            let sender = match self.decentralized_pubsub_tx.lock() {
+                Ok(slot) => slot.clone(),
+                Err(err) => {
+                    warn!("nostr decentralized pubsub sender lock poisoned: {}", err);
+                    None
+                }
+            };
+
+            if let Some(sender) = sender {
+                if sender.send(event.clone()).is_err() {
+                    warn!("nostr decentralized pubsub publisher is not running");
+                }
+            }
         }
 
         pub async fn ingest_trusted_event(&self, event: Event) -> Result<()> {
@@ -1128,6 +1164,8 @@ mod imp {
 
             if trusted {
                 self.broadcast_event(&event).await;
+                #[cfg(feature = "experimental-decentralized-pubsub")]
+                self.enqueue_decentralized_pubsub_event(&event);
             }
         }
 

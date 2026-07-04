@@ -1472,11 +1472,11 @@ enabled = false
 decentralized_pubsub = true
 "#,
         )
-        .expect("parse disabled relayless pubsub nostr config");
+        .expect("parse disabled decentralized pubsub nostr config");
         assert!(!disabled.decentralized_pubsub_enabled());
 
         let alias: NostrConfig =
-            toml::from_str("relayless_pubsub = true").expect("parse relayless pubsub alias");
+            toml::from_str("relayless_pubsub = true").expect("parse compatibility pubsub alias");
         assert!(alias.decentralized_pubsub);
     }
 
