@@ -15,9 +15,11 @@ use hashtree_core::{sha256, to_hex, Cid, MemoryStore};
 use hashtree_network::{PoolConfig, MESH_EVENT_POLICY};
 use hashtree_nostr::{
     parse_hashtree_root_event, ListEventsOptions, NostrEventStore, NostrEventStoreError,
-    StoredNostrEvent, HASHTREE_LABEL, HASHTREE_ROOT_KIND, TAG_HASH, TAG_KEY,
+    StoredNostrEvent, VerifiedStoredNostrEvent, HASHTREE_LABEL, HASHTREE_ROOT_KIND, TAG_HASH,
+    TAG_KEY,
 };
-use nostr::{Alphabet, Filter, Kind, SingleLetterTag};
+use nostr::nips::nip19::ToBech32;
+use nostr::{Alphabet, Event, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 
 const FACT_OP_KIND: u32 = 7368;
@@ -58,7 +60,7 @@ impl Default for WotPubsubSimConfig {
     fn default() -> Self {
         Self {
             scope: "fips.peer".to_string(),
-            trusted_rating_authors: vec![TRUSTED_RATING_SIGNER.to_string()],
+            trusted_rating_authors: vec![pubkey_for_node(TRUSTED_RATING_SIGNER)],
             good_peer_count: 4,
             bad_peer_count: 4,
             newcomer_count: 2,
@@ -109,29 +111,7 @@ pub struct WotPubsubSimReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WotRatingRecord {
-    pub id: String,
-    #[serde(default = "default_rating_signer")]
-    pub signer: String,
-    pub rater: String,
-    pub subject: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    pub rating: i64,
-    pub min_rating: i64,
-    pub max_rating: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sample_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window_start: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window_end: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    pub created_at: u64,
+    pub event: StoredNostrEvent,
 }
 
 impl WotRatingRecord {
@@ -143,92 +123,148 @@ impl WotRatingRecord {
         created_at: u64,
         reason: impl Into<String>,
     ) -> Self {
-        let subject = subject.into();
-        let created_at = created_at.max(1);
-        Self {
-            id: format!("rating:{subject}:{created_at}"),
-            signer: TRUSTED_RATING_SIGNER.to_string(),
-            rater: rater.into(),
+        Self::new_with_signer(
+            TRUSTED_RATING_SIGNER,
+            rater,
             subject,
-            scope: Some(scope.into()),
+            scope,
             rating,
-            min_rating: 0,
-            max_rating: 100,
-            sample_count: Some(1),
-            window_start: None,
-            window_end: Some(created_at),
-            evidence: Vec::new(),
-            reason: Some(reason.into()),
-            tags: vec!["machine".to_string(), "peer".to_string()],
             created_at,
-        }
+            reason,
+            ["machine", "peer"],
+        )
     }
 
-    fn signed_by(mut self, signer: impl Into<String>) -> Self {
-        self.signer = signer.into();
-        self
+    fn new_with_signer<const N: usize>(
+        signer: impl AsRef<str>,
+        rater: impl Into<String>,
+        subject: impl Into<String>,
+        scope: impl Into<String>,
+        rating: i64,
+        created_at: u64,
+        reason: impl Into<String>,
+        tags: [&str; N],
+    ) -> Self {
+        let rater = rater.into();
+        let subject = subject.into();
+        let scope = scope.into();
+        let created_at = created_at.max(1);
+        let event = signed_rating_event(
+            signer.as_ref(),
+            &rater,
+            &subject,
+            &scope,
+            rating,
+            created_at,
+            reason.into(),
+            &tags,
+        )
+        .expect("sim rating event signs and verifies");
+        Self { event }
+    }
+
+    #[cfg(test)]
+    fn signed_by(self, signer: impl AsRef<str>) -> Self {
+        let tags = self.tag_values("tag");
+        let tag_refs = tags.iter().map(String::as_str).collect::<Vec<_>>();
+        let event = signed_rating_event(
+            signer.as_ref(),
+            &self.rater().expect("rating rater tag exists"),
+            &self.subject().expect("rating subject tag exists"),
+            &self.scope().expect("rating scope tag exists"),
+            self.rating().expect("rating tag exists"),
+            self.created_at(),
+            self.reason().unwrap_or_else(|| "rating".to_string()),
+            &tag_refs,
+        )
+        .expect("sim rating event re-signs and verifies");
+        Self { event }
     }
 
     fn normalized_score(&self) -> Result<i64, NostrEventStoreError> {
-        if self.min_rating >= self.max_rating {
+        let rating = self.rating()?;
+        let min_rating = self.min_rating()?;
+        let max_rating = self.max_rating()?;
+        if min_rating >= max_rating {
             return Err(NostrEventStoreError::Validation(format!(
                 "rating range must have min_rating < max_rating (got {}..{})",
-                self.min_rating, self.max_rating
+                min_rating, max_rating
             )));
         }
-        if self.rating < self.min_rating || self.rating > self.max_rating {
+        if rating < min_rating || rating > max_rating {
             return Err(NostrEventStoreError::Validation(format!(
                 "rating {} is outside range {}..{}",
-                self.rating, self.min_rating, self.max_rating
+                rating, min_rating, max_rating
             )));
         }
-        let rating = i128::from(self.rating);
-        let min = i128::from(self.min_rating);
-        let max = i128::from(self.max_rating);
+        let rating = i128::from(rating);
+        let min = i128::from(min_rating);
+        let max = i128::from(max_rating);
         let centered = rating.saturating_mul(2) - min - max;
         Ok(((centered.saturating_mul(100)) / (max - min)) as i64)
     }
 
     fn to_stored_event(&self) -> Result<StoredNostrEvent, NostrEventStoreError> {
-        let mut tags = vec![
-            vec!["d".to_string(), self.id.clone()],
-            vec!["i".to_string(), self.id.clone(), "subject".to_string()],
-            vec!["i".to_string(), self.rater.to_lowercase()],
-            vec!["i".to_string(), self.subject.to_lowercase()],
-            vec!["type".to_string(), "rating".to_string()],
-            vec!["schema".to_string(), "1".to_string()],
-            vec!["created_at".to_string(), self.created_at.to_string()],
-            vec!["rater".to_string(), self.rater.clone()],
-            vec!["subject".to_string(), self.subject.clone()],
-            vec!["rating".to_string(), self.rating.to_string()],
-            vec!["min_rating".to_string(), self.min_rating.to_string()],
-            vec!["max_rating".to_string(), self.max_rating.to_string()],
-        ];
-        if let Some(scope) = self.scope.as_ref().filter(|scope| !scope.trim().is_empty()) {
-            tags.push(vec!["scope".to_string(), scope.clone()]);
-            tags.push(vec!["i".to_string(), scope.to_lowercase()]);
-        }
-        if let Some(sample_count) = self.sample_count {
-            tags.push(vec!["sample_count".to_string(), sample_count.to_string()]);
-        }
-        if let Some(window_end) = self.window_end {
-            tags.push(vec!["window_end".to_string(), window_end.to_string()]);
-        }
-        if let Some(reason) = &self.reason {
-            tags.push(vec!["reason".to_string(), reason.clone()]);
-        }
-        for tag in &self.tags {
-            tags.push(vec!["tag".to_string(), tag.clone()]);
-            tags.push(vec!["i".to_string(), tag.to_lowercase()]);
-        }
-
-        let pubkey = pubkey_for_node(&self.signer);
-        stored_event(pubkey, self.created_at, FACT_OP_KIND, tags, "")
+        VerifiedStoredNostrEvent::try_from(self.event.clone())
+            .map(VerifiedStoredNostrEvent::into_stored)
     }
-}
 
-fn default_rating_signer() -> String {
-    TRUSTED_RATING_SIGNER.to_string()
+    fn signer(&self) -> &str {
+        &self.event.pubkey
+    }
+
+    #[cfg(test)]
+    fn rater(&self) -> Option<String> {
+        self.tag_value("rater")
+    }
+
+    fn subject(&self) -> Option<String> {
+        self.tag_value("subject")
+    }
+
+    fn scope(&self) -> Option<String> {
+        self.tag_value("scope")
+    }
+
+    #[cfg(test)]
+    fn reason(&self) -> Option<String> {
+        self.tag_value("reason")
+    }
+
+    fn created_at(&self) -> u64 {
+        self.tag_value("created_at")
+            .and_then(|created_at| created_at.parse::<u64>().ok())
+            .unwrap_or(self.event.created_at)
+    }
+
+    fn rating(&self) -> Result<i64, NostrEventStoreError> {
+        self.tag_i64("rating")
+    }
+
+    fn min_rating(&self) -> Result<i64, NostrEventStoreError> {
+        self.tag_i64("min_rating")
+    }
+
+    fn max_rating(&self) -> Result<i64, NostrEventStoreError> {
+        self.tag_i64("max_rating")
+    }
+
+    fn tag_i64(&self, key: &str) -> Result<i64, NostrEventStoreError> {
+        let value = self.tag_value(key).ok_or_else(|| {
+            NostrEventStoreError::Validation(format!("rating event is missing {key} tag"))
+        })?;
+        value.parse::<i64>().map_err(|error| {
+            NostrEventStoreError::Validation(format!("rating event has invalid {key}: {error}"))
+        })
+    }
+
+    fn tag_value(&self, key: &str) -> Option<String> {
+        self.tag_values(key).into_iter().next()
+    }
+
+    fn tag_values(&self, key: &str) -> Vec<String> {
+        tag_values(&self.event, key)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,8 +327,8 @@ impl WotRatingHistory {
                 .add(self.rating_root.as_ref(), event)
                 .await?,
         );
-        if let Some(scope) = rating.scope.as_deref() {
-            self.publish_index_root(scope, rating.created_at).await?;
+        if let Some(scope) = rating.scope() {
+            self.publish_index_root(&scope, rating.created_at()).await?;
         }
         Ok(())
     }
@@ -392,7 +428,7 @@ pub async fn run_wot_pubsub_simulation(
         };
         if let Some((score, reason)) = initial {
             initial_ratings.push(RatingCandidate::new(WotRatingRecord::new(
-                LOCAL_RATER,
+                local_rater_npub(),
                 &peer.id,
                 &scope,
                 score,
@@ -455,7 +491,7 @@ pub async fn run_wot_pubsub_simulation(
                         report.newcomer_positive_ratings =
                             report.newcomer_positive_ratings.saturating_add(1);
                         pending_ratings.push(RatingCandidate::new(WotRatingRecord::new(
-                            LOCAL_RATER,
+                            local_rater_npub(),
                             &peer.id,
                             &scope,
                             75,
@@ -479,7 +515,7 @@ pub async fn run_wot_pubsub_simulation(
                         report.degraded_penalty_ratings =
                             report.degraded_penalty_ratings.saturating_add(1);
                         pending_ratings.push(RatingCandidate::new(WotRatingRecord::new(
-                            LOCAL_RATER,
+                            local_rater_npub(),
                             &peer.id,
                             &scope,
                             0,
@@ -599,7 +635,7 @@ async fn ingest_rating_candidates(
     let mut trusted = Vec::new();
     let mut untrusted = Vec::new();
     for candidate in candidates {
-        if trusted_rating_authors.contains(candidate.rating.signer.trim()) {
+        if trusted_rating_authors.contains(candidate.rating.signer()) {
             trusted.push(candidate);
         } else {
             untrusted.push(candidate);
@@ -612,7 +648,7 @@ async fn ingest_rating_candidates(
 
     for (index, candidate) in trusted.into_iter().chain(untrusted).enumerate() {
         if index >= capacity {
-            if trusted_rating_authors.contains(candidate.rating.signer.trim()) {
+            if trusted_rating_authors.contains(candidate.rating.signer()) {
                 report.trusted_rating_events_deferred =
                     report.trusted_rating_events_deferred.saturating_add(1);
             } else {
@@ -622,7 +658,7 @@ async fn ingest_rating_candidates(
             continue;
         }
 
-        if trusted_rating_authors.contains(candidate.rating.signer.trim()) {
+        if trusted_rating_authors.contains(candidate.rating.signer()) {
             publish_rating(history, scores, report, candidate.rating).await?;
             report.trusted_rating_events_accepted =
                 report.trusted_rating_events_accepted.saturating_add(1);
@@ -640,7 +676,7 @@ fn trusted_rating_authors(config: &WotPubsubSimConfig) -> BTreeSet<String> {
         .iter()
         .map(|author| author.trim())
         .filter(|author| !author.is_empty())
-        .map(ToOwned::to_owned)
+        .map(|author| author.to_lowercase())
         .collect()
 }
 
@@ -652,17 +688,17 @@ fn append_spam_rating_candidates(
     rating_time: &mut u64,
 ) {
     for index in 0..count {
-        let subject = format!("peer:spam-subject:{phase}:{index:04}");
-        let mut rating = WotRatingRecord::new(
-            format!("peer:spam-rater:{phase}:{index:04}"),
+        let subject = node_npub(&format!("peer:spam-subject:{phase}:{index:04}"));
+        let rating = WotRatingRecord::new_with_signer(
+            format!("peer:spam-signer:{phase}:{index:04}"),
+            node_npub(&format!("peer:spam-rater:{phase}:{index:04}")),
             subject,
             scope,
             100,
             take_rating_time(rating_time),
             "untrusted rating spam",
+            ["machine", "peer", "spam"],
         );
-        rating.tags.push("spam".to_string());
-        let rating = rating.signed_by(format!("peer:spam-signer:{phase}:{index:04}"));
         candidates.push(RatingCandidate::new(rating));
     }
 }
@@ -680,7 +716,10 @@ async fn publish_rating(
     rating: WotRatingRecord,
 ) -> Result<(), NostrEventStoreError> {
     let score = rating.normalized_score()?;
-    scores.insert(rating.subject.clone(), score);
+    let subject = rating.subject().ok_or_else(|| {
+        NostrEventStoreError::Validation("rating event is missing subject tag".to_string())
+    })?;
+    scores.insert(subject, score);
     history.publish_rating(&rating).await?;
     report.rating_events_published = report.rating_events_published.saturating_add(1);
     Ok(())
@@ -690,24 +729,24 @@ fn build_peers(config: &WotPubsubSimConfig) -> Vec<SimPeer> {
     let mut peers = Vec::new();
     for index in 0..config.good_peer_count {
         peers.push(SimPeer {
-            id: format!("peer:good:{index:04}"),
+            id: node_npub(&format!("peer:good:{index:04}")),
             role: PeerRole::Good,
         });
     }
     for index in 0..config.bad_peer_count {
         peers.push(SimPeer {
-            id: format!("peer:bad:{index:04}"),
+            id: node_npub(&format!("peer:bad:{index:04}")),
             role: PeerRole::Bad,
         });
     }
     for index in 0..config.newcomer_count {
         peers.push(SimPeer {
-            id: format!("peer:new:{index:04}"),
+            id: node_npub(&format!("peer:new:{index:04}")),
             role: PeerRole::Newcomer,
         });
     }
     peers.push(SimPeer {
-        id: "peer:degrading:0000".to_string(),
+        id: node_npub("peer:degrading:0000"),
         role: PeerRole::Degrading,
     });
     peers
@@ -784,13 +823,7 @@ fn index_root_event(
     if let Some(key) = root.key {
         tags.push(vec![TAG_KEY.to_string(), to_hex(&key)]);
     }
-    stored_event(
-        pubkey_for_node(LOCAL_RATER),
-        created_at.max(1),
-        HASHTREE_ROOT_KIND,
-        tags,
-        "",
-    )
+    signed_stored_event(LOCAL_RATER, created_at.max(1), HASHTREE_ROOT_KIND, tags, "")
 }
 
 fn scope_filter(kind: u32, scope: &str) -> Filter {
@@ -800,39 +833,111 @@ fn scope_filter(kind: u32, scope: &str) -> Filter {
     )
 }
 
-fn stored_event(
-    pubkey: String,
+fn signed_rating_event(
+    signer: &str,
+    rater: &str,
+    subject: &str,
+    scope: &str,
+    rating: i64,
+    created_at: u64,
+    reason: String,
+    rating_tags: &[&str],
+) -> Result<StoredNostrEvent, NostrEventStoreError> {
+    let created_at = created_at.max(1);
+    let id = format!("rating:{scope}:{subject}:{created_at}");
+    let mut tags = vec![
+        vec!["d".to_string(), id.clone()],
+        vec!["i".to_string(), id, "subject".to_string()],
+        vec!["i".to_string(), rater.to_lowercase()],
+        vec!["i".to_string(), subject.to_lowercase()],
+        vec!["i".to_string(), scope.to_lowercase()],
+        vec!["type".to_string(), "rating".to_string()],
+        vec!["schema".to_string(), "1".to_string()],
+        vec!["created_at".to_string(), created_at.to_string()],
+        vec!["rater".to_string(), rater.to_string()],
+        vec!["subject".to_string(), subject.to_string()],
+        vec!["scope".to_string(), scope.to_string()],
+        vec!["rating".to_string(), rating.to_string()],
+        vec!["min_rating".to_string(), "0".to_string()],
+        vec!["max_rating".to_string(), "100".to_string()],
+        vec!["sample_count".to_string(), "1".to_string()],
+        vec!["window_end".to_string(), created_at.to_string()],
+        vec!["reason".to_string(), reason],
+    ];
+    for tag in rating_tags {
+        tags.push(vec!["tag".to_string(), (*tag).to_string()]);
+        tags.push(vec!["i".to_string(), tag.to_lowercase()]);
+    }
+    signed_stored_event(signer, created_at, FACT_OP_KIND, tags, "")
+}
+
+fn signed_stored_event(
+    signer: &str,
     created_at: u64,
     kind: u32,
     tags: Vec<Vec<String>>,
     content: impl Into<String>,
 ) -> Result<StoredNostrEvent, NostrEventStoreError> {
     let content = content.into();
-    let id = nostr_event_id(&pubkey, created_at, kind, &tags, &content)?;
-    Ok(StoredNostrEvent {
-        id,
-        pubkey,
-        created_at,
-        kind,
-        tags,
-        content,
-        sig: "0".repeat(128),
-    })
+    let parsed_tags = tags
+        .into_iter()
+        .map(|tag| {
+            Tag::parse(tag).map_err(|error| {
+                NostrEventStoreError::Validation(format!("invalid Nostr tag: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let event = EventBuilder::new(Kind::from(kind as u16), content)
+        .tags(parsed_tags)
+        .custom_created_at(Timestamp::from(created_at.max(1)))
+        .sign_with_keys(&keys_for_node(signer))
+        .map_err(|error| {
+            NostrEventStoreError::Validation(format!("failed to sign Nostr event: {error}"))
+        })?;
+    stored_event_from_signed_event(event)
 }
 
-fn nostr_event_id(
-    pubkey: &str,
-    created_at: u64,
-    kind: u32,
-    tags: &[Vec<String>],
-    content: &str,
-) -> Result<String, NostrEventStoreError> {
-    let payload = serde_json::to_string(&(0_u8, pubkey, created_at, kind, tags, content))?;
-    Ok(to_hex(&sha256(payload.as_bytes())))
+fn stored_event_from_signed_event(event: Event) -> Result<StoredNostrEvent, NostrEventStoreError> {
+    event.verify().map_err(|error| {
+        NostrEventStoreError::Validation(format!("signature verification failed: {error}"))
+    })?;
+    let event: StoredNostrEvent = serde_json::from_value(serde_json::to_value(event)?)?;
+    VerifiedStoredNostrEvent::try_from(event).map(VerifiedStoredNostrEvent::into_stored)
 }
 
 fn pubkey_for_node(id: &str) -> String {
-    to_hex(&sha256(id.as_bytes()))
+    keys_for_node(id).public_key().to_hex()
+}
+
+fn node_npub(id: &str) -> String {
+    keys_for_node(id)
+        .public_key()
+        .to_bech32()
+        .expect("sim npub")
+}
+
+fn local_rater_npub() -> String {
+    node_npub(LOCAL_RATER)
+}
+
+fn keys_for_node(id: &str) -> Keys {
+    let secret = to_hex(&sha256(id.as_bytes()));
+    Keys::parse(&secret).expect("deterministic sim key parses")
+}
+
+fn tag_values(event: &StoredNostrEvent, key: &str) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            if tag.first().is_some_and(|tag_key| tag_key == key) {
+                tag.get(1).cloned()
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.trim().is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -908,10 +1013,13 @@ mod tests {
         let mut history = WotRatingHistory::new();
         let mut scores = HashMap::new();
         let mut report = WotPubsubSimReport::default();
-        let trusted_authors = BTreeSet::from([TRUSTED_RATING_SIGNER.to_string()]);
+        let trusted_authors = BTreeSet::from([pubkey_for_node(TRUSTED_RATING_SIGNER)]);
+        let external_rater = node_npub("peer:external-reviewer");
+        let trusted_subject = node_npub("peer:trusted-subject");
+        let spam_subject = node_npub("peer:spam-subject");
         let trusted = WotRatingRecord::new(
-            "peer:external-reviewer",
-            "peer:trusted-subject",
+            &external_rater,
+            &trusted_subject,
             "fips.peer",
             90,
             1,
@@ -919,8 +1027,8 @@ mod tests {
         )
         .signed_by(TRUSTED_RATING_SIGNER);
         let untrusted = WotRatingRecord::new(
-            TRUSTED_RATING_SIGNER,
-            "peer:spam-subject",
+            node_npub(TRUSTED_RATING_SIGNER),
+            &spam_subject,
             "fips.peer",
             100,
             2,
@@ -945,8 +1053,8 @@ mod tests {
         assert_eq!(report.trusted_rating_events_accepted, 1);
         assert_eq!(report.spam_rating_events_seen, 1);
         assert_eq!(report.spam_rating_events_dropped, 1);
-        assert_eq!(scores.get("peer:trusted-subject"), Some(&80));
-        assert!(!scores.contains_key("peer:spam-subject"));
+        assert_eq!(scores.get(&trusted_subject), Some(&80));
+        assert!(!scores.contains_key(&spam_subject));
 
         let events = history
             .query_with_nostr_filter(RatingHistoryLookupMode::RawEvents, "fips.peer")
@@ -954,7 +1062,7 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].pubkey, pubkey_for_node(TRUSTED_RATING_SIGNER));
-        assert!(has_tag(&events[0], &["rater", "peer:external-reviewer"]));
+        assert!(has_tag(&events[0], &["rater", &external_rater]));
     }
 
     #[tokio::test]
@@ -985,9 +1093,10 @@ mod tests {
     #[tokio::test]
     async fn wot_history_lookup_uses_scope_i_tag_filters() {
         let mut history = WotRatingHistory::new();
+        let subject = node_npub("peer:subject");
         let rating = WotRatingRecord::new(
-            LOCAL_RATER,
-            "peer:subject",
+            local_rater_npub(),
+            &subject,
             "fips.peer",
             80,
             10,
@@ -1002,7 +1111,7 @@ mod tests {
             .unwrap();
         assert_eq!(raw_events.len(), 1);
         assert_eq!(raw_events[0].pubkey, pubkey_for_node(TRUSTED_RATING_SIGNER));
-        assert!(has_tag(&raw_events[0], &["rater", LOCAL_RATER]));
+        assert!(has_tag(&raw_events[0], &["rater", &local_rater_npub()]));
         assert!(has_tag(&raw_events[0], &["i", "fips.peer"]));
         assert!(has_tag(&raw_events[0], &["type", "rating"]));
         assert!(has_tag(&raw_events[0], &["schema", "1"]));
