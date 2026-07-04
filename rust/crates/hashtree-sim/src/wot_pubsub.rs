@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 const FACT_OP_KIND: u32 = 7368;
 const LOCAL_RATER: &str = "peer:local";
+const TRUSTED_RATING_SIGNER: &str = "peer:trusted-crawler";
 const INDEX_LABEL: &str = "nostr-event-index";
 const HISTORY_QUERY_LIMIT: usize = 10_000;
 
@@ -37,6 +38,7 @@ pub enum RatingHistoryLookupMode {
 #[derive(Debug, Clone)]
 pub struct WotPubsubSimConfig {
     pub scope: String,
+    pub trusted_rating_authors: Vec<String>,
     pub good_peer_count: usize,
     pub bad_peer_count: usize,
     pub newcomer_count: usize,
@@ -55,7 +57,8 @@ pub struct WotPubsubSimConfig {
 impl Default for WotPubsubSimConfig {
     fn default() -> Self {
         Self {
-            scope: "peer".to_string(),
+            scope: "fips.peer".to_string(),
+            trusted_rating_authors: vec![TRUSTED_RATING_SIGNER.to_string()],
             good_peer_count: 4,
             bad_peer_count: 4,
             newcomer_count: 2,
@@ -77,6 +80,7 @@ impl Default for WotPubsubSimConfig {
 pub struct WotPubsubSimReport {
     pub scope: String,
     pub rounds: usize,
+    pub trusted_rating_author_count: u64,
     pub rating_events_published: u64,
     pub trusted_rating_events_accepted: u64,
     pub trusted_rating_events_deferred: u64,
@@ -106,6 +110,8 @@ pub struct WotPubsubSimReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WotRatingRecord {
     pub id: String,
+    #[serde(default = "default_rating_signer")]
+    pub signer: String,
     pub rater: String,
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +147,7 @@ impl WotRatingRecord {
         let created_at = created_at.max(1);
         Self {
             id: format!("rating:{subject}:{created_at}"),
+            signer: TRUSTED_RATING_SIGNER.to_string(),
             rater: rater.into(),
             subject,
             scope: Some(scope.into()),
@@ -155,6 +162,11 @@ impl WotRatingRecord {
             tags: vec!["machine".to_string(), "peer".to_string()],
             created_at,
         }
+    }
+
+    fn signed_by(mut self, signer: impl Into<String>) -> Self {
+        self.signer = signer.into();
+        self
     }
 
     fn normalized_score(&self) -> Result<i64, NostrEventStoreError> {
@@ -210,9 +222,13 @@ impl WotRatingRecord {
             tags.push(vec!["i".to_string(), tag.to_lowercase()]);
         }
 
-        let pubkey = pubkey_for_node(&self.rater);
+        let pubkey = pubkey_for_node(&self.signer);
         stored_event(pubkey, self.created_at, FACT_OP_KIND, tags, "")
     }
+}
+
+fn default_rating_signer() -> String {
+    TRUSTED_RATING_SIGNER.to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,31 +252,14 @@ impl SimPeer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RatingCandidateTrust {
-    Trusted,
-    Untrusted,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RatingCandidate {
-    trust: RatingCandidateTrust,
     rating: WotRatingRecord,
 }
 
 impl RatingCandidate {
-    fn trusted(rating: WotRatingRecord) -> Self {
-        Self {
-            trust: RatingCandidateTrust::Trusted,
-            rating,
-        }
-    }
-
-    fn untrusted(rating: WotRatingRecord) -> Self {
-        Self {
-            trust: RatingCandidateTrust::Untrusted,
-            rating,
-        }
+    fn new(rating: WotRatingRecord) -> Self {
+        Self { rating }
     }
 }
 
@@ -371,6 +370,7 @@ pub async fn run_wot_pubsub_simulation(
     let mut report = WotPubsubSimReport {
         scope: scope.clone(),
         rounds: config.rounds,
+        trusted_rating_author_count: trusted_rating_authors(&config).len() as u64,
         lookup_modes_exercised: vec![
             RatingHistoryLookupMode::RawEvents,
             RatingHistoryLookupMode::IndexRootEvents,
@@ -391,7 +391,7 @@ pub async fn run_wot_pubsub_simulation(
             PeerRole::Newcomer => None,
         };
         if let Some((score, reason)) = initial {
-            initial_ratings.push(RatingCandidate::trusted(WotRatingRecord::new(
+            initial_ratings.push(RatingCandidate::new(WotRatingRecord::new(
                 LOCAL_RATER,
                 &peer.id,
                 &scope,
@@ -408,12 +408,14 @@ pub async fn run_wot_pubsub_simulation(
         config.spam_rating_events_per_round,
         &mut rating_time,
     );
+    let trusted_rating_authors = trusted_rating_authors(&config);
     ingest_rating_candidates(
         &mut history,
         &mut scores,
         &mut report,
         initial_ratings,
         config.rating_ingest_capacity_per_round,
+        &trusted_rating_authors,
     )
     .await?;
 
@@ -452,7 +454,7 @@ pub async fn run_wot_pubsub_simulation(
                             report.newcomer_delivered_before_rating.saturating_add(1);
                         report.newcomer_positive_ratings =
                             report.newcomer_positive_ratings.saturating_add(1);
-                        pending_ratings.push(RatingCandidate::trusted(WotRatingRecord::new(
+                        pending_ratings.push(RatingCandidate::new(WotRatingRecord::new(
                             LOCAL_RATER,
                             &peer.id,
                             &scope,
@@ -476,7 +478,7 @@ pub async fn run_wot_pubsub_simulation(
                             .saturating_add(1);
                         report.degraded_penalty_ratings =
                             report.degraded_penalty_ratings.saturating_add(1);
-                        pending_ratings.push(RatingCandidate::trusted(WotRatingRecord::new(
+                        pending_ratings.push(RatingCandidate::new(WotRatingRecord::new(
                             LOCAL_RATER,
                             &peer.id,
                             &scope,
@@ -502,6 +504,7 @@ pub async fn run_wot_pubsub_simulation(
             &mut report,
             pending_ratings,
             config.rating_ingest_capacity_per_round,
+            &trusted_rating_authors,
         )
         .await?;
     }
@@ -591,13 +594,15 @@ async fn ingest_rating_candidates(
     report: &mut WotPubsubSimReport,
     candidates: Vec<RatingCandidate>,
     capacity: usize,
+    trusted_rating_authors: &BTreeSet<String>,
 ) -> Result<(), NostrEventStoreError> {
     let mut trusted = Vec::new();
     let mut untrusted = Vec::new();
     for candidate in candidates {
-        match candidate.trust {
-            RatingCandidateTrust::Trusted => trusted.push(candidate),
-            RatingCandidateTrust::Untrusted => untrusted.push(candidate),
+        if trusted_rating_authors.contains(candidate.rating.signer.trim()) {
+            trusted.push(candidate);
+        } else {
+            untrusted.push(candidate);
         }
     }
 
@@ -607,33 +612,36 @@ async fn ingest_rating_candidates(
 
     for (index, candidate) in trusted.into_iter().chain(untrusted).enumerate() {
         if index >= capacity {
-            match candidate.trust {
-                RatingCandidateTrust::Trusted => {
-                    report.trusted_rating_events_deferred =
-                        report.trusted_rating_events_deferred.saturating_add(1);
-                }
-                RatingCandidateTrust::Untrusted => {
-                    report.spam_rating_events_dropped =
-                        report.spam_rating_events_dropped.saturating_add(1);
-                }
+            if trusted_rating_authors.contains(candidate.rating.signer.trim()) {
+                report.trusted_rating_events_deferred =
+                    report.trusted_rating_events_deferred.saturating_add(1);
+            } else {
+                report.spam_rating_events_dropped =
+                    report.spam_rating_events_dropped.saturating_add(1);
             }
             continue;
         }
 
-        match candidate.trust {
-            RatingCandidateTrust::Trusted => {
-                publish_rating(history, scores, report, candidate.rating).await?;
-                report.trusted_rating_events_accepted =
-                    report.trusted_rating_events_accepted.saturating_add(1);
-            }
-            RatingCandidateTrust::Untrusted => {
-                report.spam_rating_events_dropped =
-                    report.spam_rating_events_dropped.saturating_add(1);
-            }
+        if trusted_rating_authors.contains(candidate.rating.signer.trim()) {
+            publish_rating(history, scores, report, candidate.rating).await?;
+            report.trusted_rating_events_accepted =
+                report.trusted_rating_events_accepted.saturating_add(1);
+        } else {
+            report.spam_rating_events_dropped = report.spam_rating_events_dropped.saturating_add(1);
         }
     }
 
     Ok(())
+}
+
+fn trusted_rating_authors(config: &WotPubsubSimConfig) -> BTreeSet<String> {
+    config
+        .trusted_rating_authors
+        .iter()
+        .map(|author| author.trim())
+        .filter(|author| !author.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn append_spam_rating_candidates(
@@ -654,7 +662,8 @@ fn append_spam_rating_candidates(
             "untrusted rating spam",
         );
         rating.tags.push("spam".to_string());
-        candidates.push(RatingCandidate::untrusted(rating));
+        let rating = rating.signed_by(format!("peer:spam-signer:{phase}:{index:04}"));
+        candidates.push(RatingCandidate::new(rating));
     }
 }
 
@@ -836,6 +845,8 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(report.scope, "fips.peer");
+        assert_eq!(report.trusted_rating_author_count, 1);
         assert!(report.good_delivered > report.bad_delivered);
         assert_eq!(report.bad_delivered, 0);
         assert!(report.bad_events_limited > 0);
@@ -893,6 +904,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wot_rating_ingest_trusts_event_signers_not_rater_facts() {
+        let mut history = WotRatingHistory::new();
+        let mut scores = HashMap::new();
+        let mut report = WotPubsubSimReport::default();
+        let trusted_authors = BTreeSet::from([TRUSTED_RATING_SIGNER.to_string()]);
+        let trusted = WotRatingRecord::new(
+            "peer:external-reviewer",
+            "peer:trusted-subject",
+            "fips.peer",
+            90,
+            1,
+            "trusted crawler fact",
+        )
+        .signed_by(TRUSTED_RATING_SIGNER);
+        let untrusted = WotRatingRecord::new(
+            TRUSTED_RATING_SIGNER,
+            "peer:spam-subject",
+            "fips.peer",
+            100,
+            2,
+            "untrusted crawler fact",
+        )
+        .signed_by("peer:untrusted-crawler");
+
+        ingest_rating_candidates(
+            &mut history,
+            &mut scores,
+            &mut report,
+            vec![
+                RatingCandidate::new(untrusted),
+                RatingCandidate::new(trusted),
+            ],
+            8,
+            &trusted_authors,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.trusted_rating_events_accepted, 1);
+        assert_eq!(report.spam_rating_events_seen, 1);
+        assert_eq!(report.spam_rating_events_dropped, 1);
+        assert_eq!(scores.get("peer:trusted-subject"), Some(&80));
+        assert!(!scores.contains_key("peer:spam-subject"));
+
+        let events = history
+            .query_with_nostr_filter(RatingHistoryLookupMode::RawEvents, "fips.peer")
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].pubkey, pubkey_for_node(TRUSTED_RATING_SIGNER));
+        assert!(has_tag(&events[0], &["rater", "peer:external-reviewer"]));
+    }
+
+    #[tokio::test]
     async fn wot_history_lookup_supports_raw_events_and_index_root_events() {
         let report = run_wot_pubsub_simulation(WotPubsubSimConfig::default())
             .await
@@ -936,6 +1001,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw_events.len(), 1);
+        assert_eq!(raw_events[0].pubkey, pubkey_for_node(TRUSTED_RATING_SIGNER));
+        assert!(has_tag(&raw_events[0], &["rater", LOCAL_RATER]));
         assert!(has_tag(&raw_events[0], &["i", "fips.peer"]));
         assert!(has_tag(&raw_events[0], &["type", "rating"]));
         assert!(has_tag(&raw_events[0], &["schema", "1"]));
