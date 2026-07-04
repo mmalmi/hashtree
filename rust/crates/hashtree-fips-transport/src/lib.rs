@@ -342,7 +342,7 @@ impl FipsEndpointIo for fips_core::FipsEndpoint {
             }
             return Some(FipsEndpointPacket {
                 peer_id,
-                data: message.data,
+                data: message.data.into(),
             });
         }
     }

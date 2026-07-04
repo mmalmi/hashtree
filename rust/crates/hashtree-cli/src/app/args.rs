@@ -51,6 +51,7 @@ Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
   mirror       Manage mirrored authors
+  nostr-index  Query local Nostr event indexes
   follow       Follow a user (adds to your contact list)
   unfollow     Unfollow a user (removes from your contact list)
   following    List users you follow
@@ -106,6 +107,7 @@ Identity & Social Commands:
   user         Show or set your nostr identity
   profile      Show or update your Nostr profile
   mirror       Manage mirrored authors
+  nostr-index  Query local Nostr event indexes
   follow       Follow a user (adds to your contact list)
   unfollow     Unfollow a user (removes from your contact list)
   following    List users you follow
@@ -464,6 +466,12 @@ pub(crate) enum Commands {
     Mirror {
         #[command(subcommand)]
         command: MirrorCommands,
+    },
+
+    /// Query local hashtree-backed Nostr event indexes
+    NostrIndex {
+        #[command(subcommand)]
+        command: NostrIndexCommands,
     },
 
     /// Follow a user (adds to your contact list)
@@ -845,6 +853,36 @@ pub(crate) enum SocialGraphCommands {
         /// Relay URLs to use for this index run (repeatable, overrides config relays)
         #[arg(long = "relay")]
         relays: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum NostrIndexCommands {
+    /// Query stored events with normal Nostr filter JSON
+    Query {
+        /// Stored event index root (nhash or raw CID; defaults to latest local index root)
+        #[arg(long)]
+        root: Option<String>,
+        /// Nostr filter JSON object, filter array, or REQ envelope
+        #[arg(
+            long,
+            required_unless_present = "filter_file",
+            conflicts_with = "filter_file"
+        )]
+        filter: Option<String>,
+        /// Path to a Nostr filter JSON file
+        #[arg(
+            long = "filter-file",
+            required_unless_present = "filter",
+            conflicts_with = "filter"
+        )]
+        filter_file: Option<PathBuf>,
+        /// Maximum events to return after merging all matching filters
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Output path (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
     },
 }
 

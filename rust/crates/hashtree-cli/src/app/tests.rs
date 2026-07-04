@@ -34,7 +34,8 @@ use super::storage_stats::{
 };
 use super::util::format_bytes;
 use crate::app::args::{
-    CashuCommands, CashuMintCommands, MirrorCommands, ReleaseCommands, SocialGraphCommands,
+    CashuCommands, CashuMintCommands, MirrorCommands, NostrIndexCommands, ReleaseCommands,
+    SocialGraphCommands,
 };
 use crate::app::args::{Cli, Commands};
 #[cfg(feature = "fuse")]
@@ -101,6 +102,39 @@ fn test_build_daemon_args_with_overrides() {
 fn test_build_daemon_args_minimal() {
     let args = args_to_strings(build_daemon_args(None, None, None, None));
     assert!(args.is_empty());
+}
+
+#[test]
+fn test_nostr_index_query_args() {
+    let cli = Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "query",
+        "--filter",
+        r##"{"kinds":[7368],"#i":["fips.peer"]}"##,
+        "--limit",
+        "25",
+    ])
+    .unwrap();
+
+    let Commands::NostrIndex { command } = cli.command else {
+        panic!("expected nostr-index command");
+    };
+    let NostrIndexCommands::Query {
+        root,
+        filter,
+        filter_file,
+        limit,
+        out,
+    } = command;
+    assert!(root.is_none());
+    assert_eq!(
+        filter.as_deref(),
+        Some(r##"{"kinds":[7368],"#i":["fips.peer"]}"##)
+    );
+    assert!(filter_file.is_none());
+    assert_eq!(limit, 25);
+    assert!(out.is_none());
 }
 
 #[test]

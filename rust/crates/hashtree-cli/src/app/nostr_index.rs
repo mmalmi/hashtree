@@ -10,6 +10,7 @@ use hashtree_nostr::{
     StoredNostrEvent,
 };
 use nostr::{Event, JsonUtil, Keys};
+use nostr_sdk::Filter as NostrFilter;
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use tokio::sync::watch;
@@ -113,6 +114,72 @@ struct IndexedNostrCheckpointReport {
     max_live_bytes: u64,
     negentropy_only: bool,
     relays: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NostrIndexQueryOptions {
+    pub(crate) root: Option<String>,
+    pub(crate) filter_json: String,
+    pub(crate) limit: usize,
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct NostrIndexQueryOutput {
+    pub(crate) root: String,
+    pub(crate) count: usize,
+    pub(crate) events: Vec<StoredNostrEvent>,
+}
+
+pub(crate) async fn run_nostr_index_query(
+    data_dir: PathBuf,
+    options: NostrIndexQueryOptions,
+) -> Result<NostrIndexQueryOutput> {
+    let root = if let Some(root) = options.root.as_deref() {
+        parse_root_text(root).context("parse --root")?
+    } else {
+        load_existing_root(&data_dir)?
+            .context("missing Nostr index root; pass --root or run socialgraph index first")?
+    };
+    let filters = parse_nostr_filters_json(&options.filter_json)?;
+
+    let config = Config::load()?;
+    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+    let store = Arc::new(HashtreeStore::with_options(
+        &data_dir,
+        config.storage.s3.as_ref(),
+        max_size_bytes,
+    )?);
+    let event_store = NostrEventStore::new(store.store_arc());
+
+    let mut seen = HashSet::new();
+    let mut events = Vec::new();
+    for filter in &filters {
+        for event in event_store
+            .query_events(Some(&root), filter, options.limit)
+            .await
+            .context("query stored Nostr events")?
+        {
+            if seen.insert(event.id.clone()) {
+                events.push(event);
+            }
+        }
+    }
+    events.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    events.truncate(options.limit);
+
+    let output = NostrIndexQueryOutput {
+        root: cid_to_nhash(&root)?,
+        count: events.len(),
+        events,
+    };
+    write_nostr_index_query_output(&output, options.out.as_deref())?;
+    Ok(output)
 }
 
 pub(crate) async fn run_socialgraph_index_from_cli(
@@ -468,6 +535,52 @@ fn parse_author_allowlist(body: &str, max_authors: usize) -> Vec<String> {
     authors
 }
 
+fn parse_nostr_filters_json(input: &str) -> Result<Vec<NostrFilter>> {
+    let value: serde_json::Value =
+        serde_json::from_str(input).context("parse Nostr filter JSON")?;
+    let filters = match value {
+        serde_json::Value::Array(items) if is_req_envelope(&items) => items
+            .into_iter()
+            .skip(2)
+            .map(parse_nostr_filter_value)
+            .collect::<Result<Vec<_>>>()?,
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(parse_nostr_filter_value)
+            .collect::<Result<Vec<_>>>()?,
+        value => vec![parse_nostr_filter_value(value)?],
+    };
+    if filters.is_empty() {
+        anyhow::bail!("Nostr filter JSON did not contain any filters");
+    }
+    Ok(filters)
+}
+
+fn is_req_envelope(items: &[serde_json::Value]) -> bool {
+    items.len() >= 3 && items.first().and_then(|item| item.as_str()) == Some("REQ")
+}
+
+fn parse_nostr_filter_value(value: serde_json::Value) -> Result<NostrFilter> {
+    serde_json::from_value(value).context("decode Nostr filter")
+}
+
+fn write_nostr_index_query_output(
+    output: &NostrIndexQueryOutput,
+    out: Option<&Path>,
+) -> Result<()> {
+    let json = serde_json::to_string_pretty(output).context("encode Nostr query output")?;
+    match out {
+        Some(path) if path != Path::new("-") => {
+            std::fs::write(path, format!("{json}\n"))
+                .with_context(|| format!("write Nostr query output to {}", path.display()))?;
+        }
+        _ => {
+            println!("{json}");
+        }
+    }
+    Ok(())
+}
+
 fn hashtags(event: &StoredNostrEvent) -> Vec<String> {
     let mut out = Vec::new();
     for tag in event.tags.iter() {
@@ -748,6 +861,33 @@ mod tests {
         ($kind:expr, $content:expr, $tags:expr $(,)?) => {
             EventBuilder::new($kind, $content).tags($tags)
         };
+    }
+
+    #[test]
+    fn parse_nostr_filters_json_accepts_scope_tag_filter() {
+        let filters =
+            parse_nostr_filters_json(r##"{"kinds":[7368],"#i":["fips.peer"],"limit":10}"##)
+                .expect("parse filter");
+
+        assert_eq!(filters.len(), 1);
+        let json = serde_json::to_value(&filters[0]).expect("serialize filter");
+        assert_eq!(json["kinds"], serde_json::json!([7368]));
+        assert_eq!(json["#i"], serde_json::json!(["fips.peer"]));
+        assert_eq!(json["limit"], serde_json::json!(10));
+    }
+
+    #[test]
+    fn parse_nostr_filters_json_accepts_req_envelope() {
+        let filters = parse_nostr_filters_json(
+            r##"["REQ","ratings",{"kinds":[7368],"#i":["fips.peer"]},{"kinds":[1]}]"##,
+        )
+        .expect("parse req envelope");
+
+        assert_eq!(filters.len(), 2);
+        let first = serde_json::to_value(&filters[0]).expect("serialize first filter");
+        let second = serde_json::to_value(&filters[1]).expect("serialize second filter");
+        assert_eq!(first["#i"], serde_json::json!(["fips.peer"]));
+        assert_eq!(second["kinds"], serde_json::json!([1]));
     }
 
     struct TestRelay {

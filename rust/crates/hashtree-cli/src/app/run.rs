@@ -21,8 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::add::run_add;
 use super::args::{
-    Cli, Commands, MirrorCommands, PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands,
-    StorageCommands,
+    Cli, Commands, MirrorCommands, NostrIndexCommands, PrCommands, PwaCommands, ReleaseCommands,
+    SocialGraphCommands, StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -37,7 +37,10 @@ use super::mount_target::{
     prepare_explicit_mountpoint, reject_local_mount_target, ExplicitMountpointDisposition,
 };
 use super::mounts::print_active_mounts;
-use super::nostr_index::{run_socialgraph_index_from_cli, SocialGraphIndexOptions};
+use super::nostr_index::{
+    run_nostr_index_query, run_socialgraph_index_from_cli, NostrIndexQueryOptions,
+    SocialGraphIndexOptions,
+};
 use super::peers::list_peers;
 use super::pwa::run_export;
 use super::release::publish_release_version;
@@ -1156,6 +1159,36 @@ pub(crate) async fn run() -> Result<()> {
                         println!("  {}", npub);
                     }
                 }
+            }
+        },
+        Commands::NostrIndex { command } => match command {
+            NostrIndexCommands::Query {
+                root,
+                filter,
+                filter_file,
+                limit,
+                out,
+            } => {
+                let filter_json = match (filter, filter_file) {
+                    (Some(filter), None) => filter,
+                    (None, Some(path)) => std::fs::read_to_string(&path).with_context(|| {
+                        format!("read Nostr filter JSON from {}", path.display())
+                    })?,
+                    (Some(_), Some(_)) => {
+                        bail!("--filter and --filter-file cannot be used together")
+                    }
+                    (None, None) => bail!("missing --filter or --filter-file"),
+                };
+                run_nostr_index_query(
+                    data_dir,
+                    NostrIndexQueryOptions {
+                        root,
+                        filter_json,
+                        limit,
+                        out,
+                    },
+                )
+                .await?;
             }
         },
         Commands::Info { cid: cid_input } => {
