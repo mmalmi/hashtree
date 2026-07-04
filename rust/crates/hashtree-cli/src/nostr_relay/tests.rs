@@ -240,6 +240,98 @@ async fn relay_req_serves_events_from_historical_nostr_index() -> Result<()> {
 }
 
 #[tokio::test]
+async fn trusted_ingest_appends_rating_fact_to_historical_nostr_index() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let ingest_graph_dir = tmp.path().join("ingest-graph");
+    let replay_graph_dir = tmp.path().join("replay-graph");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir)?;
+    let ingest_graph = {
+        let _guard = crate::socialgraph::test_lock();
+        crate::socialgraph::open_test_social_graph_store_with_mapsize(
+            &ingest_graph_dir,
+            Some(128 * 1024 * 1024),
+        )?
+    };
+    let ingest_backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = ingest_graph.clone();
+    let store = Arc::new(crate::storage::HashtreeStore::with_options(
+        &data_dir,
+        None,
+        128 * 1024 * 1024,
+    )?);
+    let keys = Keys::generate();
+    let subject = Keys::generate().public_key().to_hex();
+    let event = rating_fact_event(&keys, &subject, "fips.peer", 44)?;
+    let relay = NostrRelay::new(
+        Arc::clone(&ingest_backend),
+        data_dir.clone(),
+        HashSet::from([keys.public_key().to_hex()]),
+        None,
+        NostrRelayConfig {
+            spambox_db_max_bytes: 0,
+            ..Default::default()
+        },
+    )?
+    .with_historical_nostr_index(store.store_arc(), data_dir.clone());
+
+    relay.ingest_trusted_event_silent(event.clone()).await?;
+
+    assert!(data_dir.join("nostr-index/latest-root.txt").exists());
+
+    let replay_graph = {
+        let _guard = crate::socialgraph::test_lock();
+        crate::socialgraph::open_test_social_graph_store_with_mapsize(
+            &replay_graph_dir,
+            Some(128 * 1024 * 1024),
+        )?
+    };
+    let replay_backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = replay_graph.clone();
+    let replay = NostrRelay::new(
+        replay_backend,
+        data_dir.clone(),
+        HashSet::new(),
+        None,
+        NostrRelayConfig {
+            spambox_db_max_bytes: 0,
+            ..Default::default()
+        },
+    )?
+    .with_historical_nostr_index(store.store_arc(), data_dir);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    replay.register_client(1, tx, None).await;
+
+    let sub_id = SubscriptionId::new("relayless-ratings");
+    let filter = Filter::new()
+        .kind(Kind::Custom(7368))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::I), "fips.peer")
+        .limit(10);
+    replay
+        .handle_client_message(1, NostrClientMessage::req(sub_id.clone(), vec![filter]))
+        .await;
+
+    match recv_relay_message(&mut rx).await? {
+        RelayMessage::Event {
+            subscription_id,
+            event: replayed,
+        } => {
+            assert_eq!(subscription_id.as_ref(), &sub_id);
+            assert_eq!(replayed.id, event.id);
+            assert!(event_has_tag(&replayed, &["scope", "fips.peer"]));
+            assert!(event_has_tag(&replayed, &["created_at", "44"]));
+        }
+        other => anyhow::bail!("expected historical EVENT, got {:?}", other),
+    }
+    match recv_relay_message(&mut rx).await? {
+        RelayMessage::EndOfStoredEvents(subscription_id) => {
+            assert_eq!(subscription_id.as_ref(), &sub_id);
+        }
+        other => anyhow::bail!("expected EOSE, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn relay_does_not_persist_ephemeral_events() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {

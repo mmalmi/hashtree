@@ -65,9 +65,9 @@ mod imp {
     };
     use crate::socialgraph::{EventStorageClass, SocialGraphAccessControl, SocialGraphBackend};
     use crate::storage::StorageRouter;
-    use hashtree_core::{nhash_decode, Cid};
+    use hashtree_core::{nhash_decode, nhash_encode_full, Cid, NHashData};
     use hashtree_nostr::{
-        is_parameterized_replaceable_kind, is_replaceable_kind, NostrEventStore,
+        is_parameterized_replaceable_kind, is_replaceable_kind, NostrEventStore, VerifiedEvent,
         VerifiedStoredNostrEvent,
     };
     use tracing::{info, warn};
@@ -216,6 +216,35 @@ mod imp {
             }
         }
 
+        async fn ingest(&self, event: Event) -> Result<()> {
+            let root = self.load_existing_root().await?;
+            let store = Arc::clone(&self.store);
+            let Ok(_permit) = self.blocking_permits.clone().acquire_owned().await else {
+                anyhow::bail!("historical nostr index ingest skipped: blocking semaphore closed");
+            };
+            let next_root = tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(async move {
+                    let event_store = NostrEventStore::new(store);
+                    let stored = VerifiedEvent::try_from(event)?
+                        .to_stored_event()
+                        .into_stored();
+                    event_store
+                        .build(root.as_ref(), vec![stored])
+                        .await?
+                        .or(root)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("historical nostr index ingest did not produce a root")
+                        })
+                })
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("historical nostr index ingest task failed: {err}"))??;
+            self.persist_latest_root(&next_root).await
+        }
+
         async fn query(&self, filter: &NostrFilter, limit: usize) -> Vec<Event> {
             if limit == 0 {
                 return Vec::new();
@@ -296,6 +325,14 @@ mod imp {
             }
             load_nostr_index_root_file(&self.checkpoint_root_path).await
         }
+
+        async fn persist_latest_root(&self, root: &Cid) -> Result<()> {
+            if let Some(parent) = self.latest_root_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(&self.latest_root_path, format!("{}\n", cid_to_nhash(root)?)).await?;
+            Ok(())
+        }
     }
 
     async fn load_nostr_index_root_file(path: &Path) -> Result<Option<Cid>> {
@@ -320,6 +357,14 @@ mod imp {
             });
         }
         Cid::parse(value).map_err(Into::into)
+    }
+
+    fn cid_to_nhash(cid: &Cid) -> Result<String> {
+        nhash_encode_full(&NHashData {
+            hash: cid.hash,
+            decrypt_key: cid.key,
+        })
+        .map_err(Into::into)
     }
 
     #[derive(Debug, Clone)]
@@ -791,6 +836,11 @@ mod imp {
                 self.trusted
                     .ingest_with_storage_class(event.clone(), storage_class)
                     .await?;
+                if let Some(index) = &self.historical_index {
+                    if let Err(err) = index.ingest(event.clone()).await {
+                        warn!("historical nostr index ingest failed: {}", err);
+                    }
+                }
             }
 
             if broadcast {
