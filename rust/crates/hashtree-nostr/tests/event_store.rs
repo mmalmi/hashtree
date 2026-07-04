@@ -75,18 +75,33 @@ fn signed_rating_fact_event(
 ) -> Event {
     let scope_index = scope.to_lowercase();
     let rating = rating.to_string();
+    let created_at_tag = created_at.to_string();
+    let rater = keys.public_key().to_hex();
     EventBuilder::new(Kind::from(7368_u16), "")
         .tags(vec![
             Tag::parse(["i", scope_index.as_str()]).expect("scope index tag"),
             Tag::parse(["i", subject]).expect("subject index tag"),
             Tag::parse(["type", "rating"]).expect("type fact tag"),
+            Tag::parse(["schema", "1"]).expect("schema fact tag"),
+            Tag::parse(["created_at", created_at_tag.as_str()]).expect("created at fact tag"),
+            Tag::parse(["rater", rater.as_str()]).expect("rater fact tag"),
             Tag::parse(["subject", subject]).expect("subject fact tag"),
             Tag::parse(["scope", scope]).expect("scope fact tag"),
             Tag::parse(["rating", rating.as_str()]).expect("rating fact tag"),
+            Tag::parse(["min_rating", "0"]).expect("min rating fact tag"),
+            Tag::parse(["max_rating", "100"]).expect("max rating fact tag"),
         ])
         .custom_created_at(Timestamp::from(created_at))
         .sign_with_keys(keys)
         .expect("sign rating fact event")
+}
+
+fn stored_event_has_tag(event: &StoredNostrEvent, parts: &[&str]) -> bool {
+    let expected = parts
+        .iter()
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>();
+    event.tags.iter().any(|tag| tag == &expected)
 }
 
 async fn by_id_event_cid(store: Arc<MemoryStore>, root: &Cid, event_id: &str) -> Option<Cid> {
@@ -354,6 +369,12 @@ fn query_events_answers_normal_filters_from_rating_fact_indexes() {
             events.iter().map(|event| &event.id).collect::<Vec<_>>(),
             vec![&newer_rating.id.to_hex(), &older_rating.id.to_hex()]
         );
+        assert!(stored_event_has_tag(&events[0], &["schema", "1"]));
+        assert!(stored_event_has_tag(&events[0], &["created_at", "40"]));
+        assert!(stored_event_has_tag(
+            &events[0],
+            &["rater", &rater.public_key().to_hex()]
+        ));
 
         let limited = store
             .query_events(Some(&root), &filter.clone().limit(1), 100)

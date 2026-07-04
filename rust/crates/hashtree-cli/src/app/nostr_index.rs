@@ -1052,6 +1052,18 @@ mod tests {
 
         assert_eq!(query_output.count, 1);
         assert_eq!(query_output.events[0].id, event.id.to_hex());
+        assert!(stored_event_has_tag(
+            &query_output.events[0],
+            &["schema", "1"]
+        ));
+        assert!(stored_event_has_tag(
+            &query_output.events[0],
+            &["created_at", "70"]
+        ));
+        assert!(stored_event_has_tag(
+            &query_output.events[0],
+            &["rater", &rater.public_key().to_hex()]
+        ));
     }
 
     fn signed_rating_fact_event(
@@ -1063,11 +1075,16 @@ mod tests {
     ) -> Event {
         let scope_index = scope.to_lowercase();
         let rating = rating.to_string();
+        let created_at_tag = created_at.to_string();
+        let rater = keys.public_key().to_hex();
         EventBuilder::new(Kind::from(7368_u16), "")
             .tags(vec![
                 Tag::parse(["i", scope_index.as_str()]).expect("scope index tag"),
                 Tag::parse(["i", subject]).expect("subject index tag"),
                 Tag::parse(["type", "rating"]).expect("type fact tag"),
+                Tag::parse(["schema", "1"]).expect("schema fact tag"),
+                Tag::parse(["created_at", created_at_tag.as_str()]).expect("created at fact tag"),
+                Tag::parse(["rater", rater.as_str()]).expect("rater fact tag"),
                 Tag::parse(["subject", subject]).expect("subject fact tag"),
                 Tag::parse(["scope", scope]).expect("scope fact tag"),
                 Tag::parse(["rating", rating.as_str()]).expect("rating fact tag"),
@@ -1077,6 +1094,14 @@ mod tests {
             .custom_created_at(Timestamp::from(created_at))
             .sign_with_keys(keys)
             .expect("sign rating fact event")
+    }
+
+    fn stored_event_has_tag(event: &StoredNostrEvent, parts: &[&str]) -> bool {
+        let expected = parts
+            .iter()
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>();
+        event.tags.iter().any(|tag| tag == &expected)
     }
 
     struct TestRelay {

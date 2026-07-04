@@ -26,14 +26,18 @@ async fn recv_relay_message(rx: &mut mpsc::UnboundedReceiver<String>) -> Result<
 }
 
 fn rating_fact_event(keys: &Keys, subject: &str, scope: &str, created_at: u64) -> Result<Event> {
+    let created_at_tag = created_at.to_string();
+    let rater = keys.public_key().to_hex();
+    let scope_index = scope.to_lowercase();
     Ok(event_builder!(
         Kind::Custom(7368),
         "",
         [
-            Tag::parse(["i", scope])?,
+            Tag::parse(["i", scope_index.as_str()])?,
             Tag::parse(["type", "rating"])?,
-            Tag::parse(["schema", "nostr-social-graph/rating@1"])?,
-            Tag::parse(["rater", keys.public_key().to_hex().as_str()])?,
+            Tag::parse(["schema", "1"])?,
+            Tag::parse(["created_at", created_at_tag.as_str()])?,
+            Tag::parse(["rater", rater.as_str()])?,
             Tag::parse(["subject", subject])?,
             Tag::parse(["rating", "90"])?,
             Tag::parse(["min_rating", "0"])?,
@@ -43,6 +47,17 @@ fn rating_fact_event(keys: &Keys, subject: &str, scope: &str, created_at: u64) -
     )
     .custom_created_at(Timestamp::from_secs(created_at))
     .sign_with_keys(keys)?)
+}
+
+fn event_has_tag(event: &Event, parts: &[&str]) -> bool {
+    let expected = parts
+        .iter()
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>();
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.clone().to_vec() == expected)
 }
 
 #[tokio::test]
@@ -205,6 +220,12 @@ async fn relay_req_serves_events_from_historical_nostr_index() -> Result<()> {
         } => {
             assert_eq!(subscription_id.as_ref(), &sub_id);
             assert_eq!(event.id, wanted.id);
+            assert!(event_has_tag(&event, &["schema", "1"]));
+            assert!(event_has_tag(&event, &["created_at", "20"]));
+            assert!(event_has_tag(
+                &event,
+                &["rater", &rater.public_key().to_hex()]
+            ));
         }
         other => anyhow::bail!("expected historical EVENT, got {:?}", other),
     }
