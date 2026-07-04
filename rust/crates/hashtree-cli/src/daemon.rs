@@ -740,6 +740,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
                 Some(social_graph.clone()),
                 nostr_relay_config,
             )
+            .map(|relay| {
+                relay.with_historical_nostr_index(store.store_arc(), opts.data_dir.clone())
+            })
             .context("Failed to initialize Nostr relay")?,
         ))
     } else {

@@ -1,6 +1,10 @@
 use super::*;
 use anyhow::Result;
-use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind, RelayMessage, SubscriptionId};
+use hashtree_nostr::{stored_event_from_nostr_sdk_event, NostrEventStore};
+use nostr::{
+    Alphabet, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayMessage, SingleLetterTag,
+    SubscriptionId, Tag, Timestamp,
+};
 use std::collections::HashSet;
 use tempfile::TempDir;
 use tokio::time::{timeout, Duration};
@@ -19,6 +23,26 @@ async fn recv_relay_message(rx: &mut mpsc::UnboundedReceiver<String>) -> Result<
         .await?
         .ok_or_else(|| anyhow::anyhow!("channel closed"))?;
     Ok(RelayMessage::from_json(msg)?)
+}
+
+fn rating_fact_event(keys: &Keys, subject: &str, scope: &str, created_at: u64) -> Result<Event> {
+    Ok(event_builder!(
+        Kind::Custom(7368),
+        "",
+        [
+            Tag::parse(["i", scope])?,
+            Tag::parse(["type", "rating"])?,
+            Tag::parse(["schema", "nostr-social-graph/rating@1"])?,
+            Tag::parse(["rater", keys.public_key().to_hex().as_str()])?,
+            Tag::parse(["subject", subject])?,
+            Tag::parse(["rating", "90"])?,
+            Tag::parse(["min_rating", "0"])?,
+            Tag::parse(["max_rating", "100"])?,
+            Tag::parse(["scope", scope])?,
+        ]
+    )
+    .custom_created_at(Timestamp::from_secs(created_at))
+    .sign_with_keys(keys)?)
 }
 
 #[tokio::test]
@@ -106,6 +130,88 @@ async fn relay_stores_and_serves_events() -> Result<()> {
 
     match recv_relay_message(&mut rx).await? {
         RelayMessage::EndOfStoredEvents(id) => assert_eq!(id.as_ref(), &sub_id),
+        other => anyhow::bail!("expected EOSE, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn relay_req_serves_events_from_historical_nostr_index() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let graph_dir = tmp.path().join("graph");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir)?;
+    let graph_store = {
+        let _guard = crate::socialgraph::test_lock();
+        crate::socialgraph::open_test_social_graph_store_with_mapsize(
+            &graph_dir,
+            Some(128 * 1024 * 1024),
+        )?
+    };
+    let backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = graph_store.clone();
+    let store = Arc::new(crate::storage::HashtreeStore::with_options(
+        &data_dir,
+        None,
+        128 * 1024 * 1024,
+    )?);
+    let event_store = NostrEventStore::new(store.store_arc());
+
+    let rater = Keys::generate();
+    let subject = Keys::generate().public_key().to_hex();
+    let wanted = rating_fact_event(&rater, &subject, "fips.peer", 20)?;
+    let other_scope = rating_fact_event(&rater, &subject, "nvpn.exit", 30)?;
+    let root = event_store
+        .build(
+            None,
+            [wanted.clone(), other_scope]
+                .into_iter()
+                .map(|event| stored_event_from_nostr_sdk_event(&event)),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing historical index root"))?;
+    let index_dir = data_dir.join("nostr-index");
+    std::fs::create_dir_all(&index_dir)?;
+    std::fs::write(index_dir.join("latest-root.txt"), format!("{root}\n"))?;
+
+    let relay = NostrRelay::new(
+        Arc::clone(&backend),
+        data_dir.clone(),
+        HashSet::new(),
+        None,
+        NostrRelayConfig {
+            spambox_db_max_bytes: 0,
+            ..Default::default()
+        },
+    )?
+    .with_historical_nostr_index(store.store_arc(), data_dir);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    relay.register_client(1, tx, None).await;
+
+    let sub_id = SubscriptionId::new("historical-ratings");
+    let filter = Filter::new()
+        .kind(Kind::Custom(7368))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::I), "fips.peer")
+        .limit(10);
+    relay
+        .handle_client_message(1, NostrClientMessage::req(sub_id.clone(), vec![filter]))
+        .await;
+
+    match recv_relay_message(&mut rx).await? {
+        RelayMessage::Event {
+            subscription_id,
+            event,
+        } => {
+            assert_eq!(subscription_id.as_ref(), &sub_id);
+            assert_eq!(event.id, wanted.id);
+        }
+        other => anyhow::bail!("expected historical EVENT, got {:?}", other),
+    }
+    match recv_relay_message(&mut rx).await? {
+        RelayMessage::EndOfStoredEvents(subscription_id) => {
+            assert_eq!(subscription_id.as_ref(), &sub_id);
+        }
         other => anyhow::bail!("expected EOSE, got {:?}", other),
     }
 

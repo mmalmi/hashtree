@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
+use std::io::ErrorKind;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -62,9 +64,17 @@ mod imp {
         trim_process_allocations,
     };
     use crate::socialgraph::{EventStorageClass, SocialGraphAccessControl, SocialGraphBackend};
+    use crate::storage::StorageRouter;
     use hashtree_core::{nhash_decode, Cid};
-    use hashtree_nostr::{is_parameterized_replaceable_kind, is_replaceable_kind};
+    use hashtree_nostr::{
+        is_parameterized_replaceable_kind, is_replaceable_kind, NostrEventStore,
+        VerifiedStoredNostrEvent,
+    };
     use tracing::{info, warn};
+
+    const NOSTR_INDEX_DIR: &str = "nostr-index";
+    const NOSTR_INDEX_LATEST_ROOT_FILE: &str = "latest-root.txt";
+    const NOSTR_INDEX_CHECKPOINT_ROOT_FILE: &str = "checkpoint-root.txt";
 
     fn prefers_trusted_only(filter: &NostrFilter) -> bool {
         let Some(kinds) = filter.kinds.as_ref() else {
@@ -184,6 +194,132 @@ mod imp {
                 }
             }
         }
+    }
+
+    struct HistoricalNostrIndex {
+        store: Arc<StorageRouter>,
+        latest_root_path: PathBuf,
+        checkpoint_root_path: PathBuf,
+        blocking_permits: Arc<Semaphore>,
+    }
+
+    impl HistoricalNostrIndex {
+        fn new(store: Arc<StorageRouter>, data_dir: PathBuf) -> Self {
+            let index_dir = data_dir.join(NOSTR_INDEX_DIR);
+            Self {
+                store,
+                latest_root_path: index_dir.join(NOSTR_INDEX_LATEST_ROOT_FILE),
+                checkpoint_root_path: index_dir.join(NOSTR_INDEX_CHECKPOINT_ROOT_FILE),
+                blocking_permits: Arc::new(Semaphore::new(
+                    MAX_CONCURRENT_NOSTR_STORE_BLOCKING_TASKS,
+                )),
+            }
+        }
+
+        async fn query(&self, filter: &NostrFilter, limit: usize) -> Vec<Event> {
+            if limit == 0 {
+                return Vec::new();
+            }
+
+            let root = match self.load_existing_root().await {
+                Ok(Some(root)) => root,
+                Ok(None) => return Vec::new(),
+                Err(err) => {
+                    warn!("historical nostr index root load failed: {}", err);
+                    return Vec::new();
+                }
+            };
+
+            let filter_summary = nostr_filter_summary(filter);
+            let memory_before = process_memory_snapshot();
+            let started = Instant::now();
+            let store = Arc::clone(&self.store);
+            let filter = filter.clone();
+            let Ok(_permit) = self.blocking_permits.clone().acquire_owned().await else {
+                warn!("historical nostr index query skipped: blocking semaphore closed");
+                return Vec::new();
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let stored_events = runtime.block_on(async move {
+                    let event_store = NostrEventStore::new(store);
+                    event_store.query_events(Some(&root), &filter, limit).await
+                })?;
+                Ok::<_, anyhow::Error>(stored_events)
+            })
+            .await;
+            match result {
+                Ok(stored_events) => {
+                    let stored_events = match stored_events {
+                        Ok(stored_events) => stored_events,
+                        Err(err) => {
+                            warn!("historical nostr index query failed: {}", err);
+                            return Vec::new();
+                        }
+                    };
+                    let mut events = Vec::with_capacity(stored_events.len());
+                    for stored in stored_events {
+                        match VerifiedStoredNostrEvent::try_from(stored)
+                            .and_then(|event| event.to_nostr_sdk_event())
+                            .map(|event| event.into_event())
+                        {
+                            Ok(event) => events.push(event),
+                            Err(err) => {
+                                warn!("historical nostr index skipped invalid event: {}", err)
+                            }
+                        }
+                    }
+                    info!(
+                        target: "hashtree_cli::nostr_relay::query",
+                        limit,
+                        events = events.len(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        filter = %filter_summary,
+                        memory_before = ?memory_before,
+                        memory_after = ?process_memory_snapshot(),
+                        "historical nostr index query completed",
+                    );
+                    events
+                }
+                Err(err) => {
+                    warn!("historical nostr index query task failed: {}", err);
+                    Vec::new()
+                }
+            }
+        }
+
+        async fn load_existing_root(&self) -> Result<Option<Cid>> {
+            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path).await? {
+                return Ok(Some(root));
+            }
+            load_nostr_index_root_file(&self.checkpoint_root_path).await
+        }
+    }
+
+    async fn load_nostr_index_root_file(path: &Path) -> Result<Option<Cid>> {
+        let root = match tokio::fs::read_to_string(path).await {
+            Ok(root) => root,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let trimmed = root.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        parse_nostr_index_root(trimmed).map(Some)
+    }
+
+    fn parse_nostr_index_root(value: &str) -> Result<Cid> {
+        if value.starts_with("nhash1") {
+            let decoded = nhash_decode(value)?;
+            return Ok(Cid {
+                hash: decoded.hash,
+                key: decoded.decrypt_key,
+            });
+        }
+        Cid::parse(value).map_err(Into::into)
     }
 
     #[derive(Debug, Clone)]
@@ -439,6 +575,7 @@ mod imp {
         trusted: NostrStore,
         public_pubkeys: HashSet<String>,
         spambox: Option<SpamboxStore>,
+        historical_index: Option<HistoricalNostrIndex>,
         social_graph: Option<Arc<SocialGraphAccessControl>>,
         clients: Mutex<HashMap<u64, ClientState>>,
         subscriptions: Mutex<HashMap<u64, HashMap<SubscriptionId, Vec<NostrFilter>>>>,
@@ -486,6 +623,19 @@ mod imp {
                     }
                 }
             }
+
+            if let Some(index) = &self.historical_index {
+                let remaining = limit.saturating_sub(added);
+                for event in index.query(filter, remaining).await {
+                    if seen.insert(event.id) {
+                        events.push(event);
+                        added += 1;
+                        if added >= limit {
+                            return;
+                        }
+                    }
+                }
+            }
         }
 
         async fn collect_filter_count(
@@ -520,6 +670,18 @@ mod imp {
                     added += 1;
                     if added >= limit {
                         return;
+                    }
+                }
+            }
+
+            if let Some(index) = &self.historical_index {
+                let remaining = limit.saturating_sub(added);
+                for event in index.query(filter, remaining).await {
+                    if seen.insert(event.id) {
+                        added += 1;
+                        if added >= limit {
+                            return;
+                        }
                     }
                 }
             }
@@ -565,6 +727,7 @@ mod imp {
                 trusted: NostrStore::new(trusted_store),
                 public_pubkeys,
                 spambox,
+                historical_index: None,
                 social_graph,
                 clients: Mutex::new(HashMap::new()),
                 subscriptions: Mutex::new(HashMap::new()),
@@ -572,6 +735,15 @@ mod imp {
                 next_client_id: AtomicU64::new(1),
                 bluetooth_event_log,
             })
+        }
+
+        pub fn with_historical_nostr_index(
+            mut self,
+            store: Arc<StorageRouter>,
+            data_dir: PathBuf,
+        ) -> Self {
+            self.historical_index = Some(HistoricalNostrIndex::new(store, data_dir));
+            self
         }
 
         pub fn next_client_id(&self) -> u64 {
@@ -656,6 +828,18 @@ mod imp {
                     events.push(event);
                     if events.len() >= limit {
                         break;
+                    }
+                }
+            }
+
+            if let Some(index) = &self.historical_index {
+                let remaining = limit.saturating_sub(events.len());
+                for event in index.query(filter, remaining).await {
+                    if seen.insert(event.id) {
+                        events.push(event);
+                        if events.len() >= limit {
+                            break;
+                        }
                     }
                 }
             }

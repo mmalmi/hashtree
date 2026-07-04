@@ -468,6 +468,9 @@ pub(crate) async fn run() -> Result<()> {
                         Some(social_graph.clone()),
                         nostr_relay_config,
                     )
+                    .map(|relay| {
+                        relay.with_historical_nostr_index(store.store_arc(), data_dir.clone())
+                    })
                     .context("Failed to initialize Nostr relay")?,
                 ))
             } else {
