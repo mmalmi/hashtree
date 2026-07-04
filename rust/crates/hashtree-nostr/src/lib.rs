@@ -13,7 +13,7 @@ pub use tree_event_snapshots::{
     TreeEventSnapshotInfo, TreeEventSnapshotPermalink,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,7 +32,8 @@ use hashtree_core::{
 use hashtree_index::{BTree, BTreeError, BTreeOptions};
 use nostr_sdk::nips::nip44::{self, Version as Nip44Version};
 use nostr_sdk::{
-    Alphabet, Event, EventBuilder, Keys, Kind, PublicKey, SingleLetterTag, Tag, TagKind,
+    Alphabet, Event, EventBuilder, Filter as NostrFilter, Keys, Kind, PublicKey, SingleLetterTag,
+    Tag, TagKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1148,6 +1149,86 @@ impl<S: Store> NostrEventStore<S> {
         self.collect_events(by_tag, &prefix, &options).await
     }
 
+    pub async fn query_events(
+        &self,
+        root: Option<&Cid>,
+        filter: &NostrFilter,
+        limit: usize,
+    ) -> Result<Vec<StoredNostrEvent>, NostrEventStoreError> {
+        let limit = normalized_query_limit(filter, limit);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let options = ListEventsOptions {
+            limit: None,
+            since: filter.since.map(|timestamp| timestamp.as_secs()),
+            until: filter.until.map(|timestamp| timestamp.as_secs()),
+        };
+        let authors = filter
+            .authors
+            .as_ref()
+            .filter(|authors| !authors.is_empty());
+        let kinds = filter.kinds.as_ref().filter(|kinds| !kinds.is_empty());
+        let mut candidates = Vec::new();
+
+        if let Some(ids) = filter.ids.as_ref().filter(|ids| !ids.is_empty()) {
+            for id in ids {
+                if let Some(event) = self.get_by_id(root, &id.to_hex()).await? {
+                    candidates.push(event);
+                }
+            }
+        } else if let (Some(authors), Some(kinds)) = (authors, kinds) {
+            for author in authors {
+                let author = author.to_hex();
+                for kind in kinds {
+                    candidates.extend(
+                        self.list_by_author_and_kind(
+                            root,
+                            &author,
+                            u32::from(kind.as_u16()),
+                            options.clone(),
+                        )
+                        .await?,
+                    );
+                }
+            }
+        } else if let Some((tag_name, tag_values)) = first_indexed_filter_tag(filter) {
+            for tag_value in tag_values {
+                candidates.extend(
+                    self.list_by_tag(root, tag_name.as_str(), tag_value, options.clone())
+                        .await?,
+                );
+            }
+        } else if let Some(authors) = authors {
+            for author in authors {
+                candidates.extend(
+                    self.list_by_author(root, &author.to_hex(), options.clone())
+                        .await?,
+                );
+            }
+        } else if let Some(kinds) = kinds {
+            for kind in kinds {
+                candidates.extend(
+                    self.list_by_kind(root, u32::from(kind.as_u16()), options.clone())
+                        .await?,
+                );
+            }
+        } else {
+            let recent_options = if filter.search.is_some() {
+                options
+            } else {
+                ListEventsOptions {
+                    limit: Some(limit),
+                    ..options
+                }
+            };
+            candidates = self.list_recent(root, recent_options).await?;
+        }
+
+        Ok(filter_query_candidates(filter, candidates, limit))
+    }
+
     pub async fn get_parameterized_replaceable(
         &self,
         root: Option<&Cid>,
@@ -1764,6 +1845,106 @@ fn normalize_tag_value(tag_name: &str, tag_value: &str) -> String {
     } else {
         tag_value.to_string()
     }
+}
+
+fn normalized_query_limit(filter: &NostrFilter, limit: usize) -> usize {
+    filter
+        .limit
+        .map_or(limit, |filter_limit| filter_limit.min(limit))
+}
+
+fn first_indexed_filter_tag(filter: &NostrFilter) -> Option<(&SingleLetterTag, &BTreeSet<String>)> {
+    filter
+        .generic_tags
+        .iter()
+        .find(|(_, values)| !values.is_empty())
+}
+
+fn filter_query_candidates(
+    filter: &NostrFilter,
+    candidates: Vec<StoredNostrEvent>,
+    limit: usize,
+) -> Vec<StoredNostrEvent> {
+    let mut seen = HashSet::new();
+    let mut events = Vec::new();
+    for event in candidates {
+        if seen.insert(event.id.clone()) && stored_event_matches_filter(filter, &event) {
+            events.push(event);
+        }
+    }
+    events.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    events.truncate(limit);
+    events
+}
+
+fn stored_event_matches_filter(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
+    filter_ids_match(filter, event)
+        && filter_authors_match(filter, event)
+        && filter_kinds_match(filter, event)
+        && filter
+            .since
+            .is_none_or(|since| event.created_at >= since.as_secs())
+        && filter
+            .until
+            .is_none_or(|until| event.created_at <= until.as_secs())
+        && filter_tags_match(filter, event)
+        && filter_search_matches(filter, event)
+}
+
+fn filter_ids_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
+    filter.ids.as_ref().map_or(true, |ids| {
+        ids.is_empty() || ids.iter().any(|id| id.to_hex() == event.id)
+    })
+}
+
+fn filter_authors_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
+    filter.authors.as_ref().map_or(true, |authors| {
+        authors.is_empty() || authors.iter().any(|author| author.to_hex() == event.pubkey)
+    })
+}
+
+fn filter_kinds_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
+    filter.kinds.as_ref().map_or(true, |kinds| {
+        kinds.is_empty()
+            || kinds
+                .iter()
+                .any(|kind| u32::from(kind.as_u16()) == event.kind)
+    })
+}
+
+fn filter_tags_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
+    if filter.generic_tags.is_empty() {
+        return true;
+    }
+    if event.tags.is_empty() {
+        return false;
+    }
+
+    filter.generic_tags.iter().all(|(tag_name, values)| {
+        !values.is_empty()
+            && event.tags.iter().any(|tag| {
+                tag.first().map(String::as_str) == Some(tag_name.as_str())
+                    && tag.get(1).is_some_and(|value| values.contains(value))
+            })
+    })
+}
+
+fn filter_search_matches(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
+    let Some(query) = filter.search.as_ref() else {
+        return true;
+    };
+    let query = query.as_bytes();
+    query.is_empty()
+        || event
+            .content
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query))
 }
 
 fn replaceable_key(pubkey: &str, kind: u32) -> String {

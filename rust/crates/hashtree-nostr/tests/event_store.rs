@@ -13,7 +13,9 @@ use hashtree_nostr::{
     stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventStore, StoredNostrEvent,
     VerifiedEvent, VerifiedStoredNostrEvent, HASHTREE_LEGACY_ROOT_KIND, HASHTREE_ROOT_KIND,
 };
-use nostr_sdk::{EventBuilder, JsonUtil, Keys, Kind};
+use nostr_sdk::{
+    Alphabet, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, SingleLetterTag, Tag, Timestamp,
+};
 
 fn event(
     id: &str,
@@ -62,6 +64,29 @@ fn canonical_store_event(
         content: content.to_string(),
         sig: "2".repeat(128),
     }
+}
+
+fn signed_rating_fact_event(
+    keys: &Keys,
+    subject: &str,
+    scope: &str,
+    rating: i64,
+    created_at: u64,
+) -> Event {
+    let scope_index = scope.to_lowercase();
+    let rating = rating.to_string();
+    EventBuilder::new(Kind::from(7368_u16), "")
+        .tags(vec![
+            Tag::parse(["i", scope_index.as_str()]).expect("scope index tag"),
+            Tag::parse(["i", subject]).expect("subject index tag"),
+            Tag::parse(["type", "rating"]).expect("type fact tag"),
+            Tag::parse(["subject", subject]).expect("subject fact tag"),
+            Tag::parse(["scope", scope]).expect("scope fact tag"),
+            Tag::parse(["rating", rating.as_str()]).expect("rating fact tag"),
+        ])
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .expect("sign rating fact event")
 }
 
 async fn by_id_event_cid(store: Arc<MemoryStore>, root: &Cid, event_id: &str) -> Option<Cid> {
@@ -285,6 +310,57 @@ fn stores_events_by_id_author_and_replaceable_views() {
                 .unwrap(),
             vec![hashtagged]
         );
+    });
+}
+
+#[test]
+fn query_events_answers_normal_filters_from_rating_fact_indexes() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let rater = Keys::generate();
+        let subject = Keys::generate().public_key().to_hex();
+        let older_rating = signed_rating_fact_event(&rater, &subject, "fips.peer", 80, 20);
+        let newer_rating = signed_rating_fact_event(&rater, &subject, "fips.peer", 95, 40);
+        let other_scope = signed_rating_fact_event(&rater, &subject, "nvpn.exit", 90, 50);
+        let note = EventBuilder::text_note("not a rating")
+            .custom_created_at(Timestamp::from(60))
+            .sign_with_keys(&rater)
+            .expect("sign note");
+
+        let root = store
+            .build(
+                None,
+                [
+                    older_rating.clone(),
+                    newer_rating.clone(),
+                    other_scope,
+                    note,
+                ]
+                .into_iter()
+                .map(|event| stored_event_from_nostr_sdk_event(&event)),
+            )
+            .await
+            .unwrap()
+            .expect("rating root");
+
+        let filter = Filter::new()
+            .kind(Kind::from(7368_u16))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::I), "fips.peer")
+            .limit(10);
+        let events = store.query_events(Some(&root), &filter, 100).await.unwrap();
+
+        assert_eq!(
+            events.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            vec![&newer_rating.id.to_hex(), &older_rating.id.to_hex()]
+        );
+
+        let limited = store
+            .query_events(Some(&root), &filter.clone().limit(1), 100)
+            .await
+            .unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, newer_rating.id.to_hex());
     });
 }
 
@@ -615,9 +691,7 @@ fn builds_and_resolves_private_hashtree_root_events() {
     assert!(event.tags.iter().any(|tag| {
         let fields = tag.as_slice();
         fields.first().is_some_and(|name| name == "ms")
-            && fields
-                .get(1)
-                .is_some_and(|value| value == "1700000000000")
+            && fields.get(1).is_some_and(|value| value == "1700000000000")
     }));
     assert!(!event.as_json().contains(&hex::encode(root_key)));
 }
