@@ -12,11 +12,13 @@ use hashtree_nostr::{
     parse_hashtree_root_event, ListEventsOptions, NostrEventStore, NostrEventStoreError,
     StoredNostrEvent, HASHTREE_LABEL, HASHTREE_ROOT_KIND, TAG_HASH, TAG_KEY,
 };
+use nostr::{Alphabet, Filter, Kind, SingleLetterTag};
 use serde::{Deserialize, Serialize};
 
 const FACT_OP_KIND: u32 = 7368;
 const LOCAL_RATER: &str = "peer:local";
 const INDEX_LABEL: &str = "nostr-event-index";
+const HISTORY_QUERY_LIMIT: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RatingHistoryLookupMode {
@@ -161,7 +163,12 @@ impl WotRatingRecord {
     fn to_stored_event(&self) -> Result<StoredNostrEvent, NostrEventStoreError> {
         let mut tags = vec![
             vec!["d".to_string(), self.id.clone()],
+            vec!["i".to_string(), self.id.clone(), "subject".to_string()],
+            vec!["i".to_string(), self.rater.to_lowercase()],
+            vec!["i".to_string(), self.subject.to_lowercase()],
             vec!["type".to_string(), "rating".to_string()],
+            vec!["schema".to_string(), "1".to_string()],
+            vec!["created_at".to_string(), self.created_at.to_string()],
             vec!["rater".to_string(), self.rater.clone()],
             vec!["subject".to_string(), self.subject.clone()],
             vec!["rating".to_string(), self.rating.to_string()],
@@ -170,6 +177,7 @@ impl WotRatingRecord {
         ];
         if let Some(scope) = self.scope.as_ref().filter(|scope| !scope.trim().is_empty()) {
             tags.push(vec!["scope".to_string(), scope.clone()]);
+            tags.push(vec!["i".to_string(), scope.to_lowercase()]);
         }
         if let Some(sample_count) = self.sample_count {
             tags.push(vec!["sample_count".to_string(), sample_count.to_string()]);
@@ -180,12 +188,10 @@ impl WotRatingRecord {
         if let Some(reason) = &self.reason {
             tags.push(vec!["reason".to_string(), reason.clone()]);
         }
-        tags.extend(
-            self.tags
-                .iter()
-                .cloned()
-                .map(|tag| vec!["tag".to_string(), tag]),
-        );
+        for tag in &self.tags {
+            tags.push(vec!["tag".to_string(), tag.clone()]);
+            tags.push(vec!["i".to_string(), tag.to_lowercase()]);
+        }
 
         let pubkey = pubkey_for_node(&self.rater);
         stored_event(pubkey, self.created_at, FACT_OP_KIND, tags, "")
@@ -300,27 +306,16 @@ impl WotRatingHistory {
     ) -> Result<Vec<StoredNostrEvent>, NostrEventStoreError> {
         match mode {
             RatingHistoryLookupMode::RawEvents => {
+                let filter = scope_filter(FACT_OP_KIND, scope);
                 self.event_store
-                    .list_by_tag(
-                        self.rating_root.as_ref(),
-                        "scope",
-                        scope,
-                        ListEventsOptions::default(),
-                    )
+                    .query_events(self.rating_root.as_ref(), &filter, HISTORY_QUERY_LIMIT)
                     .await
             }
             RatingHistoryLookupMode::IndexRootEvents => {
-                let mut events = self
-                    .event_store
-                    .list_by_tag(
-                        self.index_root.as_ref(),
-                        "scope",
-                        scope,
-                        ListEventsOptions::default(),
-                    )
-                    .await?;
-                events.retain(|event| event.kind == HASHTREE_ROOT_KIND);
-                Ok(events)
+                let filter = scope_filter(HASHTREE_ROOT_KIND, scope);
+                self.event_store
+                    .query_events(self.index_root.as_ref(), &filter, HISTORY_QUERY_LIMIT)
+                    .await
             }
         }
     }
@@ -691,6 +686,7 @@ fn index_root_event(
         vec!["l".to_string(), HASHTREE_LABEL.to_string()],
         vec!["l".to_string(), INDEX_LABEL.to_string()],
         vec!["scope".to_string(), scope.to_string()],
+        vec!["i".to_string(), scope.to_lowercase()],
         vec!["kind".to_string(), FACT_OP_KIND.to_string()],
         vec![
             "filter".to_string(),
@@ -707,6 +703,13 @@ fn index_root_event(
         HASHTREE_ROOT_KIND,
         tags,
         "",
+    )
+}
+
+fn scope_filter(kind: u32, scope: &str) -> Filter {
+    Filter::new().kind(Kind::from(kind as u16)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::I),
+        scope.to_lowercase(),
     )
 }
 
@@ -824,5 +827,54 @@ mod tests {
             report.raw_rating_lookup_events
         );
         assert!(report.latest_index_root.is_some());
+    }
+
+    #[tokio::test]
+    async fn wot_history_lookup_uses_scope_i_tag_filters() {
+        let mut history = WotRatingHistory::new();
+        let rating = WotRatingRecord::new(
+            LOCAL_RATER,
+            "peer:subject",
+            "fips.peer",
+            80,
+            10,
+            "healthy test peer",
+        );
+
+        history.publish_rating(&rating).await.unwrap();
+
+        let raw_events = history
+            .query_with_nostr_filter(RatingHistoryLookupMode::RawEvents, "fips.peer")
+            .await
+            .unwrap();
+        assert_eq!(raw_events.len(), 1);
+        assert!(has_tag(&raw_events[0], &["i", "fips.peer"]));
+        assert!(has_tag(&raw_events[0], &["type", "rating"]));
+        assert!(has_tag(&raw_events[0], &["schema", "1"]));
+
+        let index_root_events = history
+            .query_with_nostr_filter(RatingHistoryLookupMode::IndexRootEvents, "fips.peer")
+            .await
+            .unwrap();
+        assert_eq!(index_root_events.len(), 1);
+        assert!(has_tag(&index_root_events[0], &["i", "fips.peer"]));
+
+        assert!(history
+            .query_with_nostr_filter(RatingHistoryLookupMode::RawEvents, "other.scope")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(history
+            .query_with_nostr_filter(RatingHistoryLookupMode::IndexRootEvents, "other.scope")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    fn has_tag(event: &StoredNostrEvent, expected: &[&str]) -> bool {
+        event
+            .tags
+            .iter()
+            .any(|tag| tag.iter().map(String::as_str).eq(expected.iter().copied()))
     }
 }

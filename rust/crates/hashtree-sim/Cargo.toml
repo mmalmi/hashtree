@@ -34,10 +34,10 @@ futures = { workspace = true }
 # Optional dependencies for nostr integration tests
 hashtree-resolver = { path = "../hashtree-resolver", optional = true, features = ["nostr"] }
 nostr-sdk = { workspace = true, optional = true }
-nostr = { workspace = true, optional = true }
+nostr = { workspace = true }
 
 [features]
 default = []
-nostr = ["dep:hashtree-resolver", "dep:nostr-sdk", "dep:nostr", "dep:anyhow"]
+nostr = ["dep:hashtree-resolver", "dep:nostr-sdk", "dep:anyhow"]
 
 [dev-dependencies]
