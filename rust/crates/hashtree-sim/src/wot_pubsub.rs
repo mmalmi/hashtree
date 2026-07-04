@@ -7,7 +7,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::mesh_pubsub::{
+    compute_workload_peer_graph, run_mesh_pubsub_htl_baseline_on_graph, HtlBaselineMode,
+    MeshPubsubWorkloadConfig,
+};
 use hashtree_core::{sha256, to_hex, Cid, MemoryStore};
+use hashtree_network::{PoolConfig, MESH_EVENT_POLICY};
 use hashtree_nostr::{
     parse_hashtree_root_event, ListEventsOptions, NostrEventStore, NostrEventStoreError,
     StoredNostrEvent, HASHTREE_LABEL, HASHTREE_ROOT_KIND, TAG_HASH, TAG_KEY,
@@ -41,6 +46,10 @@ pub struct WotPubsubSimConfig {
     pub degradation_round: usize,
     pub rating_ingest_capacity_per_round: usize,
     pub spam_rating_events_per_round: usize,
+    pub rating_pubsub_node_count: usize,
+    pub rating_pubsub_subscribers: usize,
+    pub rating_pubsub_publish_round_cap: usize,
+    pub rating_pubsub_payload_bytes: usize,
 }
 
 impl Default for WotPubsubSimConfig {
@@ -56,6 +65,10 @@ impl Default for WotPubsubSimConfig {
             degradation_round: 2,
             rating_ingest_capacity_per_round: 16,
             spam_rating_events_per_round: 24,
+            rating_pubsub_node_count: 24,
+            rating_pubsub_subscribers: 12,
+            rating_pubsub_publish_round_cap: 4,
+            rating_pubsub_payload_bytes: 512,
         }
     }
 }
@@ -82,6 +95,10 @@ pub struct WotPubsubSimReport {
     pub raw_rating_lookup_events: u64,
     pub index_root_lookup_events: u64,
     pub index_root_seek_events: u64,
+    pub rating_pubsub_delivery_opportunities: u64,
+    pub rating_pubsub_delivered_events: u64,
+    pub rating_pubsub_forwarded_bytes_sent: u64,
+    pub rating_pubsub_flood_forwarded_bytes_sent: u64,
     pub latest_index_root: Option<String>,
     pub lookup_modes_exercised: Vec<RatingHistoryLookupMode>,
 }
@@ -503,8 +520,69 @@ pub async fn run_wot_pubsub_simulation(
         report.latest_index_root = Some(root.to_string());
         report.index_root_seek_events = events.len() as u64;
     }
+    simulate_rating_pubsub_delivery(&config, &mut report).await;
 
     Ok(report)
+}
+
+async fn simulate_rating_pubsub_delivery(
+    config: &WotPubsubSimConfig,
+    report: &mut WotPubsubSimReport,
+) {
+    if report.rating_events_published == 0
+        || config.rating_pubsub_node_count < 2
+        || config.rating_pubsub_subscribers == 0
+        || config.rating_pubsub_publish_round_cap == 0
+    {
+        return;
+    }
+
+    let publish_rounds = (report.rating_events_published as usize)
+        .min(config.rating_pubsub_publish_round_cap)
+        .max(1);
+    let subscriber_count = config
+        .rating_pubsub_subscribers
+        .min(config.rating_pubsub_node_count.saturating_sub(1));
+    if subscriber_count == 0 {
+        return;
+    }
+
+    let pubsub_config = MeshPubsubWorkloadConfig {
+        seed: 20260704,
+        node_count: config.rating_pubsub_node_count,
+        author_count: 1,
+        subscribers_per_author: subscriber_count,
+        publish_rounds,
+        payload_bytes: config.rating_pubsub_payload_bytes.max(1),
+        pool: PoolConfig {
+            max_connections: 8,
+            satisfied_connections: 4,
+        },
+        spam_author_count: 0,
+        spam_subscribers_per_author: 0,
+        spam_publish_rounds_per_round: 0,
+        ..Default::default()
+    };
+    let (graph, topology) = compute_workload_peer_graph(&pubsub_config).await;
+    let inv_want = run_mesh_pubsub_htl_baseline_on_graph(
+        &graph,
+        &topology,
+        &pubsub_config,
+        MESH_EVENT_POLICY.max_htl,
+        HtlBaselineMode::InvWant,
+    );
+    let flood = run_mesh_pubsub_htl_baseline_on_graph(
+        &graph,
+        &topology,
+        &pubsub_config,
+        MESH_EVENT_POLICY.max_htl,
+        HtlBaselineMode::FloodPayload,
+    );
+
+    report.rating_pubsub_delivery_opportunities = inv_want.delivery_opportunities;
+    report.rating_pubsub_delivered_events = inv_want.delivered_events;
+    report.rating_pubsub_forwarded_bytes_sent = inv_want.forwarded_bytes_sent;
+    report.rating_pubsub_flood_forwarded_bytes_sent = flood.forwarded_bytes_sent;
 }
 
 async fn ingest_rating_candidates(
@@ -777,6 +855,16 @@ mod tests {
         assert_eq!(
             report.spam_rating_events_dropped,
             report.spam_rating_events_seen
+        );
+        assert!(report.rating_pubsub_delivery_opportunities > 0);
+        assert_eq!(
+            report.rating_pubsub_delivered_events,
+            report.rating_pubsub_delivery_opportunities
+        );
+        assert!(
+            report.rating_pubsub_forwarded_bytes_sent
+                < report.rating_pubsub_flood_forwarded_bytes_sent,
+            "inv/want rating stream should spend fewer bytes than full-payload flood"
         );
     }
 
