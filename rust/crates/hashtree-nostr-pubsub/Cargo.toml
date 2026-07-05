@@ -1,0 +1,20 @@
+[package]
+name = "hashtree-nostr-pubsub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "nostr-pubsub adapter for hashtree-backed Nostr event indexes"
+
+[dependencies]
+async-trait.workspace = true
+hashtree-core.workspace = true
+hashtree-nostr.workspace = true
+nostr-pubsub.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+nostr-sdk.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

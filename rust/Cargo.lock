@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "cashu-service"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4109,6 +4109,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashtree-nostr-pubsub"
+version = "0.2.76"
+dependencies = [
+ "async-trait",
+ "hashtree-core",
+ "hashtree-nostr",
+ "nostr-pubsub",
+ "nostr-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "hashtree-resolver"
 version = "0.2.76"
 dependencies = [
@@ -5496,6 +5508,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ade30de16869618919c6b5efc8258f47b654a98b51541eb77f85e8ec5e3c83a6"
 dependencies = [
  "nostr",
+]
+
+[[package]]
+name = "nostr-pubsub"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nostr",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
