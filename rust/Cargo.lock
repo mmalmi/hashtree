@@ -3045,6 +3045,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "nostr",
+ "nostr-pubsub",
  "nostr-sdk",
  "portable-atomic",
  "procfs",
@@ -5512,7 +5513,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756f09ce6a9963cc0654f6feaea8b640ba693d260ff965f8d7b78b1b293bb4d0"
 dependencies = [
  "async-trait",
  "nostr",

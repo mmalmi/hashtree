@@ -45,7 +45,7 @@ hashtree-network = { version = "0.2.76", path = "crates/hashtree-network" }
 hashtree-fips-transport = { version = "0.2.76", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.2.76", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.2.56", path = "../../cashu-service/crates/cashu-service", default-features = false }
-nostr-pubsub = { version = "0.1.0", path = "../../nostr-pubsub/crates/nostr-pubsub" }
+nostr-pubsub = "0.1.1"
 
 # AWS S3
 aws-sdk-s3 = "1"
