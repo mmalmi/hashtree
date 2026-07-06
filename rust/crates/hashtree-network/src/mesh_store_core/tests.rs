@@ -631,6 +631,57 @@ async fn test_pubsub_inv_want_publish_sends_inventory_before_payload() {
 }
 
 #[tokio::test]
+async fn test_pubsub_inv_want_inventory_follows_subscription_state() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
+    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let nodes = [&publisher, &subscriber];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 1, b"before-sub".to_vec())
+        .await;
+    assert_eq!(stats.sent_peers, 0);
+    pump_test_network(&nodes, 12).await;
+    assert!(subscriber.store.drain_pubsub_events().await.is_empty());
+
+    subscriber.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 2, b"while-subbed".to_vec())
+        .await;
+    assert_eq!(stats.sent_peers, 1);
+    pump_test_network(&nodes, 24).await;
+    let events = subscriber.store.drain_pubsub_events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload, b"while-subbed".to_vec());
+
+    subscriber.store.unsubscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+
+    let stats = publisher
+        .store
+        .publish_pubsub("author:alice", 3, b"after-unsub".to_vec())
+        .await;
+    assert_eq!(stats.sent_peers, 0);
+    pump_test_network(&nodes, 12).await;
+    assert!(subscriber.store.drain_pubsub_events().await.is_empty());
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
 async fn test_pubsub_spam_ingress_does_not_buy_reciprocity_credit() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;

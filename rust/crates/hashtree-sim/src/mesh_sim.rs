@@ -664,6 +664,8 @@ impl Simulation {
                 response_behavior: selected_strategy.response_behavior,
                 pubsub_scheduler: Default::default(),
                 pubsub_delivery_mode: MeshRoutingConfig::default().pubsub_delivery_mode,
+                pubsub_forwarding: MeshRoutingConfig::default().pubsub_forwarding,
+                pubsub_max_htl: MeshRoutingConfig::default().pubsub_max_htl,
             },
         ));
 

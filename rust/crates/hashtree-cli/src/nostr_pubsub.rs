@@ -35,15 +35,26 @@ where
     R: SignalingTransport + Send + Sync + 'static,
     F: PeerLinkFactory + Send + Sync + 'static,
 {
+    publish_nostr_event_with_limit(mesh, seq, event, MAX_NOSTR_PUBSUB_EVENT_BYTES).await
+}
+
+pub async fn publish_nostr_event_with_limit<S, R, F>(
+    mesh: &Arc<MeshStoreCore<S, R, F>>,
+    seq: u64,
+    event: &Event,
+    max_event_bytes: usize,
+) -> Result<PubsubPublishStats>
+where
+    S: Store + Send + Sync + 'static,
+    R: SignalingTransport + Send + Sync + 'static,
+    F: PeerLinkFactory + Send + Sync + 'static,
+{
     event
         .verify()
         .map_err(|err| anyhow::anyhow!("invalid nostr event signature: {err}"))?;
     let payload = event.as_json().into_bytes();
-    if payload.len() > MAX_NOSTR_PUBSUB_EVENT_BYTES {
-        anyhow::bail!(
-            "nostr pubsub event exceeds {} bytes",
-            MAX_NOSTR_PUBSUB_EVENT_BYTES
-        );
+    if payload.len() > max_event_bytes {
+        anyhow::bail!("nostr pubsub event exceeds {} bytes", max_event_bytes);
     }
     Ok(mesh
         .publish_pubsub(NOSTR_EVENT_PUBSUB_STREAM, seq, payload)
@@ -58,15 +69,24 @@ pub async fn publish_fips_nostr_event<S>(
 where
     S: Store + Send + Sync + 'static,
 {
+    publish_fips_nostr_event_with_limit(mesh, seq, event, MAX_NOSTR_PUBSUB_EVENT_BYTES).await
+}
+
+pub async fn publish_fips_nostr_event_with_limit<S>(
+    mesh: &FipsMeshPubsub<S>,
+    seq: u64,
+    event: &Event,
+    max_event_bytes: usize,
+) -> Result<PubsubPublishStats>
+where
+    S: Store + Send + Sync + 'static,
+{
     event
         .verify()
         .map_err(|err| anyhow::anyhow!("invalid nostr event signature: {err}"))?;
     let payload = event.as_json().into_bytes();
-    if payload.len() > MAX_NOSTR_PUBSUB_EVENT_BYTES {
-        anyhow::bail!(
-            "nostr pubsub event exceeds {} bytes",
-            MAX_NOSTR_PUBSUB_EVENT_BYTES
-        );
+    if payload.len() > max_event_bytes {
+        anyhow::bail!("nostr pubsub event exceeds {} bytes", max_event_bytes);
     }
     Ok(mesh
         .publish_pubsub(NOSTR_EVENT_PUBSUB_STREAM, seq, payload)
@@ -78,14 +98,21 @@ pub async fn ingest_nostr_pubsub_payload(
     stream_id: &str,
     payload: &[u8],
 ) -> Result<Option<Event>> {
+    ingest_nostr_pubsub_payload_with_limit(relay, stream_id, payload, MAX_NOSTR_PUBSUB_EVENT_BYTES)
+        .await
+}
+
+pub async fn ingest_nostr_pubsub_payload_with_limit(
+    relay: &NostrRelay,
+    stream_id: &str,
+    payload: &[u8],
+    max_event_bytes: usize,
+) -> Result<Option<Event>> {
     if stream_id != NOSTR_EVENT_PUBSUB_STREAM {
         anyhow::bail!("unexpected nostr pubsub stream {}", stream_id);
     }
-    if payload.len() > MAX_NOSTR_PUBSUB_EVENT_BYTES {
-        anyhow::bail!(
-            "nostr pubsub event exceeds {} bytes",
-            MAX_NOSTR_PUBSUB_EVENT_BYTES
-        );
+    if payload.len() > max_event_bytes {
+        anyhow::bail!("nostr pubsub event exceeds {} bytes", max_event_bytes);
     }
 
     let json = std::str::from_utf8(payload).context("nostr pubsub payload is not utf8")?;
@@ -139,6 +166,7 @@ mod tests {
         Tag, Timestamp,
     };
     use std::collections::HashSet;
+    use std::sync::OnceLock;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::time::{timeout, Duration};
@@ -146,6 +174,11 @@ mod tests {
     struct MeshNode {
         store: Arc<MeshStoreCore<MemoryStore, MockRelayTransport, MockConnectionFactory>>,
         transport: Arc<MockRelayTransport>,
+    }
+
+    fn mesh_pubsub_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     async fn make_mesh_node(relay: Arc<MockRelay>, node_id: &str) -> Result<MeshNode> {
@@ -244,6 +277,20 @@ mod tests {
             .sign_with_keys(keys)?)
     }
 
+    fn paid_exit_offer_event(keys: &Keys, offer_id: &str, created_at: u64) -> Result<Event> {
+        Ok(EventBuilder::new(
+            Kind::Custom(37196),
+            r#"{"route":"internet-exit","price_msat":1000}"#,
+        )
+        .tags([
+            Tag::parse(["d", offer_id])?,
+            Tag::parse(["i", "fips/paid-route-offer"])?,
+            Tag::parse(["app", "nostr-vpn"])?,
+        ])
+        .custom_created_at(Timestamp::from_secs(created_at))
+        .sign_with_keys(keys)?)
+    }
+
     fn event_has_tag(event: &Event, parts: &[&str]) -> bool {
         let expected = parts
             .iter()
@@ -257,6 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn decentralized_pubsub_delivers_rating_fact_to_relay_history() -> Result<()> {
+        let _guard = mesh_pubsub_test_lock().lock().await;
         let mesh_relay = MockRelay::new_with_capacity(128);
         let publisher = make_mesh_node(mesh_relay.clone(), "publisher").await?;
         let subscriber = make_mesh_node(mesh_relay, "subscriber").await?;
@@ -363,6 +411,72 @@ mod tests {
             }
             other => anyhow::bail!("expected EOSE, got {:?}", other),
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decentralized_pubsub_delivers_paid_exit_offer_to_relay_history() -> Result<()> {
+        let _guard = mesh_pubsub_test_lock().lock().await;
+        let mesh_relay = MockRelay::new_with_capacity(128);
+        let publisher = make_mesh_node(mesh_relay.clone(), "publisher").await?;
+        let subscriber = make_mesh_node(mesh_relay, "subscriber").await?;
+        let nodes = [&publisher, &subscriber];
+        for _ in 0..3 {
+            broadcast_hellos(&nodes).await?;
+            pump_mesh(&nodes, 16).await?;
+        }
+
+        subscribe_nostr_events(&subscriber.store).await;
+        pump_mesh(&nodes, 64).await?;
+
+        let tmp = TempDir::new()?;
+        let graph_dir = tmp.path().join("graph");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir)?;
+        let graph = {
+            let _guard = crate::socialgraph::test_lock();
+            crate::socialgraph::open_test_social_graph_store_with_mapsize(
+                &graph_dir,
+                Some(128 * 1024 * 1024),
+            )?
+        };
+        let backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = graph.clone();
+        let store = Arc::new(crate::storage::HashtreeStore::with_options(
+            &data_dir,
+            None,
+            128 * 1024 * 1024,
+        )?);
+        let relay = NostrRelay::new(
+            backend,
+            data_dir.clone(),
+            HashSet::new(),
+            None,
+            crate::nostr_relay::NostrRelayConfig {
+                spambox_db_max_bytes: 0,
+                ..Default::default()
+            },
+        )?
+        .with_historical_nostr_index(store.store_arc(), data_dir.clone());
+
+        let keys = Keys::generate();
+        let event = paid_exit_offer_event(&keys, "paid-exit-fi", 60)?;
+        publish_nostr_event(&publisher.store, 1, &event).await?;
+        pump_mesh(&nodes, 128).await?;
+
+        let deliveries = subscriber.store.drain_pubsub_events().await;
+        let delivery = deliveries
+            .into_iter()
+            .find(|delivery| delivery.stream_id == NOSTR_EVENT_PUBSUB_STREAM)
+            .ok_or_else(|| anyhow::anyhow!("subscriber did not receive paid-exit offer"))?;
+        let accepted = ingest_nostr_pubsub_event(&relay, delivery).await?;
+        assert_eq!(accepted.as_ref().map(|event| event.id), Some(event.id));
+
+        let filter = Filter::new().kind(Kind::Custom(37196)).limit(10);
+        let indexed = relay.query_events(&filter, 10).await;
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].id, event.id);
+        assert!(event_has_tag(&indexed[0], &["i", "fips/paid-route-offer"]));
 
         Ok(())
     }

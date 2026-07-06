@@ -334,6 +334,18 @@ pub struct NostrConfig {
     /// the experimental-decentralized-pubsub feature.
     #[serde(default, alias = "relayless_pubsub")]
     pub decentralized_pubsub: bool,
+    /// Forward decentralized pubsub traffic for peers with downstream interest.
+    #[serde(default = "default_nostr_decentralized_pubsub_forwarding")]
+    pub decentralized_pubsub_forwarding: bool,
+    /// Maximum peers selected per decentralized pubsub send.
+    #[serde(default = "default_nostr_decentralized_pubsub_fanout")]
+    pub decentralized_pubsub_fanout: usize,
+    /// Initial HTL for decentralized pubsub interest/inventory messages.
+    #[serde(default = "default_nostr_decentralized_pubsub_max_hops")]
+    pub decentralized_pubsub_max_hops: u8,
+    /// Maximum Nostr event payload accepted on decentralized pubsub.
+    #[serde(default = "default_nostr_decentralized_pubsub_max_event_bytes")]
+    pub decentralized_pubsub_max_event_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +431,22 @@ impl NostrConfig {
             && self.decentralized_pubsub
             && cfg!(feature = "experimental-decentralized-pubsub")
     }
+}
+
+fn default_nostr_decentralized_pubsub_forwarding() -> bool {
+    true
+}
+
+fn default_nostr_decentralized_pubsub_fanout() -> usize {
+    8
+}
+
+fn default_nostr_decentralized_pubsub_max_hops() -> u8 {
+    4
+}
+
+fn default_nostr_decentralized_pubsub_max_event_bytes() -> usize {
+    256 * 1024
 }
 
 // Keep in sync with hashtree-config/src/lib.rs
@@ -821,6 +849,11 @@ impl Default for NostrConfig {
             full_text_note_history_max_relay_pages:
                 default_nostr_full_text_note_history_max_relay_pages(),
             decentralized_pubsub: false,
+            decentralized_pubsub_forwarding: default_nostr_decentralized_pubsub_forwarding(),
+            decentralized_pubsub_fanout: default_nostr_decentralized_pubsub_fanout(),
+            decentralized_pubsub_max_hops: default_nostr_decentralized_pubsub_max_hops(),
+            decentralized_pubsub_max_event_bytes:
+                default_nostr_decentralized_pubsub_max_event_bytes(),
         }
     }
 }
@@ -1461,6 +1494,10 @@ chunk_target_bytes = 65536
         let enabled: NostrConfig = toml::from_str("decentralized_pubsub = true")
             .expect("parse decentralized pubsub nostr config");
         assert!(enabled.decentralized_pubsub);
+        assert!(enabled.decentralized_pubsub_forwarding);
+        assert_eq!(enabled.decentralized_pubsub_fanout, 8);
+        assert_eq!(enabled.decentralized_pubsub_max_hops, 4);
+        assert_eq!(enabled.decentralized_pubsub_max_event_bytes, 256 * 1024);
         assert_eq!(
             enabled.decentralized_pubsub_enabled(),
             cfg!(feature = "experimental-decentralized-pubsub")
@@ -1478,6 +1515,21 @@ decentralized_pubsub = true
         let alias: NostrConfig =
             toml::from_str("relayless_pubsub = true").expect("parse compatibility pubsub alias");
         assert!(alias.decentralized_pubsub);
+
+        let tuned: NostrConfig = toml::from_str(
+            r#"
+decentralized_pubsub = true
+decentralized_pubsub_forwarding = false
+decentralized_pubsub_fanout = 3
+decentralized_pubsub_max_hops = 2
+decentralized_pubsub_max_event_bytes = 4096
+"#,
+        )
+        .expect("parse tuned decentralized pubsub config");
+        assert!(!tuned.decentralized_pubsub_forwarding);
+        assert_eq!(tuned.decentralized_pubsub_fanout, 3);
+        assert_eq!(tuned.decentralized_pubsub_max_hops, 2);
+        assert_eq!(tuned.decentralized_pubsub_max_event_bytes, 4096);
     }
 
     #[test]

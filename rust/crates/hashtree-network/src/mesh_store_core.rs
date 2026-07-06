@@ -317,7 +317,7 @@ pub struct PubsubPublishStats {
 pub enum PubsubDeliveryMode {
     /// Push full frames only along advertised interest routes.
     InterestPush,
-    /// Flood small inventories by HTL and pull payloads back along want paths.
+    /// Route small inventories along advertised interest paths and pull payloads back along want paths.
     #[default]
     HtlInvWant,
 }
@@ -569,6 +569,10 @@ pub struct MeshRoutingConfig {
     pub response_behavior: ResponseBehaviorConfig,
     pub pubsub_scheduler: PubsubSchedulerConfig,
     pub pubsub_delivery_mode: PubsubDeliveryMode,
+    /// Forward peer pubsub interests, inventories, and payloads for downstream peers.
+    pub pubsub_forwarding: bool,
+    /// Initial hops-to-live for locally originated pubsub interest/inventory frames.
+    pub pubsub_max_htl: u8,
 }
 
 impl Default for MeshRoutingConfig {
@@ -588,7 +592,15 @@ impl Default for MeshRoutingConfig {
             response_behavior: ResponseBehaviorConfig::default(),
             pubsub_scheduler: PubsubSchedulerConfig::default(),
             pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
+            pubsub_forwarding: true,
+            pubsub_max_htl: MESH_EVENT_POLICY.max_htl,
         }
+    }
+}
+
+impl MeshRoutingConfig {
+    fn pubsub_initial_htl(&self) -> u8 {
+        self.pubsub_max_htl.clamp(1, MAX_HTL)
     }
 }
 
@@ -1143,17 +1155,6 @@ where
         stats
     }
 
-    async fn flood_pubsub_inventory(
-        &self,
-        inv: &PubsubInventory,
-        exclude_peer_id: Option<&str>,
-    ) -> PubsubPublishStats {
-        let mut peer_ids = self.signaling.peer_ids().await;
-        peer_ids.sort();
-        peer_ids.retain(|peer_id| exclude_peer_id.is_none_or(|exclude| peer_id != exclude));
-        self.send_pubsub_inventory_to_peers(inv, &peer_ids).await
-    }
-
     async fn send_pubsub_want_to_peer(&self, want: &PubsubWant, peer_id: &str) -> bool {
         let Some(channel) = self.signaling.get_channel(peer_id).await else {
             return false;
@@ -1373,7 +1374,7 @@ where
             self.signaling.peer_id().to_string(),
             seq,
             true,
-            MAX_HTL,
+            self.routing.pubsub_initial_htl(),
         );
         self.send_pubsub_interest_to_peers(&interest, None).await
     }
@@ -1397,7 +1398,7 @@ where
             self.signaling.peer_id().to_string(),
             self.next_pubsub_interest_seq(),
             false,
-            MAX_HTL,
+            self.routing.pubsub_initial_htl(),
         );
         self.send_pubsub_interest_to_peers(&interest, None).await
     }
@@ -1419,7 +1420,7 @@ where
             seq,
             self.signaling.peer_id().to_string(),
             payload.clone(),
-            MAX_HTL,
+            self.routing.pubsub_initial_htl(),
         );
         let frame_key = Self::pubsub_frame_key(&frame);
         self.pubsub_seen_frames
@@ -1455,9 +1456,10 @@ where
                     seq,
                     self.signaling.peer_id().to_string(),
                     payload_bytes,
-                    MESH_EVENT_POLICY.max_htl,
+                    self.routing.pubsub_initial_htl(),
                 );
-                self.flood_pubsub_inventory(&inv, None).await
+                let peers = self.interested_pubsub_peers(&inv.stream_id, None).await;
+                self.send_pubsub_inventory_to_peers(&inv, &peers).await
             }
         }
     }
@@ -3210,7 +3212,7 @@ where
             return;
         }
 
-        if interest.htl <= 1 {
+        if !self.routing.pubsub_forwarding || interest.htl <= 1 {
             return;
         }
         interest.htl = interest.htl.saturating_sub(1);
@@ -3249,7 +3251,7 @@ where
             .read()
             .await
             .contains(&frame.stream_id);
-        let mut downstream_peers = if frame.htl > 1 {
+        let mut downstream_peers = if self.routing.pubsub_forwarding && frame.htl > 1 {
             match self.routing.pubsub_delivery_mode {
                 PubsubDeliveryMode::InterestPush => {
                     let mut peers = self
@@ -3333,9 +3335,12 @@ where
             .read()
             .await
             .contains(&inv.stream_id);
-        let downstream_peers = self
-            .interested_pubsub_peers(&inv.stream_id, Some(from_peer))
-            .await;
+        let downstream_peers = if self.routing.pubsub_forwarding {
+            self.interested_pubsub_peers(&inv.stream_id, Some(from_peer))
+                .await
+        } else {
+            Vec::new()
+        };
         if local_interested || !downstream_peers.is_empty() {
             self.record_useful_bytes_received_from_peer(from_peer, wire_bytes as u64)
                 .await;
@@ -3344,10 +3349,15 @@ where
             let _ = self.send_pubsub_want_upstream(&key, &want, None).await;
         }
 
-        if !should_forward_htl(inv.htl) {
+        if !self.routing.pubsub_forwarding
+            || downstream_peers.is_empty()
+            || !should_forward_htl(inv.htl)
+        {
             return;
         }
-        let _ = self.flood_pubsub_inventory(&inv, Some(from_peer)).await;
+        let _ = self
+            .send_pubsub_inventory_to_peers(&inv, &downstream_peers)
+            .await;
     }
 
     async fn handle_pubsub_want_message(

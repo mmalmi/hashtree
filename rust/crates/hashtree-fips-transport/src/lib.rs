@@ -11,7 +11,7 @@ pub use hashtree_network::PubsubPublishStats;
 use hashtree_network::{
     transport::{PeerLink, PeerLinkFactory, SignalingTransport, TransportError},
     MeshRouter, MeshRoutingConfig, MeshStoreCore, PoolSettings, PubsubDeliveryMode,
-    SignalingMessage,
+    PubsubSchedulerConfig, SignalingMessage, MESH_EVENT_POLICY,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1206,6 +1206,37 @@ pub struct FipsMeshPubsubEvent {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FipsMeshPubsubOptions {
+    pub forwarding: bool,
+    pub fanout: usize,
+    pub max_hops: u8,
+}
+
+impl Default for FipsMeshPubsubOptions {
+    fn default() -> Self {
+        Self {
+            forwarding: true,
+            fanout: PubsubSchedulerConfig::default().fanout,
+            max_hops: MESH_EVENT_POLICY.max_htl,
+        }
+    }
+}
+
+impl FipsMeshPubsubOptions {
+    fn routing_config(&self) -> MeshRoutingConfig {
+        let mut pubsub_scheduler = PubsubSchedulerConfig::default();
+        pubsub_scheduler.fanout = self.fanout;
+        MeshRoutingConfig {
+            pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
+            pubsub_scheduler,
+            pubsub_forwarding: self.forwarding,
+            pubsub_max_htl: self.max_hops,
+            ..Default::default()
+        }
+    }
+}
+
 /// Hashtree mesh pubsub runtime backed by FIPS endpoint bytes.
 pub struct FipsMeshPubsub<S: Store + Send + Sync + 'static> {
     store: Arc<FipsMeshStore<S>>,
@@ -1223,6 +1254,11 @@ impl<S: Store + Send + Sync + 'static> FipsMeshPubsub<S> {
     /// Subscribe this node to a mesh pubsub stream.
     pub async fn subscribe_pubsub(&self, stream_id: impl Into<String>) -> PubsubPublishStats {
         self.store.subscribe_pubsub(stream_id.into()).await
+    }
+
+    /// Stop local delivery for a mesh pubsub stream and withdraw advertised interest.
+    pub async fn unsubscribe_pubsub(&self, stream_id: impl Into<String>) -> PubsubPublishStats {
+        self.store.unsubscribe_pubsub(stream_id.into()).await
     }
 
     /// Publish bytes on a mesh pubsub stream with the given origin-local sequence.
@@ -1313,6 +1349,23 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
         peer_id: String,
         request_timeout: Duration,
     ) -> Result<FipsMeshPubsub<S>, FipsTransportError> {
+        self.start_mesh_pubsub_with_options(
+            local_store,
+            peer_id,
+            request_timeout,
+            FipsMeshPubsubOptions::default(),
+        )
+        .await
+    }
+
+    /// Start a hashtree mesh pubsub runtime with explicit forwarding/fanout/hop options.
+    pub async fn start_mesh_pubsub_with_options(
+        self: &Arc<Self>,
+        local_store: Arc<S>,
+        peer_id: String,
+        request_timeout: Duration,
+        options: FipsMeshPubsubOptions,
+    ) -> Result<FipsMeshPubsub<S>, FipsTransportError> {
         let hub = FipsMeshLinkHub::default();
         let (signaling_tx, signaling_rx) = mpsc::unbounded_channel();
         let signaling_transport = Arc::new(FipsMeshSignaling {
@@ -1337,10 +1390,7 @@ impl<S: Store + Send + Sync + 'static> HashtreeFipsTransport<S> {
             router,
             request_timeout,
             false,
-            MeshRoutingConfig {
-                pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
-                ..Default::default()
-            },
+            options.routing_config(),
         ));
         store
             .start()
@@ -2187,6 +2237,33 @@ mod tests {
         assert_eq!(delivered.payload, payload);
         assert_eq!(mesh_a.peer_ids().await, vec!["b"]);
         assert_eq!(mesh_b.peer_ids().await, vec!["a"]);
+
+        mesh_b
+            .unsubscribe_pubsub("iris-drive/root-events/test")
+            .await;
+        timeout(Duration::from_secs(2), async {
+            let mut seq = 100u64;
+            loop {
+                let stats = mesh_a
+                    .publish_pubsub("iris-drive/root-events/test", seq, payload.clone())
+                    .await;
+                seq += 1;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let events = mesh_b.drain_pubsub_events().await;
+                if stats.sent_peers == 0 && events.is_empty() {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let stats = mesh_a
+            .publish_pubsub("iris-drive/root-events/test", 200, payload.clone())
+            .await;
+        assert_eq!(stats.sent_peers, 0);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(mesh_b.drain_pubsub_events().await.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

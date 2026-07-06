@@ -124,10 +124,15 @@ pub async fn start_daemon_nostr_pubsub(
     let mesh = Arc::new(
         fips_handle
             .transport
-            .start_mesh_pubsub(
+            .start_mesh_pubsub_with_options(
                 store.store_arc(),
                 fips_handle.endpoint_npub.clone(),
                 request_timeout,
+                hashtree_fips_transport::FipsMeshPubsubOptions {
+                    forwarding: config.nostr.decentralized_pubsub_forwarding,
+                    fanout: config.nostr.decentralized_pubsub_fanout,
+                    max_hops: config.nostr.decentralized_pubsub_max_hops,
+                },
             )
             .await
             .context("Failed to start decentralized Nostr pubsub over FIPS")?,
@@ -138,8 +143,11 @@ pub async fn start_daemon_nostr_pubsub(
 
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
     relay.set_decentralized_pubsub_sender(Some(outbound_tx));
-    let ingest_task = spawn_daemon_nostr_pubsub_ingest(Arc::clone(&mesh), Arc::clone(&relay));
-    let outbound_task = spawn_daemon_nostr_pubsub_outbound(Arc::clone(&mesh), outbound_rx);
+    let max_event_bytes = config.nostr.decentralized_pubsub_max_event_bytes;
+    let ingest_task =
+        spawn_daemon_nostr_pubsub_ingest(Arc::clone(&mesh), Arc::clone(&relay), max_event_bytes);
+    let outbound_task =
+        spawn_daemon_nostr_pubsub_outbound(Arc::clone(&mesh), outbound_rx, max_event_bytes);
 
     Ok(Some(Arc::new(DaemonNostrPubsubHandle {
         mesh,
@@ -158,16 +166,18 @@ fn daemon_decentralized_pubsub_ready(config: &Config, has_fips: bool, has_relay:
 fn spawn_daemon_nostr_pubsub_ingest(
     mesh: Arc<hashtree_fips_transport::FipsMeshPubsub<StorageRouter>>,
     relay: Arc<NostrRelay>,
+    max_event_bytes: usize,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let delivery = mesh.recv_pubsub_event().await;
             let stream_id = delivery.stream_id.clone();
             let origin_peer_id = delivery.origin_peer_id.clone();
-            match crate::nostr_pubsub::ingest_nostr_pubsub_payload(
+            match crate::nostr_pubsub::ingest_nostr_pubsub_payload_with_limit(
                 &relay,
                 &delivery.stream_id,
                 &delivery.payload,
+                max_event_bytes,
             )
             .await
             {
@@ -196,12 +206,20 @@ fn spawn_daemon_nostr_pubsub_ingest(
 fn spawn_daemon_nostr_pubsub_outbound(
     mesh: Arc<hashtree_fips_transport::FipsMeshPubsub<StorageRouter>>,
     mut outbound_rx: mpsc::UnboundedReceiver<nostr::Event>,
+    max_event_bytes: usize,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut seq = 1u64;
         while let Some(event) = outbound_rx.recv().await {
             let event_id = event.id.to_hex();
-            match crate::nostr_pubsub::publish_fips_nostr_event(mesh.as_ref(), seq, &event).await {
+            match crate::nostr_pubsub::publish_fips_nostr_event_with_limit(
+                mesh.as_ref(),
+                seq,
+                &event,
+                max_event_bytes,
+            )
+            .await
+            {
                 Ok(stats) => {
                     tracing::debug!(
                         event_id,
