@@ -139,6 +139,9 @@ pub struct FipsEndpointOptions {
     pub relays: Vec<String>,
     pub enable_udp: bool,
     pub enable_webrtc: bool,
+    /// Host-local Ethernet interfaces used as the only underlay when ordinary
+    /// network transports are disabled (for example, a browser VM virtio NIC).
+    pub ethernet_interfaces: Vec<String>,
     pub udp_bind_addr: Option<String>,
     pub udp_public: bool,
     pub udp_external_addr: Option<String>,
@@ -156,6 +159,7 @@ impl FipsEndpointOptions {
             relays: Vec::new(),
             enable_udp: true,
             enable_webrtc: true,
+            ethernet_interfaces: Vec::new(),
             udp_bind_addr: None,
             udp_public: false,
             udp_external_addr: None,
@@ -176,7 +180,7 @@ pub struct BoundFipsEndpoint {
 pub async fn bind_fips_endpoint(
     options: FipsEndpointOptions,
 ) -> Result<BoundFipsEndpoint, FipsTransportError> {
-    if !options.enable_udp && !options.enable_webrtc {
+    if !options.enable_udp && !options.enable_webrtc && options.ethernet_interfaces.is_empty() {
         return Err(FipsTransportError::Endpoint(
             "at least one FIPS transport must be enabled".to_string(),
         ));
@@ -188,13 +192,18 @@ pub async fn bind_fips_endpoint(
         options.discovery_scope.trim().to_string()
     };
     let packet_channel_capacity = options.packet_channel_capacity;
+    let ethernet_interfaces = options.ethernet_interfaces.clone();
     let config = fips_endpoint_config(options, &discovery_scope);
 
-    let endpoint = fips_core::FipsEndpoint::builder()
+    let mut builder = fips_core::FipsEndpoint::builder()
         .config(config)
         .discovery_scope(discovery_scope.clone())
         .without_system_tun()
-        .packet_channel_capacity(packet_channel_capacity)
+        .packet_channel_capacity(packet_channel_capacity);
+    for interface in ethernet_interfaces {
+        builder = builder.local_ethernet(interface);
+    }
+    let endpoint = builder
         .bind()
         .await
         .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
@@ -224,8 +233,10 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     config.dns.enabled = false;
     config.node.system_files_enabled = false;
     config.node.discovery.lan.scope = Some(discovery_scope.to_string());
-    config.node.discovery.nostr.enabled = true;
-    config.node.discovery.nostr.advertise = true;
+    let external_discovery =
+        options.enable_udp || options.enable_webrtc || !options.relays.is_empty();
+    config.node.discovery.nostr.enabled = external_discovery;
+    config.node.discovery.nostr.advertise = external_discovery;
     config.node.discovery.nostr.policy = if options.open_discovery_max_pending == 0 {
         NostrDiscoveryPolicy::ConfiguredOnly
     } else {
@@ -275,9 +286,9 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
         );
     }
 
-    // Some shared bootstrap peers expose tcp:443 for UDP-hostile networks.
-    // Binding stays disabled by default, so this is outbound-only.
-    config.transports.tcp = TransportInstances::Single(Default::default());
+    if options.enable_udp || options.enable_webrtc {
+        config.transports.tcp = TransportInstances::Single(Default::default());
+    }
 
     config
 }
@@ -1867,6 +1878,21 @@ mod tests {
         assert_eq!(config.node.limits.max_links, 18);
         assert_eq!(config.node.limits.max_connections, 18);
         assert_eq!(config.node.limits.max_pending_inbound, 36);
+    }
+
+    #[test]
+    fn ethernet_only_endpoint_has_no_external_discovery_or_fallback_transport() {
+        let mut options = FipsEndpointOptions::new("nsec1example");
+        options.enable_udp = false;
+        options.enable_webrtc = false;
+        options.ethernet_interfaces = vec!["eth0".to_string()];
+        let config = fips_endpoint_config(options, "fips-overlay-v1");
+
+        assert!(!config.node.discovery.nostr.enabled);
+        assert!(!config.node.discovery.nostr.advertise);
+        assert!(config.transports.udp.is_empty());
+        assert!(config.transports.webrtc.is_empty());
+        assert!(config.transports.tcp.is_empty());
     }
 
     #[test]

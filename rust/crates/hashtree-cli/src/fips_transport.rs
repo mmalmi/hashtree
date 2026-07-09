@@ -76,6 +76,7 @@ pub async fn start_daemon_fips_transport(
     options.relays = relays;
     options.enable_udp = config.server.enable_fips_udp;
     options.enable_webrtc = config.server.enable_fips_webrtc;
+    options.ethernet_interfaces = config.server.fips_ethernet_interfaces.clone();
     options.udp_bind_addr = config.server.fips_udp_bind_addr.clone();
     options.udp_public = config.server.fips_udp_public;
     options.udp_external_addr = config.server.fips_udp_external_addr.clone();

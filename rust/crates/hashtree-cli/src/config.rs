@@ -129,6 +129,9 @@ pub struct ServerConfig {
     /// Enable FIPS WebRTC endpoint transport.
     #[serde(default = "default_enable_fips_webrtc")]
     pub enable_fips_webrtc: bool,
+    /// Host-local Ethernet interfaces for FIPS endpoint transport.
+    #[serde(default)]
+    pub fips_ethernet_interfaces: Vec<String>,
     /// Allow daemon cache misses to fetch blobs from FIPS peers.
     #[serde(default = "default_fetch_from_fips_peers", alias = "http_fips_fetch")]
     pub fetch_from_fips_peers: bool,
@@ -794,6 +797,7 @@ impl Default for ServerConfig {
             fips_udp_public: false,
             fips_udp_external_addr: None,
             enable_fips_webrtc: default_enable_fips_webrtc(),
+            fips_ethernet_interfaces: Vec::new(),
             fetch_from_fips_peers: default_fetch_from_fips_peers(),
             fips_request_timeout_ms: default_fips_request_timeout_ms(),
             http_webrtc_fetch: default_http_webrtc_fetch(),
@@ -1542,6 +1546,7 @@ decentralized_pubsub_max_event_bytes = 4096
         assert!(!server.fips_udp_public);
         assert!(server.fips_udp_external_addr.is_none());
         assert_eq!(server.enable_fips_webrtc, cfg!(feature = "fips-webrtc"));
+        assert!(server.fips_ethernet_interfaces.is_empty());
         assert!(server.fetch_from_fips_peers);
         assert!(server.fips_relays.is_empty());
         assert!(server.fips_peers.is_empty());
@@ -1566,6 +1571,7 @@ fips_udp_bind_addr = "0.0.0.0:2121"
 fips_udp_public = true
 fips_udp_external_addr = "198.19.77.10:2121"
 enable_fips_webrtc = true
+fips_ethernet_interfaces = ["eth0"]
 fetch_from_fips_peers = false
 fips_request_timeout_ms = 42
 "#,
@@ -1599,6 +1605,7 @@ fips_request_timeout_ms = 42
             Some("198.19.77.10:2121")
         );
         assert!(config.server.enable_fips_webrtc);
+        assert_eq!(config.server.fips_ethernet_interfaces, ["eth0"]);
         assert!(!config.server.fetch_from_fips_peers);
         assert_eq!(config.server.fips_request_timeout_ms, 42);
     }
