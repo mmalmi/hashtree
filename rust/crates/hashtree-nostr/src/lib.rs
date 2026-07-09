@@ -876,7 +876,7 @@ impl<S: Store> NostrEventStore<S> {
         if events.is_empty() {
             return Ok(root.cloned());
         }
-        events = retain_latest_replaceable_events(events);
+        events = retain_unique_latest_events(events);
         events.sort_by(|left, right| match compare_events(left, right) {
             x if x < 0 => std::cmp::Ordering::Less,
             x if x > 0 => std::cmp::Ordering::Greater,
@@ -1986,11 +1986,15 @@ fn compare_events(left: &StoredNostrEvent, right: &StoredNostrEvent) -> i8 {
     }
 }
 
-fn retain_latest_replaceable_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostrEvent> {
+fn retain_unique_latest_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostrEvent> {
     let mut winners = BTreeMap::<(ReplaceableSlot, String), StoredNostrEvent>::new();
+    let mut seen_ids = HashSet::new();
     let mut plain = Vec::new();
 
     for event in events {
+        if !seen_ids.insert(event.id.clone()) {
+            continue;
+        }
         let slot = if is_replaceable_kind(event.kind) {
             Some((
                 ReplaceableSlot::Replaceable,

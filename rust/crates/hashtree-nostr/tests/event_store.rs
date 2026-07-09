@@ -990,6 +990,34 @@ fn build_sorts_events_deterministically() {
 }
 
 #[test]
+fn build_deduplicates_non_replaceable_events_within_batch() {
+    block_on(async {
+        let store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let author = "a".repeat(64);
+        let seed = canonical_store_event(&author, 10, 1, Vec::new(), "seed");
+        let duplicate = canonical_store_event(&author, 20, 1, Vec::new(), "duplicate");
+        let root = store
+            .build(None, vec![seed])
+            .await
+            .unwrap()
+            .expect("seed root");
+
+        let single = store
+            .build(Some(&root), vec![duplicate.clone()])
+            .await
+            .unwrap()
+            .expect("single event root");
+        let duplicated = store
+            .build(Some(&root), vec![duplicate.clone(), duplicate])
+            .await
+            .unwrap()
+            .expect("deduplicated event root");
+
+        assert_eq!(cid_to_pair(&duplicated), cid_to_pair(&single));
+    });
+}
+
+#[test]
 fn stale_replaceable_events_do_not_remain_in_general_indexes() {
     block_on(async {
         let backing = Arc::new(MemoryStore::new());
