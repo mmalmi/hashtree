@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.77 - 2026-07-09
+
+### Changed
+
+- Added normal Nostr-filter import, query, and local-relay replay for stored
+  event indexes, including signed rating facts.
+- Added feature-gated decentralized Nostr pubsub over FIPS with bounded caches
+  and subscription-routed inventory adverts.
+
+### Fixed
+
+- Closed failed, duplicate, replaced, and timed-out FIPS WebRTC sessions so
+  repeated inbound offers cannot leak ICE sockets or drive an mDNS CPU loop.
+- Deduplicated non-replaceable Nostr events within one index batch, preventing
+  repeated relay events from failing derived-index updates.
+
 ## 0.2.76 - 2026-06-29
 
 ### Fixed
