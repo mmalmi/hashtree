@@ -3,7 +3,7 @@
 //! This starts `fips_core::FipsEndpoint` inside the htree process; it does not
 //! depend on or talk to an external FIPS daemon.
 
-use crate::config::Config;
+use crate::config::{Config, NostrEventTransport};
 #[cfg(feature = "experimental-decentralized-pubsub")]
 use crate::nostr_relay::NostrRelay;
 use crate::storage::{HashtreeStore, StorageRouter};
@@ -27,6 +27,7 @@ pub struct DaemonFipsHandle {
     pub transport: Arc<DaemonFipsTransport>,
     pub endpoint_npub: String,
     pub discovery_scope: String,
+    pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,
     receiver_task: JoinHandle<()>,
 }
 
@@ -89,6 +90,22 @@ pub async fn start_daemon_fips_transport(
         .context("Failed to start FIPS endpoint")?;
 
     let request_timeout = Duration::from_millis(config.server.fips_request_timeout_ms.max(1));
+    let nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>> =
+        if config.nostr.event_transport == NostrEventTransport::FipsLocalOnly {
+            let options = nostr_pubsub_fips::FipsPubsubClientOptions {
+                query_timeout: request_timeout,
+                ..Default::default()
+            };
+            let client = nostr_pubsub_fips::FipsPubsubClient::start(
+                endpoint.native_endpoint.clone(),
+                options,
+            )
+            .await
+            .context("Failed to start local-only FIPS Nostr pubsub provider")?;
+            Some(Arc::new(client))
+        } else {
+            None
+        };
     let transport = Arc::new(
         HashtreeFipsTransport::new(endpoint.endpoint, store.store_arc())
             .with_request_timeout(request_timeout)
@@ -104,8 +121,38 @@ pub async fn start_daemon_fips_transport(
         transport,
         endpoint_npub: endpoint.local_peer_id,
         discovery_scope: endpoint.discovery_scope,
+        nostr_provider,
         receiver_task,
     }))
+}
+
+pub async fn start_daemon_nostr_provider(
+    config: &Config,
+    fips_handle: Option<&DaemonFipsHandle>,
+) -> Result<Option<Arc<dyn nostr_pubsub::PubsubProvider>>> {
+    match config.nostr.event_transport {
+        NostrEventTransport::Relay => {
+            let relays = config.nostr.active_relays();
+            if relays.is_empty() {
+                return Ok(None);
+            }
+            let event_bus = nostr_pubsub_relay::RelayEventBus::new(
+                relays,
+                Duration::from_millis(config.server.fips_request_timeout_ms.max(1)),
+            )
+            .await
+            .context("Failed to start Nostr relay event provider")?;
+            Ok(Some(Arc::new(event_bus)))
+        }
+        NostrEventTransport::FipsLocalOnly => fips_handle
+            .and_then(|handle| handle.nostr_provider.clone())
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "nostr.event_transport=fips-local-only requires the local FIPS Nostr pubsub provider"
+                )
+            }),
+    }
 }
 
 #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -320,6 +367,20 @@ mod tests {
             normalized_discovery_scope("  "),
             DEFAULT_FIPS_DISCOVERY_SCOPE.to_string()
         );
+    }
+
+    #[tokio::test]
+    async fn fips_local_only_event_transport_requires_local_provider() {
+        let mut config = Config::default();
+        config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
+
+        let error = start_daemon_nostr_provider(&config, None)
+            .await
+            .err()
+            .expect("missing local FIPS provider must fail");
+
+        assert!(error.to_string().contains("fips-local-only"));
+        assert!(error.to_string().contains("requires"));
     }
 
     #[test]

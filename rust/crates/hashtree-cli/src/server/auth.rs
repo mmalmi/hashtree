@@ -329,6 +329,8 @@ pub struct AppState {
     pub socialgraph_snapshot_public: bool,
     /// Nostr relay state for /ws and WebRTC Nostr messages
     pub nostr_relay: Option<Arc<NostrRelay>>,
+    /// Selected provider for Hashtree Nostr root/site lookup and publication.
+    pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,
     /// Active upstream Nostr relays for HTTP resolver operations.
     pub nostr_relay_urls: Vec<String>,
     /// In-process cache for resolved mutable tree roots, keyed by npub/tree(+key)

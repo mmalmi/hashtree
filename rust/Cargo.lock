@@ -3032,7 +3032,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.3.81"
+version = "0.3.82"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6260e4b5c51ff2c53f8061e1092c4d3fe8d50db139d04079ed1e7c7a58cf0e0"
 dependencies = [
  "bluer",
  "bytes",
@@ -3072,6 +3074,8 @@ dependencies = [
 [[package]]
 name = "fips-identity"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e143619aebf9db3129c1d2de67ba223bcf611216efa09a932c98a617e3e4a42b"
 dependencies = [
  "bech32",
  "hex",
@@ -3873,6 +3877,9 @@ dependencies = [
  "libc",
  "lru 0.12.5",
  "nostr",
+ "nostr-pubsub",
+ "nostr-pubsub-fips",
+ "nostr-pubsub-relay",
  "nostr-sdk",
  "nostr-social-graph",
  "nostr-social-graph-heed",
@@ -5512,13 +5519,39 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.1"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "756f09ce6a9963cc0654f6feaea8b640ba693d260ff965f8d7b78b1b293bb4d0"
+checksum = "b2650ba24f43a5f51cda05b7521766fcc3083efc64a69b2fd0edaf62d7dfd443"
 dependencies = [
  "async-trait",
  "nostr",
+ "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nostr-pubsub-fips"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "147af01377176dce991aa9e3c8c5ee54337816fa8905354a9f96f93046b0510f"
+dependencies = [
+ "async-trait",
+ "fips-core",
+ "nostr-pubsub",
+ "tokio",
+]
+
+[[package]]
+name = "nostr-pubsub-relay"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f24099cb43e456ab17344aa8e26f5cbfa7b9db2542697d984af0218cd1b0df2d"
+dependencies = [
+ "async-trait",
+ "nostr-pubsub",
+ "nostr-sdk",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

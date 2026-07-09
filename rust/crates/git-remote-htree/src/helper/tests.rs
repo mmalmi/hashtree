@@ -1071,6 +1071,13 @@ fn test_capabilities() {
 }
 
 #[test]
+fn test_local_daemon_only_disables_helper_relay_retry() {
+    assert!(should_retry_local_daemon_fetch_failure(true, false));
+    assert!(!should_retry_local_daemon_fetch_failure(true, true));
+    assert!(!should_retry_local_daemon_fetch_failure(false, false));
+}
+
+#[test]
 fn test_handle_capabilities_command() {
     let Some(mut helper) = create_test_helper() else {
         return;

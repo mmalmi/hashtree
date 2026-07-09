@@ -103,9 +103,10 @@ pub struct ServerConfig {
     #[serde(default = "default_fips_discovery_scope")]
     pub fips_discovery_scope: String,
     /// FIPS Nostr relays used for discovery adverts and encrypted signaling.
-    /// Empty means use active [nostr].relays, then FIPS built-in defaults.
+    /// Unset uses active [nostr].relays plus FIPS defaults; an explicit empty
+    /// list disables relay discovery.
     #[serde(default)]
-    pub fips_relays: Vec<String>,
+    pub fips_relays: Option<Vec<String>>,
     /// Always-configured Hashtree FIPS peers. These are useful for origin/cache
     /// pairs that should connect immediately without waiting for discovery.
     #[serde(
@@ -206,12 +207,11 @@ fn default_socialgraph_snapshot_public() -> bool {
 
 impl ServerConfig {
     pub fn resolved_fips_relays(&self, active_nostr_relays: &[String]) -> Vec<String> {
-        let configured = if self.fips_relays.is_empty() {
-            active_nostr_relays
-        } else {
-            &self.fips_relays
-        };
-        merge_fips_signal_relays(configured)
+        match &self.fips_relays {
+            Some(relays) if relays.is_empty() => Vec::new(),
+            Some(relays) => merge_fips_signal_relays(relays),
+            None => merge_fips_signal_relays(active_nostr_relays),
+        }
     }
 }
 
@@ -274,12 +274,23 @@ fn default_s3_region() -> String {
     "auto".to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NostrEventTransport {
+    #[default]
+    Relay,
+    FipsLocalOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NostrConfig {
     #[serde(default = "default_nostr_enabled")]
     pub enabled: bool,
     #[serde(default = "default_relays")]
     pub relays: Vec<String>,
+    /// Provider used for Hashtree root/site event lookup and publication.
+    #[serde(default)]
+    pub event_transport: NostrEventTransport,
     /// List of npubs allowed to write (blossom uploads). If empty, uses public_writes setting.
     #[serde(default)]
     pub allowed_npubs: Vec<String>,
@@ -422,7 +433,7 @@ impl BlossomConfig {
 
 impl NostrConfig {
     pub fn active_relays(&self) -> Vec<String> {
-        if self.enabled {
+        if self.enabled && self.event_transport == NostrEventTransport::Relay {
             self.relays.clone()
         } else {
             Vec::new()
@@ -479,7 +490,7 @@ fn default_optimistic_uploads() -> bool {
 }
 
 fn default_replicate_queue_mb() -> u64 {
-    512
+    256
 }
 
 fn default_nostr_enabled() -> bool {
@@ -790,7 +801,7 @@ impl Default for ServerConfig {
             enable_webrtc: default_enable_webrtc(),
             enable_fips: default_enable_fips(),
             fips_discovery_scope: default_fips_discovery_scope(),
-            fips_relays: Vec::new(),
+            fips_relays: None,
             fips_peers: Vec::new(),
             enable_fips_udp: default_enable_fips_udp(),
             fips_udp_bind_addr: None,
@@ -833,6 +844,7 @@ impl Default for NostrConfig {
         Self {
             enabled: default_nostr_enabled(),
             relays: default_relays(),
+            event_transport: NostrEventTransport::default(),
             allowed_npubs: Vec::new(),
             socialgraph_root: None,
             bootstrap_follows: default_nostr_bootstrap_follows(),
@@ -1170,7 +1182,7 @@ mod tests {
         assert!(config.blossom.enabled);
         assert!(!config.blossom.optimistic_uploads);
         assert!(config.blossom.replicate_servers.is_empty());
-        assert_eq!(config.blossom.replicate_queue_mb, 512);
+        assert_eq!(config.blossom.replicate_queue_mb, 256);
         assert_eq!(config.nostr.social_graph_crawl_depth, 2);
         assert_eq!(config.nostr.mirror_max_follow_distance, None);
         assert_eq!(config.nostr.max_write_distance, 3);
@@ -1490,6 +1502,17 @@ chunk_target_bytes = 65536
     }
 
     #[test]
+    fn fips_local_only_event_transport_never_exposes_direct_relays() {
+        let nostr = NostrConfig {
+            relays: vec!["wss://must-not-open.example".to_string()],
+            event_transport: NostrEventTransport::FipsLocalOnly,
+            ..NostrConfig::default()
+        };
+
+        assert!(nostr.active_relays().is_empty());
+    }
+
+    #[test]
     fn nostr_decentralized_pubsub_requires_config_and_feature() {
         let default_nostr = NostrConfig::default();
         assert!(!default_nostr.decentralized_pubsub);
@@ -1548,7 +1571,7 @@ decentralized_pubsub_max_event_bytes = 4096
         assert_eq!(server.enable_fips_webrtc, cfg!(feature = "fips-webrtc"));
         assert!(server.fips_ethernet_interfaces.is_empty());
         assert!(server.fetch_from_fips_peers);
-        assert!(server.fips_relays.is_empty());
+        assert!(server.fips_relays.is_none());
         assert!(server.fips_peers.is_empty());
         assert_eq!(server.fips_discovery_scope, "hashtree-v1");
         assert_eq!(server.fips_request_timeout_ms, 5_500);
@@ -1580,7 +1603,10 @@ fips_request_timeout_ms = 42
 
         assert!(config.server.enable_fips);
         assert_eq!(config.server.fips_discovery_scope, "test-hashtree");
-        assert_eq!(config.server.fips_relays, ["wss://fips.example"]);
+        assert_eq!(
+            config.server.fips_relays,
+            Some(vec!["wss://fips.example".to_string()])
+        );
         assert_eq!(
             config.server.fips_peers,
             [
@@ -1637,7 +1663,7 @@ http_fips_fetch = false
             ]
         );
 
-        server.fips_relays = vec!["wss://fips.example".to_string()];
+        server.fips_relays = Some(vec!["wss://fips.example".to_string()]);
         assert_eq!(
             server.resolved_fips_relays(&["wss://ignored.example".to_string()]),
             [
@@ -1651,11 +1677,11 @@ http_fips_fetch = false
     #[test]
     fn fips_relay_resolution_dedupes_bootstrap_relays() {
         let mut server = ServerConfig::default();
-        server.fips_relays = vec![
+        server.fips_relays = Some(vec![
             "wss://temp.iris.to/".to_string(),
             " wss://relay.primal.net ".to_string(),
             "wss://extra.example".to_string(),
-        ];
+        ]);
 
         assert_eq!(
             server.resolved_fips_relays(&[]),
@@ -1665,5 +1691,35 @@ http_fips_fetch = false
                 "wss://extra.example"
             ]
         );
+    }
+
+    #[test]
+    fn explicit_empty_fips_relays_disable_all_relay_discovery() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+enable_fips = true
+enable_fips_udp = false
+enable_fips_webrtc = false
+fips_ethernet_interfaces = ["eth0"]
+fips_relays = []
+
+[nostr]
+relays = ["wss://must-not-open.example"]
+event_transport = "fips-local-only"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.server.fips_relays, Some(Vec::new()));
+        assert_eq!(
+            config.nostr.event_transport,
+            NostrEventTransport::FipsLocalOnly
+        );
+        assert!(config.nostr.active_relays().is_empty());
+        assert!(config
+            .server
+            .resolved_fips_relays(&config.nostr.active_relays())
+            .is_empty());
     }
 }

@@ -84,6 +84,195 @@ fn test_new_client_uses_passed_blossom_config() {
 }
 
 #[test]
+fn test_local_daemon_only_requires_a_configured_daemon() {
+    let mut config = test_config();
+    config.server.bind_address = "127.0.0.1:0".to_string();
+    config.blossom.servers.clear();
+    config.blossom.read_servers.clear();
+    config.blossom.write_servers.clear();
+
+    let err = match NostrClient::new_with_local_daemon_only(
+        TEST_PUBKEY,
+        None,
+        None,
+        false,
+        &config,
+        true,
+    ) {
+        Ok(_) => panic!("strict mode must require a local daemon"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("HTREE_LOCAL_DAEMON_ONLY"));
+    assert!(err.to_string().contains("running local htree daemon"));
+}
+
+#[tokio::test]
+async fn test_local_daemon_only_keeps_root_and_data_requests_local() {
+    use axum::{
+        extract::{Path, State},
+        http::StatusCode,
+        routing::get,
+        Json, Router,
+    };
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let local_requests = Arc::new(AtomicUsize::new(0));
+    let local_app = Router::new()
+        .route(
+            "/api/nostr/resolve/:pubkey/:treename",
+            get(
+                |State(requests): State<Arc<AtomicUsize>>,
+                 Path((_pubkey, _treename)): Path<(String, String)>| async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "hash": "ab".repeat(32),
+                        "source": "local-relay",
+                    }))
+                },
+            ),
+        )
+        .fallback(get(|State(requests): State<Arc<AtomicUsize>>| async move {
+            requests.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NOT_FOUND
+        }))
+        .with_state(Arc::clone(&local_requests));
+    let local_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let _ = axum::serve(local_listener, local_app).await;
+    });
+
+    let public_requests = Arc::new(AtomicUsize::new(0));
+    let public_app = Router::new()
+        .fallback(get(|State(requests): State<Arc<AtomicUsize>>| async move {
+            requests.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NOT_FOUND
+        }))
+        .with_state(Arc::clone(&public_requests));
+    let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public_listener.local_addr().unwrap();
+    let public_server = tokio::spawn(async move {
+        let _ = axum::serve(public_listener, public_app).await;
+    });
+
+    let local_url = format!("http://{local_addr}");
+    let public_url = format!("http://{public_addr}");
+    let mut config = test_config();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.nostr.relays = vec![format!("ws://{public_addr}")];
+    config.blossom.servers.clear();
+    config.blossom.read_servers = vec![local_url.clone(), public_url];
+    config.blossom.write_servers = vec![format!("http://{public_addr}")];
+
+    let mut client =
+        NostrClient::new_with_local_daemon_only(TEST_PUBKEY, None, None, false, &config, true)
+            .unwrap();
+    assert!(client.local_daemon_only());
+    assert!(client.relays.is_empty());
+    assert_eq!(client.blossom.read_servers(), &[local_url.clone()]);
+    assert_eq!(client.blossom.write_servers(), &[local_url]);
+
+    let err = tokio::task::spawn_blocking(move || client.fetch_refs_with_root("repo"))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(err.to_string().contains("local-daemon-only"));
+    assert!(err.to_string().contains("fallback disabled"));
+    assert!(local_requests.load(Ordering::SeqCst) >= 2);
+    assert_eq!(public_requests.load(Ordering::SeqCst), 0);
+
+    local_server.abort();
+    public_server.abort();
+}
+
+#[tokio::test]
+async fn test_local_daemon_only_publishes_signed_root_through_daemon_only() {
+    use axum::{extract::State, http::StatusCode, routing::get, routing::post, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    let published = Arc::new(Mutex::new(None::<Event>));
+    let local_app =
+        Router::new()
+            .route(
+                "/api/nostr/events",
+                post(
+                    |State(published): State<Arc<Mutex<Option<Event>>>>,
+                     Json(event): Json<Event>| async move {
+                        *published.lock().unwrap() = Some(event);
+                        StatusCode::ACCEPTED
+                    },
+                ),
+            )
+            .fallback(
+                get(|| async { StatusCode::NOT_FOUND }).post(|| async { StatusCode::NOT_FOUND }),
+            )
+            .with_state(Arc::clone(&published));
+    let local_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let _ = axum::serve(local_listener, local_app).await;
+    });
+
+    let public_requests = Arc::new(AtomicUsize::new(0));
+    let public_app = Router::new()
+        .fallback(get(|State(requests): State<Arc<AtomicUsize>>| async move {
+            requests.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NOT_FOUND
+        }))
+        .with_state(Arc::clone(&public_requests));
+    let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public_listener.local_addr().unwrap();
+    let public_server = tokio::spawn(async move {
+        let _ = axum::serve(public_listener, public_app).await;
+    });
+
+    let keys = Keys::generate();
+    let mut config = test_config();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.nostr.relays = vec![format!("ws://{public_addr}")];
+    config.blossom.servers.clear();
+    config.blossom.read_servers = vec![format!("http://{local_addr}")];
+    config.blossom.write_servers = vec![format!("http://{public_addr}")];
+    let client = NostrClient::new_with_local_daemon_only(
+        &keys.public_key().to_hex(),
+        Some(hex::encode(keys.secret_key().to_secret_bytes())),
+        None,
+        false,
+        &config,
+        true,
+    )
+    .unwrap();
+
+    let result =
+        tokio::task::spawn_blocking(move || client.publish_repo("site", &"ab".repeat(32), None))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(result.1.configured.is_empty());
+    assert!(result.1.connected.is_empty());
+    let event = published.lock().unwrap().clone().expect("published event");
+    event.verify().unwrap();
+    assert_eq!(event.kind, Kind::Custom(KIND_HASHTREE_ROOT));
+    assert!(event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().is_some_and(|value| value == "d")
+            && values.get(1).is_some_and(|value| value == "site")
+    }));
+    assert_eq!(public_requests.load(Ordering::SeqCst), 0);
+
+    local_server.abort();
+    public_server.abort();
+}
+
+#[test]
 fn test_fetch_refs_empty() {
     let config = test_config();
     let client = NostrClient::new(TEST_PUBKEY, None, None, false, &config).unwrap();

@@ -4,29 +4,11 @@ use super::{list_directory_with_fetch, resolve_path_with_fetch};
 use crate::webrtc::{build_root_filter, pick_latest_event, root_event_from_peer, PeerRootEvent};
 use anyhow::Result;
 use hashtree_core::{from_hex, to_hex, Cid, HashTree, LinkType, Store, TreeEntry};
-use hashtree_resolver::nostr::NostrRootResolver;
-use hashtree_resolver::RootResolver;
+use nostr_pubsub::EventSourceKind;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const TREE_ROOT_CACHE_FRESH_TTL: Duration = Duration::from_secs(60);
-
-pub(super) async fn resolve_npub_root(
-    key: &str,
-    resolver: &NostrRootResolver,
-    share_secret: Option<[u8; 32]>,
-) -> Result<Cid, hashtree_resolver::ResolverError> {
-    if let Some(secret) = share_secret {
-        loop {
-            if let Some(cid) = resolver.resolve_shared(key, &secret).await? {
-                return Ok(cid);
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
-
-    resolver.resolve_wait(key).await
-}
 
 #[derive(Clone)]
 pub(super) struct ResolvedRoot {
@@ -60,14 +42,10 @@ pub(super) async fn resolve_root_from_nostr_relays(
     let query = query_events_for_local_request(state, &filter, 50).await;
     let events = query.merged_events(50);
     let latest = pick_latest_event(events.iter())?;
-    let source = if query
-        .upstream_events
-        .iter()
-        .any(|event| event.id == latest.id)
-    {
-        "nostr-relay"
-    } else {
-        "local-relay"
+    let source = match query.upstream_source(&latest.id) {
+        Some(EventSourceKind::FipsEndpoint | EventSourceKind::Peer) => "fips-pubsub",
+        Some(EventSourceKind::Relay) => "nostr-relay",
+        Some(EventSourceKind::LocalIndex) | None => "local-relay",
     };
     Some(NostrResolvedRootEvent {
         source,
@@ -155,6 +133,14 @@ pub(super) async fn resolve_root_without_cache(
         }
     }
 
+    if state
+        .nostr_provider
+        .as_ref()
+        .is_some_and(|provider| provider.mode() == nostr_pubsub::PubsubProviderMode::LocalOnly)
+    {
+        return None;
+    }
+
     if let Some(ref webrtc_state) = state.webrtc_peers {
         if let Some((source, root)) = webrtc_state
             .resolve_root_from_local_buses_with_source(pubkey, treename, Duration::from_secs(2))
@@ -209,16 +195,6 @@ pub(super) fn tree_root_cache_key(
         Some(key) => format!("{}/{}?k={}", npub, treename, to_hex(&key)),
         None => format!("{}/{}", npub, treename),
     }
-}
-
-pub(super) fn cache_public_tree_root(state: &AppState, npub: &str, treename: &str, cid: &Cid) {
-    put_cached_tree_root(
-        state,
-        cache_tree_root_key(npub, treename, Some("public"), cid.key),
-        cid.clone(),
-        "nostr",
-        None,
-    );
 }
 
 pub(super) fn query_flag(params: &HashMap<String, String>, name: &str) -> bool {

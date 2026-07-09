@@ -642,8 +642,12 @@ pub(crate) async fn run() -> Result<()> {
 
             // Combine legacy servers with configured public read servers.
             let upstream_blossom = config.blossom.all_read_servers();
-            let blossom_replica_queue_bytes =
-                (config.blossom.replicate_queue_mb.max(1) as usize) * 1024 * 1024;
+            let blossom_replica_queue_bytes = hashtree_cli::server::bounded_upload_queue_bytes(
+                config
+                    .blossom
+                    .replicate_queue_mb
+                    .saturating_mul(1024 * 1024),
+            );
             let active_nostr_relays = config.nostr.active_relays();
             let active_nostr_relay_count = active_nostr_relays.len();
             let fips_handle = hashtree_cli::fips_transport::start_daemon_fips_transport(
@@ -651,6 +655,11 @@ pub(crate) async fn run() -> Result<()> {
                 &keys,
                 Arc::clone(&store),
                 fips_peer_ids,
+            )
+            .await?;
+            let nostr_provider = hashtree_cli::fips_transport::start_daemon_nostr_provider(
+                &config,
+                fips_handle.as_ref(),
             )
             .await?;
             #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -693,6 +702,9 @@ pub(crate) async fn run() -> Result<()> {
             );
             if let Some(nostr_relay) = nostr_relay.clone() {
                 server = server.with_nostr_relay(nostr_relay);
+            }
+            if let Some(provider) = nostr_provider {
+                server = server.with_nostr_provider(provider);
             }
 
             // Add WebRTC peer state for P2P queries from HTTP handler

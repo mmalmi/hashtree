@@ -345,6 +345,8 @@ pub struct NostrClient {
     is_private: bool,
     /// Local htree daemon URL for peer-assisted root discovery
     local_daemon_url: Option<String>,
+    /// Require all root and blob reads to use the local daemon.
+    local_daemon_only: bool,
     #[cfg(test)]
     forced_fetch_refs_results: std::collections::VecDeque<Result<FetchedRefs, String>>,
 }
@@ -389,6 +391,32 @@ impl NostrClient {
         is_private: bool,
         config: &Config,
     ) -> Result<Self> {
+        let local_daemon_only = std::env::var("HTREE_LOCAL_DAEMON_ONLY")
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "" | "0" | "false" | "no" | "off"
+                )
+            })
+            .unwrap_or(false);
+        Self::new_with_local_daemon_only(
+            pubkey,
+            secret_key,
+            url_secret,
+            is_private,
+            config,
+            local_daemon_only,
+        )
+    }
+
+    fn new_with_local_daemon_only(
+        pubkey: &str,
+        secret_key: Option<String>,
+        url_secret: Option<[u8; 32]>,
+        is_private: bool,
+        config: &Config,
+        local_daemon_only: bool,
+    ) -> Result<Self> {
         // Ensure rustls has a process-wide crypto provider even when used as a library (tests).
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -405,20 +433,46 @@ impl NostrClient {
             None
         };
 
+        let detected_local_daemon =
+            hashtree_config::detect_local_daemon_url(Some(config.server.bind_address.as_str()));
+        let local_daemon_url = detected_local_daemon.clone().or_else(|| {
+            config
+                .blossom
+                .read_servers
+                .iter()
+                .find(|url| {
+                    url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")
+                })
+                .cloned()
+        });
+        if local_daemon_only && local_daemon_url.is_none() {
+            anyhow::bail!(
+                "HTREE_LOCAL_DAEMON_ONLY requires a running local htree daemon at {}",
+                config.server.bind_address
+            );
+        }
+
         // Create BlossomClient (needs keys for upload auth) from the resolved
         // config passed by the helper instead of reloading defaults from disk.
         let blossom_keys = keys.clone().unwrap_or_else(Keys::generate);
-        let mut read_servers = config.blossom.all_read_servers();
-        if let Some(local_url) =
-            hashtree_config::detect_local_daemon_url(Some(config.server.bind_address.as_str()))
-        {
+        let mut read_servers = if local_daemon_only {
+            vec![local_daemon_url.clone().expect("checked above")]
+        } else {
+            config.blossom.all_read_servers()
+        };
+        if let Some(local_url) = detected_local_daemon {
             if !read_servers.iter().any(|server| server == &local_url) {
                 read_servers.insert(0, local_url);
             }
         }
+        let write_servers = if local_daemon_only {
+            vec![local_daemon_url.clone().expect("checked above")]
+        } else {
+            config.blossom.all_write_servers()
+        };
         let blossom = BlossomClient::new_empty(blossom_keys)
             .with_read_servers(read_servers)
-            .with_write_servers(config.blossom.all_write_servers())
+            .with_write_servers(write_servers)
             .with_timeout(Duration::from_secs(120));
 
         tracing::info!(
@@ -427,23 +481,14 @@ impl NostrClient {
             blossom.write_servers()
         );
 
-        let relays = hashtree_config::resolve_relays(
-            &config.nostr.relays,
-            Some(config.server.bind_address.as_str()),
-        );
-        let local_daemon_url =
-            hashtree_config::detect_local_daemon_url(Some(config.server.bind_address.as_str()))
-                .or_else(|| {
-                    config
-                        .blossom
-                        .read_servers
-                        .iter()
-                        .find(|url| {
-                            url.starts_with("http://127.0.0.1:")
-                                || url.starts_with("http://localhost:")
-                        })
-                        .cloned()
-                });
+        let relays = if local_daemon_only {
+            Vec::new()
+        } else {
+            hashtree_config::resolve_relays(
+                &config.nostr.relays,
+                Some(config.server.bind_address.as_str()),
+            )
+        };
 
         Ok(Self {
             pubkey: pubkey.to_string(),
@@ -457,6 +502,7 @@ impl NostrClient {
             url_secret,
             is_private,
             local_daemon_url,
+            local_daemon_only,
             #[cfg(test)]
             forced_fetch_refs_results: std::collections::VecDeque::new(),
         })
@@ -707,7 +753,19 @@ impl NostrClient {
             Ok(fetched) => Ok(fetched),
             Err(err)
                 if resolved.source == Some(RootResolveSource::LocalDaemon)
-                    && allow_local_daemon =>
+                    && allow_local_daemon
+                    && self.local_daemon_only =>
+            {
+                Err(err).with_context(|| {
+                    format!(
+                        "local-daemon-only fetch for {repo_name} failed; relay/Blossom fallback disabled"
+                    )
+                })
+            }
+            Err(err)
+                if resolved.source == Some(RootResolveSource::LocalDaemon)
+                    && allow_local_daemon
+                    && !self.local_daemon_only =>
             {
                 warn!(
                     "Local daemon root for {} could not be read as a valid git tree: {}. Retrying via relays.",
@@ -956,6 +1014,24 @@ impl NostrClient {
         timeout_secs: u64,
         allow_local_daemon: bool,
     ) -> Result<ResolvedRoot> {
+        let local_daemon_timeout = Duration::from_secs(4);
+        if self.local_daemon_only {
+            if !allow_local_daemon {
+                anyhow::bail!(
+                    "local-daemon-only root lookup for {repo_name} failed; relay fallback disabled"
+                );
+            }
+            let root_data = self
+                .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "local-daemon-only root lookup returned no root for {repo_name}; relay fallback disabled"
+                    )
+                })?;
+            return self.finish_resolved_root(repo_name, root_data);
+        }
+
         // Create nostr-sdk client
         let client = Client::default();
 
@@ -971,7 +1047,6 @@ impl NostrClient {
 
         let connect_timeout = Duration::from_secs(2);
         let query_timeout = Duration::from_secs(timeout_secs.saturating_sub(2).max(3));
-        let local_daemon_timeout = Duration::from_secs(4);
         let retry_delay = Duration::from_millis(300);
         let max_attempts = 2;
 
@@ -1136,6 +1211,14 @@ impl NostrClient {
             }
         };
 
+        self.finish_resolved_root(repo_name, root_data)
+    }
+
+    fn finish_resolved_root(
+        &self,
+        repo_name: &str,
+        root_data: RootEventData,
+    ) -> Result<ResolvedRoot> {
         let root_hash = root_data.root_hash;
 
         if root_hash.is_empty() {
@@ -1526,6 +1609,10 @@ impl NostrClient {
         self.cached_root_source.get(repo_name) == Some(&RootResolveSource::LocalDaemon)
     }
 
+    pub(crate) fn local_daemon_only(&self) -> bool {
+        self.local_daemon_only
+    }
+
     /// Get the Blossom client for direct downloads
     pub fn blossom(&self) -> &BlossomClient {
         &self.blossom
@@ -1603,6 +1690,12 @@ impl NostrClient {
         encryption_key: Option<(&[u8; 32], bool, bool)>,
         repo_announcement: Option<RepoAnnouncementOptions>,
     ) -> Result<(String, RelayResult)> {
+        if self.local_daemon_only {
+            return self
+                .publish_repo_to_local_daemon(keys, repo_name, root_hash, encryption_key)
+                .await;
+        }
+
         // Create nostr-sdk client with our keys
         let client = Client::new(keys.clone());
 
@@ -1758,6 +1851,96 @@ impl NostrClient {
                 failed,
             },
         ))
+    }
+
+    async fn publish_repo_to_local_daemon(
+        &self,
+        keys: &Keys,
+        repo_name: &str,
+        root_hash: &str,
+        encryption_key: Option<(&[u8; 32], bool, bool)>,
+    ) -> Result<(String, RelayResult)> {
+        let existing_created_at = self
+            .fetch_root_from_local_daemon(repo_name, Duration::from_secs(2))
+            .await
+            .and_then(|root| root.event_created_at)
+            .map(Timestamp::from_secs);
+        let mut tags = vec![
+            Tag::custom(TagKind::custom("d"), vec![repo_name.to_string()]),
+            Tag::custom(TagKind::custom("l"), vec![LABEL_HASHTREE.to_string()]),
+            Tag::custom(TagKind::custom("hash"), vec![root_hash.to_string()]),
+        ];
+        if let Some((key, is_link_visible, is_self_private)) = encryption_key {
+            if is_self_private {
+                let key_hex = hex::encode(key);
+                let encrypted = nip44::encrypt(
+                    keys.secret_key(),
+                    &keys.public_key(),
+                    &key_hex,
+                    nip44::Version::V2,
+                )
+                .map_err(|error| anyhow::anyhow!("NIP-44 encryption failed: {error}"))?;
+                tags.push(Tag::custom(
+                    TagKind::custom("selfEncryptedKey"),
+                    vec![encrypted],
+                ));
+            } else if is_link_visible {
+                tags.push(Tag::custom(
+                    TagKind::custom("encryptedKey"),
+                    vec![hex::encode(key)],
+                ));
+            } else {
+                tags.push(Tag::custom(TagKind::custom("key"), vec![hex::encode(key)]));
+            }
+        }
+        append_repo_discovery_labels(&mut tags, repo_name);
+        let event = EventBuilder::new(Kind::Custom(KIND_HASHTREE_ROOT), root_hash)
+            .tags(tags)
+            .custom_created_at(next_replaceable_created_at(
+                Timestamp::now(),
+                existing_created_at,
+            ))
+            .sign_with_keys(keys)
+            .map_err(|error| anyhow::anyhow!("Failed to sign event: {error}"))?;
+        self.publish_event_to_local_daemon(&event).await?;
+        self.cache_public_root_in_local_daemon(repo_name, root_hash, encryption_key)
+            .await;
+
+        let npub_url = keys
+            .public_key()
+            .to_bech32()
+            .map(|npub| format!("htree://{npub}/{repo_name}"))
+            .unwrap_or_else(|_| format!("htree://{}/{repo_name}", &self.pubkey[..16]));
+        Ok((
+            npub_url,
+            RelayResult {
+                configured: Vec::new(),
+                connected: Vec::new(),
+                failed: Vec::new(),
+            },
+        ))
+    }
+
+    async fn publish_event_to_local_daemon(&self, event: &Event) -> Result<()> {
+        let base = self.local_daemon_url.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("local-daemon-only publication requires a running htree daemon")
+        })?;
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(4))
+            .build()?
+            .post(format!("{}/api/nostr/events", base.trim_end_matches('/')))
+            .json(event)
+            .send()
+            .await
+            .context("local-daemon-only Nostr publication failed")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "local-daemon-only Nostr publication failed with {status}: {detail}; relay fallback disabled"
+            );
+        }
+        Ok(())
     }
 
     fn build_repo_announcement_tags(

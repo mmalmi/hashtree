@@ -865,8 +865,12 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     ));
 
     let upstream_blossom = config.blossom.all_read_servers();
-    let blossom_replica_queue_bytes =
-        (config.blossom.replicate_queue_mb.max(1) as usize) * 1024 * 1024;
+    let blossom_replica_queue_bytes = crate::server::bounded_upload_queue_bytes(
+        config
+            .blossom
+            .replicate_queue_mb
+            .saturating_mul(1024 * 1024),
+    );
     let active_nostr_relays = config.nostr.active_relays();
     let fips_handle = crate::fips_transport::start_daemon_fips_transport(
         &config,
@@ -876,6 +880,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     )
     .await?
     .map(Arc::new);
+    let nostr_provider =
+        crate::fips_transport::start_daemon_nostr_provider(&config, fips_handle.as_deref()).await?;
     #[cfg(feature = "experimental-decentralized-pubsub")]
     let nostr_pubsub_handle = crate::fips_transport::start_daemon_nostr_pubsub(
         &config,
@@ -911,6 +917,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         );
     if let Some(nostr_relay) = nostr_relay {
         server = server.with_nostr_relay(nostr_relay);
+    }
+    if let Some(provider) = nostr_provider {
+        server = server.with_nostr_provider(provider);
     }
 
     if crate::p2p_common::peer_router_enabled(&config) {

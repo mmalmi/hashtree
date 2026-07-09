@@ -55,6 +55,9 @@ tower-http.workspace = true
 # Nostr
 nostr.workspace = true
 nostr-sdk.workspace = true
+nostr-pubsub.workspace = true
+nostr-pubsub-fips.workspace = true
+nostr-pubsub-relay.workspace = true
 nostr-social-graph.workspace = true
 nostr-social-graph-heed.workspace = true
 

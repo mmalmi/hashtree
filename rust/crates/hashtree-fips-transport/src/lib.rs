@@ -173,6 +173,7 @@ impl FipsEndpointOptions {
 
 pub struct BoundFipsEndpoint {
     pub endpoint: Arc<dyn FipsEndpointIo>,
+    pub native_endpoint: Arc<fips_core::FipsEndpoint>,
     pub local_peer_id: String,
     pub discovery_scope: String,
 }
@@ -203,14 +204,17 @@ pub async fn bind_fips_endpoint(
     for interface in ethernet_interfaces {
         builder = builder.local_ethernet(interface);
     }
-    let endpoint = builder
-        .bind()
-        .await
-        .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?;
+    let endpoint = Arc::new(
+        builder
+            .bind()
+            .await
+            .map_err(|err| FipsTransportError::Endpoint(err.to_string()))?,
+    );
     let local_peer_id = endpoint.npub().to_string();
 
     Ok(BoundFipsEndpoint {
-        endpoint: Arc::new(endpoint),
+        endpoint: endpoint.clone(),
+        native_endpoint: endpoint,
         local_peer_id,
         discovery_scope,
     })

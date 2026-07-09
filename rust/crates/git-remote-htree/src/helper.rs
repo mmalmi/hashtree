@@ -102,6 +102,13 @@ fn fetch_progress_interval() -> Duration {
     }
 }
 
+fn should_retry_local_daemon_fetch_failure(
+    root_is_from_local_daemon: bool,
+    local_daemon_only: bool,
+) -> bool {
+    root_is_from_local_daemon && !local_daemon_only
+}
+
 fn git_pack_progress_interval(stderr_is_terminal: bool) -> Duration {
     if stderr_is_terminal || std::env::var("HTREE_VERBOSE").is_ok() {
         VERBOSE_FETCH_PROGRESS_INTERVAL
@@ -547,7 +554,23 @@ impl RemoteHelper {
         if let Some(ref root) = root_hash {
             let stats = match self.fetch_git_objects_to_local_git(root) {
                 Ok(stats) => stats,
-                Err(err) if self.nostr.cached_root_is_from_local_daemon(&self.repo_name) => {
+                Err(err)
+                    if self.nostr.cached_root_is_from_local_daemon(&self.repo_name)
+                        && self.nostr.local_daemon_only() =>
+                {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "local-daemon-only object fetch for {} failed; relay/Blossom fallback disabled",
+                            self.repo_name
+                        )
+                    });
+                }
+                Err(err)
+                    if should_retry_local_daemon_fetch_failure(
+                        self.nostr.cached_root_is_from_local_daemon(&self.repo_name),
+                        self.nostr.local_daemon_only(),
+                    ) =>
+                {
                     warn!(
                         "Fetch using local daemon root failed for {}: {}. Retrying via relays.",
                         self.repo_name, err

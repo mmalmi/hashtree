@@ -638,6 +638,7 @@ fn prefer_local_relay() -> bool {
 
 fn prefer_local_daemon() -> bool {
     for key in [
+        "HTREE_LOCAL_DAEMON_ONLY",
         "HTREE_PREFER_LOCAL_DAEMON",
         "NOSTR_PREFER_LOCAL",
         "HTREE_PREFER_LOCAL_RELAY",
@@ -945,6 +946,20 @@ nsec1ghi789
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let _prefer = EnvGuard::set("HTREE_PREFER_LOCAL_DAEMON", "1");
+
+        assert_eq!(
+            detect_local_daemon_url(Some(&format!("127.0.0.1:{port}"))),
+            Some(format!("http://127.0.0.1:{port}"))
+        );
+    }
+
+    #[test]
+    fn test_strict_local_daemon_detection_uses_configured_bind_port() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _strict = EnvGuard::set("HTREE_LOCAL_DAEMON_ONLY", "1");
+        let _prefer = EnvGuard::clear("HTREE_PREFER_LOCAL_DAEMON");
 
         assert_eq!(
             detect_local_daemon_url(Some(&format!("127.0.0.1:{port}"))),

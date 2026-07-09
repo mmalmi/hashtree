@@ -267,8 +267,8 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         public_plaintext_reads: true,
         require_random_untrusted_ingest: false,
         optimistic_blossom_uploads: false,
-        optimistic_upload_queue_bytes: 512 * 1024 * 1024,
-        optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
+        optimistic_upload_queue_bytes: 256 * 1024 * 1024,
+        optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
         allowed_pubkeys: HashSet::new(),
         upstream_blossom,
         upstream_http_client: crate::server::new_upstream_http_client(),
@@ -279,8 +279,8 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
             crate::server::auth::UpstreamBlossomFetchMetrics::default(),
         ),
         blossom_upload_replicas: Vec::new(),
-        blossom_upload_replica_queue_bytes: 512 * 1024 * 1024,
-        blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(512 * 1024 * 1024)),
+        blossom_upload_replica_queue_bytes: 256 * 1024 * 1024,
+        blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
         blossom_upload_replica_keys: None,
         blossom_upload_replica_scheduler: Arc::new(
             crate::server::blossom::BlossomUploadReplicaScheduler::new(),
@@ -290,6 +290,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         social_graph_root: None,
         socialgraph_snapshot_public: false,
         nostr_relay: None,
+        nostr_provider: None,
         nostr_relay_urls: Vec::new(),
         tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2908,6 +2909,11 @@ async fn nostr_profile_queries_upstream_relays_after_local_miss() {
     let upstream_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
     let mut state = test_app_state(store, Vec::new());
     state.nostr_relay = Some(relay.clone());
+    state.nostr_provider = Some(Arc::new(
+        nostr_pubsub_relay::RelayEventBus::new([upstream_url.clone()], Duration::from_secs(2))
+            .await
+            .unwrap(),
+    ));
     state.nostr_relay_urls = vec![upstream_url];
 
     let response = nostr_profile(AxumState(state), AxumPath(keys.public_key().to_hex()))
@@ -3387,6 +3393,11 @@ async fn resolve_to_hash_refresh_uses_upstream_relays_after_local_miss() {
 
     let mut state = test_app_state(store, Vec::new());
     state.nostr_relay = Some(relay.clone());
+    state.nostr_provider = Some(Arc::new(
+        nostr_pubsub_relay::RelayEventBus::new([upstream_url.clone()], Duration::from_secs(2))
+            .await
+            .unwrap(),
+    ));
     state.nostr_relay_urls = vec![upstream_url];
 
     let refresh = resolve_to_hash(

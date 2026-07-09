@@ -53,8 +53,8 @@ pub use auth::{
 };
 
 static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
-const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 512 * 1024 * 1024;
-const DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 const INTERNAL_JSON_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 #[cfg(not(test))]
@@ -65,6 +65,12 @@ const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(60);
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+pub fn bounded_upload_queue_bytes(bytes: u64) -> usize {
+    usize::try_from(bytes)
+        .unwrap_or(usize::MAX)
+        .clamp(1, tokio::sync::Semaphore::MAX_PERMITS)
+}
 
 fn virtual_tree_hosts() -> &'static RwLock<HashMap<String, String>> {
     VIRTUAL_TREE_HOSTS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -113,10 +119,22 @@ pub fn register_virtual_tree_host(host: &str, internal_root: &str) {
 
 pub fn resolve_virtual_tree_host(host: &str) -> Option<String> {
     let normalized_host = normalize_virtual_tree_host(host)?;
-    virtual_tree_hosts()
+    let configured = virtual_tree_hosts()
         .read()
         .ok()
-        .and_then(|hosts| hosts.get(&normalized_host).cloned())
+        .and_then(|hosts| hosts.get(&normalized_host).cloned());
+    configured.or_else(|| resolve_iris_localhost_tree_root(&normalized_host))
+}
+
+fn resolve_iris_localhost_tree_root(host: &str) -> Option<String> {
+    let labels: Vec<&str> = host.strip_suffix(".iris.localhost")?.split('.').collect();
+    match labels.as_slice() {
+        [nhash] if nhash.starts_with("nhash1") => Some(format!("/htree/{nhash}")),
+        [site, npub] if !site.is_empty() && npub.starts_with("npub1") => {
+            Some(format!("/htree/{npub}/{site}"))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +195,7 @@ impl HashtreeServer {
                 social_graph_root: None,
                 socialgraph_snapshot_public: false,
                 nostr_relay: None,
+                nostr_provider: None,
                 nostr_relay_urls: Vec::new(),
                 tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
@@ -284,7 +303,7 @@ impl HashtreeServer {
         queue_bytes: usize,
         keys: nostr::Keys,
     ) -> Self {
-        let queue_bytes = queue_bytes.max(1);
+        let queue_bytes = queue_bytes.clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         let mut servers: Vec<String> = servers
             .into_iter()
             .map(|server| server.trim().trim_end_matches('/').to_string())
@@ -323,6 +342,11 @@ impl HashtreeServer {
     /// Set Nostr relay state (shared for /ws and WebRTC)
     pub fn with_nostr_relay(mut self, relay: Arc<NostrRelay>) -> Self {
         self.state.nostr_relay = Some(relay);
+        self
+    }
+
+    pub fn with_nostr_provider(mut self, provider: Arc<dyn nostr_pubsub::PubsubProvider>) -> Self {
+        self.state.nostr_provider = Some(provider);
         self
     }
 
@@ -494,6 +518,11 @@ impl HashtreeServer {
                 get(handlers::resolve_to_hash),
             )
             .route("/api/nostr/profile/:pubkey", get(handlers::nostr_profile))
+            .route(
+                "/api/nostr/events",
+                post(handlers::publish_nostr_event)
+                    .layer(DefaultBodyLimit::max(INTERNAL_JSON_BODY_LIMIT_BYTES)),
+            )
             .route("/api/trees/:pubkey", get(handlers::list_trees))
             .fallback(get(handlers::serve_virtual_host_fallback))
             .with_state(state.clone());
@@ -722,12 +751,62 @@ mod tests {
     use super::*;
     use crate::nostr_relay::{NostrRelay, NostrRelayConfig};
     use crate::storage::HashtreeStore;
+    use async_trait::async_trait;
     use hashtree_core::{
         from_hex, nhash_encode, sha256, to_hex, DirEntry, HashTree, HashTreeConfig, LinkType,
     };
-    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use nostr::{nips::nip19::ToBech32, EventBuilder, Keys, Kind, Timestamp};
+    use nostr_pubsub::{
+        EventBus, EventSource, PublishReport, PubsubProvider, PubsubProviderMode, QueryEvent,
+        QueryOptions, QueryReport, VerifiedEvent,
+    };
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    struct StaticProvider {
+        event: VerifiedEvent,
+        queries: AtomicUsize,
+        publishes: AtomicUsize,
+        mode: PubsubProviderMode,
+    }
+
+    #[async_trait]
+    impl EventBus for StaticProvider {
+        async fn publish(
+            &self,
+            _event: VerifiedEvent,
+            _source: EventSource,
+        ) -> nostr_pubsub::Result<PublishReport> {
+            self.publishes.fetch_add(1, Ordering::Relaxed);
+            Ok(PublishReport {
+                accepted: true,
+                priority: 0,
+                reason: None,
+            })
+        }
+
+        async fn query(
+            &self,
+            _filters: Vec<nostr_pubsub::Filter>,
+            _options: QueryOptions,
+        ) -> nostr_pubsub::Result<QueryReport> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            Ok(QueryReport {
+                events: vec![QueryEvent {
+                    event: self.event.clone(),
+                    source: EventSource::fips_endpoint("browser-router"),
+                    priority: 0,
+                }],
+            })
+        }
+    }
+
+    impl PubsubProvider for StaticProvider {
+        fn mode(&self) -> PubsubProviderMode {
+            self.mode
+        }
+    }
 
     #[test]
     fn resource_exhaustion_errors_are_fatal_accept_errors() {
@@ -740,6 +819,30 @@ mod tests {
         assert!(!is_resource_exhaustion_error(
             &io::Error::from_raw_os_error(libc::ECONNRESET)
         ));
+    }
+
+    #[test]
+    fn upload_queue_semaphores_fit_all_tokio_targets() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let server = HashtreeServer::new(store, "127.0.0.1:0".to_string());
+
+        assert_eq!(
+            server.state.optimistic_upload_queue.available_permits(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            server
+                .state
+                .blossom_upload_replica_queue
+                .available_permits(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            bounded_upload_queue_bytes(u64::MAX),
+            tokio::sync::Semaphore::MAX_PERMITS
+        );
+        Ok(())
     }
 
     #[test]
@@ -768,6 +871,26 @@ mod tests {
         assert_eq!(cached.source, "embedded-bootstrap");
         assert!(cached.root_event.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn iris_localhost_hosts_map_to_existing_tree_routes() {
+        assert_eq!(
+            resolve_virtual_tree_host("NHASH1EXAMPLE.iris.localhost:8080"),
+            Some("/htree/nhash1example".to_string())
+        );
+        assert_eq!(
+            resolve_virtual_tree_host("audio.NPUB1EXAMPLE.iris.localhost:8080"),
+            Some("/htree/npub1example/audio".to_string())
+        );
+        assert_eq!(
+            resolve_virtual_tree_host("audio.extra.npub1example.iris.localhost"),
+            None
+        );
+        assert_eq!(
+            resolve_virtual_tree_host("nhash1example.htree.localhost"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1006,6 +1129,162 @@ mod tests {
         handle.abort();
         clear_virtual_tree_hosts_for_test();
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn iris_localhost_hosts_serve_immutable_and_named_sites() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+
+        let (index_cid, _) = tree
+            .put(b"<!doctype html><title>Iris localhost ok</title>")
+            .await?;
+        let (main_js_cid, _) = tree.put(b"console.log('iris localhost');").await?;
+        let assets_dir = tree
+            .put_directory(vec![
+                DirEntry::from_cid("main.js", &main_js_cid).with_link_type(LinkType::File)
+            ])
+            .await?;
+        let root_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File),
+                DirEntry::from_cid("assets", &assets_dir).with_link_type(LinkType::Dir),
+            ])
+            .await?;
+
+        let nhash = nhash_encode(&root_cid.hash)?;
+        let npub = Keys::generate().public_key().to_bech32()?;
+        let site = "audio";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = HashtreeServer::new(Arc::clone(&store), "127.0.0.1:0".to_string())
+            .with_public_plaintext_reads(true)
+            .with_cached_tree_roots(vec![(format!("{npub}/{site}"), root_cid)]);
+        let handle =
+            tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
+        let client = reqwest::Client::new();
+        let base_url = format!("http://127.0.0.1:{port}");
+
+        for host in [
+            format!("{nhash}.iris.localhost:{port}"),
+            format!("{site}.{npub}.iris.localhost:{port}"),
+        ] {
+            let root_response = client
+                .get(format!("{base_url}/"))
+                .header("Host", &host)
+                .header("Accept", "text/html")
+                .send()
+                .await?;
+            assert_eq!(root_response.status(), reqwest::StatusCode::OK, "{host}");
+            assert_eq!(
+                root_response.bytes().await?.as_ref(),
+                b"<!doctype html><title>Iris localhost ok</title>"
+            );
+
+            let asset_response = client
+                .get(format!("{base_url}/assets/main.js"))
+                .header("Host", &host)
+                .send()
+                .await?;
+            assert_eq!(asset_response.status(), reqwest::StatusCode::OK, "{host}");
+            assert_eq!(
+                asset_response.bytes().await?.as_ref(),
+                b"console.log('iris localhost');"
+            );
+        }
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_iris_site_resolves_from_fips_event_provider_without_relays() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        let (index_cid, _) = tree.put(b"fips event provider site").await?;
+        let root_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("index.html", &index_cid).with_link_type(LinkType::File)
+            ])
+            .await?;
+        let owner = Keys::generate();
+        let site = "radio";
+        let root_event = EventBuilder::new(Kind::Custom(30064), "")
+            .tags(vec![
+                nostr::Tag::identifier(site),
+                nostr::Tag::custom(nostr::TagKind::custom("l"), vec!["hashtree".to_string()]),
+                nostr::Tag::custom(nostr::TagKind::custom("hash"), vec![to_hex(&root_cid.hash)]),
+            ])
+            .sign_with_keys(&owner)?;
+        let provider = Arc::new(StaticProvider {
+            event: VerifiedEvent::try_from(root_event)?,
+            queries: AtomicUsize::new(0),
+            publishes: AtomicUsize::new(0),
+            mode: PubsubProviderMode::LocalOnly,
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = HashtreeServer::new(Arc::clone(&store), "127.0.0.1:0".to_string())
+            .with_public_plaintext_reads(true)
+            .with_nostr_provider(provider.clone());
+        assert!(server.state.nostr_relay_urls.is_empty());
+        assert_eq!(
+            server.state.nostr_provider.as_ref().unwrap().mode(),
+            PubsubProviderMode::LocalOnly
+        );
+        let handle =
+            tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
+
+        let npub = owner.public_key().to_bech32()?;
+        let response = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .header("Host", format!("{site}.{npub}.iris.localhost"))
+            .header("Accept", "text/html")
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.bytes().await?.as_ref(),
+            b"fips event provider site"
+        );
+        assert_eq!(provider.queries.load(Ordering::Relaxed), 1);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn loopback_event_publication_uses_configured_provider() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(30064), "root").sign_with_keys(&keys)?;
+        let provider = Arc::new(StaticProvider {
+            event: VerifiedEvent::try_from(event.clone())?,
+            queries: AtomicUsize::new(0),
+            publishes: AtomicUsize::new(0),
+            mode: PubsubProviderMode::LocalOnly,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = HashtreeServer::new(store, "127.0.0.1:0".to_string())
+            .with_nostr_provider(provider.clone());
+        let handle =
+            tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/api/nostr/events"))
+            .json(&event)
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        assert_eq!(provider.publishes.load(Ordering::Relaxed), 1);
+        handle.abort();
         Ok(())
     }
 

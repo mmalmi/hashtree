@@ -28,6 +28,7 @@ use hashtree_resolver::{
     RootResolver,
 };
 use nostr::{Filter as NostrFilter, FromBech32, Kind, PublicKey};
+use nostr_pubsub::{EventSource, VerifiedEvent};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -661,6 +662,55 @@ pub async fn nostr_profile(
         .unwrap()
 }
 
+pub async fn publish_nostr_event(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(event): Json<nostr::Event>,
+) -> Response<Body> {
+    if !peer.ip().is_loopback() {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Nostr event publication is loopback-only"))
+            .unwrap();
+    }
+    let Some(provider) = state.nostr_provider.as_ref() else {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from("Nostr event provider is unavailable"))
+            .unwrap();
+    };
+    let event = match VerifiedEvent::try_from(event) {
+        Ok(event) => event,
+        Err(error) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(error.to_string()))
+                .unwrap();
+        }
+    };
+
+    match provider
+        .publish(event, EventSource::local_index("hashtree-daemon-http"))
+        .await
+    {
+        Ok(report) if report.accepted => Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "accepted": true }).to_string()))
+            .unwrap(),
+        Ok(report) => Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Body::from(report.reason.unwrap_or_else(|| {
+                "Nostr event provider rejected event".to_string()
+            })))
+            .unwrap(),
+        Err(error) => Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Body::from(error.to_string()))
+            .unwrap(),
+    }
+}
+
 async fn list_directory_json(
     state: &AppState,
     cid: &Cid,
@@ -910,7 +960,6 @@ async fn htree_npub_impl(
     head_only: bool,
 ) -> Response<Body> {
     let is_localhost = connect_info.0.ip().is_loopback();
-    let key = format!("{}/{}", npub, treename);
     if !is_allowed_plaintext_read_author(&state, &npub) {
         return plaintext_read_forbidden_response(&npub);
     }
@@ -919,60 +968,14 @@ async fn htree_npub_impl(
         return decryption_key_forbidden_response();
     }
 
-    let resolved = if let Some(resolved) =
-        resolve_root_for_mutable_request(&state, &npub, &treename, None).await
-    {
-        resolved.cid
-    } else {
-        let resolver = match NostrRootResolver::new(resolver_config(&state)).await {
-            Ok(r) => r,
-            Err(e) => {
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(format!("Failed to create resolver: {}", e)))
-                    .unwrap();
-            }
-        };
-
-        let cid = match tokio::time::timeout(
-            HTTP_RESOLVER_TIMEOUT,
-            resolve_npub_root(&key, &resolver, None),
-        )
-        .await
-        {
-            Ok(Ok(cid)) => cid,
-            Ok(Err(e)) => {
-                let _ = resolver.stop().await;
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from(format!("Resolution failed: {}", e)))
-                    .unwrap();
-            }
-            Err(_) => {
-                let _ = resolver.stop().await;
-                return Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .body(Body::from("Resolution timeout"))
-                    .unwrap();
-            }
-        };
-        let _ = resolver.stop().await;
-        put_cached_tree_root(
-            &state,
-            tree_root_cache_key(&npub, &treename, None),
-            cid.clone(),
-            "nostr",
-            None,
-        );
-        cid
+    let Some(resolved) = resolve_root_for_mutable_request(&state, &npub, &treename, None).await
+    else {
+        return not_found_response("Root not found through configured event provider");
     };
 
     serve_tree_root_response(
         &state,
-        resolved,
+        resolved.cid,
         path,
         headers,
         false,
@@ -2122,14 +2125,11 @@ const HTTP_RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Create resolver config with HTTP timeout
 fn resolver_config(state: &AppState) -> NostrResolverConfig {
-    let mut config = NostrResolverConfig {
+    NostrResolverConfig {
+        relays: state.nostr_relay_urls.clone(),
         resolve_timeout: HTTP_RESOLVER_TIMEOUT,
         ..Default::default()
-    };
-    if !state.nostr_relay_urls.is_empty() {
-        config.relays = state.nostr_relay_urls.clone();
     }
-    config
 }
 
 /// Resolve npub/treename to hash and serve content
@@ -2165,66 +2165,19 @@ pub async fn resolve_and_serve(
         return serve_content_internal(&state, &resolved.cid.hash, headers, false, false).await;
     }
 
-    let resolver = match NostrRootResolver::new(resolver_config(&state)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from(
-                    json!({
-                        "error": format!("Failed to create resolver: {}", e),
-                        "key": key
-                    })
-                    .to_string(),
-                ))
-                .unwrap()
-                .into_response();
-        }
-    };
-
-    // Use resolve_wait with timeout - waits for key to appear
-    // This is a mutable route (npub/treename can change over time)
-    match tokio::time::timeout(HTTP_RESOLVER_TIMEOUT, resolver.resolve_wait(&key)).await {
-        Ok(Ok(cid)) => {
-            cache_public_tree_root(&state, &pubkey, &treename, &cid);
-            let _ = resolver.stop().await;
-            serve_content_internal(&state, &cid.hash, headers, false, false).await
-        }
-        Ok(Err(e)) => {
-            let _ = resolver.stop().await;
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from(
-                    json!({
-                        "error": e.to_string(),
-                        "key": key
-                    })
-                    .to_string(),
-                ))
-                .unwrap()
-                .into_response()
-        }
-        Err(_) => {
-            let _ = resolver.stop().await;
-            Response::builder()
-                .status(StatusCode::GATEWAY_TIMEOUT)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Body::from(
-                    json!({
-                        "error": "Resolution timeout",
-                        "key": key
-                    })
-                    .to_string(),
-                ))
-                .unwrap()
-                .into_response()
-        }
-    }
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::from(
+            json!({
+                "error": "Root not found through configured event provider",
+                "key": key
+            })
+            .to_string(),
+        ))
+        .unwrap()
+        .into_response()
 }
 
 /// API endpoint to resolve npub/treename to hash (returns JSON)
@@ -2288,37 +2241,8 @@ pub async fn resolve_to_hash(
         return Json(payload);
     }
 
-    let resolver = match NostrRootResolver::new(resolver_config(&state)).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Json(json!({
-                "error": format!("Failed to create resolver: {}", e),
-                "key": key
-            }));
-        }
-    };
-
-    let relay_result =
-        match tokio::time::timeout(HTTP_RESOLVER_TIMEOUT, resolver.resolve_wait(&key)).await {
-            Ok(Ok(cid)) => {
-                cache_public_tree_root(&state, &pubkey, &treename, &cid);
-                Some(Json(json!({
-                    "key": key,
-                    "hash": to_hex(&cid.hash),
-                    "cid": cid.to_string(),
-                    "source": "nostr",
-                })))
-            }
-            Ok(Err(_)) | Err(_) => None,
-        };
-
-    let _ = resolver.stop().await;
-    if let Some(result) = relay_result {
-        return result;
-    }
-
     Json(json!({
-        "error": "Resolution failed via relays, multicast, and peers",
+        "error": "Resolution failed through configured event provider and peers",
         "key": key
     }))
 }
