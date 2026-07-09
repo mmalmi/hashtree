@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use fips_core::config::{NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances};
+use fips_core::PeerIdentity;
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 pub use hashtree_network::PubsubPublishStats;
 use hashtree_network::{
@@ -328,21 +329,25 @@ fn sanitize_peer_configs(
 #[async_trait]
 impl FipsEndpointIo for fips_core::FipsEndpoint {
     async fn send(&self, peer_id: &str, data: Vec<u8>) -> Result<(), FipsTransportError> {
-        self.send(peer_id.to_string(), data)
+        let peer = PeerIdentity::from_npub(peer_id)
+            .map_err(|err| FipsTransportError::Send(err.to_string()))?;
+        self.send_batch_to_peer(peer, vec![data])
             .await
             .map_err(|err| FipsTransportError::Send(err.to_string()))
     }
 
     async fn recv(&self) -> Option<FipsEndpointPacket> {
         loop {
-            let message = fips_core::FipsEndpoint::recv(self).await?;
-            let peer_id = message.source_npub();
+            let mut messages = Vec::with_capacity(1);
+            self.recv_batch_into(&mut messages, 1).await?;
+            let message = messages.into_iter().next()?;
+            let peer_id = message.source_peer.npub();
             if peer_id.is_empty() {
                 continue;
             }
             return Some(FipsEndpointPacket {
                 peer_id,
-                data: message.data.into(),
+                data: message.data.into_vec(),
             });
         }
     }
