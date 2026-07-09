@@ -340,7 +340,10 @@ impl HashtreeStore {
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    entries.push(hashtree_core::DirEntry::from_cid(name, cid));
+                    entries.push(
+                        hashtree_core::DirEntry::from_cid(name, cid)
+                            .with_link_type(hashtree_core::LinkType::Dir),
+                    );
                 }
             }
 

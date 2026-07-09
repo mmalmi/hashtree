@@ -253,9 +253,9 @@ Publish the canonical repo release and mirror the same staged files to GitHub in
 ./publish_release.sh --version v<version>
 ```
 
-That wraps `scripts/release_to_htree.sh`, reuses one staged release directory for both outputs, and keeps GitHub from drifting ahead of the hashtree/Homebrew publish path. Before bumping a Rust release version, add the matching `## <version> - YYYY-MM-DD` entry to [`rust/CHANGELOG.md`](CHANGELOG.md); staging now splices that entry into the published notes and fails if the version is missing.
+The checkout must be clean and `HEAD` must match the requested tag. The wrapper runs `../scripts/release-gate.sh`, then wraps `scripts/release_to_htree.sh`, reuses one staged release directory for both outputs, and keeps GitHub from drifting ahead of the hashtree/Homebrew publish path. Before bumping a Rust release version, add the matching `## <version> - YYYY-MM-DD` entry to [`rust/CHANGELOG.md`](CHANGELOG.md); staging now splices that entry into the published notes and fails if the version is missing.
 
-On macOS this builds the macOS CLI artifacts locally, builds the Linux musl CLI artifacts in target-native Alpine Docker containers, and auto-builds the Windows x64 CLI binaries from a running Parallels Windows VM when available. The Linux Docker path is deliberate: the FUSE-enabled CLI needs target-native libfuse headers/libs for `pkg-config`, which the old `cross`-based release path did not provide reliably. You can still override the Windows input explicitly with `--windows-artifacts-dir <shared-dir>`, or skip the VM step with `--skip-windows-vm`.
+On macOS this builds the macOS CLI artifacts locally, builds the Linux musl CLI artifacts in target-native Alpine Docker containers, and auto-builds the Windows x64 CLI binaries from the configured Windows build host when available. Release builds resolve external Rust dependencies from the lockfile and do not copy sibling source repositories. You can still override the Windows input explicitly with `--windows-artifacts-dir <shared-dir>`, or skip the VM step with `--skip-windows-vm`.
 
 To backfill or verify a tagged release from an exact source snapshot, point the builder at a separate checkout or worktree:
 
@@ -290,7 +290,9 @@ If you also want the same command to publish the crates.io release, opt into the
 ## Development
 
 ```bash
-cargo test --workspace         # Run all tests
+../scripts/release-gate.sh     # Full pre-publish Rust, TypeScript, and wiring gate
+../scripts/release-gate.sh --fast # Compile Rust tests; run the faster checks
+cargo test --workspace         # Run Rust tests directly
 cargo test -p hashtree-core    # Run core crate tests
 cargo bench -p hashtree-core   # Run core benchmarks
 ```

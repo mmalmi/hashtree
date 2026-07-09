@@ -18,7 +18,6 @@ Options:
   --cargo-publish                    Publish Rust crates to crates.io after releasing artifacts
   --output-dir <dir>                 Release directory to create/use
   --repo-dir <dir>                   Repository root to build/package from
-  --fips-dir <dir>                   FIPS repository root for Docker Linux builds
   --target-dir <dir>                 Cargo target dir to read/write
   --targets <csv>                    Comma-separated targets to build/package
   --windows-artifacts-dir <dir>      Directory containing Windows .exe binaries from a VM
@@ -127,7 +126,7 @@ while [ $# -gt 0 ]; do
             RELEASE_STAGE_DIR="${2:-}"
             shift 2
             ;;
-        --output-dir|--repo-dir|--fips-dir|--target-dir|--targets|--windows-artifacts-dir|--cargo-bin|--cross-bin|--linux-builder|--docker-bin|--docker-rust-image)
+        --output-dir|--repo-dir|--target-dir|--targets|--windows-artifacts-dir|--cargo-bin|--cross-bin|--linux-builder|--docker-bin|--docker-rust-image)
             BUILD_ARGS+=("$1" "${2:-}")
             shift 2
             ;;

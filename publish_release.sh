@@ -20,7 +20,6 @@ All other flags are forwarded to rust/scripts/release_to_htree.sh, including:
   --cargo-publish
   --release-stage-dir <dir>
   --output-dir <dir>
-  --fips-dir <dir>
   --target-dir <dir>
   --targets <csv>
   --windows-artifacts-dir <dir>
@@ -36,6 +35,7 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$SCRIPT_DIR"
 RELEASE_TO_HTREE_SCRIPT="${REPO_DIR}/rust/scripts/release_to_htree.sh"
+RELEASE_GATE_SCRIPT="${REPO_DIR}/scripts/release-gate.sh"
 
 VERSION=""
 SKIP_GITHUB=0
@@ -155,6 +155,25 @@ if [ ! -x "$RELEASE_TO_HTREE_SCRIPT" ]; then
     exit 1
 fi
 
+if [ ! -x "$RELEASE_GATE_SCRIPT" ]; then
+    echo "Missing release gate: ${RELEASE_GATE_SCRIPT}" >&2
+    exit 1
+fi
+
+HEAD_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
+if ! RELEASE_COMMIT="$(git -C "$REPO_DIR" rev-parse "${VERSION}^{commit}" 2>/dev/null)"; then
+    echo "Release tag does not exist locally: ${VERSION}" >&2
+    exit 1
+fi
+if [ "$HEAD_COMMIT" != "$RELEASE_COMMIT" ]; then
+    echo "Release tag ${VERSION} points to ${RELEASE_COMMIT}, but HEAD is ${HEAD_COMMIT}" >&2
+    exit 1
+fi
+if ! git -C "$REPO_DIR" diff --quiet || ! git -C "$REPO_DIR" diff --cached --quiet; then
+    echo "Tracked release sources are dirty; commit or restore them before publishing." >&2
+    exit 1
+fi
+
 if [ -z "$RELEASE_STAGE_DIR" ]; then
     RELEASE_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-release-stage-XXXXXX")"
     TEMP_DIRS+=("$RELEASE_STAGE_DIR")
@@ -174,6 +193,12 @@ if [ "$SKIP_GITHUB" -eq 0 ]; then
         echo "GitHub CLI is not authenticated. Run 'gh auth status' or use --skip-github." >&2
         exit 1
     fi
+fi
+
+"${REPO_DIR}/scripts/release-gate.sh"
+if ! git -C "$REPO_DIR" diff --quiet || ! git -C "$REPO_DIR" diff --cached --quiet; then
+    echo "Release gate changed tracked sources; commit the generated changes and rerun." >&2
+    exit 1
 fi
 
 "$RELEASE_TO_HTREE_SCRIPT" "${FORWARDED_ARGS[@]}"

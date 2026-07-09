@@ -2036,6 +2036,18 @@ impl HashtreeStore {
         let hash = sha256(data);
         let incoming_bytes = data.len() as u64;
 
+        // Make room before inserting so the just-fetched cache entry cannot be
+        // selected as the arbitrary disposable orphan during post-write quota
+        // enforcement. This is especially important for the filesystem store,
+        // whose directory iteration order is not an insertion/LRU order.
+        if !self
+            .router
+            .exists(&hash)
+            .map_err(|e| anyhow::anyhow!("Failed to check cached blob: {}", e))?
+        {
+            self.make_room_for_cached_blob(incoming_bytes)?;
+        }
+
         let mut retried_after_cleanup = false;
         loop {
             match self.router.put_sync(hash, data) {

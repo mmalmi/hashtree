@@ -90,7 +90,7 @@ read -r -d '' test_command <<'EOF' || true
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update >/dev/null
-apt-get install -y --no-install-recommends fuse3 pkg-config libfuse3-dev ca-certificates git >/dev/null
+apt-get install -y --no-install-recommends fuse3 pkg-config libfuse3-dev libdbus-1-dev libclang-dev ca-certificates git >/dev/null
 mkdir -p /cargo-home /work/rust/target
 if ! getent group "${HOST_GID}" >/dev/null; then
     groupadd -g "${HOST_GID}" codex
@@ -101,7 +101,7 @@ if ! getent passwd "${HOST_UID}" >/dev/null; then
 fi
 user_name="$(getent passwd "${HOST_UID}" | cut -d: -f1 | head -n1)"
 chown "${HOST_UID}:${HOST_GID}" /cargo-home /work/rust/target
-su "${user_name}" -s /bin/sh -lc 'export CARGO_HOME=/cargo-home && cargo test -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture'
+su "${user_name}" -s /bin/sh -c 'export CARGO_HOME=/cargo-home RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH && cd /work/rust && cargo test -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture'
 EOF
 
 "$DOCKER_BIN" run --rm \
@@ -109,6 +109,8 @@ EOF
     --cap-add SYS_ADMIN \
     --security-opt apparmor:unconfined \
     -e CARGO_HOME=/cargo-home \
+    -e RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+    -e RUST_LOG="${RUST_LOG:-info}" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     -v "${REPO_DIR}:/work" \

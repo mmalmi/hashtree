@@ -1,22 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
 const pkgDir = join(__dirname, '..');
 
-function npmEnv(): NodeJS.ProcessEnv {
-  // pnpm sets extra npm_config_* env vars that npm warns about. Strip the known ones so test output stays clean.
-  const env = { ...process.env };
-  delete env.npm_config_npm_globalconfig;
-  delete env.npm_config_recursive;
-  delete env.npm_config_verify_deps_before_run;
-  delete env.npm_config__jsr_registry;
-  return env;
-}
-
-describe('npm pack', () => {
+describe('package tarball', () => {
   let tempDir: string;
   let tarball: string;
 
@@ -24,30 +14,28 @@ describe('npm pack', () => {
     // Build first
     execSync('pnpm build', { cwd: pkgDir, stdio: 'pipe' });
 
-    // Create tarball (npm pack outputs filename to stdout)
-    const filename = execSync('npm pack', {
+    tempDir = mkdtempSync(join(tmpdir(), 'hashtree-test-'));
+
+    // Create the same publishable tarball that pnpm would upload to the npm registry.
+    const pack = JSON.parse(execFileSync('pnpm', ['pack', '--json', '--pack-destination', tempDir], {
       cwd: pkgDir,
       encoding: 'utf-8',
-      env: npmEnv(),
-    }).trim();
-    tarball = join(pkgDir, filename);
+    }));
+    tarball = pack.filename;
 
     if (!existsSync(tarball)) {
       throw new Error(`Tarball not found at ${tarball}`);
     }
 
-    // Create temp directory and install
-    tempDir = mkdtempSync(join(tmpdir(), 'hashtree-test-'));
     writeFileSync(
       join(tempDir, 'package.json'),
       JSON.stringify({ name: 'test', type: 'module' })
     );
-    execSync(`npm install ${tarball}`, { cwd: tempDir, stdio: 'pipe', env: npmEnv() });
+    execFileSync('pnpm', ['add', tarball], { cwd: tempDir, stdio: 'pipe' });
   });
 
   afterAll(() => {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });
-    if (tarball) rmSync(tarball, { force: true });
   });
 
   it('should export main entry point', async () => {

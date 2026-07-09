@@ -10,42 +10,6 @@ const scriptPath = fileURLToPath(import.meta.url)
 const scriptDir = dirname(scriptPath)
 const rustDir = dirname(scriptDir)
 const repoDir = dirname(rustDir)
-const sourceRootDir = dirname(repoDir)
-export const requiredSiblingSourceDirs = [
-  'cashu-service',
-  'cashu_spilman_channels',
-  'fips',
-  'nostr-social-graph',
-]
-const siblingSourceCopies = [
-  {
-    name: 'cashu-service',
-    paths: ['cashu-service'],
-    excludes: ['cashu-service/.git', 'cashu-service/target', 'cashu-service/dist'],
-  },
-  {
-    name: 'cashu_spilman_channels',
-    paths: ['cashu_spilman_channels'],
-    excludes: [
-      'cashu_spilman_channels/.git',
-      'cashu_spilman_channels/target',
-      'cashu_spilman_channels/dist',
-    ],
-  },
-  {
-    name: 'fips',
-    paths: ['fips/Cargo.toml', 'fips/Cargo.lock', 'fips/crates'],
-    excludes: [],
-  },
-  {
-    name: 'nostr-social-graph',
-    paths: ['nostr-social-graph/rust'],
-    excludes: [
-      'nostr-social-graph/rust/target',
-      'nostr-social-graph/rust/dist',
-    ],
-  },
-]
 
 function usage() {
   return `Usage: node rust/scripts/build_windows_vm_artifacts.mjs --output-dir <dir> [options]
@@ -149,11 +113,6 @@ function encodePowerShellScript(script) {
   return Buffer.from(script, 'utf16le').toString('base64')
 }
 
-function guestParentForwardPath(guestRepo) {
-  const normalized = guestRepo.replace(/\\/g, '/').replace(/\/+$/, '')
-  return normalized.replace(/\/[^/]+$/, '')
-}
-
 function runRemotePowerShell(host, script, { capture = false } = {}) {
   const encoded = encodePowerShellScript(script)
   return run('ssh', [host, 'powershell.exe', '-NoProfile', '-EncodedCommand', encoded], { capture })
@@ -170,10 +129,6 @@ export function windowsBuildScriptLines({ guestRepoPath }) {
     '$guestParent = Split-Path $guestRepo',
     'New-Item -ItemType Directory -Force -Path $guestParent | Out-Null',
     'if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }',
-    "foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips', 'nostr-social-graph')) {",
-    '  $siblingPath = Join-Path $guestParent $sibling',
-    '  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath -ErrorAction SilentlyContinue }',
-    '}',
     'New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null',
     '$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\\Installer\\vswhere.exe"',
     'if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }',
@@ -201,16 +156,9 @@ export function buildWindowsVmArtifacts({
   const guestRepo =
     guestRepoPath || process.env.HASHTREE_WINDOWS_GUEST_REPO_PATH || 'C:\\src\\hashtree'
   const guestRepoForward = guestRepo.replace(/\\/g, '/')
-  const guestParentForward = guestParentForwardPath(guestRepo)
 
   if (!existsSync(resolve(repoDir, 'rust'))) {
     throw new Error(`Expected ${repoDir} to contain a rust workspace directory.`)
-  }
-  for (const name of requiredSiblingSourceDirs) {
-    const sourceDir = resolve(sourceRootDir, name)
-    if (!existsSync(sourceDir)) {
-      throw new Error(`Expected sibling source directory for Windows release build: ${sourceDir}`)
-    }
   }
 
   const resolvedOutputDir = resolve(outputDir)
@@ -226,27 +174,15 @@ $guestRepo = ${psQuote(guestRepo)}
 $guestParent = Split-Path $guestRepo
 New-Item -ItemType Directory -Force -Path $guestParent | Out-Null
 if (Test-Path $guestRepo) { Remove-Item -Recurse -Force $guestRepo }
-foreach ($sibling in @('cashu-service', 'cashu_spilman_channels', 'fips', 'nostr-social-graph')) {
-  $siblingPath = Join-Path $guestParent $sibling
-  if (Test-Path $siblingPath) { Remove-Item -Recurse -Force $siblingPath -ErrorAction SilentlyContinue }
-}
 New-Item -ItemType Directory -Force -Path $guestRepo | Out-Null
 `,
   )
 
-  // 2. Push the rust workspace and sibling path dependencies via tar over SSH.
+  // 2. Push the self-contained Rust workspace via tar over SSH.
   runShellPipe(
     `tar --exclude=./rust/target --exclude=./rust/dist -cf - -C ${shQuote(repoDir)} rust ` +
       `| ssh ${shQuote(host)} tar -xf - -C ${shQuote(guestRepoForward)}`,
   )
-  for (const copy of siblingSourceCopies) {
-    const excludeArgs = copy.excludes.map((exclude) => `--exclude=${shQuote(exclude)}`).join(' ')
-    const sourceArgs = copy.paths.map((sourcePath) => shQuote(sourcePath)).join(' ')
-    runShellPipe(
-      `tar ${excludeArgs} -cf - -C ${shQuote(sourceRootDir)} ${sourceArgs} ` +
-        `| ssh ${shQuote(host)} tar -xf - -C ${shQuote(guestParentForward)}`,
-    )
-  }
 
   // 3. Build inside MSVC environment and stage outputs into a guest dir.
   const guestOutDir = `${guestRepo}\\dist\\windows-out`

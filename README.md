@@ -70,7 +70,9 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
 
 ### Packaging status
 
-- `./publish_release.sh --version v<version>` is the primary release entrypoint. It publishes the hashtree release, updates the Homebrew tap when the full macOS/Linux CLI set is present, and updates GitHub with the same staged files.
+- `./publish_release.sh --version v<version>` is the primary release entrypoint. It requires a clean checkout at that exact tag, runs the full release gate once, publishes the hashtree release, updates the Homebrew tap when the full macOS/Linux CLI set is present, and updates GitHub with the same staged files.
+- `scripts/release-gate.sh --fast` keeps the same TypeScript and release-wiring checks while compiling (but not executing) Rust tests during iteration; omit `--fast` for the pre-publish gate.
+- The full gate raises the test process open-file limit before the LMDB/server suites, avoiding order-dependent Linux failures without serializing the tests.
 - CLI release artifacts are assembled under `rust/dist/` by `rust/scripts/release_to_htree.sh`, which `./publish_release.sh` wraps.
 - Linux package-manager installs beyond Homebrew are not shipped yet.
 

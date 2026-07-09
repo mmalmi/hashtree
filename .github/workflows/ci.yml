@@ -7,39 +7,8 @@ on:
     branches: [master]
 
 jobs:
-  lint:
-    name: TypeScript Lint
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ts
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          package_json_file: ts/package.json
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: ts/pnpm-lock.yaml
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build hashtree (required for type checking)
-        run: pnpm run build:hashtree
-
-      - name: Run ESLint
-        run: pnpm lint
-
-  ts-unit-tests:
-    name: TypeScript Unit Tests
+  typescript:
+    name: TypeScript
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -66,8 +35,24 @@ jobs:
       - name: Run unit tests
         run: pnpm test
 
-  rust-unit-tests:
-    name: Rust Unit Tests
+      - name: Build hashtree (required for type checking)
+        run: pnpm run build:hashtree
+
+      - name: Run ESLint
+        run: pnpm lint
+
+      - name: Run release wiring checks
+        working-directory: .
+        run: |
+          bash scripts/test-release-script-defaults.sh
+          bash scripts/tests/test_publish_release_wrapper.sh
+          bash scripts/test-rust-binary-feature-wiring.sh
+          bash scripts/test-ci-e2e-workflow.sh
+          bash scripts/test-release-gate-wiring.sh
+          node --test rust/tests/test_build_windows_vm_artifacts.mjs
+
+  rust-tests:
+    name: Rust Tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -82,6 +67,19 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           sudo docker image prune -af || true
           df -h /
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            fuse3 \
+            libayatana-appindicator3-dev \
+            libfuse3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config
 
       - name: Ensure FUSE device is available
         run: |
@@ -105,55 +103,12 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run unit tests
-        run: cargo test --workspace
+        run: |
+          ulimit -Sn 8192
+          cargo test --workspace --locked
 
       - name: Run FUSE mount smoke test in privileged Docker
         run: bash scripts/run_fuse_smoke_in_docker.sh
-
-  rust-integration-tests:
-    name: Rust Integration Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Reclaim runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af || true
-          df -h /
-
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            fuse3 \
-            pkg-config \
-            libfuse3-dev
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Run integration tests
-        run: cargo test --workspace --tests
 
   rust-e2e-smoke-tests:
     name: Rust E2E Smoke Tests
@@ -175,6 +130,13 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           sudo docker image prune -af || true
           df -h /
+
+      - name: Install E2E system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev \
+            pkg-config
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -15,7 +15,7 @@ TEST_REPO="${TMP_DIR}/repo"
 LOG_DIR="${TMP_DIR}/logs"
 BIN_DIR="${TMP_DIR}/bin"
 
-mkdir -p "${TEST_REPO}/rust/scripts" "${LOG_DIR}" "${BIN_DIR}"
+mkdir -p "${TEST_REPO}/rust/scripts" "${TEST_REPO}/scripts" "${LOG_DIR}" "${BIN_DIR}"
 
 cp "$PUBLISH_SCRIPT" "${TEST_REPO}/publish_release.sh"
 chmod +x "${TEST_REPO}/publish_release.sh"
@@ -59,6 +59,13 @@ printf 'cli archive\n' >"${stage_dir}/assets/hashtree-aarch64-apple-darwin.tar.g
 EOF
 chmod +x "${TEST_REPO}/rust/scripts/release_to_htree.sh"
 
+cat >"${TEST_REPO}/scripts/release-gate.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'release gate invoked\n' >"${TEST_LOG_DIR}/release-gate.log"
+EOF
+chmod +x "${TEST_REPO}/scripts/release-gate.sh"
+
 cat >"${BIN_DIR}/gh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -80,6 +87,11 @@ chmod +x "${BIN_DIR}/gh"
 
 git init "${TEST_REPO}" >/dev/null
 git -C "${TEST_REPO}" remote add github git@github.com:mmalmi/hashtree.git
+git -C "${TEST_REPO}" config user.email test@example.invalid
+git -C "${TEST_REPO}" config user.name "Release Test"
+git -C "${TEST_REPO}" add .
+git -C "${TEST_REPO}" commit -m "release fixture" >/dev/null
+git -C "${TEST_REPO}" tag v0.0.1
 
 if TEST_LOG_DIR="${LOG_DIR}" PATH="${BIN_DIR}:$PATH" "${TEST_REPO}/publish_release.sh" --version v0.0.1 >"${TMP_DIR}/stdout.txt" 2>"${TMP_DIR}/stderr.txt"; then
     :
@@ -91,6 +103,7 @@ fi
 grep -F -- '--version' "${LOG_DIR}/release_to_htree.log" >/dev/null
 grep -F -- 'v0.0.1' "${LOG_DIR}/release_to_htree.log" >/dev/null
 grep -F -- '--release-stage-dir' "${LOG_DIR}/release_to_htree.log" >/dev/null
+grep -F 'release gate invoked' "${LOG_DIR}/release-gate.log" >/dev/null
 
 grep -F 'auth status' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'release view v0.0.1 --repo mmalmi/hashtree' "${LOG_DIR}/gh.log" >/dev/null

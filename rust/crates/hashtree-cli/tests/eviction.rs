@@ -431,17 +431,18 @@ fn test_orphan_eviction_first() {
 
     // Add another blob to push over limit
     let extra_data = vec![2u8; 200];
-    let _extra_hash = add_blob(&store, &extra_data);
+    let extra_hash = add_blob(&store, &extra_data);
 
     // Total is 600 bytes, limit is 500
     // Orphan should be evicted first before any trees
     let freed = store.evict_if_needed().expect("Eviction failed");
     assert!(freed > 0, "Should have freed space");
 
-    // Orphan blob should be gone
+    // One disposable orphan should be gone. The filesystem backend does not
+    // promise an order when multiple untouched blobs have the same timestamp.
     assert!(
-        !store.blob_exists(&orphan_hash).unwrap(),
-        "Orphan blob should be evicted first"
+        !store.blob_exists(&orphan_hash).unwrap() || !store.blob_exists(&extra_hash).unwrap(),
+        "A disposable orphan should be evicted before an indexed tree"
     );
 
     // Indexed tree should still exist (orphan eviction was enough)

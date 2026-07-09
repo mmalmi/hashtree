@@ -3,7 +3,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output};
 use std::time::{Duration, Instant};
 
 use common::htree_bin;
@@ -14,36 +14,80 @@ use tempfile::TempDir;
 
 const EMPTY_MOUNTS_OUTPUT: &str = "No active hashtree mounts found.";
 
-struct ChildGuard(Option<Child>);
+struct ChildGuard {
+    child: Option<Child>,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
 
 impl ChildGuard {
-    fn spawn(command: &mut Command) -> Self {
+    fn spawn(command: &mut Command, output_dir: &Path) -> Self {
+        let stdout_path = output_dir.join("mount.stdout");
+        let stderr_path = output_dir.join("mount.stderr");
+        command.stdout(std::fs::File::create(&stdout_path).expect("create mount stdout capture"));
+        command.stderr(std::fs::File::create(&stderr_path).expect("create mount stderr capture"));
         let child = command.spawn().expect("spawn mount command");
-        Self(Some(child))
+        Self {
+            child: Some(child),
+            stdout_path,
+            stderr_path,
+        }
     }
 
     fn child_mut(&mut self) -> &mut Child {
-        self.0.as_mut().expect("child process available")
+        self.child.as_mut().expect("child process available")
     }
 
     fn kill(&mut self) {
-        if let Some(child) = self.0.as_mut() {
+        if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
         }
     }
 
     fn wait_with_output(&mut self) -> Output {
-        self.0
+        let status = self
+            .child
             .take()
             .expect("child process available")
-            .wait_with_output()
-            .expect("wait for child output")
+            .wait()
+            .expect("wait for child");
+        self.output_with_status(status)
+    }
+
+    fn output_with_status(&self, status: ExitStatus) -> Output {
+        Output {
+            status,
+            stdout: std::fs::read(&self.stdout_path).expect("read mount stdout capture"),
+            stderr: std::fs::read(&self.stderr_path).expect("read mount stderr capture"),
+        }
+    }
+
+    fn stop_after_unmount(&mut self, mountpoint: &Path) -> Output {
+        if mountpoint_is_active(mountpoint) {
+            let _ = try_unmount(mountpoint);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if self
+                .child_mut()
+                .try_wait()
+                .expect("poll child after unmount")
+                .is_some()
+            {
+                return self.wait_with_output();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        self.kill();
+        self.wait_with_output()
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
+        if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -104,12 +148,9 @@ fn mount_smoke_lists_active_mount_and_unmounts_cleanly() {
         .arg(&mountpoint);
     #[cfg(target_os = "macos")]
     mount_command.arg("--allow-other");
-    mount_command
-        .env("HTREE_CONFIG_DIR", &config_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    mount_command.env("HTREE_CONFIG_DIR", &config_dir);
 
-    let mut child = ChildGuard::spawn(&mut mount_command);
+    let mut child = ChildGuard::spawn(&mut mount_command, &config_dir);
     wait_for_mounted_file(
         &mut child,
         &config_dir,
@@ -217,13 +258,14 @@ fn wait_for_mounted_file(
         if !mountpoint_is_active(mountpoint) {
             if Instant::now() >= deadline {
                 let registry_output = run_htree_command(config_dir, data_dir, ["mounts", "--json"]);
-                child.kill();
-                let mount_output = child.wait_with_output();
+                let mountinfo = current_mountinfo();
+                let root_snapshot = snapshot_dir(mountpoint);
+                let mount_output = child.stop_after_unmount(mountpoint);
                 panic!(
                     "timed out waiting for active mount {}\nmountinfo:\n{}\nroot snapshot:\n{}\nregistry stdout:\n{}\nregistry stderr:\n{}\nmount stdout:\n{}\nmount stderr:\n{}",
                     mountpoint.display(),
-                    current_mountinfo(),
-                    snapshot_dir(mountpoint),
+                    mountinfo,
+                    root_snapshot,
                     String::from_utf8_lossy(&registry_output.stdout),
                     String::from_utf8_lossy(&registry_output.stderr),
                     String::from_utf8_lossy(&mount_output.stdout),
@@ -240,14 +282,16 @@ fn wait_for_mounted_file(
         }
         if Instant::now() >= deadline {
             let registry_output = run_htree_command(config_dir, data_dir, ["mounts", "--json"]);
-            child.kill();
-            let mount_output = child.wait_with_output();
+            let mountinfo = current_mountinfo();
+            let root_snapshot = snapshot_dir(mountpoint);
+            let parent_snapshot = snapshot_dir(path.parent().unwrap_or(mountpoint));
+            let mount_output = child.stop_after_unmount(mountpoint);
             panic!(
                 "timed out waiting for mounted file {}\nmountinfo:\n{}\nroot snapshot:\n{}\nparent snapshot:\n{}\nregistry stdout:\n{}\nregistry stderr:\n{}\nmount stdout:\n{}\nmount stderr:\n{}",
                 path.display(),
-                current_mountinfo(),
-                snapshot_dir(mountpoint),
-                snapshot_dir(path.parent().unwrap_or(mountpoint)),
+                mountinfo,
+                root_snapshot,
+                parent_snapshot,
                 String::from_utf8_lossy(&registry_output.stdout),
                 String::from_utf8_lossy(&registry_output.stderr),
                 String::from_utf8_lossy(&mount_output.stdout),
@@ -259,20 +303,32 @@ fn wait_for_mounted_file(
 }
 
 fn unmount(mountpoint: &Path) {
-    #[cfg(target_os = "linux")]
-    let commands: &[&str] = &["fusermount3", "fusermount", "umount"];
-    #[cfg(not(target_os = "linux"))]
-    let commands: &[&str] = &["umount"];
+    if try_unmount(mountpoint) {
+        return;
+    }
 
-    for command in commands {
-        let status = Command::new(command).arg(mountpoint).status();
+    panic!("failed to unmount {}", mountpoint.display());
+}
+
+fn try_unmount(mountpoint: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    let commands: &[(&str, &[&str])] = &[
+        ("fusermount3", &["-u"]),
+        ("fusermount", &["-u"]),
+        ("umount", &[]),
+    ];
+    #[cfg(not(target_os = "linux"))]
+    let commands: &[(&str, &[&str])] = &[("umount", &[])];
+
+    for (command, args) in commands {
+        let status = Command::new(command).args(*args).arg(mountpoint).status();
         match status {
-            Ok(status) if status.success() => return,
+            Ok(status) if status.success() => return true,
             Ok(_) | Err(_) => continue,
         }
     }
 
-    panic!("failed to unmount {}", mountpoint.display());
+    false
 }
 
 fn fuse_smoke_skip_reason() -> Option<String> {

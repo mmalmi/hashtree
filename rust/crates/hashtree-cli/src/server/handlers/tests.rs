@@ -667,6 +667,8 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     crate::server::status_metrics::record_http_status_for_test(StatusCode::OK);
     crate::server::status_metrics::record_http_status_for_test(StatusCode::NOT_FOUND);
     crate::server::status_metrics::record_http_status_for_test(StatusCode::SERVICE_UNAVAILABLE);
+    let optimistic_upload_queue_bytes = state.optimistic_upload_queue_bytes as u64;
+    let blossom_upload_replica_queue_bytes = state.blossom_upload_replica_queue_bytes as u64;
 
     let response = daemon_status(
         AxumState(state),
@@ -710,11 +712,11 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     );
     assert_eq!(
         json["queues"]["optimistic_uploads"]["max_bytes"],
-        512 * 1024 * 1024u64
+        optimistic_upload_queue_bytes
     );
     assert_eq!(
         json["queues"]["upload_replication"]["max_bytes"],
-        512 * 1024 * 1024u64
+        blossom_upload_replica_queue_bytes
     );
     assert!(
         json["queues"]["upload_replication"]["coalesce_queue_capacity_jobs"]

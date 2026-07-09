@@ -16,19 +16,12 @@ SOURCE_REPO_DIR="${TMPDIR}/source-repo"
 TARGET_DIR="${TMPDIR}/target"
 OUTPUT_DIR="${TMPDIR}/out"
 LOG_DIR="${TMPDIR}/logs"
-CASHU_SERVICE_DIR="${TMPDIR}/cashu-service"
-CASHU_SPILMAN_DIR="${TMPDIR}/cashu_spilman_channels"
-FIPS_DIR="${TMPDIR}/fips"
-
 mkdir -p \
     "$BIN_DIR" \
     "$LOG_DIR" \
     "${SOURCE_REPO_DIR}/rust" \
-    "${CASHU_SERVICE_DIR}" \
-    "${CASHU_SPILMAN_DIR}" \
-    "${FIPS_DIR}/crates/fips-core"
+    "${TARGET_DIR}"
 printf 'lockfile\n' >"${SOURCE_REPO_DIR}/rust/Cargo.lock"
-printf '[package]\nname = "fips-core"\nversion = "0.0.0"\nedition = "2021"\n' >"${FIPS_DIR}/crates/fips-core/Cargo.toml"
 
 cat >"${BIN_DIR}/docker" <<'EOF'
 #!/bin/bash
@@ -71,21 +64,20 @@ PATH="${BIN_DIR}:$PATH" TEST_LOG_DIR="${LOG_DIR}" "${BUILD_SCRIPT}" \
     --target-dir "${TARGET_DIR}" \
     --targets "x86_64-unknown-linux-musl" \
     --linux-builder docker \
-    --fips-dir "${FIPS_DIR}" \
     --docker-bin docker \
     --docker-rust-image rust:test
 
 grep -F -- "--platform linux/amd64" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "-v ${SOURCE_REPO_DIR}:/work" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "-v ${FIPS_DIR}:/fips:ro" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "-v ${CASHU_SERVICE_DIR}:/cashu-service:ro" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "-v ${CASHU_SPILMAN_DIR}:/cashu_spilman_channels:ro" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "-v ${TARGET_DIR}:/target-dir" "${LOG_DIR}/docker.log" >/dev/null
+! grep -F -- ":/fips" "${LOG_DIR}/docker.log" >/dev/null
+! grep -F -- ":/cashu-service" "${LOG_DIR}/docker.log" >/dev/null
+! grep -F -- ":/nostr-social-graph" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "rust:test" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--target x86_64-unknown-linux-musl" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--jobs \"\${CARGO_BUILD_JOBS:-4}\"" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--locked" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "apk add --no-cache fuse3-static" "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- "apk add --no-cache build-base" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "mkdir -p /target-dir/release /target-dir/x86_64-unknown-linux-musl/release" "${LOG_DIR}/docker.log" >/dev/null
 
 test -f "${OUTPUT_DIR}/hashtree-x86_64-unknown-linux-musl.tar.gz"

@@ -106,7 +106,7 @@ fn upload_directory_progress_records_nested_files_and_bytes() {
     std::fs::write(dir.join("assets").join("main.js"), vec![2u8; 202]).expect("write asset");
 
     let progress = AddProgress::new();
-    store
+    let root_hex = store
         .upload_dir_with_options_and_chunk_size_and_progress(&dir, true, Some(64), &progress)
         .expect("upload dir with progress");
 
@@ -115,6 +115,22 @@ fn upload_directory_progress_records_nested_files_and_bytes() {
     assert_eq!(snapshot.bytes_total, 303);
     assert_eq!(snapshot.files_processed, 2);
     assert_eq!(snapshot.files_total, 2);
+
+    let root = Cid::public(from_hex(&root_hex).expect("root hash"));
+    let listing = store
+        .get_directory_listing_by_cid(&root)
+        .expect("root listing")
+        .expect("root directory");
+    let assets = listing
+        .entries
+        .iter()
+        .find(|entry| entry.name == "assets")
+        .expect("assets entry");
+    assert!(assets.is_directory, "nested directory must retain its type");
+    assert!(store
+        .resolve_path(&root, "assets/main.js")
+        .expect("resolve nested file")
+        .is_some());
 }
 
 #[test]

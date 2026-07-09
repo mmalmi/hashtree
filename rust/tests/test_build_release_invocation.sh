@@ -27,6 +27,18 @@ printf '%s\n' "$*" >>"${TEST_LOG_DIR}/rustup.log"
 EOF
 chmod +x "${BIN_DIR}/rustup"
 
+cat >"${BIN_DIR}/uname" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+case "${1:-}" in
+    -s) printf 'Darwin\n' ;;
+    -m) printf 'arm64\n' ;;
+    *) printf 'Darwin\n' ;;
+esac
+EOF
+chmod +x "${BIN_DIR}/uname"
+
 cat >"${BIN_DIR}/cargo" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -103,12 +115,10 @@ grep -F "env:${TARGET_DIR}" "${LOG_DIR}/cargo.log" >/dev/null
 grep -F "pwd:${SOURCE_REPO_DIR}/rust" "${LOG_DIR}/cargo.log" >/dev/null
 grep -F "args:build --release --target aarch64-apple-darwin -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --locked" "${LOG_DIR}/cargo.log" >/dev/null
 grep -F "args:build --release --target x86_64-apple-darwin -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --locked" "${LOG_DIR}/cargo.log" >/dev/null
-if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-    grep -F "pkg-config-allow-cross:1" "${LOG_DIR}/cargo.log" >/dev/null
-fi
+grep -F "pkg-config-allow-cross:1" "${LOG_DIR}/cargo.log" >/dev/null
 grep -F "env:${TARGET_DIR}" "${LOG_DIR}/cross.log" >/dev/null
 grep -F "pwd:${SOURCE_REPO_DIR}/rust" "${LOG_DIR}/cross.log" >/dev/null
-grep -F "args:build --release --target x86_64-unknown-linux-musl -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fuse --locked" "${LOG_DIR}/cross.log" >/dev/null
+grep -F "args:build --release --target x86_64-unknown-linux-musl -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --locked" "${LOG_DIR}/cross.log" >/dev/null
 
 test -f "${OUTPUT_DIR}/hashtree-aarch64-apple-darwin.tar.gz"
 test -f "${OUTPUT_DIR}/hashtree-x86_64-apple-darwin.tar.gz"

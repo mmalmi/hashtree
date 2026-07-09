@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 
 import {
   parseArgs,
-  requiredSiblingSourceDirs,
   windowsBuildScriptLines,
 } from '../scripts/build_windows_vm_artifacts.mjs'
 
@@ -56,6 +55,6 @@ test('windowsBuildScriptLines emits a PowerShell-friendly preamble', () => {
   const guestRepoLine = lines.find((line) => line.includes("$guestRepo = 'C:\\src\\hashtree'"))
   assert.ok(guestRepoLine, `expected $guestRepo assignment, got ${JSON.stringify(lines)}`)
 
-  assert.deepEqual(requiredSiblingSourceDirs, ['cashu-service', 'cashu_spilman_channels', 'fips'])
-  assert.ok(lines.some((line) => line.includes("cashu-service', 'cashu_spilman_channels', 'fips")))
+  assert.equal(lines.some((line) => line.includes('cashu-service')), false)
+  assert.equal(lines.some((line) => line.includes('fips')), false)
 })

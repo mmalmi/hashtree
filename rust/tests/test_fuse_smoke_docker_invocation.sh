@@ -39,7 +39,9 @@ grep -F -- "-v ${CARGO_HOME_DIR}:/cargo-home" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "-w /work/rust" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "rust:test" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "bash -lc" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "apt-get install -y --no-install-recommends fuse3 pkg-config libfuse3-dev" "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- "apt-get install -y --no-install-recommends fuse3 pkg-config libfuse3-dev libdbus-1-dev libclang-dev" "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- 'RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH' "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- "cd /work/rust" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "cargo test -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture" "${LOG_DIR}/docker.log" >/dev/null
 
 echo "test_fuse_smoke_docker_invocation.sh passed"

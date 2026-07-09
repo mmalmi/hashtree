@@ -13,7 +13,6 @@ Options:
   --target <target>                Linux musl target triple to build
   --target-dir <dir>               Cargo target directory to write into
   --repo-dir <dir>                 Repository root (default: inferred)
-  --fips-dir <dir>                 FIPS repository root (default: sibling ../fips)
   --docker-bin <path>              Docker binary to use (default: docker)
   --docker-rust-image <image>      Rust Alpine image to use
   --cargo-bin <path>               Host cargo binary used only to infer a default Rust image
@@ -28,7 +27,6 @@ DEFAULT_REPO_DIR="$(cd "${RUST_DIR}/.." && pwd)"
 TARGET=""
 TARGET_DIR=""
 REPO_DIR="${DEFAULT_REPO_DIR}"
-FIPS_DIR="${FIPS_DIR:-}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 DOCKER_RUST_IMAGE="${DOCKER_RUST_IMAGE:-}"
 CARGO_BIN="${CARGO_BIN:-cargo}"
@@ -81,10 +79,6 @@ while [ $# -gt 0 ]; do
             REPO_DIR="${2:-}"
             shift 2
             ;;
-        --fips-dir)
-            FIPS_DIR="${2:-}"
-            shift 2
-            ;;
         --docker-bin)
             DOCKER_BIN="${2:-}"
             shift 2
@@ -119,15 +113,6 @@ require_command "$DOCKER_BIN"
 mkdir -p "$TARGET_DIR"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 REPO_DIR="$(cd "$REPO_DIR" && pwd)"
-if [ -z "$FIPS_DIR" ] && [ -f "${REPO_DIR}/../fips/crates/fips-core/Cargo.toml" ]; then
-    FIPS_DIR="$(cd "${REPO_DIR}/../fips" && pwd)"
-fi
-if [ -z "$FIPS_DIR" ] || [ ! -f "${FIPS_DIR}/crates/fips-core/Cargo.toml" ]; then
-    echo "FIPS repo not found. Pass --fips-dir /path/to/fips." >&2
-    exit 1
-fi
-FIPS_DIR="$(cd "$FIPS_DIR" && pwd)"
-
 if [ -z "$DOCKER_RUST_IMAGE" ]; then
     DOCKER_RUST_IMAGE="$(default_docker_rust_image)"
 fi
@@ -135,16 +120,8 @@ fi
 platform="$(docker_platform_for_target "$TARGET")"
 docker_mounts=(
     -v "${REPO_DIR}:/work"
-    -v "${FIPS_DIR}:/fips:ro"
     -v "${TARGET_DIR}:/target-dir"
 )
-for sibling in cashu-service cashu_spilman_channels nostr-social-graph; do
-    sibling_dir="${REPO_DIR}/../${sibling}"
-    if [ -d "$sibling_dir" ]; then
-        sibling_dir="$(cd "$sibling_dir" && pwd)"
-        docker_mounts+=(-v "${sibling_dir}:/${sibling}:ro")
-    fi
-done
 
 read -r -d '' build_command <<EOF || true
 set -euo pipefail

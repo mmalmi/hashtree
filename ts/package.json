@@ -42,10 +42,8 @@
     "@wdio/mocha-framework": "^9.22.0",
     "@wdio/spec-reporter": "^9.20.0",
     "eslint": "^9.39.1",
-    "eslint-plugin-svelte": "^3.13.1",
     "globals": "^16.5.0",
     "nostr-tools": "^2.18.2",
-    "svelte-eslint-parser": "^1.4.1",
     "typescript": "^5.3.0",
     "ws": "^8.18.3"
   }

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -60,18 +59,21 @@ fn snapshot_includes_list_timestamps() {
 
     let data = flatten_chunks(chunks);
 
-    let parsed = parse_snapshot(&data);
-    let root_id = find_id(&parsed.id_to_pubkey, &root_pk.to_bytes()).expect("root id");
-    let bob_id = find_id(&parsed.id_to_pubkey, &bob_pk.to_bytes()).expect("bob id");
-    let carol_id = find_id(&parsed.id_to_pubkey, &carol_pk.to_bytes()).expect("carol id");
-
-    let (follow_ts, follow_targets) = parsed.follow_lists.get(&root_id).expect("root follow list");
-    assert_eq!(*follow_ts, follow_created_at);
-    assert!(follow_targets.contains(&bob_id));
-
-    let (mute_ts, mute_targets) = parsed.mute_lists.get(&root_id).expect("root mute list");
-    assert_eq!(*mute_ts, mute_created_at);
-    assert!(mute_targets.contains(&carol_id));
+    let parsed = SocialGraph::from_binary(&root_pk.to_hex(), &data).expect("decode snapshot");
+    assert_eq!(
+        parsed.get_follow_list_created_at(&root_pk.to_hex()),
+        Some(follow_created_at)
+    );
+    assert!(parsed
+        .get_followed_by_user(&root_pk.to_hex())
+        .contains(&bob_pk.to_hex()));
+    assert_eq!(
+        parsed.get_mute_list_created_at(&root_pk.to_hex()),
+        Some(mute_created_at)
+    );
+    assert!(parsed
+        .get_muted_by_user(&root_pk.to_hex())
+        .contains(&carol_pk.to_hex()));
 }
 
 #[test]
@@ -185,76 +187,4 @@ fn to_external_event(event: &nostr::Event) -> ExternalNostrEvent {
         id: event.id.to_hex(),
         sig: event.sig.to_string(),
     }
-}
-
-struct ParsedSnapshot {
-    id_to_pubkey: HashMap<u32, [u8; 32]>,
-    follow_lists: HashMap<u32, (u64, Vec<u32>)>,
-    mute_lists: HashMap<u32, (u64, Vec<u32>)>,
-}
-
-fn parse_snapshot(data: &[u8]) -> ParsedSnapshot {
-    let mut offset = 0usize;
-    let _version = read_varint(data, &mut offset);
-    let id_count = read_varint(data, &mut offset) as usize;
-
-    let mut id_to_pubkey = HashMap::new();
-    for _ in 0..id_count {
-        let pk = data[offset..offset + 32].try_into().unwrap();
-        offset += 32;
-        let id = read_varint(data, &mut offset) as u32;
-        id_to_pubkey.insert(id, pk);
-    }
-
-    let follow_lists_count = read_varint(data, &mut offset) as usize;
-    let mut follow_lists = HashMap::new();
-    for _ in 0..follow_lists_count {
-        let owner = read_varint(data, &mut offset) as u32;
-        let ts = read_varint(data, &mut offset);
-        let count = read_varint(data, &mut offset) as usize;
-        let mut targets = Vec::with_capacity(count);
-        for _ in 0..count {
-            targets.push(read_varint(data, &mut offset) as u32);
-        }
-        follow_lists.insert(owner, (ts, targets));
-    }
-
-    let mute_lists_count = read_varint(data, &mut offset) as usize;
-    let mut mute_lists = HashMap::new();
-    for _ in 0..mute_lists_count {
-        let owner = read_varint(data, &mut offset) as u32;
-        let ts = read_varint(data, &mut offset);
-        let count = read_varint(data, &mut offset) as usize;
-        let mut targets = Vec::with_capacity(count);
-        for _ in 0..count {
-            targets.push(read_varint(data, &mut offset) as u32);
-        }
-        mute_lists.insert(owner, (ts, targets));
-    }
-
-    ParsedSnapshot {
-        id_to_pubkey,
-        follow_lists,
-        mute_lists,
-    }
-}
-
-fn read_varint(data: &[u8], offset: &mut usize) -> u64 {
-    let mut value = 0u64;
-    let mut shift = 0u32;
-    loop {
-        let byte = data[*offset];
-        *offset += 1;
-        value |= ((byte & 0x7f) as u64) << shift;
-        if (byte & 0x80) == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    value
-}
-
-fn find_id(map: &HashMap<u32, [u8; 32]>, pk: &[u8; 32]) -> Option<u32> {
-    map.iter()
-        .find_map(|(id, value)| if value == pk { Some(*id) } else { None })
 }
