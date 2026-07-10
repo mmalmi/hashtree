@@ -204,6 +204,7 @@ async fn test_local_daemon_only_publishes_signed_root_through_daemon_only() {
     };
 
     let published = Arc::new(Mutex::new(None::<Event>));
+    let legacy_cache_requests = Arc::new(AtomicUsize::new(0));
     let local_app =
         Router::new()
             .route(
@@ -215,6 +216,16 @@ async fn test_local_daemon_only_publishes_signed_root_through_daemon_only() {
                         StatusCode::ACCEPTED
                     },
                 ),
+            )
+            .route(
+                "/api/cache-tree-root",
+                post({
+                    let requests = Arc::clone(&legacy_cache_requests);
+                    move || async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
             )
             .fallback(
                 get(|| async { StatusCode::NOT_FOUND }).post(|| async { StatusCode::NOT_FOUND }),
@@ -271,6 +282,7 @@ async fn test_local_daemon_only_publishes_signed_root_through_daemon_only() {
         values.first().is_some_and(|value| value == "d")
             && values.get(1).is_some_and(|value| value == "site")
     }));
+    assert_eq!(legacy_cache_requests.load(Ordering::SeqCst), 0);
     assert_eq!(public_requests.load(Ordering::SeqCst), 0);
 
     local_server.abort();

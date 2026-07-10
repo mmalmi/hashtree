@@ -1909,8 +1909,6 @@ impl NostrClient {
             .sign_with_keys(keys)
             .map_err(|error| anyhow::anyhow!("Failed to sign event: {error}"))?;
         self.publish_event_to_local_daemon(&event).await?;
-        self.cache_public_root_in_local_daemon(repo_name, root_hash, encryption_key)
-            .await;
 
         let npub_url = keys
             .public_key()
