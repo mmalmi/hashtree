@@ -902,11 +902,17 @@ impl NostrClient {
     ) -> Option<RootEventData> {
         let base = self.local_daemon_url.as_ref()?;
         let pubkey = self.daemon_pubkey_identifier();
+        let refresh = if self.local_daemon_only {
+            ""
+        } else {
+            "?refresh=1"
+        };
         let url = format!(
-            "{}/api/nostr/resolve/{}/{}?refresh=1",
+            "{}/api/nostr/resolve/{}/{}{}",
             base.trim_end_matches('/'),
             pubkey,
-            repo_name
+            repo_name,
+            refresh,
         );
 
         let client = reqwest::Client::builder().timeout(timeout).build().ok()?;

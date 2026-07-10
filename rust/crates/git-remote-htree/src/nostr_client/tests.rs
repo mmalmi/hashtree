@@ -110,7 +110,7 @@ fn test_local_daemon_only_requires_a_configured_daemon() {
 #[tokio::test]
 async fn test_local_daemon_only_keeps_root_and_data_requests_local() {
     use axum::{
-        extract::{Path, State},
+        extract::{OriginalUri, Path, State},
         http::StatusCode,
         routing::get,
         Json, Router,
@@ -127,8 +127,13 @@ async fn test_local_daemon_only_keeps_root_and_data_requests_local() {
             "/api/nostr/resolve/:pubkey/:treename",
             get(
                 |State(requests): State<Arc<AtomicUsize>>,
-                 Path((_pubkey, _treename)): Path<(String, String)>| async move {
+                 Path((_pubkey, _treename)): Path<(String, String)>,
+                 OriginalUri(uri): OriginalUri| async move {
                     requests.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        uri.query().is_none(),
+                        "local-only lookup must trust daemon cache"
+                    );
                     Json(json!({
                         "hash": "ab".repeat(32),
                         "source": "local-relay",
