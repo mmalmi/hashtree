@@ -5,7 +5,9 @@
 //! app-owned endpoint bytes.
 
 use async_trait::async_trait;
-use fips_core::config::{NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances};
+use fips_core::config::{
+    EthernetConfig, NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances,
+};
 use fips_core::PeerIdentity;
 use hashtree_core::{Hash, MemoryStore, Store, StoreError};
 pub use hashtree_network::PubsubPublishStats;
@@ -193,17 +195,13 @@ pub async fn bind_fips_endpoint(
         options.discovery_scope.trim().to_string()
     };
     let packet_channel_capacity = options.packet_channel_capacity;
-    let ethernet_interfaces = options.ethernet_interfaces.clone();
     let config = fips_endpoint_config(options, &discovery_scope);
 
-    let mut builder = fips_core::FipsEndpoint::builder()
+    let builder = fips_core::FipsEndpoint::builder()
         .config(config)
         .discovery_scope(discovery_scope.clone())
         .without_system_tun()
         .packet_channel_capacity(packet_channel_capacity);
-    for interface in ethernet_interfaces {
-        builder = builder.local_ethernet(interface);
-    }
     let endpoint = Arc::new(
         builder
             .bind()
@@ -251,6 +249,36 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     config.node.discovery.nostr.app = discovery_scope.to_string();
     config.node.discovery.nostr.advert_relays = options.relays.clone();
     config.node.discovery.nostr.dm_relays = options.relays;
+
+    let ethernet_configs = options
+        .ethernet_interfaces
+        .into_iter()
+        .enumerate()
+        .map(|(index, interface)| {
+            (
+                format!("local-ethernet-{index}"),
+                EthernetConfig {
+                    interface,
+                    discovery: Some(true),
+                    announce: Some(true),
+                    auto_connect: Some(true),
+                    accept_connections: Some(true),
+                    discovery_scope: Some(discovery_scope.to_string()),
+                    ..EthernetConfig::default()
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if ethernet_configs.len() == 1 {
+        config.transports.ethernet = TransportInstances::Single(
+            ethernet_configs
+                .into_values()
+                .next()
+                .expect("one Ethernet configuration"),
+        );
+    } else if !ethernet_configs.is_empty() {
+        config.transports.ethernet = TransportInstances::Named(ethernet_configs);
+    }
 
     if options.enable_udp {
         config.transports.udp = TransportInstances::Single(fips_core::UdpConfig {
@@ -1894,6 +1922,7 @@ mod tests {
         assert!(!config.node.discovery.nostr.advertise);
         assert!(config.node.discovery.nostr.advert_relays.is_empty());
         assert!(config.node.discovery.nostr.dm_relays.is_empty());
+        assert!(!config.transports.ethernet.is_empty());
         assert!(config.transports.udp.is_empty());
         assert!(config.transports.webrtc.is_empty());
         assert!(config.transports.tcp.is_empty());
