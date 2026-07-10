@@ -249,10 +249,8 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = true;
     config.node.discovery.nostr.app = discovery_scope.to_string();
-    if !options.relays.is_empty() {
-        config.node.discovery.nostr.advert_relays = options.relays.clone();
-        config.node.discovery.nostr.dm_relays = options.relays;
-    }
+    config.node.discovery.nostr.advert_relays = options.relays.clone();
+    config.node.discovery.nostr.dm_relays = options.relays;
 
     if options.enable_udp {
         config.transports.udp = TransportInstances::Single(fips_core::UdpConfig {
@@ -1894,6 +1892,8 @@ mod tests {
 
         assert!(!config.node.discovery.nostr.enabled);
         assert!(!config.node.discovery.nostr.advertise);
+        assert!(config.node.discovery.nostr.advert_relays.is_empty());
+        assert!(config.node.discovery.nostr.dm_relays.is_empty());
         assert!(config.transports.udp.is_empty());
         assert!(config.transports.webrtc.is_empty());
         assert!(config.transports.tcp.is_empty());
