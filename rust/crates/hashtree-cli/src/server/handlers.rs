@@ -690,14 +690,20 @@ pub async fn publish_nostr_event(
     };
 
     match provider
-        .publish(event, EventSource::local_index("hashtree-daemon-http"))
+        .publish(
+            event.clone(),
+            EventSource::local_index("hashtree-daemon-http"),
+        )
         .await
     {
-        Ok(report) if report.accepted => Response::builder()
-            .status(StatusCode::ACCEPTED)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({ "accepted": true }).to_string()))
-            .unwrap(),
+        Ok(report) if report.accepted => {
+            cache_published_tree_root(&state, event.as_event());
+            Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "accepted": true }).to_string()))
+                .unwrap()
+        }
         Ok(report) => Response::builder()
             .status(StatusCode::BAD_GATEWAY)
             .body(Body::from(report.reason.unwrap_or_else(|| {

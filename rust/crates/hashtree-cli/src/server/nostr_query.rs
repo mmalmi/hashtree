@@ -66,10 +66,19 @@ pub(super) async fn query_events_for_local_request(
         };
     }
 
-    let local_events = match state.nostr_relay.as_ref() {
+    let mut local_events = match state.nostr_relay.as_ref() {
         Some(relay) => relay.query_events(filter, limit).await,
         None => Vec::new(),
     };
+    if let Ok(cache) = state.tree_root_cache.lock() {
+        local_events.extend(
+            cache
+                .values()
+                .filter_map(|cached| cached.event.as_ref())
+                .filter(|event| filter.match_event(event, Default::default()))
+                .cloned(),
+        );
+    }
     if is_locally_answerable_id_query(filter) && !local_events.is_empty() {
         return LocalRequestNostrQuery {
             local_events,

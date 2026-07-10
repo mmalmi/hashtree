@@ -115,6 +115,7 @@ pub struct CachedTreeRootEntry {
     pub cid: Cid,
     pub source: &'static str,
     pub root_event: Option<PeerRootEvent>,
+    pub event: Option<nostr::Event>,
     pub cached_at: Instant,
 }
 

@@ -3,7 +3,9 @@ use super::super::nostr_query::query_events_for_local_request;
 use super::{list_directory_with_fetch, resolve_path_with_fetch};
 use crate::webrtc::{build_root_filter, pick_latest_event, root_event_from_peer, PeerRootEvent};
 use anyhow::Result;
+use git_remote_htree::nostr_client::is_hashtree_root_kind;
 use hashtree_core::{from_hex, to_hex, Cid, HashTree, LinkType, Store, TreeEntry};
+use nostr::nips::nip19::ToBech32;
 use nostr_pubsub::EventSourceKind;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -309,6 +311,55 @@ pub(super) fn put_cached_tree_root(
                 cid,
                 source,
                 root_event,
+                event: None,
+                cached_at: Instant::now(),
+            },
+        );
+    }
+}
+
+pub(super) fn cache_published_tree_root(state: &AppState, event: &nostr::Event) {
+    if !is_hashtree_root_kind(event.kind) {
+        return;
+    }
+    let Some(tree_name) = event.tags.iter().find_map(|tag| {
+        let values = tag.as_slice();
+        (values.first().is_some_and(|value| value == "d"))
+            .then(|| values.get(1).cloned())
+            .flatten()
+    }) else {
+        return;
+    };
+    let Some(root_event) = root_event_from_peer(event, "local-publish", &tree_name) else {
+        return;
+    };
+    let Some(cid) = peer_root_to_cid(&root_event) else {
+        return;
+    };
+    let npub = event
+        .pubkey
+        .to_bech32()
+        .expect("public keys always encode as npub");
+    let cache_key = tree_root_cache_key(&npub, &tree_name, None);
+    let Ok(mut cache) = state.tree_root_cache.lock() else {
+        return;
+    };
+    let is_newer = cache
+        .get(&cache_key)
+        .and_then(|cached| cached.root_event.as_ref())
+        .map(|cached| {
+            (root_event.created_at, root_event.event_id.as_str())
+                > (cached.created_at, cached.event_id.as_str())
+        })
+        .unwrap_or(true);
+    if is_newer {
+        cache.insert(
+            cache_key,
+            CachedTreeRootEntry {
+                cid,
+                source: "local-publish",
+                root_event: Some(root_event),
+                event: Some(event.clone()),
                 cached_at: Instant::now(),
             },
         );

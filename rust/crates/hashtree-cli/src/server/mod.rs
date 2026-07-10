@@ -367,6 +367,7 @@ impl HashtreeServer {
                         cid,
                         source: "embedded-bootstrap",
                         root_event: None,
+                        event: None,
                         cached_at: now,
                     },
                 );
@@ -765,7 +766,7 @@ mod tests {
     use tempfile::TempDir;
 
     struct StaticProvider {
-        event: VerifiedEvent,
+        event: Option<VerifiedEvent>,
         queries: AtomicUsize,
         publishes: AtomicUsize,
         mode: PubsubProviderMode,
@@ -793,11 +794,16 @@ mod tests {
         ) -> nostr_pubsub::Result<QueryReport> {
             self.queries.fetch_add(1, Ordering::Relaxed);
             Ok(QueryReport {
-                events: vec![QueryEvent {
-                    event: self.event.clone(),
-                    source: EventSource::fips_endpoint("browser-router"),
-                    priority: 0,
-                }],
+                events: self
+                    .event
+                    .clone()
+                    .map(|event| QueryEvent {
+                        event,
+                        source: EventSource::fips_endpoint("browser-router"),
+                        priority: 0,
+                    })
+                    .into_iter()
+                    .collect(),
             })
         }
     }
@@ -1220,7 +1226,7 @@ mod tests {
             ])
             .sign_with_keys(&owner)?;
         let provider = Arc::new(StaticProvider {
-            event: VerifiedEvent::try_from(root_event)?,
+            event: Some(VerifiedEvent::try_from(root_event)?),
             queries: AtomicUsize::new(0),
             publishes: AtomicUsize::new(0),
             mode: PubsubProviderMode::LocalOnly,
@@ -1264,7 +1270,7 @@ mod tests {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::Custom(30064), "root").sign_with_keys(&keys)?;
         let provider = Arc::new(StaticProvider {
-            event: VerifiedEvent::try_from(event.clone())?,
+            event: Some(VerifiedEvent::try_from(event.clone())?),
             queries: AtomicUsize::new(0),
             publishes: AtomicUsize::new(0),
             mode: PubsubProviderMode::LocalOnly,
@@ -1273,6 +1279,7 @@ mod tests {
         let port = listener.local_addr()?.port();
         let server = HashtreeServer::new(store, "127.0.0.1:0".to_string())
             .with_nostr_provider(provider.clone());
+        assert!(server.state.nostr_relay_urls.is_empty());
         let handle =
             tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
 
@@ -1284,6 +1291,64 @@ mod tests {
 
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
         assert_eq!(provider.publishes.load(Ordering::Relaxed), 1);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn loopback_root_publication_is_immediately_resolvable_without_provider_replay(
+    ) -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let keys = Keys::generate();
+        let tree_name = "webvm-e2e";
+        let root_hash = "11".repeat(32);
+        let encryption_key = "22".repeat(32);
+        let event = EventBuilder::new(Kind::Custom(30064), &root_hash)
+            .tags(vec![
+                nostr::Tag::identifier(tree_name),
+                nostr::Tag::custom(nostr::TagKind::custom("l"), vec!["hashtree".to_string()]),
+                nostr::Tag::custom(nostr::TagKind::custom("hash"), vec![root_hash.clone()]),
+                nostr::Tag::custom(nostr::TagKind::custom("key"), vec![encryption_key.clone()]),
+            ])
+            .sign_with_keys(&keys)?;
+        let provider = Arc::new(StaticProvider {
+            event: None,
+            queries: AtomicUsize::new(0),
+            publishes: AtomicUsize::new(0),
+            mode: PubsubProviderMode::LocalOnly,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = HashtreeServer::new(store, "127.0.0.1:0".to_string())
+            .with_nostr_provider(provider.clone());
+        assert!(server.state.nostr_relay_urls.is_empty());
+        let handle =
+            tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
+        let client = reqwest::Client::new();
+
+        let publish = client
+            .post(format!("http://127.0.0.1:{port}/api/nostr/events"))
+            .json(&event)
+            .send()
+            .await?;
+        assert_eq!(publish.status(), reqwest::StatusCode::ACCEPTED);
+
+        let npub = keys.public_key().to_bech32()?;
+        let resolved = client
+            .get(format!(
+                "http://127.0.0.1:{port}/api/nostr/resolve/{npub}/{tree_name}?refresh=1"
+            ))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        assert_eq!(resolved["hash"], root_hash);
+        assert_eq!(resolved["key_tag"], encryption_key);
+        assert_eq!(resolved["source"], "local-relay");
+        assert_eq!(provider.publishes.load(Ordering::Relaxed), 1);
+        assert_eq!(provider.queries.load(Ordering::Relaxed), 1);
         handle.abort();
         Ok(())
     }
