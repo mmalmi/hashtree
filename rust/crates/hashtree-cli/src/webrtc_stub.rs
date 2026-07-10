@@ -281,7 +281,7 @@ pub fn root_event_from_peer(
         }
         match slice[0].as_str() {
             "d" => tree_match = slice[1].as_str() == tree_name,
-            "l" => labeled = slice[1].as_str() == "hashtree",
+            "l" => labeled |= slice[1].as_str() == "hashtree",
             "hash" => hash_tag = Some(slice[1].to_string()),
             "key" => key = Some(slice[1].to_string()),
             "encryptedKey" => encrypted_key = Some(slice[1].to_string()),

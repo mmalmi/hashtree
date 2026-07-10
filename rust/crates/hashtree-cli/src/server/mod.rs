@@ -1308,6 +1308,7 @@ mod tests {
             .tags(vec![
                 nostr::Tag::identifier(tree_name),
                 nostr::Tag::custom(nostr::TagKind::custom("l"), vec!["hashtree".to_string()]),
+                nostr::Tag::custom(nostr::TagKind::custom("l"), vec!["git".to_string()]),
                 nostr::Tag::custom(nostr::TagKind::custom("hash"), vec![root_hash.clone()]),
                 nostr::Tag::custom(nostr::TagKind::custom("key"), vec![encryption_key.clone()]),
             ])
