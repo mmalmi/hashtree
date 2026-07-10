@@ -318,9 +318,12 @@ pub(super) fn put_cached_tree_root(
     }
 }
 
-pub(super) fn cache_published_tree_root(state: &AppState, event: &nostr::Event) {
+pub(super) fn cache_published_tree_root(
+    state: &AppState,
+    event: &nostr::Event,
+) -> std::result::Result<(), &'static str> {
     if !is_hashtree_root_kind(event.kind) {
-        return;
+        return Ok(());
     }
     let Some(tree_name) = event.tags.iter().find_map(|tag| {
         let values = tag.as_slice();
@@ -328,13 +331,13 @@ pub(super) fn cache_published_tree_root(state: &AppState, event: &nostr::Event) 
             .then(|| values.get(1).cloned())
             .flatten()
     }) else {
-        return;
+        return Err("Hashtree root event is missing its tree name");
     };
     let Some(root_event) = root_event_from_peer(event, "local-publish", &tree_name) else {
-        return;
+        return Err("Hashtree root event has invalid root tags");
     };
     let Some(cid) = peer_root_to_cid(&root_event) else {
-        return;
+        return Err("Hashtree root event has an invalid root hash");
     };
     let npub = event
         .pubkey
@@ -342,7 +345,7 @@ pub(super) fn cache_published_tree_root(state: &AppState, event: &nostr::Event) 
         .expect("public keys always encode as npub");
     let cache_key = tree_root_cache_key(&npub, &tree_name, None);
     let Ok(mut cache) = state.tree_root_cache.lock() else {
-        return;
+        return Err("Hashtree root cache is unavailable");
     };
     let is_newer = cache
         .get(&cache_key)
@@ -364,6 +367,7 @@ pub(super) fn cache_published_tree_root(state: &AppState, event: &nostr::Event) 
             },
         );
     }
+    Ok(())
 }
 
 fn touch_cached_tree_root(state: &AppState, cache_key: &str) {

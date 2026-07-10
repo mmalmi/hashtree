@@ -697,7 +697,12 @@ pub async fn publish_nostr_event(
         .await
     {
         Ok(report) if report.accepted => {
-            cache_published_tree_root(&state, event.as_event());
+            if let Err(error) = cache_published_tree_root(&state, event.as_event()) {
+                return Response::builder()
+                    .status(StatusCode::UNPROCESSABLE_ENTITY)
+                    .body(Body::from(error))
+                    .unwrap();
+            }
             Response::builder()
                 .status(StatusCode::ACCEPTED)
                 .header(header::CONTENT_TYPE, "application/json")
