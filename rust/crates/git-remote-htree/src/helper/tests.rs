@@ -23,6 +23,50 @@ use tokio::sync::oneshot;
 const TEST_PUBKEY: &str = "4523be58d395b1b196a9b8c82b038b6895cb02b683d0c253a955068dba1facd0";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+struct TransientMissingStore {
+    inner: Arc<MemoryStore>,
+    missing_hash: hashtree_core::Hash,
+    misses_remaining: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Store for TransientMissingStore {
+    async fn put(
+        &self,
+        hash: hashtree_core::Hash,
+        data: Vec<u8>,
+    ) -> Result<bool, hashtree_core::StoreError> {
+        self.inner.put(hash, data).await
+    }
+
+    async fn get(
+        &self,
+        hash: &hashtree_core::Hash,
+    ) -> Result<Option<Vec<u8>>, hashtree_core::StoreError> {
+        if hash == &self.missing_hash
+            && self
+                .misses_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+        {
+            return Ok(None);
+        }
+        self.inner.get(hash).await
+    }
+
+    async fn has(&self, hash: &hashtree_core::Hash) -> Result<bool, hashtree_core::StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &hashtree_core::Hash) -> Result<bool, hashtree_core::StoreError> {
+        self.inner.delete(hash).await
+    }
+}
+
 #[derive(Default)]
 struct CountingBlossomState {
     blobs: HashMap<String, Vec<u8>>,
@@ -2206,6 +2250,97 @@ fn test_git_pack_install_streams_pack_and_index_files() {
         std::fs::read(repo.path().join(".git/objects/pack").join(idx_name)).unwrap(),
         idx_bytes
     );
+}
+
+#[test]
+fn test_git_pack_install_retries_a_transient_missing_chunk() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let repo = TempDir::new().expect("temp repo");
+    assert!(git(repo.path(), &["init", "-b", "master"]).status.success());
+    let _cwd_guard = CwdGuard::set(repo.path());
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let pack_bytes = (0..5000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let inner = Arc::new(MemoryStore::new());
+    let source_tree = HashTree::new(
+        HashTreeConfig::new(Arc::clone(&inner))
+            .public()
+            .with_chunk_size(97),
+    );
+    let (pack_cid, pack_size) = rt
+        .block_on(source_tree.put(&pack_bytes))
+        .expect("write test pack to tree");
+    let missing_hash = rt
+        .block_on(collect_hashes(&source_tree, &pack_cid, 32))
+        .expect("collect pack hashes")
+        .into_iter()
+        .find(|hash| hash != &pack_cid.hash)
+        .expect("chunked pack has a leaf hash");
+    let store = Arc::new(TransientMissingStore {
+        inner: Arc::clone(&inner),
+        missing_hash,
+        misses_remaining: std::sync::atomic::AtomicUsize::new(1),
+    });
+    let tree = HashTree::new(HashTreeConfig::new(store));
+
+    let pack_hash = "1123456789abcdef0123456789abcdef01234567";
+    let pack_name = format!("pack-{pack_hash}.pack");
+    let destination = repo.path().join(".git/objects/pack").join(&pack_name);
+    let written = rt
+        .block_on(RemoteHelper::stream_git_pack_file(
+            &tree,
+            &pack_cid,
+            &destination,
+            pack_name,
+            Some(pack_size),
+            None,
+        ))
+        .expect("transiently missing chunk should be retried");
+
+    assert_eq!(written, pack_size);
+    assert_eq!(std::fs::read(destination).unwrap(), pack_bytes);
+
+    let unavailable_store = Arc::new(TransientMissingStore {
+        inner,
+        missing_hash,
+        misses_remaining: std::sync::atomic::AtomicUsize::new(GIT_PACK_STREAM_MAX_ATTEMPTS),
+    });
+    let unavailable_tree = HashTree::new(HashTreeConfig::new(unavailable_store));
+    let unavailable_name = format!("pack-{pack_hash}-unavailable.pack");
+    let unavailable_destination = repo
+        .path()
+        .join(".git/objects/pack")
+        .join(&unavailable_name);
+    let error = rt
+        .block_on(RemoteHelper::stream_git_pack_file(
+            &unavailable_tree,
+            &pack_cid,
+            &unavailable_destination,
+            unavailable_name,
+            Some(pack_size),
+            None,
+        ))
+        .expect_err("permanently missing chunk must fail within the attempt bound");
+    assert!(
+        error
+            .to_string()
+            .contains("remained unavailable after 3 attempts"),
+        "unexpected terminal error: {error:#}"
+    );
+    assert!(!unavailable_destination.exists());
+    assert!(std::fs::read_dir(unavailable_destination.parent().unwrap())
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
 }
 
 #[test]

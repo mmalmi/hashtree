@@ -37,6 +37,8 @@ const MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 256;
 const DEFAULT_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_GIT_PACK_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 const VERBOSE_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+const GIT_PACK_STREAM_MAX_ATTEMPTS: usize = 3;
+const GIT_PACK_STREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
 const GIT_PACK_PHASE_IDLE: usize = 0;
 const GIT_PACK_PHASE_DOWNLOADING: usize = 1;
 const GIT_PACK_PHASE_INDEXING: usize = 2;
@@ -1007,6 +1009,53 @@ impl RemoteHelper {
         expected_size: Option<u64>,
         progress_bytes: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<u64> {
+        use std::sync::atomic::Ordering;
+
+        for attempt in 1..=GIT_PACK_STREAM_MAX_ATTEMPTS {
+            match Self::stream_git_pack_file_once(
+                tree,
+                cid,
+                destination,
+                label.clone(),
+                expected_size,
+                progress_bytes,
+            )
+            .await
+            {
+                Ok(written) => return Ok(written),
+                Err(error) if attempt < GIT_PACK_STREAM_MAX_ATTEMPTS => {
+                    if let Some(progress_bytes) = progress_bytes {
+                        progress_bytes.store(0, Ordering::Relaxed);
+                    }
+                    warn!(
+                        attempt,
+                        max_attempts = GIT_PACK_STREAM_MAX_ATTEMPTS,
+                        %error,
+                        "Git pack stream failed; retrying the same content path"
+                    );
+                    tokio::time::sleep(GIT_PACK_STREAM_RETRY_DELAY).await;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "{} remained unavailable after {} attempts",
+                            label, GIT_PACK_STREAM_MAX_ATTEMPTS
+                        )
+                    });
+                }
+            }
+        }
+        unreachable!("git pack stream attempt loop returns on every terminal state")
+    }
+
+    async fn stream_git_pack_file_once<S: Store>(
+        tree: &hashtree_core::HashTree<S>,
+        cid: &Cid,
+        destination: &Path,
+        label: String,
+        expected_size: Option<u64>,
+        progress_bytes: Option<&std::sync::atomic::AtomicU64>,
+    ) -> Result<u64> {
         use futures::StreamExt;
         use std::sync::atomic::Ordering;
         use tokio::io::AsyncWriteExt;
@@ -1036,7 +1085,14 @@ impl RemoteHelper {
         let mut saw_chunk = false;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.with_context(|| format!("stream {}", destination.display()))?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(error).with_context(|| format!("stream {}", destination.display()));
+                }
+            };
             saw_chunk = true;
             file.write_all(&chunk)
                 .await
