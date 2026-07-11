@@ -1433,18 +1433,9 @@ impl RemoteHelper {
         }
 
         if !pack_locations.is_empty() {
-            match self
-                .install_git_pack_files_async(&tree, &pack_locations)
+            self.install_git_pack_files_async(&tree, &pack_locations)
                 .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    warn!("Failed to install git pack checkpoint: {}", err);
-                    if self.is_slow() {
-                        eprintln!("  Warning: git pack checkpoint install failed: {}", err);
-                    }
-                }
-            }
+                .context("install advertised git pack files")?;
         }
 
         let local_check_start = std::time::Instant::now();
