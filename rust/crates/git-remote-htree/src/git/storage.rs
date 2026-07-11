@@ -36,6 +36,7 @@ use super::{Error, Result};
 
 /// Box type for async recursion
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+const GIT_TREE_CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Default)]
 struct RefDirectory {
@@ -359,7 +360,8 @@ impl GitStorage {
         );
 
         // Use encrypted mode (default) - blossom servers require encrypted data
-        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let tree =
+            HashTree::new(HashTreeConfig::new(store.clone()).with_chunk_size(GIT_TREE_CHUNK_SIZE));
 
         Ok(Self {
             store,
@@ -2414,6 +2416,12 @@ mod tests {
             GitStorage::open_with_backend_and_max_bytes(temp_dir.path(), StorageBackend::Fs, 0)
                 .unwrap();
         (storage, temp_dir)
+    }
+
+    #[test]
+    fn git_storage_uses_transport_friendly_chunks() {
+        let (storage, _temp_dir) = create_test_storage();
+        assert_eq!(storage.tree.chunk_size(), GIT_TREE_CHUNK_SIZE);
     }
 
     fn create_test_storage_with_limit(max_size_bytes: u64) -> (GitStorage, TempDir) {
