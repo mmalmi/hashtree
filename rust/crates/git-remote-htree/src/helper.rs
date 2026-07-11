@@ -39,7 +39,7 @@ const DEFAULT_GIT_PACK_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 const VERBOSE_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const GIT_PACK_STREAM_MAX_ATTEMPTS: usize = 3;
 const GIT_PACK_STREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
-const GIT_PACK_DISCOVERY_MAX_ATTEMPTS: usize = 3;
+const GIT_DIRECTORY_DISCOVERY_MAX_ATTEMPTS: usize = 3;
 const GIT_PACK_PHASE_IDLE: usize = 0;
 const GIT_PACK_PHASE_DOWNLOADING: usize = 1;
 const GIT_PACK_PHASE_INDEXING: usize = 2;
@@ -766,7 +766,13 @@ impl RemoteHelper {
             }
         });
 
-        let objects_entries = match tree.list_directory(objects_cid).await {
+        let objects_entries = match Self::list_required_git_directory(
+            tree,
+            objects_cid,
+            ".git/objects directory while looking for loose objects",
+        )
+        .await
+        {
             Ok(entries) => entries,
             Err(e) => {
                 done.store(true, Ordering::Relaxed);
@@ -815,10 +821,9 @@ impl RemoteHelper {
             stream::iter(loose_prefixes.into_iter().map(|(prefix, prefix_cid)| {
                 let progress = progress.clone();
                 async move {
-                    let entries = tree_ref
-                        .list_directory(&prefix_cid)
-                        .await
-                        .with_context(|| format!("list .git/objects/{prefix}"))?;
+                    let label = format!(".git/objects/{prefix} directory");
+                    let entries =
+                        Self::list_required_git_directory(tree_ref, &prefix_cid, &label).await?;
                     progress.fetch_add(entries.len(), Ordering::Relaxed);
 
                     let mut locations = Vec::new();
@@ -999,13 +1004,13 @@ impl RemoteHelper {
         cid: &Cid,
         label: &str,
     ) -> Result<Vec<TreeEntry>> {
-        for attempt in 1..=GIT_PACK_DISCOVERY_MAX_ATTEMPTS {
+        for attempt in 1..=GIT_DIRECTORY_DISCOVERY_MAX_ATTEMPTS {
             match tree.list_directory_required(cid).await {
                 Ok(entries) => return Ok(entries),
-                Err(error) if attempt < GIT_PACK_DISCOVERY_MAX_ATTEMPTS => {
+                Err(error) if attempt < GIT_DIRECTORY_DISCOVERY_MAX_ATTEMPTS => {
                     warn!(
                         attempt,
-                        max_attempts = GIT_PACK_DISCOVERY_MAX_ATTEMPTS,
+                        max_attempts = GIT_DIRECTORY_DISCOVERY_MAX_ATTEMPTS,
                         %error,
                         "Required Git directory unavailable; retrying the same content path"
                     );
@@ -1014,7 +1019,7 @@ impl RemoteHelper {
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!(
-                            "required {label} remained unavailable after {GIT_PACK_DISCOVERY_MAX_ATTEMPTS} attempts"
+                            "required {label} remained unavailable after {GIT_DIRECTORY_DISCOVERY_MAX_ATTEMPTS} attempts"
                         )
                     });
                 }

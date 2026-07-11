@@ -1176,6 +1176,52 @@ fn test_collect_git_object_locations_ignores_missing_info_subtree_for_loose_obje
     assert_eq!(fetch_tasks[0].oid, oid);
 }
 
+#[test]
+fn test_collect_git_loose_objects_retries_transient_prefix_miss() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let locations = rt.block_on(async {
+        let inner = Arc::new(MemoryStore::new());
+        let source_tree = HashTree::new(HashTreeConfig::new(Arc::clone(&inner)).public());
+        let oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (object_cid, object_size) = source_tree
+            .put(b"compressed loose git object")
+            .await
+            .expect("loose object");
+        let prefix_cid = source_tree
+            .put_directory(vec![
+                DirEntry::from_cid(&oid[2..], &object_cid).with_size(object_size)
+            ])
+            .await
+            .expect("loose prefix");
+        let objects_cid = source_tree
+            .put_directory(vec![DirEntry::from_cid(&oid[..2], &prefix_cid)])
+            .await
+            .expect("objects dir");
+        let store = Arc::new(TransientMissingStore {
+            inner,
+            missing_hash: prefix_cid.hash,
+            misses_remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+
+        helper
+            .collect_git_loose_object_locations_async(&tree, &objects_cid)
+            .await
+            .expect("transient loose prefix miss should be retried")
+    });
+
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].oid, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+}
+
 fn write_test_config(home: &std::path::Path, blossom_url: &str, force_upload: bool) {
     write_test_config_for_servers(home, &[blossom_url], force_upload);
 }
