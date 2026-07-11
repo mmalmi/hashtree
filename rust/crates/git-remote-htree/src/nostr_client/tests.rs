@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn local_only_daemon_query_outlives_its_collection_window() {
+    assert_eq!(
+        local_daemon_query_timeout(3, true),
+        Duration::from_secs(LOCAL_DAEMON_QUERY_TIMEOUT_SECS)
+    );
+    assert_eq!(
+        local_daemon_query_timeout(10, true),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        local_daemon_query_timeout(10, false),
+        Duration::from_secs(4)
+    );
+}
+
 macro_rules! event_builder {
     ($kind:expr, $content:expr $(,)?) => {
         EventBuilder::new($kind, $content)

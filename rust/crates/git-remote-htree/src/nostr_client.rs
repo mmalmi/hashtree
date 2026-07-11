@@ -98,6 +98,16 @@ pub fn is_hashtree_root_kind(kind: Kind) -> bool {
 pub const LABEL_HASHTREE: &str = "hashtree";
 pub const LABEL_GIT: &str = "git";
 const IRIS_GIT_WEB_BASE_URL: &str = "https://git.iris.to/#";
+const LOCAL_DAEMON_QUERY_TIMEOUT_SECS: u64 = 8;
+
+fn local_daemon_query_timeout(request_timeout_secs: u64, local_daemon_only: bool) -> Duration {
+    let timeout_secs = if local_daemon_only {
+        request_timeout_secs.max(LOCAL_DAEMON_QUERY_TIMEOUT_SECS)
+    } else {
+        4
+    };
+    Duration::from_secs(timeout_secs)
+}
 
 /// Pull request status derived from trusted NIP-34 status events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1020,7 +1030,9 @@ impl NostrClient {
         timeout_secs: u64,
         allow_local_daemon: bool,
     ) -> Result<ResolvedRoot> {
-        let local_daemon_timeout = Duration::from_secs(4);
+        // The daemon gathers verified observations for its own bounded window. In local-only
+        // mode the HTTP client must outlive that window; Nostr EOSE is not a completeness signal.
+        let local_daemon_timeout = local_daemon_query_timeout(timeout_secs, self.local_daemon_only);
         if self.local_daemon_only {
             if !allow_local_daemon {
                 anyhow::bail!(
