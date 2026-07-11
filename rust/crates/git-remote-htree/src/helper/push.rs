@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use flate2::{write::ZlibEncoder, Compression};
 use hashtree_core::{HashTree, LinkType, Store, DEFAULT_CHUNK_SIZE};
 use nostr_sdk::prelude::{PublicKey, ToBech32};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -34,6 +34,19 @@ pub(super) const GIT_PACK_CHECKPOINT_MIN_OBJECTS_ENV: &str =
 const DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS: usize = 256;
 pub(super) const GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV: &str =
     "HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS";
+
+fn symbolic_head_target_is_deleted(
+    refs: &HashMap<String, String>,
+    push_specs: &[PushSpec],
+) -> bool {
+    refs.get("HEAD")
+        .and_then(|head| head.strip_prefix("ref: "))
+        .is_some_and(|target| {
+            push_specs
+                .iter()
+                .any(|spec| spec.src.is_empty() && spec.dst == target)
+        })
+}
 
 #[derive(Default)]
 struct ByteCountWriter {
@@ -1363,6 +1376,7 @@ impl RemoteHelper {
         }
 
         self.detail(&format!("  Found {} existing refs", refs.len()));
+        let drop_dangling_head = symbolic_head_target_is_deleted(&refs, &self.push_specs);
         self.remote_refs.clear();
         for (ref_name, ref_value) in &refs {
             if ref_name.starts_with("refs/") && !ref_value.starts_with("ref: ") {
@@ -1372,7 +1386,7 @@ impl RemoteHelper {
 
         for (ref_name, ref_value) in &refs {
             let is_being_pushed = self.push_specs.iter().any(|s| s.dst == *ref_name);
-            if !is_being_pushed {
+            if !is_being_pushed && !(ref_name == "HEAD" && drop_dangling_head) {
                 self.storage.import_ref(ref_name, ref_value)?;
                 debug!(
                     "Imported existing ref: {} -> {}",
@@ -3310,11 +3324,11 @@ mod tests {
     use super::{
         batch_upload_retry_delay, effective_upload_concurrency, git_batch_upload_target_bytes,
         git_pack_checkpoint_underfull_min_objects, split_pending_upload_batches,
-        upload_progress_from_counters, PendingUpload, RemoteHelper, UploadCounters,
-        DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS, GIT_BATCH_UPLOAD_TARGET_BYTES_ENV,
-        GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV,
+        symbolic_head_target_is_deleted, upload_progress_from_counters, PendingUpload, PushSpec,
+        RemoteHelper, UploadCounters, DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS,
+        GIT_BATCH_UPLOAD_TARGET_BYTES_ENV, GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV,
     };
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::process::Command;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -3325,6 +3339,22 @@ mod tests {
 
     static BATCH_TARGET_ENV_LOCK: Mutex<()> = Mutex::new(());
     static PACK_UNDERFULL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn deleted_symbolic_head_target_is_not_preserved() {
+        let refs = HashMap::from([
+            ("HEAD".to_string(), "ref: refs/heads/old".to_string()),
+            ("refs/heads/old".to_string(), "1".repeat(40)),
+            ("refs/heads/master".to_string(), "2".repeat(40)),
+        ]);
+        let specs = vec![PushSpec {
+            src: String::new(),
+            dst: "refs/heads/old".to_string(),
+            force: false,
+        }];
+
+        assert!(symbolic_head_target_is_deleted(&refs, &specs));
+    }
 
     struct EnvGuard {
         key: &'static str,
