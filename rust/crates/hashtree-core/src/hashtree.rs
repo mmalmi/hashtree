@@ -1410,6 +1410,42 @@ impl<S: Store> HashTree<S> {
         Ok(entries)
     }
 
+    /// List a directory reached through an existing parent link.
+    /// Unlike `list_directory`, an unavailable node is not an empty directory.
+    pub async fn list_directory_required(
+        &self,
+        cid: &Cid,
+    ) -> Result<Vec<TreeEntry>, HashTreeError> {
+        let node = self
+            .get_directory_node(cid)
+            .await?
+            .ok_or_else(|| HashTreeError::MissingChunk(to_hex(&cid.hash)))?;
+
+        let mut entries = Vec::new();
+        for link in &node.links {
+            if Self::is_internal_directory_link(&node, link) {
+                let sub_cid = Cid {
+                    hash: link.hash,
+                    key: link.key,
+                };
+                let sub_entries = Box::pin(self.list_directory_required(&sub_cid)).await?;
+                entries.extend(sub_entries);
+                continue;
+            }
+
+            entries.push(TreeEntry {
+                name: link.name.clone().unwrap_or_else(|| to_hex(&link.hash)),
+                hash: link.hash,
+                size: link.size,
+                link_type: link.link_type,
+                key: link.key,
+                meta: link.meta.clone(),
+            });
+        }
+
+        Ok(entries)
+    }
+
     /// Resolve a path within a tree (returns Cid with key if encrypted)
     pub async fn resolve(&self, cid: &Cid, path: &str) -> Result<Option<Cid>, HashTreeError> {
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();

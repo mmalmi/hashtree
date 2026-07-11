@@ -6,7 +6,7 @@
 use crate::git::storage::GitStorage;
 use crate::runtime::block_on_result;
 use anyhow::{bail, Context, Result};
-use hashtree_core::{Cid, Store};
+use hashtree_core::{Cid, Store, TreeEntry};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -39,6 +39,7 @@ const DEFAULT_GIT_PACK_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 const VERBOSE_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const GIT_PACK_STREAM_MAX_ATTEMPTS: usize = 3;
 const GIT_PACK_STREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
+const GIT_PACK_DISCOVERY_MAX_ATTEMPTS: usize = 3;
 const GIT_PACK_PHASE_IDLE: usize = 0;
 const GIT_PACK_PHASE_DOWNLOADING: usize = 1;
 const GIT_PACK_PHASE_INDEXING: usize = 2;
@@ -863,16 +864,12 @@ impl RemoteHelper {
         tree: &hashtree_core::HashTree<S>,
         objects_cid: &Cid,
     ) -> Result<Vec<GitPackLocation>> {
-        let objects_entries = match tree.list_directory(objects_cid).await {
-            Ok(entries) => entries,
-            Err(err) => {
-                warn!(
-                    "Failed to list .git/objects while looking for packs: {}",
-                    err
-                );
-                return Ok(Vec::new());
-            }
-        };
+        let objects_entries = Self::list_required_git_directory(
+            tree,
+            objects_cid,
+            ".git/objects directory while looking for packs",
+        )
+        .await?;
         debug!(
             ".git/objects entries while looking for packs: {:?}",
             objects_entries
@@ -889,16 +886,12 @@ impl RemoteHelper {
             key: pack_dir_entry.key,
         };
 
-        let pack_entries: HashMap<_, _> = match tree.list_directory(&pack_dir_cid).await {
-            Ok(entries) => entries
+        let pack_entries: HashMap<_, _> =
+            Self::list_required_git_directory(tree, &pack_dir_cid, ".git/objects/pack directory")
+                .await?
                 .into_iter()
                 .map(|entry| (entry.name.clone(), entry))
-                .collect(),
-            Err(err) => {
-                warn!("Failed to list .git/objects/pack: {}", err);
-                return Ok(Vec::new());
-            }
-        };
+                .collect();
         debug!(
             ".git/objects/pack entries: {:?}",
             pack_entries.keys().cloned().collect::<Vec<_>>()
@@ -973,9 +966,9 @@ impl RemoteHelper {
 
         let mut packs = Vec::new();
         for pack_name in pack_names {
-            let Some(pack_entry) = pack_entries.get(&pack_name) else {
-                continue;
-            };
+            let pack_entry = pack_entries.get(&pack_name).ok_or_else(|| {
+                anyhow::anyhow!(".git/objects/info/packs announced unavailable pack {pack_name}")
+            })?;
             let pack_cid = Cid {
                 hash: pack_entry.hash,
                 key: pack_entry.key,
@@ -999,6 +992,35 @@ impl RemoteHelper {
         }
 
         Ok(packs)
+    }
+
+    async fn list_required_git_directory<S: Store>(
+        tree: &hashtree_core::HashTree<S>,
+        cid: &Cid,
+        label: &str,
+    ) -> Result<Vec<TreeEntry>> {
+        for attempt in 1..=GIT_PACK_DISCOVERY_MAX_ATTEMPTS {
+            match tree.list_directory_required(cid).await {
+                Ok(entries) => return Ok(entries),
+                Err(error) if attempt < GIT_PACK_DISCOVERY_MAX_ATTEMPTS => {
+                    warn!(
+                        attempt,
+                        max_attempts = GIT_PACK_DISCOVERY_MAX_ATTEMPTS,
+                        %error,
+                        "Required Git directory unavailable; retrying the same content path"
+                    );
+                    tokio::time::sleep(GIT_PACK_STREAM_RETRY_DELAY).await;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "required {label} remained unavailable after {GIT_PACK_DISCOVERY_MAX_ATTEMPTS} attempts"
+                        )
+                    });
+                }
+            }
+        }
+        unreachable!("required Git directory attempt loop returns on every terminal state")
     }
 
     async fn stream_git_pack_file<S: Store>(

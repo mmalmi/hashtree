@@ -891,7 +891,10 @@ fn test_collect_git_object_locations_errors_on_bad_objects_tree_key() {
     assert!(
         err.to_string().contains("Failed to resolve .git/objects")
             || err.to_string().contains("Failed to list objects directory")
-            || err.to_string().contains("resolve .git/objects/info/packs"),
+            || err.to_string().contains("resolve .git/objects/info/packs")
+            || err
+                .to_string()
+                .contains("required .git/objects directory while looking for packs"),
         "unexpected error: {err}"
     );
 }
@@ -948,6 +951,133 @@ fn test_collect_git_pack_locations_scans_pack_dir_when_info_packs_missing() {
     assert_eq!(
         locations[0].idx_name,
         "pack-0123456789abcdef0123456789abcdef01234567.idx"
+    );
+}
+
+#[test]
+fn test_collect_git_pack_locations_rejects_unavailable_pack_directory() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let error = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let missing_pack_dir = Cid {
+            hash: [0x43; 32],
+            key: None,
+        };
+        let objects_cid = tree
+            .put_directory(vec![DirEntry::from_cid("pack", &missing_pack_dir)])
+            .await
+            .expect("objects dir");
+
+        helper
+            .collect_git_pack_locations_async(&tree, &objects_cid)
+            .await
+            .expect_err("linked pack directory must not disappear as an empty pack set")
+    });
+
+    assert!(
+        error.to_string().contains("required .git/objects/pack"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn test_collect_git_pack_locations_retries_transient_pack_directory_miss() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let locations = rt.block_on(async {
+        let inner = Arc::new(MemoryStore::new());
+        let source_tree = HashTree::new(HashTreeConfig::new(Arc::clone(&inner)).public());
+        let pack_name = "pack-0123456789abcdef0123456789abcdef01234567.pack";
+        let (pack_cid, pack_size) = source_tree.put(b"pack bytes").await.expect("pack blob");
+        let pack_dir_cid = source_tree
+            .put_directory(vec![
+                DirEntry::from_cid(pack_name, &pack_cid).with_size(pack_size)
+            ])
+            .await
+            .expect("pack dir");
+        let objects_cid = source_tree
+            .put_directory(vec![DirEntry::from_cid("pack", &pack_dir_cid)])
+            .await
+            .expect("objects dir");
+        let store = Arc::new(TransientMissingStore {
+            inner,
+            missing_hash: pack_dir_cid.hash,
+            misses_remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+
+        helper
+            .collect_git_pack_locations_async(&tree, &objects_cid)
+            .await
+            .expect("transient pack directory miss should be retried")
+    });
+
+    assert_eq!(locations.len(), 1);
+    assert_eq!(
+        locations[0].pack_name,
+        "pack-0123456789abcdef0123456789abcdef01234567.pack"
+    );
+}
+
+#[test]
+fn test_collect_git_pack_locations_rejects_announced_missing_pack() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let helper = create_test_helper().expect("helper");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let error = rt.block_on(async {
+        let store = helper.storage.store().clone();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let pack_name = "pack-0123456789abcdef0123456789abcdef01234567.pack";
+        let pack_dir_cid = tree.put_directory(vec![]).await.expect("pack dir");
+        let (info_packs_cid, info_packs_size) = tree
+            .put(format!("P {pack_name}\n").as_bytes())
+            .await
+            .expect("info packs");
+        let info_dir_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("packs", &info_packs_cid).with_size(info_packs_size)
+            ])
+            .await
+            .expect("info dir");
+        let objects_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("pack", &pack_dir_cid),
+                DirEntry::from_cid("info", &info_dir_cid),
+            ])
+            .await
+            .expect("objects dir");
+
+        helper
+            .collect_git_pack_locations_async(&tree, &objects_cid)
+            .await
+            .expect_err("announced pack must be present in the linked pack directory")
+    });
+
+    assert!(
+        error.to_string().contains("announced unavailable pack"),
+        "unexpected error: {error:#}"
     );
 }
 

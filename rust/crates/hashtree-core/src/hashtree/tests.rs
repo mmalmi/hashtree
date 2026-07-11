@@ -99,6 +99,21 @@ async fn test_put_and_read_directory() {
 }
 
 #[tokio::test]
+async fn test_required_directory_does_not_treat_missing_node_as_empty() {
+    let (_store, tree) = make_tree();
+    let missing = Cid {
+        hash: [0x42; 32],
+        key: None,
+    };
+
+    assert!(tree.list_directory(&missing).await.unwrap().is_empty());
+    assert!(matches!(
+        tree.list_directory_required(&missing).await,
+        Err(HashTreeError::MissingChunk(_))
+    ));
+}
+
+#[tokio::test]
 async fn test_is_directory() {
     let (_store, tree) = make_tree();
 
