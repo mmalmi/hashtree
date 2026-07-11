@@ -39,8 +39,8 @@ pub use product::{
 };
 #[cfg(feature = "secure-nostr-blossom")]
 pub use product::{
-    build_secure_nostr_blossom_updater, SecureNostrBlossomConfig, SecureNostrBlossomSelection,
-    SecureNostrBlossomUpdater,
+    build_secure_nostr_blossom_updater, build_secure_nostr_blossom_updater_with_events,
+    SecureNostrBlossomConfig, SecureNostrBlossomSelection, SecureNostrBlossomUpdater,
 };
 pub use progress::{DownloadCallback, DownloadEvent};
 pub use reference::UpdateRef;

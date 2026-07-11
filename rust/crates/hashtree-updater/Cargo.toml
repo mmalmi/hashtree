@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-updater"
-version.workspace = true
+version = "0.2.78"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,9 +17,9 @@ secure-nostr-blossom = [
 ]
 
 [dependencies]
-hashtree-blossom = { workspace = true, optional = true }
-hashtree-core.workspace = true
-hashtree-resolver.workspace = true
+hashtree-blossom = { version = "0.2.72", path = "../hashtree-blossom", optional = true }
+hashtree-core = { version = "0.2.72", path = "../hashtree-core" }
+hashtree-resolver = { version = "0.2.78", path = "../hashtree-resolver" }
 semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

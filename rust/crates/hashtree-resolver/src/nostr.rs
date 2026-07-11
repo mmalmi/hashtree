@@ -28,8 +28,8 @@ use tokio::task::JoinSet;
 
 use hashtree_core::{decrypt, xor_keys};
 
-const HASHTREE_KIND: u16 = 30064;
-const HASHTREE_LEGACY_KIND: u16 = 30078;
+pub const HASHTREE_KIND: u16 = 30064;
+pub const HASHTREE_LEGACY_KIND: u16 = 30078;
 const HASHTREE_LABEL: &str = "hashtree";
 const DEFAULT_SUCCESSFUL_RELAY_QUORUM: usize = 2;
 const DEFAULT_SOFT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -285,6 +285,7 @@ struct Subscription {
 pub struct NostrRootResolver {
     client: Client,
     config: NostrResolverConfig,
+    ingested_events: Arc<RwLock<HashMap<String, VerifiedEvent>>>,
     subscriptions: Arc<RwLock<HashMap<String, Subscription>>>,
 }
 
@@ -308,6 +309,7 @@ impl NostrRootResolver {
         Ok(Self {
             client,
             config,
+            ingested_events: Arc::new(RwLock::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -346,6 +348,90 @@ impl NostrRootResolver {
                 SingleLetterTag::lowercase(Alphabet::D),
                 tree_name.to_string(),
             )
+    }
+
+    /// Build the exact Nostr filter for a resolver key without opening a relay
+    /// connection. Pubsub transports can use this to subscribe on behalf of
+    /// the resolver.
+    pub fn filter_for_key(key: &str) -> Result<Filter, ResolverError> {
+        let (pubkey, tree_name) = Self::parse_key(key)?;
+        Ok(Self::build_tree_filter(pubkey, &tree_name))
+    }
+
+    /// Ingest a signed root event obtained from any transport. Returns true
+    /// only when it advances the replaceable root for its author and tree.
+    pub async fn ingest_event(&self, event: Event) -> Result<bool, ResolverError> {
+        let event = VerifiedEvent::try_from(event).map_err(ResolverError::Other)?;
+        let tree_name = event_identifier(event.as_event())
+            .ok_or_else(|| ResolverError::Other("Nostr root event has no d-tag".to_string()))?;
+        if !is_matching_tree_event(&event, &tree_name) {
+            return Err(ResolverError::Other(
+                "event is not a supported hashtree root event".to_string(),
+            ));
+        }
+        let npub = event
+            .as_event()
+            .pubkey
+            .to_bech32()
+            .map_err(|error| ResolverError::Other(error.to_string()))?;
+        let key = format!("{npub}/{tree_name}");
+        let cid = self.cid_from_event(event.as_event()).ok_or_else(|| {
+            ResolverError::Other("Nostr root event has no usable CID".to_string())
+        })?;
+
+        {
+            let mut events = self.ingested_events.write().await;
+            if events.get(&key).is_some_and(|current| {
+                !is_newer_event(event.as_event(), current.created_at(), Some(current.id()))
+            }) {
+                return Ok(false);
+            }
+            events.insert(key.clone(), event.clone());
+        }
+
+        let mut subscriptions = self.subscriptions.write().await;
+        if let Some(subscription) = subscriptions.get_mut(&key) {
+            if is_newer_event(
+                event.as_event(),
+                subscription.latest_created_at,
+                subscription.latest_event_id,
+            ) {
+                subscription.latest_created_at = event.created_at();
+                subscription.latest_event_id = Some(event.id());
+                if subscription.current_cid.as_ref() != Some(&cid) {
+                    subscription.current_cid = Some(cid.clone());
+                    let _ = subscription.tx.send(Some(cid)).await;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    async fn ingested_event(&self, key: &str) -> Option<VerifiedEvent> {
+        self.ingested_events.read().await.get(key).cloned()
+    }
+
+    async fn verified_events_for_key(
+        &self,
+        key: &str,
+        pubkey: PublicKey,
+        tree_name: &str,
+    ) -> Result<Vec<VerifiedEvent>, ResolverError> {
+        let ingested = self.ingested_event(key).await;
+        let mut events = match self
+            .fetch_verified_events_from_relays(Self::build_tree_filter(pubkey, tree_name))
+            .await
+        {
+            Ok(events) => events,
+            Err(_) if ingested.is_some() => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        if let Some(event) = ingested {
+            if !events.iter().any(|candidate| candidate.id() == event.id()) {
+                events.push(event);
+            }
+        }
+        Ok(events)
     }
 
     /// Extract Cid from event tags
@@ -684,11 +770,9 @@ impl NostrRootResolver {
 impl RootResolver for NostrRootResolver {
     async fn resolve(&self, key: &str) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
-
-        let filter = Self::build_tree_filter(pubkey, &tree_name);
-
-        // Fetch events from relays
-        let events = self.fetch_verified_events_from_relays(filter).await?;
+        let events = self
+            .verified_events_for_key(key, pubkey, &tree_name)
+            .await?;
 
         let latest_event = pick_latest_verified_event(
             events
@@ -709,10 +793,9 @@ impl RootResolver for NostrRootResolver {
         share_secret: &[u8; 32],
     ) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
-
-        let filter = Self::build_tree_filter(pubkey, &tree_name);
-
-        let events = self.fetch_verified_events_from_relays(filter).await?;
+        let events = self
+            .verified_events_for_key(key, pubkey, &tree_name)
+            .await?;
 
         let latest_event = pick_latest_verified_event(
             events
@@ -730,17 +813,15 @@ impl RootResolver for NostrRootResolver {
         let (pubkey, tree_name) = Self::parse_key(key)?;
 
         let (tx, rx) = mpsc::channel(16);
-
-        // Check if we already have a subscription
-        {
-            let subs = self.subscriptions.read().await;
-            if let Some(sub) = subs.get(key) {
-                // Send current value
-                let _ = tx.send(sub.current_cid.clone()).await;
-                // Note: In production, you'd want to share subscriptions
-                // For simplicity, we create a new one
-            }
-        }
+        let ingested = self.ingested_event(key).await;
+        let current_cid = ingested
+            .as_ref()
+            .and_then(|event| self.cid_from_event(event.as_event()));
+        let latest_created_at = ingested
+            .as_ref()
+            .map_or(Timestamp::from(0), VerifiedEvent::created_at);
+        let latest_event_id = ingested.as_ref().map(VerifiedEvent::id);
+        let _ = tx.send(current_cid.clone()).await;
 
         // Create filter
         let filter = Self::build_tree_filter(pubkey, &tree_name);
@@ -752,9 +833,9 @@ impl RootResolver for NostrRootResolver {
                 key.to_string(),
                 Subscription {
                     tx: tx.clone(),
-                    current_cid: None,
-                    latest_created_at: Timestamp::from(0),
-                    latest_event_id: None,
+                    current_cid,
+                    latest_created_at,
+                    latest_event_id,
                 },
             );
         }
@@ -1498,6 +1579,85 @@ mod tests {
 
         assert!(VerifiedEvent::try_from(event).is_ok());
         assert!(VerifiedEvent::try_from(tampered).is_err());
+    }
+
+    #[tokio::test]
+    async fn ingested_root_event_resolves_and_updates_subscription_without_relays() {
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().expect("npub");
+        let resolver = NostrRootResolver::new(NostrResolverConfig {
+            relays: Vec::new(),
+            resolve_timeout: Duration::from_millis(50),
+            secret_key: None,
+        })
+        .await
+        .expect("relayless resolver");
+        let key = format!("{npub}/releases/app");
+        let mut subscription = resolver.subscribe(&key).await.expect("subscription");
+
+        assert_eq!(subscription.recv().await, Some(None));
+        let event = build_hashtree_event(
+            &keys,
+            "releases/app",
+            1_700_000_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+        );
+        assert!(resolver.ingest_event(event).await.expect("ingest event"));
+
+        let expected = Cid {
+            hash: [0xaa; 32],
+            key: None,
+        };
+        assert_eq!(
+            resolver.resolve(&key).await.expect("resolve"),
+            Some(expected.clone())
+        );
+        assert_eq!(subscription.recv().await, Some(Some(expected)));
+    }
+
+    #[tokio::test]
+    async fn ingested_root_event_rejects_tampering_and_keeps_newest_replaceable() {
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().expect("npub");
+        let resolver = NostrRootResolver::new(NostrResolverConfig {
+            relays: Vec::new(),
+            resolve_timeout: Duration::from_millis(50),
+            secret_key: None,
+        })
+        .await
+        .expect("relayless resolver");
+        let older = build_hashtree_event(
+            &keys,
+            "releases/app",
+            1_700_000_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+        );
+        let newer = build_hashtree_event(
+            &keys,
+            "releases/app",
+            1_700_000_001,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "",
+        );
+        let tampered = tamper_event_hash(
+            &newer,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        );
+
+        assert!(resolver.ingest_event(newer).await.expect("newer"));
+        assert!(!resolver.ingest_event(older).await.expect("older"));
+        assert!(resolver.ingest_event(tampered).await.is_err());
+        assert_eq!(
+            resolver
+                .resolve(&format!("{npub}/releases/app"))
+                .await
+                .expect("resolve")
+                .expect("root")
+                .hash,
+            [0xbb; 32]
+        );
     }
 
     #[test]

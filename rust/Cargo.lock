@@ -4138,7 +4138,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.77"
+version = "0.2.78"
 dependencies = [
  "async-trait",
  "futures",
@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.77"
+version = "0.2.78"
 dependencies = [
  "async-trait",
  "flate2",

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.78 - 2026-07-11
+
+### Changed
+
+- Let transport adapters ingest verified kind `30064`/legacy `30078` root
+  events into `NostrRootResolver`, including relayless one-shot resolution and
+  open subscription updates.
+- Added a secure updater builder that seeds its resolver from signed root
+  events supplied by decentralized pubsub.
+
 ## 0.2.77 - 2026-07-09
 
 ### Changed

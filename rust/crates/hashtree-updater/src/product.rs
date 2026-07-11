@@ -12,7 +12,7 @@ use hashtree_resolver::RootResolver;
 #[cfg(feature = "secure-nostr-blossom")]
 use hashtree_resolver::{
     nostr::{NostrResolverConfig, NostrRootResolver},
-    Keys as HashtreeResolverKeys,
+    Event, Keys as HashtreeResolverKeys,
 };
 use serde::{Deserialize, Serialize};
 
@@ -522,12 +522,23 @@ impl Default for SecureNostrBlossomConfig {
 pub async fn build_secure_nostr_blossom_updater(
     config: SecureNostrBlossomConfig,
 ) -> Result<SecureNostrBlossomUpdater, UpdateError> {
+    build_secure_nostr_blossom_updater_with_events(config, std::iter::empty()).await
+}
+
+#[cfg(feature = "secure-nostr-blossom")]
+pub async fn build_secure_nostr_blossom_updater_with_events(
+    config: SecureNostrBlossomConfig,
+    events: impl IntoIterator<Item = Event>,
+) -> Result<SecureNostrBlossomUpdater, UpdateError> {
     let resolver = NostrRootResolver::new(NostrResolverConfig {
         relays: config.relays,
         resolve_timeout: config.manifest_timeout,
         secret_key: None,
     })
     .await?;
+    for event in events {
+        resolver.ingest_event(event).await?;
+    }
     let blossom = BlossomClient::new_empty(HashtreeResolverKeys::generate())
         .with_read_servers(config.blossom_read_servers)
         .with_timeout(config.download_timeout);

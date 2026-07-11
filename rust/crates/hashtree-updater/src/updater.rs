@@ -75,6 +75,10 @@ where
         &self.tree
     }
 
+    pub fn resolver(&self) -> &R {
+        &self.resolver
+    }
+
     pub async fn check(&self, options: UpdateCheckOptions) -> Result<UpdateCheck, UpdateError> {
         if options.reference.npub.is_empty() || options.reference.tree_name.is_empty() {
             return Err(UpdateError::InvalidReference(
