@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryStore, sha256, type Hash } from '@hashtree/core';
 import {
+  createRequest,
   createResponse,
+  encodeRequest,
   encodeResponse,
 } from '@hashtree/mesh';
 import {
@@ -20,6 +22,9 @@ class FakeFipsEndpoint implements FipsEndpoint {
   readonly sent: Array<{ peerId: string; data: Uint8Array }> = [];
   private readonly handlers = new Set<(message: FipsEndpointMessage) => void | Promise<void>>();
   private dropNextSendCount = 0;
+  private sendDelayMs = 0;
+  private activeSends = 0;
+  maxActiveSends = 0;
 
   constructor(
     private readonly id: string,
@@ -46,11 +51,24 @@ class FakeFipsEndpoint implements FipsEndpoint {
     if (!remote) {
       throw new Error(`unknown peer ${peerId}`);
     }
-    await remote.deliver({ peerId: this.id, data: data.slice() });
+    this.activeSends += 1;
+    this.maxActiveSends = Math.max(this.maxActiveSends, this.activeSends);
+    try {
+      if (this.sendDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
+      }
+      await remote.deliver({ peerId: this.id, data: data.slice() });
+    } finally {
+      this.activeSends -= 1;
+    }
   }
 
   dropNextSends(count: number): void {
     this.dropNextSendCount = Math.max(0, count);
+  }
+
+  setSendDelay(ms: number): void {
+    this.sendDelayMs = Math.max(0, ms);
   }
 
   onMessage(handler: (message: FipsEndpointMessage) => void | Promise<void>): () => void {
@@ -197,6 +215,31 @@ describe('@hashtree/fips-transport', () => {
 
     aTransport.close();
     bTransport.close();
+  });
+
+  it('coalesces duplicate block requests and serializes response fragments', async () => {
+    const network = new Map<string, FakeFipsEndpoint>();
+    const aEndpoint = new FakeFipsEndpoint('a', network);
+    const bEndpoint = new FakeFipsEndpoint('b', network);
+    aEndpoint.setSendDelay(1);
+    const data = new Uint8Array(FIPS_RESPONSE_FRAGMENT_SIZE * 3 + 17).fill(0x5a);
+    const hash = await sha256(data) as Hash;
+    const aStore = new MemoryStore();
+    await aStore.put(hash, data);
+    const aTransport = new HashtreeFipsTransport({
+      endpoint: aEndpoint,
+      localStore: aStore,
+    });
+    const request = new Uint8Array(encodeRequest(createRequest(hash, 10)));
+
+    await Promise.all([
+      bEndpoint.send('a', request),
+      bEndpoint.send('a', request),
+    ]);
+
+    await vi.waitFor(() => expect(aEndpoint.sent).toHaveLength(4));
+    expect(aEndpoint.maxActiveSends).toBe(1);
+    aTransport.close();
   });
 
   it('treats silence as unknown when the retry interval exceeds the request timeout', async () => {

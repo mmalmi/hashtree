@@ -66,7 +66,10 @@ export declare class HashtreeFipsTransport {
     private readonly cacheResponses;
     private readonly pending;
     private readonly responseFragments;
+    private readonly outgoingResponses;
+    private responseSendTail;
     private unsubscribe;
+    private closed;
     constructor(options: HashtreeFipsTransportOptions);
     close(): void;
     setPeers(peers: FipsPeerSource): void;
@@ -75,6 +78,7 @@ export declare class HashtreeFipsTransport {
     handleMessage(message: FipsEndpointMessage): Promise<void>;
     createReadSource(id?: string): FipsReadSource;
     private handleRequest;
+    private enqueueResponse;
     private handleResponse;
     private sendResponse;
     private handleResponseFragment;

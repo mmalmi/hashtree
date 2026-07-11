@@ -7,6 +7,7 @@ export const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS = 4;
 export const FIPS_RESPONSE_FRAGMENT_SIZE = 1024;
 const DYNAMIC_PEER_POLL_INTERVAL_MS = 100;
 const MAX_RESPONSE_FRAGMENTS = 16_384;
+const RESPONSE_FRAME_BATCH_SIZE = 8;
 function copyBytes(data) {
     return data.slice();
 }
@@ -110,7 +111,10 @@ export class HashtreeFipsTransport {
     cacheResponses;
     pending = new Map();
     responseFragments = new Map();
+    outgoingResponses = new Map();
+    responseSendTail = Promise.resolve();
     unsubscribe = null;
+    closed = false;
     constructor(options) {
         this.endpoint = options.endpoint;
         this.localStore = options.localStore ?? new MemoryStore();
@@ -125,6 +129,7 @@ export class HashtreeFipsTransport {
         });
     }
     close() {
+        this.closed = true;
         this.unsubscribe?.();
         this.unsubscribe = null;
         this.endpoint.close?.();
@@ -136,6 +141,7 @@ export class HashtreeFipsTransport {
         }
         this.pending.clear();
         this.responseFragments.clear();
+        this.outgoingResponses.clear();
     }
     setPeers(peers) {
         this.peers = peers;
@@ -180,10 +186,29 @@ export class HashtreeFipsTransport {
         };
     }
     async handleRequest(peerId, req) {
-        const data = await verifiedLocalGet(this.localStore, req.h);
-        if (!data)
-            return;
-        await this.sendResponse(peerId, req.h, data);
+        const responseKey = `${peerId}\0${hashToKey(req.h)}`;
+        let response = this.outgoingResponses.get(responseKey);
+        if (!response) {
+            response = this.enqueueResponse(async () => {
+                const data = await verifiedLocalGet(this.localStore, req.h);
+                if (!data || this.closed)
+                    return;
+                await this.sendResponse(peerId, req.h, data);
+            });
+            this.outgoingResponses.set(responseKey, response);
+            const clearResponse = () => {
+                if (this.outgoingResponses.get(responseKey) === response) {
+                    this.outgoingResponses.delete(responseKey);
+                }
+            };
+            void response.then(clearResponse, clearResponse);
+        }
+        await response;
+    }
+    enqueueResponse(send) {
+        const response = this.responseSendTail.then(send);
+        this.responseSendTail = response.catch(() => undefined);
+        return response;
     }
     async handleResponse(resp) {
         const hashKey = hashToKey(resp.h);
@@ -214,11 +239,16 @@ export class HashtreeFipsTransport {
         }
         const total = Math.ceil(data.byteLength / FIPS_RESPONSE_FRAGMENT_SIZE);
         for (let index = 0; index < total; index += 1) {
+            if (this.closed)
+                return;
             const start = index * FIPS_RESPONSE_FRAGMENT_SIZE;
             const end = Math.min(start + FIPS_RESPONSE_FRAGMENT_SIZE, data.byteLength);
             const fragment = data.slice(start, end);
             const response = createFragmentResponse(hash, fragment, index, total);
             await this.endpoint.send(peerId, new Uint8Array(encodeResponse(response)));
+            if ((index + 1) % RESPONSE_FRAME_BATCH_SIZE === 0 && index + 1 < total) {
+                await sleep(0);
+            }
         }
     }
     handleResponseFragment(hashKey, resp) {
