@@ -1,5 +1,7 @@
 node_modules/
 dist/
+!packages/hashtree-fips-transport/dist/
+!packages/hashtree-fips-transport/dist/**
 !vendor/*/dist/
 test-results/
 playwright-report/

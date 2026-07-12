@@ -6,10 +6,10 @@ This package keeps FIPS below Hashtree: FIPS discovers peers, signals transports
 and moves opaque bytes between node identities. Hashtree still owns hash
 verification, content routing, HTL, peer choice, hedging, and cache writes.
 
-Public Hashtree FIPS swarms use a Hashtree-specific FIPS discovery app scope:
+Browser providers join the shared FIPS discovery fabric by default:
 
 ```text
-hashtree-v1
+fips-overlay-v1
 ```
 
 The adapter surface is intentionally tiny:
@@ -45,7 +45,7 @@ const store = new FipsTransportStore({
   peers: () => endpoint.listPeerIds?.() ?? [],
 });
 
-console.log(DEFAULT_FIPS_DISCOVERY_APP); // hashtree-v1
+console.log(DEFAULT_FIPS_DISCOVERY_APP); // fips-overlay-v1
 const hash = await sha256(new TextEncoder().encode('hello'));
 const data = await store.get(hash);
 ```
@@ -55,7 +55,27 @@ treated as unknown/no response. The transport sends one request to each selected
 peer for a read and lets the caller's existing source selection decide whether
 to ask other peers or fall back to Blossom/local sources.
 
-The Hashtree discovery scope is an application participation advert, not the
-same thing as a generic FIPS reachability advert. A native daemon may advertise
-its own `fips-overlay-v1` identity while a separate endpoint identity behind it
-advertises `hashtree-v1`.
+`HashtreeWorkerClient` can use a managed browser FIPS node directly. FIPS owns
+Nostr peer discovery and WebRTC signaling; this package only carries Hashtree
+blob frames over authenticated FIPS endpoint data:
+
+```ts
+import { createBrowserHashtreeFipsProvider } from '@hashtree/fips-transport/browser';
+
+const provider = await createBrowserHashtreeFipsProvider({
+  deviceSecretKey,
+  relays,
+  localStore,
+});
+
+workerClient.setP2PProvider(provider);
+
+// Shut down the provider before discarding the worker client.
+await provider.stop();
+```
+
+The discovery scope is configurable for isolated deployments, but applications
+should normally stay on `fips-overlay-v1` so they share the generic FIPS transit
+fabric instead of creating a parallel Hashtree-only WebRTC island. Hashtree's
+request/response codec remains application-specific and ignores unrelated FIPS
+endpoint payloads.

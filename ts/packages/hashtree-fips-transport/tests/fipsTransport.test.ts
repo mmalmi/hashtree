@@ -125,8 +125,8 @@ class FakeFipsNode {
 }
 
 describe('@hashtree/fips-transport', () => {
-  it('uses the hashtree FIPS discovery app scope', () => {
-    expect(DEFAULT_FIPS_DISCOVERY_APP).toBe('hashtree-v1');
+  it('uses the shared FIPS overlay discovery scope', () => {
+    expect(DEFAULT_FIPS_DISCOVERY_APP).toBe('fips-overlay-v1');
   });
 
   it('adapts FIPS node endpoint data into the endpoint surface', async () => {

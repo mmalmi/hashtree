@@ -1695,6 +1695,7 @@ pub(crate) async fn run() -> Result<()> {
                     }
                     #[cfg(not(feature = "lmdb"))]
                     {
+                        let _ = (env_dir, max_gb);
                         anyhow::bail!("LMDB support not enabled in this build");
                     }
                 }

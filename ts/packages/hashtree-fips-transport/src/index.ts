@@ -22,7 +22,8 @@ import {
   type DataResponse,
 } from '@hashtree/mesh';
 
-export const DEFAULT_FIPS_DISCOVERY_APP = 'hashtree-v1';
+export { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
+
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
 export const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS = 750;
 export const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS = 4;

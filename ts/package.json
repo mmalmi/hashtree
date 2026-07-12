@@ -15,7 +15,11 @@
     "onlyBuiltDependencies": [
       "wrtc",
       "esbuild"
-    ]
+    ],
+    "overrides": {
+      "@fips/core": "file:vendor/fips/fips-core-0.0.16.tgz",
+      "@fips/transport-webrtc": "file:vendor/fips/fips-transport-webrtc-0.0.23.tgz"
+    }
   },
   "scripts": {
     "build": "pnpm run build:hashtree",
