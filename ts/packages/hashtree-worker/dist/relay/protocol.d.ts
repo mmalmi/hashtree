@@ -269,7 +269,19 @@ export type WorkerRequest = {
     id: string;
     plaintext?: string;
     error?: string;
-} | WebRTCEvent;
+} | WebRTCEvent | {
+    type: 'p2pFetchResult';
+    id: string;
+    requestId: string;
+    data?: Uint8Array;
+    error?: string;
+} | {
+    type: 'p2pPeerListResult';
+    id: string;
+    requestId: string;
+    peerIds?: string[];
+    error?: string;
+};
 /** Blossom server configuration */
 export interface BlossomServerConfig {
     url: string;
@@ -288,6 +300,11 @@ export interface WorkerConfig {
     nsec?: string;
     storeName?: string;
     forwardRateLimit?: ForwardRateLimitConfig;
+    /**
+     * `external` delegates P2P reads and peer discovery to the main thread.
+     * The legacy kind-25050 WebRTC mesh is not initialized in that mode.
+     */
+    p2pMode?: 'legacy-webrtc' | 'external' | 'off';
 }
 export type WorkerResponse = {
     type: 'ready';
@@ -448,7 +465,15 @@ export type WorkerResponse = {
     id: string;
     pubkey: string;
     ciphertext: string;
-} | WebRTCCommand;
+} | WebRTCCommand | {
+    type: 'p2pFetch';
+    requestId: string;
+    hashHex: string;
+    peerId?: string;
+} | {
+    type: 'p2pPeerList';
+    requestId: string;
+};
 export interface DirEntry {
     name: string;
     isDir: boolean;

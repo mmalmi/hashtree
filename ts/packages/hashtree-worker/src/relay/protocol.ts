@@ -155,7 +155,11 @@ export type WorkerRequest =
   | { type: 'decrypted'; id: string; plaintext?: string; error?: string }
 
   // WebRTC proxy events (main thread reports to worker)
-  | WebRTCEvent;
+  | WebRTCEvent
+
+  // External P2P provider responses (main thread → worker)
+  | { type: 'p2pFetchResult'; id: string; requestId: string; data?: Uint8Array; error?: string }
+  | { type: 'p2pPeerListResult'; id: string; requestId: string; peerIds?: string[]; error?: string };
 
 /** Blossom server configuration */
 export interface BlossomServerConfig {
@@ -177,6 +181,11 @@ export interface WorkerConfig {
   nsec?: string;  // Hex-encoded secret key (only for nsec login, not extension)
   storeName?: string;  // IndexedDB database name, defaults to 'hashtree-worker'
   forwardRateLimit?: ForwardRateLimitConfig;
+  /**
+   * `external` delegates P2P reads and peer discovery to the main thread.
+   * The legacy kind-25050 WebRTC mesh is not initialized in that mode.
+   */
+  p2pMode?: 'legacy-webrtc' | 'external' | 'off';
 }
 
 // ============================================================================
@@ -240,7 +249,11 @@ export type WorkerResponse =
   | { type: 'nip44Decrypt'; id: string; pubkey: string; ciphertext: string }
 
   // WebRTC proxy commands (worker tells main thread what to do)
-  | WebRTCCommand;
+  | WebRTCCommand
+
+  // External P2P provider requests (worker → main thread)
+  | { type: 'p2pFetch'; requestId: string; hashHex: string; peerId?: string }
+  | { type: 'p2pPeerList'; requestId: string };
 
 export interface DirEntry {
   name: string;

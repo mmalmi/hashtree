@@ -10,7 +10,7 @@
  * NIP-07 signing/encryption delegated back to main thread.
  */
 
-import { HashTree, BlossomStore } from '@hashtree/core';
+import { HashTree, BlossomStore, toHex } from '@hashtree/core';
 import { DexieStore } from '@hashtree/dexie';
 import type { WorkerRequest, WorkerResponse, WorkerConfig, SignedEvent, WebRTCCommand, BlossomUploadProgress, BlossomServerStatus } from './protocol';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
@@ -69,6 +69,7 @@ import {
 } from './webrtcSignaling';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
 import { MeshRouterStore } from '../capabilities/meshRouterStore';
+import { ExternalP2PBridge } from './externalP2P';
 // Worker state
 let tree: HashTree | null = null;
 let store: DexieStore | null = null;
@@ -82,6 +83,11 @@ let webrtcStarted = false;
 let _config: WorkerConfig | null = null;
 const WEBRTC_REQUEST_TIMEOUT_MS = 5000;
 const REMOTE_READ_TIMEOUT_MS = 15000;
+const externalP2P = new ExternalP2PBridge({
+  respond,
+  fetchTimeoutMs: REMOTE_READ_TIMEOUT_MS,
+  peerListTimeoutMs: WEBRTC_REQUEST_TIMEOUT_MS,
+});
 const treeRootSubscriptionRefs = new Map<string, number>();
 
 // Storage quota management
@@ -628,10 +634,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // Relay configuration
       case 'setRelays':
         await ndkSetRelays(msg.relays);
-        // Re-subscribe to WebRTC signaling on new relays
-        resubscribeWebRTCSignaling();
-        if (webrtcStarted) {
-          webrtc?.broadcastHello();
+        if (webrtc) {
+          // Re-subscribe to legacy WebRTC signaling only when that mesh is active.
+          resubscribeWebRTCSignaling();
+          if (webrtcStarted) {
+            webrtc.broadcastHello();
+          }
         }
         console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
@@ -709,6 +717,13 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         handleDecryptedResponse(msg.id, msg.plaintext, msg.error);
         break;
 
+      case 'p2pFetchResult':
+        externalP2P.resolveFetch(msg.requestId, msg.data, msg.error);
+        break;
+      case 'p2pPeerListResult':
+        externalP2P.resolvePeerList(msg.requestId, msg.peerIds, msg.error);
+        break;
+
       // WebRTC proxy events from main thread
       case 'rtc:peerCreated':
       case 'rtc:peerStateChange':
@@ -755,6 +770,7 @@ function respondWithTransfer(msg: WorkerResponse, transfer: Transferable[]) {
 async function handleInit(id: string, cfg: WorkerConfig) {
   try {
     _config = cfg;
+    externalP2P.setEnabled(cfg.p2pMode === 'external');
     blossomBandwidthTracker.reset();
     emitBlossomBandwidthSnapshot();
 
@@ -838,35 +854,39 @@ async function handleInit(id: string, cfg: WorkerConfig) {
       respond({ type: 'eose', subId });
     });
 
-    // Initialize WebRTC controller (RTCPeerConnection runs in main thread proxy)
-    webrtc = new WebRTCController({
-      pubkey: cfg.pubkey,
-      localStore: store,
-      sendCommand: (cmd: WebRTCCommand) => respond(cmd),
-      sendSignaling: async (msg, recipientPubkey) => {
-        await sendWebRTCSignaling(msg, recipientPubkey);
-      },
-      getFollows, // Used to classify peers into follows/other pools
-      debug: false,
-      requestTimeout: WEBRTC_REQUEST_TIMEOUT_MS,
-      forwardRateLimit: cfg.forwardRateLimit,
-      upstreamFetch: async (hash) => (await meshStore?.getDetailed(hash, {
-        skipPrimary: true,
-        sourceIds: ['blossom'],
-      }))?.data ?? null,
-    });
+    if ((cfg.p2pMode ?? 'legacy-webrtc') === 'legacy-webrtc') {
+      // Initialize legacy WebRTC only for callers that have not selected an
+      // external provider. External mode must never join the kind-25050 mesh.
+      webrtc = new WebRTCController({
+        pubkey: cfg.pubkey,
+        localStore: store,
+        sendCommand: (cmd: WebRTCCommand) => respond(cmd),
+        sendSignaling: async (msg, recipientPubkey) => {
+          await sendWebRTCSignaling(msg, recipientPubkey);
+        },
+        getFollows,
+        debug: false,
+        requestTimeout: WEBRTC_REQUEST_TIMEOUT_MS,
+        forwardRateLimit: cfg.forwardRateLimit,
+        upstreamFetch: async (hash) => (await meshStore?.getDetailed(hash, {
+          skipPrimary: true,
+          sourceIds: ['blossom'],
+        }))?.data ?? null,
+      });
+    } else {
+      webrtc = null;
+    }
 
     // Initialize media handler with the tree
     initMediaHandler(tree);
 
-    // Initialize WebRTC signaling with the controller
-    initWebRTCSignaling(webrtc);
-
-    // Subscribe to WebRTC signaling events (kind 25050)
-    setupWebRTCSignalingSubscription(cfg.pubkey);
-
-    // WebRTC starts when pool config is received (waits for settings to load)
-    console.log('[Worker] WebRTC controller ready (waiting for pool config)');
+    if (webrtc) {
+      initWebRTCSignaling(webrtc);
+      setupWebRTCSignalingSubscription(cfg.pubkey);
+      console.log('[Worker] WebRTC controller ready (waiting for pool config)');
+    } else if (externalP2P.isEnabled()) {
+      console.log('[Worker] External P2P provider selected; legacy WebRTC disabled');
+    }
 
     // Initialize SocialGraph with user's pubkey as root
     socialGraph = new SocialGraph(cfg.pubkey);
@@ -961,6 +981,13 @@ function createMeshStore(primary: DexieStore): MeshRouterStore {
     primarySourceId: 'idb',
     requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
     sourceProviders: [
+      () => externalP2P.isEnabled()
+        ? [{
+          id: 'external-p2p',
+          groupId: 'p2p',
+          get: async (hash: Uint8Array) => externalP2P.fetch(toHex(hash)),
+        }]
+        : [],
       () => webrtc
         ? webrtc.getConnectedPeerIds().map((peerId) => ({
           id: `peer:${peerId}`,
@@ -996,6 +1023,7 @@ async function handleClose(id: string) {
   meshStore = null;
   tree = null;
   blossomStore = null;
+  externalP2P.setEnabled(false);
   blossomBandwidthTracker.reset();
   _config = null;
   respond({ type: 'void', id });
@@ -1412,6 +1440,29 @@ async function handlePublish(id: string, event: SignedEvent) {
 // ============================================================================
 
 async function handleGetPeerStats(id: string) {
+  if (externalP2P.isEnabled()) {
+    const peerIds = await externalP2P.listPeers();
+    respond({
+      type: 'peerStats',
+      id,
+      stats: peerIds.map((peerId) => ({
+        peerId,
+        pubkey: peerId,
+        connected: true,
+        pool: 'other' as const,
+        requestsSent: 0,
+        requestsReceived: 0,
+        responsesSent: 0,
+        responsesReceived: 0,
+        bytesSent: 0,
+        bytesReceived: 0,
+        forwardedRequests: 0,
+        forwardedResolved: 0,
+        forwardedSuppressed: 0,
+      })),
+    });
+    return;
+  }
   if (!webrtc) {
     respond({ type: 'peerStats', id, stats: [] });
     return;

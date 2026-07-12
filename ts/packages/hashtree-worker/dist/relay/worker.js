@@ -9,7 +9,7 @@
  * Main thread communicates via postMessage.
  * NIP-07 signing/encryption delegated back to main thread.
  */
-import { HashTree, BlossomStore } from '@hashtree/core';
+import { HashTree, BlossomStore, toHex } from '@hashtree/core';
 import { DexieStore } from '@hashtree/dexie';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
 import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
@@ -40,6 +40,7 @@ import { resolveRootPath } from './rootPathResolver';
 import { initWebRTCSignaling, sendWebRTCSignaling, setupWebRTCSignalingSubscription, handleWebRTCSignalingEvent, resubscribeWebRTCSignaling, } from './webrtcSignaling';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
 import { MeshRouterStore } from '../capabilities/meshRouterStore';
+import { ExternalP2PBridge } from './externalP2P';
 // Worker state
 let tree = null;
 let store = null;
@@ -53,6 +54,11 @@ let webrtcStarted = false;
 let _config = null;
 const WEBRTC_REQUEST_TIMEOUT_MS = 5000;
 const REMOTE_READ_TIMEOUT_MS = 15000;
+const externalP2P = new ExternalP2PBridge({
+    respond,
+    fetchTimeoutMs: REMOTE_READ_TIMEOUT_MS,
+    peerListTimeoutMs: WEBRTC_REQUEST_TIMEOUT_MS,
+});
 const treeRootSubscriptionRefs = new Map();
 // Storage quota management
 let storageMaxBytes = 1024 * 1024 * 1024; // Default 1GB
@@ -528,10 +534,12 @@ self.onmessage = async (e) => {
             // Relay configuration
             case 'setRelays':
                 await ndkSetRelays(msg.relays);
-                // Re-subscribe to WebRTC signaling on new relays
-                resubscribeWebRTCSignaling();
-                if (webrtcStarted) {
-                    webrtc?.broadcastHello();
+                if (webrtc) {
+                    // Re-subscribe to legacy WebRTC signaling only when that mesh is active.
+                    resubscribeWebRTCSignaling();
+                    if (webrtcStarted) {
+                        webrtc.broadcastHello();
+                    }
                 }
                 console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
                 respond({ type: 'void', id: msg.id });
@@ -604,6 +612,12 @@ self.onmessage = async (e) => {
             case 'decrypted':
                 handleDecryptedResponse(msg.id, msg.plaintext, msg.error);
                 break;
+            case 'p2pFetchResult':
+                externalP2P.resolveFetch(msg.requestId, msg.data, msg.error);
+                break;
+            case 'p2pPeerListResult':
+                externalP2P.resolvePeerList(msg.requestId, msg.peerIds, msg.error);
+                break;
             // WebRTC proxy events from main thread
             case 'rtc:peerCreated':
             case 'rtc:peerStateChange':
@@ -645,6 +659,7 @@ function respondWithTransfer(msg, transfer) {
 async function handleInit(id, cfg) {
     try {
         _config = cfg;
+        externalP2P.setEnabled(cfg.p2pMode === 'external');
         blossomBandwidthTracker.reset();
         emitBlossomBandwidthSnapshot();
         // Initialize Dexie/IndexedDB store
@@ -714,31 +729,39 @@ async function handleInit(id, cfg) {
         setOnEose((subId) => {
             respond({ type: 'eose', subId });
         });
-        // Initialize WebRTC controller (RTCPeerConnection runs in main thread proxy)
-        webrtc = new WebRTCController({
-            pubkey: cfg.pubkey,
-            localStore: store,
-            sendCommand: (cmd) => respond(cmd),
-            sendSignaling: async (msg, recipientPubkey) => {
-                await sendWebRTCSignaling(msg, recipientPubkey);
-            },
-            getFollows, // Used to classify peers into follows/other pools
-            debug: false,
-            requestTimeout: WEBRTC_REQUEST_TIMEOUT_MS,
-            forwardRateLimit: cfg.forwardRateLimit,
-            upstreamFetch: async (hash) => (await meshStore?.getDetailed(hash, {
-                skipPrimary: true,
-                sourceIds: ['blossom'],
-            }))?.data ?? null,
-        });
+        if ((cfg.p2pMode ?? 'legacy-webrtc') === 'legacy-webrtc') {
+            // Initialize legacy WebRTC only for callers that have not selected an
+            // external provider. External mode must never join the kind-25050 mesh.
+            webrtc = new WebRTCController({
+                pubkey: cfg.pubkey,
+                localStore: store,
+                sendCommand: (cmd) => respond(cmd),
+                sendSignaling: async (msg, recipientPubkey) => {
+                    await sendWebRTCSignaling(msg, recipientPubkey);
+                },
+                getFollows,
+                debug: false,
+                requestTimeout: WEBRTC_REQUEST_TIMEOUT_MS,
+                forwardRateLimit: cfg.forwardRateLimit,
+                upstreamFetch: async (hash) => (await meshStore?.getDetailed(hash, {
+                    skipPrimary: true,
+                    sourceIds: ['blossom'],
+                }))?.data ?? null,
+            });
+        }
+        else {
+            webrtc = null;
+        }
         // Initialize media handler with the tree
         initMediaHandler(tree);
-        // Initialize WebRTC signaling with the controller
-        initWebRTCSignaling(webrtc);
-        // Subscribe to WebRTC signaling events (kind 25050)
-        setupWebRTCSignalingSubscription(cfg.pubkey);
-        // WebRTC starts when pool config is received (waits for settings to load)
-        console.log('[Worker] WebRTC controller ready (waiting for pool config)');
+        if (webrtc) {
+            initWebRTCSignaling(webrtc);
+            setupWebRTCSignalingSubscription(cfg.pubkey);
+            console.log('[Worker] WebRTC controller ready (waiting for pool config)');
+        }
+        else if (externalP2P.isEnabled()) {
+            console.log('[Worker] External P2P provider selected; legacy WebRTC disabled');
+        }
         // Initialize SocialGraph with user's pubkey as root
         socialGraph = new SocialGraph(cfg.pubkey);
         console.log('[Worker] SocialGraph initialized with root:', cfg.pubkey.slice(0, 16) + '...');
@@ -821,6 +844,13 @@ function createMeshStore(primary) {
         primarySourceId: 'idb',
         requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
         sourceProviders: [
+            () => externalP2P.isEnabled()
+                ? [{
+                        id: 'external-p2p',
+                        groupId: 'p2p',
+                        get: async (hash) => externalP2P.fetch(toHex(hash)),
+                    }]
+                : [],
             () => webrtc
                 ? webrtc.getConnectedPeerIds().map((peerId) => ({
                     id: `peer:${peerId}`,
@@ -854,6 +884,7 @@ async function handleClose(id) {
     meshStore = null;
     tree = null;
     blossomStore = null;
+    externalP2P.setEnabled(false);
     blossomBandwidthTracker.reset();
     _config = null;
     respond({ type: 'void', id });
@@ -1194,6 +1225,29 @@ async function handlePublish(id, event) {
 // Stats Handlers
 // ============================================================================
 async function handleGetPeerStats(id) {
+    if (externalP2P.isEnabled()) {
+        const peerIds = await externalP2P.listPeers();
+        respond({
+            type: 'peerStats',
+            id,
+            stats: peerIds.map((peerId) => ({
+                peerId,
+                pubkey: peerId,
+                connected: true,
+                pool: 'other',
+                requestsSent: 0,
+                requestsReceived: 0,
+                responsesSent: 0,
+                responsesReceived: 0,
+                bytesSent: 0,
+                bytesReceived: 0,
+                forwardedRequests: 0,
+                forwardedResolved: 0,
+                forwardedSuppressed: 0,
+            })),
+        });
+        return;
+    }
     if (!webrtc) {
         respond({ type: 'peerStats', id, stats: [] });
         return;
