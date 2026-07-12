@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
-pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "hashtree-v1";
+pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "fips-overlay-v1";
 pub const DEFAULT_FIPS_REQUEST_TIMEOUT: Duration = Duration::from_millis(5_500);
 pub const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 pub const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS: usize = 4;
@@ -1740,6 +1740,15 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn default_discovery_scope_joins_the_generic_fips_overlay() {
+        assert_eq!(DEFAULT_FIPS_DISCOVERY_SCOPE, "fips-overlay-v1");
+        assert_eq!(
+            FipsEndpointOptions::new("nsec1test").discovery_scope,
+            DEFAULT_FIPS_DISCOVERY_SCOPE
+        );
+    }
 
     struct FakeEndpoint {
         id: String,

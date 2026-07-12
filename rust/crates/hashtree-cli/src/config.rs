@@ -208,8 +208,10 @@ fn default_socialgraph_snapshot_public() -> bool {
 impl ServerConfig {
     pub fn resolved_fips_relays(&self, active_nostr_relays: &[String]) -> Vec<String> {
         match &self.fips_relays {
-            Some(relays) if relays.is_empty() => Vec::new(),
-            Some(relays) => merge_fips_signal_relays(relays),
+            // An explicit list is authoritative. This is required for private
+            // relay deployments and deterministic local test networks; adding
+            // public bootstrap relays here leaks signaling outside that scope.
+            Some(relays) => normalize_fips_signal_relays(relays),
             None => merge_fips_signal_relays(active_nostr_relays),
         }
     }
@@ -218,12 +220,18 @@ impl ServerConfig {
 const DEFAULT_FIPS_SIGNAL_RELAYS: [&str; 2] = ["wss://temp.iris.to", "wss://relay.primal.net"];
 
 fn merge_fips_signal_relays(configured: &[String]) -> Vec<String> {
+    normalize_fips_signal_relays(
+        &configured
+            .iter()
+            .cloned()
+            .chain(DEFAULT_FIPS_SIGNAL_RELAYS.into_iter().map(str::to_string))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn normalize_fips_signal_relays(configured: &[String]) -> Vec<String> {
     let mut relays = Vec::new();
-    for relay in configured
-        .iter()
-        .map(String::as_str)
-        .chain(DEFAULT_FIPS_SIGNAL_RELAYS)
-    {
+    for relay in configured {
         let normalized = relay.trim().trim_end_matches('/').to_string();
         if normalized.is_empty() || relays.contains(&normalized) {
             continue;
@@ -721,7 +729,7 @@ fn default_enable_fips() -> bool {
 }
 
 fn default_fips_discovery_scope() -> String {
-    "hashtree-v1".to_string()
+    hashtree_fips_transport::DEFAULT_FIPS_DISCOVERY_SCOPE.to_string()
 }
 
 fn default_enable_fips_udp() -> bool {
@@ -1573,7 +1581,7 @@ decentralized_pubsub_max_event_bytes = 4096
         assert!(server.fetch_from_fips_peers);
         assert!(server.fips_relays.is_none());
         assert!(server.fips_peers.is_empty());
-        assert_eq!(server.fips_discovery_scope, "hashtree-v1");
+        assert_eq!(server.fips_discovery_scope, "fips-overlay-v1");
         assert_eq!(server.fips_request_timeout_ms, 5_500);
     }
 
@@ -1666,20 +1674,17 @@ http_fips_fetch = false
         server.fips_relays = Some(vec!["wss://fips.example".to_string()]);
         assert_eq!(
             server.resolved_fips_relays(&["wss://ignored.example".to_string()]),
-            [
-                "wss://fips.example",
-                "wss://temp.iris.to",
-                "wss://relay.primal.net"
-            ]
+            ["wss://fips.example"]
         );
     }
 
     #[test]
-    fn fips_relay_resolution_dedupes_bootstrap_relays() {
+    fn explicit_fips_relay_resolution_is_exact_and_normalized() {
         let mut server = ServerConfig::default();
         server.fips_relays = Some(vec![
             "wss://temp.iris.to/".to_string(),
             " wss://relay.primal.net ".to_string(),
+            "wss://temp.iris.to".to_string(),
             "wss://extra.example".to_string(),
         ]);
 
@@ -1719,7 +1724,7 @@ event_transport = "fips-local-only"
         assert!(config.nostr.active_relays().is_empty());
         assert!(config
             .server
-            .resolved_fips_relays(&config.nostr.active_relays())
+            .resolved_fips_relays(&["wss://must-not-open.example".to_string()])
             .is_empty());
     }
 }

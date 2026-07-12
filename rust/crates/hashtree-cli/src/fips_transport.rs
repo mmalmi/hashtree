@@ -68,6 +68,7 @@ pub async fn start_daemon_fips_transport(
     let active_relays = config.nostr.active_relays();
     let relays = config.server.resolved_fips_relays(&active_relays);
     let discovery_scope = normalized_discovery_scope(&config.server.fips_discovery_scope);
+    let peer_configs = daemon_fips_peer_configs(config, peer_ids);
     let identity_nsec = keys
         .secret_key()
         .to_bech32()
@@ -81,7 +82,10 @@ pub async fn start_daemon_fips_transport(
     options.udp_bind_addr = config.server.fips_udp_bind_addr.clone();
     options.udp_public = config.server.fips_udp_public;
     options.udp_external_addr = config.server.fips_udp_external_addr.clone();
-    options.webrtc_auto_connect = false;
+    // A configured/followed peer may be WebRTC-only. Let this endpoint dial
+    // discovered WebRTC adverts so connectivity does not depend on the remote
+    // side winning the offer race.
+    options.webrtc_auto_connect = options.enable_webrtc && !peer_configs.is_empty();
     options.webrtc_max_connections = hashtree_fips_transport::DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS;
     options.open_discovery_max_pending = 0;
     options.packet_channel_capacity = 1024;
@@ -111,7 +115,6 @@ pub async fn start_daemon_fips_transport(
             .with_request_timeout(request_timeout)
             .with_cache_responses(false),
     );
-    let peer_configs = daemon_fips_peer_configs(config, peer_ids);
     if !peer_configs.is_empty() {
         transport.set_peer_configs(peer_configs).await;
     }
