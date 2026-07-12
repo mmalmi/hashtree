@@ -10,6 +10,10 @@ async function makeHash(): Promise<Hash> {
   return await sha256(DATA) as Hash;
 }
 
+async function makeHashFor(data: Uint8Array): Promise<Hash> {
+  return await sha256(data) as Hash;
+}
+
 function makeResponse(status: number, body?: Uint8Array, jsonBody?: unknown): Response {
   const textBody = jsonBody === undefined ? '' : JSON.stringify(jsonBody);
   return {
@@ -268,6 +272,63 @@ describe('BlossomStore', () => {
       }),
     );
     expect(uploadEvents).toEqual(['failed']);
+  });
+
+  it('waits for write server backoff instead of failing the next upload immediately', async () => {
+    vi.useFakeTimers();
+    const firstHash = await makeHash();
+    const secondData = new Uint8Array([6, 7, 8, 9]);
+    const secondHash = await makeHashFor(secondData);
+    const secondHashHex = toHex(secondHash);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeResponse(503, undefined, { error: 'busy' }))
+      .mockResolvedValueOnce(makeResponse(201, undefined, { sha256: secondHashHex }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://write.example', write: true }],
+      signer,
+    });
+
+    await expect(store.put(firstHash, DATA)).rejects.toThrow(/Blossom upload failed/);
+
+    const secondPut = store.put(secondHash, secondData);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(secondPut).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds concurrent writes without serializing every upload behind one request', async () => {
+    const hash = await makeHash();
+    const hashHex = toHex(hash);
+    const pending: Array<(response: Response) => void> = [];
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => pending.push(resolve)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://write.example', write: true }],
+      signer,
+      maxConcurrentWrites: 2,
+    });
+
+    const first = store.put(hash, DATA);
+    const second = store.put(hash, DATA);
+    const third = store.put(hash, DATA);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(pending).toHaveLength(2);
+
+    pending.shift()!(makeResponse(201, undefined, { sha256: hashHex }));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    pending.shift()!(makeResponse(201, undefined, { sha256: hashHex }));
+    pending.shift()!(makeResponse(201, undefined, { sha256: hashHex }));
+
+    await expect(Promise.all([first, second, third])).resolves.toEqual([true, true, true]);
   });
 
   it('treats 201 upload responses as newly stored', async () => {

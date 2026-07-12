@@ -72,6 +72,8 @@ export interface BlossomStoreConfig {
   getTimeoutMs?: number;
   /** Timeout for a single Blossom upload request (defaults to 120 seconds) */
   putTimeoutMs?: number;
+  /** Maximum concurrent uploads across overlapping push operations (defaults to 4). */
+  maxConcurrentWrites?: number;
   /** Skip pre-upload HEAD probes; useful when the write endpoint handles duplicates. */
   skipExistenceCheck?: boolean;
 }
@@ -112,6 +114,8 @@ const EXISTENCE_CHECK_THRESHOLD = 256 * 1024;
 const HEAD_TIMEOUT_MS = 15_000;
 const DEFAULT_GET_TIMEOUT_MS = 60_000;
 const PUT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_CONCURRENT_WRITES = 4;
+const MAX_WRITE_BACKOFF_WAIT_MS = 5_000;
 const GET_HEDGE_INTERVAL_MS = 75;
 const READ_SCORE_TIE_DELTA = 0.12;
 const BLOB_BATCH_DOWNLOAD_MAGIC = new Uint8Array([72, 84, 66, 68, 86, 49, 0, 0]); // HTBDV1\0\0
@@ -121,6 +125,20 @@ const BLOB_BATCH_DOWNLOAD_CONTENT_TYPE = 'application/vnd.hashtree.blob-batch.v1
 interface HashAttempts {
   attempts: number;
   lastAttempt: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function normalizeMaxConcurrentWrites(value: number | undefined): number {
+  const normalized = value ?? DEFAULT_MAX_CONCURRENT_WRITES;
+  if (!Number.isSafeInteger(normalized) || normalized < 1 || normalized > 32) {
+    throw new Error('maxConcurrentWrites must be an integer between 1 and 32');
+  }
+  return normalized;
 }
 
 function defaultReadStats(): ReadServerStats {
@@ -142,11 +160,13 @@ export class BlossomStore implements StoreWithMeta {
   private onUploadProgress?: BlossomUploadCallback;
   private getTimeoutMs: number;
   private putTimeoutMs: number;
+  private maxConcurrentWrites: number;
   private skipExistenceCheck: boolean;
   private serverHealth: Map<string, ServerHealth> = new Map();
   private readStats: Map<string, ReadServerStats> = new Map();
   private hashAttempts: Map<string, HashAttempts> = new Map();
-  private writeQueue: Promise<boolean> = Promise.resolve(true);
+  private activeWrites = 0;
+  private readonly writeWaiters: Array<() => void> = [];
 
   constructor(config: BlossomStoreConfig) {
     this.servers = config.servers.map(s =>
@@ -157,6 +177,7 @@ export class BlossomStore implements StoreWithMeta {
     this.onUploadProgress = config.onUploadProgress;
     this.getTimeoutMs = config.getTimeoutMs ?? DEFAULT_GET_TIMEOUT_MS;
     this.putTimeoutMs = config.putTimeoutMs ?? PUT_TIMEOUT_MS;
+    this.maxConcurrentWrites = normalizeMaxConcurrentWrites(config.maxConcurrentWrites);
     this.skipExistenceCheck = config.skipExistenceCheck === true;
   }
 
@@ -172,14 +193,18 @@ export class BlossomStore implements StoreWithMeta {
 
   /** Check if server is in backoff period */
   private isServerInBackoff(serverUrl: string): boolean {
+    return this.serverBackoffRemainingMs(serverUrl) > 0;
+  }
+
+  private serverBackoffRemainingMs(serverUrl: string, now = Date.now()): number {
     const health = this.serverHealth.get(serverUrl);
-    if (!health || health.consecutiveErrors === 0) return false;
+    if (!health || health.consecutiveErrors === 0) return 0;
 
     const backoffMs = Math.min(
       BASE_BACKOFF_MS * Math.pow(2, health.consecutiveErrors - 1),
       MAX_BACKOFF_MS
     );
-    return Date.now() - health.lastErrorTime < backoffMs;
+    return Math.max(0, backoffMs - (now - health.lastErrorTime));
   }
 
   /** Record server error */
@@ -560,13 +585,29 @@ export class BlossomStore implements StoreWithMeta {
   }
 
   async put(hash: Hash, data: Uint8Array, contentType?: string): Promise<boolean> {
-    // Queue writes sequentially to avoid overwhelming servers
-    const result = this.writeQueue.then(
-      () => this.doPut(hash, data, contentType),
-      () => this.doPut(hash, data, contentType) // Continue even if previous failed
-    );
-    this.writeQueue = result.then(() => true, () => true); // Keep queue going
-    return result;
+    await this.acquireWriteSlot();
+    try {
+      return await this.doPut(hash, data, contentType);
+    } finally {
+      this.releaseWriteSlot();
+    }
+  }
+
+  private async acquireWriteSlot(): Promise<void> {
+    if (this.activeWrites < this.maxConcurrentWrites) {
+      this.activeWrites += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.writeWaiters.push(resolve));
+  }
+
+  private releaseWriteSlot(): void {
+    const next = this.writeWaiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    this.activeWrites -= 1;
   }
 
   private async doPut(hash: Hash, data: Uint8Array, contentType?: string): Promise<boolean> {
@@ -584,15 +625,24 @@ export class BlossomStore implements StoreWithMeta {
       throw new Error('Hash does not match data');
     }
 
+    const allWriteServers = this.servers.filter(s => s.write);
+    if (allWriteServers.length === 0) {
+      throw new Error('No write-enabled server configured');
+    }
+
     // Filter to write-enabled servers not in backoff
-    const writeServers = this.servers.filter(s => s.write && !this.isServerInBackoff(s.url));
+    let writeServers = allWriteServers.filter(s => !this.isServerInBackoff(s.url));
     if (writeServers.length === 0) {
-      // Check if we have any write servers at all
-      const anyWriteServers = this.servers.filter(s => s.write);
-      if (anyWriteServers.length === 0) {
-        throw new Error('No write-enabled server configured');
+      const now = Date.now();
+      const retryDelayMs = Math.min(
+        ...allWriteServers.map(s => this.serverBackoffRemainingMs(s.url, now)).filter(ms => ms > 0)
+      );
+      if (Number.isFinite(retryDelayMs) && retryDelayMs > 0) {
+        await sleep(Math.min(retryDelayMs, MAX_WRITE_BACKOFF_WAIT_MS));
+        writeServers = allWriteServers.filter(s => !this.isServerInBackoff(s.url));
       }
-      // All servers in backoff - count as an attempt
+    }
+    if (writeServers.length === 0) {
       this.recordHashFailure(hashHex);
       throw new Error('All write servers are in backoff');
     }

@@ -162,6 +162,7 @@ export async function setCachedRoot(
     keyId?: string;
     selfEncryptedKey?: string;
     selfEncryptedLinkKey?: string;
+    force?: boolean;
   }
 ): Promise<SetCachedRootResult> {
   const cacheKey = `${npub}/${treeName}`;
@@ -182,7 +183,11 @@ export async function setCachedRoot(
     && visibility === 'private'
     && options?.selfEncryptedKey === undefined;
 
-  if (existing && compareReplaceableEventOrder(updatedAt, eventId, existing.updatedAt, existing.eventId) < 0) {
+  if (
+    !options?.force
+    && existing
+    && compareReplaceableEventOrder(updatedAt, eventId, existing.updatedAt, existing.eventId) < 0
+  ) {
     return { applied: false, record: existing };
   }
 

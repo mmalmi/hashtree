@@ -128,7 +128,9 @@ export async function setCachedRoot(npub, treeName, cid, visibility = 'public', 
     const preservePrivateMetadata = sameHash
         && visibility === 'private'
         && options?.selfEncryptedKey === undefined;
-    if (existing && compareReplaceableEventOrder(updatedAt, eventId, existing.updatedAt, existing.eventId) < 0) {
+    if (!options?.force
+        && existing
+        && compareReplaceableEventOrder(updatedAt, eventId, existing.updatedAt, existing.eventId) < 0) {
         return { applied: false, record: existing };
     }
     const cached = {

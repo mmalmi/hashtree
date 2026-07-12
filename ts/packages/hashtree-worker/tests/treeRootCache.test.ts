@@ -8,6 +8,7 @@ import {
 } from '../src/relay/treeRootCache';
 
 const HASH_A = fromHex('11'.repeat(32));
+const HASH_B = fromHex('33'.repeat(32));
 const KEY_A = fromHex('22'.repeat(32));
 
 describe('treeRootCache', () => {
@@ -78,5 +79,27 @@ describe('treeRootCache', () => {
     expect(cached?.keyId).toBeUndefined();
     expect(cached?.selfEncryptedLinkKey).toBeUndefined();
     expect(cached?.visibility).toBe('public');
+  });
+
+  it('lets an authoritative local cache sync replace a same-second relay event', async () => {
+    const npub = 'npub-worker-cache-local-write';
+    const treeName = 'main';
+
+    await setCachedRoot(npub, treeName, { hash: HASH_A }, 'public', {
+      updatedAt: 100,
+      eventId: 'ff'.repeat(32),
+    });
+
+    const rejected = await setCachedRoot(npub, treeName, { hash: HASH_B }, 'public', {
+      updatedAt: 100,
+    });
+    expect(rejected.applied).toBe(false);
+
+    const applied = await setCachedRoot(npub, treeName, { hash: HASH_B }, 'public', {
+      updatedAt: 100,
+      force: true,
+    });
+    expect(applied.applied).toBe(true);
+    expect(applied.record.hash).toEqual(HASH_B);
   });
 });

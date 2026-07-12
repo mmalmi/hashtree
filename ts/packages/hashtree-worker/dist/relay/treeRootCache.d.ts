@@ -52,6 +52,7 @@ export declare function setCachedRoot(npub: string, treeName: string, cid: CID, 
     keyId?: string;
     selfEncryptedKey?: string;
     selfEncryptedLinkKey?: string;
+    force?: boolean;
 }): Promise<SetCachedRootResult>;
 /**
  * Merge a decrypted key into an existing cache entry (if hash matches).

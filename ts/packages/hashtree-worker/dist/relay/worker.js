@@ -976,6 +976,10 @@ async function handleSetTreeRootCache(id, npub, treeName, hash, key, visibility,
             keyId: metadata?.keyId,
             selfEncryptedKey: metadata?.selfEncryptedKey,
             selfEncryptedLinkKey: metadata?.selfEncryptedLinkKey,
+            // This message comes from the page's local-write registry. It is the
+            // authoritative root for immediate same-origin /htree reads and must not
+            // lose to a relay event solely because both landed in the same second.
+            force: true,
         });
         respond({ type: 'void', id });
     }
