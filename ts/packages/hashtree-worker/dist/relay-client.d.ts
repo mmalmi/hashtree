@@ -1,18 +1,16 @@
-import type { WorkerFactory } from './client.js';
+import type { WorkerFactory, WorkerP2PProvider } from './client.js';
 import type { BlossomBandwidthStats, BlossomServerConfig, PeerStats as RelayPeerStats, RelayStats, TreeRootInfo, WorkerConfig as RelayWorkerConfig, WorkerRequest as RelayWorkerRequest, WorkerResponse as RelayWorkerResponse } from './relay/protocol.js';
 export interface TreeRootUpdate extends TreeRootInfo {
     npub: string;
     treeName: string;
 }
-export interface RelayWorkerClientConfig extends RelayWorkerConfig {
-    maxWebRTCUploadBytesPerSecond?: number | null;
-}
+export type RelayWorkerClientConfig = RelayWorkerConfig;
 export type { BlossomBandwidthStats, BlossomServerConfig, RelayPeerStats, RelayStats, TreeRootInfo, RelayWorkerConfig, RelayWorkerRequest, RelayWorkerResponse, };
 export declare class RelayWorkerClient {
     private readonly workerFactory;
     private readonly config;
     private worker;
-    private webrtcProxy;
+    private p2pProvider;
     private initPromise;
     private initPending;
     private pendingRequests;
@@ -21,6 +19,8 @@ export declare class RelayWorkerClient {
     constructor(workerFactory: WorkerFactory, config: RelayWorkerClientConfig);
     init(): Promise<void>;
     private spawnWorker;
+    private handleP2PFetch;
+    private handleP2PPeerList;
     private getNostrExtension;
     private handleSignRequest;
     private handleEncryptRequest;
@@ -35,19 +35,7 @@ export declare class RelayWorkerClient {
     getPeerStats(): Promise<RelayPeerStats[]>;
     getRelayStats(): Promise<RelayStats[]>;
     setIdentity(pubkey: string, nsecHex?: string): Promise<void>;
-    setWebRTCPools(pools: {
-        follows: {
-            max: number;
-            satisfied: number;
-        };
-        other: {
-            max: number;
-            satisfied: number;
-        };
-    }): Promise<void>;
-    setUploadLimitBytesPerSecond(maxUploadBytesPerSecond?: number | null): void;
-    setFollows(follows: string[]): Promise<void>;
-    sendHello(): Promise<void>;
+    setP2PProvider(provider: WorkerP2PProvider | null): void;
     setBlossomServers(servers: BlossomServerConfig[]): Promise<void>;
     setStorageMaxBytes(maxBytes: number): Promise<void>;
     setRelays(relays: string[]): Promise<void>;

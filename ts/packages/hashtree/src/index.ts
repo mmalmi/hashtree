@@ -178,9 +178,6 @@ export type {
   BlossomServerConfig as WorkerBlossomServerConfig,
   MediaRequest,
   MediaResponse,
-  // WebRTC proxy protocol (worker controls, main executes)
-  WebRTCCommand,
-  WebRTCEvent,
 } from './worker/protocol.js';
 
 export { generateRequestId } from './worker/protocol.js';

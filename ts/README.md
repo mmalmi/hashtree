@@ -123,8 +123,8 @@ Wire format: `{t: LinkType, l: [{h: hash, s: size, n?: name, t: linkType, ...}]}
 `@hashtree/fips-transport` sends the same `@hashtree/mesh` request/response
 frames over FIPS endpoint bytes. FIPS owns peer discovery, signaling, and
 underlay transports; Hashtree owns hash verification and source selection.
-Hashtree peers are discovered in the `hashtree-v1` FIPS app scope, separately
-from generic FIPS daemon reachability adverts.
+Browser and native providers join the shared `fips-overlay-v1` FIPS discovery
+fabric by default.
 
 ```typescript
 import {
@@ -141,7 +141,7 @@ const store = new FipsTransportStore({
   peers: () => endpoint.listPeerIds?.() ?? [],
 });
 
-console.log(DEFAULT_FIPS_DISCOVERY_APP); // hashtree-v1
+console.log(DEFAULT_FIPS_DISCOVERY_APP); // fips-overlay-v1
 const data = await store.get(hash);
 ```
 

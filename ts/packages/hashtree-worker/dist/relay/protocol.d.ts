@@ -2,7 +2,7 @@
  * Worker Protocol Types
  *
  * Message types for communication between main thread and hashtree worker.
- * Worker owns: HashTree, WebRTC, Nostr (via nostr-tools)
+ * Worker owns: HashTree and Nostr (via nostr-tools)
  * Main thread owns: UI, NIP-07 extension access (signing/encryption)
  */
 import type { CID } from '@hashtree/core';
@@ -158,30 +158,6 @@ export type WorkerRequest = {
     type: 'getStorageStats';
     id: string;
 } | {
-    type: 'setWebRTCPools';
-    id: string;
-    pools: {
-        follows: {
-            max: number;
-            satisfied: number;
-        };
-        other: {
-            max: number;
-            satisfied: number;
-        };
-    };
-} | {
-    type: 'setWebRTCForwardRateLimit';
-    id: string;
-    forwardRateLimit?: ForwardRateLimitConfig;
-} | {
-    type: 'sendWebRTCHello';
-    id: string;
-} | {
-    type: 'setFollows';
-    id: string;
-    follows: string[];
-} | {
     type: 'setBlossomServers';
     id: string;
     servers: BlossomServerConfig[];
@@ -269,7 +245,7 @@ export type WorkerRequest = {
     id: string;
     plaintext?: string;
     error?: string;
-} | WebRTCEvent | {
+} | {
     type: 'p2pFetchResult';
     id: string;
     requestId: string;
@@ -289,22 +265,12 @@ export interface BlossomServerConfig {
     write?: boolean;
     preferBatchReads?: boolean;
 }
-export interface ForwardRateLimitConfig {
-    maxForwardsPerPeerWindow?: number;
-    windowMs?: number;
-}
 export interface WorkerConfig {
     relays: string[];
     blossomServers?: BlossomServerConfig[];
     pubkey: string;
     nsec?: string;
     storeName?: string;
-    forwardRateLimit?: ForwardRateLimitConfig;
-    /**
-     * `external` delegates P2P reads and peer discovery to the main thread.
-     * The legacy kind-25050 WebRTC mesh is not initialized in that mode.
-     */
-    p2pMode?: 'legacy-webrtc' | 'external' | 'off';
 }
 export type WorkerResponse = {
     type: 'ready';
@@ -465,7 +431,7 @@ export type WorkerResponse = {
     id: string;
     pubkey: string;
     ciphertext: string;
-} | WebRTCCommand | {
+} | {
     type: 'p2pFetch';
     requestId: string;
     hashHex: string;
@@ -535,88 +501,6 @@ export type MediaResponse = {
     type: 'error';
     requestId: string;
     message: string;
-};
-/** Worker → Main: Commands to control WebRTC connections */
-export type WebRTCCommand = {
-    type: 'rtc:createPeer';
-    peerId: string;
-    pubkey: string;
-} | {
-    type: 'rtc:closePeer';
-    peerId: string;
-} | {
-    type: 'rtc:createOffer';
-    peerId: string;
-} | {
-    type: 'rtc:createAnswer';
-    peerId: string;
-} | {
-    type: 'rtc:setLocalDescription';
-    peerId: string;
-    sdp: RTCSessionDescriptionInit;
-} | {
-    type: 'rtc:setRemoteDescription';
-    peerId: string;
-    sdp: RTCSessionDescriptionInit;
-} | {
-    type: 'rtc:addIceCandidate';
-    peerId: string;
-    candidate: RTCIceCandidateInit;
-} | {
-    type: 'rtc:sendData';
-    peerId: string;
-    data: Uint8Array;
-};
-/** Main → Worker: Events from WebRTC connections */
-export type WebRTCEvent = {
-    type: 'rtc:peerCreated';
-    peerId: string;
-} | {
-    type: 'rtc:peerStateChange';
-    peerId: string;
-    state: RTCPeerConnectionState;
-} | {
-    type: 'rtc:peerClosed';
-    peerId: string;
-} | {
-    type: 'rtc:offerCreated';
-    peerId: string;
-    sdp: RTCSessionDescriptionInit;
-} | {
-    type: 'rtc:answerCreated';
-    peerId: string;
-    sdp: RTCSessionDescriptionInit;
-} | {
-    type: 'rtc:descriptionSet';
-    peerId: string;
-    error?: string;
-} | {
-    type: 'rtc:iceCandidate';
-    peerId: string;
-    candidate: RTCIceCandidateInit | null;
-} | {
-    type: 'rtc:iceGatheringComplete';
-    peerId: string;
-} | {
-    type: 'rtc:dataChannelOpen';
-    peerId: string;
-} | {
-    type: 'rtc:dataChannelMessage';
-    peerId: string;
-    data: Uint8Array;
-} | {
-    type: 'rtc:dataChannelClose';
-    peerId: string;
-} | {
-    type: 'rtc:dataChannelError';
-    peerId: string;
-    error: string;
-} | {
-    type: 'rtc:bufferHigh';
-    peerId: string;
-} | {
-    type: 'rtc:bufferLow';
-    peerId: string;
 };
 export declare function generateRequestId(): string;
 //# sourceMappingURL=protocol.d.ts.map

@@ -184,6 +184,54 @@ describe('RelayWorkerClient', () => {
     await client.close();
   });
 
+  it('bridges relay worker reads through the configured FIPS provider surface', async () => {
+    const worker = new FakeRelayWorker();
+    const client = new RelayWorkerClient((class {
+      constructor() {
+        return worker;
+      }
+    }) as unknown as new () => Worker, {
+      storeName: 'demo-sites-worker',
+      relays: ['wss://relay.example'],
+      pubkey: '11'.repeat(32),
+    });
+    const fetch = vi.fn(async (hashHex: string, peerId?: string) => {
+      expect(hashHex).toBe('ab'.repeat(32));
+      expect(peerId).toBe('fips-peer');
+      return new Uint8Array([1, 2, 3]);
+    });
+    const listPeerIds = vi.fn(async () => ['fips-peer']);
+    client.setP2PProvider({ fetch, listPeerIds });
+
+    await client.init();
+    worker.emit({
+      type: 'p2pFetch',
+      requestId: 'fips-fetch',
+      hashHex: 'ab'.repeat(32),
+      peerId: 'fips-peer',
+    });
+    await vi.waitFor(() => {
+      expect(worker.messages.at(-1)).toMatchObject({
+        type: 'p2pFetchResult',
+        requestId: 'fips-fetch',
+        data: new Uint8Array([1, 2, 3]),
+      });
+    });
+
+    worker.emit({ type: 'p2pPeerList', requestId: 'fips-peers' });
+    await vi.waitFor(() => {
+      expect(worker.messages.at(-1)).toMatchObject({
+        type: 'p2pPeerListResult',
+        requestId: 'fips-peers',
+        peerIds: ['fips-peer'],
+      });
+    });
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(listPeerIds).toHaveBeenCalledOnce();
+    await client.close();
+  });
+
   it('bridges signEvent requests to the nostr extension', async () => {
     const worker = new FakeRelayWorker();
     const client = new RelayWorkerClient((class {

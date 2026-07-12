@@ -394,7 +394,7 @@ export class HashTree {
 
   /**
    * Pull (fetch) all chunks for a tree recursively
-   * Triggers WebRTC fetches for any missing chunks
+   * Triggers remote-store fetches for any missing chunks.
    * Uses parallel fetching within each tree level for better performance
    * @returns { cid, chunks, bytes } - The CID and stats about what was pulled
    */
@@ -408,7 +408,7 @@ export class HashTree {
       if (visited.has(hex)) return;
       visited.add(hex);
 
-      // Fetch the chunk (will go to WebRTC peers if not local)
+      // Fetch the chunk from the configured store chain when it is not local.
       const data = await this.store.get(hash);
       if (!data) {
         return;

@@ -569,8 +569,12 @@ export class HashtreeWorkerClient {
   }
 
   setP2PProvider(provider: WorkerP2PProvider | null): void {
-    this.p2pFetchHandler = provider ? provider.fetch : null;
-    this.p2pPeerListHandler = provider ? provider.listPeerIds : null;
+    this.p2pFetchHandler = provider
+      ? (hashHex, peerId) => provider.fetch(hashHex, peerId)
+      : null;
+    this.p2pPeerListHandler = provider
+      ? () => provider.listPeerIds()
+      : null;
   }
 
   async close(): Promise<void> {

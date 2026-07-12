@@ -1,12 +1,12 @@
 /**
  * Test direct navigation to file URL
  * Tests that navigating directly to a file URL loads the content
- * even when WebRTC peers aren't connected yet.
+ * even when FIPS peers aren't connected yet.
  */
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser } from 'playwright';
 
 const TEST_URL = 'http://localhost:5173/#/npub1436awcdq3czqf4nyf5nmj8j3m437hdyjwry7gh86a3wwre6jwk3sz3e7ah/asdf/two%20crowns%20frank%20dicksee.jpeg';
-const TIMEOUT = 60000; // 60 seconds for WebRTC to connect and fetch large files
+const TIMEOUT = 60000; // 60 seconds for FIPS to connect and fetch large files
 
 async function runTest() {
   let browser: Browser | null = null;

@@ -52,11 +52,6 @@ export declare const DEBUG_NAMESPACES: {
     readonly NDK_WORKER_ERROR: "ndk:worker:error";
     readonly NDK_WORKER_WARN: "ndk:worker:warn";
     readonly NDK_TRANSPORT: "ndk:transport";
-    readonly WEBRTC_PEER: "webrtc:peer";
-    readonly WEBRTC_PEER_LIFECYCLE: "webrtc:peer:lifecycle";
-    readonly WEBRTC_PEER_MESSAGES: "webrtc:peer:messages";
-    readonly WEBRTC_PEER_DATA: "webrtc:peer:data";
-    readonly WEBRTC_SIGNALING: "webrtc:signaling";
     readonly CASHU_WALLET: "cashu:wallet";
     readonly CASHU_WALLET_ERROR: "cashu:wallet:error";
     readonly CASHU_WALLET_WARN: "cashu:wallet:warn";

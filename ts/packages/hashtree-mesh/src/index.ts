@@ -1,6 +1,6 @@
 export {
   PeerId,
-  WEBRTC_KIND,
+  MESH_EVENT_KIND,
   MAX_HTL,
   HtlMode,
   BLOB_REQUEST_POLICY,
@@ -30,14 +30,6 @@ export {
 } from './types.js';
 
 export type {
-  IceCandidate,
-  HelloMessage,
-  OfferMessage,
-  AnswerMessage,
-  CandidateMessage,
-  CandidatesMessage,
-  SignalingMessage,
-  DirectedMessage,
   HtlPolicy,
   DataRequest,
   DataResponse,
@@ -57,7 +49,6 @@ export type {
   PersistedPeerMetadata,
   PeerMetadataSnapshot,
   MeshStats,
-  WebRTCStats,
   BandwidthSample,
   PendingReassembly,
 } from './types.js';

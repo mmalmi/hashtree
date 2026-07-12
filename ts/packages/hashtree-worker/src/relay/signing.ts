@@ -8,12 +8,7 @@
 
 import { finalizeEvent, nip44 } from 'nostr-tools';
 import type { EventTemplate } from 'nostr-tools';
-import {
-  createAuthenticatedNip44GiftWrap,
-  createDecryptingGiftUnwrapper,
-  type GiftSeal,
-} from '../p2p/signaling.js';
-import { getSecretKey, getPubkey, getEphemeralSecretKey } from './identity';
+import { getSecretKey, getEphemeralSecretKey } from './identity';
 import type { SignedEvent, UnsignedEvent } from './protocol';
 
 // Pending NIP-07 requests (waiting for main thread)
@@ -168,35 +163,6 @@ export async function decrypt(senderPubkey: string, ciphertext: string): Promise
   } else {
     return requestDecrypt(senderPubkey, ciphertext);
   }
-}
-
-// ============================================================================
-// Gift Wrap (authenticated NIP-59 seal inside hashtree signaling envelope)
-// ============================================================================
-
-/**
- * Gift wrap an event for private delivery.
- */
-export async function giftWrap(
-  innerEvent: { kind: number; content: string; tags: string[][] },
-  recipientPubkey: string
-): Promise<SignedEvent> {
-  const myPubkey = getPubkey();
-  if (!myPubkey) throw new Error('No pubkey available');
-
-  const wrap = createAuthenticatedNip44GiftWrap<SignedEvent>({
-    senderPubkey: myPubkey,
-    signEvent,
-    encrypt,
-  });
-  return wrap(innerEvent, recipientPubkey);
-}
-
-/**
- * Unwrap a gift wrapped event.
- */
-export async function giftUnwrap(event: SignedEvent): Promise<GiftSeal | null> {
-  return createDecryptingGiftUnwrapper(decrypt)(event);
 }
 
 // ============================================================================

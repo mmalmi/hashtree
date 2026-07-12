@@ -5,7 +5,6 @@
  * Provides subscribe/publish functionality for the worker.
  *
  * Used for:
- * - WebRTC signaling (kind 25050 ephemeral)
  * - Tree root resolution (kind 30064, with legacy 30078 support)
  */
 import type { NostrFilter, SignedEvent, RelayStats } from './protocol';

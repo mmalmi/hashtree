@@ -26,39 +26,35 @@ const { hashHex } = await client.putBlob(data);
 const { data: blob } = await client.getBlob(hashHex);
 ```
 
-## Plain Worker + App-Owned Nostr
+## Plain Worker + FIPS WebRTC
 
-For simple apps, keep ordinary Nostr reads in app code and let the worker focus on
-storage, Blossom, and mesh transport:
+Browser mesh traffic runs through FIPS. FIPS owns Nostr discovery, signaling,
+and WebRTC links; the worker only exchanges Hashtree request/response frames
+through the provider interface:
 
 ```typescript
 import { HashtreeWorkerClient } from '@hashtree/worker';
-import { ManagedWebRTCMeshHost } from '@hashtree/worker/p2p';
-import { SimplePool } from 'nostr-tools/pool';
+import { DexieStore } from '@hashtree/dexie';
+import { createBrowserHashtreeFipsProvider } from '@hashtree/fips-transport/browser';
 
 const client = new HashtreeWorkerClient(HashtreeWorker, {
   storeName: 'demo-worker',
 });
+const provider = await createBrowserHashtreeFipsProvider({
+  deviceSecretKey,
+  relays: ['wss://relay.damus.io'],
+  localStore: new DexieStore('demo-fips-provider'),
+});
+client.setP2PProvider(provider);
 await client.init();
 
-const meshHost = new ManagedWebRTCMeshHost();
-meshHost.attachWorkerClient(client);
-
-const pool = new SimplePool();
-const profileSub = pool.subscribeMany(
-  ['wss://relay.damus.io'],
-  [{ kinds: [0], authors: ['pubkey-hex'] }],
-  {
-    onevent(event) {
-      console.log('profile metadata', event.content);
-    },
-  },
-);
+// Before discarding the worker client:
+await provider.stop();
+await client.close();
 ```
 
-That split keeps `HashtreeWorkerClient` reusable for apps that only need blob/media
-transport, while still allowing each app to use `nostr-tools` or another thin client
-for profiles, follows, search, or other product-specific Nostr queries.
+There is no direct Hashtree WebRTC signaling or data-channel stack in this
+package. `@fips/transport-webrtc` is the browser WebRTC underlay.
 
 ## Relay Worker Client
 
@@ -76,6 +72,8 @@ const client = new RelayWorkerClient(HashtreeWorker, {
   pubkey: '336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b',
 });
 
+// Created with createBrowserHashtreeFipsProvider(...) as above.
+client.setP2PProvider(fipsProvider);
 await client.init();
 const root = await client.getTreeRootInfo('npub1example', 'sites/example');
 const stop = client.onTreeRootUpdate((update) => {
@@ -158,7 +156,7 @@ Behavior:
 
 ## Transport Notes
 
-- If you expect media or files to keep working through the worker, daemon, or WebRTC peers, app-facing URLs should stay in `htree://...` or `/htree/...` form. Raw `https://` Blossom URLs bypass the runtime routing and will fail when a client intentionally has no direct Blossom access.
+- If you expect media or files to keep working through the worker, daemon, or FIPS peers, app-facing URLs should stay in `htree://...` or `/htree/...` form. Raw `https://` Blossom URLs bypass the runtime routing and will fail when a client intentionally has no direct Blossom access.
 - Mesh reads should be treated as liveness-based, not fixed-timeout-based. Slow peers are normal on cold paths; callers should hedge to more peers instead of converting a slow in-flight read into a synthetic not-found.
 - After bytes or fragments start flowing, prefer idle/progress-based expiry over total wall-clock deadlines. That keeps large media transfers alive without giving malicious peers an unlimited pin.
 - For realistic verification, test cold direct navigation with requester-side Blossom disabled and assert that artwork/audio loads from `/htree/...` without any fallback requests to default Blossom servers.
@@ -178,7 +176,6 @@ That lets the service worker map fetches back to the correct worker port when mu
 - `@hashtree/worker` — `createHtreeRuntime`, `resolveRuntimeEndpoints`, and `HashtreeWorkerClient`
 - `@hashtree/worker/relay-client` — `RelayWorkerClient` plus relay-backed tree-root metadata types
 - `@hashtree/worker/worker` — `attachHashtreeWorker(...)` for embedding the worker protocol into a custom worker
-- `@hashtree/worker/p2p` — `WebRTCController` / `WebRTCProxy` for P2P data channel management
 - `@hashtree/worker/entry` — Worker entry point
 - `@hashtree/worker/protocol` — Shared message types between main thread and worker
 

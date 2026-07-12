@@ -40,7 +40,7 @@ describe('MeshRouterStore', () => {
       primaryReadTimeoutMs: 0,
       requestTimeoutMs: 500,
       sources: [
-        delayedSource('webrtc', 200, slowData, slowCalls),
+        delayedSource('fips', 200, slowData, slowCalls),
         delayedSource('blossom', 50, fastData, fastCalls),
       ],
     });
@@ -71,7 +71,7 @@ describe('MeshRouterStore', () => {
       primaryReadTimeoutMs: 0,
       requestTimeoutMs: 500,
       sources: [
-        delayedSource('webrtc', 20, peerData, peerCalls),
+        delayedSource('fips', 20, peerData, peerCalls),
         delayedSource('blossom', 200, blossomData, blossomCalls),
       ],
     });
@@ -82,7 +82,7 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
 
     await vi.advanceTimersByTimeAsync(100);
-    await expect(first).resolves.toEqual({ data: peerData, sourceId: 'webrtc' });
+    await expect(first).resolves.toEqual({ data: peerData, sourceId: 'fips' });
 
     const second = router.getDetailed(HASH_B);
     await Promise.resolve();
@@ -90,7 +90,7 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
 
     await vi.advanceTimersByTimeAsync(100);
-    await expect(second).resolves.toEqual({ data: peerData, sourceId: 'webrtc' });
+    await expect(second).resolves.toEqual({ data: peerData, sourceId: 'fips' });
   });
 
   it('supports remote-only filtered reads without consulting primary storage', async () => {
@@ -402,14 +402,14 @@ describe('MeshRouterStore', () => {
       primary,
       sources: [
         {
-          id: 'webrtc',
+          id: 'fips',
           get: async () => sourceData,
         },
       ],
     });
 
     const result = await router.getDetailed(HASH_A, { skipPrimary: true });
-    expect(result).toEqual({ data: new Uint8Array([7, 8, 9]), sourceId: 'webrtc' });
+    expect(result).toEqual({ data: new Uint8Array([7, 8, 9]), sourceId: 'fips' });
     expect(result?.data).not.toBe(sourceData);
 
     sourceData[0] = 99;

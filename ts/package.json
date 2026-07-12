@@ -13,7 +13,6 @@
   "packageManager": "pnpm@10.23.0",
   "pnpm": {
     "onlyBuiltDependencies": [
-      "wrtc",
       "esbuild"
     ],
     "overrides": {

@@ -12,6 +12,4 @@ export { buildHtreeRequestPath, parseHtreeUrl, resolveHtreeRequestUrl, } from '.
 export type { MutableHtreeRequestStyle, ParsedHtreeUrl, ResolveHtreeRequestUrlOptions, } from './htree-url.js';
 export type { HtreeClientIdStorageLike } from './client-id.js';
 export type { BlossomServerConfig, WorkerConfig, WorkerRequest, WorkerResponse, RootResolveOptions, ConnectivityState, UploadProgressState, WorkerDiagnosticEvent, WorkerDiagnosticLevel, BlossomBandwidthState, BlossomBandwidthServerStats, BlobSource, } from './protocol.js';
-export { WebRTCController, WebRTCProxy, initWebRTCProxy, getWebRTCProxy, closeWebRTCProxy, } from './p2p/index.js';
-export type { WebRTCControllerConfig } from './p2p/index.js';
 //# sourceMappingURL=index.d.ts.map

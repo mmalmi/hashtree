@@ -6,8 +6,7 @@
  * Uses nsec directly when available, delegates to main thread otherwise.
  */
 import { finalizeEvent, nip44 } from 'nostr-tools';
-import { createAuthenticatedNip44GiftWrap, createDecryptingGiftUnwrapper, } from '../p2p/signaling.js';
-import { getSecretKey, getPubkey, getEphemeralSecretKey } from './identity';
+import { getSecretKey, getEphemeralSecretKey } from './identity';
 // Pending NIP-07 requests (waiting for main thread)
 const pendingSignRequests = new Map();
 const pendingEncryptRequests = new Map();
@@ -158,29 +157,6 @@ export async function decrypt(senderPubkey, ciphertext) {
     else {
         return requestDecrypt(senderPubkey, ciphertext);
     }
-}
-// ============================================================================
-// Gift Wrap (authenticated NIP-59 seal inside hashtree signaling envelope)
-// ============================================================================
-/**
- * Gift wrap an event for private delivery.
- */
-export async function giftWrap(innerEvent, recipientPubkey) {
-    const myPubkey = getPubkey();
-    if (!myPubkey)
-        throw new Error('No pubkey available');
-    const wrap = createAuthenticatedNip44GiftWrap({
-        senderPubkey: myPubkey,
-        signEvent,
-        encrypt,
-    });
-    return wrap(innerEvent, recipientPubkey);
-}
-/**
- * Unwrap a gift wrapped event.
- */
-export async function giftUnwrap(event) {
-    return createDecryptingGiftUnwrapper(decrypt)(event);
 }
 // ============================================================================
 // NIP-07 Delegation (for extension login)

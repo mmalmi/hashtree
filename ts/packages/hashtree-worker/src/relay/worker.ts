@@ -4,7 +4,7 @@
  *
  * Dedicated worker that owns:
  * - HashTree + DexieStore (IndexedDB storage)
- * - WebRTC peer connections (P2P data transfer)
+ * - FIPS-backed mesh provider requests (P2P data transfer)
  *
  * Main thread communicates via postMessage.
  * NIP-07 signing/encryption delegated back to main thread.
@@ -12,7 +12,7 @@
 
 import { HashTree, BlossomStore, toHex } from '@hashtree/core';
 import { DexieStore } from '@hashtree/dexie';
-import type { WorkerRequest, WorkerResponse, WorkerConfig, SignedEvent, WebRTCCommand, BlossomUploadProgress, BlossomServerStatus } from './protocol';
+import type { WorkerRequest, WorkerResponse, WorkerConfig, SignedEvent, BlossomUploadProgress, BlossomServerStatus } from './protocol';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
 import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
 import {
@@ -36,7 +36,6 @@ import {
   handleEncryptedResponse,
   handleDecryptedResponse,
 } from './signing';
-import { WebRTCController } from './webrtc';
 import { SocialGraph, type NostrEvent as SocialGraphNostrEvent } from 'nostr-social-graph';
 import { cloneTransferableBytes } from '../transferableBytes';
 import Dexie from 'dexie';
@@ -60,13 +59,6 @@ class SocialGraphDB extends Dexie {
 const socialGraphDB = new SocialGraphDB();
 import { initMediaHandler, registerMediaPort } from './mediaHandler';
 import { resolveRootPath } from './rootPathResolver';
-import {
-  initWebRTCSignaling,
-  sendWebRTCSignaling,
-  setupWebRTCSignalingSubscription,
-  handleWebRTCSignalingEvent,
-  resubscribeWebRTCSignaling,
-} from './webrtcSignaling';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
 import { MeshRouterStore } from '../capabilities/meshRouterStore';
 import { ExternalP2PBridge } from './externalP2P';
@@ -78,15 +70,13 @@ let blossomStore: BlossomStore | null = null;
 const blossomBandwidthTracker = new BlossomBandwidthTracker((stats) => {
   respond({ type: 'blossomBandwidth', stats });
 });
-let webrtc: WebRTCController | null = null;
-let webrtcStarted = false;
 let _config: WorkerConfig | null = null;
-const WEBRTC_REQUEST_TIMEOUT_MS = 5000;
+const P2P_PEER_LIST_TIMEOUT_MS = 5000;
 const REMOTE_READ_TIMEOUT_MS = 15000;
 const externalP2P = new ExternalP2PBridge({
   respond,
   fetchTimeoutMs: REMOTE_READ_TIMEOUT_MS,
-  peerListTimeoutMs: WEBRTC_REQUEST_TIMEOUT_MS,
+  peerListTimeoutMs: P2P_PEER_LIST_TIMEOUT_MS,
 });
 const treeRootSubscriptionRefs = new Map<string, number>();
 
@@ -379,13 +369,6 @@ async function handleRepublishTree(id: string, pubkey: string, treeName: string)
   }
 }
 
-// Follows set for WebRTC peer classification
-let followsSet = new Set<string>();
-
-function getFollows(): Set<string> {
-  return followsSet;
-}
-
 // SocialGraph state
 const KIND_CONTACTS = 3;  // kind:3 = contact list
 let socialGraph: SocialGraph = new SocialGraph(DEFAULT_BOOTSTRAP_PUBKEY);
@@ -575,36 +558,6 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         await handleGetStorageStats(msg.id);
         break;
 
-      // WebRTC pool configuration
-      case 'setWebRTCPools':
-        if (webrtc) {
-          webrtc.setPoolConfig(msg.pools);
-          // Start WebRTC on first pool config (waits for settings to load)
-          if (!webrtcStarted) {
-            webrtc.start();
-            webrtcStarted = true;
-            console.log('[Worker] WebRTC controller started (after pool config)');
-          }
-        }
-        respond({ type: 'void', id: msg.id });
-        break;
-      case 'setWebRTCForwardRateLimit':
-        if (_config) {
-          _config.forwardRateLimit = msg.forwardRateLimit;
-        }
-        webrtc?.setForwardRateLimit(msg.forwardRateLimit);
-        respond({ type: 'void', id: msg.id });
-        break;
-      case 'sendWebRTCHello':
-        webrtc?.broadcastHello();
-        respond({ type: 'void', id: msg.id });
-        break;
-      case 'setFollows':
-        followsSet = new Set(msg.follows);
-        console.log('[Worker] Follows updated:', followsSet.size, 'pubkeys:', Array.from(followsSet).map(p => p.slice(0, 16)));
-        respond({ type: 'void', id: msg.id });
-        break;
-
       // Blossom configuration
       case 'setBlossomServers':
         if (_config) {
@@ -634,13 +587,6 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // Relay configuration
       case 'setRelays':
         await ndkSetRelays(msg.relays);
-        if (webrtc) {
-          // Re-subscribe to legacy WebRTC signaling only when that mesh is active.
-          resubscribeWebRTCSignaling();
-          if (webrtcStarted) {
-            webrtc.broadcastHello();
-          }
-        }
         console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
         break;
@@ -724,22 +670,6 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         externalP2P.resolvePeerList(msg.requestId, msg.peerIds, msg.error);
         break;
 
-      // WebRTC proxy events from main thread
-      case 'rtc:peerCreated':
-      case 'rtc:peerStateChange':
-      case 'rtc:peerClosed':
-      case 'rtc:offerCreated':
-      case 'rtc:answerCreated':
-      case 'rtc:descriptionSet':
-      case 'rtc:iceCandidate':
-      case 'rtc:iceGatheringComplete':
-      case 'rtc:dataChannelOpen':
-      case 'rtc:dataChannelMessage':
-      case 'rtc:dataChannelClose':
-      case 'rtc:dataChannelError':
-        webrtc?.handleProxyEvent(msg);
-        break;
-
       default:
         console.warn('[Worker] Unknown message type:', (msg as { type: string }).type);
     }
@@ -770,7 +700,7 @@ function respondWithTransfer(msg: WorkerResponse, transfer: Transferable[]) {
 async function handleInit(id: string, cfg: WorkerConfig) {
   try {
     _config = cfg;
-    externalP2P.setEnabled(cfg.p2pMode === 'external');
+    externalP2P.setEnabled(true);
     blossomBandwidthTracker.reset();
     emitBlossomBandwidthSnapshot();
 
@@ -819,11 +749,6 @@ async function handleInit(id: string, cfg: WorkerConfig) {
       // Forward to main thread
       respond({ type: 'event', subId, event });
 
-      // Route to WebRTC handler
-      if (subId.startsWith('webrtc-')) {
-        handleWebRTCSignalingEvent(event);
-      }
-
       // Route to SocialGraph handler (all socialgraph-* subscriptions)
       if (subId.startsWith('socialgraph-') && event.kind === KIND_CONTACTS) {
         handleSocialGraphEvent(event);
@@ -854,39 +779,9 @@ async function handleInit(id: string, cfg: WorkerConfig) {
       respond({ type: 'eose', subId });
     });
 
-    if ((cfg.p2pMode ?? 'legacy-webrtc') === 'legacy-webrtc') {
-      // Initialize legacy WebRTC only for callers that have not selected an
-      // external provider. External mode must never join the kind-25050 mesh.
-      webrtc = new WebRTCController({
-        pubkey: cfg.pubkey,
-        localStore: store,
-        sendCommand: (cmd: WebRTCCommand) => respond(cmd),
-        sendSignaling: async (msg, recipientPubkey) => {
-          await sendWebRTCSignaling(msg, recipientPubkey);
-        },
-        getFollows,
-        debug: false,
-        requestTimeout: WEBRTC_REQUEST_TIMEOUT_MS,
-        forwardRateLimit: cfg.forwardRateLimit,
-        upstreamFetch: async (hash) => (await meshStore?.getDetailed(hash, {
-          skipPrimary: true,
-          sourceIds: ['blossom'],
-        }))?.data ?? null,
-      });
-    } else {
-      webrtc = null;
-    }
-
     // Initialize media handler with the tree
     initMediaHandler(tree);
-
-    if (webrtc) {
-      initWebRTCSignaling(webrtc);
-      setupWebRTCSignalingSubscription(cfg.pubkey);
-      console.log('[Worker] WebRTC controller ready (waiting for pool config)');
-    } else if (externalP2P.isEnabled()) {
-      console.log('[Worker] External P2P provider selected; legacy WebRTC disabled');
-    }
+    console.log('[Worker] FIPS mesh provider bridge ready');
 
     // Initialize SocialGraph with user's pubkey as root
     socialGraph = new SocialGraph(cfg.pubkey);
@@ -911,10 +806,6 @@ async function handleInit(id: string, cfg: WorkerConfig) {
   }
 }
 
-// NOTE: WebRTC cannot run in workers - RTCPeerConnection is not available
-// See: https://github.com/w3c/webrtc-extensions/issues/77
-// WebRTC must run in main thread and proxy to worker for storage
-
 /**
  * Handle identity change (account switch)
  */
@@ -925,11 +816,6 @@ function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
   if (_config) {
     _config.pubkey = pubkey;
     _config.nsec = nsec;
-  }
-
-  if (webrtc) {
-    webrtc.setIdentity(pubkey);
-    setupWebRTCSignalingSubscription(pubkey);
   }
 
   // Update SocialGraph root
@@ -943,8 +829,6 @@ function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
   } else {
     blossomStore = null;
   }
-
-  // NOTE: WebRTC not available in workers
 
   respond({ type: 'void', id });
 }
@@ -988,13 +872,6 @@ function createMeshStore(primary: DexieStore): MeshRouterStore {
           get: async (hash: Uint8Array) => externalP2P.fetch(toHex(hash)),
         }]
         : [],
-      () => webrtc
-        ? webrtc.getConnectedPeerIds().map((peerId) => ({
-          id: `peer:${peerId}`,
-          groupId: 'webrtc',
-          get: async (hash: Uint8Array) => webrtc ? webrtc.getFromPeer(peerId, hash) : null,
-        }))
-        : [],
       () => blossomStore
         ? blossomStore.getReadServers().map((server) => ({
           id: `blossom:${server.url}`,
@@ -1012,7 +889,6 @@ function emitBlossomBandwidthSnapshot(): void {
 }
 
 async function handleClose(id: string) {
-  // NOTE: WebRTC not available in workers
   // Close NDK connections
   closeNdk();
   // Clear identity
@@ -1463,28 +1339,7 @@ async function handleGetPeerStats(id: string) {
     });
     return;
   }
-  if (!webrtc) {
-    respond({ type: 'peerStats', id, stats: [] });
-    return;
-  }
-
-  const controllerStats = webrtc.getPeerStats();
-  const stats = controllerStats.map(s => ({
-    peerId: s.peerId,
-    pubkey: s.pubkey,
-    connected: s.connected,
-    pool: s.pool,
-    requestsSent: s.requestsSent,
-    requestsReceived: s.requestsReceived,
-    responsesSent: s.responsesSent,
-    responsesReceived: s.responsesReceived,
-    bytesSent: s.bytesSent,
-    bytesReceived: s.bytesReceived,
-    forwardedRequests: s.forwardedRequests,
-    forwardedResolved: s.forwardedResolved,
-    forwardedSuppressed: s.forwardedSuppressed,
-  }));
-  respond({ type: 'peerStats', id, stats });
+  respond({ type: 'peerStats', id, stats: [] });
 }
 
 async function handleGetRelayStats(id: string) {
@@ -1530,9 +1385,6 @@ function handleInitSocialGraph(id: string, rootPubkey?: string) {
 function handleSetSocialGraphRoot(id: string, pubkey: string) {
   try {
     socialGraph.setRoot(pubkey);
-    // Update followsSet for WebRTC peer classification
-    const follows = socialGraph.getFollowedByUser(pubkey);
-    followsSet = new Set(follows);
     notifySocialGraphVersionUpdate();
     respond({ type: 'void', id });
   } catch (err) {
@@ -1713,14 +1565,10 @@ function handleSocialGraphEvent(event: SignedEvent): void {
     // allowUnknownAuthors=true lets us track followers of any user, not just those connected to root
     socialGraph.handleEvent(event as SocialGraphNostrEvent, true);
 
-    // If this is the root user's contact list, update followsSet for WebRTC
-    // and subscribe to kind:3 from their follows
+    // If this is the root user's contact list, subscribe to kind:3 from their follows.
     if (event.pubkey === rootPubkey) {
       try {
         const follows = socialGraph.getFollowedByUser(rootPubkey);
-        followsSet = new Set(follows);
-        console.log('[Worker] Follows updated:', followsSet.size, 'pubkeys');
-
         // Subscribe to kind:3 from root's follows (depth 1)
         subscribeToFollowsContactLists(Array.from(follows), 1);
 
@@ -1735,8 +1583,6 @@ function handleSocialGraphEvent(event: SignedEvent): void {
         console.warn('[Worker] Error getting follows for root:', err);
       }
 
-      // Broadcast hello so peers can re-classify with updated follows
-      webrtc?.broadcastHello();
     } else {
       // For non-root users at depth 1, subscribe to their follows (depth 2)
       // But only if graph isn't already at max size

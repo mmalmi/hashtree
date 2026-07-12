@@ -200,4 +200,40 @@ describe('HashtreeWorkerClient timeouts', () => {
 
     await client.close();
   });
+
+  it('preserves FIPS provider method receivers', async () => {
+    const worker = new FakeWorker();
+    const WorkerFactory = class {
+      constructor() {
+        return worker;
+      }
+    } as unknown as new () => Worker;
+    const client = new HashtreeWorkerClient(WorkerFactory);
+    class Provider {
+      readonly peerIds = ['fips-peer'];
+
+      async fetch(): Promise<Uint8Array> {
+        return new Uint8Array([this.peerIds.length]);
+      }
+
+      listPeerIds(): string[] {
+        return this.peerIds;
+      }
+    }
+    client.setP2PProvider(new Provider());
+    await client.init();
+
+    worker.emitMessage({ type: 'p2pFetch', requestId: 'bound-fetch', hashHex: 'ab'.repeat(32) });
+    worker.emitMessage({ type: 'p2pPeerList', requestId: 'bound-peers' });
+    await vi.waitFor(() => {
+      expect(worker.postedMessages.some(({ message }) => (
+        message.type === 'p2pFetchResult' && message.data?.[0] === 1
+      ))).toBe(true);
+      expect(worker.postedMessages.some(({ message }) => (
+        message.type === 'p2pPeerListResult' && message.peerIds?.[0] === 'fips-peer'
+      ))).toBe(true);
+    });
+
+    await client.close();
+  });
 });

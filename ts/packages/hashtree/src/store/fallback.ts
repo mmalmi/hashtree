@@ -4,7 +4,7 @@
  * Tries stores in order until data is found.
  * Caches successful remote fetches to primary store.
  *
- * Example: local (Dexie) -> WebRTC -> Blossom
+ * Example: local (Dexie) -> FIPS mesh -> Blossom
  */
 
 import { toHex, type Store, type Hash } from '../types.js';

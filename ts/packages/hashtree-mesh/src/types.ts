@@ -1,72 +1,16 @@
 /**
  * Shared mesh transport types for hashtree.
  *
- * These primitives are transport-neutral inside the hashtree mesh stack even
- * when the default production composition uses Nostr signaling plus WebRTC.
+ * These primitives are transport-neutral inside the Hashtree mesh stack.
+ * Production peerfinding and links are supplied by FIPS.
  */
-
-// ICE candidate format (matches Rust IceCandidate)
-export interface IceCandidate {
-  candidate: string;
-  sdpMLineIndex?: number;
-  sdpMid?: string;
-}
-
-// Signaling message types (match Rust SignalingMessage enum)
-export interface HelloMessage {
-  type: 'hello';
-  peerId: string;
-  roots?: string[];
-  hashGet?: boolean;
-}
-
-export interface OfferMessage {
-  type: 'offer';
-  peerId: string;
-  targetPeerId: string;
-  sdp: string;
-}
-
-export interface AnswerMessage {
-  type: 'answer';
-  peerId: string;
-  targetPeerId: string;
-  sdp: string;
-}
-
-export interface CandidateMessage {
-  type: 'candidate';
-  peerId: string;
-  targetPeerId: string;
-  candidate: string;
-  sdpMLineIndex?: number;
-  sdpMid?: string;
-}
-
-export interface CandidatesMessage {
-  type: 'candidates';
-  peerId: string;
-  targetPeerId: string;
-  candidates: IceCandidate[];
-}
-
-export type SignalingMessage =
-  | HelloMessage
-  | OfferMessage
-  | AnswerMessage
-  | CandidateMessage
-  | CandidatesMessage;
-
-// Directed messages (have targetPeerId) - excludes HelloMessage
-export type DirectedMessage = OfferMessage | AnswerMessage | CandidateMessage | CandidatesMessage;
 
 // HTL (Hops To Live) constants - Freenet-style probabilistic decrement
 export const MAX_HTL = 10;
 export const DECREMENT_AT_MAX_PROB = 0.5;
 export const DECREMENT_AT_MIN_PROB = 0.25;
 
-// Signaling kind for WebRTC / mesh events
-export const WEBRTC_KIND = 25050;
+export const MESH_EVENT_KIND = 25050;
 
 export enum HtlMode {
   Probabilistic = 'probabilistic',
@@ -216,7 +160,7 @@ export function validateMeshNostrFrame(frame: MeshNostrFrame): string | null {
   if (frame.sender_peer_id.includes(':')) return 'invalid sender peer id';
   if (frame.htl <= 0 || frame.htl > MESH_MAX_HTL) return 'invalid htl';
   if (frame.payload?.type !== 'EVENT') return 'invalid payload type';
-  if (frame.payload.event.kind !== WEBRTC_KIND) return 'unsupported event kind';
+  if (frame.payload.event.kind !== MESH_EVENT_KIND) return 'unsupported event kind';
   return null;
 }
 
@@ -293,8 +237,6 @@ export interface MeshStats {
   meshForwarded: number;
   meshDroppedDuplicate: number;
 }
-
-export type WebRTCStats = MeshStats;
 
 export interface BandwidthSample {
   timestamp: number;

@@ -18,10 +18,6 @@
       "types": "./dist/relay-client.d.ts",
       "import": "./dist/relay-client.js"
     },
-    "./p2p": {
-      "types": "./dist/p2p/index.d.ts",
-      "import": "./dist/p2p/index.js"
-    },
     "./entry": {
       "types": "./dist/entry.d.ts",
       "import": "./dist/entry.js"

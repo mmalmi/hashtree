@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Removed the legacy direct Hashtree WebRTC worker mesh, its kind-25050
+  signaling/proxy API, and the `@hashtree/worker/p2p` export. Browser mesh
+  traffic now enters both worker clients through the FIPS provider interface,
+  with WebRTC owned by `@fips/transport-webrtc`.
+
 ## 0.2.13 - 2026-06-22
 
 Changes since the previous npm package publish.

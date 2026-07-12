@@ -7,27 +7,16 @@ Hashtree keeps the content protocol.
 
 ## Scope
 
-Public Hashtree swarms use a FIPS Nostr discovery app:
+Public Hashtree providers join the shared FIPS Nostr discovery fabric:
 
 ```text
-hashtree-v1
+fips-overlay-v1
 ```
 
-Private swarms can narrow this with app-specific suffixes, for example
-`hashtree-v1:team-alpha`. Do not add another `fips-overlay-v1:` prefix to the
-app scope.
-
-This is separate from a generic FIPS reachability advert. A host can publish:
-
-- `fips-overlay-v1` for the daemon or router identity that is reachable over
-  UDP/WebRTC/Tor/etc.
-- `hashtree-v1` for the Hashtree endpoint identity that wants or serves
-  Hashtree blobs.
-
-Those identities can be the same key for a small single-process node, or
-different keys when a host daemon routes for an app endpoint on the same machine.
-Hashtree should discover the Hashtree endpoint identity; FIPS can then route to
-it through whatever adjacent transport peers and local gateway paths it knows.
+Private deployments can select another discovery app, but browser and native
+Hashtree providers should normally share `fips-overlay-v1` rather than create a
+parallel Hashtree-only WebRTC island. The Hashtree request/response codec ignores
+unrelated FIPS endpoint payloads.
 
 ## Wire Shape
 
@@ -59,20 +48,19 @@ Silence means unknown/no response, not absence. A timeout should not be recorded
 as a content miss, and it should not trigger endless retries to the same peer.
 Hedging to other peers is a Hashtree scheduling concern.
 
-## Native WebRTC Path
+## FIPS WebRTC Underlay
 
-Native FIPS should grow WebRTC as another FIPS transport beside UDP/TCP/Tor.
-The WebRTC transport should use the same FIPS Nostr discovery/signaling format
-as `fips-ts`:
+FIPS supplies WebRTC as an underlay transport beside UDP/TCP/Tor. Hashtree does
+not publish its own WebRTC discovery or signaling events. FIPS WebRTC uses:
 
 - advert kind `37195`
 - advert identifier `fips-overlay-v1`
-- discovery `d` and `protocol` tags `hashtree-v1`
+- discovery `d` and `protocol` tags `fips-overlay-v1`
 - signal kind `21059`
 - NIP-59/NIP-44 encrypted WebRTC offer, answer, candidate, and reject messages
 - unordered, unreliable data channels for FIPS packets
 
-A native node with both UDP and WebRTC enabled can then bridge browser-only FIPS
+A native node with both UDP and WebRTC enabled can bridge browser-only FIPS
 WebRTC peers and ordinary native FIPS UDP peers. If the Hashtree node is a
 separate endpoint identity behind that daemon, the daemon should route FIPS
 endpoint bytes to it without Hashtree learning about the underlay.

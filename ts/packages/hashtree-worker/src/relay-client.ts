@@ -1,5 +1,4 @@
-import type { WorkerFactory } from './client.js';
-import { WebRTCProxy } from './p2p/webrtcProxy.js';
+import type { WorkerFactory, WorkerP2PProvider } from './client.js';
 import type {
   BlossomBandwidthStats,
   BlossomServerConfig,
@@ -38,34 +37,12 @@ type RelayWorkerRequestPayload = RelayWorkerRequest extends infer T
 type SignEventMessage = Extract<RelayWorkerResponse, { type: 'signEvent' }>;
 type EncryptMessage = Extract<RelayWorkerResponse, { type: 'nip44Encrypt' }>;
 type DecryptMessage = Extract<RelayWorkerResponse, { type: 'nip44Decrypt' }>;
-type RelayWorkerRtcCommand = Extract<
-  RelayWorkerResponse,
-  { type: 'rtc:createPeer' | 'rtc:closePeer' | 'rtc:createOffer' | 'rtc:createAnswer' | 'rtc:setLocalDescription' | 'rtc:setRemoteDescription' | 'rtc:addIceCandidate' | 'rtc:sendData' }
->;
-
-const WEBRTC_COMMAND_TYPES = new Set([
-  'rtc:createPeer',
-  'rtc:closePeer',
-  'rtc:createOffer',
-  'rtc:createAnswer',
-  'rtc:setLocalDescription',
-  'rtc:setRemoteDescription',
-  'rtc:addIceCandidate',
-  'rtc:sendData',
-]);
-
-function isRelayWorkerRtcCommand(message: RelayWorkerResponse): message is RelayWorkerRtcCommand {
-  return WEBRTC_COMMAND_TYPES.has(message.type);
-}
-
 export interface TreeRootUpdate extends TreeRootInfo {
   npub: string;
   treeName: string;
 }
 
-export interface RelayWorkerClientConfig extends RelayWorkerConfig {
-  maxWebRTCUploadBytesPerSecond?: number | null;
-}
+export type RelayWorkerClientConfig = RelayWorkerConfig;
 
 export type {
   BlossomBandwidthStats,
@@ -82,7 +59,7 @@ export class RelayWorkerClient {
   private readonly workerFactory: WorkerFactory;
   private readonly config: RelayWorkerClientConfig;
   private worker: Worker | null = null;
-  private webrtcProxy: WebRTCProxy | null = null;
+  private p2pProvider: WorkerP2PProvider | null = null;
   private initPromise: Promise<void> | null = null;
   private initPending:
     | {
@@ -127,11 +104,10 @@ export class RelayWorkerClient {
         timeoutId,
       };
 
-      const { maxWebRTCUploadBytesPerSecond: _maxUploadBytesPerSecond, ...workerConfig } = this.config;
       this.worker.postMessage({
         type: 'init',
         id: this.nextRequestId('worker_init'),
-        config: workerConfig as RelayWorkerConfig,
+        config: this.config,
       } as RelayWorkerRequest);
     });
 
@@ -146,16 +122,6 @@ export class RelayWorkerClient {
     } else {
       this.worker = new this.workerFactory();
     }
-
-    this.webrtcProxy = new WebRTCProxy((event) => {
-      if (event.type === 'rtc:dataChannelMessage' && event.data?.buffer) {
-        this.worker?.postMessage(event, [event.data.buffer]);
-        return;
-      }
-      this.worker?.postMessage(event);
-    }, {
-      maxUploadBytesPerSecond: this.config.maxWebRTCUploadBytesPerSecond ?? null,
-    });
 
     this.worker.onmessage = (event: MessageEvent<RelayWorkerResponse>) => {
       const message = event.data;
@@ -178,14 +144,20 @@ export class RelayWorkerClient {
 
       if (message.type === 'treeRootUpdate') {
         for (const listener of this.treeRootListeners) {
-          const { type: _type, ...update } = message;
+          const { type, ...update } = message;
+          void type;
           listener(update);
         }
         return;
       }
 
-      if (isRelayWorkerRtcCommand(message)) {
-        this.webrtcProxy?.handleCommand(message);
+      if (message.type === 'p2pFetch') {
+        void this.handleP2PFetch(message.requestId, message.hashHex, message.peerId);
+        return;
+      }
+
+      if (message.type === 'p2pPeerList') {
+        void this.handleP2PPeerList(message.requestId);
         return;
       }
 
@@ -217,10 +189,55 @@ export class RelayWorkerClient {
 
     this.worker.onerror = (event) => {
       const errorMessage = event instanceof ErrorEvent ? event.message : 'Worker error';
-      this.webrtcProxy?.close();
-      this.webrtcProxy = null;
       this.rejectAllPending(new Error(errorMessage));
     };
+  }
+
+  private async handleP2PFetch(requestId: string, hashHex: string, peerId?: string): Promise<void> {
+    if (!this.worker) return;
+    const id = this.nextRequestId('p2p_fetch_result');
+    try {
+      const data = await this.p2pProvider?.fetch(hashHex, peerId) ?? null;
+      if (data && data.byteLength > 0) {
+        const transferableData = data.slice();
+        this.worker.postMessage({
+          type: 'p2pFetchResult',
+          id,
+          requestId,
+          data: transferableData,
+        } satisfies RelayWorkerRequest, [transferableData.buffer]);
+        return;
+      }
+      this.worker.postMessage({ type: 'p2pFetchResult', id, requestId } satisfies RelayWorkerRequest);
+    } catch (error) {
+      this.worker.postMessage({
+        type: 'p2pFetchResult',
+        id,
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies RelayWorkerRequest);
+    }
+  }
+
+  private async handleP2PPeerList(requestId: string): Promise<void> {
+    if (!this.worker) return;
+    const id = this.nextRequestId('p2p_peer_list_result');
+    try {
+      const peerIds = await this.p2pProvider?.listPeerIds() ?? [];
+      this.worker.postMessage({
+        type: 'p2pPeerListResult',
+        id,
+        requestId,
+        peerIds: [...new Set(peerIds)],
+      } satisfies RelayWorkerRequest);
+    } catch (error) {
+      this.worker.postMessage({
+        type: 'p2pPeerListResult',
+        id,
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies RelayWorkerRequest);
+    }
   }
 
   private getNostrExtension(): NostrExtension | null {
@@ -406,41 +423,8 @@ export class RelayWorkerClient {
     }
   }
 
-  async setWebRTCPools(
-    pools: { follows: { max: number; satisfied: number }; other: { max: number; satisfied: number } },
-  ): Promise<void> {
-    const res = await this.request({ type: 'setWebRTCPools', pools });
-    if (res.type !== 'void') {
-      throw new Error('Unexpected setWebRTCPools response');
-    }
-    if (res.error) {
-      throw new Error(res.error);
-    }
-  }
-
-  setUploadLimitBytesPerSecond(maxUploadBytesPerSecond?: number | null): void {
-    this.config.maxWebRTCUploadBytesPerSecond = maxUploadBytesPerSecond ?? null;
-    this.webrtcProxy?.setUploadLimitBytesPerSecond(maxUploadBytesPerSecond ?? null);
-  }
-
-  async setFollows(follows: string[]): Promise<void> {
-    const res = await this.request({ type: 'setFollows', follows });
-    if (res.type !== 'void') {
-      throw new Error('Unexpected setFollows response');
-    }
-    if (res.error) {
-      throw new Error(res.error);
-    }
-  }
-
-  async sendHello(): Promise<void> {
-    const res = await this.request({ type: 'sendWebRTCHello' });
-    if (res.type !== 'void') {
-      throw new Error('Unexpected sendWebRTCHello response');
-    }
-    if (res.error) {
-      throw new Error(res.error);
-    }
+  setP2PProvider(provider: WorkerP2PProvider | null): void {
+    this.p2pProvider = provider;
   }
 
   async setBlossomServers(servers: BlossomServerConfig[]): Promise<void> {
@@ -519,8 +503,7 @@ export class RelayWorkerClient {
 
     this.blossomBandwidthListeners.clear();
     this.treeRootListeners.clear();
-    this.webrtcProxy?.close();
-    this.webrtcProxy = null;
+    this.p2pProvider = null;
     this.worker?.terminate();
     this.worker = null;
     this.initPromise = null;
