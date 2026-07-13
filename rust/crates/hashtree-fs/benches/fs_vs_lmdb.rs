@@ -1,6 +1,6 @@
 //! Benchmark comparing FsBlobStore vs LmdbBlobStore performance
 //!
-//! Run with: cargo bench -p hashtree-fs --features lmdb
+//! Run with: cargo bench -p hashtree-fs
 
 use hashtree_core::sha256;
 use hashtree_core::store::Store;
@@ -62,7 +62,7 @@ async fn benchmark_store<S: Store>(
     store: &S,
     files: &[(String, Vec<u8>)],
     name: &str,
-) -> (Duration, Duration, usize) {
+) -> (Duration, Duration) {
     let mut total_bytes = 0usize;
     let mut hashes = Vec::new();
 
@@ -100,7 +100,7 @@ async fn benchmark_store<S: Store>(
         format_throughput(total_bytes, read_duration)
     );
 
-    (write_duration, read_duration, total_bytes)
+    (write_duration, read_duration)
 }
 
 #[tokio::main]
@@ -125,12 +125,11 @@ async fn main() {
 
     // Benchmark FsBlobStore
     let fs_store = hashtree_fs::FsBlobStore::new(fs_temp.path().join("blobs")).unwrap();
-    let (fs_write, fs_read, total_bytes) =
-        benchmark_store(&fs_store, &files, "FsBlobStore (filesystem)").await;
+    let (fs_write, fs_read) = benchmark_store(&fs_store, &files, "FsBlobStore (filesystem)").await;
 
     // Benchmark LmdbBlobStore
     let lmdb_store = hashtree_lmdb::LmdbBlobStore::new(lmdb_temp.path().join("blobs")).unwrap();
-    let (lmdb_write, lmdb_read, _) = benchmark_store(&lmdb_store, &files, "LmdbBlobStore").await;
+    let (lmdb_write, lmdb_read) = benchmark_store(&lmdb_store, &files, "LmdbBlobStore").await;
 
     // Summary
     println!("\n=== Summary ===");
