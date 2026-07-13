@@ -44,6 +44,7 @@ pub mod builder;
 pub mod codec;
 pub mod crypto;
 pub mod diff;
+mod directory;
 pub mod hash;
 pub mod hashtree;
 pub mod nhash;

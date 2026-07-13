@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::codec::{decode_tree_node, is_directory_node, is_tree_node};
+use crate::directory::is_internal_directory_link;
 use crate::hash::sha256;
 use crate::store::Store;
 use crate::types::{to_hex, Cid, Hash, Link, LinkType, TreeNode};
@@ -44,40 +45,6 @@ pub struct TreeReader<S: Store> {
 }
 
 impl<S: Store> TreeReader<S> {
-    fn internal_chunk_start(name: &str) -> Option<usize> {
-        let suffix = name.strip_prefix("_chunk_")?;
-        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        suffix.parse().ok()
-    }
-
-    fn node_uses_legacy_directory_fanout(node: &TreeNode) -> bool {
-        node.node_type == LinkType::Dir
-            && !node.links.is_empty()
-            && node.links.iter().all(|link| {
-                let Some(name) = link.name.as_deref() else {
-                    return false;
-                };
-                Self::internal_chunk_start(name).is_some() && link.link_type == LinkType::Dir
-            })
-    }
-
-    fn is_internal_directory_link(node: &TreeNode, link: &Link) -> bool {
-        if node.node_type == LinkType::Fanout {
-            return matches!(link.link_type, LinkType::Dir | LinkType::Fanout);
-        }
-
-        if !Self::node_uses_legacy_directory_fanout(node) || link.link_type != LinkType::Dir {
-            return false;
-        }
-
-        let Some(name) = link.name.as_deref() else {
-            return false;
-        };
-        Self::internal_chunk_start(name).is_some()
-    }
-
     fn decode_node_or_blob(data: &[u8]) -> Result<Option<TreeNode>, ReaderError> {
         match decode_tree_node(data) {
             Ok(node) => Ok(Some(node)),
@@ -507,7 +474,7 @@ impl<S: Store> TreeReader<S> {
 
         for link in &node.links {
             // Skip internal chunk nodes (names starting with _chunk_)
-            if Self::is_internal_directory_link(&node, link) {
+            if is_internal_directory_link(&node, link) {
                 let sub_entries = Box::pin(self.list_directory(&link.hash)).await?;
                 entries.extend(sub_entries);
                 continue;
@@ -561,7 +528,7 @@ impl<S: Store> TreeReader<S> {
     fn find_link(&self, node: &TreeNode, name: &str) -> Option<Link> {
         node.links
             .iter()
-            .find(|l| !Self::is_internal_directory_link(node, l) && l.name.as_deref() == Some(name))
+            .find(|l| !is_internal_directory_link(node, l) && l.name.as_deref() == Some(name))
             .cloned()
     }
 
@@ -573,7 +540,7 @@ impl<S: Store> TreeReader<S> {
     ) -> Result<Option<Hash>, ReaderError> {
         for link in &node.links {
             // Only search internal nodes
-            if !Self::is_internal_directory_link(node, link) {
+            if !is_internal_directory_link(node, link) {
                 continue;
             }
 
@@ -670,7 +637,7 @@ impl<S: Store> TreeReader<S> {
             let child_path = match &link.name {
                 Some(name) => {
                     // Skip internal chunk nodes in path
-                    if Self::is_internal_directory_link(&node, link) {
+                    if is_internal_directory_link(&node, link) {
                         Box::pin(self.walk_recursive(&link.hash, path, entries)).await?;
                         continue;
                     }

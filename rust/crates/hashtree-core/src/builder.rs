@@ -5,10 +5,10 @@
 //! - Supports streaming appends
 //! - Encryption enabled by default (CHK - Content Hash Key)
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::codec::encode_and_hash;
+use crate::directory::{directory_fanout_meta, DirectoryFanoutSpan};
 use crate::hash::sha256;
 use crate::store::Store;
 use crate::types::{Cid, DirEntry, Hash, Link, LinkType, TreeNode};
@@ -23,26 +23,6 @@ pub const BEP52_CHUNK_SIZE: usize = 16 * 1024;
 
 /// Default max links per tree node (fanout)
 pub const DEFAULT_MAX_LINKS: usize = 174;
-
-#[derive(Clone)]
-struct DirectoryFanoutSpan {
-    link: Link,
-    count: usize,
-    first: String,
-    last: String,
-}
-
-fn directory_fanout_meta(
-    count: usize,
-    first: &str,
-    last: &str,
-) -> HashMap<String, serde_json::Value> {
-    let mut meta = HashMap::new();
-    meta.insert("count".to_string(), serde_json::json!(count as u64));
-    meta.insert("first".to_string(), serde_json::json!(first));
-    meta.insert("last".to_string(), serde_json::json!(last));
-    meta
-}
 
 /// Builder configuration
 #[derive(Clone)]
@@ -248,67 +228,6 @@ impl<S: Store> TreeBuilder<S> {
         }
 
         Box::pin(self.build_tree_internal(sub_links, total_size)).await
-    }
-
-    /// Build a balanced tree from links
-    /// Handles fanout by creating intermediate nodes
-    #[allow(dead_code)]
-    async fn build_tree(
-        &self,
-        links: Vec<Link>,
-        total_size: Option<u64>,
-    ) -> Result<Hash, BuilderError> {
-        // Single link with matching size - return it directly
-        if links.len() == 1 {
-            if let Some(ts) = total_size {
-                if links[0].size == ts {
-                    return Ok(links[0].hash);
-                }
-            }
-        }
-
-        // Fits in one node
-        if links.len() <= self.max_links {
-            let node = TreeNode {
-                node_type: LinkType::File,
-                links,
-            };
-            let (data, hash) = encode_and_hash(&node)?;
-            self.store
-                .put(hash, data)
-                .await
-                .map_err(|e| BuilderError::Store(e.to_string()))?;
-            return Ok(hash);
-        }
-
-        // Need to split into sub-trees
-        let mut sub_trees: Vec<Link> = Vec::new();
-
-        for batch in links.chunks(self.max_links) {
-            let batch_size: u64 = batch.iter().map(|l| l.size).sum();
-
-            let node = TreeNode {
-                node_type: LinkType::File,
-                links: batch.to_vec(),
-            };
-            let (data, hash) = encode_and_hash(&node)?;
-            self.store
-                .put(hash, data)
-                .await
-                .map_err(|e| BuilderError::Store(e.to_string()))?;
-
-            sub_trees.push(Link {
-                hash,
-                name: None,
-                size: batch_size,
-                key: None,
-                link_type: LinkType::File, // subtree
-                meta: None,
-            });
-        }
-
-        // Recursively build parent level
-        Box::pin(self.build_tree(sub_trees, total_size)).await
     }
 
     /// Build a directory from entries

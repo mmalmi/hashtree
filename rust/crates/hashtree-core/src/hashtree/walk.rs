@@ -1,4 +1,5 @@
 use super::*;
+use crate::directory::is_internal_directory_link;
 
 impl<S: Store> HashTree<S> {
     fn decode_node_or_blob(data: &[u8]) -> Result<Option<TreeNode>, HashTreeError> {
@@ -65,7 +66,7 @@ impl<S: Store> HashTree<S> {
         for link in &node.links {
             let child_path = match &link.name {
                 Some(name) => {
-                    if Self::is_internal_directory_link(&node, link) {
+                    if is_internal_directory_link(&node, link) {
                         let sub_cid = Cid {
                             hash: link.hash,
                             key: link.key,
@@ -210,7 +211,7 @@ impl<S: Store> HashTree<S> {
                 for link in &node.links {
                     let child_path = match &link.name {
                         Some(name) => {
-                            if Self::is_internal_directory_link(&node, link) {
+                            if is_internal_directory_link(&node, link) {
                                 let sub_cid = Cid {
                                     hash: link.hash,
                                     key: link.key,
@@ -331,7 +332,7 @@ impl<S: Store> HashTree<S> {
                         // Create stack with children to process
                         let mut stack: Vec<WalkStackItem> = Vec::new();
                         for link in node.links.iter().rev() {
-                            let is_internal = Self::is_internal_directory_link(&node, link);
+                            let is_internal = is_internal_directory_link(&node, link);
                             let child_path = match &link.name {
                                 Some(name) if !is_internal => {
                                     if path.is_empty() {
@@ -430,7 +431,7 @@ impl<S: Store> HashTree<S> {
 
             // Push children to stack
             for link in node.links.iter().rev() {
-                let is_internal = Self::is_internal_directory_link(&node, link);
+                let is_internal = is_internal_directory_link(&node, link);
                 let child_path = match &link.name {
                     Some(name) if !is_internal => {
                         if item.path.is_empty() {
