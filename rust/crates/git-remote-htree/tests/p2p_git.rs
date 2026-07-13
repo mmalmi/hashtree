@@ -5,25 +5,14 @@
 
 mod common;
 
-use common::create_test_repo;
 use common::test_relay::TestRelay;
+use common::{command_output_with_timeout, create_test_repo};
 use git_remote_htree::nostr_client::KIND_HASHTREE_ROOT;
 use nostr::{Keys, ToBech32};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
-fn kill_child_process_group(child: &mut Child) {
-    #[cfg(unix)]
-    unsafe {
-        let _ = libc::killpg(child.id() as i32, libc::SIGKILL);
-    }
-    let _ = child.kill();
-}
 
 /// Test peer with htree daemon
 struct TestPeer {
@@ -169,42 +158,8 @@ enabled = false
         timeout: Duration,
     ) -> Result<std::process::Output, String> {
         let mut command = self.git_command(args, cwd);
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(unix)]
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-
-        let mut child = command
-            .spawn()
-            .map_err(|err| format!("Failed to start git {}: {err}", args.join(" ")))?;
-        let start = std::time::Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => {
-                    return child
-                        .wait_with_output()
-                        .map_err(|err| format!("Failed to collect git output: {err}"));
-                }
-                Ok(None) if start.elapsed() >= timeout => {
-                    kill_child_process_group(&mut child);
-                    let output = child
-                        .wait_with_output()
-                        .map_err(|err| format!("Failed to collect timed-out git output: {err}"))?;
-                    return Err(format!(
-                        "git {} timed out after {:?}: {}",
-                        args.join(" "),
-                        timeout,
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(err) => return Err(format!("Failed to poll git {}: {err}", args.join(" "))),
-            }
-        }
+        command_output_with_timeout(&mut command, timeout)
+            .map_err(|err| format!("git {}: {err}", args.join(" ")))
     }
 
     fn git_ok(&self, args: &[&str], cwd: &Path) {
@@ -337,7 +292,7 @@ fn find_bin_dir() -> Option<PathBuf> {
 
 fn wait_for_server(url: &str) -> bool {
     for _ in 0..30 {
-        if let Ok(resp) = reqwest::blocking::get(&format!("{}/health", url)) {
+        if let Ok(resp) = reqwest::blocking::get(format!("{}/health", url)) {
             if resp.status().is_success() {
                 return true;
             }
@@ -403,7 +358,7 @@ fn root_diagnostics(
 
 fn wait_for_fips_peer(peer_url: &str, target_npub: &str) -> bool {
     for attempt in 1..=30 {
-        if let Ok(resp) = reqwest::blocking::get(&format!("{}/api/status", peer_url)) {
+        if let Ok(resp) = reqwest::blocking::get(format!("{}/api/status", peer_url)) {
             if let Ok(text) = resp.text() {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                     let has_peer = json
@@ -458,14 +413,14 @@ fn test_p2p_git_roundtrip() {
         19091,
         htree_bin.to_str().unwrap(),
         &keys_a,
-        &[pubkey_b.clone()],
+        std::slice::from_ref(&pubkey_b),
         &relay_url,
     );
     let peer_b = TestPeer::new(
         19092,
         htree_bin.to_str().unwrap(),
         &keys_b,
-        &[pubkey_a.clone()],
+        std::slice::from_ref(&pubkey_a),
         &relay_url,
     );
     assert!(wait_for_server(&peer_a.api_url()), "Peer A failed to start");

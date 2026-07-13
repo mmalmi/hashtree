@@ -53,7 +53,7 @@ fn parse_final_upload_progress(stderr: &str) -> Option<UploadProgress> {
         .lines()
         .flat_map(|line| line.split('\r'))
         .filter_map(parse_upload_progress_line)
-        .last()
+        .next_back()
 }
 
 fn parse_last_listed_object_count(stderr: &str) -> Option<u32> {
@@ -67,7 +67,7 @@ fn parse_last_listed_object_count(stderr: &str) -> Option<u32> {
             let count = rest.split_whitespace().next()?;
             count.parse::<u32>().ok()
         })
-        .last()
+        .next_back()
 }
 
 /// Test diff-based push - second push should upload fewer blobs

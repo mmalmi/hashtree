@@ -9,9 +9,59 @@
 
 use nostr::ToBech32;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+fn kill_child_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::killpg(child.id() as i32, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+pub fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("Failed to start command: {err}"))?;
+    let start = Instant::now();
+    while child
+        .try_wait()
+        .map_err(|err| format!("Failed to poll command: {err}"))?
+        .is_none()
+    {
+        if start.elapsed() >= timeout {
+            kill_child_process_group(&mut child);
+            let output = child
+                .wait_with_output()
+                .map_err(|err| format!("Failed to collect timed-out command output: {err}"))?;
+            return Err(format!(
+                "Command timed out after {timeout:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    child
+        .wait_with_output()
+        .map_err(|err| format!("Failed to collect command output: {err}"))
+}
 
 /// Minimal in-memory nostr relay for testing with real-time event broadcasting
 pub mod test_relay {
@@ -369,183 +419,174 @@ pub mod test_relay {
             let msg_type = parsed[0].as_str().unwrap_or("");
 
             match msg_type {
-                "EVENT" => {
-                    if parsed.len() >= 2 {
-                        let event = parsed[1].clone();
-                        if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
-                            let kind = event.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
-                            if reject_event_kinds.contains(&kind) {
-                                let ok_msg =
-                                    serde_json::json!(["OK", id, false, "rejected for test"]);
-                                let mut w = write.lock().await;
-                                let _ = w.send(Message::Text(ok_msg.to_string())).await;
-                                continue;
-                            }
-
-                            // Store event
-                            events.write().await.insert(id.to_string(), event.clone());
-
-                            // Send OK response
-                            let ok_msg = serde_json::json!(["OK", id, true, ""]);
-                            {
-                                let mut w = write.lock().await;
-                                let _ = w.send(Message::Text(ok_msg.to_string())).await;
-                            }
-
-                            // Broadcast to all connections
-                            let _ = event_tx.send(event);
-                        }
-                    }
-                }
-                "REQ" => {
-                    if parsed.len() >= 3 {
-                        let sub_id = parsed[1].as_str().unwrap_or("sub").to_string();
-
-                        // Parse all filters (can have multiple)
-                        let mut filters = Vec::new();
-                        for i in 2..parsed.len() {
-                            let filter = &parsed[i];
-
-                            let kinds_arr: Vec<u64> = filter
-                                .get("kinds")
-                                .and_then(|k| k.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-                                .unwrap_or_default();
-
-                            // Single kind for backward compat
-                            let kind = if kinds_arr.len() == 1 {
-                                Some(kinds_arr[0])
-                            } else {
-                                None
-                            };
-
-                            // If more than one kind, use kinds vec
-                            let kinds = if kinds_arr.len() > 1 {
-                                kinds_arr
-                            } else {
-                                vec![]
-                            };
-
-                            let authors: Vec<String> = filter
-                                .get("authors")
-                                .and_then(|a| a.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-
-                            let p_tag = filter
-                                .get("#p")
-                                .and_then(|p| p.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-
-                            let l_tag = filter
-                                .get("#l")
-                                .and_then(|l| l.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-
-                            let a_tag = filter
-                                .get("#a")
-                                .and_then(|a| a.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-
-                            let e_tags: Vec<String> = filter
-                                .get("#e")
-                                .and_then(|e| e.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-
-                            let d_tag = filter
-                                .get("#d")
-                                .and_then(|d| d.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-
-                            filters.push(StoredFilter {
-                                sub_id: sub_id.clone(),
-                                kind,
-                                kinds,
-                                authors,
-                                p_tag,
-                                l_tag,
-                                a_tag,
-                                e_tags,
-                                d_tag,
-                            });
-                        }
-
-                        let should_ignore_req = filters.iter().any(|filter| {
-                            filter
-                                .kind
-                                .into_iter()
-                                .chain(filter.kinds.iter().copied())
-                                .any(|kind| ignore_req_kinds.contains(&kind))
-                        });
-                        if should_ignore_req {
-                            continue;
-                        }
-
-                        let req_kinds: Vec<u64> = filters
-                            .iter()
-                            .flat_map(|filter| {
-                                filter.kind.into_iter().chain(filter.kinds.iter().copied())
-                            })
-                            .collect();
-                        let should_respond_empty_once = {
-                            let mut remaining = respond_empty_req_kinds_once.lock().await;
-                            req_kinds.into_iter().any(|kind| remaining.remove(&kind))
-                        };
-                        if should_respond_empty_once {
-                            let eose = serde_json::json!(["EOSE", &sub_id]);
+                "EVENT" if parsed.len() >= 2 => {
+                    let event = parsed[1].clone();
+                    if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                        let kind = event.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if reject_event_kinds.contains(&kind) {
+                            let ok_msg = serde_json::json!(["OK", id, false, "rejected for test"]);
                             let mut w = write.lock().await;
-                            let _ = w.send(Message::Text(eose.to_string())).await;
+                            let _ = w.send(Message::Text(ok_msg.to_string())).await;
                             continue;
                         }
 
-                        // Store subscription
-                        subscriptions
-                            .write()
-                            .await
-                            .insert(sub_id.clone(), filters.clone());
+                        // Store event
+                        events.write().await.insert(id.to_string(), event.clone());
 
-                        // Send matching historical events
-                        let events_lock = events.read().await;
-                        let mut w = write.lock().await;
-
-                        for event in events_lock.values() {
-                            for filter in &filters {
-                                if filter.matches(event) {
-                                    let event_msg = serde_json::json!(["EVENT", &sub_id, event]);
-                                    let _ = w.send(Message::Text(event_msg.to_string())).await;
-                                    break;
-                                }
-                            }
+                        // Send OK response
+                        let ok_msg = serde_json::json!(["OK", id, true, ""]);
+                        {
+                            let mut w = write.lock().await;
+                            let _ = w.send(Message::Text(ok_msg.to_string())).await;
                         }
-                        drop(events_lock);
 
-                        // Send EOSE
-                        let eose = serde_json::json!(["EOSE", &sub_id]);
-                        let _ = w.send(Message::Text(eose.to_string())).await;
+                        // Broadcast to all connections
+                        let _ = event_tx.send(event);
                     }
                 }
-                "CLOSE" => {
-                    if parsed.len() >= 2 {
-                        if let Some(sub_id) = parsed[1].as_str() {
-                            subscriptions.write().await.remove(sub_id);
+                "REQ" if parsed.len() >= 3 => {
+                    let sub_id = parsed[1].as_str().unwrap_or("sub").to_string();
+
+                    // Parse all filters (can have multiple)
+                    let mut filters = Vec::new();
+                    for filter in parsed.iter().skip(2) {
+                        let kinds_arr: Vec<u64> = filter
+                            .get("kinds")
+                            .and_then(|k| k.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+                            .unwrap_or_default();
+
+                        // Single kind for backward compat
+                        let kind = if kinds_arr.len() == 1 {
+                            Some(kinds_arr[0])
+                        } else {
+                            None
+                        };
+
+                        // If more than one kind, use kinds vec
+                        let kinds = if kinds_arr.len() > 1 {
+                            kinds_arr
+                        } else {
+                            vec![]
+                        };
+
+                        let authors: Vec<String> = filter
+                            .get("authors")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let p_tag = filter
+                            .get("#p")
+                            .and_then(|p| p.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let l_tag = filter
+                            .get("#l")
+                            .and_then(|l| l.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let a_tag = filter
+                            .get("#a")
+                            .and_then(|a| a.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let e_tags: Vec<String> = filter
+                            .get("#e")
+                            .and_then(|e| e.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let d_tag = filter
+                            .get("#d")
+                            .and_then(|d| d.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        filters.push(StoredFilter {
+                            sub_id: sub_id.clone(),
+                            kind,
+                            kinds,
+                            authors,
+                            p_tag,
+                            l_tag,
+                            a_tag,
+                            e_tags,
+                            d_tag,
+                        });
+                    }
+
+                    let should_ignore_req = filters.iter().any(|filter| {
+                        filter
+                            .kind
+                            .into_iter()
+                            .chain(filter.kinds.iter().copied())
+                            .any(|kind| ignore_req_kinds.contains(&kind))
+                    });
+                    if should_ignore_req {
+                        continue;
+                    }
+
+                    let req_kinds: Vec<u64> = filters
+                        .iter()
+                        .flat_map(|filter| {
+                            filter.kind.into_iter().chain(filter.kinds.iter().copied())
+                        })
+                        .collect();
+                    let should_respond_empty_once = {
+                        let mut remaining = respond_empty_req_kinds_once.lock().await;
+                        req_kinds.into_iter().any(|kind| remaining.remove(&kind))
+                    };
+                    if should_respond_empty_once {
+                        let eose = serde_json::json!(["EOSE", &sub_id]);
+                        let mut w = write.lock().await;
+                        let _ = w.send(Message::Text(eose.to_string())).await;
+                        continue;
+                    }
+
+                    // Store subscription
+                    subscriptions
+                        .write()
+                        .await
+                        .insert(sub_id.clone(), filters.clone());
+
+                    // Send matching historical events
+                    let events_lock = events.read().await;
+                    let mut w = write.lock().await;
+
+                    for event in events_lock.values() {
+                        for filter in &filters {
+                            if filter.matches(event) {
+                                let event_msg = serde_json::json!(["EVENT", &sub_id, event]);
+                                let _ = w.send(Message::Text(event_msg.to_string())).await;
+                                break;
+                            }
                         }
+                    }
+                    drop(events_lock);
+
+                    // Send EOSE
+                    let eose = serde_json::json!(["EOSE", &sub_id]);
+                    let _ = w.send(Message::Text(eose.to_string())).await;
+                }
+                "CLOSE" if parsed.len() >= 2 => {
+                    if let Some(sub_id) = parsed[1].as_str() {
+                        subscriptions.write().await.remove(sub_id);
                     }
                 }
                 _ => {}

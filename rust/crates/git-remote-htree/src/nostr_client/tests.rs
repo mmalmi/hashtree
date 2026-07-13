@@ -195,7 +195,10 @@ async fn test_local_daemon_only_keeps_root_and_data_requests_local() {
             .unwrap();
     assert!(client.local_daemon_only());
     assert!(client.relays.is_empty());
-    assert_eq!(client.blossom.read_servers(), &[local_url.clone()]);
+    assert_eq!(
+        client.blossom.read_servers(),
+        std::slice::from_ref(&local_url)
+    );
     assert_eq!(client.blossom.write_servers(), &[local_url]);
 
     let err = tokio::task::spawn_blocking(move || client.fetch_refs_with_root("repo"))
@@ -740,7 +743,7 @@ fn test_fetch_refs_does_not_cache_unverified_daemon_root_when_tree_download_fail
             || err.to_string().contains("No servers")
     );
     assert_eq!(client.get_cached_root_hash("repo"), None);
-    assert!(client.cached_refs.get("repo").is_none());
+    assert!(!client.cached_refs.contains_key("repo"));
 }
 
 #[test]
@@ -841,7 +844,7 @@ fn test_private_key_is_nip44_encrypted_not_plaintext() {
         0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
         0xcd, 0xef,
     ];
-    let plaintext_hex = hex::encode(&chk_key);
+    let plaintext_hex = hex::encode(chk_key);
 
     let encrypted = nip44::encrypt(
         keys.secret_key(),
@@ -877,7 +880,7 @@ fn test_encryption_modes_produce_different_values() {
     let pubkey = keys.public_key();
 
     let chk_key: [u8; 32] = [0xaa; 32];
-    let plaintext_hex = hex::encode(&chk_key);
+    let plaintext_hex = hex::encode(chk_key);
 
     let public_value = plaintext_hex.clone();
     let private_value = nip44::encrypt(
@@ -1003,7 +1006,7 @@ fn test_latest_trusted_pr_status_kinds_ignores_untrusted_signers() {
     );
 
     let statuses = latest_trusted_pr_status_kinds(
-        &[pr_event.clone()],
+        std::slice::from_ref(&pr_event),
         &[spoofed_status],
         &repo_owner.public_key().to_hex(),
     );
@@ -1028,7 +1031,7 @@ fn test_latest_trusted_pr_status_kinds_accepts_pr_author() {
     );
 
     let statuses = latest_trusted_pr_status_kinds(
-        &[pr_event.clone()],
+        std::slice::from_ref(&pr_event),
         &[author_status],
         &repo_owner.public_key().to_hex(),
     );
@@ -1053,7 +1056,7 @@ fn test_latest_trusted_pr_status_kinds_rejects_applied_from_pr_author() {
     );
 
     let statuses = latest_trusted_pr_status_kinds(
-        &[pr_event.clone()],
+        std::slice::from_ref(&pr_event),
         &[author_applied],
         &repo_owner.public_key().to_hex(),
     );
@@ -1078,7 +1081,7 @@ fn test_latest_trusted_pr_status_kinds_accepts_repo_owner() {
     );
 
     let statuses = latest_trusted_pr_status_kinds(
-        &[pr_event.clone()],
+        std::slice::from_ref(&pr_event),
         &[owner_status],
         &repo_owner.public_key().to_hex(),
     );
@@ -1109,7 +1112,7 @@ fn test_latest_trusted_pr_status_kinds_preserves_owner_applied_over_newer_author
     );
 
     let statuses = latest_trusted_pr_status_kinds(
-        &[pr_event.clone()],
+        std::slice::from_ref(&pr_event),
         &[owner_applied, newer_author_open],
         &repo_owner.public_key().to_hex(),
     );
@@ -1142,7 +1145,7 @@ fn test_latest_trusted_pr_status_kinds_ignores_newer_untrusted_status() {
     );
 
     let statuses = latest_trusted_pr_status_kinds(
-        &[pr_event.clone()],
+        std::slice::from_ref(&pr_event),
         &[trusted_open, spoofed_closed],
         &repo_owner.public_key().to_hex(),
     );

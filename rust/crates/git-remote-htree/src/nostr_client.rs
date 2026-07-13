@@ -99,6 +99,7 @@ pub const LABEL_HASHTREE: &str = "hashtree";
 pub const LABEL_GIT: &str = "git";
 const IRIS_GIT_WEB_BASE_URL: &str = "https://git.iris.to/#";
 const LOCAL_DAEMON_QUERY_TIMEOUT_SECS: u64 = 8;
+const REPO_PUBLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn local_daemon_query_timeout(request_timeout_secs: u64, local_daemon_only: bool) -> Duration {
     let timeout_secs = if local_daemon_only {
@@ -1691,13 +1692,20 @@ impl NostrClient {
         );
 
         // Create a new multi-threaded runtime for nostr-sdk which spawns background tasks
-        block_on_result(self.publish_repo_async(
-            keys,
-            repo_name,
-            root_hash,
-            encryption_key,
-            repo_announcement,
-        ))
+        block_on_result(async {
+            tokio::time::timeout(
+                REPO_PUBLISH_TIMEOUT,
+                self.publish_repo_async(
+                    keys,
+                    repo_name,
+                    root_hash,
+                    encryption_key,
+                    repo_announcement,
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Repository metadata publication timed out"))?
+        })
     }
 
     async fn publish_repo_async(
@@ -1791,8 +1799,15 @@ impl NostrClient {
             .sign_with_keys(keys)
             .map_err(|e| anyhow::anyhow!("Failed to sign event: {}", e))?;
 
-        // Send event to connected relays
-        match client.send_event(&event).await {
+        let ready_relays = client
+            .relays()
+            .await
+            .into_iter()
+            .filter_map(|(url, relay)| relay.is_connected().then_some(url))
+            .collect::<Vec<_>>();
+
+        // Send only to relays that connected within the bounded wait above.
+        match client.send_event_to(ready_relays, &event).await {
             Ok(output) => {
                 // Track which relays confirmed
                 for url in output.success.iter() {

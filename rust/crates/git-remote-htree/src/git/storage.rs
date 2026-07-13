@@ -92,13 +92,13 @@ impl LocalStore {
         let path = path.as_ref();
         #[cfg(feature = "lmdb")]
         {
-            return Self::new_for_backend_with_openers(
+            Self::new_for_backend_with_openers(
                 path,
                 backend,
                 max_bytes,
                 Self::open_fs_store,
                 Self::open_lmdb_store,
-            );
+            )
         }
 
         #[cfg(not(feature = "lmdb"))]
@@ -1276,9 +1276,9 @@ impl GitStorage {
                     if imported {
                         continue;
                     }
-                    return Err(Error::ObjectNotFound(oid).into());
+                    return Err(Error::ObjectNotFound(oid));
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(err),
             }
         };
 

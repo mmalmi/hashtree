@@ -1344,11 +1344,14 @@ fn test_handle_list_for_push_command() {
 }
 
 #[test]
-fn test_for_push_defers_unreadable_remote_state_and_normal_push_rejects() {
+fn test_for_push_allows_normal_push_to_replace_missing_remote_root() {
     let Some(mut helper) = create_test_helper() else {
         return;
     };
-    let root_error = "Failed to download root hash 424242424242: Not found at all servers";
+    helper
+        .nostr
+        .cache_root_for_test("test-repo", "42".repeat(32), None);
+    let root_error = "Failed to download .git directory (424242424242): Download failed on all servers: https://upload.example returned 404 Not Found";
     helper.nostr.force_fetch_refs_error_for_test(root_error);
     helper.nostr.force_fetch_refs_error_for_test(root_error);
 
@@ -1357,11 +1360,36 @@ fn test_for_push_defers_unreadable_remote_state_and_normal_push_rejects() {
         .expect("unreadable refs should be deferred until push specs")
         .expect("list for-push should still return an advertisement terminator");
     assert_eq!(listed, vec![String::new()]);
-    assert_eq!(
-        helper.push_ref_advertisement_error.as_deref(),
-        Some(root_error)
-    );
 
+    helper.push_specs.push(PushSpec {
+        src: "refs/heads/missing-root-repair-test".to_string(),
+        dst: "refs/heads/master".to_string(),
+        force: false,
+    });
+
+    let error = helper
+        .execute_push()
+        .expect_err("push should proceed past the missing remote root");
+    assert!(
+        error.to_string().contains("Failed to resolve ref"),
+        "normal push should reach local ref resolution when only the published root is missing: {error}"
+    );
+}
+
+#[test]
+fn test_for_push_still_rejects_ambiguous_remote_read_failure() {
+    let Some(mut helper) = create_test_helper() else {
+        return;
+    };
+    helper.nostr.force_fetch_refs_error_for_test(
+        "Failed to download .git directory (424242424242): Download failed on all servers: https://upload.example returned 404 Not Found",
+    );
+    helper
+        .nostr
+        .force_fetch_refs_error_for_test("Relay query timed out");
+    helper
+        .handle_command("list for-push")
+        .expect("missing root should defer the decision until push");
     helper.push_specs.push(PushSpec {
         src: "HEAD".to_string(),
         dst: "refs/heads/master".to_string(),
@@ -1370,14 +1398,13 @@ fn test_for_push_defers_unreadable_remote_state_and_normal_push_rejects() {
 
     let result = helper
         .execute_push()
-        .expect("normal push rejection should be reported to git")
+        .expect("ambiguous read failure should be reported to git")
         .expect("push should return status lines");
     assert!(
         result
             .iter()
             .any(|line| line.contains("remote-state-unreadable")),
-        "normal push should be rejected when existing remote state is unreadable: {:?}",
-        result
+        "ambiguous read failure must not replace remote state: {result:?}"
     );
 }
 
@@ -1436,7 +1463,6 @@ fn test_for_push_reuploads_missing_cached_root_and_retries_ref_advertisement() {
         "ref advertisement should be retried after reupload: {:?}",
         listed
     );
-    assert_eq!(helper.push_ref_advertisement_error, None);
 }
 
 #[test]

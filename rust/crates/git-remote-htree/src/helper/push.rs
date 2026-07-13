@@ -241,8 +241,7 @@ fn git_batch_upload_target_bytes() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_GIT_BATCH_UPLOAD_TARGET_BYTES)
-        .min(hashtree_blossom::BATCH_UPLOAD_MAX_BYTES)
-        .max(1)
+        .clamp(1, hashtree_blossom::BATCH_UPLOAD_MAX_BYTES)
 }
 
 fn batch_upload_retry_delay(attempt: u32) -> Duration {
@@ -913,10 +912,7 @@ impl RemoteHelper {
 
     fn load_existing_remote_state_with_missing_root_repair(&mut self) -> Result<()> {
         match self.load_existing_remote_state() {
-            Ok(()) => {
-                self.push_ref_advertisement_error = None;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(err) => {
                 let err_message = err.to_string();
                 if !Self::is_missing_root_download_error(&err_message) {
@@ -926,7 +922,6 @@ impl RemoteHelper {
                 match self.reupload_cached_remote_root_after_missing_download(&err_message) {
                     Ok(true) => {
                         self.load_existing_remote_state()?;
-                        self.push_ref_advertisement_error = None;
                         Ok(())
                     }
                     Ok(false) => Err(err),
@@ -935,7 +930,7 @@ impl RemoteHelper {
                             "  Warning: Could not reupload missing htree root from local store: {}",
                             repair_err
                         );
-                        Err(repair_err)
+                        Err(err)
                     }
                 }
             }
@@ -1255,13 +1250,13 @@ impl RemoteHelper {
                     "Could not load existing remote state: {} (likely new repo)",
                     e
                 );
+            } else if Self::is_missing_root_download_error(&err_str) {
+                eprintln!(
+                    "  Warning: Published htree root is missing; rebuilding it from this checkout."
+                );
             } else {
-                let reason = self
-                    .push_ref_advertisement_error
-                    .as_deref()
-                    .unwrap_or(&err_str);
                 eprintln!("  Rejected: Could not load existing htree remote state.");
-                eprintln!("  {}", reason);
+                eprintln!("  {}", err_str);
                 eprintln!(
                     "  Use 'git push --force' only if this local checkout should repair/replace the published htree root."
                 );
@@ -1386,7 +1381,7 @@ impl RemoteHelper {
 
         for (ref_name, ref_value) in &refs {
             let is_being_pushed = self.push_specs.iter().any(|s| s.dst == *ref_name);
-            if !is_being_pushed && !(ref_name == "HEAD" && drop_dangling_head) {
+            if !(is_being_pushed || ref_name == "HEAD" && drop_dangling_head) {
                 self.storage.import_ref(ref_name, ref_value)?;
                 debug!(
                     "Imported existing ref: {} -> {}",
@@ -3171,7 +3166,7 @@ impl RemoteHelper {
                 if pending_uploads.len() >= UPLOAD_CHECK_BATCH_SIZE
                     && !flush_pending_uploads(
                         &mut pending_uploads,
-                        &blossom,
+                        blossom,
                         &all_servers,
                         use_upload_check,
                         !servers_needing_full.is_empty(),
@@ -3188,7 +3183,7 @@ impl RemoteHelper {
 
             let _ = flush_pending_uploads(
                 &mut pending_uploads,
-                &blossom,
+                blossom,
                 &all_servers,
                 use_upload_check,
                 !servers_needing_full.is_empty(),

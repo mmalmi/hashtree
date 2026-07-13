@@ -9,7 +9,7 @@ use hashtree_nostr::{
     CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
     StoredNostrEvent, VerifiedEvent,
 };
-use nostr::{Event, Keys};
+use nostr::Keys;
 use nostr_sdk::{Event as NostrSdkEvent, Filter as NostrFilter};
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
@@ -1059,7 +1059,7 @@ mod tests {
         scope: &str,
         rating: i64,
         created_at: u64,
-    ) -> Event {
+    ) -> nostr::Event {
         let scope_index = scope.to_lowercase();
         let rating = rating.to_string();
         let created_at_tag = created_at.to_string();

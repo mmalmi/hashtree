@@ -1,7 +1,11 @@
 mod common;
 
-use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
+use common::{
+    command_output_with_timeout, create_test_repo, skip_if_no_binary, test_relay::TestRelay,
+    TestEnv, TestServer,
+};
 use std::process::Command;
+use std::time::Duration;
 
 #[test]
 fn test_git_push_fails_when_only_local_relay_confirms_publish() {
@@ -59,12 +63,12 @@ write_servers = ["{}"]
         String::from_utf8_lossy(&add_remote.stderr)
     );
 
-    let push = Command::new("git")
-        .args(["push", "htree", "master"])
+    let mut push = Command::new("git");
+    push.args(["push", "htree", "master"])
         .current_dir(repo.path())
-        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .output()
-        .expect("run git push");
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    let push = command_output_with_timeout(&mut push, Duration::from_secs(50))
+        .expect("git push should honor the repository publication timeout");
 
     let stderr = String::from_utf8_lossy(&push.stderr);
     assert!(
@@ -73,7 +77,9 @@ write_servers = ["{}"]
         stderr
     );
     assert!(
-        stderr.contains("local relays only") || stderr.contains("No public relay confirmed"),
+        stderr.contains("local relays only")
+            || stderr.contains("No public relay confirmed")
+            || stderr.contains("publication timed out"),
         "stderr should explain the local-only relay publish failure, stderr:\n{}",
         stderr
     );
