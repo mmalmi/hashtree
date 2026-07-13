@@ -84,11 +84,12 @@ export declare class BTree {
     mergeLinks(base: CID | null, other: CID | null, preferOther?: boolean): Promise<CID | null>;
     build(items: Iterable<[string, string]>): Promise<CID | null>;
     buildLinks(items: Iterable<[string, CID]>): Promise<CID | null>;
+    private buildTree;
     private cidEquals;
     private createLeafWithLink;
     private insertLinkRecursive;
     private insertLinkIntoLeaf;
-    private insertLinkIntoInternal;
+    private insertIntoInternal;
     private splitLeafWithLinks;
     private traverseLinksInOrder;
     private traverseLinksInOrderVerified;
@@ -101,7 +102,6 @@ export declare class BTree {
     private listCachedEntries;
     private insertRecursive;
     private insertIntoLeaf;
-    private insertIntoInternal;
     private splitLeaf;
     private splitInternal;
     private findChild;

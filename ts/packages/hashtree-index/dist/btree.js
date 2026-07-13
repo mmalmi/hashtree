@@ -1,4 +1,6 @@
 import { HashTree, LinkType, toHex } from '@hashtree/core';
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 export class BTree {
     tree;
     order;
@@ -13,12 +15,10 @@ export class BTree {
         if (!root) {
             return this.createLeaf([[key, value]]);
         }
-        // Early exit: if key already exists with same value, return unchanged
-        const existingValue = await this.get(root, key);
-        if (existingValue === value) {
+        const result = await this.insertRecursive(root, key, value);
+        if (result.unchanged) {
             return root;
         }
-        const result = await this.insertRecursive(root, key, value);
         if (result.split) {
             return (await this.tree.putDirectory([
                 treeEntry(escapeKey(result.split.leftFirstKey), result.split.left, 0, LinkType.Dir),
@@ -40,7 +40,7 @@ export class BTree {
             const data = await this.tree.readFile(entry.cid);
             if (!data)
                 return null;
-            return new TextDecoder().decode(data);
+            return textDecoder.decode(data);
         }
         const { child } = this.findChild(entries, key);
         return this.get(child.cid, key);
@@ -228,6 +228,12 @@ export class BTree {
         return result;
     }
     async build(items) {
+        return this.buildTree(items, (chunk) => this.createLeaf(chunk), false);
+    }
+    async buildLinks(items) {
+        return this.buildTree(items, (chunk) => this.createLeafWithLink(chunk), true);
+    }
+    async buildTree(items, createLeaf, preserveCounts) {
         const sorted = [...items];
         if (sorted.length === 0) {
             return null;
@@ -247,46 +253,8 @@ export class BTree {
             const chunk = deduped.slice(index, index + this.maxKeys);
             level.push({
                 firstKey: chunk[0][0],
-                cid: await this.createLeaf(chunk),
-                count: 0,
-            });
-        }
-        while (level.length > 1) {
-            const nextLevel = [];
-            for (let index = 0; index < level.length; index += this.maxKeys) {
-                const chunk = level.slice(index, index + this.maxKeys);
-                nextLevel.push({
-                    firstKey: chunk[0].firstKey,
-                    cid: await this.createInternalNode(chunk),
-                    count: 0,
-                });
-            }
-            level = nextLevel;
-        }
-        return level[0]?.cid ?? null;
-    }
-    async buildLinks(items) {
-        const sorted = [...items];
-        if (sorted.length === 0) {
-            return null;
-        }
-        sorted.sort((left, right) => compareKeys(left[0], right[0]));
-        const deduped = [];
-        for (const [key, cid] of sorted) {
-            const last = deduped[deduped.length - 1];
-            if (last && last[0] === key) {
-                last[1] = cid;
-                continue;
-            }
-            deduped.push([key, cid]);
-        }
-        let level = [];
-        for (let index = 0; index < deduped.length; index += this.maxKeys) {
-            const chunk = deduped.slice(index, index + this.maxKeys);
-            level.push({
-                firstKey: chunk[0][0],
-                cid: await this.createLeafWithLink(chunk),
-                count: chunk.length,
+                cid: await createLeaf(chunk),
+                count: preserveCounts ? chunk.length : 0,
             });
         }
         while (level.length > 1) {
@@ -326,7 +294,7 @@ export class BTree {
         if (isLeaf) {
             return this.insertLinkIntoLeaf(node, entries, key, targetCid);
         }
-        return this.insertLinkIntoInternal(node, entries, key, targetCid, signal);
+        return this.insertIntoInternal(node, entries, key, (child) => this.insertLinkRecursive(child, key, targetCid, signal), true);
     }
     async insertLinkIntoLeaf(node, entries, key, targetCid) {
         const escapedKey = escapeKey(key);
@@ -352,9 +320,9 @@ export class BTree {
             count: this.countLinkEntries(newEntries),
         };
     }
-    async insertLinkIntoInternal(node, entries, key, targetCid, signal) {
+    async insertIntoInternal(node, entries, key, insert, preserveCounts) {
         const { child } = this.findChild(entries, key);
-        const result = await this.insertLinkRecursive(child.cid, key, targetCid, signal);
+        const result = await insert(child.cid);
         if (result.unchanged) {
             return { cid: node, unchanged: true };
         }
@@ -363,12 +331,12 @@ export class BTree {
             newEntries.push(treeEntry(escapeKey(result.split.leftFirstKey), result.split.left, result.split.leftCount, LinkType.Dir), treeEntry(escapeKey(result.split.rightFirstKey), result.split.right, result.split.rightCount, LinkType.Dir));
         }
         else {
-            newEntries.push(treeEntry(child.name, result.cid, result.count, LinkType.Dir));
+            newEntries.push(treeEntry(child.name, result.cid, preserveCounts ? result.count : 0, LinkType.Dir));
         }
         const sortedEntries = this.sortEntries(newEntries);
         const newNode = (await this.tree.putDirectory(sortedEntries)).cid;
         if (sortedEntries.length > this.maxKeys) {
-            const split = await this.splitInternal(sortedEntries, true);
+            const split = await this.splitInternal(sortedEntries, preserveCounts);
             return {
                 cid: newNode,
                 count: split.leftCount + split.rightCount,
@@ -377,7 +345,7 @@ export class BTree {
         }
         return {
             cid: newNode,
-            count: await this.countLinkEntriesOrSubtrees(sortedEntries),
+            count: preserveCounts ? await this.countLinkEntriesOrSubtrees(sortedEntries) : 0,
         };
     }
     async splitLeafWithLinks(entries) {
@@ -542,34 +510,27 @@ export class BTree {
         if (isLeaf) {
             return this.insertIntoLeaf(node, entries, key, value);
         }
-        else {
-            return this.insertIntoInternal(node, entries, key, value);
-        }
+        return this.insertIntoInternal(node, entries, key, (child) => this.insertRecursive(child, key, value), false);
     }
     async insertIntoLeaf(node, entries, key, value) {
         const escapedKey = escapeKey(key);
-        const { cid: valueCid, size } = await this.tree.putFile(new TextEncoder().encode(value));
-        const newNode = await this.tree.setEntry(node, [], escapedKey, valueCid, size, LinkType.Blob);
-        const newEntries = await this.tree.listDirectory(newNode);
+        const existing = entries.find((entry) => entry.name === escapedKey);
+        if (existing?.type === LinkType.Blob) {
+            const data = await this.tree.readFile(existing.cid);
+            if (data && textDecoder.decode(data) === value) {
+                return { cid: node, unchanged: true };
+            }
+        }
+        const { cid, size } = await this.tree.putFile(textEncoder.encode(value));
+        const newEntries = this.sortEntries([
+            ...entries.filter((entry) => entry.name !== escapedKey),
+            treeEntry(escapedKey, cid, size, LinkType.Blob),
+        ]);
+        const newNode = (await this.tree.putDirectory(newEntries)).cid;
         if (newEntries.length > this.maxKeys) {
-            return { cid: newNode, split: await this.splitLeaf(newEntries) };
+            return { cid: newNode, count: 0, split: await this.splitLeaf(newEntries) };
         }
-        return { cid: newNode };
-    }
-    async insertIntoInternal(node, entries, key, value) {
-        const { child } = this.findChild(entries, key);
-        const result = await this.insertRecursive(child.cid, key, value);
-        let newNode = await this.tree.setEntry(node, [], child.name, result.cid, 0, LinkType.Dir);
-        if (result.split) {
-            newNode = await this.tree.removeEntry(newNode, [], child.name);
-            newNode = await this.tree.setEntry(newNode, [], escapeKey(result.split.leftFirstKey), result.split.left, 0, LinkType.Dir);
-            newNode = await this.tree.setEntry(newNode, [], escapeKey(result.split.rightFirstKey), result.split.right, 0, LinkType.Dir);
-        }
-        const newEntries = await this.tree.listDirectory(newNode);
-        if (newEntries.length > this.maxKeys) {
-            return { cid: newNode, split: await this.splitInternal(newEntries) };
-        }
-        return { cid: newNode };
+        return { cid: newNode, count: 0 };
     }
     async splitLeaf(entries) {
         const sorted = this.sortEntries(entries);
@@ -639,7 +600,7 @@ export class BTree {
     async createLeaf(items) {
         const entries = [];
         for (const [key, value] of items) {
-            const { cid, size } = await this.tree.putFile(new TextEncoder().encode(value));
+            const { cid, size } = await this.tree.putFile(textEncoder.encode(value));
             entries.push(treeEntry(escapeKey(key), cid, size, LinkType.Blob));
         }
         return (await this.tree.putDirectory(entries)).cid;
@@ -693,7 +654,7 @@ export class BTree {
                     continue;
                 const data = await this.tree.readFile(entry.cid);
                 if (data) {
-                    yield [unescapeKey(entry.name), new TextDecoder().decode(data)];
+                    yield [unescapeKey(entry.name), textDecoder.decode(data)];
                 }
             }
         }
@@ -721,7 +682,7 @@ export class BTree {
                     return;
                 const data = await this.tree.readFile(entry.cid);
                 if (data) {
-                    yield [key, new TextDecoder().decode(data)];
+                    yield [key, textDecoder.decode(data)];
                 }
             }
         }

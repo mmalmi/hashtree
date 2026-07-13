@@ -42,6 +42,23 @@ describe('BTree', () => {
       expect(value).toBe('value2');
     });
 
+    it('should mutate a string leaf with one node read and two writes', async () => {
+      let root = await btree.insert(null, 'a', '1');
+      const get = vi.spyOn(store, 'get');
+      const put = vi.spyOn(store, 'put');
+
+      root = await btree.insert(root, 'b', '2');
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(put).toHaveBeenCalledTimes(2);
+
+      get.mockClear();
+      put.mockClear();
+      const unchanged = await btree.insert(root, 'b', '2');
+      expect(unchanged).toBe(root);
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(put).not.toHaveBeenCalled();
+    });
+
     it('should handle multiple keys', async () => {
       let root = await btree.insert(null, 'b', '2');
       root = await btree.insert(root, 'a', '1');
@@ -527,7 +544,7 @@ describe('BTree', () => {
 
   describe('key escaping', () => {
     it('should handle keys with slashes', async () => {
-      let root = await btree.insert(null, 'path/to/file', 'content');
+      const root = await btree.insert(null, 'path/to/file', 'content');
       expect(await btree.get(root, 'path/to/file')).toBe('content');
 
       // Verify escaped name in directory
@@ -536,7 +553,7 @@ describe('BTree', () => {
     });
 
     it('should handle keys with percent signs', async () => {
-      let root = await btree.insert(null, '100%', 'value');
+      const root = await btree.insert(null, '100%', 'value');
       expect(await btree.get(root, '100%')).toBe('value');
 
       const entries = await tree.listDirectory(root);
@@ -768,7 +785,6 @@ describe('BTree', () => {
 
       const root1 = await btree.insertLink(null, 'key', cid1);
       const root2 = await btree.insertLink(null, 'key', cid2);
-      const root3 = await btree.insertLink(null, 'key', cid3);
 
       // Same hash without key -> same root
       const root1b = await btree.insertLink(root1, 'key', cid1);
