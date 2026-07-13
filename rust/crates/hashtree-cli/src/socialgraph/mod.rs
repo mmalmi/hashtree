@@ -26,8 +26,9 @@ use futures::executor::block_on;
 use hashtree_core::{nhash_encode_full, Cid, HashTree, HashTreeConfig, NHashData};
 use hashtree_index::BTree;
 use hashtree_nostr::{
-    is_parameterized_replaceable_kind, is_replaceable_kind, ListEventsOptions, NostrEventStore,
-    NostrEventStoreError, ProfileGuard as NostrProfileGuard, StoredNostrEvent,
+    is_parameterized_replaceable_kind, is_replaceable_kind, stored_event_from_nostr_sdk_event,
+    ListEventsOptions, NostrEventStore, NostrEventStoreError, ProfileGuard as NostrProfileGuard,
+    StoredNostrEvent,
 };
 #[cfg(test)]
 use hashtree_nostr::{
@@ -1075,7 +1076,7 @@ impl SocialGraphStore {
         let current_root = bucket.events_root_for_write()?;
         let stored_events = events
             .iter()
-            .map(stored_event_from_nostr)
+            .map(stored_event_from_nostr_sdk_event)
             .collect::<Vec<_>>();
         let next_root = block_on(
             bucket
@@ -1439,22 +1440,6 @@ fn graph_event_from_nostr(event: &Event) -> GraphEvent {
         kind: event.kind.as_u16() as u32,
         pubkey: event.pubkey.to_hex(),
         id: event.id.to_hex(),
-        sig: event.sig.to_string(),
-    }
-}
-
-fn stored_event_from_nostr(event: &Event) -> StoredNostrEvent {
-    StoredNostrEvent {
-        id: event.id.to_hex(),
-        pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_secs(),
-        kind: event.kind.as_u16() as u32,
-        tags: event
-            .tags
-            .iter()
-            .map(|tag| tag.as_slice().to_vec())
-            .collect(),
-        content: event.content.clone(),
         sig: event.sig.to_string(),
     }
 }

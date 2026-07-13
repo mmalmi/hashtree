@@ -2054,7 +2054,7 @@ fn benchmark_nostr_btree_query_tradeoffs() {
     let stored_events = dataset
         .events
         .iter()
-        .map(stored_event_from_nostr)
+        .map(stored_event_from_nostr_sdk_event)
         .collect::<Vec<_>>();
 
     println!(

@@ -43,7 +43,7 @@ impl EventIndexBucket {
     }
 
     pub(super) fn store_event(&self, root: Option<&Cid>, event: &Event) -> Result<Cid> {
-        let stored = stored_event_from_nostr(event);
+        let stored = stored_event_from_nostr_sdk_event(event);
         let _profile = NostrProfileGuard::new("socialgraph.event_store.add");
         block_on(self.event_store.add(root, stored)).map_err(map_event_store_error)
     }
