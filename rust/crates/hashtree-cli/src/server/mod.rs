@@ -1268,7 +1268,7 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(30064), "root").sign_with_keys(&keys)?;
+        let event = EventBuilder::new(Kind::TextNote, "provider test").sign_with_keys(&keys)?;
         let provider = Arc::new(StaticProvider {
             event: Some(VerifiedEvent::try_from(event.clone())?),
             queries: AtomicUsize::new(0),
