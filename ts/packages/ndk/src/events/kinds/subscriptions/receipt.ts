@@ -26,7 +26,7 @@ export class NDKSubscriptionReceipt extends NDKEvent {
     constructor(ndk: NDK | undefined, rawEvent?: NostrEvent) {
         super(ndk, rawEvent);
         this.kind ??= NDKKind.SubscriptionReceipt;
-        this.debug = ndk?.debug.extend("subscription-start") ?? debug("ndk:subscription-start");
+        this.debug = ndk?.debug.extend("subscription-receipt") ?? debug("ndk:subscription-receipt");
     }
 
     static from(event: NDKEvent) {
@@ -37,34 +37,26 @@ export class NDKSubscriptionReceipt extends NDKEvent {
      * This is the person being subscribed to
      */
     get recipient(): NDKUser | undefined {
-        const pTag = this.getMatchingTags("p")?.[0];
-        if (!pTag) return undefined;
-
-        const user = new NDKUser({ pubkey: pTag[1] });
-        return user;
+        const pubkey = this.tagValue("p");
+        return pubkey ? new NDKUser({ pubkey }) : undefined;
     }
 
     set recipient(user: NDKUser | undefined) {
         this.removeTag("p");
-        if (!user) return;
-        this.tags.push(["p", user.pubkey]);
+        if (user) this.tags.push(["p", user.pubkey]);
     }
 
     /**
      * This is the person subscribing
      */
     get subscriber(): NDKUser | undefined {
-        const PTag = this.getMatchingTags("P")?.[0];
-        if (!PTag) return undefined;
-
-        const user = new NDKUser({ pubkey: PTag[1] });
-        return user;
+        const pubkey = this.tagValue("P");
+        return pubkey ? new NDKUser({ pubkey }) : undefined;
     }
 
     set subscriber(user: NDKUser | undefined) {
         this.removeTag("P");
-        if (!user) return;
-        this.tags.push(["P", user.pubkey]);
+        if (user) this.tags.push(["P", user.pubkey]);
     }
 
     set subscriptionStart(event: NDKSubscriptionStart) {
@@ -76,8 +68,7 @@ export class NDKSubscriptionReceipt extends NDKEvent {
     }
 
     get tierName(): string | undefined {
-        const tag = this.getMatchingTags("tier")?.[0];
-        return tag?.[1];
+        return this.tagValue("tier");
     }
 
     get isValid(): boolean {

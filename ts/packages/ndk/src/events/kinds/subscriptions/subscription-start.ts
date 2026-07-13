@@ -47,17 +47,13 @@ export class NDKSubscriptionStart extends NDKEvent {
      * Recipient of the subscription. I.e. The author of this event subscribes to this user.
      */
     get recipient(): NDKUser | undefined {
-        const pTag = this.getMatchingTags("p")?.[0];
-        if (!pTag) return undefined;
-
-        const user = new NDKUser({ pubkey: pTag[1] });
-        return user;
+        const pubkey = this.tagValue("p");
+        return pubkey ? new NDKUser({ pubkey }) : undefined;
     }
 
     set recipient(user: NDKUser | undefined) {
         this.removeTag("p");
-        if (!user) return;
-        this.tags.push(["p", user.pubkey]);
+        if (user) this.tags.push(["p", user.pubkey]);
     }
 
     /**
