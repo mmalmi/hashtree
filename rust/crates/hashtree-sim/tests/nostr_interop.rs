@@ -1,6 +1,5 @@
 #[cfg(feature = "nostr")]
 mod nostr_interop {
-    use hashtree_core;
     use hashtree_resolver::nostr::{NostrResolverConfig, NostrRootResolver};
     use hashtree_resolver::RootResolver;
     use hashtree_sim::WsRelay;

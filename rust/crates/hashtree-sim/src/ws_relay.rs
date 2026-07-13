@@ -262,77 +262,67 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
 
     // Handle incoming messages
     while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Text(text) = msg {
-            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-                if parsed.is_empty() {
-                    continue;
-                }
+        let Message::Text(text) = msg else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+            continue;
+        };
+        let Some(msg_type) = parsed.first().and_then(serde_json::Value::as_str) else {
+            continue;
+        };
 
-                let msg_type = parsed[0].as_str().unwrap_or("");
+        match msg_type {
+            "EVENT" if parsed.len() >= 2 => {
+                if let Ok(event) = serde_json::from_value::<NostrEvent>(parsed[1].clone()) {
+                    let event_id = event.id.clone();
 
-                match msg_type {
-                    "EVENT" => {
-                        if parsed.len() >= 2 {
-                            if let Ok(event) =
-                                serde_json::from_value::<NostrEvent>(parsed[1].clone())
-                            {
-                                let event_id = event.id.clone();
+                    // Store event
+                    state.events.write().await.push(event.clone());
 
-                                // Store event
-                                state.events.write().await.push(event.clone());
+                    // Broadcast to all subscribers
+                    let _ = state.broadcast.send(event);
 
-                                // Broadcast to all subscribers
-                                let _ = state.broadcast.send(event);
-
-                                // Send OK
-                                let ok_msg = serde_json::json!(["OK", event_id, true, ""]);
-                                let _ = tx.send(ok_msg.to_string()).await;
-                            }
-                        }
-                    }
-                    "REQ" => {
-                        if parsed.len() >= 3 {
-                            let sub_id = parsed[1].as_str().unwrap_or("").to_string();
-                            let mut filters = Vec::new();
-
-                            for value in parsed.iter().skip(2) {
-                                if let Ok(filter) =
-                                    serde_json::from_value::<NostrFilter>(value.clone())
-                                {
-                                    filters.push(filter);
-                                }
-                            }
-
-                            // Send matching stored events
-                            let events = state.events.read().await;
-                            for event in events.iter() {
-                                if filters.iter().any(|f| f.matches(event)) {
-                                    let msg = serde_json::json!(["EVENT", &sub_id, event]);
-                                    let _ = tx.send(msg.to_string()).await;
-                                }
-                            }
-                            drop(events);
-
-                            // Send EOSE
-                            let eose_msg = serde_json::json!(["EOSE", &sub_id]);
-                            let _ = tx.send(eose_msg.to_string()).await;
-
-                            // Store subscription
-                            subscriptions
-                                .write()
-                                .await
-                                .insert(sub_id, Subscription { filters });
-                        }
-                    }
-                    "CLOSE" => {
-                        if parsed.len() >= 2 {
-                            let sub_id = parsed[1].as_str().unwrap_or("");
-                            subscriptions.write().await.remove(sub_id);
-                        }
-                    }
-                    _ => {}
+                    // Send OK
+                    let ok_msg = serde_json::json!(["OK", event_id, true, ""]);
+                    let _ = tx.send(ok_msg.to_string()).await;
                 }
             }
+            "REQ" if parsed.len() >= 3 => {
+                let sub_id = parsed[1].as_str().unwrap_or("").to_string();
+                let mut filters = Vec::new();
+
+                for value in parsed.iter().skip(2) {
+                    if let Ok(filter) = serde_json::from_value::<NostrFilter>(value.clone()) {
+                        filters.push(filter);
+                    }
+                }
+
+                // Send matching stored events
+                let events = state.events.read().await;
+                for event in events.iter() {
+                    if filters.iter().any(|f| f.matches(event)) {
+                        let msg = serde_json::json!(["EVENT", &sub_id, event]);
+                        let _ = tx.send(msg.to_string()).await;
+                    }
+                }
+                drop(events);
+
+                // Send EOSE
+                let eose_msg = serde_json::json!(["EOSE", &sub_id]);
+                let _ = tx.send(eose_msg.to_string()).await;
+
+                // Store subscription
+                subscriptions
+                    .write()
+                    .await
+                    .insert(sub_id, Subscription { filters });
+            }
+            "CLOSE" if parsed.len() >= 2 => {
+                let sub_id = parsed[1].as_str().unwrap_or("");
+                subscriptions.write().await.remove(sub_id);
+            }
+            _ => {}
         }
     }
 

@@ -2000,6 +2000,7 @@ pub async fn run_mesh_pubsub_htl_gossipsub_baseline(
 ///   - on prune, mark a `prune_backoff_rounds`-round cooldown: that edge
 ///     can't be re-grafted until the cooldown expires
 ///   - heartbeat grafts the highest-scoring non-cooldowned lazy peer
+///
 /// Designed to fix the prune/regraft churn that the v1.0 baseline falls into
 /// with a high underlay degree.
 pub async fn run_mesh_pubsub_htl_gossipsub_v11_baseline(

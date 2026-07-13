@@ -430,9 +430,9 @@ fn print_ranked_for_profile(profile: GateProfile, summaries: &[Summary]) {
             ScoredSummary {
                 summary: Summary {
                     label: summary.label.clone(),
-                    reference_pool: summary.reference_pool.clone(),
-                    conservative_pool: summary.conservative_pool.clone(),
-                    aggressive_pool: summary.aggressive_pool.clone(),
+                    reference_pool: summary.reference_pool,
+                    conservative_pool: summary.conservative_pool,
+                    aggressive_pool: summary.aggressive_pool,
                     weights: summary.weights,
                     runs: summary.runs,
                     avg_success_rate: summary.avg_success_rate,
@@ -552,7 +552,7 @@ async fn main() {
                 duration: Duration::from_secs(runtime.duration_secs),
                 seed: *seed,
                 // Fallback-only when strategy_mix is empty; keep aligned with reference.
-                pool: candidate.reference_pool.clone(),
+                pool: candidate.reference_pool,
                 discovery_interval_ms: 100,
                 hello_reannounce_interval_ms: 400,
                 churn_rate: 0.02,
@@ -570,7 +570,7 @@ async fn main() {
                     NodeStrategyProfile {
                         name: "reference".to_string(),
                         weight: w_ref,
-                        pool: candidate.reference_pool.clone(),
+                        pool: candidate.reference_pool,
                         selection_strategy: candidate.reference_strategy.selection_strategy,
                         fairness_enabled: candidate.reference_strategy.fairness_enabled,
                         dispatch: candidate.reference_strategy.dispatch,
@@ -579,7 +579,7 @@ async fn main() {
                     NodeStrategyProfile {
                         name: "conservative".to_string(),
                         weight: w_cons,
-                        pool: candidate.conservative_pool.clone(),
+                        pool: candidate.conservative_pool,
                         selection_strategy: candidate.conservative_strategy.selection_strategy,
                         fairness_enabled: candidate.conservative_strategy.fairness_enabled,
                         dispatch: candidate.conservative_strategy.dispatch,
@@ -588,7 +588,7 @@ async fn main() {
                     NodeStrategyProfile {
                         name: "aggressive".to_string(),
                         weight: w_agg,
-                        pool: candidate.aggressive_pool.clone(),
+                        pool: candidate.aggressive_pool,
                         selection_strategy: candidate.aggressive_strategy.selection_strategy,
                         fairness_enabled: candidate.aggressive_strategy.fairness_enabled,
                         dispatch: candidate.aggressive_strategy.dispatch,
@@ -597,7 +597,7 @@ async fn main() {
                     NodeStrategyProfile {
                         name: "goofball".to_string(),
                         weight: 20,
-                        pool: candidate.conservative_pool.clone(),
+                        pool: candidate.conservative_pool,
                         selection_strategy: SelectionStrategy::RoundRobin,
                         fairness_enabled: true,
                         dispatch: RequestDispatchConfig::default(),
@@ -606,7 +606,7 @@ async fn main() {
                     NodeStrategyProfile {
                         name: "adversarial".to_string(),
                         weight: 20,
-                        pool: candidate.aggressive_pool.clone(),
+                        pool: candidate.aggressive_pool,
                         selection_strategy: SelectionStrategy::Random,
                         fairness_enabled: true,
                         dispatch: RequestDispatchConfig::default(),
@@ -691,9 +691,9 @@ async fn main() {
         let n = runs.len() as f64;
         summaries.push(Summary {
             label: candidate.label.clone(),
-            reference_pool: candidate.reference_pool.clone(),
-            conservative_pool: candidate.conservative_pool.clone(),
-            aggressive_pool: candidate.aggressive_pool.clone(),
+            reference_pool: candidate.reference_pool,
+            conservative_pool: candidate.conservative_pool,
+            aggressive_pool: candidate.aggressive_pool,
             weights: candidate.weights,
             runs: runs.len(),
             avg_success_rate: success_sum / n,
