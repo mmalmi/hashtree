@@ -8,7 +8,7 @@ import {
   fromHex,
   type CID,
   type Store,
-} from "./hashtreeAdapter";
+} from "@hashtree/core";
 import { FileStore } from "./hashtreeStore";
 import {
   deserializeCid,

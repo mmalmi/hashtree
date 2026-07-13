@@ -10,6 +10,9 @@ export interface BTreeSampleOptions {
 export interface BTreeLinkEntriesOptions {
     verifyCount?: boolean;
 }
+export interface BTreeOperationOptions {
+    signal?: AbortSignal;
+}
 export declare class BTree {
     private tree;
     private order;
@@ -22,11 +25,11 @@ export declare class BTree {
      * Uses LinkType.File to store the target CID directly as a native link.
      * This enables natural deduplication and avoids JSON serialization.
      */
-    insertLink(root: CID | null, key: string, targetCid: CID): Promise<CID>;
+    insertLink(root: CID | null, key: string, targetCid: CID, options?: BTreeOperationOptions): Promise<CID>;
     /**
      * Get a CID link from the tree.
      */
-    getLink(root: CID | null, key: string): Promise<CID | null>;
+    getLink(root: CID | null, key: string, options?: BTreeOperationOptions): Promise<CID | null>;
     /**
      * Iterate all CID links in the tree.
      */

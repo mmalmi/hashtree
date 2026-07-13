@@ -1,7 +1,7 @@
 import fuse from "./fuse";
+import { BlossomStore, nhashDecode, type BlossomServer } from "@hashtree/core";
 import profileData from "../../../data/profileData.json";
 import { ProfileSearchIndex } from "../../../scripts/profileSearchIndex";
-import { BlossomStore, nhashDecode, type BlossomServer } from "../../../scripts/hashtreeAdapter";
 
 export type SearchProfile = {
   pubKey: string;

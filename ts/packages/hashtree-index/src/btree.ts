@@ -14,16 +14,18 @@ export interface BTreeLinkEntriesOptions {
   verifyCount?: boolean;
 }
 
+export interface BTreeOperationOptions {
+  signal?: AbortSignal;
+}
+
 type LinkTraversalCache = {
   entries: Map<string, TreeEntry[]>;
   counts: Map<string, number>;
 };
 
-type BTreeMutationResult = {
-  cid: CID;
-  count: number;
-  split?: SplitResult;
-};
+type BTreeMutationResult =
+  | { cid: CID; unchanged: true }
+  | { cid: CID; count: number; split?: SplitResult; unchanged?: false };
 
 export class BTree {
   private tree: HashTree;
@@ -53,18 +55,8 @@ export class BTree {
 
     if (result.split) {
       return (await this.tree.putDirectory([
-        {
-          name: escapeKey(result.split.leftFirstKey),
-          cid: result.split.left,
-          size: 0,
-          type: LinkType.Dir,
-        },
-        {
-          name: escapeKey(result.split.rightFirstKey),
-          cid: result.split.right,
-          size: 0,
-          type: LinkType.Dir,
-        },
+        treeEntry(escapeKey(result.split.leftFirstKey), result.split.left, 0, LinkType.Dir),
+        treeEntry(escapeKey(result.split.rightFirstKey), result.split.right, 0, LinkType.Dir),
       ])).cid;
     }
 
@@ -98,33 +90,35 @@ export class BTree {
    * Uses LinkType.File to store the target CID directly as a native link.
    * This enables natural deduplication and avoids JSON serialization.
    */
-  async insertLink(root: CID | null, key: string, targetCid: CID): Promise<CID> {
+  async insertLink(
+    root: CID | null,
+    key: string,
+    targetCid: CID,
+    options: BTreeOperationOptions = {},
+  ): Promise<CID> {
     if (!root) {
       return this.createLeafWithLink([[key, targetCid]]);
     }
 
-    // Early exit: if key already exists with same CID, return unchanged
-    const existingCid = await this.getLink(root, key);
-    if (existingCid && this.cidEquals(existingCid, targetCid)) {
+    const result = await this.insertLinkRecursive(root, key, targetCid, options.signal);
+    if (result.unchanged) {
       return root;
     }
 
-    const result = await this.insertLinkRecursive(root, key, targetCid);
-
     if (result.split) {
       return (await this.tree.putDirectory([
-        {
-          name: escapeKey(result.split.leftFirstKey),
-          cid: result.split.left,
-          size: result.split.leftCount,
-          type: LinkType.Dir,
-        },
-        {
-          name: escapeKey(result.split.rightFirstKey),
-          cid: result.split.right,
-          size: result.split.rightCount,
-          type: LinkType.Dir,
-        },
+        treeEntry(
+          escapeKey(result.split.leftFirstKey),
+          result.split.left,
+          result.split.leftCount,
+          LinkType.Dir,
+        ),
+        treeEntry(
+          escapeKey(result.split.rightFirstKey),
+          result.split.right,
+          result.split.rightCount,
+          LinkType.Dir,
+        ),
       ])).cid;
     }
 
@@ -134,10 +128,14 @@ export class BTree {
   /**
    * Get a CID link from the tree.
    */
-  async getLink(root: CID | null, key: string): Promise<CID | null> {
+  async getLink(
+    root: CID | null,
+    key: string,
+    options: BTreeOperationOptions = {},
+  ): Promise<CID | null> {
     if (!root) return null;
 
-    const entries = await this.tree.listDirectory(root);
+    const entries = await this.tree.listDirectory(root, options.signal);
     const isLeaf = this.isLeafNode(entries);
 
     if (isLeaf) {
@@ -148,7 +146,7 @@ export class BTree {
     }
 
     const { child } = this.findChild(entries, key);
-    return this.getLink(child.cid, key);
+    return this.getLink(child.cid, key, options);
   }
 
   /**
@@ -423,27 +421,24 @@ export class BTree {
   }
 
   private async createLeafWithLink(items: Array<[string, CID]>): Promise<CID> {
-    return (await this.tree.putDirectory(items.map(([key, targetCid]) => ({
-      name: escapeKey(key),
-      cid: targetCid,
-      size: 0,
-      type: LinkType.File,
-    })))).cid;
+    return (await this.tree.putDirectory(items.map(([key, cid]) =>
+      treeEntry(escapeKey(key), cid, 0, LinkType.File)
+    ))).cid;
   }
 
   private async insertLinkRecursive(
     node: CID,
     key: string,
-    targetCid: CID
+    targetCid: CID,
+    signal?: AbortSignal,
   ): Promise<BTreeMutationResult> {
-    const entries = await this.tree.listDirectory(node);
+    const entries = await this.tree.listDirectory(node, signal);
     const isLeaf = this.isLeafNode(entries);
 
     if (isLeaf) {
       return this.insertLinkIntoLeaf(node, entries, key, targetCid);
-    } else {
-      return this.insertLinkIntoInternal(node, entries, key, targetCid);
     }
+    return this.insertLinkIntoInternal(node, entries, key, targetCid, signal);
   }
 
   private async insertLinkIntoLeaf(
@@ -453,9 +448,17 @@ export class BTree {
     targetCid: CID
   ): Promise<BTreeMutationResult> {
     const escapedKey = escapeKey(key);
-    const newNode = await this.tree.setEntry(node, [], escapedKey, targetCid, 0, LinkType.File);
+    const existing = entries.find((entry) => entry.name === escapedKey);
+    if (existing?.type === LinkType.File && this.cidEquals(existing.cid, targetCid)) {
+      return { cid: node, unchanged: true };
+    }
 
-    const newEntries = await this.tree.listDirectory(newNode);
+    const newEntries = this.sortEntries([
+      ...entries.filter((entry) => entry.name !== escapedKey),
+      treeEntry(escapedKey, targetCid, 0, LinkType.File),
+    ]);
+    const newNode = (await this.tree.putDirectory(newEntries)).cid;
+
     if (newEntries.length > this.maxKeys) {
       const split = await this.splitLeafWithLinks(newEntries);
       return {
@@ -475,36 +478,39 @@ export class BTree {
     node: CID,
     entries: TreeEntry[],
     key: string,
-    targetCid: CID
+    targetCid: CID,
+    signal?: AbortSignal,
   ): Promise<BTreeMutationResult> {
     const { child } = this.findChild(entries, key);
-    const result = await this.insertLinkRecursive(child.cid, key, targetCid);
-
-    let newNode = await this.tree.setEntry(node, [], child.name, result.cid, result.count, LinkType.Dir);
-
-    if (result.split) {
-      newNode = await this.tree.removeEntry(newNode, [], child.name);
-      newNode = await this.tree.setEntry(
-        newNode,
-        [],
-        escapeKey(result.split.leftFirstKey),
-        result.split.left,
-        result.split.leftCount,
-        LinkType.Dir,
-      );
-      newNode = await this.tree.setEntry(
-        newNode,
-        [],
-        escapeKey(result.split.rightFirstKey),
-        result.split.right,
-        result.split.rightCount,
-        LinkType.Dir,
-      );
+    const result = await this.insertLinkRecursive(child.cid, key, targetCid, signal);
+    if (result.unchanged) {
+      return { cid: node, unchanged: true };
     }
 
-    const newEntries = await this.tree.listDirectory(newNode);
-    if (newEntries.length > this.maxKeys) {
-      const split = await this.splitInternal(newEntries, true);
+    const newEntries = entries.filter((entry) => entry.name !== child.name);
+    if (result.split) {
+      newEntries.push(
+        treeEntry(
+          escapeKey(result.split.leftFirstKey),
+          result.split.left,
+          result.split.leftCount,
+          LinkType.Dir,
+        ),
+        treeEntry(
+          escapeKey(result.split.rightFirstKey),
+          result.split.right,
+          result.split.rightCount,
+          LinkType.Dir,
+        ),
+      );
+    } else {
+      newEntries.push(treeEntry(child.name, result.cid, result.count, LinkType.Dir));
+    }
+
+    const sortedEntries = this.sortEntries(newEntries);
+    const newNode = (await this.tree.putDirectory(sortedEntries)).cid;
+    if (sortedEntries.length > this.maxKeys) {
+      const split = await this.splitInternal(sortedEntries, true);
       return {
         cid: newNode,
         count: split.leftCount + split.rightCount,
@@ -514,7 +520,7 @@ export class BTree {
 
     return {
       cid: newNode,
-      count: await this.countLinkEntriesOrSubtrees(newEntries),
+      count: await this.countLinkEntriesOrSubtrees(sortedEntries),
     };
   }
 
@@ -850,23 +856,15 @@ export class BTree {
     const entries: TreeEntry[] = [];
     for (const [key, value] of items) {
       const { cid, size } = await this.tree.putFile(new TextEncoder().encode(value));
-      entries.push({
-        name: escapeKey(key),
-        cid,
-        size,
-        type: LinkType.Blob,
-      });
+      entries.push(treeEntry(escapeKey(key), cid, size, LinkType.Blob));
     }
     return (await this.tree.putDirectory(entries)).cid;
   }
 
   private async createInternalNode(children: BuiltNode[]): Promise<CID> {
-    const entries: TreeEntry[] = children.map((child) => ({
-      name: escapeKey(child.firstKey),
-      cid: child.cid,
-      size: child.count,
-      type: LinkType.Dir,
-    }));
+    const entries = children.map((child) =>
+      treeEntry(escapeKey(child.firstKey), child.cid, child.count, LinkType.Dir)
+    );
     return (await this.tree.putDirectory(entries)).cid;
   }
 
@@ -1009,6 +1007,10 @@ interface BuiltNode {
   firstKey: string;
   cid: CID;
   count: number;
+}
+
+function treeEntry(name: string, cid: CID, size: number, type: LinkType): TreeEntry {
+  return { name, cid, size, type };
 }
 
 export function escapeKey(key: string): string {

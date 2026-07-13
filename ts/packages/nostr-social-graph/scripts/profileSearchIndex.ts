@@ -1,5 +1,5 @@
-import { SearchIndex, type SearchOptions, type SearchResult } from './hashtreeIndex';
-import { fromHex, nhashEncode, toHex, type CID, type Store } from './hashtreeAdapter';
+import { fromHex, nhashEncode, toHex, type CID, type Store } from '@hashtree/core';
+import { SearchIndex, type SearchOptions, type SearchResult } from '@hashtree/index';
 
 export type ProfileSearchRecord = {
   pubKey: string;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { BTree, escapeKey, unescapeKey } from '../src/btree.js';
 import { MemoryStore, HashTree, LinkType, type CID } from '@hashtree/core';
 
@@ -214,6 +214,37 @@ describe('BTree', () => {
   });
 
   describe('link bulk build', () => {
+    it('should abort CID link lookups for unavailable roots', async () => {
+      const controller = new AbortController();
+      const root = {
+        hash: new Uint8Array(32).fill(9),
+      };
+      setTimeout(() => controller.abort(new Error('lookup budget exhausted')), 5);
+
+      await expect(btree.getLink(root, 'missing', { signal: controller.signal }))
+        .rejects
+        .toThrow('lookup budget exhausted');
+    });
+
+    it('should mutate or reuse a leaf with one read and at most one write', async () => {
+      const first = await tree.putFile(new TextEncoder().encode('first'));
+      const second = await tree.putFile(new TextEncoder().encode('second'));
+      let root = await btree.insertLink(null, 'a', first.cid);
+      const get = vi.spyOn(store, 'get');
+      const put = vi.spyOn(store, 'put');
+
+      root = await btree.insertLink(root, 'b', second.cid);
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(put).toHaveBeenCalledTimes(1);
+
+      get.mockClear();
+      put.mockClear();
+      const unchanged = await btree.insertLink(root, 'b', second.cid);
+      expect(unchanged).toBe(root);
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(put).not.toHaveBeenCalled();
+    });
+
     it('should build a link tree from unsorted entries', async () => {
       const a = await tree.putFile(new TextEncoder().encode('a'));
       const b = await tree.putFile(new TextEncoder().encode('b'));

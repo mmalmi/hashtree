@@ -4,6 +4,7 @@ import { sha256, toHex } from '@hashtree/core';
 
 describe('BlossomTransport.fetch', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -101,22 +102,26 @@ describe('BlossomTransport.fetch', () => {
   it('limits concurrent read fetches across hashes', async () => {
     const base = 'https://throttled.example';
     const concurrencyLimit = 32;
-    const hashes = Array.from({ length: concurrencyLimit + 8 }, (_, index) =>
-      index.toString(16).padStart(64, '0'));
+    const payloads = Array.from({ length: concurrencyLimit + 8 }, (_, index) =>
+      new TextEncoder().encode(`concurrent fetch ${index}`));
+    const hashes = await Promise.all(payloads.map(async (data) => toHex(await sha256(data))));
+    const payloadByHash = new Map(hashes.map((hash, index) => [hash, payloads[index]]));
     const releases: Array<() => void> = [];
     let active = 0;
     let maxActive = 0;
 
-    const fetchMock = vi.fn(() => {
+    const fetchMock = vi.fn((input: string | URL) => {
+      const hash = String(input).split('/').pop()?.replace(/\.bin$/, '');
+      const data = hash ? payloadByHash.get(hash) : undefined;
       active += 1;
       maxActive = Math.max(maxActive, active);
       return new Promise((resolve) => {
         releases.push(() => {
           active -= 1;
           resolve({
-            ok: false,
-            status: 404,
-            arrayBuffer: async () => new ArrayBuffer(0),
+            ok: true,
+            status: 200,
+            arrayBuffer: async () => data!.buffer.slice(0),
           });
         });
       });
@@ -152,7 +157,7 @@ describe('BlossomTransport.fetch', () => {
       release();
     }
 
-    await expect(Promise.all(requests)).resolves.toEqual(Array(hashes.length).fill(null));
+    await expect(Promise.all(requests)).resolves.toEqual(payloads);
     expect(maxActive).toBeLessThanOrEqual(concurrencyLimit);
   }, 10_000);
 

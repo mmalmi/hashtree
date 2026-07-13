@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { fromHex, nhashDecode, toHex } from '@hashtree/core';
 import { profileSearchIndexNhash } from '../scripts/profileSearchIndex';
-import { fromHex, nhashDecode, toHex } from '../scripts/hashtreeAdapter';
 
 describe('profileSearchIndexNhash', () => {
   it('returns null when no root is provided', () => {

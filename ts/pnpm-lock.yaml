@@ -369,6 +369,9 @@ importers:
       '@hashtree/core':
         specifier: workspace:*
         version: link:../hashtree
+      '@hashtree/index':
+        specifier: workspace:*
+        version: link:../hashtree-index
       '@nostr-dev-kit/ndk':
         specifier: ^2.14.5
         version: 2.18.1(nostr-tools@2.18.2(typescript@5.9.3))

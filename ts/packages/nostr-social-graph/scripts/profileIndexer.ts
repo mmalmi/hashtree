@@ -25,8 +25,8 @@ import {
 } from "./profileSearchIndex";
 import { canonicalizeProfile } from "./profileCanonicalize";
 import { parseCrawlDistance } from "./crawlDistance";
-import type { SearchOptions, SearchResult } from "./hashtreeIndex";
-import type { CID } from "./hashtreeAdapter";
+import type { CID } from "@hashtree/core";
+import type { SearchOptions, SearchResult } from "@hashtree/index";
 
 console.log('Starting profile indexer...');
 

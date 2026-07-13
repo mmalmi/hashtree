@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { toHex, type Hash, type Store } from './hashtreeAdapter';
+import { toHex, type Hash, type Store } from '@hashtree/core';
 
 export class FileStore implements Store {
   private ready: Promise<void>;
