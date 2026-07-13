@@ -1897,24 +1897,23 @@ fn stored_event_matches_filter(filter: &NostrFilter, event: &StoredNostrEvent) -
 }
 
 fn filter_ids_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
-    filter.ids.as_ref().map_or(true, |ids| {
-        ids.is_empty() || ids.iter().any(|id| id.to_hex() == event.id)
-    })
+    filter_values_match(filter.ids.as_ref(), |id| id.to_hex() == event.id)
 }
 
 fn filter_authors_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
-    filter.authors.as_ref().map_or(true, |authors| {
-        authors.is_empty() || authors.iter().any(|author| author.to_hex() == event.pubkey)
+    filter_values_match(filter.authors.as_ref(), |author| {
+        author.to_hex() == event.pubkey
     })
 }
 
 fn filter_kinds_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
-    filter.kinds.as_ref().map_or(true, |kinds| {
-        kinds.is_empty()
-            || kinds
-                .iter()
-                .any(|kind| u32::from(kind.as_u16()) == event.kind)
+    filter_values_match(filter.kinds.as_ref(), |kind| {
+        u32::from(kind.as_u16()) == event.kind
     })
+}
+
+fn filter_values_match<T>(values: Option<&BTreeSet<T>>, matches: impl Fn(&T) -> bool) -> bool {
+    values.is_none_or(|values| values.is_empty() || values.iter().any(matches))
 }
 
 fn filter_tags_match(filter: &NostrFilter, event: &StoredNostrEvent) -> bool {
