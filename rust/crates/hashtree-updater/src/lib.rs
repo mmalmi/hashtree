@@ -14,6 +14,8 @@ mod install;
 mod manifest;
 mod product;
 mod progress;
+#[cfg(feature = "nostr-pubsub")]
+mod pubsub;
 mod reference;
 mod target;
 mod update_policy;
@@ -43,6 +45,8 @@ pub use product::{
     SecureNostrBlossomConfig, SecureNostrBlossomSelection, SecureNostrBlossomUpdater,
 };
 pub use progress::{DownloadCallback, DownloadEvent};
+#[cfg(feature = "nostr-pubsub")]
+pub use pubsub::UpdateEventCache;
 pub use reference::UpdateRef;
 pub use target::UpdateTarget;
 pub use update_policy::UpdateAutoCheckPolicy;

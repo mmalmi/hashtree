@@ -1707,8 +1707,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -3231,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3537,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-blossom"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3557,7 +3559,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "clap",
@@ -3569,7 +3571,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3637,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-collection"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -3651,7 +3653,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-config"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -3661,7 +3663,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3683,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3699,14 +3701,14 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded-ffi"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "hashtree-embedded",
 ]
 
 [[package]]
 name = "hashtree-ffi"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "axum",
  "futures",
@@ -3722,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "fips-core",
@@ -3741,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fs"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3756,7 +3758,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fuse"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "fuser",
  "futures",
@@ -3769,7 +3771,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -3779,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3791,11 +3793,11 @@ dependencies = [
 
 [[package]]
 name = "hashtree-merge"
-version = "0.2.79"
+version = "0.2.80"
 
 [[package]]
 name = "hashtree-network"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3824,7 +3826,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "futures",
  "hashtree-collection",
@@ -3845,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-pubsub"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3857,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "futures",
@@ -3872,7 +3874,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-s3"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -3886,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-sim"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3906,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.79"
+version = "0.2.80"
 dependencies = [
  "async-trait",
  "flate2",
@@ -3914,6 +3916,8 @@ dependencies = [
  "hashtree-core",
  "hashtree-resolver",
  "hashtree-sim",
+ "nostr-pubsub",
+ "nostr-sdk",
  "semver",
  "serde",
  "serde_json",
@@ -5269,6 +5273,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostr-identity"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "848aac810edafec01cd47650e31bfe920129a9d1422df0385cca286625caeed4"
+dependencies = [
+ "anyhow",
+ "nostr-sdk",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "nostr-pubsub"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5283,27 +5301,43 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.1.3"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "147af01377176dce991aa9e3c8c5ee54337816fa8905354a9f96f93046b0510f"
+checksum = "16273e48a909dd95096b112af5a8e0c079ba1446c50adf93663f3c47cd638c87"
 dependencies = [
  "async-trait",
  "fips-core",
+ "nostr",
  "nostr-pubsub",
+ "nostr-pubsub-social-graph",
  "tokio",
 ]
 
 [[package]]
 name = "nostr-pubsub-relay"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f24099cb43e456ab17344aa8e26f5cbfa7b9db2542697d984af0218cd1b0df2d"
+checksum = "e7d9e278806e79e040d274708f35a008cb947fa37aed185a6d6142cf7561c223"
 dependencies = [
  "async-trait",
  "nostr-pubsub",
  "nostr-sdk",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "nostr-pubsub-social-graph"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29c11ac9ed42cfcf5b26af89111af4e82c357bc5ad06c47a1b0428430358b6d5"
+dependencies = [
+ "async-trait",
+ "nostr",
+ "nostr-pubsub",
+ "nostr-social-graph",
+ "nostr-social-memory",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5361,6 +5395,23 @@ dependencies = [
  "heed",
  "nostr-social-graph",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nostr-social-memory"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a51c186658b0602aebc9566ee405adfcc1c92d082c697543d0b50358da7f0f"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "nostr-identity",
+ "nostr-sdk",
+ "nostr-social-graph",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]

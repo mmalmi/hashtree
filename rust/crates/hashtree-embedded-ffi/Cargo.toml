@@ -13,4 +13,4 @@ crate-type = ["cdylib"]
 name = "hashtree_embedded_ffi"
 
 [dependencies]
-hashtree-embedded = { version = "0.2.79", path = "../hashtree-embedded" }
+hashtree-embedded = { version = "0.2.80", path = "../hashtree-embedded" }

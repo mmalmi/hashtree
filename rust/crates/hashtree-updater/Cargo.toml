@@ -14,12 +14,18 @@ secure-nostr-blossom = [
   "dep:hashtree-blossom",
   "hashtree-blossom/store",
   "hashtree-resolver/nostr",
+  "nostr-pubsub",
+]
+nostr-pubsub = [
+  "dep:nostr-pubsub",
+  "hashtree-resolver/nostr",
 ]
 
 [dependencies]
 hashtree-blossom = { workspace = true, optional = true }
 hashtree-core.workspace = true
 hashtree-resolver.workspace = true
+nostr-pubsub = { workspace = true, optional = true }
 semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -34,6 +40,7 @@ async-trait.workspace = true
 flate2 = "1.0"
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-sim = { path = "../hashtree-sim", features = ["nostr"] }
+nostr-sdk.workspace = true
 tar = "0.4"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -7,6 +7,8 @@ pub enum UpdateError {
     InvalidReference(String),
     #[error("failed to resolve update root: {0}")]
     Resolve(#[from] ResolverError),
+    #[error("update announcement failed: {0}")]
+    Announcement(String),
     #[error("hashtree read failed: {0}")]
     Tree(#[from] HashTreeError),
     #[error("release root was not found for {0}")]

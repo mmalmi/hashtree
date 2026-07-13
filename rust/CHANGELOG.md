@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.80 - 2026-07-13
+
+### Changed
+
+- Added a transport-neutral updater event cache that derives the exact signed
+  Hashtree root subscription from the trusted release reference, consumes
+  `nostr-pubsub` providers, and seeds relayless update resolution.
+- Updated the FIPS pubsub adapter to the peer-serving `0.1.8` release with
+  isolated service-port receive ownership and late-subscriber replay.
+
+### Fixed
+
+- Rejected malformed, wrong-author, wrong-tree, duplicate, and stale update
+  announcements before they reach the release resolver.
+
 ## 0.2.79 - 2026-07-13
 
 ### Changed

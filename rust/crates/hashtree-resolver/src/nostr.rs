@@ -358,6 +358,19 @@ impl NostrRootResolver {
         Ok(Self::build_tree_filter(pubkey, &tree_name))
     }
 
+    /// Validate that a signed event is a usable root for exactly this key.
+    ///
+    /// Pubsub consumers can use this before caching an event obtained from an
+    /// untrusted transport. Private roots require resolver keys and therefore
+    /// are not considered usable by this transport-neutral check.
+    pub fn event_matches_key(key: &str, event: &Event) -> Result<bool, ResolverError> {
+        let (pubkey, tree_name) = Self::parse_key(key)?;
+        let event = VerifiedEvent::try_from(event.clone()).map_err(ResolverError::Other)?;
+        Ok(event.as_event().pubkey == pubkey
+            && is_matching_tree_event(&event, &tree_name)
+            && Self::cid_from_event_with_keys(event.as_event(), None).is_some())
+    }
+
     /// Ingest a signed root event obtained from any transport. Returns true
     /// only when it advances the replaceable root for its author and tree.
     pub async fn ingest_event(&self, event: Event) -> Result<bool, ResolverError> {
