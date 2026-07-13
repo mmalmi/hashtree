@@ -5,18 +5,12 @@ use hashtree_cli::{
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, RootResolver,
 };
 use hashtree_core::Cid;
+use hashtree_updater::UpdateRef;
 use std::path::PathBuf;
 
 /// Resolved CID with optional path.
 pub(crate) struct ResolvedCid {
     pub(crate) cid: hashtree_core::Cid,
-    pub(crate) path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedPublishedTarget {
-    pub(crate) npub: String,
-    pub(crate) tree_name: String,
     pub(crate) path: Option<String>,
 }
 
@@ -29,51 +23,8 @@ pub(crate) struct ResolveOptions {
     pub(crate) data_dir: Option<PathBuf>,
 }
 
-fn decode_target_segment(segment: &str) -> String {
-    let bytes = segment.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let hi = bytes[index + 1] as char;
-            let lo = bytes[index + 2] as char;
-            if let (Some(hi), Some(lo)) = (hi.to_digit(16), lo.to_digit(16)) {
-                decoded.push(((hi << 4) | lo) as u8);
-                index += 3;
-                continue;
-            }
-        }
-
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-
-    String::from_utf8(decoded).unwrap_or_else(|_| segment.to_string())
-}
-
-pub(crate) fn parse_published_target(input: &str) -> Option<ParsedPublishedTarget> {
-    let input = input.strip_prefix("htree://").unwrap_or(input);
-    let input = input.split('#').next().unwrap_or(input);
-    let input = input.split('?').next().unwrap_or(input).trim_matches('/');
-
-    if !input.starts_with("npub1") {
-        return None;
-    }
-
-    let mut parts = input.split('/');
-    let npub = parts.next()?;
-    let tree_name = decode_target_segment(parts.next()?);
-    if tree_name.is_empty() {
-        return None;
-    }
-
-    let path_parts = parts.map(decode_target_segment).collect::<Vec<_>>();
-    Some(ParsedPublishedTarget {
-        npub: npub.to_string(),
-        tree_name,
-        path: (!path_parts.is_empty()).then(|| path_parts.join("/")),
-    })
+pub(crate) fn parse_published_target(input: &str) -> Option<UpdateRef> {
+    UpdateRef::parse(input).ok()
 }
 
 /// Resolve a CID input which can be:
@@ -135,7 +86,7 @@ pub(crate) async fn resolve_cid_input_with_opts(
 
     // Check if it looks like an npub path (npub1.../name or npub1.../name/path).
     if let Some(parsed_target) = parse_published_target(normalized_input) {
-        let key = format!("{}/{}", parsed_target.npub, parsed_target.tree_name);
+        let key = parsed_target.resolver_key();
         eprintln!("Resolving {}...", key);
 
         let mut config = NostrResolverConfig::default();
@@ -193,7 +144,7 @@ pub(crate) async fn resolve_cid_input_with_opts(
 }
 
 fn resolve_cached_published_target(
-    parsed_target: &ParsedPublishedTarget,
+    parsed_target: &UpdateRef,
     opts: &ResolveOptions,
 ) -> Result<Option<ResolvedCid>> {
     let Some(data_dir) = opts.data_dir.as_deref() else {
@@ -209,7 +160,7 @@ fn resolve_cached_published_target(
 }
 
 fn resolve_cached_published_target_from_cache(
-    parsed_target: &ParsedPublishedTarget,
+    parsed_target: &UpdateRef,
     cached: Option<CachedRoot>,
 ) -> Result<Option<ResolvedCid>> {
     let Some(cached) = cached else {
@@ -246,7 +197,7 @@ mod tests {
         let hash = "11".repeat(32);
         let key = "22".repeat(32);
 
-        let parsed_target = ParsedPublishedTarget {
+        let parsed_target = UpdateRef {
             npub,
             tree_name: "mount-test".to_string(),
             path: Some("nested/file.txt".to_string()),

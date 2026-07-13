@@ -271,7 +271,7 @@ pub(crate) async fn mount_fuse(
     let published_target = parse_published_target(&base);
     let nostr_key = published_target
         .as_ref()
-        .map(|target| format!("{}/{}", target.npub, target.tree_name));
+        .map(|target| target.resolver_key());
     let visibility_str = mount_visibility.as_str().to_string();
 
     let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;

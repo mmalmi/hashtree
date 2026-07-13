@@ -16,8 +16,8 @@ use super::lists::{
     update_mute_list_file_with_status, MuteEntry, MuteUpdate,
 };
 use super::resolve::{
-    parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ParsedPublishedTarget,
-    ResolveOptions, ResolvedCid,
+    parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ResolveOptions,
+    ResolvedCid,
 };
 #[cfg(feature = "fuse")]
 use super::run::{
@@ -44,6 +44,7 @@ use clap::{CommandFactory, Parser};
 use hashtree_cli::config::ServerMode;
 use hashtree_cli::{Config as AppConfig, FetchConfig, Fetcher, HashtreeStore, NostrToBech32};
 use hashtree_core::{nhash_decode, Cid};
+use hashtree_updater::UpdateRef;
 use nostr::{Keys, Kind};
 #[cfg(feature = "fuse")]
 use std::io;
@@ -629,7 +630,7 @@ fn test_parse_published_target_decodes_slash_containing_tree_names() {
         parse_published_target(
             "htree://npub1owner/releases%2Fnostr-vpn/v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip",
         ),
-        Some(ParsedPublishedTarget {
+        Some(UpdateRef {
             npub: "npub1owner".to_string(),
             tree_name: "releases/nostr-vpn".to_string(),
             path: Some("v0.3.0/assets/nostr-vpn-v0.3.0-macos-arm64.zip".to_string()),

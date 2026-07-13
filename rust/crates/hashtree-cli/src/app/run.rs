@@ -221,10 +221,7 @@ fn pinned_ref_key_for_input(input: &str) -> Option<String> {
     if parsed_target.path.is_some() {
         return None;
     }
-    Some(format!(
-        "{}/{}",
-        parsed_target.npub, parsed_target.tree_name
-    ))
+    Some(parsed_target.resolver_key())
 }
 
 pub(crate) fn stored_published_pin_hash(
@@ -256,7 +253,7 @@ pub(crate) async fn pin_input_target(
         let ref_key = parsed_target
             .path
             .is_none()
-            .then(|| format!("{}/{}", parsed_target.npub, parsed_target.tree_name));
+            .then(|| parsed_target.resolver_key());
         (parsed_target.npub.clone(), Some(name), ref_key)
     } else {
         ("pinned".to_string(), Some(normalized_input), None)
