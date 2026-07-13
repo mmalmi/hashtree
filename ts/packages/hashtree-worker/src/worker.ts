@@ -31,6 +31,7 @@ import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabiliti
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
 import { streamFileRangeChunks } from './mediaStreaming.js';
+import { parseHttpByteRange } from './httpRange.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
 
 const DEFAULT_STORE_NAME = 'hashtree-worker';
@@ -130,65 +131,6 @@ interface MediaErrorResponse {
   type: 'error';
   requestId: string;
   message: string;
-}
-
-interface ResolvedByteRange {
-  start: number;
-  endInclusive: number;
-}
-
-type ParsedHttpRange =
-  | { kind: 'range'; range: ResolvedByteRange }
-  | { kind: 'unsatisfiable' }
-  | { kind: 'unsupported' };
-
-function parseHttpByteRange(
-  rangeHeader: string | null | undefined,
-  totalSize: number,
-): ParsedHttpRange {
-  if (!rangeHeader) return { kind: 'unsupported' };
-  const bytesRange = rangeHeader.startsWith('bytes=')
-    ? rangeHeader.slice('bytes='.length)
-    : null;
-  if (!bytesRange || bytesRange.includes(',')) return { kind: 'unsupported' };
-  if (totalSize <= 0) return { kind: 'unsatisfiable' };
-
-  const parts = bytesRange.split('-', 2);
-  if (parts.length !== 2) return { kind: 'unsupported' };
-  const [startPart, endPart] = parts;
-
-  if (!startPart) {
-    const suffixLength = Number.parseInt(endPart, 10);
-    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
-      return { kind: 'unsatisfiable' };
-    }
-    const clampedSuffix = Math.min(suffixLength, totalSize);
-    return {
-      kind: 'range',
-      range: {
-        start: totalSize - clampedSuffix,
-        endInclusive: totalSize - 1,
-      },
-    };
-  }
-
-  const start = Number.parseInt(startPart, 10);
-  if (!Number.isFinite(start) || start < 0 || start >= totalSize) {
-    return { kind: 'unsatisfiable' };
-  }
-
-  const endInclusive = endPart ? Number.parseInt(endPart, 10) : totalSize - 1;
-  if (!Number.isFinite(endInclusive) || endInclusive < start) {
-    return { kind: 'unsatisfiable' };
-  }
-
-  return {
-    kind: 'range',
-    range: {
-      start,
-      endInclusive: Math.min(endInclusive, totalSize - 1),
-    },
-  };
 }
 
 const MEDIA_CHUNK_SIZE = 256 * 1024;
@@ -595,8 +537,7 @@ async function requestP2PPeerIds(): Promise<string[]> {
   }
 
   const requestId = nextP2PPeerListRequestId();
-  let pending: Promise<string[]>;
-  pending = new Promise<string[]>((resolve) => {
+  const pending = new Promise<string[]>((resolve) => {
     pendingP2PPeerLists.set(requestId, { resolve });
     respond({ type: 'p2pPeerList', requestId });
   }).finally(() => {
@@ -973,14 +914,12 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       });
     }
 
-    let emittedChunks = 0;
     for (let offset = 0; offset < startupChunk.byteLength; offset += MEDIA_CHUNK_SIZE) {
       const chunk = startupChunk.slice(offset, offset + MEDIA_CHUNK_SIZE);
       if (chunk.byteLength === 0) {
         continue;
       }
       startupBytesSent += chunk.byteLength;
-      emittedChunks += 1;
       if (offset === 0) {
         emitDiagnostic('debug', 'media', 'first-chunk', 'Emitting first unbounded media chunk', {
           requestId: request.requestId,
@@ -998,7 +937,6 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
 
     const stream = readFileStreamWithRetries(tree, cid, startupBytesSent, request.requestId, MEDIA_STREAM_PREFETCH);
     for await (const chunk of stream) {
-      emittedChunks += 1;
       const transferableChunk = cloneTransferableBytes(chunk);
       const chunkMessage: MediaChunkResponse = {
         type: 'chunk',
@@ -1201,9 +1139,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       });
     }
 
-    let emittedChunks = 0;
     if (firstChunk) {
-      emittedChunks += 1;
       emitDiagnostic('debug', 'media', 'first-chunk', 'Emitting first ranged media chunk', {
         requestId: request.requestId,
         bytes: firstChunk.byteLength,
@@ -1221,7 +1157,6 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       if (!chunk) {
         break;
       }
-      emittedChunks += 1;
       const transferableChunk = cloneTransferableBytes(chunk);
       const chunkMessage: MediaChunkResponse = {
         type: 'chunk',
