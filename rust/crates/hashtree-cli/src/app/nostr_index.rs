@@ -9,7 +9,7 @@ use hashtree_nostr::{
     CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
     StoredNostrEvent, VerifiedEvent,
 };
-use nostr::{Event, JsonUtil, Keys};
+use nostr::{Event, Keys};
 use nostr_sdk::{Event as NostrSdkEvent, Filter as NostrFilter};
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
@@ -393,25 +393,12 @@ async fn sync_socialgraph_profile_index_from_root(
 
     let parsed = events
         .into_iter()
-        .map(stored_event_to_nostr_event)
-        .collect::<Result<Vec<_>>>()?;
+        .map(|event| event.to_nostr_sdk_event())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     graph_store
         .sync_profile_index_for_events(&parsed)
         .context("sync crawled profile search index")?;
     Ok(())
-}
-
-fn stored_event_to_nostr_event(event: StoredNostrEvent) -> Result<Event> {
-    let value = serde_json::json!({
-        "id": event.id,
-        "pubkey": event.pubkey,
-        "created_at": event.created_at,
-        "kind": event.kind,
-        "tags": event.tags,
-        "content": event.content,
-        "sig": event.sig,
-    });
-    Event::from_json(value.to_string()).context("decode stored nostr event")
 }
 
 async fn warm_social_graph(

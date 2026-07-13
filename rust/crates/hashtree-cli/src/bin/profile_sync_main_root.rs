@@ -8,8 +8,8 @@ use hashtree_cli::config::{ensure_keys, parse_npub, pubkey_bytes};
 use hashtree_cli::socialgraph::{self, SocialGraphBackend};
 use hashtree_cli::{Config, HashtreeStore};
 use hashtree_core::{nhash_decode, nhash_encode_full, Cid, NHashData};
-use hashtree_nostr::{ListEventsOptions, NostrEventStore, StoredNostrEvent};
-use nostr::{Event, JsonUtil, Kind};
+use hashtree_nostr::{ListEventsOptions, NostrEventStore};
+use nostr::Kind;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -37,19 +37,6 @@ fn resolve_root_text(data_dir: &Path, explicit: Option<String>) -> Result<String
     }
 
     anyhow::bail!("no root provided and no latest/checkpoint root file found")
-}
-
-fn stored_event_to_nostr_event(event: StoredNostrEvent) -> Result<Event> {
-    let value = serde_json::json!({
-        "id": event.id,
-        "pubkey": event.pubkey,
-        "created_at": event.created_at,
-        "kind": event.kind,
-        "tags": event.tags,
-        "content": event.content,
-        "sig": event.sig,
-    });
-    Event::from_json(value.to_string()).context("decode stored nostr event")
 }
 
 fn cid_to_nhash(cid: &Cid) -> Result<String> {
@@ -110,8 +97,8 @@ fn main() -> Result<()> {
 
     let events = stored
         .into_iter()
-        .map(stored_event_to_nostr_event)
-        .collect::<Result<Vec<_>>>()?;
+        .map(|event| event.to_nostr_sdk_event())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     graph_store
         .sync_profile_index_for_events(&events)

@@ -711,7 +711,7 @@ impl SocialGraphStore {
             events.extend(
                 stored
                     .into_iter()
-                    .map(nostr_event_from_stored)
+                    .map(stored_event_to_nostr_event)
                     .collect::<Result<Vec<_>>>()?,
             );
         }
@@ -752,7 +752,7 @@ impl SocialGraphStore {
             events.extend(
                 stored
                     .into_iter()
-                    .map(nostr_event_from_stored)
+                    .map(stored_event_to_nostr_event)
                     .collect::<Result<Vec<_>>>()?,
             );
         }
@@ -1459,21 +1459,8 @@ fn stored_event_from_nostr(event: &Event) -> StoredNostrEvent {
     }
 }
 
-fn nostr_event_from_stored(event: StoredNostrEvent) -> Result<Event> {
-    let value = serde_json::json!({
-        "id": event.id,
-        "pubkey": event.pubkey,
-        "created_at": event.created_at,
-        "kind": event.kind,
-        "tags": event.tags,
-        "content": event.content,
-        "sig": event.sig,
-    });
-    Event::from_json(value.to_string()).context("decode stored nostr event")
-}
-
 pub(crate) fn stored_event_to_nostr_event(event: StoredNostrEvent) -> Result<Event> {
-    nostr_event_from_stored(event)
+    Ok(event.to_nostr_sdk_event()?)
 }
 
 fn encode_cid(cid: &Cid) -> Result<Vec<u8>> {

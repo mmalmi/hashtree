@@ -51,7 +51,7 @@ impl EventIndexBucket {
     fn load_event_by_id(&self, root: &Cid, event_id: &str) -> Result<Option<Event>> {
         let stored = block_on(self.event_store.get_by_id(Some(root), event_id))
             .map_err(map_event_store_error)?;
-        stored.map(nostr_event_from_stored).transpose()
+        stored.map(stored_event_to_nostr_event).transpose()
     }
 
     fn load_events_for_author(
@@ -87,7 +87,7 @@ impl EventIndexBucket {
         };
         stored
             .into_iter()
-            .map(nostr_event_from_stored)
+            .map(stored_event_to_nostr_event)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -107,7 +107,7 @@ impl EventIndexBucket {
         .map_err(map_event_store_error)?;
         stored
             .into_iter()
-            .map(nostr_event_from_stored)
+            .map(stored_event_to_nostr_event)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -129,7 +129,7 @@ impl EventIndexBucket {
         .map_err(map_event_store_error)?;
         stored
             .into_iter()
-            .map(nostr_event_from_stored)
+            .map(stored_event_to_nostr_event)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -147,7 +147,7 @@ impl EventIndexBucket {
         .map_err(map_event_store_error)?;
         stored
             .into_iter()
-            .map(nostr_event_from_stored)
+            .map(stored_event_to_nostr_event)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -180,7 +180,7 @@ impl EventIndexBucket {
             .map_err(map_event_store_error)?;
             let next_events = stored
                 .into_iter()
-                .map(nostr_event_from_stored)
+                .map(stored_event_to_nostr_event)
                 .collect::<Result<Vec<_>>>()?;
             extend_unique_events(&mut events, &mut seen, next_events, limit);
         }
@@ -313,7 +313,7 @@ impl EventIndexBucket {
                     ))
                     .map_err(map_event_store_error)?
                     {
-                        events.push(nostr_event_from_stored(stored)?);
+                        events.push(stored_event_to_nostr_event(stored)?);
                     }
                 }
             }
@@ -330,7 +330,7 @@ impl EventIndexBucket {
                 ))
                 .map_err(map_event_store_error)?
                 {
-                    events.push(nostr_event_from_stored(stored)?);
+                    events.push(stored_event_to_nostr_event(stored)?);
                 }
             }
             return Ok(Some(dedupe_events(events)));

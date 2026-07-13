@@ -75,6 +75,13 @@ pub struct StoredNostrEvent {
     pub sig: String,
 }
 
+impl StoredNostrEvent {
+    pub fn to_nostr_sdk_event(&self) -> Result<Event, NostrEventStoreError> {
+        let bytes = serde_json::to_vec(self)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
 /// A Nostr SDK event whose id and Schnorr signature have been checked locally.
 #[derive(Debug, Clone)]
 pub struct VerifiedEvent(Event);
@@ -126,7 +133,7 @@ impl VerifiedStoredNostrEvent {
     }
 
     pub fn to_nostr_sdk_event(&self) -> Result<VerifiedEvent, NostrEventStoreError> {
-        VerifiedEvent::try_from(nostr_sdk_event_from_stored_event(&self.event)?)
+        VerifiedEvent::try_from(self.event.to_nostr_sdk_event()?)
     }
 }
 
@@ -135,7 +142,7 @@ impl TryFrom<StoredNostrEvent> for VerifiedStoredNostrEvent {
 
     fn try_from(event: StoredNostrEvent) -> Result<Self, Self::Error> {
         let event = normalize_signed_event(event)?;
-        let sdk_event = nostr_sdk_event_from_stored_event(&event)?;
+        let sdk_event = event.to_nostr_sdk_event()?;
         verify_nostr_sdk_event(&sdk_event)?;
         Ok(Self { event })
     }
@@ -416,13 +423,6 @@ pub fn stored_event_from_nostr_sdk_event(event: &Event) -> StoredNostrEvent {
         content: event.content.clone(),
         sig: event.sig.to_string(),
     }
-}
-
-fn nostr_sdk_event_from_stored_event(
-    event: &StoredNostrEvent,
-) -> Result<Event, NostrEventStoreError> {
-    let bytes = serde_json::to_vec(event)?;
-    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn verify_nostr_sdk_event(event: &Event) -> Result<(), NostrEventStoreError> {
