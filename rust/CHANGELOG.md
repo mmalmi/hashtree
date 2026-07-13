@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.79 - 2026-07-13
+
+### Changed
+
+- Routed browser Hashtree mesh traffic through the external FIPS provider and
+  removed the duplicate direct WebRTC worker transport.
+- Simplified shared Rust and TypeScript storage, indexing, Git, Nostr, and
+  updater paths while preserving their existing public behavior.
+
+### Fixed
+
+- Hardened Git tree and pack transfer against incomplete or transient reads,
+  bounded relay publication, and let normal pushes rebuild a published root
+  only after a definitive `404`/not-found result.
+
 ## 0.2.78 - 2026-07-11
 
 ### Changed

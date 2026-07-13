@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-resolver"
-version = "0.2.78"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 description = "Root resolver for hashtree - maps human-readable keys to merkle root hashes"
 
 [dependencies]
-hashtree-core = { version = "0.2.72", path = "../hashtree-core" }
+hashtree-core.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }

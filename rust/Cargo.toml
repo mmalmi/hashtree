@@ -4,7 +4,7 @@ exclude = ["vendor/fuser"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.77"
+version = "0.2.79"
 edition = "2021"
 license = "MIT"
 repository = "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree"
@@ -29,21 +29,21 @@ futures = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 
 # Internal (path for local dev, version for publishing)
-hashtree-core = { version = "0.2.77", path = "crates/hashtree-core" }
-hashtree-index = { version = "0.2.77", path = "crates/hashtree-index" }
-hashtree-collection = { version = "0.2.77", path = "crates/hashtree-collection" }
-hashtree-lmdb = { version = "0.2.77", path = "crates/hashtree-lmdb" }
-hashtree-s3 = { version = "0.2.77", path = "crates/hashtree-s3" }
-hashtree-blossom = { version = "0.2.77", path = "crates/hashtree-blossom" }
-hashtree-sim = { version = "0.2.77", path = "crates/hashtree-sim" }
-hashtree-resolver = { version = "0.2.78", path = "crates/hashtree-resolver" }
-hashtree-config = { version = "0.2.77", path = "crates/hashtree-config" }
-hashtree-fs = { version = "0.2.77", path = "crates/hashtree-fs" }
-hashtree-nostr = { version = "0.2.77", path = "crates/hashtree-nostr" }
-hashtree-nostr-pubsub = { version = "0.2.77", path = "crates/hashtree-nostr-pubsub" }
-hashtree-network = { version = "0.2.77", path = "crates/hashtree-network" }
-hashtree-fips-transport = { version = "0.2.77", path = "crates/hashtree-fips-transport" }
-hashtree-updater = { version = "0.2.78", path = "crates/hashtree-updater" }
+hashtree-core = { version = "0.2.79", path = "crates/hashtree-core" }
+hashtree-index = { version = "0.2.79", path = "crates/hashtree-index" }
+hashtree-collection = { version = "0.2.79", path = "crates/hashtree-collection" }
+hashtree-lmdb = { version = "0.2.79", path = "crates/hashtree-lmdb" }
+hashtree-s3 = { version = "0.2.79", path = "crates/hashtree-s3" }
+hashtree-blossom = { version = "0.2.79", path = "crates/hashtree-blossom" }
+hashtree-sim = { version = "0.2.79", path = "crates/hashtree-sim" }
+hashtree-resolver = { version = "0.2.79", path = "crates/hashtree-resolver" }
+hashtree-config = { version = "0.2.79", path = "crates/hashtree-config" }
+hashtree-fs = { version = "0.2.79", path = "crates/hashtree-fs" }
+hashtree-nostr = { version = "0.2.79", path = "crates/hashtree-nostr" }
+hashtree-nostr-pubsub = { version = "0.2.79", path = "crates/hashtree-nostr-pubsub" }
+hashtree-network = { version = "0.2.79", path = "crates/hashtree-network" }
+hashtree-fips-transport = { version = "0.2.79", path = "crates/hashtree-fips-transport" }
+hashtree-updater = { version = "0.2.79", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.2.57", default-features = false }
 nostr-pubsub = "0.1.3"
 nostr-pubsub-fips = "0.1.3"

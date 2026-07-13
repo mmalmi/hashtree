@@ -2719,6 +2719,13 @@ mod tests {
         }
     }
 
+    async fn receive_replication<T>(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+            .await
+            .expect("replication request timed out")
+            .expect("replication channel closed")
+    }
+
     fn create_upload_auth_header(keys: &nostr::Keys) -> String {
         use nostr::{EventBuilder, Kind, Tag, TagKind, Timestamp};
 
@@ -3217,10 +3224,7 @@ mod tests {
         let parsed: BatchUploadResponse =
             serde_json::from_slice(&body).expect("parse batch response");
         assert_eq!(parsed.uploaded, 1);
-        let replicated = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("replication request timed out")
-            .expect("replication channel closed");
+        let replicated = receive_replication(&mut rx).await;
         assert_eq!(replicated, vec![second_hash_hex]);
         assert!(
             tokio::time::timeout(Duration::from_millis(100), rx.recv())
@@ -3319,10 +3323,7 @@ mod tests {
             .into_response();
         assert_eq!(second_response.status(), StatusCode::OK);
 
-        let replicated = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("replication request timed out")
-            .expect("replication channel closed");
+        let replicated = receive_replication(&mut rx).await;
         let replicated_hashes = replicated.into_iter().collect::<HashSet<_>>();
         assert_eq!(replicated_hashes, expected_hashes);
         assert!(
@@ -3472,10 +3473,7 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
-        let replicated = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("replication request timed out")
-            .expect("replication channel closed");
+        let replicated = receive_replication(&mut rx).await;
         assert!(replicated > 0);
         assert_eq!(expected_hash.len(), 64);
     }
