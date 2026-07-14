@@ -307,8 +307,13 @@ export class HashtreeWorkerClient {
             throw new Error(res.error);
         }
     }
-    async getBlob(hashHex) {
-        const res = await this.request({ type: 'getBlob', hashHex });
+    async getBlob(hashHex, options = {}) {
+        const res = await this.request({
+            type: 'getBlob',
+            hashHex,
+            sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
+            skipPrimary: options.skipPrimary,
+        });
         if (res.type !== 'blob') {
             throw new Error('Unexpected response for getBlob');
         }
@@ -316,6 +321,21 @@ export class HashtreeWorkerClient {
             throw new Error(res.error || 'Blob not found');
         }
         return { data: res.data, source: res.source };
+    }
+    async hasBlob(hashHex, options = {}) {
+        const res = await this.request({
+            type: 'hasBlob',
+            hashHex,
+            sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
+            skipPrimary: options.skipPrimary,
+        });
+        if (res.type !== 'availability') {
+            throw new Error('Unexpected response for hasBlob');
+        }
+        if (res.error) {
+            throw new Error(res.error);
+        }
+        return { available: res.available, size: res.size, source: res.source };
     }
     async getBlobForPeer(hashHex) {
         const res = await this.request({ type: 'getBlob', hashHex, forPeer: true });

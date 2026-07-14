@@ -50,9 +50,20 @@ export declare class HashtreeWorkerClient {
         nhash: string;
     }>;
     cancelPutBlobStream(streamId: string): Promise<void>;
-    getBlob(hashHex: string): Promise<{
+    getBlob(hashHex: string, options?: {
+        sourceIds?: readonly string[];
+        skipPrimary?: boolean;
+    }): Promise<{
         data: Uint8Array;
         source: BlobSource;
+    }>;
+    hasBlob(hashHex: string, options?: {
+        sourceIds?: readonly string[];
+        skipPrimary?: boolean;
+    }): Promise<{
+        available: boolean;
+        size?: number;
+        source?: BlobSource;
     }>;
     getBlobForPeer(hashHex: string): Promise<Uint8Array | null>;
     setBlossomServers(servers: BlossomServerConfig[]): Promise<void>;

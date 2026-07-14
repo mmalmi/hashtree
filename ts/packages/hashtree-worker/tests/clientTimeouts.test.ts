@@ -66,6 +66,36 @@ class FakeWorker {
   }
 }
 
+class GetBlobWorker extends FakeWorker {
+  static instance: GetBlobWorker | null = null;
+
+  constructor() {
+    super();
+    GetBlobWorker.instance = this;
+  }
+
+  override postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
+    super.postMessage(message, transfer);
+    if (message.type === 'getBlob') {
+      this.emitMessage({
+        type: 'blob',
+        id: message.id,
+        data: new Uint8Array([1]),
+        source: 'blossom',
+      });
+    }
+    if (message.type === 'hasBlob') {
+      this.emitMessage({
+        type: 'availability',
+        id: message.id,
+        available: true,
+        size: 42,
+        source: 'blossom',
+      });
+    }
+  }
+}
+
 describe('HashtreeWorkerClient timeouts', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -101,6 +131,36 @@ describe('HashtreeWorkerClient timeouts', () => {
     await vi.advanceTimersByTimeAsync(30_001);
     expect(getError?.message).toContain('Worker request timed out: getBlob');
 
+    await client.close();
+  });
+
+  it('passes scoped read sources to getBlob', async () => {
+    const client = new HashtreeWorkerClient(GetBlobWorker as unknown as new () => Worker);
+
+    await client.getBlob('deadbeef', { sourceIds: ['blossom'] });
+
+    expect(GetBlobWorker.instance?.postedMessages.at(-1)?.message).toMatchObject({
+      type: 'getBlob',
+      hashHex: 'deadbeef',
+      sourceIds: ['blossom'],
+    });
+    await client.close();
+  });
+
+  it('checks scoped blob availability without downloading it', async () => {
+    const client = new HashtreeWorkerClient(GetBlobWorker as unknown as new () => Worker);
+
+    await expect(client.hasBlob('cafebabe', { sourceIds: ['blossom'] })).resolves.toEqual({
+      available: true,
+      size: 42,
+      source: 'blossom',
+    });
+
+    expect(GetBlobWorker.instance?.postedMessages.at(-1)?.message).toMatchObject({
+      type: 'hasBlob',
+      hashHex: 'cafebabe',
+      sourceIds: ['blossom'],
+    });
     await client.close();
   });
 

@@ -390,8 +390,16 @@ export class HashtreeWorkerClient {
     }
   }
 
-  async getBlob(hashHex: string): Promise<{ data: Uint8Array; source: BlobSource }> {
-    const res = await this.request({ type: 'getBlob', hashHex });
+  async getBlob(
+    hashHex: string,
+    options: { sourceIds?: readonly string[]; skipPrimary?: boolean } = {},
+  ): Promise<{ data: Uint8Array; source: BlobSource }> {
+    const res = await this.request({
+      type: 'getBlob',
+      hashHex,
+      sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
+      skipPrimary: options.skipPrimary,
+    });
     if (res.type !== 'blob') {
       throw new Error('Unexpected response for getBlob');
     }
@@ -399,6 +407,25 @@ export class HashtreeWorkerClient {
       throw new Error(res.error || 'Blob not found');
     }
     return { data: res.data, source: res.source };
+  }
+
+  async hasBlob(
+    hashHex: string,
+    options: { sourceIds?: readonly string[]; skipPrimary?: boolean } = {},
+  ): Promise<{ available: boolean; size?: number; source?: BlobSource }> {
+    const res = await this.request({
+      type: 'hasBlob',
+      hashHex,
+      sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
+      skipPrimary: options.skipPrimary,
+    });
+    if (res.type !== 'availability') {
+      throw new Error('Unexpected response for hasBlob');
+    }
+    if (res.error) {
+      throw new Error(res.error);
+    }
+    return { available: res.available, size: res.size, source: res.source };
   }
 
   async getBlobForPeer(hashHex: string): Promise<Uint8Array | null> {

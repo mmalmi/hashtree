@@ -60,6 +60,7 @@ let storage: IdbBlobStorage | null = null;
 let blossom: BlossomTransport | null = null;
 let meshStore: MeshRouterStore | null = null;
 let tree: HashTree | null = null;
+let mediaTree: HashTree | null = null;
 let nostrRelays: string[] = [];
 let probeInterval: ReturnType<typeof setInterval> | null = null;
 let probeIntervalMs = DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;
@@ -425,6 +426,7 @@ function resetState(): void {
   blossom = null;
   meshStore = null;
   tree = null;
+  mediaTree = null;
   for (const pending of pendingP2PFetches.values()) {
     if (pending.slowLogId) {
       clearTimeout(pending.slowLogId);
@@ -643,6 +645,31 @@ async function loadBlobData(
   return { data: result.data, source, sourceId: result.sourceId };
 }
 
+async function hasBlobData(
+  hashHex: string,
+  options: MeshRouterGetOptions = {},
+): Promise<{ available: boolean; size?: number; source?: BlobSource }> {
+  if (!options.skipPrimary && storage) {
+    const cached = await storage.get(hashHex);
+    if (cached) {
+      return { available: true, size: cached.byteLength, source: 'idb' };
+    }
+  }
+  const sourceIds = options.sourceIds;
+  const allowsBlossom = !sourceIds || sourceIds.some((sourceId) => (
+    sourceId === 'blossom' || sourceId.startsWith('blossom:')
+  ));
+  const blossomStat = allowsBlossom && blossom ? await blossom.stat(hashHex) : null;
+  if (blossomStat) {
+    return {
+      available: true,
+      size: blossomStat.size ?? undefined,
+      source: 'blossom',
+    };
+  }
+  return { available: false };
+}
+
 async function loadPeerBlobData(hashHex: string): Promise<LoadedBlobData | null> {
   const trustedEncryptedHash = shouldServeHashToPeer(hashHex, peerShareableEncryptedHashes);
   const trustedPublishedHash = shouldServeHashToPeer(hashHex, peerShareablePublishedHashes);
@@ -749,6 +776,29 @@ function createMeshStore(): MeshRouterStore {
   });
 }
 
+function createMediaStore(): Store {
+  return {
+    put: async (hash: Hash, data: Uint8Array): Promise<boolean> => {
+      if (!meshStore) return false;
+      return await meshStore.put(hash, data);
+    },
+    get: async (hash: Hash): Promise<Uint8Array | null> => {
+      if (!meshStore) return null;
+      // Interactive media must not stall behind a peer miss. The routed read
+      // still checks the local primary store before the configured Blossoms.
+      return (await meshStore.getDetailed(hash, { sourceIds: ['blossom'] }))?.data ?? null;
+    },
+    has: async (hash: Hash): Promise<boolean> => {
+      if (!meshStore) return false;
+      return await meshStore.has(hash);
+    },
+    delete: async (hash: Hash): Promise<boolean> => {
+      if (!meshStore) return false;
+      return await meshStore.delete(hash);
+    },
+  };
+}
+
 async function getPlaintextFileSize(fileCid: CID): Promise<number | null> {
   if (!tree) return null;
 
@@ -796,6 +846,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     postMediaError(port, request.requestId, 'Worker not initialized');
     return;
   }
+  const requestTree = mediaTree ?? tree;
 
   let rootCid: CID;
   try {
@@ -823,7 +874,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       requestId: request.requestId,
       path: requestedPath,
     });
-    const rootIsDirectory = await detectMediaDirectoryWithRetries(tree, rootCid, requestedPath, request.requestId);
+    const rootIsDirectory = await detectMediaDirectoryWithRetries(requestTree, rootCid, requestedPath, request.requestId);
     emitDiagnostic('debug', 'media', 'path-resolve-root-kind', 'Resolved root directory status for media request', {
       requestId: request.requestId,
       path: requestedPath,
@@ -834,7 +885,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
         requestId: request.requestId,
         path: requestedPath,
       });
-      const resolved = await resolveMediaPathWithRetries(tree, rootCid, requestedPath, request.requestId);
+      const resolved = await resolveMediaPathWithRetries(requestTree, rootCid, requestedPath, request.requestId);
       if (resolved) {
         cid = resolved.cid;
         emitDiagnostic('debug', 'media', 'path-resolved', 'Resolved media path to a CID', {
@@ -897,7 +948,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     }
 
     const startupChunk = await readStartupMediaRangeWithRetries(
-      tree,
+      requestTree,
       cid,
       0,
       STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES,
@@ -935,7 +986,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       port.postMessage(chunkMessage, [transferableChunk.buffer]);
     }
 
-    const stream = readFileStreamWithRetries(tree, cid, startupBytesSent, request.requestId, MEDIA_STREAM_PREFETCH);
+    const stream = readFileStreamWithRetries(requestTree, cid, startupBytesSent, request.requestId, MEDIA_STREAM_PREFETCH);
     for await (const chunk of stream) {
       const transferableChunk = cloneTransferableBytes(chunk);
       const chunkMessage: MediaChunkResponse = {
@@ -1074,7 +1125,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
         end,
       });
     }
-    const buffered = await readStartupMediaRangeWithRetries(tree, cid, start, end + 1);
+    const buffered = await readStartupMediaRangeWithRetries(requestTree, cid, start, end + 1);
     if (!sendHeadersBeforeFirstChunk) {
       port.postMessage(headersMessage);
       emitDiagnostic('debug', 'media', 'headers-sent', 'Sent media response headers', {
@@ -1114,7 +1165,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
   }
 
   if (!request.head) {
-    const stream = streamFileRangeChunks(tree, cid, start, end, MEDIA_CHUNK_SIZE, MEDIA_STREAM_PREFETCH);
+    const stream = streamFileRangeChunks(requestTree, cid, start, end, MEDIA_CHUNK_SIZE, MEDIA_STREAM_PREFETCH);
     const iterator = stream[Symbol.asyncIterator]();
     let firstChunk: Uint8Array | null = null;
     if (sendHeadersBeforeFirstChunk) {
@@ -1242,6 +1293,7 @@ function init(config: WorkerConfig): void {
   );
   meshStore = createMeshStore();
   tree = new HashTree({ store: meshStore });
+  mediaTree = new HashTree({ store: createMediaStore() });
   publishBlossomBandwidth(blossom.getBandwidthStats());
   emitDiagnostic('info', 'worker', 'initialized', 'Hashtree worker initialized', {
     storeName,
@@ -1622,7 +1674,10 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
       }
       const loaded = req.forPeer
         ? await loadPeerBlobData(req.hashHex)
-        : await loadBlobData(req.hashHex);
+        : await loadBlobData(req.hashHex, {
+          sourceIds: req.sourceIds,
+          skipPrimary: req.skipPrimary,
+        });
       if (!loaded) {
         respond({
           type: 'blob',
@@ -1634,6 +1689,25 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
         return;
       }
       respond({ type: 'blob', id: req.id, data: loaded.data, source: loaded.source });
+      return;
+    }
+
+    case 'hasBlob': {
+      if (!storage) {
+        respond({ type: 'availability', id: req.id, available: false, error: 'Worker not initialized' });
+        return;
+      }
+      const result = await hasBlobData(req.hashHex, {
+        sourceIds: req.sourceIds,
+        skipPrimary: req.skipPrimary,
+      });
+      respond({
+        type: 'availability',
+        id: req.id,
+        available: result.available,
+        size: result.size,
+        source: result.source,
+      });
       return;
     }
 

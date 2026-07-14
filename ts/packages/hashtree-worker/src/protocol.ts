@@ -110,7 +110,21 @@ export type WorkerRequest =
   | { type: 'cancelPutBlobStream'; id: string; streamId: string }
   | { type: 'p2pFetchResult'; id: string; requestId: string; data?: Uint8Array; error?: string }
   | { type: 'p2pPeerListResult'; id: string; requestId: string; peerIds?: string[]; error?: string }
-  | { type: 'getBlob'; id: string; hashHex: string; forPeer?: boolean }
+  | {
+      type: 'getBlob';
+      id: string;
+      hashHex: string;
+      forPeer?: boolean;
+      sourceIds?: string[];
+      skipPrimary?: boolean;
+    }
+  | {
+      type: 'hasBlob';
+      id: string;
+      hashHex: string;
+      sourceIds?: string[];
+      skipPrimary?: boolean;
+    }
   | { type: 'registerMediaPort'; id: string; port: MessagePort }
   | { type: 'setBlossomServers'; id: string; servers: BlossomServerConfig[] }
   | { type: 'setStorageMaxBytes'; id: string; maxBytes: number }
@@ -131,6 +145,7 @@ export type WorkerResponse =
   | { type: 'blockStored'; id: string; block: StoredBlockResult }
   | { type: 'blocksStored'; id: string; blocks: StoredBlockResult[] }
   | { type: 'blob'; id: string; data?: Uint8Array; source?: BlobSource; error?: string }
+  | { type: 'availability'; id: string; available: boolean; size?: number; source?: BlobSource; error?: string }
   | { type: 'cid'; id: string; cid?: CID; error?: string }
   | { type: 'void'; id: string; error?: string }
   | { type: 'storageStats'; id: string; items: number; bytes: number; maxBytes: number; error?: string }

@@ -21,6 +21,9 @@ export declare class BlossomTransport {
     upload(hashHex: string, data: Uint8Array, _mimeType?: string, onUploadProgress?: BlossomUploadCallback): Promise<void>;
     fetch(hashHex: string): Promise<Uint8Array | null>;
     fetchFromServer(hashHex: string, serverUrl: string): Promise<Uint8Array | null>;
+    stat(hashHex: string): Promise<{
+        size: number | null;
+    } | null>;
     private fetchInternal;
 }
 //# sourceMappingURL=blossomTransport.d.ts.map

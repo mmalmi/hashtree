@@ -143,6 +143,14 @@ export type WorkerRequest = {
     id: string;
     hashHex: string;
     forPeer?: boolean;
+    sourceIds?: string[];
+    skipPrimary?: boolean;
+} | {
+    type: 'hasBlob';
+    id: string;
+    hashHex: string;
+    sourceIds?: string[];
+    skipPrimary?: boolean;
 } | {
     type: 'registerMediaPort';
     id: string;
@@ -219,6 +227,13 @@ export type WorkerResponse = {
     type: 'blob';
     id: string;
     data?: Uint8Array;
+    source?: BlobSource;
+    error?: string;
+} | {
+    type: 'availability';
+    id: string;
+    available: boolean;
+    size?: number;
     source?: BlobSource;
     error?: string;
 } | {

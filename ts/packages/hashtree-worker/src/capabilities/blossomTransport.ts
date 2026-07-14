@@ -15,10 +15,13 @@ import {
 export const DEFAULT_BLOSSOM_SERVERS: BlossomServerConfig[] = [];
 
 const MAX_CONCURRENT_READ_FETCHES = 32;
+const MAX_CONCURRENT_HEAD_FETCHES = 64;
 const DEFAULT_FETCH_TIMEOUT_MS = 6_000;
 
 let activeReadFetches = 0;
 const pendingReadFetchWaiters: Array<() => void> = [];
+let activeHeadFetches = 0;
+const pendingHeadFetchWaiters: Array<() => void> = [];
 
 export type {
   BlossomBandwidthServerStats,
@@ -98,6 +101,26 @@ function withReadFetchSlot<T>(loader: () => Promise<T>): Promise<T> {
     }
 
     pendingReadFetchWaiters.push(start);
+  });
+}
+
+function withHeadFetchSlot<T>(loader: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const start = () => {
+      activeHeadFetches += 1;
+      Promise.resolve()
+        .then(loader)
+        .then(resolve, reject)
+        .finally(() => {
+          activeHeadFetches = Math.max(0, activeHeadFetches - 1);
+          pendingHeadFetchWaiters.shift()?.();
+        });
+    };
+    if (activeHeadFetches < MAX_CONCURRENT_HEAD_FETCHES) {
+      start();
+      return;
+    }
+    pendingHeadFetchWaiters.push(start);
   });
 }
 
@@ -203,6 +226,27 @@ export class BlossomTransport {
     ).getFromServers(fromHex(hashHex), [normalizedServerUrl]));
     this.inflightFetches.set(key, pending);
     return await pending;
+  }
+
+  async stat(hashHex: string): Promise<{ size: number | null } | null> {
+    for (const server of this.getReadServers()) {
+      try {
+        const response = await withHeadFetchSlot(async () => await fetch(
+          `${server.url}/${hashHex}.bin`,
+          { method: 'HEAD', signal: AbortSignal.timeout(this.fetchTimeoutMs) },
+        ));
+        if (!response.ok) {
+          continue;
+        }
+        const contentLength = Number(response.headers.get('content-length'));
+        return {
+          size: Number.isFinite(contentLength) && contentLength >= 0 ? contentLength : null,
+        };
+      } catch {
+        continue;
+      }
+    }
+    return null;
   }
 
   private fetchInternal(

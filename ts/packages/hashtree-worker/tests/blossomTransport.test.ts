@@ -73,6 +73,26 @@ describe('BlossomTransport.fetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('reads blob size with HEAD without downloading the body', async () => {
+    const hashHex = 'b'.repeat(64);
+    const base = 'https://fast.example';
+    const fetchMock = vi.fn((_input: string | URL, init?: RequestInit) => Promise.resolve({
+      ok: true,
+      headers: new Headers({ 'content-length': '2097168' }),
+      arrayBuffer: async () => {
+        throw new Error('body should not be read');
+      },
+      method: init?.method,
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = new BlossomTransport([{ url: base, read: true, write: false }]);
+
+    await expect(transport.stat(hashHex)).resolves.toEqual({ size: 2_097_168 });
+    expect(fetchMock).toHaveBeenCalledWith(`${base}/${hashHex}.bin`, expect.objectContaining({
+      method: 'HEAD',
+    }));
+  });
+
   it('clears timed-out inflight reads so later retries can refetch', async () => {
     vi.useFakeTimers();
     const hashHex = 'a'.repeat(64);
