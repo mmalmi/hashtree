@@ -764,6 +764,7 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     struct StaticProvider {
         event: Option<VerifiedEvent>,
@@ -1026,15 +1027,22 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
         let (port, handle) = spawn_test_server(store).await?;
-        let body = vec![0_u8; blossom::MAX_SINGLE_UPLOAD_BODY_BYTES + 1];
-
-        let response = reqwest::Client::new()
-            .put(format!("http://127.0.0.1:{port}/upload"))
-            .body(body)
-            .send()
+        let declared_bytes = blossom::MAX_SINGLE_UPLOAD_BODY_BYTES + 1;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        stream
+            .write_all(
+                format!(
+                    "PUT /upload HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {declared_bytes}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
             .await?;
 
-        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        // Send headers only: receiving a response proves authentication ran
+        // before either buffering the declared body or enforcing its limit.
+        let mut status_line = String::new();
+        BufReader::new(stream).read_line(&mut status_line).await?;
+        assert_eq!(status_line.trim_end(), "HTTP/1.1 401 Unauthorized");
         handle.abort();
         Ok(())
     }
