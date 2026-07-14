@@ -1,15 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const script = path.join(repoRoot, 'scripts', 'publish.sh');
-
-test('standalone social graph source stays outside the Hashtree workspace', () => {
-  assert.equal(existsSync(path.join(repoRoot, 'packages', 'nostr-social-graph')), false);
-});
 
 test('publish plan lists hashtree npm packages in dependency order', () => {
   const output = execFileSync(script, ['--plan'], {
@@ -21,7 +16,7 @@ test('publish plan lists hashtree npm packages in dependency order', () => {
     .trim()
     .split('\n')
     .filter(Boolean)
-    .filter((line) => line.startsWith('@'));
+    .filter((line) => line.startsWith('@') || line.startsWith('nostr-social-graph'));
 
   assert.deepEqual(packages, [
     '@hashtree/core',
