@@ -23,7 +23,7 @@
   "scripts": {
     "build": "pnpm run build:hashtree",
     "build:hashtree": "pnpm --filter @hashtree/core build",
-    "test": "pnpm --filter @hashtree/core test",
+    "test": "node --test scripts/*.test.mjs && pnpm --filter @hashtree/core test",
     "test:watch": "pnpm --filter @hashtree/core test:watch",
     "lint": "eslint packages/hashtree/src",
     "lint:fix": "eslint packages/hashtree/src --fix",

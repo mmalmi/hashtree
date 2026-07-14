@@ -8,6 +8,8 @@
   signaling/proxy API, and the `@hashtree/worker/p2p` export. Browser mesh
   traffic now enters both worker clients through the FIPS provider interface,
   with WebRTC owned by `@fips/transport-webrtc`.
+- Removed the stale in-workspace `nostr-social-graph` source copy. The worker's
+  optional integration now resolves the independently published package.
 
 ## 0.2.13 - 2026-06-22
 
