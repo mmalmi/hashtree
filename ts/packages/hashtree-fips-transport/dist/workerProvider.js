@@ -1,39 +1,47 @@
 import { fromHex } from '@hashtree/core';
-import { HashtreeFipsTransport, createFipsNodeEndpoint, } from './index.js';
+import { TcpBlobTransport } from './tcpBlobTransport.js';
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().
  * Peer selection remains dynamic: the provider reads authenticated FIPS links
  * for every request instead of maintaining a second discovery mesh.
  */
 export class FipsWorkerP2PProvider {
-    endpoint;
     transport;
+    node;
+    peers = new Set();
+    unsubscribePeer;
     closed = false;
     constructor(options) {
-        const { node, ...transportOptions } = options;
-        this.endpoint = createFipsNodeEndpoint(node);
-        this.transport = new HashtreeFipsTransport({
-            ...transportOptions,
-            endpoint: this.endpoint,
-            peers: () => this.endpoint.listPeerIds?.() ?? [],
+        this.node = options.node;
+        this.unsubscribePeer = this.node.on('peer', (event) => {
+            if (event.state === 'connected')
+                this.peers.add(event.remotePubkey);
+            else
+                this.peers.delete(event.remotePubkey);
+        });
+        this.transport = new TcpBlobTransport({
+            endpoint: options.node,
+            localStore: options.localStore,
+            timeoutMs: options.requestTimeoutMs,
         });
     }
     fetch(hashHex, peerId) {
         if (this.closed)
             return Promise.resolve(null);
         const hash = parseHash(hashHex);
-        return this.transport.get(hash, peerId ? [peerId] : undefined);
+        return this.transport.get(hash, peerId ? [peerId] : [...this.peers]);
     }
     async listPeerIds() {
         if (this.closed)
             return [];
-        return [...await Promise.resolve(this.endpoint.listPeerIds?.() ?? [])];
+        return [...this.peers];
     }
     close() {
         if (this.closed)
             return;
         this.closed = true;
-        this.transport.close();
+        this.unsubscribePeer();
+        void this.transport.close();
     }
 }
 export function createFipsWorkerP2PProvider(options) {

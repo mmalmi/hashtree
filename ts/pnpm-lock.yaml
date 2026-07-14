@@ -132,6 +132,9 @@ importers:
       '@fips/core':
         specifier: file:../../vendor/fips/fips-core-0.0.21.tgz
         version: file:vendor/fips/fips-core-0.0.21.tgz
+      '@fips/tcp':
+        specifier: github:mmalmi/fips-tcp#353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e&path:ts
+        version: https://codeload.github.com/mmalmi/fips-tcp/tar.gz/353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e#path:ts
       '@fips/transport-webrtc':
         specifier: file:../../vendor/fips/fips-transport-webrtc-0.0.30.tgz
         version: file:vendor/fips/fips-transport-webrtc-0.0.30.tgz(typescript@5.9.3)
@@ -1079,6 +1082,10 @@ packages:
   '@fips/core@file:vendor/fips/fips-core-0.0.21.tgz':
     resolution: {integrity: sha512-vATACaOwheisqkbaIT2ujgw1eKlKCCMb+lGDFt8ojRUvElkQJxA7RnMFEX7cXjlOiA2vmedLsQkxT8hhjosK+g==, tarball: file:vendor/fips/fips-core-0.0.21.tgz}
     version: 0.0.21
+
+  '@fips/tcp@https://codeload.github.com/mmalmi/fips-tcp/tar.gz/353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e#path:ts':
+    resolution: {path: ts, tarball: https://codeload.github.com/mmalmi/fips-tcp/tar.gz/353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e}
+    version: 0.1.0
 
   '@fips/transport-webrtc@file:vendor/fips/fips-transport-webrtc-0.0.30.tgz':
     resolution: {integrity: sha512-E8S+B4HxCBQf0E1sSsRF74gcq4cz9lDuCP4pqRlxdUZ2W0TMX+qoaYA8NnN2rqRWaiDsgVCZmbulBDs3r10sNg==, tarball: file:vendor/fips/fips-transport-webrtc-0.0.30.tgz}
@@ -5035,6 +5042,8 @@ snapshots:
       '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/base': 2.2.0
+
+  '@fips/tcp@https://codeload.github.com/mmalmi/fips-tcp/tar.gz/353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e#path:ts': {}
 
   '@fips/transport-webrtc@file:vendor/fips/fips-transport-webrtc-0.0.30.tgz(typescript@5.9.3)':
     dependencies:

@@ -23,6 +23,7 @@ import {
 } from '@hashtree/mesh';
 
 export { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
+export { TcpBlobTransport, type TcpBlobTransportOptions } from './tcpBlobTransport.js';
 
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
 export const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS = 750;

@@ -42,7 +42,8 @@ describe('FIPS worker P2P provider integration', () => {
         transport: 'memory',
         addr: fipsToHex(sourceIdentity.publicKey),
       });
-      const data = new TextEncoder().encode('worker provider over real FIPS sessions');
+      const data = new Uint8Array(180_000);
+      data.forEach((_, index) => { data[index] = index % 251; });
       const hash = await sha256(data) as Hash;
       await sourceStore.put(hash, data);
 

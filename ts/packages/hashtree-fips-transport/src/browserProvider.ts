@@ -28,8 +28,6 @@ interface BrowserHashtreeFipsProviderBaseOptions {
   relayConnectTimeoutMs?: number;
   iceGatherTimeoutMs?: number;
   requestTimeoutMs?: number;
-  requestRetryIntervalMs?: number;
-  requestMaxAttempts?: number;
   forwarding?: boolean;
   logger?: Logger;
 }
@@ -85,11 +83,9 @@ export async function createBrowserHashtreeFipsProvider(
     logger: options.logger,
   });
   const provider = createFipsWorkerP2PProvider({
-    node: node as unknown as FipsNodeLike,
+    node: node as unknown as FipsNodeLike & FipsNode,
     localStore: options.localStore,
     requestTimeoutMs: options.requestTimeoutMs,
-    requestRetryIntervalMs: options.requestRetryIntervalMs,
-    requestMaxAttempts: options.requestMaxAttempts,
   });
 
   let stopped = false;

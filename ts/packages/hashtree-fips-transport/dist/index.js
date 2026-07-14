@@ -1,6 +1,7 @@
 import { MemoryStore, sha256, toHex, } from '@hashtree/core';
 import { createRequest, createResponse, createFragmentResponse, encodeRequest, encodeResponse, hashToKey, isFragmented, MAX_HTL, MSG_TYPE_REQUEST, MSG_TYPE_RESPONSE, parseMessage, verifyHash, } from '@hashtree/mesh';
 export { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
+export { TcpBlobTransport } from './tcpBlobTransport.js';
 export const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5_500;
 export const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS = 750;
 export const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS = 4;

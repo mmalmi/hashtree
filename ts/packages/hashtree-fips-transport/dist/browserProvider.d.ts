@@ -12,8 +12,6 @@ interface BrowserHashtreeFipsProviderBaseOptions {
     relayConnectTimeoutMs?: number;
     iceGatherTimeoutMs?: number;
     requestTimeoutMs?: number;
-    requestRetryIntervalMs?: number;
-    requestMaxAttempts?: number;
     forwarding?: boolean;
     logger?: Logger;
 }

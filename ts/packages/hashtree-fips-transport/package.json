@@ -45,6 +45,7 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
+    "@fips/tcp": "github:mmalmi/fips-tcp#353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e&path:ts",
     "@hashtree/core": "0.1.8",
     "@hashtree/mesh": "0.1.3"
   },

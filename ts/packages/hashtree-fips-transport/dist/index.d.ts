@@ -1,5 +1,6 @@
 import { type Hash, type Store } from '@hashtree/core';
 export { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
+export { TcpBlobTransport, type TcpBlobTransportOptions } from './tcpBlobTransport.js';
 export declare const DEFAULT_FIPS_REQUEST_TIMEOUT_MS = 5500;
 export declare const DEFAULT_FIPS_REQUEST_RETRY_INTERVAL_MS = 750;
 export declare const DEFAULT_FIPS_REQUEST_MAX_ATTEMPTS = 4;

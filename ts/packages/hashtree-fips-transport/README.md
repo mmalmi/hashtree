@@ -1,10 +1,13 @@
 # @hashtree/fips-transport
 
-Hashtree blob exchange over FIPS endpoint bytes.
+Hashtree blob exchange over reliable TCP/FIPS streams.
 
 This package keeps FIPS below Hashtree: FIPS discovers peers, signals transports,
-and moves opaque bytes between node identities. Hashtree still owns hash
-verification, content routing, HTL, peer choice, hedging, and cache writes.
+and moves authenticated datagrams between node identities. TCP/FIPS owns
+ordered byte delivery, flow control, and segment retransmission. Hashtree still
+owns hash verification, peer choice, one whole-session retry, and cache writes.
+The byte framing is documented in
+[`docs/tcp-fips-blob-v1.md`](../../../docs/tcp-fips-blob-v1.md).
 
 Browser providers join the shared FIPS discovery fabric by default:
 
@@ -23,8 +26,8 @@ export interface FipsEndpoint {
 }
 ```
 
-For a real `@fips/core` node, use the built-in endpoint-data bridge. It maps
-Hashtree blob frames onto FIPS app-owned endpoint bytes:
+The low-level endpoint-data bridge remains available for record-oriented
+embeddings. Managed browser and worker providers use `@fips/tcp` service 39018.
 
 Use it as a local-first store wrapper:
 
@@ -50,14 +53,9 @@ const hash = await sha256(new TextEncoder().encode('hello'));
 const data = await store.get(hash);
 ```
 
-If a peer does not have a blob, it does not need to send a miss. Silence is
-treated as unknown/no response. The transport sends one request to each selected
-peer for a read and lets the caller's existing source selection decide whether
-to ask other peers or fall back to Blossom/local sources.
-
 `HashtreeWorkerClient` can use a managed browser FIPS node directly. FIPS owns
 Nostr peer discovery and WebRTC signaling; this package only carries Hashtree
-blob frames over authenticated FIPS endpoint data:
+blob streams over authenticated FIPS service datagrams:
 
 ```ts
 import { createBrowserHashtreeFipsProvider } from '@hashtree/fips-transport/browser';
@@ -76,6 +74,4 @@ await provider.stop();
 
 The discovery scope is configurable for isolated deployments, but applications
 should normally stay on `fips-overlay-v1` so they share the generic FIPS transit
-fabric instead of creating a parallel Hashtree-only WebRTC island. Hashtree's
-request/response codec remains application-specific and ignores unrelated FIPS
-endpoint payloads.
+fabric instead of creating a parallel Hashtree-only WebRTC island.
