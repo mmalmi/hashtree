@@ -2784,9 +2784,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.3.97"
+version = "0.3.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c947b6a9c7acae6801f76b3c0b0d2cac49314e75b0e0bbf96b7a325834caa5c"
+checksum = "16149f0fd238336ef647520f89cb78e8dc52a27c1304683b63bb0c704cd0288c"
 dependencies = [
  "bluer",
  "bytes",
@@ -2798,7 +2798,6 @@ dependencies = [
  "libc",
  "mdns-sd",
  "nostr",
- "nostr-pubsub",
  "nostr-sdk",
  "portable-atomic",
  "procfs",
@@ -5292,9 +5291,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de761d2063ad86c23c209664a141e2de1c32de5b4eed71ffc06f447dee465c36"
+checksum = "9043da7feb269ca7fc32657deb563355cfddd85e42f8b115769bac3549b1536e"
 dependencies = [
  "async-trait",
  "fips-core",
