@@ -14,12 +14,12 @@ use hashtree_core::{from_hex, Cid, HashTree, HashTreeConfig, HashTreeError, NHas
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::add::run_add;
+use super::add::{run_add, AddOptions};
 use super::args::{
     Cli, Commands, MirrorCommands, NostrIndexCommands, PrCommands, PwaCommands, ReleaseCommands,
     SocialGraphCommands, StorageCommands,
@@ -29,7 +29,7 @@ use super::cashu_delegate::run_cashu_helper;
 use super::daemonize::{format_daemon_status, reload_daemon, spawn_daemon, stop_daemon};
 use super::lists::{follow_user, list_following, list_muted, mute_user, update_profile};
 #[cfg(feature = "fuse")]
-use super::mount::mount_fuse;
+use super::mount::{mount_fuse, MountFuseOptions};
 #[cfg(feature = "fuse")]
 use super::mount_registry::list_active_mounts;
 #[cfg(feature = "fuse")]
@@ -208,9 +208,9 @@ fn ensure_supported_pin_target(input: &str) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_cid_input_for_pin(input: &str, data_dir: &PathBuf) -> Result<ResolvedCid> {
+async fn resolve_cid_input_for_pin(input: &str, data_dir: &Path) -> Result<ResolvedCid> {
     let opts = ResolveOptions {
-        data_dir: Some(data_dir.clone()),
+        data_dir: Some(data_dir.to_path_buf()),
         ..ResolveOptions::default()
     };
     resolve_cid_input_with_opts(input, &opts).await
@@ -970,12 +970,14 @@ pub(crate) async fn run() -> Result<()> {
             mount_fuse(
                 target,
                 mountpoint,
-                visibility,
-                link_key,
-                private,
-                relays,
-                allow_other,
                 data_dir,
+                MountFuseOptions {
+                    visibility,
+                    link_key,
+                    private,
+                    relays,
+                    allow_other,
+                },
             )
             .await?;
         }
@@ -994,12 +996,14 @@ pub(crate) async fn run() -> Result<()> {
             run_add(
                 data_dir.clone(),
                 path,
-                only_hash,
-                unencrypted,
-                no_ignore,
-                publish,
-                chunk_size,
-                local,
+                AddOptions {
+                    only_hash,
+                    unencrypted,
+                    no_ignore,
+                    publish,
+                    chunk_size,
+                    local,
+                },
             )
             .await?
         }
@@ -2285,7 +2289,7 @@ async fn fetch_daemon_status_quietly(addr: &str) -> Option<serde_json::Value> {
     response.json().await.ok()
 }
 
-fn status_u64<'a>(status: &'a serde_json::Value, section: &str, key: &str) -> u64 {
+fn status_u64(status: &serde_json::Value, section: &str, key: &str) -> u64 {
     status
         .get(section)
         .and_then(|value| value.get(key))

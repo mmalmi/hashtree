@@ -176,7 +176,7 @@ mod create {
     async fn test_file_deduplication() {
         let (store, tree) = make_tree_with_chunk_size(100);
 
-        let repeated_chunk = vec![42u8; 100];
+        let repeated_chunk = [42u8; 100];
         let data: Vec<u8> = repeated_chunk.iter().cycle().take(500).cloned().collect();
 
         let (cid, size) = tree.put_file(&data).await.unwrap();

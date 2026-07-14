@@ -1,6 +1,6 @@
-use super::progress::emit_upload_progress;
+use super::progress::{emit_upload_progress, UploadProgress};
 use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir};
-use super::{fetch_progress_interval, upload_progress, AncestorCheck, PushSpec, RemoteHelper};
+use super::{fetch_progress_interval, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
 use crate::nostr_client::{
@@ -128,6 +128,11 @@ struct PendingUpload {
     force_all_servers: bool,
 }
 
+struct IndividualUpload {
+    item: PendingUpload,
+    head_fallback: bool,
+}
+
 enum BatchUploadOutcome {
     Uploaded,
     Unsupported(Vec<PendingUpload>),
@@ -148,6 +153,16 @@ struct UploadCounters {
     failed: Arc<AtomicUsize>,
     completed: Arc<AtomicUsize>,
     discovered_total: Arc<AtomicUsize>,
+}
+
+struct PendingUploadPipeline<'a> {
+    blossom: &'a hashtree_blossom::BlossomClient,
+    all_servers: &'a [String],
+    use_upload_check: bool,
+    repairing_server_tree: bool,
+    tx: &'a tokio::sync::mpsc::Sender<IndividualUpload>,
+    counters: &'a UploadCounters,
+    batch_upload_concurrency: usize,
 }
 
 pub(super) struct GitPackCheckpointPlan {
@@ -421,18 +436,18 @@ fn upload_progress_from_counters(
     has_old_tree: bool,
 ) -> super::progress::UploadProgress {
     let discovered = counters.discovered_total.load(Ordering::Relaxed);
-    upload_progress(
-        counters.completed.load(Ordering::Relaxed),
+    UploadProgress {
+        processed: counters.completed.load(Ordering::Relaxed),
         discovered,
-        discovery_complete
+        total: discovery_complete
             .load(Ordering::Relaxed)
             .then_some(discovered),
-        counters.uploaded.load(Ordering::Relaxed),
-        counters.skipped_diff.load(Ordering::Relaxed),
-        counters.skipped_server.load(Ordering::Relaxed),
-        counters.failed.load(Ordering::Relaxed),
+        uploaded: counters.uploaded.load(Ordering::Relaxed),
+        skipped_diff: counters.skipped_diff.load(Ordering::Relaxed),
+        skipped_server: counters.skipped_server.load(Ordering::Relaxed),
+        failed: counters.failed.load(Ordering::Relaxed),
         has_old_tree,
-    )
+    }
 }
 
 fn spawn_periodic_upload_progress(
@@ -462,17 +477,14 @@ fn spawn_periodic_upload_progress(
 }
 
 async fn enqueue_pending_upload(
-    tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
+    tx: &tokio::sync::mpsc::Sender<IndividualUpload>,
     item: PendingUpload,
     head_fallback: bool,
 ) -> bool {
-    tx.send((
-        item.hash,
-        item.data,
-        item.from_old_tree,
-        item.force_all_servers,
+    tx.send(IndividualUpload {
+        item,
         head_fallback,
-    ))
+    })
     .await
     .is_ok()
 }
@@ -737,90 +749,88 @@ async fn upload_pending_with_server_batches(
     Ok(fallback)
 }
 
-async fn flush_pending_uploads(
-    pending: &mut Vec<PendingUpload>,
-    blossom: &hashtree_blossom::BlossomClient,
-    all_servers: &[String],
-    use_upload_check: bool,
-    repairing_server_tree: bool,
-    upload_check_supported: &mut bool,
-    tx: &tokio::sync::mpsc::Sender<([u8; 32], Vec<u8>, bool, bool, bool)>,
-    counters: &UploadCounters,
-    batch_upload_concurrency: usize,
-) -> bool {
-    if pending.is_empty() {
-        return true;
-    }
-
-    let mut present = HashSet::new();
-    let mut checked_all_servers = false;
-    if use_upload_check && *upload_check_supported {
-        let hashes: HashSet<[u8; 32]> = pending.iter().map(|item| item.hash).collect();
-        match check_upload_presence_on_servers(blossom, all_servers, &hashes).await {
-            Some(presence) => {
-                checked_all_servers = presence.complete;
-                present = presence.present;
-            }
-            None => {
-                *upload_check_supported = false;
-            }
-        }
-    }
-
-    let head_fallback = use_upload_check && !checked_all_servers && !repairing_server_tree;
-    let mut to_upload = Vec::new();
-    for item in pending.drain(..) {
-        if present.contains(&item.hash) {
-            record_skipped_candidate(counters, item.from_old_tree);
-            continue;
+impl PendingUploadPipeline<'_> {
+    async fn flush(
+        &self,
+        pending: &mut Vec<PendingUpload>,
+        upload_check_supported: &mut bool,
+    ) -> bool {
+        if pending.is_empty() {
+            return true;
         }
 
-        to_upload.push(item);
-    }
+        let mut present = HashSet::new();
+        let mut checked_all_servers = false;
+        if self.use_upload_check && *upload_check_supported {
+            let hashes: HashSet<[u8; 32]> = pending.iter().map(|item| item.hash).collect();
+            match check_upload_presence_on_servers(self.blossom, self.all_servers, &hashes).await {
+                Some(presence) => {
+                    checked_all_servers = presence.complete;
+                    present = presence.present;
+                }
+                None => {
+                    *upload_check_supported = false;
+                }
+            }
+        }
 
-    let batch_servers = if all_servers.len() == 1 || !repairing_server_tree {
-        Some(all_servers)
-    } else {
-        None
-    };
+        let head_fallback =
+            self.use_upload_check && !checked_all_servers && !self.repairing_server_tree;
+        let mut to_upload = Vec::new();
+        for item in pending.drain(..) {
+            if present.contains(&item.hash) {
+                record_skipped_candidate(self.counters, item.from_old_tree);
+                continue;
+            }
 
-    if !to_upload.is_empty() && batch_servers.is_some_and(|servers| !servers.is_empty()) {
-        let batch_servers = batch_servers.unwrap();
-        let mut batchable = Vec::new();
-        let mut fallback_to_individual = Vec::new();
-        for item in to_upload {
-            if item.force_all_servers || item.data.len() > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
+            to_upload.push(item);
+        }
+
+        let batch_servers = if self.all_servers.len() == 1 || !self.repairing_server_tree {
+            Some(self.all_servers)
+        } else {
+            None
+        };
+
+        if !to_upload.is_empty() && batch_servers.is_some_and(|servers| !servers.is_empty()) {
+            let batch_servers = batch_servers.unwrap();
+            let mut batchable = Vec::new();
+            let mut fallback_to_individual = Vec::new();
+            for item in to_upload {
+                if item.force_all_servers
+                    || item.data.len() > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
+                {
+                    fallback_to_individual.push(item);
+                } else {
+                    batchable.push(item);
+                }
+            }
+
+            match upload_pending_with_server_batches(
+                batchable,
+                self.blossom,
+                batch_servers,
+                self.counters,
+                self.batch_upload_concurrency,
+            )
+            .await
             {
-                fallback_to_individual.push(item);
-            } else {
-                batchable.push(item);
+                Ok(fallback) => {
+                    to_upload = fallback;
+                    to_upload.extend(fallback_to_individual);
+                }
+                Err(_) => return false,
             }
         }
 
-        match upload_pending_with_server_batches(
-            batchable,
-            blossom,
-            batch_servers,
-            counters,
-            batch_upload_concurrency,
-        )
-        .await
-        {
-            Ok(fallback) => {
-                to_upload = fallback;
-                to_upload.extend(fallback_to_individual);
+        for item in to_upload {
+            if !enqueue_pending_upload(self.tx, item, head_fallback).await {
+                return false;
             }
-            Err(_) => return false,
         }
-    }
 
-    for item in to_upload {
-        if !enqueue_pending_upload(tx, item, head_fallback).await {
-            return false;
-        }
+        true
     }
-
-    true
 }
 
 async fn upload_block_to_file_servers(
@@ -3005,7 +3015,7 @@ impl RemoteHelper {
 
             const CHANNEL_SIZE: usize = 100;
             let upload_concurrency = self.upload_concurrency(all_servers.len());
-            let (tx, rx) = mpsc::channel::<([u8; 32], Vec<u8>, bool, bool, bool)>(CHANNEL_SIZE);
+            let (tx, rx) = mpsc::channel::<IndividualUpload>(CHANNEL_SIZE);
 
             let upload_handle = {
                 let blossom = blossom.clone();
@@ -3021,7 +3031,16 @@ impl RemoteHelper {
 
                     let stream = ReceiverStream::new(rx);
                     stream
-                        .map(|(hash, data, from_old_tree, force_all_servers, head_fallback)| {
+                        .map(|IndividualUpload {
+                                  item,
+                                  head_fallback,
+                              }| {
+                            let PendingUpload {
+                                hash,
+                                data,
+                                from_old_tree,
+                                force_all_servers,
+                            } = item;
                             let blossom = blossom.clone();
                             let uploaded = Arc::clone(&uploaded);
                             let skipped_server = Arc::clone(&skipped_server);
@@ -3079,6 +3098,15 @@ impl RemoteHelper {
             let mut queue: Vec<UploadQueueItem> = Vec::new();
             let mut pending_uploads = Vec::with_capacity(UPLOAD_CHECK_BATCH_SIZE.min(1024));
             let mut upload_check_supported = true;
+            let upload_pipeline = PendingUploadPipeline {
+                blossom,
+                all_servers: &all_servers,
+                use_upload_check,
+                repairing_server_tree: !servers_needing_full.is_empty(),
+                tx: &tx,
+                counters: &counters,
+                batch_upload_concurrency: upload_concurrency,
+            };
             let _ = queue_upload_item_if_new(
                 &mut queue,
                 &mut queued,
@@ -3164,49 +3192,31 @@ impl RemoteHelper {
                     force_all_servers: force_all_servers_for_hash,
                 });
                 if pending_uploads.len() >= UPLOAD_CHECK_BATCH_SIZE
-                    && !flush_pending_uploads(
-                        &mut pending_uploads,
-                        blossom,
-                        &all_servers,
-                        use_upload_check,
-                        !servers_needing_full.is_empty(),
-                        &mut upload_check_supported,
-                        &tx,
-                        &counters,
-                        upload_concurrency,
-                    )
-                    .await
+                    && !upload_pipeline
+                        .flush(&mut pending_uploads, &mut upload_check_supported)
+                        .await
                 {
                     break;
                 }
             }
 
-            let _ = flush_pending_uploads(
-                &mut pending_uploads,
-                blossom,
-                &all_servers,
-                use_upload_check,
-                !servers_needing_full.is_empty(),
-                &mut upload_check_supported,
-                &tx,
-                &counters,
-                upload_concurrency,
-            )
-            .await;
+            let _ = upload_pipeline
+                .flush(&mut pending_uploads, &mut upload_check_supported)
+                .await;
 
             discovery_complete.store(true, Ordering::Relaxed);
 
             let final_total_seen = discovered_total.load(Ordering::Relaxed);
-            emit_upload_progress(upload_progress(
-                completed.load(Ordering::Relaxed),
-                final_total_seen,
-                Some(final_total_seen),
-                uploaded.load(Ordering::Relaxed),
-                skipped_diff.load(Ordering::Relaxed),
-                skipped_server.load(Ordering::Relaxed),
-                failed.load(Ordering::Relaxed),
+            emit_upload_progress(UploadProgress {
+                processed: completed.load(Ordering::Relaxed),
+                discovered: final_total_seen,
+                total: Some(final_total_seen),
+                uploaded: uploaded.load(Ordering::Relaxed),
+                skipped_diff: skipped_diff.load(Ordering::Relaxed),
+                skipped_server: skipped_server.load(Ordering::Relaxed),
+                failed: failed.load(Ordering::Relaxed),
                 has_old_tree,
-            ));
+            });
 
             drop(tx);
             let _ = upload_handle.await;
@@ -3220,16 +3230,16 @@ impl RemoteHelper {
             let final_local_failed = local_failed.load(Ordering::Relaxed);
             let final_completed = completed.load(Ordering::Relaxed);
 
-            emit_upload_progress(upload_progress(
-                final_completed,
-                final_total_seen,
-                Some(final_total_seen),
-                final_uploaded,
-                final_skipped_diff,
-                final_skipped_server,
-                final_failed,
+            emit_upload_progress(UploadProgress {
+                processed: final_completed,
+                discovered: final_total_seen,
+                total: Some(final_total_seen),
+                uploaded: final_uploaded,
+                skipped_diff: final_skipped_diff,
+                skipped_server: final_skipped_server,
+                failed: final_failed,
                 has_old_tree,
-            ));
+            });
             eprintln!();
 
             info!(

@@ -138,6 +138,7 @@ impl WotRatingRecord {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_signer<const N: usize>(
         signer: impl AsRef<str>,
         rater: impl Into<String>,
@@ -896,6 +897,7 @@ fn scope_filter(kind: u32, scope: &str) -> Filter {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn signed_rating_event(
     signer: &str,
     rater: &str,

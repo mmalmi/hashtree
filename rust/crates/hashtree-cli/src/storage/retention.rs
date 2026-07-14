@@ -590,7 +590,7 @@ impl HashtreeStore {
             });
         }
 
-        owners.sort_by(|a, b| a.owner.cmp(&b.owner));
+        owners.sort_by_key(|stats| stats.owner);
         Ok(owners)
     }
 
@@ -1202,12 +1202,12 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = HashtreeStore::with_options(temp_dir.path(), None, 500).expect("store");
 
-        let hash1 = hashtree_core::sha256(&vec![1u8; 200]);
-        let hash2 = hashtree_core::sha256(&vec![2u8; 200]);
-        let hash3 = hashtree_core::sha256(&vec![3u8; 200]);
-        store.put_blob(&vec![1u8; 200]).expect("put blob 1");
-        store.put_blob(&vec![2u8; 200]).expect("put blob 2");
-        store.put_blob(&vec![3u8; 200]).expect("put blob 3");
+        let hash1 = hashtree_core::sha256(&[1u8; 200]);
+        let hash2 = hashtree_core::sha256(&[2u8; 200]);
+        let hash3 = hashtree_core::sha256(&[3u8; 200]);
+        store.put_blob(&[1u8; 200]).expect("put blob 1");
+        store.put_blob(&[2u8; 200]).expect("put blob 2");
+        store.put_blob(&[3u8; 200]).expect("put blob 3");
         store
             .index_tree(&hash1, "owner1", Some("tree1"), PRIORITY_OTHER, None)
             .expect("index tree 1");

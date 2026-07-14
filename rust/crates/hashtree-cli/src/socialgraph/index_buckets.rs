@@ -662,9 +662,7 @@ impl ProfileIndexBucket {
     }
 }
 
-pub(super) fn latest_metadata_events_by_pubkey<'a>(
-    events: &'a [Event],
-) -> BTreeMap<String, &'a Event> {
+pub(super) fn latest_metadata_events_by_pubkey(events: &[Event]) -> BTreeMap<String, &Event> {
     let mut latest_by_pubkey = BTreeMap::<String, &Event>::new();
     for event in events.iter().filter(|event| event.kind == Kind::Metadata) {
         let pubkey = event.pubkey.to_hex();

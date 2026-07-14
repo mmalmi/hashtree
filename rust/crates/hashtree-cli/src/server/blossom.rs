@@ -2100,14 +2100,14 @@ fn blossom_auth_error_response(status: StatusCode, reason: &'static str) -> Resp
         .unwrap()
 }
 
-fn verify_upload_batch_auth(headers: &HeaderMap) -> Result<BlossomAuth, Response<Body>> {
+fn verify_upload_batch_auth(headers: &HeaderMap) -> Result<BlossomAuth, Box<Response<Body>>> {
     verify_blossom_auth(headers, "upload", None)
-        .map_err(|(status, reason)| blossom_auth_error_response(status, reason))
+        .map_err(|(status, reason)| Box::new(blossom_auth_error_response(status, reason)))
 }
 
 pub async fn require_upload_auth_middleware(request: Request, next: Next) -> Response<Body> {
     if let Err(response) = verify_upload_batch_auth(request.headers()) {
-        return response;
+        return *response;
     }
     next.run(request).await
 }
@@ -2268,10 +2268,9 @@ async fn upload_decoded_blob_batch(
                 let replica_items = replica_specs
                     .iter()
                     .zip(items.iter())
-                    .filter_map(|((sha256_hex, content_type), (hash, data))| {
-                        inserted.contains(hash).then(|| {
-                            replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
-                        })
+                    .filter(|&((_, _), (hash, _))| inserted.contains(hash))
+                    .map(|((sha256_hex, content_type), (_, data))| {
+                        replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
                     })
                     .collect::<Vec<_>>();
                 let replication =
@@ -2330,7 +2329,7 @@ pub async fn upload_blob_batch(
     let started_at = Instant::now();
     let auth = match verify_upload_batch_auth(&headers) {
         Ok(auth) => auth,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let mut blobs = Vec::with_capacity(payload.blobs.len());
     for blob in payload.blobs {
@@ -2356,7 +2355,7 @@ pub async fn upload_blob_batch_binary(
     let started_at = Instant::now();
     let auth = match verify_upload_batch_auth(&headers) {
         Ok(auth) => auth,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let blobs = match parse_binary_batch_upload(&body) {
         Ok(blobs) => blobs,
@@ -2570,7 +2569,7 @@ pub async fn list_blobs(
                 .collect();
 
             // Sort by uploaded descending (most recent first)
-            filtered.sort_by(|a, b| b.uploaded.cmp(&a.uploaded));
+            filtered.sort_by_key(|descriptor| std::cmp::Reverse(descriptor.uploaded));
 
             // Apply limit
             let limit = query.limit.unwrap_or(100).min(1000);
@@ -3144,9 +3143,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn upload_blob_batch_binary_replicates_only_new_blobs() {
-        let _lock = test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = test_env_lock().lock().await;
         let config_dir = TempDir::new().expect("config dir");
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
 
@@ -3236,9 +3233,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn upload_replication_coalesces_adjacent_binary_batches() {
-        let _lock = test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = test_env_lock().lock().await;
         let config_dir = TempDir::new().expect("config dir");
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
         let _flush_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_FLUSH_MS", "200");
@@ -3334,7 +3329,7 @@ mod tests {
         );
         let metrics_after = blossom_upload_replica_queue_snapshot(&state);
         assert!(
-            metrics_after.accepted_batches >= metrics_before.accepted_batches + 1,
+            metrics_after.accepted_batches > metrics_before.accepted_batches,
             "coalesced replication should increment accepted batch metrics"
         );
         assert!(
@@ -3420,9 +3415,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn upload_blob_replicates_to_configured_blossom_target() {
-        let _lock = test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = test_env_lock().lock().await;
         let config_dir = TempDir::new().expect("config dir");
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
 
@@ -3480,9 +3473,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn upload_blob_duplicate_does_not_replicate_to_configured_blossom_target() {
-        let _lock = test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = test_env_lock().lock().await;
         let config_dir = TempDir::new().expect("config dir");
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
 
@@ -3716,9 +3707,7 @@ mod tests {
 
     #[tokio::test]
     async fn optimistic_upload_existing_blob_does_not_replicate_duplicate() {
-        let _lock = test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = test_env_lock().lock().await;
         let config_dir = TempDir::new().expect("config dir");
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
 

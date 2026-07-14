@@ -527,7 +527,7 @@ fn test_ref_key_replaces_old_version() {
 fn test_put_cached_blob_evicts_disposable_orphans() {
     let (store, _tmp) = test_store(250);
 
-    let protected_hash = add_blob(&store, &vec![9u8; 100]);
+    let protected_hash = add_blob(&store, &[9u8; 100]);
     store
         .index_tree(
             &protected_hash,
@@ -538,10 +538,10 @@ fn test_put_cached_blob_evicts_disposable_orphans() {
         )
         .unwrap();
 
-    let disposable_hash = add_blob(&store, &vec![1u8; 100]);
+    let disposable_hash = add_blob(&store, &[1u8; 100]);
     assert!(store.blob_exists(&disposable_hash).unwrap());
 
-    let cached_hash = from_hex(&store.put_cached_blob(&vec![2u8; 100]).unwrap()).unwrap();
+    let cached_hash = from_hex(&store.put_cached_blob(&[2u8; 100]).unwrap()).unwrap();
 
     assert!(
         store.blob_exists(&protected_hash).unwrap(),
@@ -565,13 +565,13 @@ fn test_put_cached_blob_evicts_disposable_orphans() {
 fn test_put_cached_blob_preserves_owned_blossom_blob() {
     let (store, _tmp) = test_store(250);
 
-    let owned_hash = add_blob(&store, &vec![7u8; 100]);
+    let owned_hash = add_blob(&store, &[7u8; 100]);
     store
         .set_blob_owner(&owned_hash, &[42u8; 32])
         .expect("Failed to set owner");
 
-    let disposable_hash = add_blob(&store, &vec![1u8; 100]);
-    let cached_hash = from_hex(&store.put_cached_blob(&vec![2u8; 100]).unwrap()).unwrap();
+    let disposable_hash = add_blob(&store, &[1u8; 100]);
+    let cached_hash = from_hex(&store.put_cached_blob(&[2u8; 100]).unwrap()).unwrap();
 
     assert!(
         store.blob_exists(&owned_hash).unwrap(),

@@ -2,7 +2,7 @@ mod common;
 
 use std::ffi::OsString;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use common::htree_bin;
@@ -10,9 +10,9 @@ use hashtree_cli::{Config, HashtreeStore};
 use hashtree_core::{from_hex, nhash_encode};
 use tempfile::TempDir;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 struct EnvVarGuard {
@@ -111,7 +111,7 @@ fn info_handles_directory_roots() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_fetches_missing_hash_via_local_daemon() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
 
     let tmp = TempDir::new().expect("temp dir");
     let config_dir = tmp.path().join("config");

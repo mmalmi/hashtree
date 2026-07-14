@@ -147,51 +147,45 @@ mod test_relay {
             let msg_type = parsed[0].as_str().unwrap_or("");
 
             match msg_type {
-                "EVENT" => {
-                    if parsed.len() >= 2 {
-                        let event = parsed[1].clone();
-                        if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
-                            events.write().await.insert(id.to_string(), event.clone());
+                "EVENT" if parsed.len() >= 2 => {
+                    let event = parsed[1].clone();
+                    if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                        events.write().await.insert(id.to_string(), event.clone());
 
-                            let ok_msg = serde_json::json!(["OK", id, true, ""]);
-                            {
-                                let mut w = write.lock().await;
-                                let _ = w.send(Message::Text(ok_msg.to_string())).await;
-                            }
-
-                            let _ = event_tx.send(event);
-                        }
-                    }
-                }
-                "REQ" => {
-                    if parsed.len() >= 3 {
-                        let sub_id = parsed[1].as_str().unwrap_or("sub").to_string();
-
-                        // Store subscription
-                        subscriptions
-                            .write()
-                            .await
-                            .insert(sub_id.clone(), Filter::new());
-
-                        // Send matching stored events
-                        let stored = events.read().await;
-                        for (_id, event) in stored.iter() {
-                            let event_msg = serde_json::json!(["EVENT", &sub_id, event]);
+                        let ok_msg = serde_json::json!(["OK", id, true, ""]);
+                        {
                             let mut w = write.lock().await;
-                            let _ = w.send(Message::Text(event_msg.to_string())).await;
+                            let _ = w.send(Message::Text(ok_msg.to_string())).await;
                         }
 
-                        // Send EOSE
-                        let eose = serde_json::json!(["EOSE", &sub_id]);
-                        let mut w = write.lock().await;
-                        let _ = w.send(Message::Text(eose.to_string())).await;
+                        let _ = event_tx.send(event);
                     }
                 }
-                "CLOSE" => {
-                    if parsed.len() >= 2 {
-                        if let Some(sub_id) = parsed[1].as_str() {
-                            subscriptions.write().await.remove(sub_id);
-                        }
+                "REQ" if parsed.len() >= 3 => {
+                    let sub_id = parsed[1].as_str().unwrap_or("sub").to_string();
+
+                    // Store subscription
+                    subscriptions
+                        .write()
+                        .await
+                        .insert(sub_id.clone(), Filter::new());
+
+                    // Send matching stored events
+                    let stored = events.read().await;
+                    for (_id, event) in stored.iter() {
+                        let event_msg = serde_json::json!(["EVENT", &sub_id, event]);
+                        let mut w = write.lock().await;
+                        let _ = w.send(Message::Text(event_msg.to_string())).await;
+                    }
+
+                    // Send EOSE
+                    let eose = serde_json::json!(["EOSE", &sub_id]);
+                    let mut w = write.lock().await;
+                    let _ = w.send(Message::Text(eose.to_string())).await;
+                }
+                "CLOSE" if parsed.len() >= 2 => {
+                    if let Some(sub_id) = parsed[1].as_str() {
+                        subscriptions.write().await.remove(sub_id);
                     }
                 }
                 _ => {}

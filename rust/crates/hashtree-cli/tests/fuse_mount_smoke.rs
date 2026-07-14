@@ -338,10 +338,10 @@ fn fuse_smoke_skip_reason() -> Option<String> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        return Some(
+        Some(
             "automatic FUSE smoke coverage only runs on Linux; set HTREE_REQUIRE_FUSE_SMOKE=1 to force a local run"
                 .to_string(),
-        );
+        )
     }
 
     #[cfg(target_os = "linux")]

@@ -2648,11 +2648,7 @@ impl HashtreeStore {
 
             // Check if this chunk overlaps with requested range
             if chunk_end >= start && current_offset <= end {
-                let chunk_read_start = if current_offset >= start {
-                    0
-                } else {
-                    start - current_offset
-                };
+                let chunk_read_start = start.saturating_sub(current_offset);
 
                 let chunk_read_end = if chunk_end <= end {
                     chunk_size - 1
@@ -3053,11 +3049,7 @@ impl Iterator for FileRangeChunksOwned {
             return self.next();
         }
 
-        let chunk_read_start = if self.current_offset >= self.start {
-            0
-        } else {
-            self.start - self.current_offset
-        };
+        let chunk_read_start = self.start.saturating_sub(self.current_offset);
 
         let chunk_read_end = if chunk_end <= self.end {
             chunk_size - 1

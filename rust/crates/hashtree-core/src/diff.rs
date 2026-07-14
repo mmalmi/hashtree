@@ -712,10 +712,10 @@ mod tests {
         old_hashes_vec.push(old_root.hash);
 
         // Modify 5 files
-        for i in 0..5 {
+        for (i, entry) in entries.iter_mut().enumerate().take(5) {
             let data = format!("modified content {}", i);
             let hash = tree.put_blob(data.as_bytes()).await.unwrap();
-            entries[i] = DirEntry::new(format!("file{}.txt", i), hash).with_size(data.len() as u64);
+            *entry = DirEntry::new(format!("file{}.txt", i), hash).with_size(data.len() as u64);
         }
 
         let new_root = tree.put_directory(entries).await.unwrap();

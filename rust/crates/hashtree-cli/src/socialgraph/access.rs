@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn test_allowed_pubkey_passes() {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock_blocking();
         let tmp = TempDir::new().unwrap();
         let graph_store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
         let pk_hex = "aa".repeat(32);

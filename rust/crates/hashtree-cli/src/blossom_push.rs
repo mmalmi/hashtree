@@ -233,7 +233,7 @@ async fn upload_cids_with_client(
             }
         }
 
-        if processed % BLOSSOM_PUSH_PROGRESS_EVERY == 0 || processed == total {
+        if processed.is_multiple_of(BLOSSOM_PUSH_PROGRESS_EVERY) || processed == total {
             println!(
                 "  file servers: {processed}/{total} processed ({total_uploaded} uploaded, {total_skipped} already exist, {total_errors} failed)",
             );

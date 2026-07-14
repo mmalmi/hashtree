@@ -1209,6 +1209,10 @@ mod fuse_impl {
         }
     }
 
+    fn checked_u32<T: TryInto<u32>>(value: T) -> Option<u32> {
+        value.try_into().ok()
+    }
+
     fn host_fs_stats(path: &Path) -> Option<FsStats> {
         let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
         let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
@@ -1218,7 +1222,7 @@ mod fuse_impl {
         }
 
         let stat = unsafe { stat.assume_init() };
-        let bsize = u32::try_from(stat.f_bsize).ok()?;
+        let bsize = checked_u32(stat.f_bsize)?;
         Some(FsStats {
             blocks: stat.f_blocks,
             bfree: stat.f_bfree,

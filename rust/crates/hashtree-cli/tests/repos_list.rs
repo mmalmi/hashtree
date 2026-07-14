@@ -8,7 +8,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind, Timestamp, ToBech32};
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
@@ -119,7 +119,7 @@ impl ReposFixture {
     }
 }
 
-fn append_alias(config_dir: &PathBuf, npub: &str, alias: &str) {
+fn append_alias(config_dir: &Path, npub: &str, alias: &str) {
     let aliases_path = config_dir.join("aliases");
     let mut file = fs::OpenOptions::new()
         .create(true)

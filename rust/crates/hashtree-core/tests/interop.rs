@@ -256,7 +256,7 @@ fn test_chk_encryption_vectors() {
         let expected = &vector.expected;
 
         assert_eq!(
-            hex::encode(&key),
+            hex::encode(key),
             expected.hash, // We store key in hash field for CHK vectors
             "CHK key mismatch for {}",
             vector.name
@@ -450,7 +450,7 @@ fn generate_chk_vectors() {
   }},"#,
             name,
             hex::encode(data),
-            hex::encode(&key),
+            hex::encode(key),
             hex::encode(&ciphertext)
         );
     }

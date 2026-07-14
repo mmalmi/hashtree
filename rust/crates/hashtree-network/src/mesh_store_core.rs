@@ -47,6 +47,7 @@ const MIN_RECENT_FORWARD_MISS_TTL_MS: u64 = 250;
 const PUBSUB_SEEN_CAPACITY: usize = 16_384;
 const PUBSUB_INBOX_CAPACITY: usize = 4_096;
 const PUBSUB_FRAME_CACHE_CAPACITY: usize = 4_096;
+const VERIFIED_BLOCK_DELIVERY_CAPACITY: usize = 4_096;
 const PUBSUB_SEEN_TTL: Duration = Duration::from_secs(120);
 
 /// Pending request awaiting response
@@ -301,6 +302,30 @@ pub struct PubsubEvent {
     pub origin_peer_id: String,
     pub from_peer_id: String,
     pub payload: Vec<u8>,
+}
+
+/// Evidence that this peer won an outstanding, hash-verified block request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedBlockDelivery {
+    pub hash: Hash,
+    pub provider_peer_id: String,
+    pub payload_bytes: u64,
+}
+
+/// One atomic drain of verified delivery evidence and any overflow since the prior drain.
+///
+/// Dropped evidence is intentionally not recoverable or billable through this API. An
+/// application adapter must surface a non-zero count and must not infer a payment claim.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerifiedBlockDeliveryBatch {
+    pub deliveries: Vec<VerifiedBlockDelivery>,
+    pub dropped_since_last_drain: u64,
+}
+
+#[derive(Default)]
+struct VerifiedBlockDeliveryBuffer {
+    deliveries: VecDeque<VerifiedBlockDelivery>,
+    dropped_since_last_drain: u64,
 }
 
 /// Send-side accounting from a pubsub publish or forwarded pubsub message.
@@ -674,6 +699,8 @@ where
     pubsub_frame_cache: Mutex<VecDeque<(String, PubsubFrame)>>,
     /// Local pubsub delivery inbox.
     pubsub_inbox: Mutex<VecDeque<PubsubEvent>>,
+    /// Bounded application-facing evidence for first-winner block deliveries.
+    verified_block_deliveries: Mutex<VerifiedBlockDeliveryBuffer>,
     /// Wakes consumers waiting for local pubsub deliveries.
     pubsub_notify: Notify,
     /// Per stream/peer deferred counts for aging pubsub strategies.
@@ -774,6 +801,7 @@ where
             )),
             pubsub_frame_cache: Mutex::new(VecDeque::new()),
             pubsub_inbox: Mutex::new(VecDeque::new()),
+            verified_block_deliveries: Mutex::new(VerifiedBlockDeliveryBuffer::default()),
             pubsub_notify: Notify::new(),
             pubsub_deferred_counts: RwLock::new(HashMap::new()),
             next_pubsub_interest_seq: AtomicU64::new(1),
@@ -1467,6 +1495,15 @@ where
     /// Drain locally delivered pubsub events.
     pub async fn drain_pubsub_events(&self) -> Vec<PubsubEvent> {
         self.pubsub_inbox.lock().await.drain(..).collect()
+    }
+
+    /// Drain verified first-winner block deliveries for an application adapter.
+    pub async fn drain_verified_block_deliveries(&self) -> VerifiedBlockDeliveryBatch {
+        let mut buffer = self.verified_block_deliveries.lock().await;
+        VerifiedBlockDeliveryBatch {
+            deliveries: buffer.deliveries.drain(..).collect(),
+            dropped_since_last_drain: std::mem::take(&mut buffer.dropped_since_last_drain),
+        }
     }
 
     /// Wait until a locally delivered pubsub event is available, then return it.
@@ -2952,7 +2989,24 @@ where
         hash_key: String,
         payload: Vec<u8>,
     ) {
-        if let Some(pending) = self.pending_requests.write().await.remove(&hash_key) {
+        let pending = self.pending_requests.write().await.remove(&hash_key);
+        if let Some(pending) = pending {
+            let payload_bytes = payload.len() as u64;
+            self.record_useful_bytes_received_from_peer(from_peer, payload_bytes)
+                .await;
+            {
+                let mut deliveries = self.verified_block_deliveries.lock().await;
+                deliveries.deliveries.push_back(VerifiedBlockDelivery {
+                    hash: *hash,
+                    provider_peer_id: from_peer.to_string(),
+                    payload_bytes,
+                });
+                while deliveries.deliveries.len() > VERIFIED_BLOCK_DELIVERY_CAPACITY {
+                    deliveries.deliveries.pop_front();
+                    deliveries.dropped_since_last_drain =
+                        deliveries.dropped_since_last_drain.saturating_add(1);
+                }
+            }
             self.release_queried_peer_requests(&pending.queried_peers)
                 .await;
             let rtt_ms = pending.started_at.elapsed().as_millis() as u64;
@@ -3039,8 +3093,6 @@ where
             return;
         }
 
-        self.record_useful_bytes_received_from_peer(from_peer, res.d.len() as u64)
-            .await;
         self.complete_pending_response(from_peer, &hash, hash_key, res.d)
             .await;
     }
@@ -3476,6 +3528,9 @@ where
         self.local_store.delete(hash).await
     }
 }
+
+#[cfg(test)]
+mod delivery_tests;
 
 #[cfg(test)]
 mod tests;

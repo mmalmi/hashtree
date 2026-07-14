@@ -64,7 +64,7 @@ fn event_has_tag(event: &Event, parts: &[&str]) -> bool {
 async fn relay_stores_and_serves_events() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -156,7 +156,7 @@ async fn relay_stores_and_serves_events() -> Result<()> {
 async fn relay_enqueues_trusted_client_events_for_decentralized_pubsub() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -228,7 +228,7 @@ async fn relay_req_serves_events_from_historical_nostr_index() -> Result<()> {
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir)?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             &graph_dir,
             Some(128 * 1024 * 1024),
@@ -317,7 +317,7 @@ async fn trusted_ingest_appends_rating_fact_to_historical_nostr_index() -> Resul
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir)?;
     let ingest_graph = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             &ingest_graph_dir,
             Some(128 * 1024 * 1024),
@@ -349,7 +349,7 @@ async fn trusted_ingest_appends_rating_fact_to_historical_nostr_index() -> Resul
     assert!(data_dir.join("nostr-index/latest-root.txt").exists());
 
     let replay_graph = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             &replay_graph_dir,
             Some(128 * 1024 * 1024),
@@ -405,7 +405,7 @@ async fn trusted_ingest_appends_rating_fact_to_historical_nostr_index() -> Resul
 async fn relay_does_not_persist_ephemeral_events() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -460,7 +460,7 @@ async fn relay_does_not_persist_ephemeral_events() -> Result<()> {
 async fn relay_persists_bluetooth_received_event_records() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -524,7 +524,7 @@ async fn relay_persists_bluetooth_received_event_records() -> Result<()> {
 async fn relay_persists_nhash_bluetooth_received_event_records() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -588,7 +588,7 @@ async fn relay_persists_nhash_bluetooth_received_event_records() -> Result<()> {
 async fn relay_caps_bluetooth_received_event_records_to_last_100() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -651,7 +651,7 @@ async fn relay_caps_bluetooth_received_event_records_to_last_100() -> Result<()>
 async fn relay_serves_all_events_for_since_zero_catch_all_filter() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -738,7 +738,7 @@ async fn relay_serves_all_events_for_since_zero_catch_all_filter() -> Result<()>
 async fn relay_spambox_does_not_serve_untrusted_events() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -803,7 +803,7 @@ async fn relay_spambox_does_not_serve_untrusted_events() -> Result<()> {
 async fn relay_trusts_authenticated_client_for_its_own_events() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -885,7 +885,7 @@ async fn relay_trusts_authenticated_client_for_its_own_events() -> Result<()> {
 async fn relay_routes_non_authored_trusted_events_to_ambient_index() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -942,7 +942,7 @@ async fn relay_routes_non_authored_trusted_events_to_ambient_index() -> Result<(
 async fn relay_serves_parameterized_replaceable_queries() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -1037,7 +1037,7 @@ async fn relay_serves_parameterized_replaceable_queries() -> Result<()> {
 async fn relay_serves_replaceable_queries() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -1111,7 +1111,7 @@ async fn relay_serves_replaceable_queries() -> Result<()> {
 async fn relay_count_dedupes_across_filters_and_honors_filter_limits() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -1183,7 +1183,7 @@ async fn relay_count_dedupes_across_filters_and_honors_filter_limits() -> Result
 async fn relay_count_caps_filter_limit_to_config_max() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),
@@ -1254,7 +1254,7 @@ async fn relay_count_caps_filter_limit_to_config_max() -> Result<()> {
 async fn relay_register_subscription_query_caps_filter_limit_to_config_max() -> Result<()> {
     let tmp = TempDir::new()?;
     let graph_store = {
-        let _guard = crate::socialgraph::test_lock();
+        let _guard = crate::socialgraph::test_lock().await;
         crate::socialgraph::open_test_social_graph_store_with_mapsize(
             tmp.path(),
             Some(128 * 1024 * 1024),

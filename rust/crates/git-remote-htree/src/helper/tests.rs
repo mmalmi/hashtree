@@ -1086,29 +1086,29 @@ fn test_git_pack_progress_formats_single_aggregate_line() {
     let total = 82 * 1024 * 1024;
     let loaded = 20 * 1024 * 1024;
     assert_eq!(
-        RemoteHelper::format_git_pack_progress_line(
-            3,
-            5,
-            loaded,
-            total,
-            4,
-            GIT_PACK_PHASE_DOWNLOADING,
-            false,
-            std::time::Duration::from_secs(12)
-        ),
+        RemoteHelper::format_git_pack_progress_line(GitPackProgressSnapshot {
+            processed_packs: 3,
+            total_packs: 5,
+            loaded_pack_bytes: loaded,
+            total_pack_bytes: total,
+            current_pack: 4,
+            phase: GIT_PACK_PHASE_DOWNLOADING,
+            done: false,
+            elapsed: std::time::Duration::from_secs(12),
+        }),
         "  Loading git packs: 3/5 (20.0 MiB/82.0 MiB), downloading 4/5, 12s"
     );
     assert_eq!(
-        RemoteHelper::format_git_pack_progress_line(
-            5,
-            5,
-            total,
-            total,
-            5,
-            GIT_PACK_PHASE_IDLE,
-            true,
-            std::time::Duration::from_secs(12)
-        ),
+        RemoteHelper::format_git_pack_progress_line(GitPackProgressSnapshot {
+            processed_packs: 5,
+            total_packs: 5,
+            loaded_pack_bytes: total,
+            total_pack_bytes: total,
+            current_pack: 5,
+            phase: GIT_PACK_PHASE_IDLE,
+            done: true,
+            elapsed: std::time::Duration::from_secs(12),
+        }),
         "  Loading git packs: 5/5 (82.0 MiB/82.0 MiB) done in 12.0s"
     );
 }

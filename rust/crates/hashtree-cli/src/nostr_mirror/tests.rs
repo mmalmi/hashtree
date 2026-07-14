@@ -448,7 +448,7 @@ where
 
 #[tokio::test]
 async fn apply_history_root_updates_profile_index() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -508,7 +508,7 @@ async fn apply_history_root_updates_profile_index() -> Result<()> {
 
 #[tokio::test]
 async fn apply_history_root_publishes_profile_search_tree() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -596,7 +596,7 @@ async fn apply_history_root_publishes_profile_search_tree() -> Result<()> {
 
 #[tokio::test]
 async fn apply_history_root_publishes_profiles_by_pubkey_tree() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -690,7 +690,7 @@ async fn apply_history_root_publishes_profiles_by_pubkey_tree() -> Result<()> {
 
 #[tokio::test]
 async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publish() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -783,7 +783,7 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 
 #[tokio::test]
 async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -936,7 +936,7 @@ async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Re
 
 #[tokio::test]
 async fn uploaded_event_root_state_is_reused_after_restart() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1012,7 +1012,7 @@ async fn uploaded_event_root_state_is_reused_after_restart() -> Result<()> {
 
 #[tokio::test]
 async fn event_publish_uses_last_uploaded_root_while_newer_root_uploads() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1130,7 +1130,7 @@ async fn event_publish_uses_last_uploaded_root_while_newer_root_uploads() -> Res
 
 #[tokio::test]
 async fn root_publish_retries_with_fresh_client_when_primary_publish_client_misses() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1187,7 +1187,7 @@ async fn root_publish_retries_with_fresh_client_when_primary_publish_client_miss
 
 #[tokio::test]
 async fn apply_history_root_publishes_profile_search_over_existing_stale_event() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1303,7 +1303,7 @@ async fn apply_history_root_publishes_profile_search_over_existing_stale_event()
 
 #[tokio::test]
 async fn apply_history_root_publishes_event_tree() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1391,7 +1391,7 @@ async fn apply_history_root_publishes_event_tree() -> Result<()> {
 
 #[tokio::test]
 async fn startup_publish_sends_existing_profile_search_root() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1425,7 +1425,7 @@ async fn startup_publish_sends_existing_profile_search_root() -> Result<()> {
     let event_store = NostrEventStore::new(store.store_arc());
     let root = event_store.build(None, vec![stored]).await?;
     graph_store.write_public_events_root(root.as_ref())?;
-    graph_store.rebuild_profile_index_for_events(&[alice_profile.clone()])?;
+    graph_store.rebuild_profile_index_for_events(std::slice::from_ref(&alice_profile))?;
 
     let relay = TestRelay::new(Vec::new());
     let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
@@ -1482,7 +1482,7 @@ async fn startup_publish_sends_existing_profile_search_root() -> Result<()> {
 
 #[tokio::test]
 async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1567,7 +1567,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
 
 #[tokio::test]
 async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1710,7 +1710,7 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
 
 #[tokio::test]
 async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1786,7 +1786,7 @@ async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
 
 #[tokio::test]
 async fn mirror_history_sync_accepts_large_contact_list_events() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1855,7 +1855,7 @@ async fn mirror_history_sync_accepts_large_contact_list_events() -> Result<()> {
 
 #[tokio::test]
 async fn mirror_collect_authors_skips_overmuted_users() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1908,7 +1908,7 @@ async fn mirror_collect_authors_skips_overmuted_users() -> Result<()> {
 
 #[tokio::test]
 async fn full_text_history_prioritizes_low_indexed_direct_follows() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -1982,7 +1982,7 @@ async fn full_text_history_prioritizes_low_indexed_direct_follows() -> Result<()
 
 #[tokio::test]
 async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -2043,7 +2043,7 @@ async fn mirror_collect_missing_profile_authors_skips_existing_profiles() -> Res
 
 #[tokio::test]
 async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -2139,7 +2139,7 @@ async fn live_event_flush_publishes_only_for_new_public_root() -> Result<()> {
 
 #[tokio::test]
 async fn live_event_flush_recovers_invalid_public_event_root_before_publish() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -2232,7 +2232,7 @@ async fn live_event_flush_recovers_invalid_public_event_root_before_publish() ->
 
 #[tokio::test]
 async fn mirror_live_ingest_updates_profile_index() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(
@@ -2312,7 +2312,7 @@ async fn mirror_live_ingest_updates_profile_index() -> Result<()> {
 
 #[tokio::test]
 async fn mirror_republishes_roots_changed_outside_the_mirror() -> Result<()> {
-    let _guard = crate::socialgraph::test_lock();
+    let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(HashtreeStore::new(tmp.path())?);
     let graph_store = open_social_graph_store_with_storage(

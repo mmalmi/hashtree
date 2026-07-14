@@ -1,9 +1,9 @@
 //! TreeBuilder benchmark for different chunk sizes and encryption modes.
 //!
-//! Run with: cargo bench -p hashtree --features encryption
+//! Run with: cargo bench -p hashtree-core
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use hashtree::{HashTree, HashTreeConfig, MemoryStore, BEP52_CHUNK_SIZE, DEFAULT_CHUNK_SIZE};
+use hashtree_core::{HashTree, HashTreeConfig, MemoryStore, BEP52_CHUNK_SIZE, DEFAULT_CHUNK_SIZE};
 use std::sync::Arc;
 
 /// Generate random data
@@ -72,7 +72,7 @@ fn bench_tree_reader(c: &mut Criterion) {
                     .with_chunk_size(*chunk_size)
                     .public();
                 let tree = HashTree::new(config);
-                let cid = tree.put(&data).await.unwrap();
+                let (cid, _) = tree.put(&data).await.unwrap();
                 (tree, cid)
             });
 
@@ -107,7 +107,7 @@ fn bench_roundtrip(c: &mut Criterion) {
                         .with_chunk_size(chunk_size)
                         .public();
                     let tree = HashTree::new(config);
-                    let cid = tree.put(black_box(data)).await.unwrap();
+                    let (cid, _) = tree.put(black_box(data)).await.unwrap();
                     tree.get(&cid, None).await.unwrap()
                 })
             })
@@ -118,7 +118,6 @@ fn bench_roundtrip(c: &mut Criterion) {
 }
 
 /// Benchmark encrypted vs non-encrypted write performance
-#[cfg(feature = "encryption")]
 fn bench_encrypted_write(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("encrypted_write");
@@ -163,7 +162,6 @@ fn bench_encrypted_write(c: &mut Criterion) {
 }
 
 /// Benchmark encrypted vs non-encrypted read performance
-#[cfg(feature = "encryption")]
 fn bench_encrypted_read(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("encrypted_read");
@@ -180,7 +178,7 @@ fn bench_encrypted_read(c: &mut Criterion) {
             let store = Arc::new(MemoryStore::new());
             let config = HashTreeConfig::new(store).public();
             let tree = HashTree::new(config);
-            let cid = tree.put(&data).await.unwrap();
+            let (cid, _) = tree.put(&data).await.unwrap();
             (tree, cid)
         });
 
@@ -197,7 +195,7 @@ fn bench_encrypted_read(c: &mut Criterion) {
             let store = Arc::new(MemoryStore::new());
             let config = HashTreeConfig::new(store); // encrypted by default
             let tree = HashTree::new(config);
-            let cid = tree.put(&data).await.unwrap();
+            let (cid, _) = tree.put(&data).await.unwrap();
             (tree, cid)
         });
 
@@ -213,7 +211,6 @@ fn bench_encrypted_read(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "encryption")]
 criterion_group!(
     benches,
     bench_tree_builder,
@@ -221,14 +218,6 @@ criterion_group!(
     bench_roundtrip,
     bench_encrypted_write,
     bench_encrypted_read,
-);
-
-#[cfg(not(feature = "encryption"))]
-criterion_group!(
-    benches,
-    bench_tree_builder,
-    bench_tree_reader,
-    bench_roundtrip,
 );
 
 criterion_main!(benches);

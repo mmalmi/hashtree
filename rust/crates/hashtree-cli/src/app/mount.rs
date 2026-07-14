@@ -24,6 +24,14 @@ pub(crate) struct MountVisibility {
     pub(crate) link_key: Option<[u8; 32]>,
 }
 
+pub(crate) struct MountFuseOptions {
+    pub(crate) visibility: Option<String>,
+    pub(crate) link_key: Option<String>,
+    pub(crate) private: bool,
+    pub(crate) relays: Option<String>,
+    pub(crate) allow_other: bool,
+}
+
 pub(crate) fn parse_mount_visibility(
     visibility: Option<String>,
     link_key: Option<String>,
@@ -217,13 +225,16 @@ where
 pub(crate) async fn mount_fuse(
     target: String,
     mountpoint: Option<PathBuf>,
-    visibility: Option<String>,
-    link_key: Option<String>,
-    private: bool,
-    relays: Option<String>,
-    allow_other: bool,
     data_dir: PathBuf,
+    options: MountFuseOptions,
 ) -> Result<()> {
+    let MountFuseOptions {
+        visibility,
+        link_key,
+        private,
+        relays,
+        allow_other,
+    } = options;
     let current_dir = std::env::current_dir()?;
     let (mountpoint, implicit_mountpoint) = match mountpoint {
         Some(path) => (path, false),
@@ -255,11 +266,13 @@ pub(crate) async fn mount_fuse(
         config.nostr.relays.clone()
     };
 
-    let mut opts = ResolveOptions::default();
-    opts.link_key = mount_link_key;
-    opts.private = mount_visibility == hashtree_core::TreeVisibility::Private;
-    opts.relays = Some(relays);
-    opts.data_dir = Some(data_dir.clone());
+    let mut opts = ResolveOptions {
+        link_key: mount_link_key,
+        private: mount_visibility == hashtree_core::TreeVisibility::Private,
+        relays: Some(relays),
+        data_dir: Some(data_dir.clone()),
+        ..ResolveOptions::default()
+    };
 
     if opts.private {
         let keys =

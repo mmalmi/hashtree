@@ -46,7 +46,7 @@ use nostr_social_graph_heed::HeedSocialGraph;
 use crate::storage::{LocalStore, StorageRouter};
 
 #[cfg(test)]
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::OnceLock;
 #[cfg(test)]
 use std::time::Instant;
 
@@ -172,17 +172,24 @@ pub trait SocialGraphBackend: Send + Sync {
 }
 
 #[cfg(test)]
-pub type TestLockGuard = MutexGuard<'static, ()>;
+pub type TestLockGuard = tokio::sync::MutexGuard<'static, ()>;
 
 #[cfg(test)]
-static NDB_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static NDB_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[cfg(test)]
-pub fn test_lock() -> TestLockGuard {
-    NDB_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
+fn test_mutex() -> &'static tokio::sync::Mutex<()> {
+    NDB_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+pub async fn test_lock() -> TestLockGuard {
+    test_mutex().lock().await
+}
+
+#[cfg(test)]
+pub fn test_lock_blocking() -> TestLockGuard {
+    test_mutex().blocking_lock()
 }
 
 pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>> {

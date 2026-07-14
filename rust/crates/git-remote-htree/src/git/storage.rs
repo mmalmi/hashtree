@@ -38,6 +38,13 @@ use super::{Error, Result};
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 const GIT_TREE_CHUNK_SIZE: usize = 64 * 1024;
 
+struct BaseObjectSources<'a, S: Store> {
+    objects: &'a HashMap<String, Vec<u8>>,
+    tree: &'a HashTree<S>,
+    objects_cid: &'a Cid,
+    progress: Option<&'a RepoTreeBuildProgress>,
+}
+
 #[derive(Default)]
 struct RefDirectory {
     files: BTreeMap<String, String>,
@@ -1176,14 +1183,17 @@ impl GitStorage {
                     let index_result = if let (Some(base_tree), Some(base_objects_cid), Some(base_tree_sha)) =
                         (base_tree, base_objects_cid.as_ref(), base_tree_sha.as_deref())
                     {
+                        let sources = BaseObjectSources {
+                            objects: &objects_clone,
+                            tree: base_tree,
+                            objects_cid: base_objects_cid,
+                            progress,
+                        };
                         self.build_index_file_with_base(
                             tree_oid,
-                            &objects_clone,
-                            base_tree,
-                            base_objects_cid,
+                            &sources,
                             base_tree_sha,
                             base_root_entries.as_ref(),
-                            progress,
                         )
                         .await
                     } else {
@@ -1223,14 +1233,17 @@ impl GitStorage {
                     let working_tree_entries = if let (Some(base_tree), Some(base_objects_cid), Some(base_tree_sha)) =
                         (base_tree, base_objects_cid.as_ref(), base_tree_sha.as_deref())
                     {
+                        let sources = BaseObjectSources {
+                            objects: &objects_clone,
+                            tree: base_tree,
+                            objects_cid: base_objects_cid,
+                            progress,
+                        };
                         self.build_working_tree_entries_with_base(
                             tree_oid,
-                            &objects_clone,
-                            base_tree,
-                            base_objects_cid,
+                            &sources,
                             base_tree_sha,
                             base_root_entries.as_ref(),
-                            progress,
                         )
                         .await?
                     } else {
@@ -1376,29 +1389,26 @@ impl GitStorage {
     fn build_working_tree_entries_with_base_recursive_boxed<'a, S: Store + 'a>(
         &'a self,
         tree_oid: &'a str,
-        objects: &'a HashMap<String, Vec<u8>>,
-        base_tree: &'a HashTree<S>,
-        base_objects_cid: &'a Cid,
+        sources: &'a BaseObjectSources<'a, S>,
         old_tree_oid: Option<&'a str>,
         old_dir_entries: Option<&'a Vec<hashtree_core::TreeEntry>>,
-        progress: Option<&'a RepoTreeBuildProgress>,
     ) -> BoxFuture<'a, Result<Vec<DirEntry>>> {
         Box::pin(async move {
             let tree_entries = self
                 .get_tree_entries_from_sources(
                     tree_oid,
-                    objects,
-                    Some(base_tree),
-                    Some(base_objects_cid),
+                    sources.objects,
+                    Some(sources.tree),
+                    Some(sources.objects_cid),
                 )
                 .await?;
             let old_tree_entries = if let Some(old_tree_oid) = old_tree_oid {
                 match self
                     .get_tree_entries_from_sources(
                         old_tree_oid,
-                        objects,
-                        Some(base_tree),
-                        Some(base_objects_cid),
+                        sources.objects,
+                        Some(sources.tree),
+                        Some(sources.objects_cid),
                     )
                     .await
                 {
@@ -1438,7 +1448,7 @@ impl GitStorage {
                             && old_dir_entry.link_type == LinkType::Dir
                         {
                             entries.push(Self::tree_entry_to_dir_entry(old_dir_entry));
-                            if let Some(progress) = progress {
+                            if let Some(progress) = sources.progress {
                                 progress.record_working_dir(true);
                             }
                             continue;
@@ -1452,7 +1462,8 @@ impl GitStorage {
                     let old_subdir_entries = if let Some(old_dir_entry) = old_dir_entry.as_ref() {
                         if old_dir_entry.link_type == LinkType::Dir {
                             Some(
-                                base_tree
+                                sources
+                                    .tree
                                     .list_directory(&Cid {
                                         hash: old_dir_entry.hash,
                                         key: old_dir_entry.key,
@@ -1475,12 +1486,9 @@ impl GitStorage {
                     let sub_entries = self
                         .build_working_tree_entries_with_base_recursive_boxed(
                             &oid_hex,
-                            objects,
-                            base_tree,
-                            base_objects_cid,
+                            sources,
                             old_subtree_oid.as_deref(),
                             old_subdir_entries.as_ref(),
-                            progress,
                         )
                         .await?;
                     let dir_cid = self.tree.put_directory(sub_entries).await.map_err(|e| {
@@ -1489,7 +1497,7 @@ impl GitStorage {
                     entries.push(
                         DirEntry::from_cid(&entry.name, &dir_cid).with_link_type(LinkType::Dir),
                     );
-                    if let Some(progress) = progress {
+                    if let Some(progress) = sources.progress {
                         progress.record_working_dir(false);
                     }
                     continue;
@@ -1503,14 +1511,14 @@ impl GitStorage {
                         && old_dir_entry.link_type != LinkType::Dir
                     {
                         entries.push(Self::tree_entry_to_dir_entry(old_dir_entry));
-                        if let Some(progress) = progress {
+                        if let Some(progress) = sources.progress {
                             progress.record_working_file(true);
                         }
                         continue;
                     }
                 }
 
-                let blob_content = match self.get_object_content(&oid_hex, objects) {
+                let blob_content = match self.get_object_content(&oid_hex, sources.objects) {
                     Some((ObjectType::Blob, blob_content)) => blob_content,
                     Some((obj_type, _)) => {
                         return Err(Error::InvalidObjectType(format!(
@@ -1522,7 +1530,7 @@ impl GitStorage {
                         if let Some(old_dir_entry) = old_dir_entry.as_ref() {
                             if old_dir_entry.link_type != LinkType::Dir {
                                 entries.push(Self::tree_entry_to_dir_entry(old_dir_entry));
-                                if let Some(progress) = progress {
+                                if let Some(progress) = sources.progress {
                                     progress.record_working_file(true);
                                 }
                                 continue;
@@ -1531,7 +1539,7 @@ impl GitStorage {
                         return Err(Error::ObjectNotFound(oid_hex));
                     }
                     None => match self
-                        .get_object_content_from_base(&oid_hex, base_tree, base_objects_cid)
+                        .get_object_content_from_base(&oid_hex, sources.tree, sources.objects_cid)
                         .await?
                     {
                         Some((ObjectType::Blob, blob_content)) => blob_content,
@@ -1550,7 +1558,7 @@ impl GitStorage {
                         Error::StorageError(format!("put blob {}: {}", entry.name, e))
                     })?;
                 entries.push(DirEntry::from_cid(&entry.name, &cid).with_size(size));
-                if let Some(progress) = progress {
+                if let Some(progress) = sources.progress {
                     progress.record_working_file(false);
                 }
             }
@@ -1563,12 +1571,9 @@ impl GitStorage {
     async fn build_working_tree_entries_with_base<S: Store>(
         &self,
         tree_oid: &str,
-        objects: &HashMap<String, Vec<u8>>,
-        base_tree: &HashTree<S>,
-        base_objects_cid: &Cid,
+        sources: &BaseObjectSources<'_, S>,
         base_tree_oid: &str,
         base_root_entries: Option<&Vec<hashtree_core::TreeEntry>>,
-        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Vec<DirEntry>> {
         let root_entries = base_root_entries.map(|entries| {
             entries
@@ -1580,12 +1585,9 @@ impl GitStorage {
 
         self.build_working_tree_entries_with_base_recursive_boxed(
             tree_oid,
-            objects,
-            base_tree,
-            base_objects_cid,
+            sources,
             Some(base_tree_oid),
             root_entries.as_ref(),
-            progress,
         )
         .await
     }
@@ -1980,12 +1982,9 @@ impl GitStorage {
     async fn build_index_file_with_base<S: Store>(
         &self,
         tree_oid: &str,
-        objects: &HashMap<String, Vec<u8>>,
-        base_tree: &HashTree<S>,
-        base_objects_cid: &Cid,
+        sources: &BaseObjectSources<'_, S>,
         base_tree_oid: &str,
         base_root_entries: Option<&Vec<hashtree_core::TreeEntry>>,
-        progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Vec<u8>> {
         let mut entries: Vec<(String, [u8; 20], u32, u32)> = Vec::new();
         let root_entries = base_root_entries.map(|entries| {
@@ -1998,14 +1997,11 @@ impl GitStorage {
 
         self.collect_tree_entries_for_index_with_base_boxed(
             tree_oid,
-            objects,
-            base_tree,
-            base_objects_cid,
+            sources,
             Some(base_tree_oid),
             root_entries.as_ref(),
             "",
             &mut entries,
-            progress,
         )
         .await?;
 
@@ -2146,31 +2142,28 @@ impl GitStorage {
     fn collect_tree_entries_for_index_with_base_boxed<'a, S: Store + 'a>(
         &'a self,
         tree_oid: &'a str,
-        objects: &'a HashMap<String, Vec<u8>>,
-        base_tree: &'a HashTree<S>,
-        base_objects_cid: &'a Cid,
+        sources: &'a BaseObjectSources<'a, S>,
         old_tree_oid: Option<&'a str>,
         old_dir_entries: Option<&'a Vec<hashtree_core::TreeEntry>>,
         prefix: &'a str,
         entries: &'a mut Vec<(String, [u8; 20], u32, u32)>,
-        progress: Option<&'a RepoTreeBuildProgress>,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let tree_entries = self
                 .get_tree_entries_from_sources(
                     tree_oid,
-                    objects,
-                    Some(base_tree),
-                    Some(base_objects_cid),
+                    sources.objects,
+                    Some(sources.tree),
+                    Some(sources.objects_cid),
                 )
                 .await?;
             let old_tree_entries = if let Some(old_tree_oid) = old_tree_oid {
                 Some(
                     self.get_tree_entries_from_sources(
                         old_tree_oid,
-                        objects,
-                        Some(base_tree),
-                        Some(base_objects_cid),
+                        sources.objects,
+                        Some(sources.tree),
+                        Some(sources.objects_cid),
                     )
                     .await?,
                 )
@@ -2207,7 +2200,8 @@ impl GitStorage {
                     let old_subdir_entries = if let Some(old_dir_entry) = old_dir_entry.as_ref() {
                         if old_dir_entry.link_type == LinkType::Dir {
                             Some(
-                                base_tree
+                                sources
+                                    .tree
                                     .list_directory(&Cid {
                                         hash: old_dir_entry.hash,
                                         key: old_dir_entry.key,
@@ -2229,14 +2223,11 @@ impl GitStorage {
 
                     self.collect_tree_entries_for_index_with_base_boxed(
                         &oid_hex,
-                        objects,
-                        base_tree,
-                        base_objects_cid,
+                        sources,
                         old_subtree_oid.as_deref(),
                         old_subdir_entries.as_ref(),
                         &path,
                         entries,
-                        progress,
                     )
                     .await?;
                     continue;
@@ -2260,24 +2251,24 @@ impl GitStorage {
                     } else {
                         self.blob_size_from_sources(
                             &oid_hex,
-                            objects,
-                            Some(base_tree),
-                            Some(base_objects_cid),
+                            sources.objects,
+                            Some(sources.tree),
+                            Some(sources.objects_cid),
                         )
                         .await? as u32
                     }
                 } else {
                     self.blob_size_from_sources(
                         &oid_hex,
-                        objects,
-                        Some(base_tree),
-                        Some(base_objects_cid),
+                        sources.objects,
+                        Some(sources.tree),
+                        Some(sources.objects_cid),
                     )
                     .await? as u32
                 };
 
                 entries.push((path, sha1_bytes, entry.mode, size));
-                if let Some(progress) = progress {
+                if let Some(progress) = sources.progress {
                     progress.record_index_entry();
                 }
             }

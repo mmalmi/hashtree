@@ -323,7 +323,7 @@ mod tests {
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
         let ingest_graph = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 &ingest_graph_dir,
                 Some(128 * 1024 * 1024),
@@ -363,7 +363,7 @@ mod tests {
         assert!(data_dir.join("nostr-index/latest-root.txt").exists());
 
         let replay_graph = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 &replay_graph_dir,
                 Some(128 * 1024 * 1024),
@@ -435,7 +435,7 @@ mod tests {
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
         let graph = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 &graph_dir,
                 Some(128 * 1024 * 1024),
@@ -488,7 +488,7 @@ mod tests {
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 &graph_dir,
                 Some(128 * 1024 * 1024),

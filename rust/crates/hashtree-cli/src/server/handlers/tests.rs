@@ -584,14 +584,13 @@ async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>) -> String {
                     let _ = write
                         .send(TungsteniteMessage::Text(
                             NostrRelayMessage::event(subscription_id.clone(), event.clone())
-                                .as_json()
-                                .into(),
+                                .as_json(),
                         ))
                         .await;
                 }
                 let _ = write
                     .send(TungsteniteMessage::Text(
-                        NostrRelayMessage::eose(subscription_id).as_json().into(),
+                        NostrRelayMessage::eose(subscription_id).as_json(),
                     ))
                     .await;
             }
@@ -1089,9 +1088,9 @@ async fn ensure_blob_available_coalesces_concurrent_upstream_fetches() {
         ensure_blob_available(&state, &hash),
     );
 
-    assert_eq!(first.unwrap(), true);
-    assert_eq!(second.unwrap(), true);
-    assert_eq!(third.unwrap(), true);
+    assert!(first.unwrap());
+    assert!(second.unwrap());
+    assert!(third.unwrap());
     assert_eq!(
         requested_ids.lock().unwrap().as_slice(),
         &[format!("{}.bin", hex::encode(hash))]
@@ -1130,14 +1129,8 @@ async fn ensure_blob_available_caches_sequential_explicit_upstream_misses() {
     let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
     let state = test_app_state(local_store, vec![format!("http://{}", upstream_addr)]);
 
-    assert_eq!(
-        ensure_blob_available(&state, &missing_hash).await.unwrap(),
-        false
-    );
-    assert_eq!(
-        ensure_blob_available(&state, &missing_hash).await.unwrap(),
-        false
-    );
+    assert!(!ensure_blob_available(&state, &missing_hash).await.unwrap());
+    assert!(!ensure_blob_available(&state, &missing_hash).await.unwrap());
     assert_eq!(
         requested_ids.lock().unwrap().as_slice(),
         &[format!("{}.bin", hex::encode(missing_hash))]
@@ -1170,14 +1163,8 @@ async fn ensure_blob_available_retries_indeterminate_upstream_misses() {
     let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
     let state = test_app_state(local_store, vec![format!("http://{}", upstream_addr)]);
 
-    assert_eq!(
-        ensure_blob_available(&state, &missing_hash).await.unwrap(),
-        false
-    );
-    assert_eq!(
-        ensure_blob_available(&state, &missing_hash).await.unwrap(),
-        false
-    );
+    assert!(!ensure_blob_available(&state, &missing_hash).await.unwrap());
+    assert!(!ensure_blob_available(&state, &missing_hash).await.unwrap());
     assert_eq!(
         requested_ids.lock().unwrap().as_slice(),
         &[
@@ -1238,9 +1225,9 @@ async fn fetch_missing_chunk_coalesces_concurrent_upstream_fetches() {
         },
     );
 
-    assert_eq!(first.unwrap(), true);
-    assert_eq!(second.unwrap(), true);
-    assert_eq!(third.unwrap(), true);
+    assert!(first.unwrap());
+    assert!(second.unwrap());
+    assert!(third.unwrap());
     assert_eq!(
         requested_ids.lock().unwrap().as_slice(),
         &[format!("{}.bin", hash_hex)]
@@ -1818,13 +1805,17 @@ async fn serve_cid_with_range_honors_suffix_ranges() {
 
     let response = serve_cid_with_range(
         &state,
-        &cid,
-        headers,
-        false,
-        false,
-        false,
-        Some("clip.mp4"),
-        false,
+        CidRangeRequest {
+            cid: &cid,
+            headers,
+            filename_hint: Some("clip.mp4"),
+            options: TreeServeOptions {
+                is_immutable: false,
+                is_localhost: false,
+                allow_decryption_keys: false,
+                head_only: false,
+            },
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
@@ -1858,13 +1849,17 @@ async fn serve_cid_with_range_streams_large_explicit_ranges() {
 
     let response = serve_cid_with_range(
         &state,
-        &cid,
-        headers,
-        true,
-        false,
-        false,
-        Some("clip.mp4"),
-        false,
+        CidRangeRequest {
+            cid: &cid,
+            headers,
+            filename_hint: Some("clip.mp4"),
+            options: TreeServeOptions {
+                is_immutable: true,
+                is_localhost: false,
+                allow_decryption_keys: false,
+                head_only: false,
+            },
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
@@ -1894,13 +1889,17 @@ async fn serve_cid_with_range_head_returns_metadata_without_body() {
 
     let response = serve_cid_with_range(
         &state,
-        &cid,
-        axum::http::HeaderMap::new(),
-        true,
-        false,
-        false,
-        Some("release.tar.gz"),
-        true,
+        CidRangeRequest {
+            cid: &cid,
+            headers: axum::http::HeaderMap::new(),
+            filename_hint: Some("release.tar.gz"),
+            options: TreeServeOptions {
+                is_immutable: true,
+                is_localhost: false,
+                allow_decryption_keys: false,
+                head_only: true,
+            },
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1929,13 +1928,17 @@ async fn serve_cid_with_range_streams_large_full_gets() {
 
     let response = serve_cid_with_range(
         &state,
-        &cid,
-        axum::http::HeaderMap::new(),
-        true,
-        false,
-        false,
-        Some("release.tar.gz"),
-        false,
+        CidRangeRequest {
+            cid: &cid,
+            headers: axum::http::HeaderMap::new(),
+            filename_hint: Some("release.tar.gz"),
+            options: TreeServeOptions {
+                is_immutable: true,
+                is_localhost: false,
+                allow_decryption_keys: false,
+                head_only: false,
+            },
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1979,13 +1982,17 @@ async fn serve_cid_with_range_streams_keyed_full_gets() {
 
     let response = serve_cid_with_range(
         &state,
-        &cid,
-        axum::http::HeaderMap::new(),
-        true,
-        false,
-        false,
-        Some("release.tar.gz"),
-        false,
+        CidRangeRequest {
+            cid: &cid,
+            headers: axum::http::HeaderMap::new(),
+            filename_hint: Some("release.tar.gz"),
+            options: TreeServeOptions {
+                is_immutable: true,
+                is_localhost: false,
+                allow_decryption_keys: false,
+                head_only: false,
+            },
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -2013,13 +2020,17 @@ async fn serve_cid_with_range_rejects_keyed_ranges() {
 
     let response = serve_cid_with_range(
         &state,
-        &cid,
-        headers,
-        true,
-        false,
-        false,
-        Some("release.tar.gz"),
-        false,
+        CidRangeRequest {
+            cid: &cid,
+            headers,
+            filename_hint: Some("release.tar.gz"),
+            options: TreeServeOptions {
+                is_immutable: true,
+                is_localhost: false,
+                allow_decryption_keys: false,
+                head_only: false,
+            },
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -2100,14 +2111,16 @@ async fn htree_npub_path_range_fetches_missing_nested_file_from_upstream() {
     );
 
     let response = htree_npub_impl(
-        State(state),
-        npub,
-        "videos/Music".to_string(),
-        Some("video_1767136282070/video.mp4".to_string()),
-        Query(HashMap::new()),
-        headers,
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: "videos/Music".to_string(),
+            path: Some("video_1767136282070/video.mp4".to_string()),
+            params: HashMap::new(),
+            headers,
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 
@@ -2180,14 +2193,16 @@ async fn htree_npub_path_range_fetches_missing_nested_file_chunks_from_upstream(
     );
 
     let response = htree_npub_impl(
-        State(state),
-        npub,
-        "videos/Music".to_string(),
-        Some("video_1767136255334/video.mp4".to_string()),
-        Query(HashMap::new()),
-        headers,
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: "videos/Music".to_string(),
+            path: Some("video_1767136255334/video.mp4".to_string()),
+            params: HashMap::new(),
+            headers,
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 
@@ -2418,14 +2433,16 @@ async fn htree_npub_rejects_unapproved_plaintext_reads_when_public_reads_disable
     );
 
     let response = htree_npub_impl(
-        State(state),
-        npub,
-        "shared".to_string(),
-        Some("secret.txt".to_string()),
-        Query(HashMap::new()),
-        axum::http::HeaderMap::new(),
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: "shared".to_string(),
+            path: Some("secret.txt".to_string()),
+            params: HashMap::new(),
+            headers: axum::http::HeaderMap::new(),
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 
@@ -2464,14 +2481,16 @@ async fn htree_npub_rejects_query_decryption_key_even_when_author_allowed() {
     );
 
     let response = htree_npub_impl(
-        State(state),
-        npub,
-        "shared".to_string(),
-        Some("secret.txt".to_string()),
-        Query(HashMap::from([("k".to_string(), "aa".repeat(32))])),
-        axum::http::HeaderMap::new(),
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: "shared".to_string(),
+            path: Some("secret.txt".to_string()),
+            params: HashMap::from([("k".to_string(), "aa".repeat(32))]),
+            headers: axum::http::HeaderMap::new(),
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 
@@ -3271,14 +3290,16 @@ async fn htree_npub_path_serves_stale_cached_root_and_refreshes_in_background() 
         .cached_at = Instant::now() - Duration::from_secs(120);
 
     let response = htree_npub_impl(
-        State(state.clone()),
-        npub,
-        tree_name.to_string(),
-        Some("latest/release.json".to_string()),
-        Query(HashMap::new()),
-        axum::http::HeaderMap::new(),
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: tree_name.to_string(),
+            path: Some("latest/release.json".to_string()),
+            params: HashMap::new(),
+            headers: axum::http::HeaderMap::new(),
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 
@@ -3338,14 +3359,16 @@ async fn htree_npub_path_returns_304_for_matching_mutable_file_etag() {
     );
 
     let response = htree_npub_impl(
-        State(state),
-        npub,
-        tree_name.to_string(),
-        Some("app.js".to_string()),
-        Query(HashMap::new()),
-        headers,
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: tree_name.to_string(),
+            path: Some("app.js".to_string()),
+            params: HashMap::new(),
+            headers,
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 
@@ -3522,14 +3545,16 @@ async fn htree_npub_path_thumbnail_does_not_fall_back_to_historical_root() {
     );
 
     let response = htree_npub_impl(
-        State(state),
-        npub,
-        tree_name.to_string(),
-        Some("thumbnail".to_string()),
-        Query(HashMap::new()),
-        axum::http::HeaderMap::new(),
-        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))),
-        false,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename: tree_name.to_string(),
+            path: Some("thumbnail".to_string()),
+            params: HashMap::new(),
+            headers: axum::http::HeaderMap::new(),
+            is_localhost: true,
+            head_only: false,
+        },
     )
     .await;
 

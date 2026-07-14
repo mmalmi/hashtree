@@ -530,8 +530,8 @@ impl BackgroundNostrMirror {
                     }
                     let new_authors = authors
                         .iter()
+                        .filter(|author| !subscribed_authors.contains(*author))
                         .cloned()
-                        .filter(|author| !subscribed_authors.contains(author))
                         .collect::<Vec<_>>();
                     if !new_authors.is_empty() {
                         debug!(
@@ -1013,8 +1013,7 @@ impl BackgroundNostrMirror {
                 relay_fetch_mode: RelayFetchMode::GlobalRecent,
                 author_batch_size,
                 per_author_event_limit: per_author_event_limit
-                    .min(LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT)
-                    .max(1),
+                    .clamp(1, LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT),
                 relay_page_size,
                 max_relay_pages: LARGE_HISTORY_SYNC_MAX_RELAY_PAGES,
             };

@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
 
         let send_started = Instant::now();
         write
-            .send(Message::Text(payload.into()))
+            .send(Message::Text(payload))
             .await
             .context("send EVENT")?;
 

@@ -47,6 +47,38 @@ const CID_RANGE_STREAM_CHUNK_SIZE: u64 = 256 * 1024;
 const NOT_FOUND_CACHE_CONTROL: &str = "no-store";
 const IMMUTABLE_NOT_FOUND_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=5";
 
+#[derive(Clone, Copy)]
+struct TreeServeOptions {
+    is_immutable: bool,
+    is_localhost: bool,
+    allow_decryption_keys: bool,
+    head_only: bool,
+}
+
+struct TreeRootRequest {
+    cid: Cid,
+    path: Option<String>,
+    headers: HeaderMap,
+    options: TreeServeOptions,
+}
+
+struct MutableTreeRequest {
+    npub: String,
+    treename: String,
+    path: Option<String>,
+    params: HashMap<String, String>,
+    headers: HeaderMap,
+    is_localhost: bool,
+    head_only: bool,
+}
+
+struct CidRangeRequest<'a> {
+    cid: &'a Cid,
+    headers: HeaderMap,
+    filename_hint: Option<&'a str>,
+    options: TreeServeOptions,
+}
+
 fn not_found_response(body: impl Into<Body>) -> Response<Body> {
     not_found_response_with_cache_control(body, NOT_FOUND_CACHE_CONTROL)
 }
@@ -112,11 +144,11 @@ fn invalid_native_store_hash() -> Response<Body> {
         .unwrap()
 }
 
-fn parse_native_store_hash(hash_hex: &str) -> Result<[u8; 32], Response<Body>> {
+fn parse_native_store_hash(hash_hex: &str) -> Result<[u8; 32], Box<Response<Body>>> {
     if hash_hex.len() != 64 || !hash_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(invalid_native_store_hash());
+        return Err(Box::new(invalid_native_store_hash()));
     }
-    from_hex(hash_hex).map_err(|_| invalid_native_store_hash())
+    from_hex(hash_hex).map_err(|_| Box::new(invalid_native_store_hash()))
 }
 
 pub async fn iris_store_get(
@@ -125,7 +157,7 @@ pub async fn iris_store_get(
 ) -> impl IntoResponse {
     let hash = match parse_native_store_hash(&hash_hex) {
         Ok(hash) => hash,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match get_blob_without_blocking_runtime(&state, hash).await {
@@ -153,7 +185,7 @@ pub async fn iris_store_head(
 ) -> impl IntoResponse {
     let hash = match parse_native_store_hash(&hash_hex) {
         Ok(hash) => hash,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match get_blob_size_without_blocking_runtime(&state, hash).await {
@@ -182,7 +214,7 @@ pub async fn iris_store_put(
 ) -> impl IntoResponse {
     let expected_hash = match parse_native_store_hash(&hash_hex) {
         Ok(hash) => hash,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let actual_hash = sha256(&body);
     if actual_hash != expected_hash {
@@ -243,7 +275,7 @@ pub async fn iris_store_delete(
 ) -> impl IntoResponse {
     let hash = match parse_native_store_hash(&hash_hex) {
         Ok(hash) => hash,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let store = state.store.clone();
@@ -333,14 +365,16 @@ async fn serve_virtual_tree_host_request(
         }
         VirtualTreeRoot::Mutable { npub, treename } => {
             htree_npub_impl(
-                State(state.clone()),
-                npub.clone(),
-                treename.clone(),
-                requested_path.clone().filter(|path| !path.is_empty()),
-                Query(params.clone()),
-                headers.clone(),
-                ConnectInfo(connect_info.0),
-                head_only,
+                state,
+                MutableTreeRequest {
+                    npub: npub.clone(),
+                    treename: treename.clone(),
+                    path: requested_path.clone().filter(|path| !path.is_empty()),
+                    params: params.clone(),
+                    headers: headers.clone(),
+                    is_localhost: connect_info.0.ip().is_loopback(),
+                    head_only,
+                },
             )
             .await
         }
@@ -367,14 +401,16 @@ async fn serve_virtual_tree_host_request(
         }
         VirtualTreeRoot::Mutable { npub, treename } => {
             htree_npub_impl(
-                State(state.clone()),
-                npub,
-                treename,
-                None,
-                Query(params),
-                headers,
-                connect_info,
-                head_only,
+                state,
+                MutableTreeRequest {
+                    npub,
+                    treename,
+                    path: None,
+                    params,
+                    headers,
+                    is_localhost: connect_info.0.ip().is_loopback(),
+                    head_only,
+                },
             )
             .await
         }
@@ -407,16 +443,20 @@ async fn serve_configured_immutable_tree_host_request(
 
     serve_tree_root_response(
         state,
-        Cid {
-            hash: nhash_data.hash,
-            key: None,
+        TreeRootRequest {
+            cid: Cid {
+                hash: nhash_data.hash,
+                key: None,
+            },
+            path,
+            headers,
+            options: TreeServeOptions {
+                is_immutable: true,
+                is_localhost,
+                allow_decryption_keys: false,
+                head_only,
+            },
         },
-        path,
-        headers,
-        true,
-        is_localhost,
-        false,
-        head_only,
     )
     .await
 }
@@ -853,17 +893,14 @@ pub async fn htree_nhash_path(
     .await
 }
 
-async fn serve_tree_root_response(
-    state: &AppState,
-    cid: Cid,
-    path: Option<String>,
-    headers: axum::http::HeaderMap,
-    is_immutable: bool,
-    is_localhost: bool,
-    allow_decryption_keys: bool,
-    head_only: bool,
-) -> Response<Body> {
-    if cid.key.is_some() && !allow_decryption_keys {
+async fn serve_tree_root_response(state: &AppState, request: TreeRootRequest) -> Response<Body> {
+    let TreeRootRequest {
+        cid,
+        path,
+        headers,
+        options,
+    } = request;
+    if cid.key.is_some() && !options.allow_decryption_keys {
         return decryption_key_forbidden_response();
     }
 
@@ -905,13 +942,12 @@ async fn serve_tree_root_response(
             Ok(Some(DirectoryTarget::File { cid: entry, path })) => {
                 return serve_cid_with_range(
                     state,
-                    &entry,
-                    headers,
-                    is_immutable,
-                    is_localhost,
-                    allow_decryption_keys,
-                    Some(&path),
-                    head_only,
+                    CidRangeRequest {
+                        cid: &entry,
+                        headers,
+                        filename_hint: Some(&path),
+                        options,
+                    },
                 )
                 .await;
             }
@@ -919,9 +955,9 @@ async fn serve_tree_root_response(
                 return list_directory_json(
                     state,
                     &listing_cid,
-                    allow_decryption_keys,
-                    is_immutable,
-                    is_localhost,
+                    options.allow_decryption_keys,
+                    options.is_immutable,
+                    options.is_localhost,
                 )
                 .await;
             }
@@ -938,7 +974,7 @@ async fn serve_tree_root_response(
         }
     }
 
-    if is_immutable
+    if options.is_immutable
         && effective_path
             .as_deref()
             .map(|requested_path| requested_path.contains('/'))
@@ -949,29 +985,27 @@ async fn serve_tree_root_response(
 
     serve_cid_with_range(
         state,
-        &cid,
-        headers,
-        is_immutable,
-        is_localhost,
-        allow_decryption_keys,
-        effective_path.as_deref(),
-        head_only,
+        CidRangeRequest {
+            cid: &cid,
+            headers,
+            filename_hint: effective_path.as_deref(),
+            options,
+        },
     )
     .await
 }
 
-async fn htree_npub_impl(
-    State(state): State<AppState>,
-    npub: String,
-    treename: String,
-    path: Option<String>,
-    Query(params): Query<HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
-    head_only: bool,
-) -> Response<Body> {
-    let is_localhost = connect_info.0.ip().is_loopback();
-    if !is_allowed_plaintext_read_author(&state, &npub) {
+async fn htree_npub_impl(state: &AppState, request: MutableTreeRequest) -> Response<Body> {
+    let MutableTreeRequest {
+        npub,
+        treename,
+        path,
+        params,
+        headers,
+        is_localhost,
+        head_only,
+    } = request;
+    if !is_allowed_plaintext_read_author(state, &npub) {
         return plaintext_read_forbidden_response(&npub);
     }
 
@@ -979,20 +1013,24 @@ async fn htree_npub_impl(
         return decryption_key_forbidden_response();
     }
 
-    let Some(resolved) = resolve_root_for_mutable_request(&state, &npub, &treename, None).await
+    let Some(resolved) = resolve_root_for_mutable_request(state, &npub, &treename, None).await
     else {
         return not_found_response("Root not found through configured event provider");
     };
 
     serve_tree_root_response(
-        &state,
-        resolved.cid,
-        path,
-        headers,
-        false,
-        is_localhost,
-        true,
-        head_only,
+        state,
+        TreeRootRequest {
+            cid: resolved.cid,
+            path,
+            headers,
+            options: TreeServeOptions {
+                is_immutable: false,
+                is_localhost,
+                allow_decryption_keys: true,
+                head_only,
+            },
+        },
     )
     .await
 }
@@ -1016,14 +1054,16 @@ pub async fn htree_npub(
         .map(|entry| entry.treename.clone())
         .unwrap_or(treename);
     htree_npub_impl(
-        State(state),
-        full,
-        resolved_treename,
-        None,
-        Query(params),
-        headers,
-        connect_info,
-        method == Method::HEAD,
+        &state,
+        MutableTreeRequest {
+            npub: full,
+            treename: resolved_treename,
+            path: None,
+            params,
+            headers,
+            is_localhost: connect_info.0.ip().is_loopback(),
+            head_only: method == Method::HEAD,
+        },
     )
     .await
 }
@@ -1048,14 +1088,16 @@ pub async fn htree_npub_path(
         .unwrap_or(treename);
     let resolved_path = parsed.and_then(|entry| entry.path).or(Some(path));
     htree_npub_impl(
-        State(state),
-        full,
-        resolved_treename,
-        resolved_path,
-        Query(params),
-        headers,
-        connect_info,
-        method == Method::HEAD,
+        &state,
+        MutableTreeRequest {
+            npub: full,
+            treename: resolved_treename,
+            path: resolved_path,
+            params,
+            headers,
+            is_localhost: connect_info.0.ip().is_loopback(),
+            head_only: method == Method::HEAD,
+        },
     )
     .await
 }
@@ -1366,17 +1408,14 @@ fn parse_byte_range(range_header: &str, total_size: u64) -> Option<ParsedByteRan
     })
 }
 
-async fn serve_cid_with_range(
-    state: &AppState,
-    cid: &Cid,
-    headers: axum::http::HeaderMap,
-    is_immutable: bool,
-    is_localhost: bool,
-    allow_decryption_keys: bool,
-    filename_hint: Option<&str>,
-    head_only: bool,
-) -> Response<Body> {
-    if cid.key.is_some() && !allow_decryption_keys {
+async fn serve_cid_with_range(state: &AppState, request: CidRangeRequest<'_>) -> Response<Body> {
+    let CidRangeRequest {
+        cid,
+        headers,
+        filename_hint,
+        options,
+    } = request;
+    if cid.key.is_some() && !options.allow_decryption_keys {
         return decryption_key_forbidden_response();
     }
 
@@ -1397,7 +1436,7 @@ async fn serve_cid_with_range(
         }
     };
     let etag = etag_for_cid(cid);
-    let cache_control = tree_response_cache_control(is_immutable);
+    let cache_control = tree_response_cache_control(options.is_immutable);
 
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     if range_header.is_none() && if_none_match_matches(&headers, &etag) {
@@ -1407,7 +1446,7 @@ async fn serve_cid_with_range(
             .header(header::CACHE_CONTROL, cache_control)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN);
-        if is_localhost {
+        if options.is_localhost {
             builder = builder.header("X-Source", "local");
         }
         return builder.body(Body::empty()).unwrap();
@@ -1433,7 +1472,7 @@ async fn serve_cid_with_range(
             let end_exclusive = end_inclusive.saturating_add(1);
             let content_length = end_exclusive.saturating_sub(start) as usize;
             let content_range = format!("bytes {}-{}/{}", start, end_inclusive, total_size);
-            let body = if head_only {
+            let body = if options.head_only {
                 Body::empty()
             } else {
                 Body::from_stream(stream_file_range_cid_with_fetch(
@@ -1454,7 +1493,7 @@ async fn serve_cid_with_range(
                 .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN)
                 .header(header::ETAG, etag.clone())
                 .header(header::CACHE_CONTROL, cache_control);
-            if is_localhost {
+            if options.is_localhost {
                 builder = builder.header("X-Source", "local");
             }
             return builder.body(body).unwrap();
@@ -1470,11 +1509,11 @@ async fn serve_cid_with_range(
         .header(CROSS_ORIGIN_RESOURCE_POLICY_HEADER, CORP_CROSS_ORIGIN)
         .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, cache_control);
-    if is_localhost {
+    if options.is_localhost {
         builder = builder.header("X-Source", "local");
     }
 
-    let body = if head_only || total_size == 0 {
+    let body = if options.head_only || total_size == 0 {
         Body::empty()
     } else {
         Body::from_stream(stream_file_range_cid_with_fetch(
@@ -1792,14 +1831,16 @@ pub async fn serve_npub(
     }
 
     htree_npub_impl(
-        State(state),
-        npub,
-        treename,
-        path,
-        Query(query),
-        headers,
-        connect_info,
-        method == Method::HEAD,
+        &state,
+        MutableTreeRequest {
+            npub,
+            treename,
+            path,
+            params: query,
+            headers,
+            is_localhost: connect_info.0.ip().is_loopback(),
+            head_only: method == Method::HEAD,
+        },
     )
     .await
     .into_response()

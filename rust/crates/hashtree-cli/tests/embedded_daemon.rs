@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -9,9 +9,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 struct EnvVarGuard {
@@ -40,7 +40,7 @@ impl Drop for EnvVarGuard {
 #[tokio::test]
 async fn embedded_daemon_serves_htree_test() {
     let dir = TempDir::new().expect("temp dir");
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _config_env = EnvVarGuard::set("HTREE_CONFIG_DIR", dir.path());
     let _data_env = EnvVarGuard::set("HTREE_DATA_DIR", dir.path());
 
@@ -139,7 +139,7 @@ async fn embedded_daemon_respects_explicit_config_dir_without_env() {
 #[tokio::test]
 async fn embedded_daemon_uses_default_blossom_servers_when_config_is_empty() {
     let dir = TempDir::new().expect("temp dir");
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _config_env = EnvVarGuard::set("HTREE_CONFIG_DIR", dir.path());
     let _data_env = EnvVarGuard::set("HTREE_DATA_DIR", dir.path());
 
@@ -187,7 +187,7 @@ async fn embedded_daemon_uses_default_blossom_servers_when_config_is_empty() {
 #[tokio::test]
 async fn embedded_daemon_accepts_ws_route_with_trailing_slash() {
     let dir = TempDir::new().expect("temp dir");
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _config_env = EnvVarGuard::set("HTREE_CONFIG_DIR", dir.path());
     let _data_env = EnvVarGuard::set("HTREE_DATA_DIR", dir.path());
 
@@ -231,8 +231,7 @@ async fn embedded_daemon_accepts_ws_route_with_trailing_slash() {
                     .authors(vec![nostr::Keys::generate().public_key()])
                     .kinds(vec![nostr::Kind::from(30078_u16)])],
             )
-            .as_json()
-            .into(),
+            .as_json(),
         ))
         .await
         .expect("send req");
@@ -258,7 +257,7 @@ async fn embedded_daemon_accepts_ws_route_with_trailing_slash() {
 #[tokio::test]
 async fn embedded_daemon_reports_assist_mode_in_status() {
     let dir = TempDir::new().expect("temp dir");
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _config_env = EnvVarGuard::set("HTREE_CONFIG_DIR", dir.path());
     let _data_env = EnvVarGuard::set("HTREE_DATA_DIR", dir.path());
 
@@ -299,7 +298,7 @@ async fn embedded_daemon_reports_assist_mode_in_status() {
 #[tokio::test]
 async fn embedded_daemon_socialgraph_snapshot_is_not_cors_readable() {
     let dir = TempDir::new().expect("temp dir");
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _config_env = EnvVarGuard::set("HTREE_CONFIG_DIR", dir.path());
     let _data_env = EnvVarGuard::set("HTREE_DATA_DIR", dir.path());
 
@@ -355,7 +354,7 @@ async fn embedded_daemon_socialgraph_snapshot_is_not_cors_readable() {
 #[tokio::test]
 async fn embedded_daemon_background_services_follow_live_relay_settings() {
     let dir = TempDir::new().expect("temp dir");
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _config_env = EnvVarGuard::set("HTREE_CONFIG_DIR", dir.path());
     let _data_env = EnvVarGuard::set("HTREE_DATA_DIR", dir.path());
 

@@ -1271,8 +1271,10 @@ impl Default for FipsMeshPubsubOptions {
 
 impl FipsMeshPubsubOptions {
     fn routing_config(&self) -> MeshRoutingConfig {
-        let mut pubsub_scheduler = PubsubSchedulerConfig::default();
-        pubsub_scheduler.fanout = self.fanout;
+        let pubsub_scheduler = PubsubSchedulerConfig {
+            fanout: self.fanout,
+            ..PubsubSchedulerConfig::default()
+        };
         MeshRoutingConfig {
             pubsub_delivery_mode: PubsubDeliveryMode::HtlInvWant,
             pubsub_scheduler,

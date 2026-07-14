@@ -914,17 +914,14 @@ async fn prefetch_file_range_chunks_with_fetch<S: Store>(
 
     let mut hashes = Vec::new();
     let mut seen = HashSet::new();
-    collect_range_leaf_hashes(
+    let mut collector = RangeLeafCollector {
         state,
-        tree,
-        &node,
         start,
-        actual_end,
-        0,
-        &mut hashes,
-        &mut seen,
-    )
-    .await?;
+        end: actual_end,
+        hashes: &mut hashes,
+        seen: &mut seen,
+    };
+    collector.collect(tree, &node, 0).await?;
 
     if hashes.is_empty() {
         return Ok(());
@@ -971,65 +968,62 @@ fn blob_batch_download_max_bytes() -> usize {
         .unwrap_or(DEFAULT_BLOB_BATCH_DOWNLOAD_MAX_BYTES)
 }
 
-async fn collect_range_leaf_hashes<S: Store>(
-    state: &AppState,
-    tree: &HashTree<S>,
-    node: &TreeNode,
+struct RangeLeafCollector<'a> {
+    state: &'a AppState,
     start: u64,
     end: u64,
-    base_offset: u64,
-    hashes: &mut Vec<[u8; 32]>,
-    seen: &mut HashSet<[u8; 32]>,
-) -> Result<(), String> {
-    let mut current_offset = base_offset;
+    hashes: &'a mut Vec<[u8; 32]>,
+    seen: &'a mut HashSet<[u8; 32]>,
+}
 
-    for link in &node.links {
-        let child_start = current_offset;
-        let child_end = child_start.saturating_add(link.size);
-        current_offset = child_end;
+impl RangeLeafCollector<'_> {
+    async fn collect<S: Store>(
+        &mut self,
+        tree: &HashTree<S>,
+        node: &TreeNode,
+        base_offset: u64,
+    ) -> Result<(), String> {
+        let mut current_offset = base_offset;
 
-        if child_end <= start {
-            continue;
-        }
-        if child_start >= end {
-            break;
-        }
+        for link in &node.links {
+            let child_start = current_offset;
+            let child_end = child_start.saturating_add(link.size);
+            current_offset = child_end;
 
-        if link.link_type == LinkType::File
-            && state
-                .store
-                .blob_exists(&link.hash)
-                .map_err(|err| err.to_string())?
-        {
-            let child_cid = link_to_cid(link);
-            if let Some(child_node) = tree
-                .get_node(&child_cid)
-                .await
-                .map_err(|err| err.to_string())?
+            if child_end <= self.start {
+                continue;
+            }
+            if child_start >= self.end {
+                break;
+            }
+
+            if link.link_type == LinkType::File
+                && self
+                    .state
+                    .store
+                    .blob_exists(&link.hash)
+                    .map_err(|err| err.to_string())?
             {
-                if child_node.node_type == LinkType::File {
-                    Box::pin(collect_range_leaf_hashes(
-                        state,
-                        tree,
-                        &child_node,
-                        start,
-                        end,
-                        child_start,
-                        hashes,
-                        seen,
-                    ))
-                    .await?;
-                    continue;
+                let child_cid = link_to_cid(link);
+                if let Some(child_node) = tree
+                    .get_node(&child_cid)
+                    .await
+                    .map_err(|err| err.to_string())?
+                {
+                    if child_node.node_type == LinkType::File {
+                        Box::pin(self.collect(tree, &child_node, child_start)).await?;
+                        continue;
+                    }
                 }
+            }
+
+            if self.seen.insert(link.hash) {
+                self.hashes.push(link.hash);
             }
         }
 
-        if seen.insert(link.hash) {
-            hashes.push(link.hash);
-        }
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn link_to_cid(link: &Link) -> Cid {

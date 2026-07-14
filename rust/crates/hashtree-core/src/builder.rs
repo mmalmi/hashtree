@@ -632,8 +632,8 @@ mod tests {
         let builder = TreeBuilder::new(config);
 
         let mut data = vec![0u8; 1024 * 2 + 100];
-        for i in 0..data.len() {
-            data[i] = (i % 256) as u8;
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
         }
 
         let (_cid, size) = builder.put(&data).await.unwrap();

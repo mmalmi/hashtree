@@ -48,7 +48,7 @@ pub use mesh_store_core::{
     build_hedged_wave_plan, normalize_dispatch_config, run_hedged_waves, sync_selector_peers,
     DataPumpStats, HedgedWaveAction, MeshReadSource, MeshRoutingConfig, MeshStoreCore,
     PubsubDeliveryMode, PubsubEvent, PubsubPublishStats, RequestDispatchConfig,
-    ResponseBehaviorConfig, SimMeshStore,
+    ResponseBehaviorConfig, SimMeshStore, VerifiedBlockDelivery, VerifiedBlockDeliveryBatch,
 };
 pub use mock::{
     clear_channel_registry, MockConnectionFactory, MockDataChannel, MockLatencyMode, MockRelay,

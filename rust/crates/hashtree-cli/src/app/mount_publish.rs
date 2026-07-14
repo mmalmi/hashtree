@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use futures::future::pending;
 use hashtree_core::{Cid, HashTree, HashTreeConfig, LinkType, Store};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Sleep;
 
 pub(crate) const MOUNT_PUBLISH_DEBOUNCE: Duration = Duration::from_secs(1);
@@ -160,7 +160,8 @@ where
             .await
             .map_err(|_| anyhow::anyhow!("mount publish worker dropped shutdown reply"))?;
 
-        if let Some(task) = self.task.lock().unwrap().take() {
+        let task = self.task.lock().await.take();
+        if let Some(task) = task {
             task.await
                 .map_err(|error| anyhow::anyhow!("mount publish worker join failed: {error}"))?;
         }

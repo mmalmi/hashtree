@@ -931,8 +931,8 @@ mod tests {
         let reader = TreeReader::new(store);
 
         let mut data = vec![0u8; 350];
-        for i in 0..data.len() {
-            data[i] = (i % 256) as u8;
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
         }
 
         let (cid, _size) = builder.put(&data).await.unwrap();
@@ -1203,8 +1203,8 @@ mod tests {
 
         // Create 350 bytes of sequential data
         let mut data = vec![0u8; 350];
-        for i in 0..data.len() {
-            data[i] = (i % 256) as u8;
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
         }
 
         let (cid, _size) = builder.put(&data).await.unwrap();
@@ -1276,8 +1276,8 @@ mod tests {
         let reader = TreeReader::new(store);
 
         let mut data = vec![0u8; 350];
-        for i in 0..data.len() {
-            data[i] = (i % 256) as u8;
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
         }
 
         let (cid, _size) = builder.put(&data).await.unwrap();
@@ -1319,8 +1319,8 @@ mod tests {
         let reader = TreeReader::new(store);
 
         let mut data = vec![0u8; 350];
-        for i in 0..data.len() {
-            data[i] = (i % 256) as u8;
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
         }
 
         let (cid, _size) = builder.put(&data).await.unwrap();

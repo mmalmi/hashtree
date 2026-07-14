@@ -1553,6 +1553,7 @@ impl<S: Store> HashTree<S> {
 
     /// Add or update an entry in a directory with optional link metadata.
     /// Returns new root Cid (immutable operation)
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_entry_with_meta(
         &self,
         root: &Cid,

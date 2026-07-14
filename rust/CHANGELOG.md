@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.82 - 2026-07-14
+
+### Added
+
+- Exposed bounded, first-winner delivery evidence for hash-verified mesh blocks,
+  allowing application adapters to account for useful service without coupling
+  Hashtree networking to a payment implementation.
+- Reported delivery-evidence overflow explicitly so lost evidence is never
+  inferred as a billable service claim.
+
+### Changed
+
+- Updated the optional service-accounting integration to `cashu-service` 0.3.0
+  and the FIPS pubsub adapter to `nostr-pubsub-fips` 0.2.3.
+- Restored warning-denying Rust 1.95 Clippy coverage across all targets and
+  features, including benchmarks and async test serialization.
+
+### Fixed
+
+- Credited useful bytes only to the first valid responder; corrupt responses,
+  late duplicates, and concurrent losers no longer receive reciprocity credit.
+- Included every publishable workspace crate in the staged Cargo release plan.
+
 ## 0.2.81 - 2026-07-14
 
 ### Changed

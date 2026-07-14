@@ -22,7 +22,6 @@ mod progress;
 mod push;
 mod storage_support;
 
-use progress::UploadProgress;
 use storage_support::get_hashtree_data_dir;
 #[cfg(test)]
 use storage_support::{build_repo_viewer_url, queue_hash_if_new};
@@ -44,30 +43,19 @@ const GIT_PACK_PHASE_IDLE: usize = 0;
 const GIT_PACK_PHASE_DOWNLOADING: usize = 1;
 const GIT_PACK_PHASE_INDEXING: usize = 2;
 
+struct GitPackProgressSnapshot {
+    processed_packs: usize,
+    total_packs: usize,
+    loaded_pack_bytes: u64,
+    total_pack_bytes: u64,
+    current_pack: usize,
+    phase: usize,
+    done: bool,
+    elapsed: Duration,
+}
+
 use crate::nostr_client::NostrClient;
 use hashtree_config::Config;
-
-fn upload_progress(
-    processed: usize,
-    discovered: usize,
-    total: Option<usize>,
-    uploaded: usize,
-    skipped_diff: usize,
-    skipped_server: usize,
-    failed: usize,
-    has_old_tree: bool,
-) -> UploadProgress {
-    UploadProgress {
-        processed,
-        discovered,
-        total,
-        uploaded,
-        skipped_diff,
-        skipped_server,
-        failed,
-        has_old_tree,
-    }
-}
 
 fn git_tree_walk_concurrency() -> usize {
     std::env::var("HTREE_GIT_TREE_WALK_CONCURRENCY")
@@ -225,16 +213,17 @@ impl RemoteHelper {
         }
     }
 
-    fn format_git_pack_progress_line(
-        processed_packs: usize,
-        total_packs: usize,
-        loaded_pack_bytes: u64,
-        total_pack_bytes: u64,
-        current_pack: usize,
-        phase: usize,
-        done: bool,
-        elapsed: Duration,
-    ) -> String {
+    fn format_git_pack_progress_line(snapshot: GitPackProgressSnapshot) -> String {
+        let GitPackProgressSnapshot {
+            processed_packs,
+            total_packs,
+            loaded_pack_bytes,
+            total_pack_bytes,
+            current_pack,
+            phase,
+            done,
+            elapsed,
+        } = snapshot;
         let loaded_pack_bytes = loaded_pack_bytes.min(total_pack_bytes);
         let progress = format!(
             "{}/{} ({}/{})",
@@ -1177,16 +1166,16 @@ impl RemoteHelper {
         let stderr_is_terminal = std::io::stderr().is_terminal();
         let install_start = Instant::now();
 
-        let initial_line = Self::format_git_pack_progress_line(
-            0,
+        let initial_line = Self::format_git_pack_progress_line(GitPackProgressSnapshot {
+            processed_packs: 0,
             total_packs,
-            0,
-            total_pack_size,
-            0,
-            GIT_PACK_PHASE_IDLE,
-            false,
-            Duration::ZERO,
-        );
+            loaded_pack_bytes: 0,
+            total_pack_bytes: total_pack_size,
+            current_pack: 0,
+            phase: GIT_PACK_PHASE_IDLE,
+            done: false,
+            elapsed: Duration::ZERO,
+        });
         Self::emit_git_pack_progress_line(&initial_line, stderr_is_terminal, false);
 
         let progress_task = {
@@ -1207,17 +1196,18 @@ impl RemoteHelper {
                     if progress_done.load(Ordering::Relaxed) {
                         break;
                     }
-                    let line = RemoteHelper::format_git_pack_progress_line(
-                        processed_packs.load(Ordering::Relaxed),
-                        total_packs,
-                        loaded_pack_bytes.load(Ordering::Relaxed)
-                            + current_pack_bytes.load(Ordering::Relaxed),
-                        total_pack_size,
-                        current_pack.load(Ordering::Relaxed),
-                        phase.load(Ordering::Relaxed),
-                        false,
-                        install_start.elapsed(),
-                    );
+                    let line =
+                        RemoteHelper::format_git_pack_progress_line(GitPackProgressSnapshot {
+                            processed_packs: processed_packs.load(Ordering::Relaxed),
+                            total_packs,
+                            loaded_pack_bytes: loaded_pack_bytes.load(Ordering::Relaxed)
+                                + current_pack_bytes.load(Ordering::Relaxed),
+                            total_pack_bytes: total_pack_size,
+                            current_pack: current_pack.load(Ordering::Relaxed),
+                            phase: phase.load(Ordering::Relaxed),
+                            done: false,
+                            elapsed: install_start.elapsed(),
+                        });
                     RemoteHelper::emit_git_pack_progress_line(&line, stderr_is_terminal, false);
                 }
             })
@@ -1310,16 +1300,16 @@ impl RemoteHelper {
 
         match &install_result {
             Ok(_) => {
-                let line = Self::format_git_pack_progress_line(
-                    pack_locations.len(),
-                    pack_locations.len(),
-                    total_pack_size,
-                    total_pack_size,
-                    pack_locations.len(),
-                    GIT_PACK_PHASE_IDLE,
-                    true,
-                    install_start.elapsed(),
-                );
+                let line = Self::format_git_pack_progress_line(GitPackProgressSnapshot {
+                    processed_packs: pack_locations.len(),
+                    total_packs: pack_locations.len(),
+                    loaded_pack_bytes: total_pack_size,
+                    total_pack_bytes: total_pack_size,
+                    current_pack: pack_locations.len(),
+                    phase: GIT_PACK_PHASE_IDLE,
+                    done: true,
+                    elapsed: install_start.elapsed(),
+                });
                 Self::emit_git_pack_progress_line(&line, stderr_is_terminal, true);
             }
             Err(_) if stderr_is_terminal => {

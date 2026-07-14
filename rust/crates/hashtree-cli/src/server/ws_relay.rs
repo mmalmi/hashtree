@@ -37,7 +37,7 @@ enum WsClientMessage {
 #[derive(Debug)]
 enum WsTextMessage<'a> {
     Hashtree(WsClientMessage),
-    Nostr(NostrClientMessage<'a>),
+    Nostr(Box<NostrClientMessage<'a>>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -156,7 +156,7 @@ fn parse_ws_text_message(text: &str) -> Option<WsTextMessage<'static>> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
         if let Ok(msg) = NostrClientMessage::from_json(trimmed) {
-            return Some(WsTextMessage::Nostr(msg));
+            return Some(WsTextMessage::Nostr(Box::new(msg)));
         }
     }
 
@@ -313,14 +313,8 @@ async fn run_upstream_nostr_subscription(
     };
     let (mut write, mut read) = socket.split();
     let request = NostrClientMessage::req(subscription_id.clone(), filters).as_json();
-    state
-        .ws_relay
-        .note_upstream_relay_send(request.as_bytes().len());
-    if write
-        .send(TungsteniteMessage::Text(request.into()))
-        .await
-        .is_err()
-    {
+    state.ws_relay.note_upstream_relay_send(request.len());
+    if write.send(TungsteniteMessage::Text(request)).await.is_err() {
         tracing::warn!(
             "upstream nostr relay request send failed: client_id={} subscription_id={} relay={}",
             client_id,
@@ -338,8 +332,8 @@ async fn run_upstream_nostr_subscription(
                     let close = NostrClientMessage::close(subscription_id.clone()).as_json();
                     state
                         .ws_relay
-                        .note_upstream_relay_send(close.as_bytes().len());
-                    let _ = write.send(TungsteniteMessage::Text(close.into())).await;
+                        .note_upstream_relay_send(close.len());
+                    let _ = write.send(TungsteniteMessage::Text(close)).await;
                     let _ = write.close().await;
                     break;
                 }
@@ -349,7 +343,7 @@ async fn run_upstream_nostr_subscription(
                     Some(Ok(TungsteniteMessage::Text(text))) => {
                         state
                             .ws_relay
-                            .note_upstream_relay_receive(text.as_bytes().len());
+                            .note_upstream_relay_receive(text.len());
                         if matches!(
                             NostrRelayMessage::from_json(text.as_str()),
                             Ok(NostrRelayMessage::EndOfStoredEvents(sid)) if sid.as_ref() == &subscription_id
@@ -503,7 +497,7 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                     }
                     WsTextMessage::Nostr(msg) => {
                         if let Some(relay) = &state.nostr_relay {
-                            match msg {
+                            match *msg {
                                 NostrClientMessage::Req {
                                     subscription_id,
                                     filters,
@@ -589,7 +583,7 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                                 }
                             }
                         } else {
-                            handle_nostr_message(client_id, msg, state).await;
+                            handle_nostr_message(client_id, *msg, state).await;
                         }
                     }
                 }
@@ -1228,14 +1222,13 @@ mod tests {
                         let _ = write
                             .send(TungsteniteMessage::Text(
                                 NostrRelayMessage::event(subscription_id.clone(), event.clone())
-                                    .as_json()
-                                    .into(),
+                                    .as_json(),
                             ))
                             .await;
                     }
                     let _ = write
                         .send(TungsteniteMessage::Text(
-                            NostrRelayMessage::eose(subscription_id).as_json().into(),
+                            NostrRelayMessage::eose(subscription_id).as_json(),
                         ))
                         .await;
                 }
@@ -1316,9 +1309,9 @@ mod tests {
         })
     }
 
-    fn ws_integrity_test_state(tmp: &TempDir) -> Result<AppState> {
+    async fn ws_integrity_test_state(tmp: &TempDir) -> Result<AppState> {
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 tmp.path(),
                 Some(128 * 1024 * 1024),
@@ -1362,7 +1355,7 @@ mod tests {
     #[tokio::test]
     async fn json_found_response_waits_for_valid_binary_payload() -> Result<()> {
         let tmp = TempDir::new()?;
-        let state = ws_integrity_test_state(&tmp)?;
+        let state = ws_integrity_test_state(&tmp).await?;
         let expected_hash = hex_encode(sha256(b"expected"));
         let peer_id = 7;
         let origin_id = 11;
@@ -1389,7 +1382,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_binary_response_with_wrong_hash_is_not_forwarded() -> Result<()> {
         let tmp = TempDir::new()?;
-        let state = ws_integrity_test_state(&tmp)?;
+        let state = ws_integrity_test_state(&tmp).await?;
         let expected_hash = hex_encode(sha256(b"expected"));
         let peer_id = 7;
         let origin_id = 11;
@@ -1413,7 +1406,7 @@ mod tests {
     #[tokio::test]
     async fn msgpack_response_with_wrong_hash_is_not_forwarded() -> Result<()> {
         let tmp = TempDir::new()?;
-        let state = ws_integrity_test_state(&tmp)?;
+        let state = ws_integrity_test_state(&tmp).await?;
         let expected_hash = sha256(b"expected");
         let peer_id = 7;
         let origin_id = 11;
@@ -1451,7 +1444,7 @@ mod tests {
     async fn upstream_proxy_forwards_events_and_caches_them() -> Result<()> {
         let tmp = TempDir::new()?;
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 tmp.path(),
                 Some(128 * 1024 * 1024),
@@ -1549,7 +1542,7 @@ mod tests {
     async fn req_waits_for_upstream_event_before_eose() -> Result<()> {
         let tmp = TempDir::new()?;
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 tmp.path(),
                 Some(128 * 1024 * 1024),
@@ -1597,7 +1590,7 @@ mod tests {
         )
         .as_json();
 
-        handle_message(client_id, Message::Text(request.into()), &state).await;
+        handle_message(client_id, Message::Text(request), &state).await;
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(2), ws_rx.recv())
             .await?
@@ -1635,7 +1628,7 @@ mod tests {
     async fn websocket_publish_returns_ok_for_trusted_event() -> Result<()> {
         let tmp = TempDir::new()?;
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 tmp.path(),
                 Some(128 * 1024 * 1024),
@@ -1684,7 +1677,7 @@ mod tests {
             .sign_with_keys(&author_keys)?;
         socket
             .send(TungsteniteMessage::Text(
-                NostrClientMessage::event(event.clone()).as_json().into(),
+                NostrClientMessage::event(event.clone()).as_json(),
             ))
             .await?;
 
@@ -1721,7 +1714,7 @@ mod tests {
     async fn websocket_req_is_rate_limited_after_configured_quota() -> Result<()> {
         let tmp = TempDir::new()?;
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 tmp.path(),
                 Some(128 * 1024 * 1024),
@@ -1766,8 +1759,7 @@ mod tests {
         socket
             .send(TungsteniteMessage::Text(
                 NostrClientMessage::req(SubscriptionId::new("sub-1"), vec![Filter::new()])
-                    .as_json()
-                    .into(),
+                    .as_json(),
             ))
             .await?;
 
@@ -1787,8 +1779,7 @@ mod tests {
         socket
             .send(TungsteniteMessage::Text(
                 NostrClientMessage::req(SubscriptionId::new("sub-2"), vec![Filter::new()])
-                    .as_json()
-                    .into(),
+                    .as_json(),
             ))
             .await?;
 
@@ -1811,7 +1802,7 @@ mod tests {
     async fn websocket_publish_is_rate_limited_for_untrusted_spambox_events() -> Result<()> {
         let tmp = TempDir::new()?;
         let graph_store = {
-            let _guard = crate::socialgraph::test_lock();
+            let _guard = crate::socialgraph::test_lock().await;
             crate::socialgraph::open_test_social_graph_store_with_mapsize(
                 tmp.path(),
                 Some(128 * 1024 * 1024),
@@ -1861,7 +1852,7 @@ mod tests {
 
         socket
             .send(TungsteniteMessage::Text(
-                NostrClientMessage::event(event_a.clone()).as_json().into(),
+                NostrClientMessage::event(event_a.clone()).as_json(),
             ))
             .await?;
 
@@ -1886,7 +1877,7 @@ mod tests {
 
         socket
             .send(TungsteniteMessage::Text(
-                NostrClientMessage::event(event_b.clone()).as_json().into(),
+                NostrClientMessage::event(event_b.clone()).as_json(),
             ))
             .await?;
 

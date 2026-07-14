@@ -4,6 +4,7 @@ use hashtree_cli::socialgraph::{open_social_graph_store, SocialGraphBackend, Soc
 use hashtree_cli::storage::PinnedItem;
 use hashtree_cli::{HashtreeStore, TreeMeta, PRIORITY_FOLLOWED, PRIORITY_OWN};
 use hashtree_core::{from_hex, to_hex, types::Hash};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -295,12 +296,10 @@ fn collect_storage_inventory_with_graph(
     }
 
     for bucket in &mut inventory.buckets {
-        bucket
-            .trees
-            .sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes));
+        bucket.trees.sort_by_key(|item| Reverse(item.size_bytes));
         bucket
             .pinned_items
-            .sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes));
+            .sort_by_key(|item| Reverse(item.size_bytes));
         bucket.authors.sort_by(|left, right| {
             right
                 .known_bytes()

@@ -1017,7 +1017,7 @@ fn rewrite_html_asset_urls(
 fn rewrite_html_urls(html: &str, rewrites: &[(String, String)]) -> String {
     let mut output = html.to_string();
     let mut sorted_rewrites = rewrites.to_vec();
-    sorted_rewrites.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    sorted_rewrites.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
     for (from, to) in sorted_rewrites {
         output = output.replace(&from, &to);
     }

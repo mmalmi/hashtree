@@ -1388,9 +1388,9 @@ dependencies = [
 
 [[package]]
 name = "cashu-service"
-version = "0.2.57"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02cd7cc2b5cf7ce343c8f4d91945d6051f0b18c60c3d34aa6915736ada4dec3a"
+checksum = "fe41f2a040b24570c91eaec667c244d0a490a3f5a01ce48721cd1755b91dbc9c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2426,7 +2426,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2689,7 +2689,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3232,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3538,7 +3538,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-blossom"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3558,7 +3558,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "clap",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-collection"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-config"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -3662,7 +3662,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3700,14 +3700,14 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded-ffi"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "hashtree-embedded",
 ]
 
 [[package]]
 name = "hashtree-ffi"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "axum",
  "futures",
@@ -3723,7 +3723,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "fips-core",
@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fs"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3757,7 +3757,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fuse"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "fuser",
  "futures",
@@ -3770,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3792,11 +3792,11 @@ dependencies = [
 
 [[package]]
 name = "hashtree-merge"
-version = "0.2.81"
+version = "0.2.82"
 
 [[package]]
 name = "hashtree-network"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3825,7 +3825,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "futures",
  "hashtree-collection",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-pubsub"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3858,7 +3858,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "futures",
@@ -3873,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-s3"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -3887,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-sim"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3907,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.81"
+version = "0.2.82"
 dependencies = [
  "async-trait",
  "flate2",
@@ -4226,7 +4226,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -4502,7 +4502,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5291,9 +5291,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6899ab1067aff08925024d25ca4d95a5267c1cafdbfcc9ead2a59670086f552"
+checksum = "03649ec74a5e1a0794a5dacfb79340badeccd4625b6cc6bc16d7a6e64d2a8afe"
 dependencies = [
  "async-trait",
  "fips-core",
@@ -5410,7 +5410,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6353,7 +6353,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6390,9 +6390,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6915,7 +6915,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8237,7 +8237,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9728,7 +9728,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

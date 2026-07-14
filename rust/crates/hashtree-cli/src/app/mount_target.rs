@@ -37,7 +37,7 @@ fn pubkey_hex_to_npub(pubkey_hex: &str) -> Result<String> {
 }
 
 pub(crate) fn normalize_mount_target_for_resolution(target: &str) -> Result<String> {
-    normalize_mount_target_for_resolution_with(target, |identifier| resolve_identity(identifier))
+    normalize_mount_target_for_resolution_with(target, resolve_identity)
 }
 
 fn normalize_mount_target_for_resolution_with<F>(target: &str, resolver: F) -> Result<String>

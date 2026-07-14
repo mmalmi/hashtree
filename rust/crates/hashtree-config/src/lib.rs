@@ -791,8 +791,10 @@ upload_concurrency = 24
 
     #[test]
     fn test_all_servers() {
-        let mut config = BlossomConfig::default();
-        config.servers = vec!["https://legacy.server".to_string()];
+        let config = BlossomConfig {
+            servers: vec!["https://legacy.server".to_string()],
+            ..BlossomConfig::default()
+        };
 
         let read = config.all_read_servers();
         assert!(read.contains(&"https://legacy.server".to_string()));

@@ -237,95 +237,89 @@ mod test_relay {
             let msg_type = parsed[0].as_str().unwrap_or("");
 
             match msg_type {
-                "EVENT" => {
-                    if parsed.len() >= 2 {
-                        let event = parsed[1].clone();
-                        if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
-                            events.write().await.insert(id.to_string(), event.clone());
+                "EVENT" if parsed.len() >= 2 => {
+                    let event = parsed[1].clone();
+                    if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                        events.write().await.insert(id.to_string(), event.clone());
 
-                            let ok_msg = serde_json::json!(["OK", id, true, ""]);
-                            {
-                                let mut w = write.lock().await;
-                                let _ = w.send(Message::Text(ok_msg.to_string())).await;
-                            }
-
-                            let _ = event_tx.send(event);
+                        let ok_msg = serde_json::json!(["OK", id, true, ""]);
+                        {
+                            let mut w = write.lock().await;
+                            let _ = w.send(Message::Text(ok_msg.to_string())).await;
                         }
+
+                        let _ = event_tx.send(event);
                     }
                 }
-                "REQ" => {
-                    if parsed.len() >= 3 {
-                        let sub_id = parsed[1].as_str().unwrap_or("sub").to_string();
+                "REQ" if parsed.len() >= 3 => {
+                    let sub_id = parsed[1].as_str().unwrap_or("sub").to_string();
 
-                        let mut filters = Vec::new();
-                        for filter in parsed.iter().skip(2) {
-                            let kind = filter
-                                .get("kinds")
-                                .and_then(|k| k.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_u64());
+                    let mut filters = Vec::new();
+                    for filter in parsed.iter().skip(2) {
+                        let kind = filter
+                            .get("kinds")
+                            .and_then(|k| k.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_u64());
 
-                            let authors: Vec<String> = filter
-                                .get("authors")
-                                .and_then(|a| a.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
+                        let authors: Vec<String> = filter
+                            .get("authors")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
 
-                            let p_tag = filter
-                                .get("#p")
-                                .and_then(|p| p.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
+                        let p_tag = filter
+                            .get("#p")
+                            .and_then(|p| p.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
 
-                            let l_tag = filter
-                                .get("#l")
-                                .and_then(|l| l.as_array())
-                                .and_then(|a| a.first())
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
+                        let l_tag = filter
+                            .get("#l")
+                            .and_then(|l| l.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
 
-                            filters.push(StoredFilter {
-                                sub_id: sub_id.clone(),
-                                kind,
-                                authors,
-                                p_tag,
-                                l_tag,
-                            });
-                        }
+                        filters.push(StoredFilter {
+                            sub_id: sub_id.clone(),
+                            kind,
+                            authors,
+                            p_tag,
+                            l_tag,
+                        });
+                    }
 
-                        subscriptions
-                            .write()
-                            .await
-                            .insert(sub_id.clone(), filters.clone());
+                    subscriptions
+                        .write()
+                        .await
+                        .insert(sub_id.clone(), filters.clone());
 
-                        let events_lock = events.read().await;
-                        let mut w = write.lock().await;
+                    let events_lock = events.read().await;
+                    let mut w = write.lock().await;
 
-                        for event in events_lock.values() {
-                            for filter in &filters {
-                                if filter.matches(event) {
-                                    let event_msg = serde_json::json!(["EVENT", &sub_id, event]);
-                                    let _ = w.send(Message::Text(event_msg.to_string())).await;
-                                    break;
-                                }
+                    for event in events_lock.values() {
+                        for filter in &filters {
+                            if filter.matches(event) {
+                                let event_msg = serde_json::json!(["EVENT", &sub_id, event]);
+                                let _ = w.send(Message::Text(event_msg.to_string())).await;
+                                break;
                             }
                         }
-                        drop(events_lock);
-
-                        let eose = serde_json::json!(["EOSE", &sub_id]);
-                        let _ = w.send(Message::Text(eose.to_string())).await;
                     }
+                    drop(events_lock);
+
+                    let eose = serde_json::json!(["EOSE", &sub_id]);
+                    let _ = w.send(Message::Text(eose.to_string())).await;
                 }
-                "CLOSE" => {
-                    if parsed.len() >= 2 {
-                        if let Some(sub_id) = parsed[1].as_str() {
-                            subscriptions.write().await.remove(sub_id);
-                        }
+                "CLOSE" if parsed.len() >= 2 => {
+                    if let Some(sub_id) = parsed[1].as_str() {
+                        subscriptions.write().await.remove(sub_id);
                     }
                 }
                 _ => {}

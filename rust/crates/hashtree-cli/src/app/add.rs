@@ -41,6 +41,15 @@ pub(crate) struct PublishedAddSummary<'a> {
     pub(crate) identity_was_generated: bool,
 }
 
+pub(crate) struct AddOptions {
+    pub(crate) only_hash: bool,
+    pub(crate) unencrypted: bool,
+    pub(crate) no_ignore: bool,
+    pub(crate) publish: Option<String>,
+    pub(crate) chunk_size: Option<usize>,
+    pub(crate) local: bool,
+}
+
 pub(crate) fn render_add_output(
     path_display: &str,
     display_route: &str,
@@ -107,16 +116,15 @@ pub(crate) fn render_add_output(
     output
 }
 
-pub(crate) async fn run_add(
-    data_dir: PathBuf,
-    path: PathBuf,
-    only_hash: bool,
-    unencrypted: bool,
-    no_ignore: bool,
-    publish: Option<String>,
-    chunk_size: Option<usize>,
-    local: bool,
-) -> Result<()> {
+pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOptions) -> Result<()> {
+    let AddOptions {
+        only_hash,
+        unencrypted,
+        no_ignore,
+        publish,
+        chunk_size,
+        local,
+    } = options;
     let _local_add_env = local.then(|| apply_local_add_env(&data_dir));
     let is_dir = path.is_dir();
     let show_progress = add_progress_enabled();

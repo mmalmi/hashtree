@@ -1421,9 +1421,7 @@ chunk_target_bytes = 65536
 
     #[test]
     fn test_auth_cookie_generation() -> Result<()> {
-        let _lock = test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = test_env_lock().blocking_lock();
         let temp_dir = TempDir::new()?;
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", temp_dir.path());
 
@@ -1446,8 +1444,10 @@ chunk_target_bytes = 65536
 
     #[test]
     fn test_blossom_read_servers_include_write_only_servers_as_fresh_fallbacks() {
-        let mut config = BlossomConfig::default();
-        config.servers = vec!["https://legacy.server".to_string()];
+        let config = BlossomConfig {
+            servers: vec!["https://legacy.server".to_string()],
+            ..BlossomConfig::default()
+        };
 
         let read = config.all_read_servers();
         assert!(read.contains(&"https://legacy.server".to_string()));
@@ -1680,13 +1680,15 @@ http_fips_fetch = false
 
     #[test]
     fn explicit_fips_relay_resolution_is_exact_and_normalized() {
-        let mut server = ServerConfig::default();
-        server.fips_relays = Some(vec![
-            "wss://temp.iris.to/".to_string(),
-            " wss://relay.primal.net ".to_string(),
-            "wss://temp.iris.to".to_string(),
-            "wss://extra.example".to_string(),
-        ]);
+        let server = ServerConfig {
+            fips_relays: Some(vec![
+                "wss://temp.iris.to/".to_string(),
+                " wss://relay.primal.net ".to_string(),
+                "wss://temp.iris.to".to_string(),
+                "wss://extra.example".to_string(),
+            ]),
+            ..ServerConfig::default()
+        };
 
         assert_eq!(
             server.resolved_fips_relays(&[]),

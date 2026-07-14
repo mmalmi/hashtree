@@ -36,7 +36,13 @@ unsafe fn string_from_ptr(ptr: *const c_char, label: &str) -> Result<String, Str
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn hashtree_embedded_start(state_root: *const c_char) -> *mut c_void {
+/// Start an embedded daemon rooted at the supplied filesystem path.
+///
+/// # Safety
+///
+/// `state_root` must point to a valid NUL-terminated C string for the duration
+/// of this call.
+pub unsafe extern "C" fn hashtree_embedded_start(state_root: *const c_char) -> *mut c_void {
     clear_last_error();
 
     let state_root = match unsafe { string_from_ptr(state_root, "state_root") } {
@@ -60,7 +66,13 @@ pub extern "C" fn hashtree_embedded_start(state_root: *const c_char) -> *mut c_v
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn hashtree_embedded_shutdown(handle: *mut c_void) {
+/// Stop and release an embedded daemon handle.
+///
+/// # Safety
+///
+/// A non-null `handle` must have been returned by [`hashtree_embedded_start`]
+/// and must not previously have been passed to this function.
+pub unsafe extern "C" fn hashtree_embedded_shutdown(handle: *mut c_void) {
     if handle.is_null() {
         return;
     }
@@ -69,7 +81,13 @@ pub extern "C" fn hashtree_embedded_shutdown(handle: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn hashtree_embedded_reload(handle: *mut c_void) -> bool {
+/// Reload the configuration of a running embedded daemon.
+///
+/// # Safety
+///
+/// A non-null `handle` must be a live handle returned by
+/// [`hashtree_embedded_start`].
+pub unsafe extern "C" fn hashtree_embedded_reload(handle: *mut c_void) -> bool {
     clear_last_error();
     if handle.is_null() {
         set_last_error("embedded daemon handle was null");
@@ -88,7 +106,14 @@ pub extern "C" fn hashtree_embedded_reload(handle: *mut c_void) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn hashtree_embedded_get_base_url(handle: *const c_void) -> *mut c_char {
+/// Return the base URL of a running embedded daemon.
+///
+/// # Safety
+///
+/// A non-null `handle` must be a live handle returned by
+/// [`hashtree_embedded_start`]. The returned string must be released with
+/// [`hashtree_embedded_string_free`].
+pub unsafe extern "C" fn hashtree_embedded_get_base_url(handle: *const c_void) -> *mut c_char {
     clear_last_error();
     if handle.is_null() {
         set_last_error("embedded daemon handle was null");
@@ -99,7 +124,14 @@ pub extern "C" fn hashtree_embedded_get_base_url(handle: *const c_void) -> *mut 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn hashtree_embedded_get_self_npub(handle: *const c_void) -> *mut c_char {
+/// Return the daemon's Nostr public key.
+///
+/// # Safety
+///
+/// A non-null `handle` must be a live handle returned by
+/// [`hashtree_embedded_start`]. The returned string must be released with
+/// [`hashtree_embedded_string_free`].
+pub unsafe extern "C" fn hashtree_embedded_get_self_npub(handle: *const c_void) -> *mut c_char {
     clear_last_error();
     if handle.is_null() {
         set_last_error("embedded daemon handle was null");
@@ -119,7 +151,13 @@ pub extern "C" fn hashtree_embedded_take_last_error() -> *mut c_char {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn hashtree_embedded_string_free(value: *mut c_char) {
+/// Release a string returned by this library.
+///
+/// # Safety
+///
+/// A non-null `value` must have been returned by a Hashtree embedded FFI string
+/// function and must not previously have been freed.
+pub unsafe extern "C" fn hashtree_embedded_string_free(value: *mut c_char) {
     if value.is_null() {
         return;
     }

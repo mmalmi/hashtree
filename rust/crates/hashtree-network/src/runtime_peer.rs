@@ -410,11 +410,14 @@ mod tests {
         }
     }
 
-    fn test_registrar() -> (
+    type TestPeerMap = Arc<RwLock<HashMap<String, MeshPeerEntry<Arc<TestSession>>>>>;
+    type TestRegistrarParts = (
         TransportPeerRegistrar<Arc<TestSession>>,
-        Arc<RwLock<HashMap<String, MeshPeerEntry<Arc<TestSession>>>>>,
+        TestPeerMap,
         Arc<AtomicUsize>,
-    ) {
+    );
+
+    fn test_registrar() -> TestRegistrarParts {
         let peers = Arc::new(RwLock::new(HashMap::new()));
         let connected_count = Arc::new(AtomicUsize::new(0));
         let registrar = TransportPeerRegistrar::new(

@@ -105,9 +105,7 @@ mod tests {
 
     #[test]
     fn seed_identity_defaults_creates_contacts_and_aliases() {
-        let _lock = crate::test_support::test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::test_support::test_env_lock().blocking_lock();
         let temp = TempDir::new().expect("temp dir");
         let _guard = crate::test_support::EnvVarGuard::set("HTREE_CONFIG_DIR", temp.path());
 
@@ -143,9 +141,7 @@ mod tests {
 
     #[test]
     fn seed_identity_defaults_respects_existing_contacts_and_opt_out() {
-        let _lock = crate::test_support::test_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::test_support::test_env_lock().blocking_lock();
         let temp = TempDir::new().expect("temp dir");
         let _guard = crate::test_support::EnvVarGuard::set("HTREE_CONFIG_DIR", temp.path());
 

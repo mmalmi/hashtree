@@ -53,6 +53,7 @@ STAGE_2_CRATES=(
 STAGE_3_CRATES=(
     "hashtree-fs"
     "hashtree-collection"
+    "hashtree-ffi"
     "hashtree-network"
     "hashtree-updater"
 )
@@ -63,6 +64,7 @@ STAGE_4_CRATES=(
 )
 
 STAGE_5_CRATES=(
+    "hashtree-nostr-pubsub"
     "git-remote-htree"
     "tauri-plugin-hashtree-updater"
 )
