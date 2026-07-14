@@ -15,7 +15,7 @@ webrtc = ["fips-core/webrtc-transport"]
 
 [dependencies]
 async-trait.workspace = true
-fips-core = "0.3.89"
+fips-core = "0.3.97"
 hashtree-core.workspace = true
 hashtree-network.workspace = true
 hex.workspace = true

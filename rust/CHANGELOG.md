@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.81 - 2026-07-14
+
+### Changed
+
+- Updated the decentralized Nostr pubsub core, FIPS, relay, social-graph, and
+  FIPS endpoint dependencies to their hardened production releases.
+
 ## 0.2.80 - 2026-07-13
 
 ### Changed
