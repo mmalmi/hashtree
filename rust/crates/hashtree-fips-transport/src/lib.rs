@@ -1,10 +1,17 @@
-//! Hashtree blob exchange over FIPS endpoint bytes.
+//! Hashtree blob routes over FIPS endpoint bytes.
 //!
-//! FIPS owns peer discovery, signaling, and underlay transports. The minimal
-//! surface provides verified TCP blob requests and optional same-host service
-//! reuse. The older mesh request and pubsub APIs are isolated behind the
-//! explicit `legacy-mesh` feature for existing CLI integration; the TCP path
-//! never falls back to that protocol.
+//! FIPS owns authenticated identity, peer discovery, signaling, routing, and
+//! underlay transports. The TCP/FIPS route provides verified blob requests and
+//! optional same-host service reuse. It is a fast path within a higher-level
+//! Store or resolver composition, which may continue through other routes when
+//! this route returns no result.
+//!
+//! [`hashtree-network`](https://docs.rs/hashtree-network) remains Hashtree's
+//! canonical decentralized content-routing layer and owns mesh forwarding and
+//! HTL. Its integration here is gated by the `legacy-mesh` Cargo feature only
+//! for compatibility with existing feature selections; the name does not mean
+//! that HTL routing is deprecated or replaced. The TCP route does not silently
+//! invoke the mesh or duplicate its framing; composition happens above it.
 
 mod same_host;
 mod tcp_blob;
