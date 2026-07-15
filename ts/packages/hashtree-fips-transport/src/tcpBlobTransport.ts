@@ -5,6 +5,7 @@ export const TCP_BLOB_SERVICE_PORT = 39_018;
 export const TCP_BLOB_MAGIC = 0x48;
 export const TCP_BLOB_VERSION = 1;
 const GET = 1;
+const MISSING = 0;
 const FOUND = 1;
 const HEADER_BYTES = 7;
 const REQUEST_BYTES = 35;
@@ -39,20 +40,31 @@ export class TcpBlobTransport {
     const local = await this.verifiedGet(hash);
     if (local) return local;
     const peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
-    if (peers.length === 0) return null;
+    if (peers.length === 0) throw new Error('no TCP/FIPS blob providers are available');
+    let failures: unknown[] = [];
     for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
       const results = await Promise.all(
-        peers.map((peer) => this.fetchFromPeer(
-          peer,
-          hash,
-          Math.max(250, Math.floor(this.timeoutMs / 2)),
-        ).catch(() => undefined)),
+        peers.map(async (peer) => {
+          try {
+            const data = await this.fetchFromPeer(
+              peer,
+              hash,
+              Math.max(250, Math.floor(this.timeoutMs / 2)),
+            );
+            return data === null
+              ? { kind: 'missing' as const }
+              : { kind: 'found' as const, data };
+          } catch (error) {
+            return { kind: 'failed' as const, error };
+          }
+        }),
       );
-      const data = results.find((result): result is Uint8Array => result instanceof Uint8Array);
-      if (data) return data;
-      if (results.every((result) => result === null)) return null;
+      const found = results.find((result) => result.kind === 'found');
+      if (found?.kind === 'found') return found.data;
+      failures = results.flatMap((result) => result.kind === 'failed' ? [result.error] : []);
+      if (failures.length === 0) return null;
     }
-    return null;
+    throw new AggregateError(failures, 'TCP/FIPS blob availability is uncertain');
   }
 
   async close(): Promise<void> {
@@ -74,11 +86,9 @@ export class TcpBlobTransport {
       const request = encodeTcpBlobRequest(hash);
       await this.writeAll(connection, request, deadline);
       const header = await this.readExact(connection, HEADER_BYTES, deadline);
-      if (header[0] !== TCP_BLOB_MAGIC || header[1] !== TCP_BLOB_VERSION) throw new Error('invalid TCP/FIPS blob response');
-      if (header[2] !== FOUND) return null;
-      const size = new DataView(header.buffer, header.byteOffset + 3, 4).getUint32(0);
-      if (size > TCP_BLOB_MAX_BYTES) throw new Error('TCP/FIPS blob exceeds size limit');
-      const data = await this.readExact(connection, size, deadline);
+      const response = decodeTcpBlobResponseHeader(header);
+      if (!response.found) return null;
+      const data = await this.readExact(connection, response.size, deadline);
       if (!bytesEqual(await sha256(data), hash)) throw new Error('TCP/FIPS blob hash mismatch');
       await this.options.localStore.put(hash, data.slice()).catch(() => false);
       return data;
@@ -177,10 +187,35 @@ export function encodeTcpBlobResponseHeader(found: boolean, size: number): Uint8
   if (!Number.isInteger(size) || size < 0 || size > TCP_BLOB_MAX_BYTES) {
     throw new Error('TCP/FIPS blob response size is invalid');
   }
+  if (!found && size !== 0) throw new Error('missing TCP/FIPS blob response has non-zero size');
   const header = new Uint8Array(HEADER_BYTES);
-  header.set([TCP_BLOB_MAGIC, TCP_BLOB_VERSION, found ? FOUND : 0]);
+  header.set([TCP_BLOB_MAGIC, TCP_BLOB_VERSION, found ? FOUND : MISSING]);
   new DataView(header.buffer).setUint32(3, size);
   return header;
+}
+
+export interface TcpBlobResponseHeader {
+  found: boolean;
+  size: number;
+}
+
+export function decodeTcpBlobResponseHeader(header: Uint8Array): TcpBlobResponseHeader {
+  if (
+    header.byteLength !== HEADER_BYTES
+    || header[0] !== TCP_BLOB_MAGIC
+    || header[1] !== TCP_BLOB_VERSION
+  ) {
+    throw new Error('invalid TCP/FIPS blob response');
+  }
+  const status = header[2];
+  const size = new DataView(header.buffer, header.byteOffset + 3, 4).getUint32(0);
+  if (status === MISSING) {
+    if (size !== 0) throw new Error('missing TCP/FIPS blob response has non-zero size');
+    return { found: false, size };
+  }
+  if (status !== FOUND) throw new Error('unsupported TCP/FIPS blob response status');
+  if (size > TCP_BLOB_MAX_BYTES) throw new Error('TCP/FIPS blob exceeds size limit');
+  return { found: true, size };
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

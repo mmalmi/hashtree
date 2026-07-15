@@ -30,4 +30,9 @@ export declare class TcpBlobTransport {
 }
 export declare function encodeTcpBlobRequest(hash: Uint8Array): Uint8Array;
 export declare function encodeTcpBlobResponseHeader(found: boolean, size: number): Uint8Array;
+export interface TcpBlobResponseHeader {
+    found: boolean;
+    size: number;
+}
+export declare function decodeTcpBlobResponseHeader(header: Uint8Array): TcpBlobResponseHeader;
 //# sourceMappingURL=tcpBlobTransport.d.ts.map
