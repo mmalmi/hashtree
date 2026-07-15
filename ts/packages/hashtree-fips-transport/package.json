@@ -1,7 +1,7 @@
 {
   "name": "@hashtree/fips-transport",
-  "version": "0.2.0",
-  "description": "Hashtree mesh blob transport over opaque FIPS endpoint bytes",
+  "version": "0.3.0",
+  "description": "Hashtree blob transport over reliable TCP/FIPS streams",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -46,8 +46,7 @@
   },
   "dependencies": {
     "@fips/tcp": "github:mmalmi/fips-tcp#353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e&path:ts",
-    "@hashtree/core": "0.1.8",
-    "@hashtree/mesh": "0.1.3"
+    "@hashtree/core": "0.1.8"
   },
   "peerDependencies": {
     "@fips/core": ">=0.0.21",

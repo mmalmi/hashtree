@@ -15,42 +15,26 @@ Browser providers join the shared FIPS discovery fabric by default:
 fips-overlay-v1
 ```
 
-The adapter surface is intentionally tiny:
-
-```ts
-export interface FipsEndpoint {
-  send(peerId: string, data: Uint8Array): Promise<void>;
-  onMessage(handler: (message: { peerId: string; data: Uint8Array }) => void | Promise<void>): () => void;
-  listPeerIds?(): readonly string[] | Promise<readonly string[]>;
-  localPeerId?(): string;
-}
-```
-
-The low-level endpoint-data bridge remains available for record-oriented
-embeddings. Managed browser and worker providers use `@fips/tcp` service 39018.
-
-Use it as a local-first store wrapper:
+The adapter exposes one transport: `TcpBlobTransport`. It uses `@fips/tcp`
+service 39018 and verifies each blob hash before returning or caching data:
 
 ```ts
 import { MemoryStore, sha256 } from '@hashtree/core';
 import {
-  FipsTransportStore,
-  createFipsNodeEndpoint,
+  TcpBlobTransport,
   DEFAULT_FIPS_DISCOVERY_APP,
 } from '@hashtree/fips-transport';
 
-const endpoint = createFipsNodeEndpoint(fipsNode);
-
 const localStore = new MemoryStore();
-const store = new FipsTransportStore({
-  endpoint,
+const transport = new TcpBlobTransport({
+  endpoint: fipsNode,
   localStore,
-  peers: () => endpoint.listPeerIds?.() ?? [],
 });
 
 console.log(DEFAULT_FIPS_DISCOVERY_APP); // fips-overlay-v1
 const hash = await sha256(new TextEncoder().encode('hello'));
-const data = await store.get(hash);
+const data = await transport.get(hash, [peerId]);
+await transport.close();
 ```
 
 `HashtreeWorkerClient` can use a managed browser FIPS node directly. FIPS owns

@@ -1,14 +1,17 @@
 import { type Store } from '@hashtree/core';
-import { type FipsNodeLike, type HashtreeFipsTransportOptions } from './index.js';
 import type { FipsDatagramEndpoint } from '@fips/tcp';
 import { TcpBlobTransport } from './tcpBlobTransport.js';
 export interface HashtreeWorkerP2PProvider {
     fetch(hashHex: string, peerId?: string): Promise<Uint8Array | null>;
     listPeerIds(): string[] | Promise<string[]>;
 }
-export interface FipsWorkerP2PProviderOptions extends Omit<HashtreeFipsTransportOptions, 'endpoint' | 'localStore' | 'peers' | 'requestRetryIntervalMs' | 'requestMaxAttempts'> {
-    node: FipsNodeLike & FipsDatagramEndpoint;
+export interface FipsWorkerNode extends FipsDatagramEndpoint {
+    on(event: 'peer', handler: (value: unknown) => void): () => void;
+}
+export interface FipsWorkerP2PProviderOptions {
+    node: FipsWorkerNode;
     localStore: Store;
+    requestTimeoutMs?: number;
 }
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().

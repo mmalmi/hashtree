@@ -13,7 +13,8 @@ export class FipsWorkerP2PProvider {
     closed = false;
     constructor(options) {
         this.node = options.node;
-        this.unsubscribePeer = this.node.on('peer', (event) => {
+        this.unsubscribePeer = this.node.on('peer', (value) => {
+            const event = value;
             if (event.state === 'connected')
                 this.peers.add(event.remotePubkey);
             else

@@ -6,7 +6,6 @@ import {
   type Logger,
 } from '@fips/core';
 import { WebRtcTransport } from '@fips/transport-webrtc';
-import type { FipsNodeLike } from './index.js';
 import { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
 import {
   createFipsWorkerP2PProvider,
@@ -83,7 +82,7 @@ export async function createBrowserHashtreeFipsProvider(
     logger: options.logger,
   });
   const provider = createFipsWorkerP2PProvider({
-    node: node as unknown as FipsNodeLike & FipsNode,
+    node,
     localStore: options.localStore,
     requestTimeoutMs: options.requestTimeoutMs,
   });

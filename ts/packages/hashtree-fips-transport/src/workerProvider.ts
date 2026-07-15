@@ -1,8 +1,4 @@
 import { fromHex, type Hash, type Store } from '@hashtree/core';
-import {
-  type FipsNodeLike,
-  type HashtreeFipsTransportOptions,
-} from './index.js';
 import type { FipsDatagramEndpoint } from '@fips/tcp';
 import { TcpBlobTransport } from './tcpBlobTransport.js';
 
@@ -11,12 +7,14 @@ export interface HashtreeWorkerP2PProvider {
   listPeerIds(): string[] | Promise<string[]>;
 }
 
-export interface FipsWorkerP2PProviderOptions extends Omit<
-  HashtreeFipsTransportOptions,
-  'endpoint' | 'localStore' | 'peers' | 'requestRetryIntervalMs' | 'requestMaxAttempts'
-> {
-  node: FipsNodeLike & FipsDatagramEndpoint;
+export interface FipsWorkerNode extends FipsDatagramEndpoint {
+  on(event: 'peer', handler: (value: unknown) => void): () => void;
+}
+
+export interface FipsWorkerP2PProviderOptions {
+  node: FipsWorkerNode;
   localStore: Store;
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -26,14 +24,15 @@ export interface FipsWorkerP2PProviderOptions extends Omit<
  */
 export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
   readonly transport: TcpBlobTransport;
-  private readonly node: FipsNodeLike;
+  private readonly node: FipsWorkerNode;
   private readonly peers = new Set<string>();
   private readonly unsubscribePeer: () => void;
   private closed = false;
 
   constructor(options: FipsWorkerP2PProviderOptions) {
     this.node = options.node;
-    this.unsubscribePeer = this.node.on('peer', (event) => {
+    this.unsubscribePeer = this.node.on('peer', (value) => {
+      const event = value as { remotePubkey: string; state: 'connected' | 'disconnected' };
       if (event.state === 'connected') this.peers.add(event.remotePubkey);
       else this.peers.delete(event.remotePubkey);
     });
