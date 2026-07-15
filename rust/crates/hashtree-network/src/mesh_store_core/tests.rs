@@ -65,6 +65,58 @@ struct RecordingNoResultRoute {
     delay: Duration,
 }
 
+struct CancellableReadSource {
+    id: String,
+    data: Vec<u8>,
+    blocked_calls: AtomicUsize,
+    calls: AtomicUsize,
+    cancellations: AtomicUsize,
+}
+
+impl CancellableReadSource {
+    fn new(id: impl Into<String>, data: Vec<u8>, blocked_calls: usize) -> Self {
+        Self {
+            id: id.into(),
+            data,
+            blocked_calls: AtomicUsize::new(blocked_calls),
+            calls: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+        }
+    }
+}
+
+struct CancellationCount<'a>(&'a AtomicUsize);
+
+impl Drop for CancellationCount<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[async_trait]
+impl BlobRoute for CancellableReadSource {
+    async fn route(&self, _request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let should_block = self
+            .blocked_calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if should_block {
+            let _cancellation = CancellationCount(&self.cancellations);
+            std::future::pending::<()>().await;
+        }
+        Ok(BlobReply::Data(self.data.clone()))
+    }
+}
+
+impl MeshReadSource for CancellableReadSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 impl RecordingNoResultRoute {
     fn new(delay: Duration) -> Self {
         Self {
@@ -352,6 +404,132 @@ async fn concurrent_searches_with_different_htl_are_not_coalesced() {
     );
     assert_eq!(short.expect("short search"), BlobReply::NoResult);
     assert_eq!(long.expect("long search"), BlobReply::NoResult);
+    assert_eq!(source.calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn first_source_hit_cancels_the_hedged_loser() {
+    let data = b"winning source cancels its loser".to_vec();
+    let hash = hashtree_core::sha256(&data);
+    let local = Arc::new(MemoryStore::new());
+    let store = make_test_store_with_routing(
+        local,
+        "cancel-hedged-loser",
+        MeshRoutingConfig {
+            dispatch: RequestDispatchConfig {
+                initial_fanout: 1,
+                hedge_fanout: 1,
+                max_fanout: 2,
+                hedge_interval_ms: 5,
+            },
+            ..Default::default()
+        },
+    );
+    let stalled = Arc::new(CancellableReadSource::new(
+        "a-stalled",
+        data.clone(),
+        usize::MAX,
+    ));
+    let winning_store = Arc::new(MemoryStore::new());
+    winning_store.put(hash, data.clone()).await.unwrap();
+    store
+        .set_read_sources(vec![
+            stalled.clone() as Arc<dyn MeshReadSource>,
+            Arc::new(MockReadSource::new(
+                "b-winner",
+                winning_store,
+                Arc::new(AtomicUsize::new(0)),
+                Duration::ZERO,
+            )),
+        ])
+        .await;
+
+    assert_eq!(
+        store.route(BlobRequest { hash, htl: 1 }).await.unwrap(),
+        BlobReply::Data(data),
+    );
+    assert_eq!(stalled.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        stalled.cancellations.load(Ordering::Relaxed),
+        1,
+        "the losing route future must be dropped, not detached",
+    );
+}
+
+#[tokio::test]
+async fn cancelled_source_owner_releases_inflight_for_retry() {
+    let data = b"retry after the first client dies".to_vec();
+    let hash = hashtree_core::sha256(&data);
+    let store = Arc::new(make_test_store(
+        Arc::new(MemoryStore::new()),
+        "cancelled-source-owner",
+    ));
+    let source = Arc::new(CancellableReadSource::new("source", data.clone(), 1));
+    store
+        .set_read_sources(vec![source.clone() as Arc<dyn MeshReadSource>])
+        .await;
+
+    let owner = {
+        let store = store.clone();
+        tokio::spawn(async move { store.route(BlobRequest { hash, htl: 1 }).await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while source.calls.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("source request did not start");
+
+    let waiter = {
+        let store = store.clone();
+        tokio::spawn(async move { store.route(BlobRequest { hash, htl: 1 }).await })
+    };
+    let hash_key = format!("{}:1", hash_to_key(&hash));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let joined = store
+                .inflight_source_fetches
+                .lock()
+                .expect("inflight source requests")
+                .get(&hash_key)
+                .is_some_and(|fetch| !fetch.waiters.is_empty());
+            if joined {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second request did not join the inflight source request");
+
+    owner.abort();
+    let _ = owner.await;
+
+    assert_eq!(source.cancellations.load(Ordering::Relaxed), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("coalesced waiter remained stranded")
+            .expect("coalesced waiter task panicked")
+            .is_err(),
+        "owner cancellation is an incomplete attempt, not a miss",
+    );
+    assert!(store
+        .inflight_source_fetches
+        .lock()
+        .expect("inflight source requests")
+        .is_empty());
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.route(BlobRequest { hash, htl: 1 }),
+        )
+        .await
+        .expect("retry joined a stranded inflight request")
+        .expect("retry failed"),
+        BlobReply::Data(data),
+    );
     assert_eq!(source.calls.load(Ordering::Relaxed), 2);
 }
 
@@ -2007,7 +2185,7 @@ async fn test_parallel_route_cleanup_releases_losing_source_state() {
             .store
             .inflight_source_fetches
             .lock()
-            .await
+            .expect("inflight source requests")
             .is_empty(),
         "parallel peer win should remove the losing read-source inflight entry",
     );

@@ -12,7 +12,7 @@ use std::future::Future;
 use std::hash::{Hash as _, Hasher};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::Instant;
@@ -185,7 +185,66 @@ impl RouteFetchOutcome {
 }
 
 struct InflightSourceFetch {
+    owner: Arc<()>,
     waiters: Vec<oneshot::Sender<RouteFetchOutcome>>,
+}
+
+fn complete_inflight_source_fetch(
+    inflight_source_fetches: &StdMutex<HashMap<String, InflightSourceFetch>>,
+    hash_key: &str,
+    expected_owner: Option<&Arc<()>>,
+    result: RouteFetchOutcome,
+) {
+    let mut inflight = inflight_source_fetches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let owns_entry = expected_owner.is_none_or(|expected| {
+        inflight
+            .get(hash_key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.owner, expected))
+    });
+    let waiters = owns_entry
+        .then(|| inflight.remove(hash_key))
+        .flatten()
+        .map(|inflight| inflight.waiters)
+        .unwrap_or_default();
+    drop(inflight);
+    for waiter in waiters {
+        let _ = waiter.send(result.clone());
+    }
+}
+
+/// Owns one shared source fetch until it completes or its caller is cancelled.
+///
+/// Tokio futures have no asynchronous drop hook, so this deliberately uses a
+/// synchronous mutex around the tiny inflight registry. Dropping an aborted
+/// owner removes the entry and wakes coalesced callers with a non-miss outcome.
+struct InflightSourceFetchGuard<'a> {
+    inflight_source_fetches: &'a StdMutex<HashMap<String, InflightSourceFetch>>,
+    hash_key: String,
+    owner: Arc<()>,
+}
+
+impl InflightSourceFetchGuard<'_> {
+    fn complete(self, result: RouteFetchOutcome) {
+        complete_inflight_source_fetch(
+            self.inflight_source_fetches,
+            &self.hash_key,
+            Some(&self.owner),
+            result,
+        );
+    }
+}
+
+impl Drop for InflightSourceFetchGuard<'_> {
+    fn drop(&mut self) {
+        complete_inflight_source_fetch(
+            self.inflight_source_fetches,
+            &self.hash_key,
+            Some(&self.owner),
+            RouteFetchOutcome::Timeout,
+        );
+    }
 }
 
 enum SourceFetchOutcome {
@@ -721,7 +780,7 @@ where
     /// Adaptive health stats for non-peer read sources.
     read_source_stats: RwLock<HashMap<String, AdaptiveSourceStats>>,
     /// Shared in-flight upstream reads keyed by hash.
-    inflight_source_fetches: Mutex<HashMap<String, InflightSourceFetch>>,
+    inflight_source_fetches: StdMutex<HashMap<String, InflightSourceFetch>>,
     /// Adaptive selector for peer ordering.
     peer_selector: RwLock<PeerSelector>,
     /// Active per-peer in-flight reads so concurrent block fetches spread across peers.
@@ -824,7 +883,7 @@ where
             next_quote_id: RwLock::new(1),
             read_sources: RwLock::new(HashMap::new()),
             read_source_stats: RwLock::new(HashMap::new()),
-            inflight_source_fetches: Mutex::new(HashMap::new()),
+            inflight_source_fetches: StdMutex::new(HashMap::new()),
             peer_selector: RwLock::new(selector),
             peer_active_requests: RwLock::new(HashMap::new()),
             peer_wire_stats: RwLock::new(HashMap::new()),
@@ -2721,7 +2780,7 @@ where
                 };
                 self.record_read_source_request(&source_id).await;
                 pending_source_ids.insert(source_id.clone());
-                pending.push(tokio::spawn(async move {
+                pending.push(async move {
                     let started_at = Instant::now();
                     let result = std::panic::AssertUnwindSafe(source.route(source_request))
                         .catch_unwind()
@@ -2742,7 +2801,7 @@ where
                             SourceFetchOutcome::Failure { source_id }
                         }
                     }
-                }));
+                });
             }
 
             let is_last_wave =
@@ -2755,16 +2814,12 @@ where
 
             while Instant::now() < window_end {
                 let remaining = window_end.saturating_duration_since(Instant::now());
-                let Some(result) = tokio::time::timeout(remaining, pending.next())
+                let Some(outcome) = tokio::time::timeout(remaining, pending.next())
                     .await
                     .ok()
                     .flatten()
                 else {
                     break;
-                };
-                let Ok(outcome) = result else {
-                    saw_failure = true;
-                    continue;
                 };
                 match outcome {
                     SourceFetchOutcome::Hit {
@@ -2809,48 +2864,50 @@ where
 
     async fn request_from_read_sources(&self, request: BlobRequest) -> RouteFetchOutcome {
         let hash_key = format!("{}:{}", hash_to_key(&request.hash), request.htl);
-        let existing_wait = {
-            let mut inflight = self.inflight_source_fetches.lock().await;
+        let (existing_wait, owner_guard) = {
+            let mut inflight = self
+                .inflight_source_fetches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(existing) = inflight.get_mut(&hash_key) {
                 let (tx, rx) = oneshot::channel();
                 existing.waiters.push(tx);
-                Some(rx)
+                (Some(rx), None)
             } else {
+                let owner = Arc::new(());
                 inflight.insert(
                     hash_key.clone(),
                     InflightSourceFetch {
+                        owner: owner.clone(),
                         waiters: Vec::new(),
                     },
                 );
-                None
+                (
+                    None,
+                    Some(InflightSourceFetchGuard {
+                        inflight_source_fetches: &self.inflight_source_fetches,
+                        hash_key: hash_key.clone(),
+                        owner,
+                    }),
+                )
             }
         };
 
         if let Some(wait) = existing_wait {
-            return wait.await.unwrap_or(RouteFetchOutcome::Timeout);
+            return match tokio::time::timeout(self.request_timeout, wait).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) | Err(_) => RouteFetchOutcome::Timeout,
+            };
         }
 
+        let owner_guard = owner_guard.expect("new source fetch owns its inflight entry");
         let result = self.request_from_read_sources_inner(request).await;
         if let RouteFetchOutcome::Hit(hit) = &result {
             let _ = self.local_store.put(request.hash, hit.clone()).await;
         }
-        self.complete_inflight_source_fetch(&hash_key, result.clone())
-            .await;
+        owner_guard.complete(result.clone());
 
         result
-    }
-
-    async fn complete_inflight_source_fetch(&self, hash_key: &str, result: RouteFetchOutcome) {
-        let waiters = self
-            .inflight_source_fetches
-            .lock()
-            .await
-            .remove(hash_key)
-            .map(|inflight| inflight.waiters)
-            .unwrap_or_default();
-        for waiter in waiters {
-            let _ = waiter.send(result.clone());
-        }
     }
 
     async fn cancel_pending_peer_route(&self, hash: &Hash) {
@@ -2871,11 +2928,12 @@ where
             ReadRoute::Peers(_) => self.cancel_pending_peer_route(&request.hash).await,
             ReadRoute::Sources => {
                 let hash_key = format!("{}:{}", hash_to_key(&request.hash), request.htl);
-                self.complete_inflight_source_fetch(
+                complete_inflight_source_fetch(
+                    &self.inflight_source_fetches,
                     &hash_key,
+                    None,
                     RouteFetchOutcome::Hit(winner_data.to_vec()),
-                )
-                .await;
+                );
             }
         }
     }
