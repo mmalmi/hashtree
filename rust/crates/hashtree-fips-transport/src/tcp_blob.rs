@@ -116,7 +116,29 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         store: Arc<S>,
         transport_config: TcpBlobTransportConfig,
     ) -> Result<Self, TcpBlobTransportError> {
-        Self::bind_internal(endpoint, store, transport_config, None, true).await
+        let route = Arc::new(StoreBlobRoute::new(store.clone()));
+        Self::bind_internal(endpoint, store, route, transport_config, None, true).await
+    }
+
+    /// Bind a blob service backed by a route that may resolve beyond the local
+    /// cache. The request, including its HTL, is passed to the route unchanged.
+    pub async fn bind_route(
+        endpoint: Arc<FipsEndpoint>,
+        store: Arc<S>,
+        route: Arc<dyn BlobRoute>,
+    ) -> Result<Self, TcpBlobTransportError> {
+        Self::bind_route_with_config(endpoint, store, route, TcpBlobTransportConfig::default())
+            .await
+    }
+
+    /// Bind a route-backed blob service with an explicit idle timeout.
+    pub async fn bind_route_with_config(
+        endpoint: Arc<FipsEndpoint>,
+        store: Arc<S>,
+        route: Arc<dyn BlobRoute>,
+        transport_config: TcpBlobTransportConfig,
+    ) -> Result<Self, TcpBlobTransportError> {
+        Self::bind_internal(endpoint, store, route, transport_config, None, true).await
     }
 
     /// Bind a client-only transport that rejects every inbound TCP session.
@@ -125,7 +147,8 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         store: Arc<S>,
         transport_config: TcpBlobTransportConfig,
     ) -> Result<Self, TcpBlobTransportError> {
-        Self::bind_internal(endpoint, store, transport_config, None, false).await
+        let route = Arc::new(StoreBlobRoute::new(store.clone()));
+        Self::bind_internal(endpoint, store, route, transport_config, None, false).await
     }
 
     /// Bind and advertise this store as a reusable same-host blob service.
@@ -135,12 +158,41 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         transport_config: TcpBlobTransportConfig,
         priority: i16,
     ) -> Result<Self, TcpBlobTransportError> {
-        Self::bind_internal(endpoint, store, transport_config, Some(priority), true).await
+        let route = Arc::new(StoreBlobRoute::new(store.clone()));
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            Some(priority),
+            true,
+        )
+        .await
+    }
+
+    /// Bind and advertise a route-backed reusable blob service.
+    pub async fn bind_advertised_route_with_config(
+        endpoint: Arc<FipsEndpoint>,
+        store: Arc<S>,
+        route: Arc<dyn BlobRoute>,
+        transport_config: TcpBlobTransportConfig,
+        priority: i16,
+    ) -> Result<Self, TcpBlobTransportError> {
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            Some(priority),
+            true,
+        )
+        .await
     }
 
     async fn bind_internal(
         endpoint: Arc<FipsEndpoint>,
         store: Arc<S>,
+        route: Arc<dyn BlobRoute>,
         transport_config: TcpBlobTransportConfig,
         advertise_priority: Option<i16>,
         serve_inbound: bool,
@@ -173,7 +225,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         let actor = TcpBlobActor {
             tcp,
             serve_inbound,
-            route: Arc::new(StoreBlobRoute::new(store.clone())),
+            route,
             commands: command_rx,
             pending_commands: VecDeque::with_capacity(PENDING_COMMAND_CAPACITY),
             active_gets: HashMap::new(),
@@ -356,10 +408,10 @@ struct StoreLoad {
     result: Result<BlobReply, StoreError>,
 }
 
-struct TcpBlobActor<S: Store + ?Sized + 'static> {
+struct TcpBlobActor {
     tcp: FipsTcpEndpoint,
     serve_inbound: bool,
-    route: Arc<StoreBlobRoute<S>>,
+    route: Arc<dyn BlobRoute>,
     commands: mpsc::Receiver<Command>,
     pending_commands: VecDeque<Command>,
     active_gets: HashMap<ConnectionId, ActiveGet>,
@@ -370,7 +422,7 @@ struct TcpBlobActor<S: Store + ?Sized + 'static> {
     idle_timeout_ms: u64,
 }
 
-impl<S: Store + ?Sized + 'static> TcpBlobActor<S> {
+impl TcpBlobActor {
     async fn run(mut self) -> Result<(), TcpBlobTransportError> {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);

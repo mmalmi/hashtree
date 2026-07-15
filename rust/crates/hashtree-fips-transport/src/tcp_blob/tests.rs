@@ -3,6 +3,7 @@ use fips_core::config::{PeerConfig, TransportInstances};
 use fips_core::{encode_nsec, Config, Identity, UdpConfig};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
@@ -23,6 +24,95 @@ async fn streams_concurrent_blobs_and_explicit_miss_over_two_real_fips_endpoints
     tokio::spawn(streams_concurrent_blobs_and_explicit_miss_on_worker())
         .await
         .expect("loopback worker task panicked");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn custom_server_route_preserves_htl_and_distinguishes_no_result_from_error() {
+    tokio::spawn(custom_server_route_on_worker())
+        .await
+        .expect("custom-route worker task panicked");
+}
+
+async fn custom_server_route_on_worker() {
+    let (endpoint_a, endpoint_b, peer_a) = connected_endpoints().await;
+    let data = b"mesh result served through the shared blob route".to_vec();
+    let data_hash = hash(&data);
+    let missing_hash = [0x51; 32];
+    let failing_hash = [0x52; 32];
+    let route = Arc::new(RecordingRoute::new(data_hash, data, failing_hash));
+    let transport_a = TcpBlobTransport::bind_route_with_config(
+        endpoint_a.clone(),
+        Arc::new(MemoryStore::new()),
+        route.clone(),
+        test_config(Duration::from_secs(2)),
+    )
+    .await
+    .expect("bind custom blob route");
+    let transport_b = Arc::new(
+        TcpBlobTransport::bind_with_config(
+            endpoint_b.clone(),
+            Arc::new(MemoryStore::new()),
+            test_config(Duration::from_secs(2)),
+        )
+        .await
+        .expect("bind client blob service"),
+    );
+    let peer_route = transport_b.route_to(peer_a);
+
+    assert!(matches!(
+        peer_route
+            .route(BlobRequest {
+                hash: data_hash,
+                htl: 7,
+            })
+            .await,
+        Ok(BlobReply::Data(_))
+    ));
+    assert_eq!(
+        peer_route
+            .route(BlobRequest {
+                hash: missing_hash,
+                htl: 3,
+            })
+            .await
+            .expect("explicit NoResult became a transport failure"),
+        BlobReply::NoResult
+    );
+    assert!(
+        peer_route
+            .route(BlobRequest {
+                hash: failing_hash,
+                htl: 1,
+            })
+            .await
+            .is_err(),
+        "route failure became an explicit NoResult"
+    );
+
+    {
+        let requests = route.requests.lock().expect("recorded requests");
+        assert!(requests.contains(&BlobRequest {
+            hash: data_hash,
+            htl: 7,
+        }));
+        assert!(requests.contains(&BlobRequest {
+            hash: missing_hash,
+            htl: 3,
+        }));
+        assert!(requests.contains(&BlobRequest {
+            hash: failing_hash,
+            htl: 1,
+        }));
+    }
+    drop(peer_route);
+
+    transport_a.shutdown().await.unwrap();
+    match Arc::try_unwrap(transport_b) {
+        Ok(transport) => transport.shutdown().await.unwrap(),
+        Err(_) => panic!("client transport still has task references"),
+    }
+    endpoint_a.shutdown().await.unwrap();
+    endpoint_b.shutdown().await.unwrap();
 }
 
 async fn streams_concurrent_blobs_and_explicit_miss_on_worker() {
@@ -369,6 +459,41 @@ struct GatedStore {
     blocked_hash: Hash,
     blocked_started: AtomicUsize,
     release: Notify,
+}
+
+struct RecordingRoute {
+    data_hash: Hash,
+    data: Vec<u8>,
+    failing_hash: Hash,
+    requests: Mutex<Vec<BlobRequest>>,
+}
+
+impl RecordingRoute {
+    fn new(data_hash: Hash, data: Vec<u8>, failing_hash: Hash) -> Self {
+        Self {
+            data_hash,
+            data,
+            failing_hash,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobRoute for RecordingRoute {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.requests
+            .lock()
+            .expect("record route request")
+            .push(request);
+        if request.hash == self.data_hash {
+            Ok(BlobReply::Data(self.data.clone()))
+        } else if request.hash == self.failing_hash {
+            Err(StoreError::Other("injected route failure".to_string()))
+        } else {
+            Ok(BlobReply::NoResult)
+        }
+    }
 }
 
 impl GatedStore {
