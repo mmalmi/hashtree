@@ -50,9 +50,22 @@ const PUBSUB_SEEN_TTL: Duration = Duration::from_secs(120);
 
 /// Pending request awaiting response
 struct PendingRequest {
+    owner: Arc<()>,
     response_tx: oneshot::Sender<Option<Vec<u8>>>,
     started_at: Instant,
     queried_peers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PendingRequestKey {
+    hash: Hash,
+    htl: u8,
+}
+
+impl PendingRequestKey {
+    fn new(hash: Hash, htl: u8) -> Self {
+        Self { hash, htl }
+    }
 }
 
 struct PendingQuoteRequest {
@@ -192,17 +205,15 @@ struct InflightSourceFetch {
 fn complete_inflight_source_fetch(
     inflight_source_fetches: &StdMutex<HashMap<String, InflightSourceFetch>>,
     hash_key: &str,
-    expected_owner: Option<&Arc<()>>,
+    expected_owner: &Arc<()>,
     result: RouteFetchOutcome,
 ) {
     let mut inflight = inflight_source_fetches
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let owns_entry = expected_owner.is_none_or(|expected| {
-        inflight
-            .get(hash_key)
-            .is_some_and(|entry| Arc::ptr_eq(&entry.owner, expected))
-    });
+    let owns_entry = inflight
+        .get(hash_key)
+        .is_some_and(|entry| Arc::ptr_eq(&entry.owner, expected_owner));
     let waiters = owns_entry
         .then(|| inflight.remove(hash_key))
         .flatten()
@@ -230,7 +241,7 @@ impl InflightSourceFetchGuard<'_> {
         complete_inflight_source_fetch(
             self.inflight_source_fetches,
             &self.hash_key,
-            Some(&self.owner),
+            &self.owner,
             result,
         );
     }
@@ -241,7 +252,7 @@ impl Drop for InflightSourceFetchGuard<'_> {
         complete_inflight_source_fetch(
             self.inflight_source_fetches,
             &self.hash_key,
-            Some(&self.owner),
+            &self.owner,
             RouteFetchOutcome::Timeout,
         );
     }
@@ -765,11 +776,11 @@ where
     /// Per-peer HTL config
     htl_configs: RwLock<HashMap<String, PeerHTLConfig>>,
     /// Pending requests we sent
-    pending_requests: RwLock<HashMap<String, PendingRequest>>,
+    pending_requests: RwLock<HashMap<PendingRequestKey, Vec<PendingRequest>>>,
     /// Pending quote negotiations keyed by requested hash.
     pending_quotes: RwLock<HashMap<String, PendingQuoteRequest>>,
     /// Forwarded peer requests currently being resolved through the mesh/upstream.
-    pending_forward_requests: RwLock<HashMap<String, PendingForwardRequest>>,
+    pending_forward_requests: RwLock<HashMap<PendingRequestKey, PendingForwardRequest>>,
     /// Bounded negative cache for recently forwarded misses/timeouts.
     /// Quotes we issued to peers and will accept exactly once until expiry.
     issued_quotes: RwLock<HashMap<(String, String, u64), IssuedQuote>>,
@@ -2611,6 +2622,47 @@ where
         result
     }
 
+    async fn register_pending_request(
+        &self,
+        request_key: PendingRequestKey,
+        queried_peers: Vec<String>,
+    ) -> (Arc<()>, oneshot::Receiver<Option<Vec<u8>>>) {
+        let owner = Arc::new(());
+        let (response_tx, response_rx) = oneshot::channel();
+        self.pending_requests
+            .write()
+            .await
+            .entry(request_key)
+            .or_default()
+            .push(PendingRequest {
+                owner: owner.clone(),
+                response_tx,
+                started_at: Instant::now(),
+                queried_peers,
+            });
+        (owner, response_rx)
+    }
+
+    async fn take_pending_request(
+        &self,
+        request_key: PendingRequestKey,
+        owner: &Arc<()>,
+    ) -> Option<(PendingRequest, bool)> {
+        let mut pending = self.pending_requests.write().await;
+        let (request, remove_key) = {
+            let requests = pending.get_mut(&request_key)?;
+            let index = requests
+                .iter()
+                .position(|request| Arc::ptr_eq(&request.owner, owner))?;
+            let request = requests.swap_remove(index);
+            (request, requests.is_empty())
+        };
+        if remove_key {
+            pending.remove(&request_key);
+        }
+        Some((request, remove_key))
+    }
+
     async fn request_from_single_peer(
         &self,
         hash: &Hash,
@@ -2618,23 +2670,23 @@ where
         request_htl: u8,
         quote_id: Option<u64>,
     ) -> Option<Vec<u8>> {
-        let hash_key = hash_to_key(hash);
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.write().await.insert(
-            hash_key.clone(),
-            PendingRequest {
-                response_tx: tx,
-                started_at: Instant::now(),
-                queried_peers: vec![peer_id.to_string()],
-            },
-        );
+        let request_key = PendingRequestKey::new(*hash, request_htl);
+        let (owner, rx) = self
+            .register_pending_request(request_key, vec![peer_id.to_string()])
+            .await;
 
         let mut rx = rx;
         if !self
             .send_request_to_peer(peer_id, hash, request_htl, quote_id)
             .await
         {
-            let _ = self.pending_requests.write().await.remove(&hash_key);
+            if self
+                .take_pending_request(request_key, &owner)
+                .await
+                .is_some_and(|(_, last)| last)
+            {
+                let _ = self.take_forward_requesters(request_key).await;
+            }
             return None;
         }
         self.reserve_peer_request(peer_id).await;
@@ -2646,14 +2698,16 @@ where
             }
         }
 
-        if let Some(pending) = self.pending_requests.write().await.remove(&hash_key) {
+        if let Some((pending, last)) = self.take_pending_request(request_key, &owner).await {
             self.release_queried_peer_requests(&pending.queried_peers)
                 .await;
             for peer_id in pending.queried_peers {
                 self.peer_selector.write().await.record_timeout(&peer_id);
             }
+            if last {
+                let _ = self.take_forward_requesters(request_key).await;
+            }
         }
-        let _ = self.take_forward_requesters(&hash_key).await;
         None
     }
 
@@ -2663,16 +2717,8 @@ where
         ordered_peer_ids: &[String],
         request_htl: u8,
     ) -> RouteFetchOutcome {
-        let hash_key = hash_to_key(hash);
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.write().await.insert(
-            hash_key.clone(),
-            PendingRequest {
-                response_tx: tx,
-                started_at: Instant::now(),
-                queried_peers: Vec::new(),
-            },
-        );
+        let request_key = PendingRequestKey::new(*hash, request_htl);
+        let (owner, rx) = self.register_pending_request(request_key, Vec::new()).await;
 
         let rx = Arc::new(Mutex::new(rx));
         let result = run_hedged_waves(
@@ -2682,7 +2728,7 @@ where
             |range| {
                 let wave_peer_ids = ordered_peer_ids[range].to_vec();
                 let hash = *hash;
-                let hash_key = hash_key.clone();
+                let owner = owner.clone();
                 async move {
                     let mut sent = 0usize;
                     for peer_id in wave_peer_ids {
@@ -2692,8 +2738,16 @@ where
                         {
                             sent += 1;
                             self.reserve_peer_request(&peer_id).await;
-                            if let Some(pending) =
-                                self.pending_requests.write().await.get_mut(&hash_key)
+                            if let Some(pending) = self
+                                .pending_requests
+                                .write()
+                                .await
+                                .get_mut(&request_key)
+                                .and_then(|requests| {
+                                    requests
+                                        .iter_mut()
+                                        .find(|request| Arc::ptr_eq(&request.owner, &owner))
+                                })
                             {
                                 pending.queried_peers.push(peer_id);
                             }
@@ -2723,14 +2777,16 @@ where
         .await;
 
         let Some(data) = result else {
-            if let Some(pending) = self.pending_requests.write().await.remove(&hash_key) {
+            if let Some((pending, last)) = self.take_pending_request(request_key, &owner).await {
                 self.release_queried_peer_requests(&pending.queried_peers)
                     .await;
                 for peer_id in pending.queried_peers {
                     self.peer_selector.write().await.record_timeout(&peer_id);
                 }
+                if last {
+                    let _ = self.take_forward_requesters(request_key).await;
+                }
             }
-            let _ = self.take_forward_requesters(&hash_key).await;
             return RouteFetchOutcome::Timeout;
         };
 
@@ -2910,31 +2966,20 @@ where
         result
     }
 
-    async fn cancel_pending_peer_route(&self, hash: &Hash) {
-        let hash_key = hash_to_key(hash);
-        if let Some(pending) = self.pending_requests.write().await.remove(&hash_key) {
-            self.release_queried_peer_requests(&pending.queried_peers)
-                .await;
+    async fn cancel_pending_peer_route(&self, request_key: PendingRequestKey) {
+        if let Some(pending) = self.pending_requests.write().await.remove(&request_key) {
+            let queried_peers: Vec<_> = pending
+                .iter()
+                .flat_map(|request| request.queried_peers.iter().cloned())
+                .collect();
+            self.release_queried_peer_requests(&queried_peers).await;
         }
     }
 
-    async fn cancel_losing_route(
-        &self,
-        request: BlobRequest,
-        route: &ReadRoute,
-        winner_data: &[u8],
-    ) {
-        match route {
-            ReadRoute::Peers(_) => self.cancel_pending_peer_route(&request.hash).await,
-            ReadRoute::Sources => {
-                let hash_key = format!("{}:{}", hash_to_key(&request.hash), request.htl);
-                complete_inflight_source_fetch(
-                    &self.inflight_source_fetches,
-                    &hash_key,
-                    None,
-                    RouteFetchOutcome::Hit(winner_data.to_vec()),
-                );
-            }
+    async fn cancel_losing_route(&self, request: BlobRequest, route: &ReadRoute) {
+        if matches!(route, ReadRoute::Peers(_)) {
+            self.cancel_pending_peer_route(PendingRequestKey::new(request.hash, request.htl))
+                .await;
         }
     }
 
@@ -3046,7 +3091,7 @@ where
                         tokio::select! {
                             result = &mut first_fut, if !first_done => {
                                 first_done = true;
-                                if let RouteFetchOutcome::Hit(data) = &result {
+                                if matches!(result, RouteFetchOutcome::Hit(_)) {
                                     if !second_done {
                                         self.cancel_losing_route(
                                             BlobRequest {
@@ -3054,7 +3099,6 @@ where
                                                 htl: context.request_htl,
                                             },
                                             &second.route,
-                                            data,
                                         ).await;
                                     }
                                     return result;
@@ -3063,7 +3107,7 @@ where
                             }
                             result = &mut second_fut, if !second_done => {
                                 second_done = true;
-                                if let RouteFetchOutcome::Hit(data) = &result {
+                                if matches!(result, RouteFetchOutcome::Hit(_)) {
                                     if !first_done {
                                         self.cancel_losing_route(
                                             BlobRequest {
@@ -3071,7 +3115,6 @@ where
                                                 htl: context.request_htl,
                                             },
                                             &first.route,
-                                            data,
                                         ).await;
                                     }
                                     return result;
@@ -3103,27 +3146,28 @@ where
         }
     }
 
-    async fn begin_forward_request(&self, hash_key: &str, requester_id: &str) -> bool {
+    async fn begin_forward_request(
+        &self,
+        request_key: PendingRequestKey,
+        requester_id: &str,
+    ) -> bool {
         let mut pending = self.pending_forward_requests.write().await;
-        if let Some(existing) = pending.get_mut(hash_key) {
+        if let Some(existing) = pending.get_mut(&request_key) {
             existing.requester_ids.insert(requester_id.to_string());
             return false;
         }
 
         let mut requester_ids = HashSet::new();
         requester_ids.insert(requester_id.to_string());
-        pending.insert(
-            hash_key.to_string(),
-            PendingForwardRequest { requester_ids },
-        );
+        pending.insert(request_key, PendingForwardRequest { requester_ids });
         true
     }
 
-    async fn take_forward_requesters(&self, hash_key: &str) -> Vec<String> {
+    async fn take_forward_requesters(&self, request_key: PendingRequestKey) -> Vec<String> {
         self.pending_forward_requests
             .write()
             .await
-            .remove(hash_key)
+            .remove(&request_key)
             .map(|pending| pending.requester_ids.into_iter().collect())
             .unwrap_or_default()
     }
@@ -3132,48 +3176,73 @@ where
         self: &Arc<Self>,
         from_peer: &str,
         hash: &Hash,
-        hash_key: String,
         payload: Vec<u8>,
     ) {
-        let pending = self.pending_requests.write().await.remove(&hash_key);
-        if let Some(pending) = pending {
-            let payload_bytes = payload.len() as u64;
-            self.record_useful_bytes_received_from_peer(from_peer, payload_bytes)
-                .await;
-            {
-                let mut deliveries = self.verified_block_deliveries.lock().await;
-                deliveries.deliveries.push_back(VerifiedBlockDelivery {
-                    hash: *hash,
-                    provider_peer_id: from_peer.to_string(),
-                    payload_bytes,
-                });
-                while deliveries.deliveries.len() > VERIFIED_BLOCK_DELIVERY_CAPACITY {
-                    deliveries.deliveries.pop_front();
-                    deliveries.dropped_since_last_drain =
-                        deliveries.dropped_since_last_drain.saturating_add(1);
-                }
+        let pending = {
+            let mut requests = self.pending_requests.write().await;
+            let matching_keys: Vec<_> = requests
+                .keys()
+                .filter(|key| key.hash == *hash)
+                .copied()
+                .collect();
+            matching_keys
+                .into_iter()
+                .flat_map(|key| {
+                    requests
+                        .remove(&key)
+                        .into_iter()
+                        .flatten()
+                        .map(move |request| (key, request))
+                })
+                .collect::<Vec<_>>()
+        };
+        if pending.is_empty() {
+            return;
+        }
+
+        let payload_bytes = payload.len() as u64;
+        self.record_useful_bytes_received_from_peer(from_peer, payload_bytes)
+            .await;
+        {
+            let mut deliveries = self.verified_block_deliveries.lock().await;
+            deliveries.deliveries.push_back(VerifiedBlockDelivery {
+                hash: *hash,
+                provider_peer_id: from_peer.to_string(),
+                payload_bytes,
+            });
+            while deliveries.deliveries.len() > VERIFIED_BLOCK_DELIVERY_CAPACITY {
+                deliveries.deliveries.pop_front();
+                deliveries.dropped_since_last_drain =
+                    deliveries.dropped_since_last_drain.saturating_add(1);
             }
-            self.release_queried_peer_requests(&pending.queried_peers)
-                .await;
-            let rtt_ms = pending.started_at.elapsed().as_millis() as u64;
-            self.peer_selector.write().await.record_success(
-                from_peer,
-                rtt_ms,
-                payload.len() as u64,
-            );
-            let forward_requesters = self.take_forward_requesters(&hash_key).await;
-            let response_bytes = if forward_requesters.is_empty() {
-                None
-            } else {
-                Some(encode_response(&create_response(hash, payload.clone())))
-            };
-            let _ = pending.response_tx.send(Some(payload));
-            if let Some(response_bytes) = response_bytes {
-                for requester_id in forward_requesters {
-                    Arc::clone(self)
-                        .enqueue_response_send(requester_id, response_bytes.clone(), Instant::now())
-                        .await;
-                }
+        }
+
+        let rtt_ms = pending
+            .iter()
+            .map(|(_, request)| request.started_at.elapsed().as_millis() as u64)
+            .max()
+            .unwrap_or_default();
+        let queried_peers: Vec<_> = pending
+            .iter()
+            .flat_map(|(_, request)| request.queried_peers.iter().cloned())
+            .collect();
+        self.release_queried_peer_requests(&queried_peers).await;
+        self.peer_selector
+            .write()
+            .await
+            .record_success(from_peer, rtt_ms, payload_bytes);
+
+        let mut forward_requesters = HashSet::new();
+        for (request_key, pending) in pending {
+            forward_requesters.extend(self.take_forward_requesters(request_key).await);
+            let _ = pending.response_tx.send(Some(payload.clone()));
+        }
+        if !forward_requesters.is_empty() {
+            let response_bytes = encode_response(&create_response(hash, payload));
+            for requester_id in forward_requesters {
+                Arc::clone(self)
+                    .enqueue_response_send(requester_id, response_bytes.clone(), Instant::now())
+                    .await;
             }
         }
     }
@@ -3239,7 +3308,7 @@ where
             return;
         }
 
-        self.complete_pending_response(from_peer, &hash, hash_key, res.d)
+        self.complete_pending_response(from_peer, &hash, res.d)
             .await;
     }
 
@@ -3298,6 +3367,7 @@ where
             None => return,
         };
         let hash_key = hash_to_key(&hash);
+        let request_key = PendingRequestKey::new(hash, req.htl);
 
         if let Some(quote_id) = req.q {
             if !self.take_valid_quote(from_peer, &hash_key, quote_id).await {
@@ -3348,12 +3418,17 @@ where
             }
         }
 
-        if self.pending_requests.read().await.contains_key(&hash_key) {
-            let _ = self.begin_forward_request(&hash_key, from_peer).await;
+        if self
+            .pending_requests
+            .read()
+            .await
+            .contains_key(&request_key)
+        {
+            let _ = self.begin_forward_request(request_key, from_peer).await;
             return;
         }
 
-        if !self.begin_forward_request(&hash_key, from_peer).await {
+        if !self.begin_forward_request(request_key, from_peer).await {
             return;
         }
 
@@ -3380,7 +3455,7 @@ where
                 })
                 .await
             };
-            let requester_ids = this.take_forward_requesters(&hash_key).await;
+            let requester_ids = this.take_forward_requesters(request_key).await;
             match result {
                 RouteFetchOutcome::Hit(data) => {
                     let ready_at = Instant::now() + this.response_send_delay(&hash, data.len());

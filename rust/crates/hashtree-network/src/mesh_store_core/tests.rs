@@ -408,6 +408,54 @@ async fn concurrent_searches_with_different_htl_are_not_coalesced() {
 }
 
 #[tokio::test]
+async fn concurrent_peer_requests_do_not_overwrite_same_or_different_htl() {
+    let store = Arc::new(make_test_store(
+        Arc::new(MemoryStore::new()),
+        "distinct-peer-budgets",
+    ));
+    let data = b"one verified response can satisfy both budgets".to_vec();
+    let hash = hashtree_core::sha256(&data);
+    let low_key = PendingRequestKey::new(hash, 1);
+    let high_key = PendingRequestKey::new(hash, 3);
+    let (_, low_rx) = store
+        .register_pending_request(low_key, vec!["provider".to_string()])
+        .await;
+    let (_, duplicate_low_rx) = store
+        .register_pending_request(low_key, vec!["provider".to_string()])
+        .await;
+    let (_, high_rx) = store
+        .register_pending_request(high_key, vec!["provider".to_string()])
+        .await;
+    let pending = store.pending_requests.read().await;
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.get(&low_key).map(Vec::len), Some(2));
+    drop(pending);
+    assert!(store.begin_forward_request(low_key, "low-requester").await);
+    assert!(
+        store
+            .begin_forward_request(high_key, "high-requester")
+            .await
+    );
+    assert_eq!(store.pending_forward_requests.read().await.len(), 2);
+
+    store
+        .handle_response_message("provider", create_response(&hash, data.clone()))
+        .await;
+
+    assert_eq!(
+        low_rx.await.expect("low-budget response"),
+        Some(data.clone())
+    );
+    assert_eq!(
+        duplicate_low_rx.await.expect("duplicate response"),
+        Some(data.clone())
+    );
+    assert_eq!(high_rx.await.expect("high-budget response"), Some(data));
+    assert!(store.pending_requests.read().await.is_empty());
+    assert!(store.pending_forward_requests.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn first_source_hit_cancels_the_hedged_loser() {
     let data = b"winning source cancels its loser".to_vec();
     let hash = hashtree_core::sha256(&data);
@@ -702,15 +750,16 @@ async fn run_forwarded_request_with_pumps(
     hash: Hash,
     nodes: &[&TestNode],
 ) -> Option<Vec<u8>> {
-    let hash_key = hash_to_key(&hash);
+    let request_key = PendingRequestKey::new(hash, MAX_HTL);
     let (tx, mut rx) = oneshot::channel();
     requester.store.pending_requests.write().await.insert(
-        hash_key,
-        PendingRequest {
+        request_key,
+        vec![PendingRequest {
+            owner: Arc::new(()),
             response_tx: tx,
             started_at: Instant::now(),
             queried_peers: vec![gateway_peer_id.to_string()],
-        },
+        }],
     );
 
     let channel = requester
@@ -737,7 +786,7 @@ async fn run_forwarded_request_with_pumps(
                 .pending_requests
                 .write()
                 .await
-                .remove(&hash_to_key(&hash));
+                .remove(&request_key);
             return None;
         }
 
@@ -2533,13 +2582,12 @@ async fn test_incomplete_forwarded_search_can_retry_immediately() {
     tokio::time::sleep(Duration::from_millis(160)).await;
     tokio::task::yield_now().await;
 
-    let hash_key = hash_to_key(&hash);
     assert!(!gateway
         .store
         .pending_requests
         .read()
         .await
-        .contains_key(&hash_key));
+        .contains_key(&PendingRequestKey::new(hash, MAX_HTL)));
     gateway
         .store
         .handle_request_message("requester", create_request(&hash, MAX_HTL))
@@ -2556,7 +2604,7 @@ async fn test_incomplete_forwarded_search_can_retry_immediately() {
 }
 
 #[tokio::test]
-async fn test_forwarded_upstream_fetch_is_shared_across_multiple_requesters() {
+async fn test_forwarded_upstream_fetches_keep_distinct_cycle_budgets() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;
 
@@ -2602,8 +2650,8 @@ async fn test_forwarded_upstream_fetch_is_shared_across_multiple_requesters() {
     assert_eq!(result_b, Some(payload));
     assert_eq!(
         calls.load(Ordering::Relaxed),
-        1,
-        "gateway should coalesce concurrent upstream reads for the same hash",
+        2,
+        "the direct and cycle-decremented searches have distinct HTL budgets",
     );
 
     crate::mock::clear_channel_registry().await;

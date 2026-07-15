@@ -30,12 +30,13 @@ fn make_store() -> Arc<TestStore> {
 async fn expect_response(store: &Arc<TestStore>, hash: Hash, peers: &[&str]) {
     let (response_tx, _response_rx) = oneshot::channel();
     store.pending_requests.write().await.insert(
-        hash_to_key(&hash),
-        PendingRequest {
+        PendingRequestKey::new(hash, MAX_HTL),
+        vec![PendingRequest {
+            owner: Arc::new(()),
             response_tx,
             started_at: Instant::now(),
             queried_peers: peers.iter().map(ToString::to_string).collect(),
-        },
+        }],
     );
 }
 
@@ -66,7 +67,7 @@ async fn corrupt_response_gets_no_delivery_evidence_or_reciprocity_credit() {
         .pending_requests
         .read()
         .await
-        .contains_key(&hash_to_key(&hash)));
+        .contains_key(&PendingRequestKey::new(hash, MAX_HTL)));
 
     store
         .handle_response_message("honest", create_response(&hash, payload.clone()))
