@@ -11,9 +11,8 @@ mod tcp_blob;
 
 pub use same_host::{SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError};
 pub use tcp_blob::{
-    encode_tcp_blob_request, encode_tcp_blob_response_header, TcpBlobTransport,
-    TcpBlobTransportConfig, TcpBlobTransportError, TCP_BLOB_CAPABILITY, TCP_BLOB_MAX_BYTES,
-    TCP_BLOB_SERVICE_PORT,
+    TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig, TcpBlobTransportError,
+    TCP_BLOB_CAPABILITY, TCP_BLOB_MAX_BYTES, TCP_BLOB_SERVICE_PORT,
 };
 
 #[cfg(feature = "legacy-mesh")]

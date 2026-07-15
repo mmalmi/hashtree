@@ -5,12 +5,15 @@ use std::time::Duration;
 use fips_core::config::{RoutingMode, TransportInstances};
 use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{Config, FipsEndpoint, PeerIdentity, UdpConfig};
-use hashtree_core::{Hash, MemoryStore, Store};
+use hashtree_core::{
+    BlobReply, BlobRequest, BlobRoute, Hash, MemoryStore, Store, StoreBlobRoute, StoreError,
+};
 use hashtree_fips_transport::{
     SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError, TcpBlobTransport,
     TcpBlobTransportConfig, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT,
 };
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::timeout;
 
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,6 +25,7 @@ async fn standalone_store_needs_no_provider_and_preserves_local_mutations() {
     let store = SameHostBlobStore::bind(
         endpoint.clone(),
         local.clone(),
+        None,
         SameHostBlobStoreConfig::default(),
     )
     .await
@@ -46,6 +50,7 @@ async fn rejects_provider_fanout_above_the_actor_bound() {
     let result = SameHostBlobStore::bind(
         endpoint.clone(),
         Arc::new(MemoryStore::new()),
+        None,
         SameHostBlobStoreConfig::default().with_max_provider_attempts(5),
     )
     .await;
@@ -61,10 +66,14 @@ async fn rejects_provider_fanout_above_the_actor_bound() {
 async fn accepts_a_platform_erased_local_store_without_an_adapter_enum() {
     let endpoint = endpoint(rendezvous_addr(), "iris-chat-platform-store-v1").await;
     let local: Arc<dyn Store> = Arc::new(MemoryStore::new());
-    let store =
-        SameHostBlobStore::bind(endpoint.clone(), local, SameHostBlobStoreConfig::default())
-            .await
-            .expect("bind erased store");
+    let store = SameHostBlobStore::bind(
+        endpoint.clone(),
+        local,
+        None,
+        SameHostBlobStoreConfig::default(),
+    )
+    .await
+    .expect("bind erased store");
     let data = b"desktop LMDB or mobile memory behind one Store slot".to_vec();
     let content_hash = hash(&data);
 
@@ -90,6 +99,7 @@ async fn nonadvertised_client_store_rejects_inbound_blob_reads() {
     let private = SameHostBlobStore::bind(
         private_endpoint.clone(),
         private_local,
+        None,
         SameHostBlobStoreConfig::default(),
     )
     .await
@@ -137,6 +147,7 @@ async fn discovers_provider_across_product_scopes_caches_blob_and_falls_back_aft
     let provider = SameHostBlobStore::bind(
         provider_endpoint.clone(),
         provider_local,
+        None,
         SameHostBlobStoreConfig::provider(100),
     )
     .await
@@ -144,6 +155,7 @@ async fn discovers_provider_across_product_scopes_caches_blob_and_falls_back_aft
     let consumer = SameHostBlobStore::bind(
         consumer_endpoint.clone(),
         consumer_local.clone(),
+        None,
         SameHostBlobStoreConfig::default(),
     )
     .await
@@ -204,6 +216,7 @@ async fn healthy_provider_repairs_a_corrupt_local_cache_entry() {
     let provider = SameHostBlobStore::bind(
         provider_endpoint.clone(),
         provider_local,
+        None,
         SameHostBlobStoreConfig::provider(100),
     )
     .await
@@ -211,6 +224,7 @@ async fn healthy_provider_repairs_a_corrupt_local_cache_entry() {
     let consumer = SameHostBlobStore::bind(
         consumer_endpoint.clone(),
         consumer_local.clone(),
+        None,
         SameHostBlobStoreConfig::default(),
     )
     .await
@@ -235,7 +249,184 @@ async fn healthy_provider_repairs_a_corrupt_local_cache_entry() {
 }
 
 #[tokio::test]
-async fn provider_withdrawal_during_request_is_failure_then_later_standalone_miss() {
+async fn provider_miss_falls_through_to_existing_store_and_caches_hit() {
+    let rendezvous = rendezvous_addr();
+    let provider_endpoint = endpoint(rendezvous, "empty-same-host-provider").await;
+    let consumer_endpoint = endpoint(rendezvous, "consumer-with-existing-store").await;
+    let provider = SameHostBlobStore::bind(
+        provider_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        SameHostBlobStoreConfig::provider(100),
+    )
+    .await
+    .expect("bind empty provider");
+    let fallback = Arc::new(MemoryStore::new());
+    let data = b"existing standalone resolver wins after local provider miss".to_vec();
+    let content_hash = hash(&data);
+    fallback.put(content_hash, data.clone()).await.unwrap();
+    let local = Arc::new(MemoryStore::new());
+    let consumer = SameHostBlobStore::bind(
+        consumer_endpoint.clone(),
+        local.clone(),
+        Some(Arc::new(StoreBlobRoute::new(fallback))),
+        SameHostBlobStoreConfig::default(),
+    )
+    .await
+    .expect("bind consumer");
+
+    wait_for_provider(&consumer_endpoint, provider_endpoint.npub()).await;
+    assert_eq!(
+        consumer.get(&content_hash).await.unwrap(),
+        Some(data.clone())
+    );
+    assert_eq!(local.get(&content_hash).await.unwrap(), Some(data));
+
+    drop(consumer);
+    drop(provider);
+    consumer_endpoint.shutdown().await.unwrap();
+    provider_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_failure_falls_through_to_existing_store_and_caches_hit() {
+    let rendezvous = rendezvous_addr();
+    let provider_endpoint = endpoint(rendezvous, "failing-same-host-provider").await;
+    let consumer_endpoint = endpoint(rendezvous, "consumer-after-provider-failure").await;
+    let transport = TcpBlobTransportConfig {
+        idle_timeout: Duration::from_millis(250),
+    };
+    let provider = SameHostBlobStore::bind(
+        provider_endpoint.clone(),
+        Arc::new(FailingStore),
+        None,
+        SameHostBlobStoreConfig::provider(100).with_transport(transport),
+    )
+    .await
+    .expect("bind failing provider");
+    let fallback = Arc::new(MemoryStore::new());
+    let data = b"existing standalone resolver wins after local provider failure".to_vec();
+    let content_hash = hash(&data);
+    fallback.put(content_hash, data.clone()).await.unwrap();
+    let local = Arc::new(MemoryStore::new());
+    let consumer = SameHostBlobStore::bind(
+        consumer_endpoint.clone(),
+        local.clone(),
+        Some(Arc::new(StoreBlobRoute::new(fallback))),
+        SameHostBlobStoreConfig::default().with_transport(transport),
+    )
+    .await
+    .expect("bind consumer");
+
+    wait_for_provider(&consumer_endpoint, provider_endpoint.npub()).await;
+    assert_eq!(
+        consumer.get(&content_hash).await.unwrap(),
+        Some(data.clone())
+    );
+    assert_eq!(local.get(&content_hash).await.unwrap(), Some(data));
+
+    drop(consumer);
+    drop(provider);
+    consumer_endpoint.shutdown().await.unwrap();
+    provider_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn corrupt_provider_falls_through_to_existing_route_and_caches_hit() {
+    let rendezvous = rendezvous_addr();
+    let provider_endpoint = endpoint(rendezvous, "corrupt-same-host-provider").await;
+    let consumer_endpoint = endpoint(rendezvous, "consumer-after-provider-corruption").await;
+    let data = b"standalone route repairs an invalid provider response".to_vec();
+    let content_hash = hash(&data);
+    let provider_store = Arc::new(MemoryStore::new());
+    provider_store
+        .put(content_hash, b"wrong bytes".to_vec())
+        .await
+        .unwrap();
+    let transport = TcpBlobTransportConfig {
+        idle_timeout: Duration::from_millis(250),
+    };
+    let provider = SameHostBlobStore::bind(
+        provider_endpoint.clone(),
+        provider_store,
+        None,
+        SameHostBlobStoreConfig::provider(100).with_transport(transport),
+    )
+    .await
+    .expect("bind corrupt provider");
+    let standalone = Arc::new(MemoryStore::new());
+    standalone.put(content_hash, data.clone()).await.unwrap();
+    let local = Arc::new(MemoryStore::new());
+    let consumer = SameHostBlobStore::bind(
+        consumer_endpoint.clone(),
+        local.clone(),
+        Some(Arc::new(StoreBlobRoute::new(standalone))),
+        SameHostBlobStoreConfig::default().with_transport(transport),
+    )
+    .await
+    .expect("bind consumer");
+
+    wait_for_provider(&consumer_endpoint, provider_endpoint.npub()).await;
+    assert_eq!(
+        consumer.get(&content_hash).await.unwrap(),
+        Some(data.clone())
+    );
+    assert_eq!(local.get(&content_hash).await.unwrap(), Some(data));
+
+    drop(consumer);
+    drop(provider);
+    consumer_endpoint.shutdown().await.unwrap();
+    provider_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn final_no_result_is_not_negative_cached() {
+    let consumer_endpoint = endpoint(rendezvous_addr(), "no-result-consumer").await;
+    let standalone = Arc::new(CountingNoResultRoute::default());
+    let consumer = SameHostBlobStore::bind(
+        consumer_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        Some(standalone.clone()),
+        SameHostBlobStoreConfig::default(),
+    )
+    .await
+    .expect("bind consumer");
+    let missing = [0xb4; 32];
+
+    assert_eq!(consumer.get(&missing).await.unwrap(), None);
+    assert_eq!(consumer.get(&missing).await.unwrap(), None);
+    assert_eq!(standalone.calls.load(Ordering::Acquire), 2);
+    assert_eq!(standalone.last_htl.load(Ordering::Acquire), 0);
+
+    drop(consumer);
+    consumer_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn standalone_error_and_corrupt_data_remain_errors() {
+    let consumer_endpoint = endpoint(rendezvous_addr(), "bad-standalone-consumer").await;
+    let standalone = Arc::new(BadStandaloneRoute::default());
+    let consumer = SameHostBlobStore::bind(
+        consumer_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        Some(standalone.clone()),
+        SameHostBlobStoreConfig::default(),
+    )
+    .await
+    .expect("bind consumer");
+    let expected_hash = hash(b"expected bytes");
+
+    assert!(consumer.get(&expected_hash).await.is_err());
+    assert!(consumer.get(&expected_hash).await.is_err());
+    assert_eq!(standalone.calls.load(Ordering::Acquire), 2);
+    assert_eq!(standalone.last_htl.load(Ordering::Acquire), 0);
+
+    drop(consumer);
+    consumer_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_withdrawal_during_request_advances_to_standalone_miss() {
     let rendezvous = rendezvous_addr();
     let provider_endpoint = endpoint(rendezvous, "withdrawing-provider-v1").await;
     let consumer_endpoint = endpoint(rendezvous, "iris-chat-withdrawal-v1").await;
@@ -250,6 +441,7 @@ async fn provider_withdrawal_during_request_is_failure_then_later_standalone_mis
         SameHostBlobStore::bind(
             consumer_endpoint.clone(),
             Arc::new(MemoryStore::new()),
+            None,
             SameHostBlobStoreConfig::default().with_transport(TcpBlobTransportConfig {
                 idle_timeout: Duration::from_millis(250),
             }),
@@ -267,10 +459,7 @@ async fn provider_withdrawal_during_request_is_failure_then_later_standalone_mis
     drop(stalled_receiver);
     wait_for_no_provider(&consumer_endpoint).await;
 
-    assert!(
-        request.await.expect("request task").is_err(),
-        "provider death during an attempted read became a false miss"
-    );
+    assert_eq!(request.await.expect("request task").unwrap(), None);
     assert_eq!(consumer.get(&missing).await.unwrap(), None);
 
     drop(consumer);
@@ -279,7 +468,7 @@ async fn provider_withdrawal_during_request_is_failure_then_later_standalone_mis
 }
 
 #[tokio::test]
-async fn healthy_provider_wins_without_hol_and_mixed_miss_failure_is_not_a_false_miss() {
+async fn healthy_provider_wins_without_hol_and_mixed_miss_failure_advances() {
     let rendezvous = rendezvous_addr();
     let stalled_endpoint = endpoint(rendezvous, "stalled-provider").await;
     let healthy_endpoint = endpoint(rendezvous, "healthy-provider").await;
@@ -304,6 +493,7 @@ async fn healthy_provider_wins_without_hol_and_mixed_miss_failure_is_not_a_false
     let healthy = SameHostBlobStore::bind(
         healthy_endpoint.clone(),
         healthy_local,
+        None,
         SameHostBlobStoreConfig::provider(100).with_transport(transport),
     )
     .await
@@ -311,6 +501,7 @@ async fn healthy_provider_wins_without_hol_and_mixed_miss_failure_is_not_a_false
     let consumer = SameHostBlobStore::bind(
         consumer_endpoint.clone(),
         Arc::new(MemoryStore::new()),
+        None,
         SameHostBlobStoreConfig::default().with_transport(transport),
     )
     .await
@@ -326,10 +517,7 @@ async fn healthy_provider_wins_without_hol_and_mixed_miss_failure_is_not_a_false
     );
 
     let missing = [0x99; 32];
-    assert!(
-        consumer.get(&missing).await.is_err(),
-        "one explicit miss plus one failed advertised provider must remain a failure"
-    );
+    assert_eq!(consumer.get(&missing).await.unwrap(), None);
     drop(stalled_receiver);
     wait_for_provider_count(&consumer_endpoint, 1).await;
     assert_eq!(consumer.get(&missing).await.unwrap(), None);
@@ -452,4 +640,59 @@ async fn wait_for_no_provider(endpoint: &FipsEndpoint) {
 
 fn hash(data: &[u8]) -> Hash {
     Sha256::digest(data).into()
+}
+
+struct FailingStore;
+
+#[async_trait::async_trait]
+impl Store for FailingStore {
+    async fn put(&self, _hash: Hash, _data: Vec<u8>) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    async fn get(&self, _hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        Err(StoreError::Other("deliberate provider failure".to_string()))
+    }
+
+    async fn has(&self, _hash: &Hash) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    async fn delete(&self, _hash: &Hash) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct CountingNoResultRoute {
+    calls: AtomicUsize,
+    last_htl: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl BlobRoute for CountingNoResultRoute {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        self.last_htl.store(request.htl as usize, Ordering::Release);
+        Ok(BlobReply::NoResult)
+    }
+}
+
+#[derive(Default)]
+struct BadStandaloneRoute {
+    calls: AtomicUsize,
+    last_htl: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl BlobRoute for BadStandaloneRoute {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        let call = self.calls.fetch_add(1, Ordering::AcqRel);
+        self.last_htl.store(request.htl as usize, Ordering::Release);
+        if call == 0 {
+            Err(StoreError::Other("deliberate route failure".to_string()))
+        } else {
+            Ok(BlobReply::Data(b"wrong bytes".to_vec()))
+        }
+    }
 }

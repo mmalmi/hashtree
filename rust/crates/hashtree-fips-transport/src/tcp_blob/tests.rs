@@ -11,29 +11,9 @@ fn request_matches_shared_codec_vector() {
     let hash = std::array::from_fn(|index| index as u8);
 
     assert_eq!(
-        hex::encode(encode_tcp_blob_request(&hash)),
-        "480101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        hex::encode(encode_blob_request(&BlobRequest { hash, htl: 0 })),
+        "48010100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
     );
-}
-
-#[test]
-fn response_header_matches_shared_codec_vector() {
-    assert_eq!(
-        hex::encode(encode_tcp_blob_response_header(true, 3).unwrap()),
-        "48010100000003"
-    );
-}
-
-#[test]
-fn codec_rejects_oversize_and_invalid_status_headers() {
-    assert!(matches!(
-        encode_tcp_blob_response_header(true, TCP_BLOB_MAX_BYTES + 1),
-        Err(TcpBlobTransportError::BlobTooLarge(_))
-    ));
-    assert!(matches!(
-        decode_response_header(&[MAGIC, VERSION, 2, 0, 0, 0, 0]),
-        Err(TcpBlobTransportError::Protocol(_))
-    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

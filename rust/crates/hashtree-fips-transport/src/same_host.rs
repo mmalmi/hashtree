@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use fips_core::discovery::local::rank_capability_providers;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use hashtree_core::store::StoreStats;
-use hashtree_core::{Hash, Store, StoreError};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::task::JoinSet;
@@ -14,6 +14,10 @@ use crate::{
     TcpBlobTransport, TcpBlobTransportConfig, TcpBlobTransportError, TCP_BLOB_CAPABILITY,
     TCP_BLOB_SERVICE_PORT,
 };
+
+fn verify_hash(data: &[u8], expected: &Hash) -> bool {
+    Sha256::digest(data).as_slice() == expected
+}
 
 /// Policy for an optional same-host Hashtree service attachment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +81,7 @@ pub enum SameHostBlobStoreError {
 pub struct SameHostBlobStore<S: Store + ?Sized + 'static> {
     endpoint: Arc<FipsEndpoint>,
     local: Arc<S>,
+    standalone: Option<Arc<dyn BlobRoute>>,
     transport: Arc<TcpBlobTransport<S>>,
     max_provider_attempts: usize,
 }
@@ -85,6 +90,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
     pub async fn bind(
         endpoint: Arc<FipsEndpoint>,
         local: Arc<S>,
+        standalone: Option<Arc<dyn BlobRoute>>,
         config: SameHostBlobStoreConfig,
     ) -> Result<Self, SameHostBlobStoreError> {
         if config.max_provider_attempts == 0 {
@@ -117,6 +123,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
         Ok(Self {
             endpoint,
             local,
+            standalone,
             transport: Arc::new(transport),
             max_provider_attempts: config.max_provider_attempts,
         })
@@ -146,39 +153,52 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
             .collect())
     }
 
-    async fn discovered_get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
-        let peers = self.provider_peers()?;
-        if peers.is_empty() {
-            return Ok(None);
-        }
+    async fn discovered_get(&self, hash: &Hash) -> Option<Vec<u8>> {
+        let peers = self.provider_peers().ok()?;
 
         let mut attempts = JoinSet::new();
         for peer in peers {
-            let transport = self.transport.clone();
-            let hash = *hash;
-            attempts.spawn(async move { transport.request_from_peer(&hash, peer).await });
+            let route = self.transport.route_to(peer);
+            let request = BlobRequest {
+                hash: *hash,
+                htl: 0,
+            };
+            attempts.spawn(async move { route.route(request).await });
         }
 
-        let mut failures = Vec::new();
         while let Some(result) = attempts.join_next().await {
             match result {
-                Ok(Ok(Some(data))) => {
+                Ok(Ok(BlobReply::Data(data))) if verify_hash(&data, hash) => {
                     attempts.abort_all();
-                    self.cache_remote(hash, &data).await?;
-                    return Ok(Some(data));
+                    return Some(data);
                 }
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => failures.push(error.to_string()),
-                Err(error) => failures.push(error.to_string()),
+                Ok(Ok(BlobReply::Data(_) | BlobReply::NoResult) | Err(_)) | Err(_) => {}
             }
         }
-        if failures.is_empty() {
+        None
+    }
+
+    async fn standalone_get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(standalone) = self.standalone.as_ref() else {
             return Ok(None);
-        }
-        Err(StoreError::Other(format!(
-            "same-host blob providers failed: {}",
-            failures.join("; ")
-        )))
+        };
+        let data = match standalone
+            .route(BlobRequest {
+                hash: *hash,
+                htl: 0,
+            })
+            .await?
+        {
+            BlobReply::Data(data) if verify_hash(&data, hash) => data,
+            BlobReply::Data(_) => {
+                return Err(StoreError::Other(
+                    "standalone Hashtree route returned a blob with the wrong hash".to_string(),
+                ));
+            }
+            BlobReply::NoResult => return Ok(None),
+        };
+        self.cache_remote(hash, &data).await?;
+        Ok(Some(data))
     }
 
     async fn cache_remote(&self, hash: &Hash, data: &[u8]) -> Result<(), StoreError> {
@@ -238,13 +258,17 @@ impl<S: Store + ?Sized + 'static> Store for SameHostBlobStore<S> {
             }
             corrupt_local = true;
         }
-        let remote = self.discovered_get(hash).await?;
-        if remote.is_none() && corrupt_local {
+        if let Some(data) = self.discovered_get(hash).await {
+            self.cache_remote(hash, &data).await?;
+            return Ok(Some(data));
+        }
+        let standalone = self.standalone_get(hash).await?;
+        if standalone.is_none() && corrupt_local {
             return Err(StoreError::Other(
-                "local Hashtree blob hash mismatch and no provider repaired it".to_string(),
+                "local Hashtree blob hash mismatch and no read source repaired it".to_string(),
             ));
         }
-        Ok(remote)
+        Ok(standalone)
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {

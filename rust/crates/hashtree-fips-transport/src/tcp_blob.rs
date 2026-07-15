@@ -3,11 +3,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use fips_tcp::{Config as TcpConfig, ConnectionId, State};
 use fips_tcp_endpoint::FipsTcpEndpoint;
-use hashtree_core::{Hash, MemoryStore, Store, StoreError};
+use hashtree_core::{
+    decode_blob_reply_header, decode_blob_request, encode_blob_reply_header, encode_blob_request,
+    BlobCodecError, BlobReply, BlobReplyHeader, BlobRequest, BlobRoute, Hash, MemoryStore, Store,
+    StoreBlobRoute, StoreError, BLOB_MAX_BYTES, BLOB_REPLY_HEADER_BYTES, BLOB_REQUEST_BYTES,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -20,14 +25,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 /// coupling requires the corrected versioned FIPS/fips-tcp release.
 pub const TCP_BLOB_CAPABILITY: &str = "hashtree.blob/1";
 pub const TCP_BLOB_SERVICE_PORT: u16 = 39_018;
-pub const TCP_BLOB_MAX_BYTES: usize = 16 * 1024 * 1024;
-
-const REQUEST_BYTES: usize = 35;
-const RESPONSE_HEADER_BYTES: usize = 7;
-const MAGIC: u8 = 0x48;
-const VERSION: u8 = 1;
-const GET: u8 = 1;
-const FOUND: u8 = 1;
+pub const TCP_BLOB_MAX_BYTES: usize = BLOB_MAX_BYTES;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_QUEUED_COMMANDS: usize = 16;
 const COMMAND_CHANNEL_CAPACITY: usize = MAX_QUEUED_COMMANDS / 2;
@@ -52,6 +50,12 @@ pub struct TcpBlobTransport<S: Store + ?Sized + 'static = MemoryStore> {
     store: Arc<S>,
     commands: mpsc::Sender<Command>,
     task: Option<JoinHandle<Result<(), TcpBlobTransportError>>>,
+}
+
+/// One authenticated peer exposed through the shared blob-routing contract.
+pub struct TcpBlobPeerRoute<S: Store + ?Sized + 'static = MemoryStore> {
+    transport: Arc<TcpBlobTransport<S>>,
+    peer: PeerIdentity,
 }
 
 /// Runtime limits for a TCP/FIPS blob service.
@@ -169,7 +173,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         let actor = TcpBlobActor {
             tcp,
             serve_inbound,
-            store: store.clone(),
+            route: Arc::new(StoreBlobRoute::new(store.clone())),
             commands: command_rx,
             pending_commands: VecDeque::with_capacity(PENDING_COMMAND_CAPACITY),
             active_gets: HashMap::new(),
@@ -212,28 +216,46 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         hash: &Hash,
         peer: PeerIdentity,
     ) -> Result<Option<Vec<u8>>, TcpBlobTransportError> {
-        let data = self.request_from_peer(hash, peer).await?;
-        if let Some(data) = &data {
-            self.store.put(*hash, data.clone()).await?;
+        match self
+            .request_from_peer(
+                BlobRequest {
+                    hash: *hash,
+                    htl: 0,
+                },
+                peer,
+            )
+            .await?
+        {
+            BlobReply::Data(data) => {
+                self.store.put(*hash, data.clone()).await?;
+                Ok(Some(data))
+            }
+            BlobReply::NoResult => Ok(None),
         }
-        Ok(data)
     }
 
     pub(crate) async fn request_from_peer(
         &self,
-        hash: &Hash,
+        request: BlobRequest,
         peer: PeerIdentity,
-    ) -> Result<Option<Vec<u8>>, TcpBlobTransportError> {
+    ) -> Result<BlobReply, TcpBlobTransportError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Get {
                 peer,
-                hash: *hash,
+                request,
                 reply,
             })
             .await
             .map_err(|_| TcpBlobTransportError::Closed)?;
         result.await.map_err(|_| TcpBlobTransportError::Closed)?
+    }
+
+    pub fn route_to(self: &Arc<Self>, peer: PeerIdentity) -> TcpBlobPeerRoute<S> {
+        TcpBlobPeerRoute {
+            transport: self.clone(),
+            peer,
+        }
     }
 
     pub async fn shutdown(mut self) -> Result<(), TcpBlobTransportError> {
@@ -254,6 +276,16 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
     }
 }
 
+#[async_trait]
+impl<S: Store + ?Sized + 'static> BlobRoute for TcpBlobPeerRoute<S> {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.transport
+            .request_from_peer(request, self.peer)
+            .await
+            .map_err(|error| StoreError::Other(error.to_string()))
+    }
+}
+
 impl<S: Store + ?Sized + 'static> Drop for TcpBlobTransport<S> {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
@@ -265,8 +297,8 @@ impl<S: Store + ?Sized + 'static> Drop for TcpBlobTransport<S> {
 enum Command {
     Get {
         peer: PeerIdentity,
-        hash: Hash,
-        reply: oneshot::Sender<Result<Option<Vec<u8>>, TcpBlobTransportError>>,
+        request: BlobRequest,
+        reply: oneshot::Sender<Result<BlobReply, TcpBlobTransportError>>,
     },
     Shutdown {
         reply: oneshot::Sender<()>,
@@ -275,8 +307,8 @@ enum Command {
 
 struct PendingGet {
     peer: PeerIdentity,
-    hash: Hash,
-    reply: oneshot::Sender<Result<Option<Vec<u8>>, TcpBlobTransportError>>,
+    blob: BlobRequest,
+    reply: oneshot::Sender<Result<BlobReply, TcpBlobTransportError>>,
     attempts_started: u8,
 }
 
@@ -304,15 +336,15 @@ enum ServerPhase {
         bytes: Vec<u8>,
     },
     WaitingForStore {
-        hash: Hash,
+        request: BlobRequest,
     },
     LoadingStore {
-        hash: Hash,
+        request: BlobRequest,
         task_id: TaskId,
         abort: AbortHandle,
     },
     WritingResponse {
-        header: [u8; RESPONSE_HEADER_BYTES],
+        header: [u8; BLOB_REPLY_HEADER_BYTES],
         header_offset: usize,
         data: Option<Vec<u8>>,
         data_offset: usize,
@@ -321,13 +353,13 @@ enum ServerPhase {
 
 struct StoreLoad {
     connection: ConnectionId,
-    result: Result<Option<Vec<u8>>, StoreError>,
+    result: Result<BlobReply, StoreError>,
 }
 
 struct TcpBlobActor<S: Store + ?Sized + 'static> {
     tcp: FipsTcpEndpoint,
     serve_inbound: bool,
-    store: Arc<S>,
+    route: Arc<StoreBlobRoute<S>>,
     commands: mpsc::Receiver<Command>,
     pending_commands: VecDeque<Command>,
     active_gets: HashMap<ConnectionId, ActiveGet>,
@@ -409,13 +441,18 @@ impl<S: Store + ?Sized + 'static> TcpBlobActor<S> {
             let Some(command) = self.pending_commands.pop_front() else {
                 break;
             };
-            let Command::Get { peer, hash, reply } = command else {
+            let Command::Get {
+                peer,
+                request,
+                reply,
+            } = command
+            else {
                 unreachable!("shutdown commands are handled first");
             };
             if !reply.is_closed() {
                 let request = PendingGet {
                     peer,
-                    hash,
+                    blob: request,
                     reply,
                     attempts_started: 0,
                 };
@@ -526,7 +563,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobActor<S> {
                 ServerConnection {
                     deadline_ms: self.deadline_ms(now_ms),
                     phase: ServerPhase::ReadingRequest {
-                        bytes: Vec::with_capacity(REQUEST_BYTES),
+                        bytes: Vec::with_capacity(BLOB_REQUEST_BYTES),
                     },
                 },
             );
@@ -559,25 +596,25 @@ impl<S: Store + ?Sized + 'static> TcpBlobActor<S> {
             .servers
             .iter()
             .filter_map(|(connection, server)| match server.phase {
-                ServerPhase::WaitingForStore { hash } => Some((*connection, hash)),
+                ServerPhase::WaitingForStore { request } => Some((*connection, request)),
                 _ => None,
             })
             .take(available)
             .collect::<Vec<_>>();
 
-        for (connection, hash) in waiting {
-            let store = self.store.clone();
+        for (connection, request) in waiting {
+            let route = self.route.clone();
             let abort = self.store_loads.spawn(async move {
                 StoreLoad {
                     connection,
-                    result: store.get(&hash).await,
+                    result: route.route(request).await,
                 }
             });
             let task_id = abort.id();
             self.store_load_connections.insert(task_id, connection);
             if let Some(server) = self.servers.get_mut(&connection) {
                 server.phase = ServerPhase::LoadingStore {
-                    hash,
+                    request,
                     task_id,
                     abort,
                 };
@@ -611,35 +648,38 @@ impl<S: Store + ?Sized + 'static> TcpBlobActor<S> {
         let Some(mut server) = self.servers.remove(&connection) else {
             return;
         };
-        let hash = match server.phase {
+        let request = match server.phase {
             ServerPhase::LoadingStore {
-                hash,
+                request,
                 task_id: expected,
                 ..
-            } if expected == task_id => hash,
+            } if expected == task_id => request,
             _ => {
                 let _ = self.tcp.close(connection, now_ms).await;
                 return;
             }
         };
-        let data = match result {
-            Some(Ok(Some(data))) if verify_hash(&data, &hash) => Some(data),
-            Some(Ok(None)) => None,
+        let reply = match result {
+            Some(Ok(BlobReply::Data(data))) if verify_hash(&data, &request.hash) => {
+                BlobReply::Data(data)
+            }
+            Some(Ok(BlobReply::NoResult)) => BlobReply::NoResult,
             _ => {
                 let _ = self.tcp.close(connection, now_ms).await;
                 return;
             }
         };
-        if data
-            .as_ref()
-            .is_some_and(|data| data.len() > TCP_BLOB_MAX_BYTES)
-        {
-            let _ = self.tcp.close(connection, now_ms).await;
-            return;
-        }
-        let header =
-            encode_tcp_blob_response_header(data.is_some(), data.as_ref().map_or(0, Vec::len))
-                .expect("validated TCP blob response size");
+        let header = match encode_blob_reply_header(&reply) {
+            Ok(header) => header,
+            Err(_) => {
+                let _ = self.tcp.close(connection, now_ms).await;
+                return;
+            }
+        };
+        let data = match reply {
+            BlobReply::Data(data) => Some(data),
+            BlobReply::NoResult => None,
+        };
         server.deadline_ms = self.deadline_ms(now_ms);
         server.phase = ServerPhase::WritingResponse {
             header,
@@ -660,7 +700,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobActor<S> {
 
 enum ClientDrive {
     Pending,
-    Complete(Option<Vec<u8>>),
+    Complete(BlobReply),
     Failed(TcpBlobTransportError),
 }
 
@@ -688,7 +728,7 @@ async fn drive_active_get(
             ClientDrive::Pending
         }
         ClientPhase::WritingRequest { offset } => {
-            let request = encode_tcp_blob_request(&active.request.hash);
+            let request = encode_blob_request(&active.request.blob);
             match tcp
                 .write(active.connection, &request[*offset..], now_ms)
                 .await
@@ -700,7 +740,7 @@ async fn drive_active_get(
                     *offset += written;
                     if *offset == request.len() {
                         active.phase = ClientPhase::ReadingHeader {
-                            bytes: Vec::with_capacity(RESPONSE_HEADER_BYTES),
+                            bytes: Vec::with_capacity(BLOB_REPLY_HEADER_BYTES),
                         };
                     }
                     ClientDrive::Pending
@@ -712,7 +752,7 @@ async fn drive_active_get(
             match tcp
                 .read(
                     active.connection,
-                    RESPONSE_HEADER_BYTES - bytes.len(),
+                    BLOB_REPLY_HEADER_BYTES - bytes.len(),
                     now_ms,
                 )
                 .await
@@ -725,18 +765,20 @@ async fn drive_active_get(
                 }
                 Err(error) => return ClientDrive::Failed(transport_error(error)),
             }
-            if bytes.len() == RESPONSE_HEADER_BYTES {
-                match decode_response_header(bytes) {
-                    Ok(ResponseHeader::Missing) => return ClientDrive::Complete(None),
-                    Ok(ResponseHeader::Found(0)) => {
+            if bytes.len() == BLOB_REPLY_HEADER_BYTES {
+                match decode_blob_reply_header(bytes).map_err(codec_error) {
+                    Ok(BlobReplyHeader::NoResult) => {
+                        return ClientDrive::Complete(BlobReply::NoResult)
+                    }
+                    Ok(BlobReplyHeader::Data(0)) => {
                         let data = Vec::new();
-                        return if verify_hash(&data, &active.request.hash) {
-                            ClientDrive::Complete(Some(data))
+                        return if verify_hash(&data, &active.request.blob.hash) {
+                            ClientDrive::Complete(BlobReply::Data(data))
                         } else {
                             ClientDrive::Failed(TcpBlobTransportError::HashMismatch)
                         };
                     }
-                    Ok(ResponseHeader::Found(size)) => {
+                    Ok(BlobReplyHeader::Data(size)) => {
                         active.phase = ClientPhase::ReadingBody {
                             size,
                             bytes: Vec::with_capacity(size),
@@ -770,8 +812,8 @@ async fn drive_active_get(
             }
             if bytes.len() == *size {
                 let data = std::mem::take(bytes);
-                if verify_hash(&data, &active.request.hash) {
-                    ClientDrive::Complete(Some(data))
+                if verify_hash(&data, &active.request.blob.hash) {
+                    ClientDrive::Complete(BlobReply::Data(data))
                 } else {
                     ClientDrive::Failed(TcpBlobTransportError::HashMismatch)
                 }
@@ -803,7 +845,7 @@ async fn drive_server(
     match &mut server.phase {
         ServerPhase::ReadingRequest { bytes } => {
             let chunk = match tcp
-                .read(connection, REQUEST_BYTES - bytes.len(), now_ms)
+                .read(connection, BLOB_REQUEST_BYTES - bytes.len(), now_ms)
                 .await
             {
                 Ok(chunk) => chunk,
@@ -813,12 +855,12 @@ async fn drive_server(
                 server.deadline_ms = refreshed_deadline(now_ms, idle_timeout_ms);
             }
             bytes.extend_from_slice(&chunk);
-            if bytes.len() == REQUEST_BYTES {
-                let hash = match decode_request(bytes) {
-                    Ok(hash) => hash,
+            if bytes.len() == BLOB_REQUEST_BYTES {
+                let request = match decode_blob_request(bytes) {
+                    Ok(request) => request,
                     Err(_) => return false,
                 };
-                server.phase = ServerPhase::WaitingForStore { hash };
+                server.phase = ServerPhase::WaitingForStore { request };
             } else if tcp.is_read_closed(connection) {
                 return false;
             }
@@ -876,76 +918,10 @@ fn refreshed_deadline(now_ms: u64, idle_timeout_ms: u64) -> u64 {
     now_ms.saturating_add(idle_timeout_ms)
 }
 
-pub fn encode_tcp_blob_request(hash: &Hash) -> [u8; REQUEST_BYTES] {
-    let mut request = [0; REQUEST_BYTES];
-    request[..3].copy_from_slice(&[MAGIC, VERSION, GET]);
-    request[3..].copy_from_slice(hash);
-    request
-}
-
-pub fn encode_tcp_blob_response_header(
-    found: bool,
-    size: usize,
-) -> Result<[u8; RESPONSE_HEADER_BYTES], TcpBlobTransportError> {
-    if size > TCP_BLOB_MAX_BYTES {
-        return Err(TcpBlobTransportError::BlobTooLarge(size));
-    }
-    if !found && size != 0 {
-        return Err(TcpBlobTransportError::Protocol(
-            "missing response has a non-zero payload length",
-        ));
-    }
-    let mut header = [0; RESPONSE_HEADER_BYTES];
-    header[..3].copy_from_slice(&[MAGIC, VERSION, if found { FOUND } else { 0 }]);
-    header[3..].copy_from_slice(&(size as u32).to_be_bytes());
-    Ok(header)
-}
-
-fn decode_request(bytes: &[u8]) -> Result<Hash, TcpBlobTransportError> {
-    if bytes.len() != REQUEST_BYTES {
-        return Err(TcpBlobTransportError::Protocol(
-            "request has the wrong length",
-        ));
-    }
-    if bytes[..3] != [MAGIC, VERSION, GET] {
-        return Err(TcpBlobTransportError::Protocol(
-            "request has an unsupported prelude",
-        ));
-    }
-    let mut hash = [0; 32];
-    hash.copy_from_slice(&bytes[3..]);
-    Ok(hash)
-}
-
-enum ResponseHeader {
-    Missing,
-    Found(usize),
-}
-
-fn decode_response_header(bytes: &[u8]) -> Result<ResponseHeader, TcpBlobTransportError> {
-    if bytes.len() != RESPONSE_HEADER_BYTES {
-        return Err(TcpBlobTransportError::Protocol(
-            "response header has the wrong length",
-        ));
-    }
-    if bytes[0] != MAGIC || bytes[1] != VERSION {
-        return Err(TcpBlobTransportError::Protocol(
-            "response has an unsupported prelude",
-        ));
-    }
-    let size = u32::from_be_bytes(bytes[3..].try_into().expect("four-byte length")) as usize;
-    if size > TCP_BLOB_MAX_BYTES {
-        return Err(TcpBlobTransportError::BlobTooLarge(size));
-    }
-    match bytes[2] {
-        0 if size == 0 => Ok(ResponseHeader::Missing),
-        0 => Err(TcpBlobTransportError::Protocol(
-            "missing response has a non-zero payload length",
-        )),
-        FOUND => Ok(ResponseHeader::Found(size)),
-        _ => Err(TcpBlobTransportError::Protocol(
-            "response has an unsupported status",
-        )),
+fn codec_error(error: BlobCodecError) -> TcpBlobTransportError {
+    match error {
+        BlobCodecError::Invalid(message) => TcpBlobTransportError::Protocol(message),
+        BlobCodecError::BlobTooLarge(size) => TcpBlobTransportError::BlobTooLarge(size),
     }
 }
 
