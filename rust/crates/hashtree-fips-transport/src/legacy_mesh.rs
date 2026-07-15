@@ -137,12 +137,16 @@ pub struct FipsEndpointOptions {
     pub relays: Vec<String>,
     pub enable_udp: bool,
     pub enable_webrtc: bool,
+    /// Join the ordinary fixed-loopback FIPS rendezvous transport.
+    pub enable_local_rendezvous: bool,
     /// Host-local Ethernet interfaces used as the only underlay when ordinary
     /// network transports are disabled (for example, a browser VM virtio NIC).
     pub ethernet_interfaces: Vec<String>,
+    pub enable_lan_discovery: bool,
     pub udp_bind_addr: Option<String>,
     pub udp_public: bool,
     pub udp_external_addr: Option<String>,
+    pub share_local_candidates: bool,
     pub webrtc_auto_connect: bool,
     pub webrtc_max_connections: usize,
     pub open_discovery_max_pending: usize,
@@ -157,10 +161,13 @@ impl FipsEndpointOptions {
             relays: Vec::new(),
             enable_udp: true,
             enable_webrtc: true,
+            enable_local_rendezvous: false,
             ethernet_interfaces: Vec::new(),
+            enable_lan_discovery: true,
             udp_bind_addr: None,
             udp_public: false,
             udp_external_addr: None,
+            share_local_candidates: true,
             webrtc_auto_connect: false,
             webrtc_max_connections: DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS,
             open_discovery_max_pending: 0,
@@ -179,7 +186,11 @@ pub struct BoundFipsEndpoint {
 pub async fn bind_fips_endpoint(
     options: FipsEndpointOptions,
 ) -> Result<BoundFipsEndpoint, FipsTransportError> {
-    if !options.enable_udp && !options.enable_webrtc && options.ethernet_interfaces.is_empty() {
+    if !options.enable_udp
+        && !options.enable_webrtc
+        && !options.enable_local_rendezvous
+        && options.ethernet_interfaces.is_empty()
+    {
         return Err(FipsTransportError::Endpoint(
             "at least one FIPS transport must be enabled".to_string(),
         ));
@@ -191,6 +202,7 @@ pub async fn bind_fips_endpoint(
         options.discovery_scope.trim().to_string()
     };
     let packet_channel_capacity = options.packet_channel_capacity;
+    let enable_local_rendezvous = options.enable_local_rendezvous;
     let config = fips_endpoint_config(options, &discovery_scope);
 
     let builder = fips_core::FipsEndpoint::builder()
@@ -198,6 +210,11 @@ pub async fn bind_fips_endpoint(
         .discovery_scope(discovery_scope.clone())
         .without_system_tun()
         .packet_channel_capacity(packet_channel_capacity);
+    let builder = if enable_local_rendezvous {
+        builder.local_rendezvous()
+    } else {
+        builder
+    };
     let endpoint = Arc::new(
         builder
             .bind()
@@ -230,7 +247,10 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
     config.tun.enabled = false;
     config.dns.enabled = false;
     config.node.system_files_enabled = false;
-    config.node.discovery.lan.scope = Some(discovery_scope.to_string());
+    config.node.discovery.lan.enabled = options.enable_lan_discovery;
+    config.node.discovery.lan.scope = options
+        .enable_lan_discovery
+        .then(|| discovery_scope.to_string());
     let external_discovery =
         options.enable_udp || options.enable_webrtc || !options.relays.is_empty();
     config.node.discovery.nostr.enabled = external_discovery;
@@ -241,7 +261,7 @@ fn fips_endpoint_config(options: FipsEndpointOptions, discovery_scope: &str) -> 
         NostrDiscoveryPolicy::Open
     };
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
-    config.node.discovery.nostr.share_local_candidates = true;
+    config.node.discovery.nostr.share_local_candidates = options.share_local_candidates;
     config.node.discovery.nostr.app = discovery_scope.to_string();
     config.node.discovery.nostr.advert_relays = options.relays;
 
@@ -1895,6 +1915,46 @@ mod tests {
             config.node.discovery.nostr.app,
             "iris-drive-v1:private-owner"
         );
+    }
+
+    #[test]
+    fn endpoint_config_can_disable_ambient_lan_discovery_and_local_candidates() {
+        let mut options = FipsEndpointOptions::new("nsec1example");
+        options.enable_lan_discovery = false;
+        options.share_local_candidates = false;
+        let config = fips_endpoint_config(options, "test-scope");
+
+        assert!(!config.node.discovery.lan.enabled);
+        assert_eq!(config.node.discovery.lan.scope, None);
+        assert!(!config.node.discovery.nostr.share_local_candidates);
+    }
+
+    #[test]
+    fn local_rendezvous_does_not_suppress_enabled_outbound_transports() {
+        let mut options = FipsEndpointOptions::new("nsec1example");
+        options.enable_local_rendezvous = true;
+        let config = fips_endpoint_config(options, "test-scope");
+
+        assert!(!config.transports.udp.is_empty());
+        assert!(!config.transports.tcp.is_empty());
+        assert!(config.node.discovery.nostr.enabled);
+    }
+
+    #[tokio::test]
+    async fn local_rendezvous_is_a_complete_additive_endpoint_transport() {
+        let identity = fips_core::Identity::generate();
+        let mut options =
+            FipsEndpointOptions::new(fips_core::encode_nsec(&identity.keypair().secret_key()));
+        options.enable_udp = false;
+        options.enable_webrtc = false;
+        options.enable_local_rendezvous = true;
+        options.enable_lan_discovery = false;
+        options.share_local_candidates = false;
+
+        let bound = bind_fips_endpoint(options)
+            .await
+            .expect("bind same-host-only endpoint");
+        bound.native_endpoint.shutdown().await.unwrap();
     }
 
     #[test]

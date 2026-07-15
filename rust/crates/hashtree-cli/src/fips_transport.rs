@@ -9,31 +9,39 @@ use crate::nostr_relay::NostrRelay;
 use crate::storage::{HashtreeStore, StorageRouter};
 use anyhow::{Context, Result};
 use hashtree_fips_transport::{
-    bind_fips_endpoint, FipsEndpointOptions, FipsPeerConfig, HashtreeFipsTransport,
+    bind_fips_endpoint, BoundFipsEndpoint, FipsEndpointOptions, FipsPeerConfig,
+    HashtreeFipsTransport, SameHostBlobStore, SameHostBlobStoreConfig,
     DEFAULT_FIPS_DISCOVERY_SCOPE,
 };
 use nostr::nips::nip19::ToBech32;
 use nostr::PublicKey;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(feature = "experimental-decentralized-pubsub")]
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub type DaemonFipsTransport = HashtreeFipsTransport<StorageRouter>;
+type DaemonSameHostProvider = SameHostBlobStore<StorageRouter>;
+
+const DAEMON_SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
 
 pub struct DaemonFipsHandle {
     pub transport: Arc<DaemonFipsTransport>,
     pub endpoint_npub: String,
     pub discovery_scope: String,
     pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,
+    same_host_provider: Mutex<Option<DaemonSameHostProvider>>,
     receiver_task: JoinHandle<()>,
 }
 
 impl DaemonFipsHandle {
     pub fn shutdown(&self) {
         self.receiver_task.abort();
+        if let Ok(mut provider) = self.same_host_provider.lock() {
+            provider.take();
+        }
     }
 }
 
@@ -78,6 +86,7 @@ pub async fn start_daemon_fips_transport(
     options.relays = relays;
     options.enable_udp = config.server.enable_fips_udp;
     options.enable_webrtc = config.server.enable_fips_webrtc;
+    options.enable_local_rendezvous = true;
     options.ethernet_interfaces = config.server.fips_ethernet_interfaces.clone();
     options.udp_bind_addr = config.server.fips_udp_bind_addr.clone();
     options.udp_public = config.server.fips_udp_public;
@@ -111,10 +120,11 @@ pub async fn start_daemon_fips_transport(
             None
         };
     let transport = Arc::new(
-        HashtreeFipsTransport::new(endpoint.endpoint, store.store_arc())
+        HashtreeFipsTransport::new(endpoint.endpoint.clone(), store.store_arc())
             .with_request_timeout(request_timeout)
             .with_cache_responses(false),
     );
+    let same_host_provider = bind_daemon_same_host_provider(&endpoint, store.store_arc()).await?;
     if !peer_configs.is_empty() {
         transport.set_peer_configs(peer_configs).await;
     }
@@ -125,8 +135,23 @@ pub async fn start_daemon_fips_transport(
         endpoint_npub: endpoint.local_peer_id,
         discovery_scope: endpoint.discovery_scope,
         nostr_provider,
+        same_host_provider: Mutex::new(Some(same_host_provider)),
         receiver_task,
     }))
+}
+
+async fn bind_daemon_same_host_provider(
+    endpoint: &BoundFipsEndpoint,
+    store: Arc<StorageRouter>,
+) -> Result<DaemonSameHostProvider> {
+    SameHostBlobStore::bind(
+        endpoint.native_endpoint.clone(),
+        store,
+        None,
+        SameHostBlobStoreConfig::provider(DAEMON_SAME_HOST_PROVIDER_PRIORITY),
+    )
+    .await
+    .context("Failed to advertise htree's same-host blob provider")
 }
 
 pub async fn start_daemon_nostr_provider(
@@ -352,6 +377,9 @@ fn normalized_discovery_scope(scope: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashtree_core::Store;
+    use sha2::{Digest, Sha256};
+    use tokio::time::timeout;
 
     #[test]
     fn fips_peer_ids_from_pubkeys_encodes_npbus() {
@@ -384,6 +412,94 @@ mod tests {
 
         assert!(error.to_string().contains("fips-local-only"));
         assert!(error.to_string().contains("requires"));
+    }
+
+    #[tokio::test]
+    async fn daemon_same_host_provider_advertises_and_serves_storage_router() {
+        let provider_endpoint = local_only_endpoint("htree-provider-test").await;
+        let observer_endpoint = local_only_endpoint("iris-drive-observer-test").await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
+        let data = b"served directly from htree StorageRouter".to_vec();
+        let hash = Sha256::digest(&data).into();
+        store.store_arc().put(hash, data.clone()).await.unwrap();
+        let provider = bind_daemon_same_host_provider(&provider_endpoint, store.store_arc())
+            .await
+            .expect("bind htree provider");
+        let transport = Arc::new(HashtreeFipsTransport::new(
+            provider_endpoint.endpoint.clone(),
+            store.store_arc(),
+        ));
+        let receiver_task = transport.start();
+        let handle = DaemonFipsHandle {
+            transport,
+            endpoint_npub: provider_endpoint.local_peer_id.clone(),
+            discovery_scope: provider_endpoint.discovery_scope.clone(),
+            nostr_provider: None,
+            same_host_provider: Mutex::new(Some(provider)),
+            receiver_task,
+        };
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if provider_advertised(&observer_endpoint, &provider_endpoint.local_peer_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("htree provider capability did not converge");
+
+        let requester = hashtree_fips_transport::SameHostBlobStore::bind(
+            observer_endpoint.native_endpoint.clone(),
+            Arc::new(hashtree_core::MemoryStore::new()),
+            None,
+            hashtree_fips_transport::SameHostBlobStoreConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(requester.get(&hash).await.unwrap(), Some(data));
+
+        drop(requester);
+        handle.shutdown();
+        timeout(Duration::from_secs(10), async {
+            while provider_advertised(&observer_endpoint, &provider_endpoint.local_peer_id) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("htree provider capability survived daemon shutdown");
+        drop(handle);
+        observer_endpoint.native_endpoint.shutdown().await.unwrap();
+        provider_endpoint.native_endpoint.shutdown().await.unwrap();
+    }
+
+    fn provider_advertised(endpoint: &BoundFipsEndpoint, npub: &str) -> bool {
+        endpoint
+            .native_endpoint
+            .local_instance_advertisements()
+            .unwrap()
+            .iter()
+            .any(|advert| {
+                advert.npub == npub
+                    && advert
+                        .capability(hashtree_fips_transport::TCP_BLOB_CAPABILITY)
+                        .and_then(|capability| capability.fsp_port)
+                        == Some(hashtree_fips_transport::TCP_BLOB_SERVICE_PORT)
+            })
+    }
+
+    async fn local_only_endpoint(scope: &str) -> hashtree_fips_transport::BoundFipsEndpoint {
+        let keys = nostr::Keys::generate();
+        let mut options = FipsEndpointOptions::new(keys.secret_key().to_bech32().unwrap());
+        options.discovery_scope = scope.to_string();
+        options.enable_udp = false;
+        options.enable_webrtc = false;
+        options.enable_local_rendezvous = true;
+        options.enable_lan_discovery = false;
+        options.share_local_candidates = false;
+        bind_fips_endpoint(options).await.unwrap()
     }
 
     #[test]
