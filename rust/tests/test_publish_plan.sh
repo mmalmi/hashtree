@@ -30,16 +30,18 @@ require_line() {
 
 require_line "${RUST_DIR}/Cargo.toml" 'version = "0.2.82"' \
     "unchanged workspace crates must remain at 0.2.82"
-for crate in hashtree-core hashtree-cli hashtree-embedded; do
-    require_line "${RUST_DIR}/crates/${crate}/Cargo.toml" 'version = "0.2.83"' \
-        "${crate} must release as 0.2.83"
-done
-require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.3.0"' \
-    "hashtree-fips-transport must remain at 0.3.0"
+require_line "${RUST_DIR}/crates/hashtree-core/Cargo.toml" 'version = "0.2.84"' \
+    "hashtree-core must remain at its published 0.2.84 wire-contract release"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.85"' \
+    "hashtree-cli must release as 0.2.85"
+require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.83"' \
+    "unchanged hashtree-embedded must remain at 0.2.83"
+require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.0"' \
+    "hashtree-fips-transport must release as breaking cleanup 0.4.0"
 
-grep -F 'hashtree-core = { version = "0.2.83", path = "crates/hashtree-core" }' \
+grep -F 'hashtree-core = { version = "0.2.84", path = "crates/hashtree-core" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-fips-transport = { version = "0.3.0", path = "crates/hashtree-fips-transport" }' \
+grep -F 'hashtree-fips-transport = { version = "0.4.0", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-cli = { version = "0.2.83", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null
@@ -58,8 +60,8 @@ require_registry_lock fips-core 0.4.0 5eb5c2cd49701461cfe2a9604eec3ddad6d3fadca6
 require_registry_lock fips-identity 0.3.1 e143619aebf9db3129c1d2de67ba223bcf611216efa09a932c98a617e3e4a42b
 require_registry_lock fips-tcp 0.2.0 d18861c5eca7c472fbbdbbfb498f8d2525405081a9a24b42633c600ba6f6e42a
 require_registry_lock fips-tcp-endpoint 0.2.0 8e3e01e352b709b80f4261e2cd7d0ffde2d3aaf175267b3960997e70f7305c12
-require_registry_lock nostr-pubsub 0.1.10 0a3c668aede5ebf20501199206e1853ee8e26f38d476a60f54fb27443dfb552f
-require_registry_lock nostr-pubsub-fips 0.3.0 c2e2904004e5d0e55a676db596f8f052e171eabd236799b5aec7718b04a0a79e
+require_registry_lock nostr-pubsub 0.1.11 f3c509d68c8de0f87de781630cca6d3d4e61b2fe8a1ba3d21463efd7bc4780c6
+require_registry_lock nostr-pubsub-fips 0.3.1 5663a6108ae432879d6d7441036b979605fc032011c0a6e81dbf1798ce844f6c
 require_registry_lock nostr-pubsub-social-graph 0.2.2 9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550
 
 if printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'cashu-service' >/dev/null; then

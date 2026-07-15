@@ -2,12 +2,16 @@
 
 ## Unreleased
 
-## 0.3.2 - 2026-07-16
+## 0.4.0 - 2026-07-16
 
 ### Changed
 
 - Exposed native endpoint configuration independently from the legacy mesh
-  compatibility feature, including endpoint-only WebRTC support.
+  carrier, including endpoint-only WebRTC support.
+- Removed the duplicate raw-datagram `legacy-mesh` carrier, framing, and
+  feature. `hashtree-fips-transport` now has one authenticated TCP/FIPS blob
+  protocol; `hashtree-network` remains the canonical HTL router and is
+  composed through the shared `BlobRoute` contract.
 
 ### Fixed
 
@@ -29,6 +33,12 @@
 - Removed the CLI's `legacy-mesh` feature dependency and obsolete Nostr mesh
   forwarding, fanout, HTL, framing, and payload helpers; canonical Hashtree
   blob routing remains on `BlobResolver` and `fips-tcp`.
+
+### Fixed
+
+- Made local adds that spill blobs into the deterministic external pack tier
+  readable after a fresh process opens the store, while ordinary writes remain
+  inline unless storage policy explicitly opts into external blobs.
 
 ## 0.3.1 - 2026-07-15
 

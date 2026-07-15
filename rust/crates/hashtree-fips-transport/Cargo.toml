@@ -1,27 +1,19 @@
 [package]
 name = "hashtree-fips-transport"
-version = "0.3.2"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Hashtree blob transport over FIPS endpoint bytes"
+description = "Verified Hashtree blob routes over authenticated TCP/FIPS streams"
 keywords = ["hashtree", "fips", "p2p", "merkle"]
 
 [features]
 default = []
-legacy-mesh = [
-    "dep:hashtree-network",
-    "dep:hex",
-    "dep:rmp-serde",
-    "dep:serde",
-    "dep:serde_bytes",
-    "dep:serde_json",
-]
 interop-fixture = ["dep:hex", "dep:serde", "dep:serde_json"]
 webrtc-endpoint = ["fips-core/webrtc-transport"]
-webrtc = ["legacy-mesh", "webrtc-endpoint"]
+webrtc = ["webrtc-endpoint"]
 
 [dependencies]
 async-trait.workspace = true
@@ -29,11 +21,8 @@ fips-core = "0.4.0"
 fips-tcp = "0.2.0"
 fips-tcp-endpoint = "0.2.0"
 hashtree-core.workspace = true
-hashtree-network = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-rmp-serde = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
-serde_bytes = { version = "0.11", optional = true }
 serde_json = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true

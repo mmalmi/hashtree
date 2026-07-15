@@ -15,13 +15,14 @@ bash rust/tests/test_publish_plan.sh
 ! grep -F 'for sibling in' rust/scripts/build_linux_release_target_docker.sh >/dev/null
 ! grep -F 'requiredSiblingSourceDirs' rust/scripts/build_windows_vm_artifacts.mjs >/dev/null
 
-# The reusable same-host store stays independently consumable without pulling
-# in or falling back to the old mesh protocol. The CLI opts into compatibility
-# explicitly until its broader mesh/pubsub surface migrates.
+# The reusable blob transport has one implementation and does not pull the
+# separate Hashtree HTL router into the carrier layer.
 grep -F 'default = []' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-grep -F 'hashtree-network = { workspace = true, optional = true }' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'required-features = ["interop-fixture"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-grep -F 'hashtree-fips-transport = { workspace = true, features = ["legacy-mesh"] }' rust/crates/hashtree-cli/Cargo.toml >/dev/null
+grep -F 'webrtc = ["webrtc-endpoint"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
+! grep -F 'legacy-mesh' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
+! grep -F 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
+! test -e rust/crates/hashtree-fips-transport/src/legacy_mesh.rs
 
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.

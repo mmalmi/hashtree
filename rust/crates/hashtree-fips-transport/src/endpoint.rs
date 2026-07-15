@@ -1,4 +1,4 @@
-//! Native embedded FIPS endpoint configuration shared by blob and legacy users.
+//! Native embedded FIPS endpoint configuration for Hashtree blob routes.
 
 use fips_core::config::{
     EthernetConfig, NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances,
@@ -86,8 +86,6 @@ impl FipsEndpointOptions {
 }
 
 pub struct BoundFipsEndpoint {
-    #[cfg(feature = "legacy-mesh")]
-    pub endpoint: Arc<dyn crate::legacy_mesh::FipsEndpointIo>,
     pub native_endpoint: Arc<fips_core::FipsEndpoint>,
     pub local_peer_id: String,
     pub discovery_scope: String,
@@ -152,8 +150,6 @@ async fn bind_fips_endpoint_inner(
     let local_peer_id = endpoint.npub().to_string();
 
     Ok(BoundFipsEndpoint {
-        #[cfg(feature = "legacy-mesh")]
-        endpoint: endpoint.clone(),
         native_endpoint: endpoint,
         local_peer_id,
         discovery_scope,
@@ -198,14 +194,6 @@ pub async fn set_fips_peer_configs(
             Err(FipsTransportError::Endpoint(err.to_string()))
         }
     }
-}
-
-#[cfg(test)]
-pub(crate) fn fips_endpoint_config(
-    options: FipsEndpointOptions,
-    discovery_scope: &str,
-) -> fips_core::Config {
-    fips_endpoint_config_with_local_rendezvous(options, discovery_scope, None)
 }
 
 fn fips_endpoint_config_with_local_rendezvous(
