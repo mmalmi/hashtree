@@ -18,10 +18,10 @@ legacy-mesh = [
     "dep:serde",
     "dep:serde_bytes",
     "dep:serde_json",
-    "dep:tracing",
 ]
 interop-fixture = ["dep:hex", "dep:serde", "dep:serde_json"]
-webrtc = ["legacy-mesh", "fips-core/webrtc-transport"]
+webrtc-endpoint = ["fips-core/webrtc-transport"]
+webrtc = ["legacy-mesh", "webrtc-endpoint"]
 
 [dependencies]
 async-trait.workspace = true
@@ -38,7 +38,7 @@ serde_json = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
-tracing = { workspace = true, optional = true }
+tracing.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

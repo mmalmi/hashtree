@@ -13,9 +13,12 @@
 //! that HTL routing is deprecated or replaced. The TCP route does not silently
 //! invoke the mesh or duplicate its framing; composition happens above it.
 
+mod endpoint;
 mod same_host;
 mod tcp_blob;
 
+pub use endpoint::*;
+pub use fips_core::FipsEndpoint;
 pub use fips_core::PeerIdentity;
 pub use same_host::{SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError};
 pub use tcp_blob::{

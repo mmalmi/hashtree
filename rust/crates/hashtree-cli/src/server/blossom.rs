@@ -2674,7 +2674,7 @@ mod tests {
             hash_get_enabled: true,
             http_webrtc_fetch: true,
             webrtc_peers: None,
-            fips_transport: None,
+            fips_endpoint: None,
             fips_blob_resolver: None,
             fetch_from_fips_peers: true,
             ws_relay: Arc::new(WsRelayState::new()),

@@ -1,5 +1,5 @@
 use crate::blob_cache::BlobCache;
-use crate::fips_transport::{DaemonBlobResolver, DaemonFipsTransport};
+use crate::fips_transport::DaemonBlobResolver;
 use crate::nostr_relay::NostrRelay;
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
@@ -274,8 +274,8 @@ pub struct AppState {
     pub http_webrtc_fetch: bool,
     /// WebRTC peer state for forwarding requests to connected P2P peers
     pub webrtc_peers: Option<Arc<WebRTCState>>,
-    /// FIPS-backed Hashtree blob transport for peer fetches and responses.
-    pub fips_transport: Option<Arc<DaemonFipsTransport>>,
+    /// Native authenticated FIPS endpoint used by blob routes and services.
+    pub fips_endpoint: Option<Arc<hashtree_fips_transport::FipsEndpoint>>,
     /// Canonical Hashtree resolver whose peer routes run over fips-tcp.
     pub fips_blob_resolver: Option<Arc<DaemonBlobResolver>>,
     pub fetch_from_fips_peers: bool,

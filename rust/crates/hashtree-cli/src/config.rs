@@ -102,6 +102,10 @@ pub struct ServerConfig {
     /// FIPS discovery/signaling scope for Hashtree peers.
     #[serde(default = "default_fips_discovery_scope")]
     pub fips_discovery_scope: String,
+    /// Optional loopback rendezvous address override for isolated local stacks.
+    /// Unset uses the FIPS well-known address (127.0.0.1:21211).
+    #[serde(default)]
+    pub fips_local_rendezvous_addr: Option<String>,
     /// FIPS Nostr relays used for discovery adverts and encrypted signaling.
     /// Unset uses active [nostr].relays plus FIPS defaults; an explicit empty
     /// list disables relay discovery.
@@ -356,16 +360,8 @@ pub struct NostrConfig {
     /// the experimental-decentralized-pubsub feature.
     #[serde(default, alias = "relayless_pubsub")]
     pub decentralized_pubsub: bool,
-    /// Forward decentralized pubsub traffic for peers with downstream interest.
-    #[serde(default = "default_nostr_decentralized_pubsub_forwarding")]
-    pub decentralized_pubsub_forwarding: bool,
-    /// Maximum peers selected per decentralized pubsub send.
-    #[serde(default = "default_nostr_decentralized_pubsub_fanout")]
-    pub decentralized_pubsub_fanout: usize,
-    /// Initial HTL for decentralized pubsub interest/inventory messages.
-    #[serde(default = "default_nostr_decentralized_pubsub_max_hops")]
-    pub decentralized_pubsub_max_hops: u8,
-    /// Maximum Nostr event payload accepted on decentralized pubsub.
+    /// Maximum encoded Nostr event frame accepted on decentralized pubsub.
+    /// Values above the authenticated FIPS datagram limit are clamped.
     #[serde(default = "default_nostr_decentralized_pubsub_max_event_bytes")]
     pub decentralized_pubsub_max_event_bytes: usize,
 }
@@ -455,20 +451,8 @@ impl NostrConfig {
     }
 }
 
-fn default_nostr_decentralized_pubsub_forwarding() -> bool {
-    true
-}
-
-fn default_nostr_decentralized_pubsub_fanout() -> usize {
-    8
-}
-
-fn default_nostr_decentralized_pubsub_max_hops() -> u8 {
-    4
-}
-
 fn default_nostr_decentralized_pubsub_max_event_bytes() -> usize {
-    256 * 1024
+    nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES
 }
 
 // Keep in sync with hashtree-config/src/lib.rs
@@ -809,6 +793,7 @@ impl Default for ServerConfig {
             enable_webrtc: default_enable_webrtc(),
             enable_fips: default_enable_fips(),
             fips_discovery_scope: default_fips_discovery_scope(),
+            fips_local_rendezvous_addr: None,
             fips_relays: None,
             fips_peers: Vec::new(),
             enable_fips_udp: default_enable_fips_udp(),
@@ -873,9 +858,6 @@ impl Default for NostrConfig {
             full_text_note_history_max_relay_pages:
                 default_nostr_full_text_note_history_max_relay_pages(),
             decentralized_pubsub: false,
-            decentralized_pubsub_forwarding: default_nostr_decentralized_pubsub_forwarding(),
-            decentralized_pubsub_fanout: default_nostr_decentralized_pubsub_fanout(),
-            decentralized_pubsub_max_hops: default_nostr_decentralized_pubsub_max_hops(),
             decentralized_pubsub_max_event_bytes:
                 default_nostr_decentralized_pubsub_max_event_bytes(),
         }
@@ -1529,10 +1511,10 @@ chunk_target_bytes = 65536
         let enabled: NostrConfig = toml::from_str("decentralized_pubsub = true")
             .expect("parse decentralized pubsub nostr config");
         assert!(enabled.decentralized_pubsub);
-        assert!(enabled.decentralized_pubsub_forwarding);
-        assert_eq!(enabled.decentralized_pubsub_fanout, 8);
-        assert_eq!(enabled.decentralized_pubsub_max_hops, 4);
-        assert_eq!(enabled.decentralized_pubsub_max_event_bytes, 256 * 1024);
+        assert_eq!(
+            enabled.decentralized_pubsub_max_event_bytes,
+            nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES
+        );
         assert_eq!(
             enabled.decentralized_pubsub_enabled(),
             cfg!(feature = "experimental-decentralized-pubsub")
@@ -1554,16 +1536,10 @@ decentralized_pubsub = true
         let tuned: NostrConfig = toml::from_str(
             r#"
 decentralized_pubsub = true
-decentralized_pubsub_forwarding = false
-decentralized_pubsub_fanout = 3
-decentralized_pubsub_max_hops = 2
 decentralized_pubsub_max_event_bytes = 4096
 "#,
         )
         .expect("parse tuned decentralized pubsub config");
-        assert!(!tuned.decentralized_pubsub_forwarding);
-        assert_eq!(tuned.decentralized_pubsub_fanout, 3);
-        assert_eq!(tuned.decentralized_pubsub_max_hops, 2);
         assert_eq!(tuned.decentralized_pubsub_max_event_bytes, 4096);
     }
 
@@ -1582,6 +1558,7 @@ decentralized_pubsub_max_event_bytes = 4096
         assert!(server.fips_relays.is_none());
         assert!(server.fips_peers.is_empty());
         assert_eq!(server.fips_discovery_scope, "fips-overlay-v1");
+        assert!(server.fips_local_rendezvous_addr.is_none());
         assert_eq!(server.fips_request_timeout_ms, 5_500);
     }
 
@@ -1592,6 +1569,7 @@ decentralized_pubsub_max_event_bytes = 4096
 [server]
 enable_fips = true
 fips_discovery_scope = "test-hashtree"
+fips_local_rendezvous_addr = "127.0.0.1:32111"
 fips_relays = ["wss://fips.example"]
 fips_peers = [
   { npub = "npub1origin", udp_addresses = ["udp:192.0.2.10:2121"] },
@@ -1611,6 +1589,10 @@ fips_request_timeout_ms = 42
 
         assert!(config.server.enable_fips);
         assert_eq!(config.server.fips_discovery_scope, "test-hashtree");
+        assert_eq!(
+            config.server.fips_local_rendezvous_addr.as_deref(),
+            Some("127.0.0.1:32111")
+        );
         assert_eq!(
             config.server.fips_relays,
             Some(vec!["wss://fips.example".to_string()])

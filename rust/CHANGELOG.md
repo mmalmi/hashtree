@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Replaced the htree daemon's legacy raw FIPS status and Nostr mesh carrier
+  with one native embedded endpoint and one authenticated `nostr-pubsub`
+  service shared by local-only root operations and decentralized relay events.
+- Made the fixed loopback UDP rendezvous address optionally configurable for
+  isolated full-stack tests while preserving the well-known production default.
+- Removed the CLI's `legacy-mesh` feature dependency and obsolete Nostr mesh
+  forwarding, fanout, HTL, framing, and payload helpers; canonical Hashtree
+  blob routing remains on `BlobResolver` and `fips-tcp`.
+
 ## 0.3.1 - 2026-07-15
 
 ### Changed

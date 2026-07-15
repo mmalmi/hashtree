@@ -663,7 +663,6 @@ pub(crate) async fn run() -> Result<()> {
             let nostr_pubsub_handle = hashtree_cli::fips_transport::start_daemon_nostr_pubsub(
                 &config,
                 fips_handle.as_ref(),
-                Arc::clone(&store),
                 nostr_relay.clone(),
             )
             .await?;
@@ -710,7 +709,7 @@ pub(crate) async fn run() -> Result<()> {
             }
             if let Some(ref fips_handle) = fips_handle {
                 server = server
-                    .with_fips_transport(fips_handle.transport.clone())
+                    .with_fips_endpoint(fips_handle.endpoint.clone())
                     .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
             }
 
@@ -777,7 +776,7 @@ pub(crate) async fn run() -> Result<()> {
             }
             #[cfg(feature = "experimental-decentralized-pubsub")]
             if nostr_pubsub_handle.is_some() {
-                println!("Nostr decentralized pubsub: enabled (FIPS mesh)");
+                println!("Nostr decentralized pubsub: enabled (authenticated FIPS pubsub)");
             } else if config.nostr.decentralized_pubsub {
                 println!(
                     "Nostr decentralized pubsub: disabled (requires local Nostr relay and FIPS)"
@@ -879,7 +878,7 @@ pub(crate) async fn run() -> Result<()> {
             }
 
             if let Some(ref fips_handle) = fips_handle {
-                fips_handle.shutdown();
+                fips_handle.shutdown().await;
             }
 
             background_services_controller.shutdown().await;

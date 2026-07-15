@@ -162,7 +162,7 @@ impl HashtreeServer {
                 hash_get_enabled: true,
                 http_webrtc_fetch: true,
                 webrtc_peers: None,
-                fips_transport: None,
+                fips_endpoint: None,
                 fips_blob_resolver: None,
                 fetch_from_fips_peers: true,
                 ws_relay: Arc::new(auth::WsRelayState::new()),
@@ -266,11 +266,11 @@ impl HashtreeServer {
         self
     }
 
-    pub fn with_fips_transport(
+    pub fn with_fips_endpoint(
         mut self,
-        transport: Arc<crate::fips_transport::DaemonFipsTransport>,
+        endpoint: Arc<hashtree_fips_transport::FipsEndpoint>,
     ) -> Self {
-        self.state.fips_transport = Some(transport);
+        self.state.fips_endpoint = Some(endpoint);
         self
     }
 

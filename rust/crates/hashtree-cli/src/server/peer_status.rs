@@ -249,8 +249,14 @@ pub(super) async fn daemon_status(
         },
         "nostr_relays": state.nostr_relay_urls.len(),
     });
-    let fips = if let Some(ref transport) = state.fips_transport {
-        let peers = transport.peer_ids().await;
+    let fips = if let Some(ref endpoint) = state.fips_endpoint {
+        let peers = endpoint
+            .peers()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|peer| peer.npub)
+            .collect::<Vec<_>>();
         json!({
             "enabled": true,
             "fetch_from_peers": state.fetch_from_fips_peers,
@@ -339,7 +345,7 @@ pub(super) async fn daemon_status(
             "http_webrtc_fetch": state.http_webrtc_fetch,
             "fetch_from_fips_peers": state.fetch_from_fips_peers,
             "http_fips_fetch": state.fetch_from_fips_peers,
-            "fips": state.fips_transport.is_some(),
+            "fips": state.fips_endpoint.is_some(),
         },
         "fips": fips,
         "mesh": mesh.clone(),

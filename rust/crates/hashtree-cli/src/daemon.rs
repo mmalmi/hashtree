@@ -629,7 +629,7 @@ impl EmbeddedDaemonController {
             handle.shutdown();
         }
         if let Some(handle) = self.fips_handle.as_ref() {
-            handle.shutdown();
+            handle.shutdown().await;
         }
         if let Some(controller) = self.background_services_controller.as_ref() {
             controller.shutdown().await;
@@ -886,7 +886,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     let nostr_pubsub_handle = crate::fips_transport::start_daemon_nostr_pubsub(
         &config,
         fips_handle.as_deref(),
-        Arc::clone(&store),
         nostr_relay.clone(),
     )
     .await?;
@@ -929,7 +928,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     }
     if let Some(ref fips_handle) = fips_handle {
         server = server
-            .with_fips_transport(fips_handle.transport.clone())
+            .with_fips_endpoint(fips_handle.endpoint.clone())
             .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
     }
 

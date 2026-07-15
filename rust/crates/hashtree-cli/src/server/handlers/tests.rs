@@ -256,7 +256,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         hash_get_enabled: true,
         http_webrtc_fetch: true,
         webrtc_peers: None,
-        fips_transport: None,
+        fips_endpoint: None,
         fips_blob_resolver: None,
         fetch_from_fips_peers: true,
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
@@ -700,6 +700,41 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
             .unwrap()
             >= 1
     );
+}
+
+#[tokio::test]
+async fn daemon_status_reads_native_fips_endpoint_without_legacy_transport() {
+    let temp = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
+    let mut options = hashtree_fips_transport::FipsEndpointOptions::new(
+        Keys::generate().secret_key().to_bech32().unwrap(),
+    );
+    options.discovery_scope = format!("status-test-{}", uuid::Uuid::new_v4());
+    options.enable_udp = true;
+    options.udp_bind_addr = Some("127.0.0.1:0".to_string());
+    options.enable_webrtc = false;
+    options.enable_local_rendezvous = false;
+    options.enable_lan_discovery = false;
+    options.relays.clear();
+    let endpoint = hashtree_fips_transport::bind_fips_endpoint(options)
+        .await
+        .unwrap();
+    let mut state = test_app_state(store, vec![]);
+    state.fips_endpoint = Some(endpoint.native_endpoint.clone());
+
+    let response = daemon_status(
+        AxumState(state),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 21417))),
+    )
+    .await
+    .into_response();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["fips"]["enabled"], true);
+    assert_eq!(json["fips"]["total_peers"], 0);
+    assert_eq!(json["capabilities"]["fips"], true);
+    endpoint.native_endpoint.shutdown().await.unwrap();
 }
 
 #[tokio::test]
