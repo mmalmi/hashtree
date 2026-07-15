@@ -67,6 +67,7 @@ const LMDB_HOT_BLOB_LEGACY_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_LEGACY_DIR";
 const LMDB_HOT_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR";
 #[cfg(feature = "lmdb")]
 const LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR";
+pub const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
 const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
@@ -313,18 +314,36 @@ fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(feature = "lmdb")]
+fn local_add_external_blob_reopen_options(store_path: &Path) -> ExternalBlobOptions {
+    ExternalBlobOptions {
+        base_path: store_path.with_file_name(LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME),
+        min_bytes: usize::MAX,
+        sync: true,
+        pack_target_bytes: None,
+    }
+}
+
+#[cfg(feature = "lmdb")]
 fn external_blob_options_for(
     store_path: &Path,
     override_dir_env: Option<&str>,
-) -> Option<ExternalBlobOptions> {
-    let options = ExternalBlobOptions::from_env(store_path)?;
-    override_dir_env
+) -> ExternalBlobOptions {
+    let options = ExternalBlobOptions::from_env(store_path).unwrap_or_else(|| {
+        // `htree add --local` spills large blobs into this deterministic sibling
+        // directory. Keep ordinary opens able to read those markers without
+        // changing their write placement; local add opts into packed writes via
+        // its process-local environment.
+        local_add_external_blob_reopen_options(store_path)
+    });
+    let override_path = override_dir_env
         .and_then(|name| std::env::var(name).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|path| options.clone().with_base_path(path))
-        .or(Some(options))
+        .map(PathBuf::from);
+    match override_path {
+        Some(path) => options.with_base_path(path),
+        None => options,
+    }
 }
 
 #[cfg(feature = "lmdb")]
@@ -343,7 +362,7 @@ fn open_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
 ) -> Result<LmdbBlobStore, StoreError> {
     std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
     remove_stale_fs_blob_shards(path.as_ref())?;
-    let external_blobs = external_blob_options_for(path.as_ref(), external_dir_env);
+    let external_blobs = Some(external_blob_options_for(path.as_ref(), external_dir_env));
     match map_size_bytes {
         Some(map_size_bytes) => {
             LmdbBlobStore::with_max_bytes_and_external_blob_options(path, map_size_bytes, |_| {
@@ -370,7 +389,7 @@ fn open_unbounded_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
 ) -> Result<LmdbBlobStore, StoreError> {
     std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
     remove_stale_fs_blob_shards(path.as_ref())?;
-    let external_blobs = external_blob_options_for(path.as_ref(), external_dir_env);
+    let external_blobs = Some(external_blob_options_for(path.as_ref(), external_dir_env));
     match map_size_bytes {
         Some(map_size_bytes) => {
             let map_size = usize::try_from(align_lmdb_map_size(map_size_bytes))
@@ -3369,6 +3388,25 @@ mod tests {
             "expected LMDB map to grow to at least {requested} bytes, got {map_size}"
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn local_add_reopen_options_leave_ordinary_writes_inline() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store_path = temp.path().join("blobs");
+        let external_path = temp.path().join(LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME);
+        let store = LmdbBlobStore::with_external_blob_options(
+            &store_path,
+            Some(local_add_external_blob_reopen_options(&store_path)),
+        )?;
+        let data = vec![7; 192 * 1024];
+        let hash = sha256(&data);
+
+        assert!(store.put_sync(hash, &data)?);
+        assert_eq!(store.get_sync(&hash)?, Some(data));
+        assert!(!external_path.exists());
         Ok(())
     }
 

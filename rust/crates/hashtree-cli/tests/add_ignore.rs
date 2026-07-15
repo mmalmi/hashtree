@@ -8,6 +8,21 @@ use hashtree_cli::HashtreeStore;
 use hashtree_core::from_hex;
 use tempfile::TempDir;
 
+const EXTERNAL_BLOB_ENV_VARS: [&str; 4] = [
+    "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES",
+    "HTREE_LMDB_EXTERNAL_BLOB_DIR",
+    "HTREE_LMDB_EXTERNAL_BLOB_SYNC",
+    "HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES",
+];
+
+fn htree_command_without_external_blob_env() -> Command {
+    let mut command = Command::new(htree_bin());
+    for name in EXTERNAL_BLOB_ENV_VARS {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn write_site_fixture(root: &Path) {
     std::fs::create_dir_all(root.join(".well-known")).expect("create .well-known");
     std::fs::create_dir_all(root.join(".Trashes")).expect("create .Trashes");
@@ -20,7 +35,7 @@ fn write_site_fixture(root: &Path) {
 }
 
 fn run_add(site_dir: &Path, data_dir: &Path, config_dir: &Path, extra_args: &[&str]) -> String {
-    let output = Command::new(htree_bin())
+    let output = htree_command_without_external_blob_env()
         .arg("--data-dir")
         .arg(data_dir)
         .arg("add")
@@ -38,6 +53,47 @@ fn run_add(site_dir: &Path, data_dir: &Path, config_dir: &Path, extra_args: &[&s
     );
 
     String::from_utf8(output.stdout).expect("stdout utf-8")
+}
+
+#[test]
+fn local_add_external_pack_reopens_without_process_env() {
+    let temp = TempDir::new().expect("temp dir");
+    let source = temp.path().join("large.bin");
+    let data_dir = temp.path().join("data");
+    let config_dir = temp.path().join("config");
+    let contents: Vec<u8> = (0..192 * 1024).map(|offset| (offset % 251) as u8).collect();
+    std::fs::write(&source, &contents).expect("write source fixture");
+
+    let stdout = run_add(
+        &source,
+        &data_dir,
+        &config_dir,
+        &["--local", "--unencrypted"],
+    );
+    assert!(
+        std::fs::read_dir(data_dir.join("blob-files-v1"))
+            .expect("external blob pack directory")
+            .next()
+            .is_some(),
+        "local add should preserve the external pack optimization"
+    );
+
+    let output = htree_command_without_external_blob_env()
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("cat")
+        .arg(parse_hash(&stdout))
+        .env("HTREE_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("run htree cat");
+
+    assert!(
+        output.status.success(),
+        "ordinary reopen failed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, contents);
 }
 
 fn parse_hash(stdout: &str) -> String {

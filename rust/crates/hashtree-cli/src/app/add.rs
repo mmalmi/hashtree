@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use hashtree_cli::config::ensure_keys_string;
 use hashtree_cli::{
     AddProgress, AddProgressSnapshot, Config, HashtreeStore, NostrKeys, NostrResolverConfig,
-    NostrRootResolver, NostrToBech32, RootResolver, PRIORITY_OWN,
+    NostrRootResolver, NostrToBech32, RootResolver, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, PRIORITY_OWN,
 };
 use hashtree_core::{
     from_hex, key_from_hex, nhash_encode, nhash_encode_full, Cid, HashTree, HashTreeConfig,
@@ -23,7 +23,6 @@ use super::util::format_bytes;
 const IRIS_DRIVE_WEB_BASE_URL: &str = "https://drive.iris.to";
 const IRIS_SITES_WEB_BASE_URL: &str = "https://sites.iris.to";
 const LOCAL_ADD_EXTERNAL_BLOB_MIN_BYTES: &str = "65536";
-const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
 const LOCAL_ADD_STREAM_BATCH_TARGET_BYTES: &str = "268435456";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
