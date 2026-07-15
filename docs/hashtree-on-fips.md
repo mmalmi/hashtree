@@ -24,12 +24,19 @@ Hashtree-only WebRTC island.
 delivery, flow control, and segment retransmission. Hashtree owns provider
 choice, one bounded whole-session retry, hash verification, and cache writes.
 
-The client sends a fixed 35-byte GET request containing a 32-byte SHA-256 hash.
-The provider returns a seven-byte header that explicitly says found or missing;
-a found header is followed by the blob. Implementations reject blobs above 16
-MiB and verify the requested hash before returning or caching them. The exact
-wire format and shared vectors are in
+The client sends a fixed 36-byte `BlobRequest { hash, htl }`. The provider
+returns a seven-byte header for `BlobReply::Data(bytes)` or
+`BlobReply::NoResult`; a Data header is followed by the blob. NoResult says only
+that this route produced no data. It is neither proof of global absence nor a
+cacheable negative result. Implementations reject blobs above 16 MiB and verify
+the requested hash before returning or caching them. The exact wire format and
+shared vectors are in
 [`tcp-fips-blob-v1.md`](tcp-fips-blob-v1.md).
+
+Direct same-host requests use HTL `0`. The `hashtree-network` HTL mesh remains
+Hashtree's canonical decentralized content-routing layer. Only forwarding from
+one Hashtree mesh peer to another consumes one HTL; terminal adapters and FIPS
+routing hops do not consume it.
 
 ## Optional Same-host Store
 
@@ -50,17 +57,19 @@ shared-egress role, or fallback blob framing.
 
 Transport uncertainty must not become false absence:
 
-- For an explicit transport query, `null` means every attempted provider
-  explicitly reported missing; no providers is an availability error.
-- For the optional same-host Store wrapper, no advertised local provider is an
-  ordinary standalone miss. Once a provider attempt begins, timeout, reset, or
-  a mixed miss/failure result remains an error.
-- Timeouts, resets, malformed responses, and mixed miss/failure results remain
-  availability errors after the bounded retry.
+- An explicit `BlobReply::NoResult` means only that one provider or route
+  produced no data. It is never cached and does not cancel other routes.
+- For the optional same-host Store wrapper, no provider, NoResult, timeout,
+  reset, provider death, and malformed or corrupt replies all leave the
+  standalone Store/resolver path available. One local provider cannot suppress
+  standalone storage or mesh lookup.
+- A transport failure remains a failure for that route; it is not rewritten as
+  NoResult or global absence. If the standalone route also fails, its error is
+  returned.
 - A hash mismatch is an error and poisoned bytes are never cached.
 
-These rules let callers continue to another source without recording a slow or
-broken peer as proof that content does not exist.
+These rules let callers continue to another source without recording a slow,
+broken, or empty peer as proof that content does not exist.
 
 ## Browser And Worker Providers
 
