@@ -44,7 +44,7 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
   }
 
   fetch(hashHex: string, peerId?: string): Promise<Uint8Array | null> {
-    if (this.closed) return Promise.resolve(null);
+    if (this.closed) return Promise.reject(new Error('FIPS worker P2P provider is closed'));
     const hash = parseHash(hashHex);
     return this.transport.get(hash, peerId ? [peerId] : [...this.peers]);
   }

@@ -28,7 +28,7 @@ export class FipsWorkerP2PProvider {
     }
     fetch(hashHex, peerId) {
         if (this.closed)
-            return Promise.resolve(null);
+            return Promise.reject(new Error('FIPS worker P2P provider is closed'));
         const hash = parseHash(hashHex);
         return this.transport.get(hash, peerId ? [peerId] : [...this.peers]);
     }

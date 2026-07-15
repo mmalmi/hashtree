@@ -102,6 +102,15 @@ describe('FIPS worker P2P provider integration', () => {
     expect(() => provider.fetch('not-a-hash')).toThrow('32-byte hex');
     provider.close();
   });
+
+  it('does not report a closed provider as an explicit content miss', async () => {
+    const identity = await identityFromSecretKey(secret(6));
+    const node = new FipsNode({ identity, transports: [] });
+    const provider = createFipsWorkerP2PProvider({ node, localStore: new MemoryStore() });
+
+    provider.close();
+    await expect(provider.fetch('00'.repeat(32))).rejects.toThrow('closed');
+  });
 });
 
 function secret(value: number): Uint8Array {

@@ -8,6 +8,8 @@
   reliable TCP/FIPS blob protocol. Removed the obsolete raw endpoint-datagram
   transport/store API and its `@hashtree/mesh` dependency while preserving the
   browser and worker providers on `TcpBlobTransport`.
+- Closed worker providers now reject reads instead of reporting a false content
+  miss.
 - Removed the legacy direct Hashtree WebRTC worker mesh, its kind-25050
   signaling/proxy API, and the `@hashtree/worker/p2p` export. Browser mesh
   traffic now enters both worker clients through the FIPS provider interface,
