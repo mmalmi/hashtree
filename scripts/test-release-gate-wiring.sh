@@ -37,6 +37,9 @@ node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
 const packageJson = JSON.parse(fs.readFileSync('ts/package.json', 'utf8'));
+const transportPackage = JSON.parse(
+  fs.readFileSync('ts/packages/hashtree-fips-transport/package.json', 'utf8'),
+);
 const expected = [
   'pnpm --filter @hashtree/fips-transport... build',
   'pnpm --filter @hashtree/fips-transport verify:dist',
@@ -46,6 +49,9 @@ const expected = [
 
 if (packageJson.scripts?.['verify:fips-transport'] !== expected) {
   throw new Error('ts/package.json must define the canonical FIPS transport gate');
+}
+if (transportPackage.scripts?.['verify:dist'] !== 'node ../../scripts/assert-clean.mjs dist') {
+  throw new Error('the FIPS transport gate must reject stale generated files');
 }
 NODE
 [ "$(grep -Fc 'pnpm run verify:fips-transport' .github/workflows/ci.yml)" -eq 1 ]
