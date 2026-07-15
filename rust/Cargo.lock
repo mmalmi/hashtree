@@ -5292,6 +5292,8 @@ dependencies = [
 [[package]]
 name = "nostr-pubsub"
 version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a3c668aede5ebf20501199206e1853ee8e26f38d476a60f54fb27443dfb552f"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5328,6 +5330,8 @@ dependencies = [
 [[package]]
 name = "nostr-pubsub-social-graph"
 version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550"
 dependencies = [
  "async-trait",
  "nostr",

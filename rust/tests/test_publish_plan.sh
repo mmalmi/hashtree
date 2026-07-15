@@ -44,6 +44,15 @@ grep -F 'hashtree-fips-transport = { version = "0.3.0", path = "crates/hashtree-
 grep -F 'hashtree-cli = { version = "0.2.83", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null
 
+nostr_pubsub_lock="$(awk '/^\[\[package\]\]$/ { capture = 0 } /^name = "nostr-pubsub"$/ { capture = 1 } capture' "${RUST_DIR}/Cargo.lock")"
+printf '%s\n' "$nostr_pubsub_lock" | grep -Fx 'version = "0.1.10"' >/dev/null
+printf '%s\n' "$nostr_pubsub_lock" | grep -Fx 'source = "registry+https://github.com/rust-lang/crates.io-index"' >/dev/null
+printf '%s\n' "$nostr_pubsub_lock" | grep -Fx 'checksum = "0a3c668aede5ebf20501199206e1853ee8e26f38d476a60f54fb27443dfb552f"' >/dev/null
+nostr_pubsub_social_lock="$(awk '/^\[\[package\]\]$/ { capture = 0 } /^name = "nostr-pubsub-social-graph"$/ { capture = 1 } capture' "${RUST_DIR}/Cargo.lock")"
+printf '%s\n' "$nostr_pubsub_social_lock" | grep -Fx 'version = "0.2.2"' >/dev/null
+printf '%s\n' "$nostr_pubsub_social_lock" | grep -Fx 'source = "registry+https://github.com/rust-lang/crates.io-index"' >/dev/null
+printf '%s\n' "$nostr_pubsub_social_lock" | grep -Fx 'checksum = "9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550"' >/dev/null
+
 if printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'cashu-service' >/dev/null; then
     echo "cashu-service is published from the standalone cashu-service repo, not hashtree" >&2
     exit 1
