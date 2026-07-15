@@ -32,7 +32,6 @@ Code scope:
   - `rust/crates/hashtree-network/tests/formal_mesh_props.rs`
   - `rust/crates/hashtree-network/tests/types.rs`
   - `ts/packages/hashtree-mesh/tests/core.test.ts`
-  - `ts/packages/hashtree-fips-transport/tests/fipsTransport.test.ts`
 - No public relay dependencies for formal invariants.
 
 ## CI

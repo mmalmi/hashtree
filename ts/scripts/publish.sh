@@ -31,6 +31,7 @@ done
 
 PACKAGES=(
     "@hashtree/core"
+    "@hashtree/fips-transport"
     "@hashtree/merge"
     "@hashtree/dexie"
     "@hashtree/git"
