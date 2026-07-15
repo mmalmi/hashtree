@@ -7,6 +7,43 @@ PUBLISH_SCRIPT="${RUST_DIR}/scripts/publish.sh"
 
 PLAN_OUTPUT="$("${PUBLISH_SCRIPT}" --plan)"
 
+fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-publish-test.XXXXXX")"
+trap 'rm -rf "${fake_bin}"' EXIT
+printf '%s\n' '#!/bin/sh' 'echo "crate version already exists" >&2' 'exit 1' \
+    >"${fake_bin}/cargo"
+chmod +x "${fake_bin}/cargo"
+
+SKIP_OUTPUT="$(PATH="${fake_bin}:${PATH}" "${PUBLISH_SCRIPT}" --dry-run)"
+planned_count="$(printf '%s\n' "$PLAN_OUTPUT" | awk 'NF { count++ } END { print count }')"
+skipped_count="$(printf '%s\n' "$SKIP_OUTPUT" | grep -cF 'already published at this version (skipping)')"
+if [ "$planned_count" -ne "$skipped_count" ]; then
+    echo "unchanged registry versions must skip without failing the release" >&2
+    exit 1
+fi
+
+require_line() {
+    grep -Fx "$2" "$1" >/dev/null || {
+        echo "$3" >&2
+        exit 1
+    }
+}
+
+require_line "${RUST_DIR}/Cargo.toml" 'version = "0.2.82"' \
+    "unchanged workspace crates must remain at 0.2.82"
+for crate in hashtree-core hashtree-cli hashtree-embedded; do
+    require_line "${RUST_DIR}/crates/${crate}/Cargo.toml" 'version = "0.2.83"' \
+        "${crate} must release as 0.2.83"
+done
+require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.3.0"' \
+    "hashtree-fips-transport must remain at 0.3.0"
+
+grep -F 'hashtree-core = { version = "0.2.83", path = "crates/hashtree-core" }' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'hashtree-fips-transport = { version = "0.3.0", path = "crates/hashtree-fips-transport" }' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'hashtree-cli = { version = "0.2.83", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }' \
+    "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null
+
 if printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'cashu-service' >/dev/null; then
     echo "cashu-service is published from the standalone cashu-service repo, not hashtree" >&2
     exit 1
@@ -16,14 +53,29 @@ printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-fuse' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-collection' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-cashu-cli' >/dev/null
 
-fuse_line="$(printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk '$2 == "hashtree-fuse" { print $1; exit }')"
-collection_line="$(printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk '$2 == "hashtree-collection" { print $1; exit }')"
-nostr_line="$(printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk '$2 == "hashtree-nostr" { print $1; exit }')"
-cli_line="$(printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk '$2 == "hashtree-cli" { print $1; exit }')"
-cashu_cli_line="$(printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk '$2 == "hashtree-cashu-cli" { print $1; exit }')"
+plan_line() {
+    printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk -v crate="$1" '$2 == crate { print $1; exit }'
+}
 
-if [ -z "$fuse_line" ] || [ -z "$collection_line" ] || [ -z "$nostr_line" ] || [ -z "$cli_line" ] || [ -z "$cashu_cli_line" ]; then
-    echo "Failed to find hashtree-fuse, hashtree-collection, hashtree-nostr, hashtree-cli, or hashtree-cashu-cli in publish plan" >&2
+fuse_line="$(plan_line hashtree-fuse)"
+core_line="$(plan_line hashtree-core)"
+collection_line="$(plan_line hashtree-collection)"
+nostr_line="$(plan_line hashtree-nostr)"
+transport_line="$(plan_line hashtree-fips-transport)"
+cli_line="$(plan_line hashtree-cli)"
+cashu_cli_line="$(plan_line hashtree-cashu-cli)"
+embedded_line="$(plan_line hashtree-embedded)"
+
+if [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$collection_line" ] || \
+    [ -z "$nostr_line" ] || [ -z "$transport_line" ] || [ -z "$cli_line" ] || \
+    [ -z "$cashu_cli_line" ] || [ -z "$embedded_line" ]; then
+    echo "Failed to find a required crate in the publish plan" >&2
+    exit 1
+fi
+
+if [ "$core_line" -ge "$transport_line" ] || [ "$transport_line" -ge "$cli_line" ] || \
+    [ "$cli_line" -ge "$embedded_line" ]; then
+    echo "registry release order must be core -> transport -> CLI -> embedded" >&2
     exit 1
 fi
 

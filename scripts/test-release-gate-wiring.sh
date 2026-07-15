@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
+bash rust/tests/test_publish_plan.sh
+
 # A clean checkout must resolve every non-workspace Rust dependency without
 # sibling repositories mounted beside hashtree.
 ! grep -F 'path = "../../cashu-service/' rust/Cargo.toml >/dev/null

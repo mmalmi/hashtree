@@ -23,6 +23,22 @@
   miss/provider-failure results as errors, and prevented client-only stores from
   serving inbound blobs.
 
+## 0.2.83 - 2026-07-15
+
+### Added
+
+- Added the canonical `BlobRoute` request/reply boundary to `hashtree-core`,
+  including compact HTL-aware request vectors and terminal Store routing.
+- Let the `htree` daemon advertise its existing `StorageRouter` as an
+  authenticated same-host blob provider through its existing FIPS endpoint.
+
+### Changed
+
+- Versioned only `hashtree-core`, `hashtree-cli`, and `hashtree-embedded` at
+  `0.2.83`, allowing embedded consumers to resolve one Core/transport/FIPS type
+  graph while workspace-versioned crates remain at `0.2.82` and
+  `hashtree-fips-transport` advances independently to `0.3.0`.
+
 ## 0.2.82 - 2026-07-14
 
 ### Added
