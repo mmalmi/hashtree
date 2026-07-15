@@ -742,16 +742,17 @@ async fn first_available_fetch_prefers_fast_success() {
     let result = first_available_fetch(vec![
         async {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            Some("slow")
+            Ok(Some("slow"))
         }
         .boxed(),
         async {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            Some("fast")
+            Ok(Some("fast"))
         }
         .boxed(),
     ])
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(result, Some("fast"));
 }
@@ -759,32 +760,46 @@ async fn first_available_fetch_prefers_fast_success() {
 #[tokio::test]
 async fn first_available_fetch_skips_empty_results() {
     let result = first_available_fetch(vec![
-        async { None::<&'static str> }.boxed(),
+        async { Ok(None::<&'static str>) }.boxed(),
         async {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            Some("available")
+            Ok(Some("available"))
         }
         .boxed(),
     ])
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(result, Some("available"));
 }
 
 #[tokio::test]
+async fn first_available_fetch_preserves_failure_when_no_route_hits() {
+    let result = first_available_fetch(vec![
+        async { Ok(None::<&'static str>) }.boxed(),
+        async { Err::<Option<&'static str>, _>("route failed".to_string()) }.boxed(),
+    ])
+    .await;
+
+    assert_eq!(result.unwrap_err(), "route failed");
+}
+
+#[tokio::test]
 async fn await_fetch_task_returns_result() {
-    let result = await_fetch_task("test", "abc123", async { Some(7usize) }).await;
+    let result = await_fetch_task("test", "abc123", async { Ok(Some(7usize)) })
+        .await
+        .unwrap();
     assert_eq!(result, Some(7));
 }
 
 #[tokio::test]
 async fn await_fetch_task_recovers_from_panic() {
-    let result: Option<usize> = await_fetch_task("test", "abc123", async move {
+    let result: Result<Option<usize>, String> = await_fetch_task("test", "abc123", async move {
         panic!("boom");
     })
     .await;
 
-    assert!(result.is_none());
+    assert!(result.is_err());
 }
 
 async fn blob_resolver_with_source(
@@ -822,8 +837,49 @@ async fn fetch_and_cache_blob_uses_canonical_fips_resolver() {
     let mut state = test_app_state(local_store.clone(), Vec::new());
     state.fips_blob_resolver = Some(resolver);
 
-    assert!(fetch_and_cache_blob(&state, &hash).await);
+    assert!(fetch_and_cache_blob(&state, &hash).await.unwrap());
     assert_eq!(local_store.get_blob(&hash).unwrap(), Some(data));
+}
+
+#[tokio::test]
+async fn canonical_fips_no_result_and_failure_remain_distinct() {
+    let missing = sha256(b"missing from this bounded search");
+    let temp_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let empty_resolver =
+        blob_resolver_with_source(local_store.store_arc(), Arc::new(MemoryStore::new())).await;
+    let mut state = test_app_state(local_store.clone(), Vec::new());
+    state.fips_blob_resolver = Some(empty_resolver);
+    assert!(!fetch_and_cache_blob(&state, &missing).await.unwrap());
+
+    let corrupt_source = Arc::new(MemoryStore::new());
+    corrupt_source
+        .put(missing, b"wrong content".to_vec())
+        .await
+        .unwrap();
+    state.fips_blob_resolver =
+        Some(blob_resolver_with_source(local_store.store_arc(), corrupt_source).await);
+    assert!(fetch_and_cache_blob(&state, &missing).await.is_err());
+    let corrupt_source = Arc::new(MemoryStore::new());
+    corrupt_source
+        .put(missing, b"still wrong".to_vec())
+        .await
+        .unwrap();
+    state.fips_blob_resolver =
+        Some(blob_resolver_with_source(local_store.store_arc(), corrupt_source).await);
+
+    let response = serve_content_or_blob(
+        State(state),
+        Path(format!("{}.bin", hex::encode(missing))),
+        Query(HashMap::new()),
+        axum::http::Method::GET,
+        axum::http::HeaderMap::new(),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43124))),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 }
 
 #[tokio::test]
@@ -1087,8 +1143,8 @@ async fn ensure_blob_available_retries_indeterminate_upstream_misses() {
     let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
     let state = test_app_state(local_store, vec![format!("http://{}", upstream_addr)]);
 
-    assert!(!ensure_blob_available(&state, &missing_hash).await.unwrap());
-    assert!(!ensure_blob_available(&state, &missing_hash).await.unwrap());
+    assert!(ensure_blob_available(&state, &missing_hash).await.is_err());
+    assert!(ensure_blob_available(&state, &missing_hash).await.is_err());
     assert_eq!(
         requested_ids.lock().unwrap().as_slice(),
         &[

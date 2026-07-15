@@ -119,7 +119,7 @@ pub struct CachedTreeRootEntry {
     pub cached_at: Instant,
 }
 
-pub type SharedBlobFetch = Shared<BoxFuture<'static, bool>>;
+pub type SharedBlobFetch = Shared<BoxFuture<'static, Result<bool, String>>>;
 pub type SharedBlobRead = Shared<BoxFuture<'static, Result<Option<Vec<u8>>, String>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

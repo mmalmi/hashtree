@@ -19,18 +19,18 @@ const BLOB_BATCH_DOWNLOAD_MAX_HASHES_ENV: &str = "HTREE_BLOB_BATCH_DOWNLOAD_MAX_
 const BLOB_BATCH_DOWNLOAD_MAX_BYTES_ENV: &str = "HTREE_BLOB_BATCH_DOWNLOAD_MAX_BYTES";
 const UPSTREAM_BLOSSOM_MISS_TTL: Duration = Duration::from_secs(10);
 
-pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> bool {
+pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> Result<bool, String> {
     fetch_and_cache_blob_with_source(state, hash)
         .await
-        .is_some()
+        .map(|source| source.is_some())
 }
 
 pub(super) async fn fetch_and_cache_blob_with_source(
     state: &AppState,
     hash: &[u8],
-) -> Option<BlobSource> {
+) -> Result<Option<BlobSource>, String> {
     if !state.hash_get_enabled {
-        return None;
+        return Ok(None);
     }
 
     let hash_hex = hex::encode(hash);
@@ -45,7 +45,7 @@ pub(super) async fn fetch_and_cache_blob_with_source(
         Upstream { data: Vec<u8>, server: String },
     }
 
-    let mut fetches: Vec<BoxFuture<'static, Option<FetchResult>>> = Vec::new();
+    let mut fetches: Vec<BoxFuture<'static, Result<Option<FetchResult>, String>>> = Vec::new();
 
     if state.hash_get_enabled && state.http_webrtc_fetch {
         if let Some(ref webrtc_state) = state.webrtc_peers {
@@ -59,10 +59,11 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                 async move {
                     let query_hash_hex = peer_hash_hex.clone();
                     await_fetch_task("webrtc", &peer_hash_hex, async move {
-                        query_webrtc_peers(&webrtc_state, &query_hash_hex).await
+                        Ok(query_webrtc_peers(&webrtc_state, &query_hash_hex)
+                            .await
+                            .map(|(data, peer_id)| FetchResult::WebRtc { data, peer_id }))
                     })
                     .await
-                    .map(|(data, peer_id)| FetchResult::WebRtc { data, peer_id })
                 }
                 .boxed(),
             );
@@ -81,10 +82,11 @@ pub(super) async fn fetch_and_cache_blob_with_source(
             fetches.push(
                 async move {
                     await_fetch_task("fips", &fips_hash_hex, async move {
-                        query_fips_peers(&resolver, &fips_hash).await
+                        query_fips_peers(&resolver, &fips_hash)
+                            .await
+                            .map(|data| data.map(|data| FetchResult::Fips { data }))
                     })
                     .await
-                    .map(|data| FetchResult::Fips { data })
                 }
                 .boxed(),
             );
@@ -122,33 +124,33 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                     let query_hash_hex = upstream_hash_hex.clone();
                     let miss_cache_hash_hex = query_hash_hex.clone();
                     await_fetch_task("upstream", &upstream_hash_hex, async move {
-                        Some(
-                            query_upstream_blossom_result(
-                                upstream_http_client,
-                                &upstream_blossom,
-                                &query_hash_hex,
-                            )
-                            .await,
+                        match query_upstream_blossom_result(
+                            upstream_http_client,
+                            &upstream_blossom,
+                            &query_hash_hex,
                         )
+                        .await
+                        {
+                            UpstreamBlossomQueryResult::Hit { data, server } => {
+                                upstream_metrics.note_hit(data.len());
+                                Ok(Some(FetchResult::Upstream { data, server }))
+                            }
+                            UpstreamBlossomQueryResult::DefiniteMiss => {
+                                upstream_metrics.note_explicit_miss();
+                                if let Ok(mut cache) = upstream_miss_cache.lock() {
+                                    cache.put(miss_cache_hash_hex, (), UPSTREAM_BLOSSOM_MISS_TTL);
+                                }
+                                Ok(None)
+                            }
+                            UpstreamBlossomQueryResult::Indeterminate { reason } => {
+                                upstream_metrics.note_indeterminate_miss(reason.clone());
+                                Err(format!(
+                                    "Blossom upstream search was incomplete: {reason:?}"
+                                ))
+                            }
+                        }
                     })
                     .await
-                    .and_then(|result| match result {
-                        UpstreamBlossomQueryResult::Hit { data, server } => {
-                            upstream_metrics.note_hit(data.len());
-                            Some(FetchResult::Upstream { data, server })
-                        }
-                        UpstreamBlossomQueryResult::DefiniteMiss => {
-                            upstream_metrics.note_explicit_miss();
-                            if let Ok(mut cache) = upstream_miss_cache.lock() {
-                                cache.put(miss_cache_hash_hex, (), UPSTREAM_BLOSSOM_MISS_TTL);
-                            }
-                            None
-                        }
-                        UpstreamBlossomQueryResult::Indeterminate { reason } => {
-                            upstream_metrics.note_indeterminate_miss(reason);
-                            None
-                        }
-                    })
                 }
                 .boxed(),
             );
@@ -157,7 +159,7 @@ pub(super) async fn fetch_and_cache_blob_with_source(
         tracing::info!("[htree-fetch] No upstream Blossom servers configured");
     }
 
-    if let Some(result) = first_available_fetch(fetches).await {
+    if let Some(result) = first_available_fetch(fetches).await? {
         match result {
             FetchResult::WebRtc { data, peer_id } => {
                 tracing::info!(
@@ -169,9 +171,9 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
-                    return None;
+                    return Err(format!("failed to cache peer data: {e}"));
                 }
-                return Some(BlobSource::WebRtc(peer_id));
+                return Ok(Some(BlobSource::WebRtc(peer_id)));
             }
             FetchResult::Fips { data } => {
                 tracing::info!(
@@ -182,9 +184,9 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache FIPS peer data: {}", e);
-                    return None;
+                    return Err(format!("failed to cache FIPS peer data: {e}"));
                 }
-                return Some(BlobSource::Fips);
+                return Ok(Some(BlobSource::Fips));
             }
             FetchResult::Upstream { data, server } => {
                 tracing::info!(
@@ -196,9 +198,9 @@ pub(super) async fn fetch_and_cache_blob_with_source(
                 let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
                 if let Err(e) = result {
                     tracing::warn!("[htree-fetch] Failed to cache upstream data: {}", e);
-                    return None;
+                    return Err(format!("failed to cache upstream data: {e}"));
                 }
-                return Some(BlobSource::Upstream(server));
+                return Ok(Some(BlobSource::Upstream(server)));
             }
         }
     }
@@ -210,7 +212,7 @@ pub(super) async fn fetch_and_cache_blob_with_source(
         );
     }
 
-    None
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -642,9 +644,13 @@ pub(super) fn blob_read_busy_error() -> &'static str {
     BLOB_READ_BUSY
 }
 
-pub(super) async fn await_fetch_task<F, T>(source: &str, hash_hex: &str, future: F) -> Option<T>
+pub(super) async fn await_fetch_task<F, T>(
+    source: &str,
+    hash_hex: &str,
+    future: F,
+) -> Result<Option<T>, String>
 where
-    F: std::future::Future<Output = Option<T>>,
+    F: std::future::Future<Output = Result<Option<T>, String>>,
 {
     match std::panic::AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result,
@@ -654,26 +660,34 @@ where
                 source,
                 &hash_hex[..16.min(hash_hex.len())],
             );
-            None
+            Err(format!("{source} fetch task panicked"))
         }
     }
 }
 
 pub(super) async fn first_available_fetch<T>(
-    futures: Vec<BoxFuture<'static, Option<T>>>,
-) -> Option<T> {
+    futures: Vec<BoxFuture<'static, Result<Option<T>, String>>>,
+) -> Result<Option<T>, String> {
     let mut pending = FuturesUnordered::new();
+    let mut first_failure = None;
     for future in futures {
         pending.push(future);
     }
 
     while let Some(result) = pending.next().await {
-        if let Some(value) = result {
-            return Some(value);
+        match result {
+            Ok(Some(value)) => return Ok(Some(value)),
+            Ok(None) => {}
+            Err(error) => {
+                first_failure.get_or_insert(error);
+            }
         }
     }
 
-    None
+    match first_failure {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
 }
 
 pub(super) async fn ensure_blob_available(
@@ -709,7 +723,7 @@ pub(super) async fn ensure_blob_available(
         }
     };
 
-    if fetch.await {
+    if fetch.await? {
         return Ok(true);
     }
 
@@ -1189,8 +1203,10 @@ impl BlobSource {
 pub(super) async fn query_fips_peers(
     resolver: &Arc<DaemonBlobResolver>,
     hash: &[u8],
-) -> Option<Vec<u8>> {
-    let hash: [u8; 32] = hash.try_into().ok()?;
+) -> Result<Option<Vec<u8>>, String> {
+    let hash: [u8; 32] = hash
+        .try_into()
+        .map_err(|_| "FIPS blob hash has the wrong length".to_string())?;
     match hashtree_core::BlobRoute::route(
         resolver.as_ref(),
         hashtree_core::BlobRequest {
@@ -1200,12 +1216,9 @@ pub(super) async fn query_fips_peers(
     )
     .await
     {
-        Ok(hashtree_core::BlobReply::Data(data)) => Some(data),
-        Ok(hashtree_core::BlobReply::NoResult) => None,
-        Err(err) => {
-            tracing::warn!("FIPS peer fetch failed: {}", err);
-            None
-        }
+        Ok(hashtree_core::BlobReply::Data(data)) => Ok(Some(data)),
+        Ok(hashtree_core::BlobReply::NoResult) => Ok(None),
+        Err(err) => Err(format!("FIPS peer fetch failed: {err}")),
     }
 }
 

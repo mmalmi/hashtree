@@ -1185,19 +1185,32 @@ async fn serve_raw_blob_with_range(
     };
 
     if total_size.is_none() && allow_fetch {
-        if let Some(fetch_source) = fetch_and_cache_blob_with_source(state, &hash).await {
-            source = fetch_source;
-            total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
-                Ok(size) => size,
-                Err(error) => {
-                    tracing::warn!(
-                        "Failed to read fetched blob size {}: {}",
-                        to_hex(&hash),
-                        error
-                    );
-                    None
-                }
-            };
+        match fetch_and_cache_blob_with_source(state, &hash).await {
+            Ok(Some(fetch_source)) => {
+                source = fetch_source;
+                total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
+                    Ok(size) => size,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Failed to read fetched blob size {}: {}",
+                            to_hex(&hash),
+                            error
+                        );
+                        None
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!("Blob fetch {} was incomplete: {}", to_hex(&hash), error);
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .header("Retry-After", "1")
+                    .body(Body::from("Blob search incomplete; retry later"))
+                    .unwrap();
+            }
         }
     }
 
