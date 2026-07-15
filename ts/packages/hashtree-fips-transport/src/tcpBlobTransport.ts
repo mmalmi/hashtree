@@ -8,7 +8,7 @@ const GET = 1;
 const MISSING = 0;
 const FOUND = 1;
 const HEADER_BYTES = 7;
-const REQUEST_BYTES = 35;
+const REQUEST_BYTES = 36;
 const IO_CHUNK_BYTES = 64 * 1024;
 const POLL_INTERVAL_MS = 10;
 export const TCP_BLOB_MAX_BYTES = 16 * 1024 * 1024;
@@ -115,10 +115,7 @@ export class TcpBlobTransport {
   private async serve(connection: ConnectionId): Promise<void> {
     const deadline = Date.now() + this.timeoutMs;
     const request = await this.readExact(connection, REQUEST_BYTES, deadline);
-    if (request[0] !== TCP_BLOB_MAGIC || request[1] !== TCP_BLOB_VERSION || request[2] !== GET) {
-      throw new Error('invalid TCP/FIPS blob request');
-    }
-    const hash = request.slice(3) as Hash;
+    const { hash } = decodeTcpBlobRequest(request);
     const data = await this.verifiedGet(hash);
     const header = encodeTcpBlobResponseHeader(Boolean(data), data?.byteLength ?? 0);
     await this.writeAll(connection, header, deadline);
@@ -175,12 +172,27 @@ export class TcpBlobTransport {
   }
 }
 
-export function encodeTcpBlobRequest(hash: Uint8Array): Uint8Array {
+export function encodeTcpBlobRequest(hash: Uint8Array, htl = 0): Uint8Array {
   if (hash.byteLength !== 32) throw new Error('TCP/FIPS blob hash must be 32 bytes');
+  if (!Number.isInteger(htl) || htl < 0 || htl > 0xff) {
+    throw new Error('TCP/FIPS blob HTL is invalid');
+  }
   const request = new Uint8Array(REQUEST_BYTES);
-  request.set([TCP_BLOB_MAGIC, TCP_BLOB_VERSION, GET]);
-  request.set(hash, 3);
+  request.set([TCP_BLOB_MAGIC, TCP_BLOB_VERSION, GET, htl]);
+  request.set(hash, 4);
   return request;
+}
+
+export function decodeTcpBlobRequest(request: Uint8Array): { hash: Hash; htl: number } {
+  if (
+    request.byteLength !== REQUEST_BYTES
+    || request[0] !== TCP_BLOB_MAGIC
+    || request[1] !== TCP_BLOB_VERSION
+    || request[2] !== GET
+  ) {
+    throw new Error('invalid TCP/FIPS blob request');
+  }
+  return { hash: request.slice(4) as Hash, htl: request[3] };
 }
 
 export function encodeTcpBlobResponseHeader(found: boolean, size: number): Uint8Array {

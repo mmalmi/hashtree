@@ -28,7 +28,11 @@ export declare class TcpBlobTransport {
     private writeAll;
     private readExact;
 }
-export declare function encodeTcpBlobRequest(hash: Uint8Array): Uint8Array;
+export declare function encodeTcpBlobRequest(hash: Uint8Array, htl?: number): Uint8Array;
+export declare function decodeTcpBlobRequest(request: Uint8Array): {
+    hash: Hash;
+    htl: number;
+};
 export declare function encodeTcpBlobResponseHeader(found: boolean, size: number): Uint8Array;
 export interface TcpBlobResponseHeader {
     found: boolean;
