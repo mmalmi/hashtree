@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 
-use hashtree_core::{Hash, Store, StoreError};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError};
 
 use crate::peer_selector::{PeerMetadataSnapshot, PeerSelector, SelectionStrategy};
 use crate::protocol::{
@@ -42,8 +42,6 @@ use crate::types::{
 // Keep the on-disk namespace stable across the crate rename so existing peer
 // metadata does not disappear for users upgrading from the old package name.
 const PEER_METADATA_POINTER_SLOT_KEY: &[u8] = b"hashtree-mesh/peer-metadata/latest/v1";
-const RECENT_FORWARD_MISS_CAPACITY: usize = 4096;
-const MIN_RECENT_FORWARD_MISS_TTL_MS: u64 = 250;
 const PUBSUB_SEEN_CAPACITY: usize = 16_384;
 const PUBSUB_INBOX_CAPACITY: usize = 4_096;
 const PUBSUB_FRAME_CACHE_CAPACITY: usize = 4_096;
@@ -124,6 +122,18 @@ enum RouteFetchOutcome {
     Hit(Vec<u8>),
     Miss,
     Timeout,
+    Failure,
+}
+
+impl RouteFetchOutcome {
+    fn combine_without_hit(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Hit(data), _) | (_, Self::Hit(data)) => Self::Hit(data),
+            (Self::Failure, _) | (_, Self::Failure) => Self::Failure,
+            (Self::Timeout, _) | (_, Self::Timeout) => Self::Timeout,
+            (Self::Miss, Self::Miss) => Self::Miss,
+        }
+    }
 }
 
 struct InflightSourceFetch {
@@ -654,7 +664,6 @@ where
     /// Forwarded peer requests currently being resolved through the mesh/upstream.
     pending_forward_requests: RwLock<HashMap<String, PendingForwardRequest>>,
     /// Bounded negative cache for recently forwarded misses/timeouts.
-    recent_forward_misses: Mutex<TimedSeenSet>,
     /// Quotes we issued to peers and will accept exactly once until expiry.
     issued_quotes: RwLock<HashMap<(String, String, u64), IssuedQuote>>,
     /// Monotonic quote identifier generator.
@@ -763,10 +772,6 @@ where
             pending_requests: RwLock::new(HashMap::new()),
             pending_quotes: RwLock::new(HashMap::new()),
             pending_forward_requests: RwLock::new(HashMap::new()),
-            recent_forward_misses: Mutex::new(TimedSeenSet::new(
-                RECENT_FORWARD_MISS_CAPACITY,
-                Self::recent_forward_miss_ttl(request_timeout),
-            )),
             issued_quotes: RwLock::new(HashMap::new()),
             next_quote_id: RwLock::new(1),
             read_sources: RwLock::new(HashMap::new()),
@@ -813,15 +818,6 @@ where
             debug,
             running: RwLock::new(false),
         }
-    }
-
-    fn recent_forward_miss_ttl(request_timeout: Duration) -> Duration {
-        let ttl_ms = request_timeout
-            .as_millis()
-            .saturating_mul(2)
-            .max(MIN_RECENT_FORWARD_MISS_TTL_MS as u128)
-            .min(u64::MAX as u128) as u64;
-        Duration::from_millis(ttl_ms)
     }
 
     /// Start the store (begin listening for messages)
@@ -2006,15 +2002,10 @@ where
             None => return false,
         };
 
-        let htl_config = {
-            let configs = self.htl_configs.read().await;
-            configs
-                .get(peer_id)
-                .cloned()
-                .unwrap_or_else(PeerHTLConfig::random)
-        };
-
-        let send_htl = htl_config.decrement(request_htl);
+        // Hashtree owns HTL and consumes exactly one unit when forwarding a
+        // blob request to another mesh peer. Transport/routing hops below this
+        // layer must not alter it.
+        let send_htl = request_htl.saturating_sub(1);
         let req = match quote_id {
             Some(quote_id) => create_request_with_quote(hash, send_htl, quote_id),
             None => create_request(hash, send_htl),
@@ -2392,11 +2383,15 @@ where
         quote_ttl: Duration,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         if let Some(data) = self.local_store.get(hash).await? {
+            if hashtree_core::sha256(&data) != *hash {
+                return Err(StoreError::Other(
+                    "local store returned corrupt content".to_string(),
+                ));
+            }
             return Ok(Some(data));
         }
-        Ok(self
-            .request_from_peers_with_quote(hash, payment_sat, quote_ttl)
-            .await)
+        self.request_from_peers_with_quote(hash, payment_sat, quote_ttl)
+            .await
     }
 
     async fn request_from_peers_with_quote(
@@ -2404,10 +2399,10 @@ where
         hash: &Hash,
         payment_sat: u64,
         quote_ttl: Duration,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let ordered_peer_ids = self.ordered_connected_peers(None).await;
         if ordered_peer_ids.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         if let Some(quote) = self
@@ -2418,11 +2413,23 @@ where
                 .request_from_single_peer(hash, &quote.peer_id, MAX_HTL, Some(quote.quote_id))
                 .await
             {
-                return Some(data);
+                return Ok(Some(data));
             }
         }
 
-        self.request_from_mesh(hash).await
+        match self
+            .request_from_mesh_with_context(hash, &MeshReadContext::default())
+            .await
+        {
+            RouteFetchOutcome::Hit(data) => Ok(Some(data)),
+            RouteFetchOutcome::Miss => Ok(None),
+            RouteFetchOutcome::Timeout => Err(StoreError::Other(
+                "blob retrieval deadline expired before the search completed".to_string(),
+            )),
+            RouteFetchOutcome::Failure => Err(StoreError::Other(
+                "blob retrieval failed before the search completed".to_string(),
+            )),
+        }
     }
 
     async fn request_quote_from_peers(
@@ -2640,6 +2647,7 @@ where
         let mut pending = FuturesUnordered::new();
         let mut pending_source_ids = HashSet::new();
         let mut saw_timeout = false;
+        let mut saw_failure = false;
         let mut next_source_idx = 0usize;
 
         for (wave_idx, wave_size) in wave_plan.iter().copied().enumerate() {
@@ -2659,11 +2667,14 @@ where
                         .catch_unwind()
                         .await;
                     match result {
-                        Ok(Some(data)) => SourceFetchOutcome::Hit {
-                            source_id,
-                            data,
-                            elapsed_ms: started_at.elapsed().as_millis().max(1) as u64,
-                        },
+                        Ok(Some(data)) if hashtree_core::sha256(&data) == hash => {
+                            SourceFetchOutcome::Hit {
+                                source_id,
+                                data,
+                                elapsed_ms: started_at.elapsed().as_millis().max(1) as u64,
+                            }
+                        }
+                        Ok(Some(_)) => SourceFetchOutcome::Failure { source_id },
                         Ok(None) => SourceFetchOutcome::Miss { source_id },
                         Err(_) => SourceFetchOutcome::Failure { source_id },
                     }
@@ -2688,6 +2699,7 @@ where
                     break;
                 };
                 let Ok(outcome) = result else {
+                    saw_failure = true;
                     continue;
                 };
                 match outcome {
@@ -2707,6 +2719,7 @@ where
                     }
                     SourceFetchOutcome::Failure { source_id } => {
                         pending_source_ids.remove(&source_id);
+                        saw_failure = true;
                         self.record_read_source_failure(&source_id).await;
                     }
                 }
@@ -2723,6 +2736,8 @@ where
         }
         if saw_timeout {
             RouteFetchOutcome::Timeout
+        } else if saw_failure {
+            RouteFetchOutcome::Failure
         } else {
             RouteFetchOutcome::Miss
         }
@@ -2880,14 +2895,11 @@ where
         &self,
         hash: &Hash,
         context: &MeshReadContext,
-    ) -> Option<Vec<u8>> {
+    ) -> RouteFetchOutcome {
         let routes = self.ranked_read_routes(context).await;
         match routes.as_slice() {
-            [] => None,
-            [ranked] => match self.run_read_route(hash, &ranked.route, context).await {
-                RouteFetchOutcome::Hit(data) => Some(data),
-                RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
-            },
+            [] => RouteFetchOutcome::Miss,
+            [ranked] => self.run_read_route(hash, &ranked.route, context).await,
             [first, second, ..] => {
                 if self.should_probe_multiple_routes(&routes) {
                     let first_fut = self.run_read_route(hash, &first.route, context);
@@ -2896,25 +2908,28 @@ where
                     tokio::pin!(second_fut);
                     let mut first_done = false;
                     let mut second_done = false;
+                    let mut combined = RouteFetchOutcome::Miss;
                     loop {
                         tokio::select! {
                             result = &mut first_fut, if !first_done => {
                                 first_done = true;
-                                if let RouteFetchOutcome::Hit(data) = result {
+                                if let RouteFetchOutcome::Hit(data) = &result {
                                     if !second_done {
-                                        self.cancel_losing_route(hash, &second.route, &data).await;
+                                        self.cancel_losing_route(hash, &second.route, data).await;
                                     }
-                                    return Some(data);
+                                    return result;
                                 }
+                                combined = combined.combine_without_hit(result);
                             }
                             result = &mut second_fut, if !second_done => {
                                 second_done = true;
-                                if let RouteFetchOutcome::Hit(data) = result {
+                                if let RouteFetchOutcome::Hit(data) = &result {
                                     if !first_done {
-                                        self.cancel_losing_route(hash, &first.route, &data).await;
+                                        self.cancel_losing_route(hash, &first.route, data).await;
                                     }
-                                    return Some(data);
+                                    return result;
                                 }
+                                combined = combined.combine_without_hit(result);
                             }
                             else => break,
                         }
@@ -2922,27 +2937,23 @@ where
                             break;
                         }
                     }
-                    None
+                    combined
                 } else {
-                    match self.run_read_route(hash, &first.route, context).await {
-                        RouteFetchOutcome::Hit(data) => return Some(data),
-                        RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => {}
+                    let mut combined = self.run_read_route(hash, &first.route, context).await;
+                    if matches!(combined, RouteFetchOutcome::Hit(_)) {
+                        return combined;
                     }
                     for ranked in routes.iter().skip(1) {
-                        match self.run_read_route(hash, &ranked.route, context).await {
-                            RouteFetchOutcome::Hit(data) => return Some(data),
-                            RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => {}
+                        let result = self.run_read_route(hash, &ranked.route, context).await;
+                        if matches!(result, RouteFetchOutcome::Hit(_)) {
+                            return result;
                         }
+                        combined = combined.combine_without_hit(result);
                     }
-                    None
+                    combined
                 }
             }
         }
-    }
-
-    async fn request_from_mesh(&self, hash: &Hash) -> Option<Vec<u8>> {
-        self.request_from_mesh_with_context(hash, &MeshReadContext::default())
-            .await
     }
 
     async fn begin_forward_request(&self, hash_key: &str, requester_id: &str) -> bool {
@@ -2959,18 +2970,6 @@ where
             PendingForwardRequest { requester_ids },
         );
         true
-    }
-
-    async fn was_recent_forward_miss(&self, hash_key: &str) -> bool {
-        self.recent_forward_misses.lock().await.contains(hash_key)
-    }
-
-    async fn mark_recent_forward_miss(&self, hash_key: &str) {
-        let _ = self
-            .recent_forward_misses
-            .lock()
-            .await
-            .insert_if_new(hash_key.to_string());
     }
 
     async fn take_forward_requesters(&self, hash_key: &str) -> Vec<String> {
@@ -3203,16 +3202,6 @@ where
             return;
         }
 
-        if self.was_recent_forward_miss(&hash_key).await {
-            if self.debug {
-                println!(
-                    "[MeshStoreCore] Suppressing recently missed forwarded request for {}",
-                    hash_key
-                );
-            }
-            return;
-        }
-
         if !self.begin_forward_request(&hash_key, from_peer).await {
             return;
         }
@@ -3234,23 +3223,23 @@ where
                         from_peer
                     );
                 }
-                match this.request_from_read_sources(&hash).await {
-                    RouteFetchOutcome::Hit(data) => Some(data),
-                    RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => None,
-                }
+                this.request_from_read_sources(&hash).await
             };
             let requester_ids = this.take_forward_requesters(&hash_key).await;
-            if let Some(data) = result {
-                let ready_at = Instant::now() + this.response_send_delay(&hash, data.len());
-                let res = create_response(&hash, data);
-                let response_bytes = encode_response(&res);
-                for requester_id in requester_ids {
-                    Arc::clone(&this)
-                        .enqueue_response_send(requester_id, response_bytes.clone(), ready_at)
-                        .await;
+            match result {
+                RouteFetchOutcome::Hit(data) => {
+                    let ready_at = Instant::now() + this.response_send_delay(&hash, data.len());
+                    let res = create_response(&hash, data);
+                    let response_bytes = encode_response(&res);
+                    for requester_id in requester_ids {
+                        Arc::clone(&this)
+                            .enqueue_response_send(requester_id, response_bytes.clone(), ready_at)
+                            .await;
+                    }
                 }
-            } else {
-                this.mark_recent_forward_miss(&hash_key).await;
+                RouteFetchOutcome::Miss
+                | RouteFetchOutcome::Timeout
+                | RouteFetchOutcome::Failure => {}
             }
         });
     }
@@ -3500,6 +3489,54 @@ where
 }
 
 #[async_trait]
+impl<S, R, F> BlobRoute for MeshStoreCore<S, R, F>
+where
+    S: Store + Send + Sync + 'static,
+    R: SignalingTransport + Send + Sync + 'static,
+    F: PeerLinkFactory + Send + Sync + 'static,
+{
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        if let Some(data) = self.local_store.get(&request.hash).await? {
+            if hashtree_core::sha256(&data) != request.hash {
+                return Err(StoreError::Other(
+                    "local store returned corrupt content".to_string(),
+                ));
+            }
+            return Ok(BlobReply::Data(data));
+        }
+
+        if request.htl == 0 {
+            return Ok(BlobReply::NoResult);
+        }
+
+        let context = MeshReadContext {
+            exclude_peer_id: None,
+            request_htl: request.htl,
+        };
+        match self
+            .request_from_mesh_with_context(&request.hash, &context)
+            .await
+        {
+            RouteFetchOutcome::Hit(data) => {
+                if hashtree_core::sha256(&data) != request.hash {
+                    return Err(StoreError::Other(
+                        "blob route returned corrupt content".to_string(),
+                    ));
+                }
+                Ok(BlobReply::Data(data))
+            }
+            RouteFetchOutcome::Miss => Ok(BlobReply::NoResult),
+            RouteFetchOutcome::Timeout => Err(StoreError::Other(
+                "blob retrieval deadline expired before the search completed".to_string(),
+            )),
+            RouteFetchOutcome::Failure => Err(StoreError::Other(
+                "blob retrieval failed before the search completed".to_string(),
+            )),
+        }
+    }
+}
+
+#[async_trait]
 impl<S, R, F> Store for MeshStoreCore<S, R, F>
 where
     S: Store + Send + Sync + 'static,
@@ -3511,13 +3548,18 @@ where
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
-        // Try local first
-        if let Some(data) = self.local_store.get(hash).await? {
-            return Ok(Some(data));
-        }
-
-        // Try peers
-        Ok(self.request_from_mesh(hash).await)
+        Ok(
+            match self
+                .route(BlobRequest {
+                    hash: *hash,
+                    htl: MAX_HTL,
+                })
+                .await?
+            {
+                BlobReply::Data(data) => Some(data),
+                BlobReply::NoResult => None,
+            },
+        )
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {

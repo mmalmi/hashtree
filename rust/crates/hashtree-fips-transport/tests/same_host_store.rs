@@ -7,6 +7,7 @@ use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{Config, FipsEndpoint, PeerIdentity, UdpConfig};
 use hashtree_core::{
     BlobReply, BlobRequest, BlobRoute, Hash, MemoryStore, Store, StoreBlobRoute, StoreError,
+    BLOB_DEFAULT_HTL,
 };
 use hashtree_fips_transport::{
     SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError, TcpBlobTransport,
@@ -396,7 +397,10 @@ async fn final_no_result_is_not_negative_cached() {
     assert_eq!(consumer.get(&missing).await.unwrap(), None);
     assert_eq!(consumer.get(&missing).await.unwrap(), None);
     assert_eq!(standalone.calls.load(Ordering::Acquire), 2);
-    assert_eq!(standalone.last_htl.load(Ordering::Acquire), 0);
+    assert_eq!(
+        standalone.last_htl.load(Ordering::Acquire),
+        usize::from(BLOB_DEFAULT_HTL)
+    );
 
     drop(consumer);
     consumer_endpoint.shutdown().await.unwrap();
@@ -419,7 +423,10 @@ async fn standalone_error_and_corrupt_data_remain_errors() {
     assert!(consumer.get(&expected_hash).await.is_err());
     assert!(consumer.get(&expected_hash).await.is_err());
     assert_eq!(standalone.calls.load(Ordering::Acquire), 2);
-    assert_eq!(standalone.last_htl.load(Ordering::Acquire), 0);
+    assert_eq!(
+        standalone.last_htl.load(Ordering::Acquire),
+        usize::from(BLOB_DEFAULT_HTL)
+    );
 
     drop(consumer);
     consumer_endpoint.shutdown().await.unwrap();

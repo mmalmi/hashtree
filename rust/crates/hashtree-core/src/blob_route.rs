@@ -8,6 +8,8 @@ use thiserror::Error;
 use crate::{Hash, Store, StoreError};
 
 pub const BLOB_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Default Hashtree mesh-search budget used by standalone resolvers.
+pub const BLOB_DEFAULT_HTL: u8 = 10;
 pub const BLOB_REQUEST_BYTES: usize = 36;
 pub const BLOB_REPLY_HEADER_BYTES: usize = 7;
 

@@ -1,6 +1,6 @@
 use super::*;
 use async_trait::async_trait;
-use hashtree_core::MemoryStore;
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, MemoryStore};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -61,6 +61,147 @@ fn mock_network_lock() -> &'static tokio::sync::Mutex<()> {
 
 fn make_test_store(local_store: Arc<MemoryStore>, node_id: &str) -> TestStore {
     make_test_store_with_routing(local_store, node_id, MeshRoutingConfig::default())
+}
+
+#[tokio::test]
+async fn blob_route_htl_zero_is_strictly_local() {
+    let local = Arc::new(MemoryStore::new());
+    let route = make_test_store(local.clone(), "blob-route-local");
+    let local_data = b"local blob route data".to_vec();
+    let local_hash = hashtree_core::sha256(&local_data);
+    local
+        .put(local_hash, local_data.clone())
+        .await
+        .expect("put local data");
+
+    assert_eq!(
+        route
+            .route(BlobRequest {
+                hash: local_hash,
+                htl: 0,
+            })
+            .await
+            .expect("route local hit"),
+        BlobReply::Data(local_data),
+    );
+
+    let source_data = b"must not be queried at htl zero".to_vec();
+    let source_hash = hashtree_core::sha256(&source_data);
+    let source_store = Arc::new(MemoryStore::new());
+    source_store
+        .put(source_hash, source_data)
+        .await
+        .expect("put source data");
+    let source_calls = Arc::new(AtomicUsize::new(0));
+    route
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "terminal-source",
+            source_store,
+            source_calls.clone(),
+            Duration::ZERO,
+        ))])
+        .await;
+
+    assert_eq!(
+        route
+            .route(BlobRequest {
+                hash: source_hash,
+                htl: 0,
+            })
+            .await
+            .expect("route local miss"),
+        BlobReply::NoResult,
+    );
+    assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn blob_route_terminal_source_hit_is_verified_and_cached() {
+    let local = Arc::new(MemoryStore::new());
+    let route = make_test_store(local.clone(), "blob-route-source");
+    let data = b"verified terminal source data".to_vec();
+    let hash = hashtree_core::sha256(&data);
+    let source_store = Arc::new(MemoryStore::new());
+    source_store
+        .put(hash, data.clone())
+        .await
+        .expect("put source data");
+    route
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "terminal-source",
+            source_store,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::ZERO,
+        ))])
+        .await;
+
+    assert_eq!(
+        route
+            .route(BlobRequest { hash, htl: 1 })
+            .await
+            .expect("route source hit"),
+        BlobReply::Data(data.clone()),
+    );
+    assert_eq!(local.get(&hash).await.expect("get cached data"), Some(data));
+}
+
+#[tokio::test]
+async fn blob_route_timeout_and_corruption_are_not_no_result() {
+    let timeout_local = Arc::new(MemoryStore::new());
+    let timeout_route = make_test_store(timeout_local, "blob-route-timeout");
+    let timeout_data = b"late terminal source data".to_vec();
+    let timeout_hash = hashtree_core::sha256(&timeout_data);
+    let timeout_source = Arc::new(MemoryStore::new());
+    timeout_source
+        .put(timeout_hash, timeout_data)
+        .await
+        .expect("put timeout source data");
+    timeout_route
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "slow-source",
+            timeout_source,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::from_millis(300),
+        ))])
+        .await;
+    assert!(
+        timeout_route
+            .route(BlobRequest {
+                hash: timeout_hash,
+                htl: 1,
+            })
+            .await
+            .is_err(),
+        "an incomplete timed-out search must be an error",
+    );
+
+    let corrupt_local = Arc::new(MemoryStore::new());
+    let corrupt_route = make_test_store(corrupt_local, "blob-route-corrupt");
+    let expected = b"expected source data".to_vec();
+    let expected_hash = hashtree_core::sha256(&expected);
+    let corrupt_source = Arc::new(MemoryStore::new());
+    corrupt_source
+        .put(expected_hash, b"wrong source data".to_vec())
+        .await
+        .expect("put corrupt source data");
+    corrupt_route
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "corrupt-source",
+            corrupt_source,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::ZERO,
+        ))])
+        .await;
+    assert!(
+        corrupt_route
+            .route(BlobRequest {
+                hash: expected_hash,
+                htl: 1,
+            })
+            .await
+            .is_err(),
+        "a corrupt response must be an error",
+    );
 }
 
 fn make_test_store_with_routing(
@@ -1405,8 +1546,11 @@ async fn test_read_source_timeout_records_timeout_not_miss() {
         )) as Arc<dyn MeshReadSource>])
         .await;
 
-    let result = store.get(&hash).await.expect("get");
-    assert!(result.is_none());
+    let error = store
+        .get(&hash)
+        .await
+        .expect_err("a timed-out search must remain incomplete");
+    assert!(error.to_string().contains("deadline expired"));
 
     let stats = store.read_source_stats.read().await;
     let route = stats.get("slow").expect("slow source stats");
@@ -1958,6 +2102,48 @@ async fn test_forwarded_request_with_exhausted_htl_does_not_forward_to_peers() {
 }
 
 #[tokio::test]
+async fn test_blob_request_forwarding_decrements_htl_exactly_once() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let gateway = make_shared_test_node(relay.clone(), "a-gateway", MeshRoutingConfig::default());
+    let provider = make_shared_test_node(relay, "b-provider", MeshRoutingConfig::default());
+    let nodes = [&gateway, &provider];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    let hash = hashtree_core::sha256(b"exact-htl-decrement");
+    let provider_channel = provider
+        .store
+        .signaling()
+        .get_channel("a-gateway")
+        .await
+        .expect("provider channel");
+
+    for (request_htl, expected_wire_htl) in [(1, 0), (3, 2), (MAX_HTL, MAX_HTL - 1)] {
+        assert!(
+            gateway
+                .store
+                .send_request_to_peer("b-provider", &hash, request_htl, None)
+                .await,
+            "request should be sent",
+        );
+        let bytes = provider_channel.try_recv().expect("forwarded request");
+        let DataMessage::Request(request) = parse_message(&bytes).expect("request message") else {
+            panic!("forwarding must send a blob request");
+        };
+        assert_eq!(request.htl, expected_wire_htl);
+    }
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
 async fn test_forwarded_request_can_be_served_from_another_peer() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;
@@ -1990,7 +2176,7 @@ async fn test_forwarded_request_can_be_served_from_another_peer() {
 }
 
 #[tokio::test]
-async fn test_recent_forward_miss_suppresses_immediate_reforward() {
+async fn test_incomplete_forwarded_search_can_retry_immediately() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;
 
@@ -2025,8 +2211,6 @@ async fn test_recent_forward_miss_suppresses_immediate_reforward() {
         .read()
         .await
         .contains_key(&hash_key));
-    assert!(gateway.store.was_recent_forward_miss(&hash_key).await);
-
     gateway
         .store
         .handle_request_message("requester", create_request(&hash, MAX_HTL))
@@ -2035,8 +2219,8 @@ async fn test_recent_forward_miss_suppresses_immediate_reforward() {
     tokio::task::yield_now().await;
     let second_attempt = provider.store.drain_available_data_messages().await;
     assert_eq!(
-        second_attempt.request_messages, 0,
-        "gateway should suppress immediate reflood of a recently missed hash",
+        second_attempt.request_messages, 1,
+        "silence is not an authoritative miss and must not suppress retry",
     );
 
     crate::mock::clear_channel_registry().await;

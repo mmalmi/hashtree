@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use fips_core::discovery::local::rank_capability_providers;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use hashtree_core::store::StoreStats;
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError, BLOB_DEFAULT_HTL};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::task::JoinSet;
@@ -27,6 +27,8 @@ pub struct SameHostBlobStoreConfig {
     pub advertise_priority: Option<i16>,
     /// Maximum number of ranked provider hints attempted for one cache miss.
     pub max_provider_attempts: usize,
+    /// Hashtree search budget for the application's standalone fallback route.
+    pub standalone_htl: u8,
     /// TCP/FIPS actor progress limits.
     pub transport: TcpBlobTransportConfig,
 }
@@ -48,6 +50,11 @@ impl SameHostBlobStoreConfig {
         self.transport = transport;
         self
     }
+
+    pub fn with_standalone_htl(mut self, standalone_htl: u8) -> Self {
+        self.standalone_htl = standalone_htl;
+        self
+    }
 }
 
 impl Default for SameHostBlobStoreConfig {
@@ -55,6 +62,7 @@ impl Default for SameHostBlobStoreConfig {
         Self {
             advertise_priority: None,
             max_provider_attempts: 4,
+            standalone_htl: BLOB_DEFAULT_HTL,
             transport: TcpBlobTransportConfig::default(),
         }
     }
@@ -84,6 +92,7 @@ pub struct SameHostBlobStore<S: Store + ?Sized + 'static> {
     standalone: Option<Arc<dyn BlobRoute>>,
     transport: Arc<TcpBlobTransport<S>>,
     max_provider_attempts: usize,
+    standalone_htl: u8,
 }
 
 impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
@@ -126,6 +135,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
             standalone,
             transport: Arc::new(transport),
             max_provider_attempts: config.max_provider_attempts,
+            standalone_htl: config.standalone_htl,
         })
     }
 
@@ -185,7 +195,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
         let data = match standalone
             .route(BlobRequest {
                 hash: *hash,
-                htl: 0,
+                htl: self.standalone_htl,
             })
             .await?
         {

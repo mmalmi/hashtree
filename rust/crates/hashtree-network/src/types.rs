@@ -272,8 +272,8 @@ pub enum DataMessage {
     },
 }
 
-/// HTL (Hops To Live) constants - Freenet-style probabilistic decrement
-pub const MAX_HTL: u8 = 10;
+/// Default HTL (Hops To Live) budget for mesh blob retrieval.
+pub const MAX_HTL: u8 = hashtree_core::BLOB_DEFAULT_HTL;
 /// Probability to decrement at max HTL (50%)
 pub const DECREMENT_AT_MAX_PROB: f64 = 0.5;
 /// Probability to decrement at min HTL=1 (25%)
