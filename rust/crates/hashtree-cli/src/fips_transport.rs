@@ -31,6 +31,7 @@ pub type DaemonBlobResolver = BlobResolver<StorageRouter>;
 type DaemonBlobTransport = TcpBlobTransport<StorageRouter>;
 
 const DAEMON_SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
+const BLOB_RESOLVER_REPLY_MARGIN: Duration = Duration::from_secs(1);
 
 pub struct DaemonFipsHandle {
     pub transport: Arc<DaemonFipsTransport>,
@@ -166,7 +167,7 @@ async fn bind_daemon_blob_resolver(
             endpoint.native_endpoint.clone(),
             store,
             resolver.clone(),
-            TcpBlobTransportConfig::default(),
+            blob_transport_config(request_timeout),
             DAEMON_SAME_HOST_PROVIDER_PRIORITY,
         )
         .await
@@ -176,7 +177,7 @@ async fn bind_daemon_blob_resolver(
         .iter()
         .filter_map(|peer| {
             let identity = PeerIdentity::from_npub(&peer.npub).ok()?;
-            let route: Arc<dyn BlobRoute> = Arc::new(transport.route_to(identity));
+            let route: Arc<dyn BlobRoute> = Arc::new(transport.weak_route_to(identity));
             Some(
                 Arc::new(NamedBlobRoute::mesh_peer(peer.npub.clone(), route))
                     as Arc<dyn MeshReadSource>,
@@ -185,6 +186,12 @@ async fn bind_daemon_blob_resolver(
         .collect();
     resolver.set_read_sources(routes).await;
     Ok((resolver, transport))
+}
+
+fn blob_transport_config(resolver_timeout: Duration) -> TcpBlobTransportConfig {
+    TcpBlobTransportConfig {
+        idle_timeout: resolver_timeout.saturating_add(BLOB_RESOLVER_REPLY_MARGIN),
+    }
 }
 
 pub async fn start_daemon_nostr_provider(
@@ -732,6 +739,13 @@ mod tests {
                 FipsPeerConfig::new("followed"),
             ]
         );
+    }
+
+    #[test]
+    fn blob_carrier_deadline_outlives_the_complete_resolver_budget() {
+        for resolver_timeout in [Duration::from_millis(1), Duration::from_secs(20)] {
+            assert!(blob_transport_config(resolver_timeout).idle_timeout > resolver_timeout);
+        }
     }
 
     #[cfg(feature = "experimental-decentralized-pubsub")]

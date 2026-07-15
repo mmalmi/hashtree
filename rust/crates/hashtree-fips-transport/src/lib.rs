@@ -19,8 +19,9 @@ mod tcp_blob;
 pub use fips_core::PeerIdentity;
 pub use same_host::{SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError};
 pub use tcp_blob::{
-    TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig, TcpBlobTransportError,
-    TCP_BLOB_CAPABILITY, TCP_BLOB_MAX_BYTES, TCP_BLOB_SERVICE_PORT,
+    InboundBlobPolicy, TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig,
+    TcpBlobTransportError, WeakTcpBlobPeerRoute, TCP_BLOB_CAPABILITY, TCP_BLOB_MAX_BYTES,
+    TCP_BLOB_SERVICE_PORT,
 };
 
 #[cfg(feature = "legacy-mesh")]

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use hashtree_core::{
     decode_blob_reply_header, decode_blob_request, encode_blob_reply_header, encode_blob_request,
     BlobReply, BlobReplyHeader, BlobRequest, BlobRoute, Hash, Store, StoreBlobRoute, StoreError,
-    BLOB_MAX_BYTES,
+    BLOB_MAX_BYTES, BLOB_MAX_HTL,
 };
 use sha2::Digest;
 
@@ -48,6 +48,10 @@ fn compact_codec_rejects_noncanonical_frames() {
     });
     request[0] = 0;
     assert!(decode_blob_request(&request).is_err());
+    for invalid_htl in [BLOB_MAX_HTL + 1, u8::MAX] {
+        request[0..4].copy_from_slice(&[0x48, 1, 1, invalid_htl]);
+        assert!(decode_blob_request(&request).is_err());
+    }
     assert!(decode_blob_reply_header(&[0x48, 1, 0, 0, 0, 0, 1]).is_err());
     assert!(decode_blob_reply_header(&[0x48, 1, 2, 0, 0, 0, 0]).is_err());
     assert!(decode_blob_reply_header(&[0x48, 1, 1, 1, 0, 0, 1]).is_err());
@@ -83,6 +87,36 @@ async fn terminal_store_route_ignores_htl_and_reads_once() {
         gets: AtomicUsize::new(0),
     }));
     assert!(failing.route(BlobRequest { hash, htl: 3 }).await.is_err());
+}
+
+#[tokio::test]
+async fn terminal_store_route_rejects_corrupt_and_oversized_data() {
+    let expected_hash: Hash = sha2::Sha256::digest(b"expected").into();
+    let corrupt = StoreBlobRoute::new(Arc::new(CountingStore {
+        result: GetResult::Data(b"wrong".to_vec()),
+        gets: AtomicUsize::new(0),
+    }));
+    assert!(corrupt
+        .route(BlobRequest {
+            hash: expected_hash,
+            htl: 0,
+        })
+        .await
+        .is_err());
+
+    let oversized_data = vec![0x55; BLOB_MAX_BYTES + 1];
+    let oversized_hash: Hash = sha2::Sha256::digest(&oversized_data).into();
+    let oversized = StoreBlobRoute::new(Arc::new(CountingStore {
+        result: GetResult::Data(oversized_data),
+        gets: AtomicUsize::new(0),
+    }));
+    assert!(oversized
+        .route(BlobRequest {
+            hash: oversized_hash,
+            htl: 0,
+        })
+        .await
+        .is_err());
 }
 
 struct CountingStore {

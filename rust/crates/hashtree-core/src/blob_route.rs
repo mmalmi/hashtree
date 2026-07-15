@@ -8,8 +8,10 @@ use thiserror::Error;
 use crate::{Hash, Store, StoreError};
 
 pub const BLOB_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum number of Hashtree mesh forwarding hops accepted by the protocol.
+pub const BLOB_MAX_HTL: u8 = 10;
 /// Default Hashtree mesh-search budget used by standalone resolvers.
-pub const BLOB_DEFAULT_HTL: u8 = 10;
+pub const BLOB_DEFAULT_HTL: u8 = BLOB_MAX_HTL;
 pub const BLOB_REQUEST_BYTES: usize = 36;
 pub const BLOB_REPLY_HEADER_BYTES: usize = 7;
 
@@ -50,6 +52,17 @@ impl<S: Store + ?Sized> StoreBlobRoute<S> {
 impl<S: Store + ?Sized + 'static> BlobRoute for StoreBlobRoute<S> {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
         Ok(match self.store.get(&request.hash).await? {
+            Some(data) if data.len() > BLOB_MAX_BYTES => {
+                return Err(StoreError::Other(format!(
+                    "blob route returned {} bytes, exceeding the {BLOB_MAX_BYTES}-byte limit",
+                    data.len()
+                )));
+            }
+            Some(data) if crate::sha256(&data) != request.hash => {
+                return Err(StoreError::Other(
+                    "blob route returned content with the wrong hash".to_string(),
+                ));
+            }
             Some(data) => BlobReply::Data(data),
             None => BlobReply::NoResult,
         })
@@ -68,6 +81,8 @@ pub enum BlobCodecError {
     Invalid(&'static str),
     #[error("Hashtree blob size {0} exceeds the 16 MiB limit")]
     BlobTooLarge(usize),
+    #[error("Hashtree blob HTL {0} exceeds the maximum of {BLOB_MAX_HTL}")]
+    HtlTooLarge(u8),
 }
 
 pub fn encode_blob_request(request: &BlobRequest) -> [u8; BLOB_REQUEST_BYTES] {
@@ -85,6 +100,9 @@ pub fn decode_blob_request(bytes: &[u8]) -> Result<BlobRequest, BlobCodecError> 
         return Err(BlobCodecError::Invalid(
             "request has an unsupported prelude",
         ));
+    }
+    if bytes[3] > BLOB_MAX_HTL {
+        return Err(BlobCodecError::HtlTooLarge(bytes[3]));
     }
     let mut hash = [0; 32];
     hash.copy_from_slice(&bytes[4..]);

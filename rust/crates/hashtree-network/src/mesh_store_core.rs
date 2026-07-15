@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError, BLOB_MAX_BYTES};
 
 use crate::peer_selector::{PeerMetadataSnapshot, PeerSelector, SelectionStrategy};
 use crate::protocol::{
@@ -2581,7 +2581,7 @@ where
         self.reserve_peer_request(peer_id).await;
 
         if let Ok(Ok(Some(data))) = tokio::time::timeout(self.request_timeout, &mut rx).await {
-            if hashtree_core::sha256(&data) == *hash {
+            if data.len() <= BLOB_MAX_BYTES && hashtree_core::sha256(&data) == *hash {
                 let _ = self.local_store.put(*hash, data.clone()).await;
                 return Some(data);
             }
@@ -2648,7 +2648,10 @@ where
                 async move {
                     let mut rx = rx.lock().await;
                     match tokio::time::timeout(wait, &mut *rx).await {
-                        Ok(Ok(Some(data))) if hashtree_core::sha256(&data) == *hash => {
+                        Ok(Ok(Some(data)))
+                            if data.len() <= BLOB_MAX_BYTES
+                                && hashtree_core::sha256(&data) == *hash =>
+                        {
                             HedgedWaveAction::Success(data)
                         }
                         Ok(Ok(Some(_))) => HedgedWaveAction::Continue,
@@ -2725,7 +2728,8 @@ where
                         .await;
                     match result {
                         Ok(Ok(BlobReply::Data(data)))
-                            if hashtree_core::sha256(&data) == source_request.hash =>
+                            if data.len() <= BLOB_MAX_BYTES
+                                && hashtree_core::sha256(&data) == source_request.hash =>
                         {
                             SourceFetchOutcome::Hit {
                                 source_id,
@@ -3228,6 +3232,9 @@ where
         from_peer: &str,
         req: crate::protocol::DataRequest,
     ) {
+        if req.htl > MAX_HTL {
+            return;
+        }
         let hash = match crate::protocol::bytes_to_hash(&req.h) {
             Some(h) => h,
             None => return,
@@ -3253,33 +3260,34 @@ where
 
         // Check local store
         if let Ok(Some(mut data)) = self.local_store.get(&hash).await {
-            if self.should_drop_response(&hash) {
-                if self.debug {
-                    println!(
-                        "[MeshStoreCore] Dropping response for {} due to actor profile",
-                        hash_to_key(&hash)
-                    );
+            if data.len() <= BLOB_MAX_BYTES && hashtree_core::sha256(&data) == hash {
+                if self.should_drop_response(&hash) {
+                    if self.debug {
+                        println!(
+                            "[MeshStoreCore] Dropping response for {} due to actor profile",
+                            hash_to_key(&hash)
+                        );
+                    }
+                    return;
                 }
+
+                let response_delay = self.response_send_delay(&hash, data.len());
+                if self.should_corrupt_response(&hash) {
+                    if data.is_empty() {
+                        data.push(0x80);
+                    } else {
+                        data[0] ^= 0x80;
+                    }
+                }
+
+                let res = create_response(&hash, data);
+                let response_bytes = encode_response(&res);
+                let ready_at = Instant::now() + response_delay;
+                Arc::clone(self)
+                    .enqueue_response_send(from_peer.to_string(), response_bytes, ready_at)
+                    .await;
                 return;
             }
-
-            let response_delay = self.response_send_delay(&hash, data.len());
-            if self.should_corrupt_response(&hash) {
-                if data.is_empty() {
-                    data.push(0x80);
-                } else {
-                    data[0] ^= 0x80;
-                }
-            }
-
-            // Send response
-            let res = create_response(&hash, data);
-            let response_bytes = encode_response(&res);
-            let ready_at = Instant::now() + response_delay;
-            Arc::clone(self)
-                .enqueue_response_send(from_peer.to_string(), response_bytes, ready_at)
-                .await;
-            return;
         }
 
         if self.pending_requests.read().await.contains_key(&hash_key) {
@@ -3585,7 +3593,19 @@ where
     F: PeerLinkFactory + Send + Sync + 'static,
 {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        if request.htl > MAX_HTL {
+            return Err(StoreError::Other(format!(
+                "Hashtree blob HTL {} exceeds the maximum of {MAX_HTL}",
+                request.htl
+            )));
+        }
         if let Some(data) = self.local_store.get(&request.hash).await? {
+            if data.len() > BLOB_MAX_BYTES {
+                return Err(StoreError::Other(format!(
+                    "local store returned {} bytes, exceeding the {BLOB_MAX_BYTES}-byte limit",
+                    data.len()
+                )));
+            }
             if hashtree_core::sha256(&data) != request.hash {
                 return Err(StoreError::Other(
                     "local store returned corrupt content".to_string(),
@@ -3607,6 +3627,12 @@ where
             .await
         {
             RouteFetchOutcome::Hit(data) => {
+                if data.len() > BLOB_MAX_BYTES {
+                    return Err(StoreError::Other(format!(
+                        "blob route returned {} bytes, exceeding the {BLOB_MAX_BYTES}-byte limit",
+                        data.len()
+                    )));
+                }
                 if hashtree_core::sha256(&data) != request.hash {
                     return Err(StoreError::Other(
                         "blob route returned corrupt content".to_string(),

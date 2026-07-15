@@ -1,18 +1,20 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use fips_core::discovery::local::rank_capability_providers;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use hashtree_core::store::StoreStats;
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError, BLOB_DEFAULT_HTL};
+use hashtree_core::{
+    BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError, BLOB_DEFAULT_HTL, BLOB_MAX_HTL,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::task::JoinSet;
 
 use crate::tcp_blob::MAX_OUTBOUND_GETS;
 use crate::{
-    TcpBlobTransport, TcpBlobTransportConfig, TcpBlobTransportError, TCP_BLOB_CAPABILITY,
-    TCP_BLOB_SERVICE_PORT,
+    InboundBlobPolicy, TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig,
+    TcpBlobTransportError, WeakTcpBlobPeerRoute, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT,
 };
 
 fn verify_hash(data: &[u8], expected: &Hash) -> bool {
@@ -83,6 +85,8 @@ pub enum SameHostBlobStoreError {
     NoProviderAttempts,
     #[error("same-host blob store may attempt at most {MAX_OUTBOUND_GETS} providers, got {0}")]
     TooManyProviderAttempts(usize),
+    #[error("same-host Hashtree search HTL {0} exceeds the maximum of {BLOB_MAX_HTL}")]
+    HtlTooLarge(u8),
     #[error(transparent)]
     Transport(#[from] TcpBlobTransportError),
 }
@@ -97,7 +101,7 @@ pub enum SameHostBlobStoreError {
 pub struct SameHostBlobStore<S: Store + ?Sized + 'static> {
     endpoint: Arc<FipsEndpoint>,
     local: Arc<S>,
-    standalone: Option<Arc<dyn BlobRoute>>,
+    standalone: RwLock<Option<Arc<dyn BlobRoute>>>,
     transport: Arc<TcpBlobTransport<S>>,
     max_provider_attempts: usize,
     provider_htl: u8,
@@ -111,6 +115,33 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
         standalone: Option<Arc<dyn BlobRoute>>,
         config: SameHostBlobStoreConfig,
     ) -> Result<Self, SameHostBlobStoreError> {
+        let inbound_route = Arc::new(hashtree_core::StoreBlobRoute::new(local.clone()));
+        let inbound_policy: InboundBlobPolicy = if config.advertise_priority.is_some() {
+            Arc::new(|_| true)
+        } else {
+            Arc::new(|_| false)
+        };
+        Self::bind_route_with_policy(
+            endpoint,
+            local,
+            standalone,
+            inbound_route,
+            inbound_policy,
+            config,
+        )
+        .await
+    }
+
+    /// Bind one TCP/FIPS blob service for provider discovery, standalone peer
+    /// routes, and an application-authorized inbound route.
+    pub async fn bind_route_with_policy(
+        endpoint: Arc<FipsEndpoint>,
+        local: Arc<S>,
+        standalone: Option<Arc<dyn BlobRoute>>,
+        inbound_route: Arc<dyn BlobRoute>,
+        inbound_policy: InboundBlobPolicy,
+        config: SameHostBlobStoreConfig,
+    ) -> Result<Self, SameHostBlobStoreError> {
         if config.max_provider_attempts == 0 {
             return Err(SameHostBlobStoreError::NoProviderAttempts);
         }
@@ -119,21 +150,29 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
                 config.max_provider_attempts,
             ));
         }
+        let requested_htl = config.provider_htl.max(config.standalone_htl);
+        if requested_htl > BLOB_MAX_HTL {
+            return Err(SameHostBlobStoreError::HtlTooLarge(requested_htl));
+        }
         let transport = match config.advertise_priority {
             Some(priority) => {
-                TcpBlobTransport::bind_advertised_with_config(
+                TcpBlobTransport::bind_advertised_route_with_config_and_policy(
                     endpoint.clone(),
                     local.clone(),
+                    inbound_route,
                     config.transport,
                     priority,
+                    inbound_policy,
                 )
                 .await?
             }
             None => {
-                TcpBlobTransport::bind_client_with_config(
+                TcpBlobTransport::bind_route_with_config_and_policy(
                     endpoint.clone(),
                     local.clone(),
+                    inbound_route,
                     config.transport,
+                    inbound_policy,
                 )
                 .await?
             }
@@ -141,7 +180,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
         Ok(Self {
             endpoint,
             local,
-            standalone,
+            standalone: RwLock::new(standalone),
             transport: Arc::new(transport),
             max_provider_attempts: config.max_provider_attempts,
             provider_htl: config.provider_htl,
@@ -151,6 +190,21 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
 
     pub fn local_store(&self) -> &Arc<S> {
         &self.local
+    }
+
+    pub fn peer_route(&self, peer: PeerIdentity) -> TcpBlobPeerRoute<S> {
+        self.transport.route_to(peer)
+    }
+
+    pub fn weak_peer_route(&self, peer: PeerIdentity) -> WeakTcpBlobPeerRoute<S> {
+        self.transport.weak_route_to(peer)
+    }
+
+    pub fn set_standalone_route(&self, route: Option<Arc<dyn BlobRoute>>) {
+        *self
+            .standalone
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = route;
     }
 
     fn provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
@@ -199,7 +253,12 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
     }
 
     async fn standalone_get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
-        let Some(standalone) = self.standalone.as_ref() else {
+        let standalone = self
+            .standalone
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(standalone) = standalone else {
             return Ok(None);
         };
         let data = match standalone

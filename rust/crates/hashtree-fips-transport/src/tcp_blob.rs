@@ -11,7 +11,8 @@ use fips_tcp_endpoint::FipsTcpEndpoint;
 use hashtree_core::{
     decode_blob_reply_header, decode_blob_request, encode_blob_reply_header, encode_blob_request,
     BlobCodecError, BlobReply, BlobReplyHeader, BlobRequest, BlobRoute, Hash, MemoryStore, Store,
-    StoreBlobRoute, StoreError, BLOB_MAX_BYTES, BLOB_REPLY_HEADER_BYTES, BLOB_REQUEST_BYTES,
+    StoreBlobRoute, StoreError, BLOB_MAX_BYTES, BLOB_MAX_HTL, BLOB_REPLY_HEADER_BYTES,
+    BLOB_REQUEST_BYTES,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -54,8 +55,27 @@ pub struct TcpBlobTransport<S: Store + ?Sized + 'static = MemoryStore> {
 
 /// One authenticated peer exposed through the shared blob-routing contract.
 pub struct TcpBlobPeerRoute<S: Store + ?Sized + 'static = MemoryStore> {
+    transport: Arc<TcpBlobTransport<S>>,
+    peer: PeerIdentity,
+}
+
+/// A non-owning peer route for compositions where the transport's inbound
+/// route points back to the resolver that contains this route.
+pub struct WeakTcpBlobPeerRoute<S: Store + ?Sized + 'static = MemoryStore> {
     transport: Weak<TcpBlobTransport<S>>,
     peer: PeerIdentity,
+}
+
+/// Synchronous admission policy evaluated for every authenticated inbound
+/// blob session. Captured state may be updated by the owning application.
+pub type InboundBlobPolicy = Arc<dyn Fn(PeerIdentity) -> bool + Send + Sync>;
+
+fn allow_all_inbound() -> InboundBlobPolicy {
+    Arc::new(|_| true)
+}
+
+fn deny_all_inbound() -> InboundBlobPolicy {
+    Arc::new(|_| false)
 }
 
 /// Runtime limits for a TCP/FIPS blob service.
@@ -117,7 +137,15 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         transport_config: TcpBlobTransportConfig,
     ) -> Result<Self, TcpBlobTransportError> {
         let route = Arc::new(StoreBlobRoute::new(store.clone()));
-        Self::bind_internal(endpoint, store, route, transport_config, None, true).await
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            None,
+            allow_all_inbound(),
+        )
+        .await
     }
 
     /// Bind a blob service backed by a route that may resolve beyond the local
@@ -138,7 +166,35 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         route: Arc<dyn BlobRoute>,
         transport_config: TcpBlobTransportConfig,
     ) -> Result<Self, TcpBlobTransportError> {
-        Self::bind_internal(endpoint, store, route, transport_config, None, true).await
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            None,
+            allow_all_inbound(),
+        )
+        .await
+    }
+
+    /// Bind a route-backed service with caller-owned authenticated-peer
+    /// admission. The policy is re-evaluated for each new inbound session.
+    pub async fn bind_route_with_config_and_policy(
+        endpoint: Arc<FipsEndpoint>,
+        store: Arc<S>,
+        route: Arc<dyn BlobRoute>,
+        transport_config: TcpBlobTransportConfig,
+        inbound_policy: InboundBlobPolicy,
+    ) -> Result<Self, TcpBlobTransportError> {
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            None,
+            inbound_policy,
+        )
+        .await
     }
 
     /// Bind a client-only transport that rejects every inbound TCP session.
@@ -148,7 +204,15 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         transport_config: TcpBlobTransportConfig,
     ) -> Result<Self, TcpBlobTransportError> {
         let route = Arc::new(StoreBlobRoute::new(store.clone()));
-        Self::bind_internal(endpoint, store, route, transport_config, None, false).await
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            None,
+            deny_all_inbound(),
+        )
+        .await
     }
 
     /// Bind and advertise this store as a reusable same-host blob service.
@@ -165,7 +229,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
             route,
             transport_config,
             Some(priority),
-            true,
+            allow_all_inbound(),
         )
         .await
     }
@@ -184,7 +248,28 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
             route,
             transport_config,
             Some(priority),
-            true,
+            allow_all_inbound(),
+        )
+        .await
+    }
+
+    /// Bind and advertise a route-backed service with caller-owned
+    /// authenticated-peer admission.
+    pub async fn bind_advertised_route_with_config_and_policy(
+        endpoint: Arc<FipsEndpoint>,
+        store: Arc<S>,
+        route: Arc<dyn BlobRoute>,
+        transport_config: TcpBlobTransportConfig,
+        priority: i16,
+        inbound_policy: InboundBlobPolicy,
+    ) -> Result<Self, TcpBlobTransportError> {
+        Self::bind_internal(
+            endpoint,
+            store,
+            route,
+            transport_config,
+            Some(priority),
+            inbound_policy,
         )
         .await
     }
@@ -195,7 +280,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         route: Arc<dyn BlobRoute>,
         transport_config: TcpBlobTransportConfig,
         advertise_priority: Option<i16>,
-        serve_inbound: bool,
+        inbound_policy: InboundBlobPolicy,
     ) -> Result<Self, TcpBlobTransportError> {
         if transport_config.idle_timeout.is_zero() {
             return Err(TcpBlobTransportError::InvalidConfig(
@@ -224,7 +309,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let actor = TcpBlobActor {
             tcp,
-            serve_inbound,
+            inbound_policy,
             route,
             commands: command_rx,
             pending_commands: VecDeque::with_capacity(PENDING_COMMAND_CAPACITY),
@@ -291,6 +376,11 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         request: BlobRequest,
         peer: PeerIdentity,
     ) -> Result<BlobReply, TcpBlobTransportError> {
+        if request.htl > BLOB_MAX_HTL {
+            return Err(TcpBlobTransportError::Protocol(
+                "request HTL exceeds the Hashtree protocol bound",
+            ));
+        }
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Get {
@@ -305,6 +395,13 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
 
     pub fn route_to(self: &Arc<Self>, peer: PeerIdentity) -> TcpBlobPeerRoute<S> {
         TcpBlobPeerRoute {
+            transport: self.clone(),
+            peer,
+        }
+    }
+
+    pub fn weak_route_to(self: &Arc<Self>, peer: PeerIdentity) -> WeakTcpBlobPeerRoute<S> {
+        WeakTcpBlobPeerRoute {
             transport: Arc::downgrade(self),
             peer,
         }
@@ -330,6 +427,16 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
 
 #[async_trait]
 impl<S: Store + ?Sized + 'static> BlobRoute for TcpBlobPeerRoute<S> {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.transport
+            .request_from_peer(request, self.peer)
+            .await
+            .map_err(|error| StoreError::Other(error.to_string()))
+    }
+}
+
+#[async_trait]
+impl<S: Store + ?Sized + 'static> BlobRoute for WeakTcpBlobPeerRoute<S> {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
         self.transport
             .upgrade()
@@ -412,7 +519,7 @@ struct StoreLoad {
 
 struct TcpBlobActor {
     tcp: FipsTcpEndpoint,
-    serve_inbound: bool,
+    inbound_policy: InboundBlobPolicy,
     route: Arc<dyn BlobRoute>,
     commands: mpsc::Receiver<Command>,
     pending_commands: VecDeque<Command>,
@@ -608,7 +715,11 @@ impl TcpBlobActor {
 
     async fn accept_connections(&mut self, now_ms: u64) {
         while let Some(connection) = self.tcp.accept() {
-            if self.servers.len() >= MAX_SERVER_CONNECTIONS || !self.serve_inbound {
+            let authorized = self
+                .tcp
+                .peer(connection)
+                .is_some_and(|peer| (self.inbound_policy)(peer));
+            if self.servers.len() >= MAX_SERVER_CONNECTIONS || !authorized {
                 let _ = self.tcp.close(connection, now_ms).await;
                 continue;
             }
@@ -976,6 +1087,9 @@ fn codec_error(error: BlobCodecError) -> TcpBlobTransportError {
     match error {
         BlobCodecError::Invalid(message) => TcpBlobTransportError::Protocol(message),
         BlobCodecError::BlobTooLarge(size) => TcpBlobTransportError::BlobTooLarge(size),
+        BlobCodecError::HtlTooLarge(_) => {
+            TcpBlobTransportError::Protocol("request HTL exceeds the Hashtree protocol bound")
+        }
     }
 }
 

@@ -7,14 +7,14 @@ use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{Config, FipsEndpoint, PeerIdentity, UdpConfig};
 use hashtree_core::{
     BlobReply, BlobRequest, BlobRoute, Hash, MemoryStore, Store, StoreBlobRoute, StoreError,
-    BLOB_DEFAULT_HTL,
+    BLOB_DEFAULT_HTL, BLOB_MAX_HTL,
 };
 use hashtree_fips_transport::{
-    SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError, TcpBlobTransport,
-    TcpBlobTransportConfig, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT,
+    InboundBlobPolicy, SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError,
+    TcpBlobTransport, TcpBlobTransportConfig, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT,
 };
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::time::timeout;
 
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -59,6 +59,24 @@ async fn rejects_provider_fanout_above_the_actor_bound() {
     assert!(matches!(
         result,
         Err(SameHostBlobStoreError::TooManyProviderAttempts(5))
+    ));
+    endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejects_search_htl_above_the_protocol_bound() {
+    let endpoint = endpoint(rendezvous_addr(), "bounded-consumer-htl").await;
+    let result = SameHostBlobStore::bind(
+        endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        SameHostBlobStoreConfig::default().with_provider_htl(BLOB_MAX_HTL + 1),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(SameHostBlobStoreError::HtlTooLarge(value)) if value == BLOB_MAX_HTL + 1
     ));
     endpoint.shutdown().await.unwrap();
 }
@@ -129,6 +147,99 @@ async fn nonadvertised_client_store_rejects_inbound_blob_reads() {
     drop(private);
     requester_endpoint.shutdown().await.unwrap();
     private_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_inbound_policy_serves_only_authorized_peers_on_the_owned_transport() {
+    let rendezvous = rendezvous_addr();
+    let server_endpoint = endpoint(rendezvous, "drive-authorized-blob-server").await;
+    let requester_endpoint = endpoint(rendezvous, "drive-authorized-blob-requester").await;
+    let data = b"Drive serves its local blob only after application authorization".to_vec();
+    let content_hash = hash(&data);
+    let local = Arc::new(MemoryStore::new());
+    local.put(content_hash, data.clone()).await.unwrap();
+    let requester_identity = PeerIdentity::from_npub(requester_endpoint.npub()).unwrap();
+    let authorized = Arc::new(AtomicBool::new(false));
+    let policy: InboundBlobPolicy = {
+        let authorized = authorized.clone();
+        Arc::new(move |peer| peer == requester_identity && authorized.load(Ordering::Acquire))
+    };
+    let server = SameHostBlobStore::bind_route_with_policy(
+        server_endpoint.clone(),
+        local.clone(),
+        None,
+        Arc::new(StoreBlobRoute::new(local)),
+        policy,
+        SameHostBlobStoreConfig::default().with_transport(TcpBlobTransportConfig {
+            idle_timeout: Duration::from_millis(250),
+        }),
+    )
+    .await
+    .expect("bind policy-aware same-host store");
+    let requester = TcpBlobTransport::bind_with_config(
+        requester_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        TcpBlobTransportConfig {
+            idle_timeout: Duration::from_millis(250),
+        },
+    )
+    .await
+    .expect("bind requester");
+    wait_for_connection(&requester_endpoint, server_endpoint.npub()).await;
+    let server_identity = PeerIdentity::from_npub(server_endpoint.npub()).unwrap();
+
+    assert!(
+        requester
+            .fetch_from_peer(&content_hash, server_identity)
+            .await
+            .is_err(),
+        "unauthorized peer reached the inbound blob route"
+    );
+    authorized.store(true, Ordering::Release);
+    assert_eq!(
+        requester
+            .fetch_from_peer(&content_hash, server_identity)
+            .await
+            .unwrap(),
+        Some(data)
+    );
+
+    requester.shutdown().await.unwrap();
+    drop(server);
+    requester_endpoint.shutdown().await.unwrap();
+    server_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_standalone_route_reuses_the_same_owned_tcp_transport() {
+    let rendezvous = rendezvous_addr();
+    let source_endpoint = endpoint(rendezvous, "drive-standalone-source").await;
+    let drive_endpoint = endpoint(rendezvous, "drive-standalone-consumer").await;
+    let data = b"one owned transport supplies Drive's standalone route".to_vec();
+    let content_hash = hash(&data);
+    let source_local = Arc::new(MemoryStore::new());
+    source_local.put(content_hash, data.clone()).await.unwrap();
+    let source = TcpBlobTransport::bind(source_endpoint.clone(), source_local)
+        .await
+        .expect("bind source");
+    let drive = SameHostBlobStore::bind(
+        drive_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        SameHostBlobStoreConfig::default(),
+    )
+    .await
+    .expect("bind Drive store");
+    wait_for_connection(&drive_endpoint, source_endpoint.npub()).await;
+    let source_identity = PeerIdentity::from_npub(source_endpoint.npub()).unwrap();
+    drive.set_standalone_route(Some(Arc::new(drive.peer_route(source_identity))));
+
+    assert_eq!(drive.get(&content_hash).await.unwrap(), Some(data));
+
+    drop(drive);
+    source.shutdown().await.unwrap();
+    drive_endpoint.shutdown().await.unwrap();
+    source_endpoint.shutdown().await.unwrap();
 }
 
 #[tokio::test]

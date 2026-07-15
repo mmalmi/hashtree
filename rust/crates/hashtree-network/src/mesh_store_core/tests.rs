@@ -1,6 +1,6 @@
 use super::*;
 use async_trait::async_trait;
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, MemoryStore};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, MemoryStore, BLOB_MAX_BYTES, BLOB_MAX_HTL};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -147,6 +147,61 @@ async fn blob_route_htl_zero_is_strictly_local() {
         BlobReply::NoResult,
     );
     assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn blob_route_rejects_search_budgets_above_the_protocol_bound() {
+    let route = make_test_store(Arc::new(MemoryStore::new()), "bounded-blob-route");
+    let missing = hashtree_core::sha256(b"bounded HTL");
+
+    assert_eq!(
+        route
+            .route(BlobRequest {
+                hash: missing,
+                htl: BLOB_MAX_HTL,
+            })
+            .await
+            .unwrap(),
+        BlobReply::NoResult,
+    );
+    for invalid_htl in [BLOB_MAX_HTL + 1, u8::MAX] {
+        assert!(route
+            .route(BlobRequest {
+                hash: missing,
+                htl: invalid_htl,
+            })
+            .await
+            .is_err(),);
+    }
+}
+
+#[tokio::test]
+async fn blob_route_rejects_oversized_local_and_source_data() {
+    let data = vec![0x42; BLOB_MAX_BYTES + 1];
+    let hash = hashtree_core::sha256(&data);
+    let local = Arc::new(MemoryStore::new());
+    local.put(hash, data.clone()).await.unwrap();
+    let local_route = make_test_store(local, "oversized-local-route");
+    assert!(local_route
+        .route(BlobRequest { hash, htl: 0 })
+        .await
+        .is_err());
+
+    let source_store = Arc::new(MemoryStore::new());
+    source_store.put(hash, data).await.unwrap();
+    let source_route = make_test_store(Arc::new(MemoryStore::new()), "oversized-source-route");
+    source_route
+        .set_read_sources(vec![Arc::new(MockReadSource::new(
+            "oversized-source",
+            source_store,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::ZERO,
+        ))])
+        .await;
+    assert!(source_route
+        .route(BlobRequest { hash, htl: 1 })
+        .await
+        .is_err());
 }
 
 #[tokio::test]
