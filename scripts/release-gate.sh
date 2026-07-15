@@ -60,7 +60,7 @@ node --test "$repo_root/rust/tests/test_build_windows_vm_artifacts.mjs"
 
 pnpm --dir "$repo_root/ts" install --frozen-lockfile
 pnpm --dir "$repo_root/ts" test
-pnpm --dir "$repo_root/ts" run build:hashtree
+pnpm --dir "$repo_root/ts" run verify:fips-transport
 pnpm --dir "$repo_root/ts" lint
 
 (

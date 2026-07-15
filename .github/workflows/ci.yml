@@ -35,8 +35,8 @@ jobs:
       - name: Run unit tests
         run: pnpm test
 
-      - name: Build hashtree (required for type checking)
-        run: pnpm run build:hashtree
+      - name: Build hashtree and verify FIPS transport package
+        run: pnpm run verify:fips-transport
 
       - name: Run ESLint
         run: pnpm lint

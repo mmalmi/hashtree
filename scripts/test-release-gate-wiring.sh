@@ -30,6 +30,26 @@ grep -F 'needs: gate' .github/workflows/release.yml >/dev/null
 ! grep -F 'cargo test --workspace --tests' .github/workflows/ci.yml >/dev/null
 [ "$(grep -h 'libwebkit2gtk-4.1-dev' .github/workflows/ci.yml .github/workflows/release.yml | wc -l | tr -d ' ')" -eq 2 ]
 
+# The independently consumable FIPS transport has one canonical TypeScript
+# verification command. Both CI and the release gate must invoke it instead of
+# copying its build/test/lint sequence into multiple release paths.
+node --input-type=module <<'NODE'
+import fs from 'node:fs';
+
+const packageJson = JSON.parse(fs.readFileSync('ts/package.json', 'utf8'));
+const expected = [
+  'pnpm --filter @hashtree/fips-transport... build',
+  'pnpm --filter @hashtree/fips-transport test',
+  'pnpm --filter @hashtree/fips-transport lint',
+].join(' && ');
+
+if (packageJson.scripts?.['verify:fips-transport'] !== expected) {
+  throw new Error('ts/package.json must define the canonical FIPS transport gate');
+}
+NODE
+[ "$(grep -Fc 'pnpm run verify:fips-transport' .github/workflows/ci.yml)" -eq 1 ]
+[ "$(grep -Fc 'pnpm --dir "$repo_root/ts" run verify:fips-transport' scripts/release-gate.sh)" -eq 1 ]
+
 # Windows packaging must build every binary before copying it into the zip.
 grep -F 'name: Build release binaries (Windows)' .github/workflows/release.yml >/dev/null
 grep -F -- '-p git-remote-htree' .github/workflows/release.yml >/dev/null
