@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,7 +54,7 @@ pub struct TcpBlobTransport<S: Store + ?Sized + 'static = MemoryStore> {
 
 /// One authenticated peer exposed through the shared blob-routing contract.
 pub struct TcpBlobPeerRoute<S: Store + ?Sized + 'static = MemoryStore> {
-    transport: Arc<TcpBlobTransport<S>>,
+    transport: Weak<TcpBlobTransport<S>>,
     peer: PeerIdentity,
 }
 
@@ -305,7 +305,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
 
     pub fn route_to(self: &Arc<Self>, peer: PeerIdentity) -> TcpBlobPeerRoute<S> {
         TcpBlobPeerRoute {
-            transport: self.clone(),
+            transport: Arc::downgrade(self),
             peer,
         }
     }
@@ -332,6 +332,8 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
 impl<S: Store + ?Sized + 'static> BlobRoute for TcpBlobPeerRoute<S> {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
         self.transport
+            .upgrade()
+            .ok_or_else(|| StoreError::Other("TCP/FIPS blob transport is closed".to_string()))?
             .request_from_peer(request, self.peer)
             .await
             .map_err(|error| StoreError::Other(error.to_string()))

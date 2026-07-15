@@ -709,7 +709,9 @@ pub(crate) async fn run() -> Result<()> {
                 server = server.with_webrtc_peers(webrtc_state.clone());
             }
             if let Some(ref fips_handle) = fips_handle {
-                server = server.with_fips_transport(fips_handle.transport.clone());
+                server = server
+                    .with_fips_transport(fips_handle.transport.clone())
+                    .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
             }
 
             let background_services_controller = Arc::new(

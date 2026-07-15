@@ -407,6 +407,43 @@ async fn final_no_result_is_not_negative_cached() {
 }
 
 #[tokio::test]
+async fn configured_provider_htl_enters_the_same_canonical_route() {
+    let rendezvous = rendezvous_addr();
+    let provider_endpoint = endpoint(rendezvous, "route-aware-provider").await;
+    let consumer_endpoint = endpoint(rendezvous, "route-aware-consumer").await;
+    let provider_route = Arc::new(CountingNoResultRoute::default());
+    let provider = Arc::new(
+        TcpBlobTransport::bind_advertised_route_with_config(
+            provider_endpoint.clone(),
+            Arc::new(MemoryStore::new()),
+            provider_route.clone(),
+            TcpBlobTransportConfig::default(),
+            100,
+        )
+        .await
+        .expect("bind route-aware provider"),
+    );
+    let consumer = SameHostBlobStore::bind(
+        consumer_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        None,
+        SameHostBlobStoreConfig::default().with_provider_htl(3),
+    )
+    .await
+    .expect("bind route-aware consumer");
+    wait_for_provider(&consumer_endpoint, provider_endpoint.npub()).await;
+
+    assert_eq!(consumer.get(&[0xc3; 32]).await.unwrap(), None);
+    assert_eq!(provider_route.calls.load(Ordering::Acquire), 1);
+    assert_eq!(provider_route.last_htl.load(Ordering::Acquire), 3);
+
+    drop(consumer);
+    drop(provider);
+    consumer_endpoint.shutdown().await.unwrap();
+    provider_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn standalone_error_and_corrupt_data_remain_errors() {
     let consumer_endpoint = endpoint(rendezvous_addr(), "bad-standalone-consumer").await;
     let standalone = Arc::new(BadStandaloneRoute::default());

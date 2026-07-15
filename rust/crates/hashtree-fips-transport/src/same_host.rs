@@ -27,6 +27,8 @@ pub struct SameHostBlobStoreConfig {
     pub advertise_priority: Option<i16>,
     /// Maximum number of ranked provider hints attempted for one cache miss.
     pub max_provider_attempts: usize,
+    /// Search budget sent to same-host providers. Zero keeps lookup provider-local.
+    pub provider_htl: u8,
     /// Hashtree search budget for the application's standalone fallback route.
     pub standalone_htl: u8,
     /// TCP/FIPS actor progress limits.
@@ -51,6 +53,11 @@ impl SameHostBlobStoreConfig {
         self
     }
 
+    pub fn with_provider_htl(mut self, provider_htl: u8) -> Self {
+        self.provider_htl = provider_htl;
+        self
+    }
+
     pub fn with_standalone_htl(mut self, standalone_htl: u8) -> Self {
         self.standalone_htl = standalone_htl;
         self
@@ -62,6 +69,7 @@ impl Default for SameHostBlobStoreConfig {
         Self {
             advertise_priority: None,
             max_provider_attempts: 4,
+            provider_htl: 0,
             standalone_htl: BLOB_DEFAULT_HTL,
             transport: TcpBlobTransportConfig::default(),
         }
@@ -92,6 +100,7 @@ pub struct SameHostBlobStore<S: Store + ?Sized + 'static> {
     standalone: Option<Arc<dyn BlobRoute>>,
     transport: Arc<TcpBlobTransport<S>>,
     max_provider_attempts: usize,
+    provider_htl: u8,
     standalone_htl: u8,
 }
 
@@ -135,6 +144,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
             standalone,
             transport: Arc::new(transport),
             max_provider_attempts: config.max_provider_attempts,
+            provider_htl: config.provider_htl,
             standalone_htl: config.standalone_htl,
         })
     }
@@ -171,7 +181,7 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
             let route = self.transport.route_to(peer);
             let request = BlobRequest {
                 hash: *hash,
-                htl: 0,
+                htl: self.provider_htl,
             };
             attempts.spawn(async move { route.route(request).await });
         }

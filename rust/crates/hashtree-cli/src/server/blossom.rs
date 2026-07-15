@@ -2675,6 +2675,7 @@ mod tests {
             http_webrtc_fetch: true,
             webrtc_peers: None,
             fips_transport: None,
+            fips_blob_resolver: None,
             fetch_from_fips_peers: true,
             ws_relay: Arc::new(WsRelayState::new()),
             max_upload_bytes: 5 * 1024 * 1024,

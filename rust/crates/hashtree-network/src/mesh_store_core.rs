@@ -75,15 +75,63 @@ struct PendingResponseSend {
     queue_sequence: u64,
 }
 
-#[async_trait]
-pub trait MeshReadSource: Send + Sync {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobRouteKind {
+    Terminal,
+    MeshPeer,
+}
+
+pub trait MeshReadSource: BlobRoute {
     fn id(&self) -> &str;
+
+    fn kind(&self) -> BlobRouteKind {
+        BlobRouteKind::Terminal
+    }
 
     fn is_available(&self) -> bool {
         true
     }
+}
 
-    async fn get(&self, hash: &Hash) -> Option<Vec<u8>>;
+pub struct NamedBlobRoute {
+    id: String,
+    kind: BlobRouteKind,
+    route: Arc<dyn BlobRoute>,
+}
+
+impl NamedBlobRoute {
+    pub fn terminal(id: impl Into<String>, route: Arc<dyn BlobRoute>) -> Self {
+        Self {
+            id: id.into(),
+            kind: BlobRouteKind::Terminal,
+            route,
+        }
+    }
+
+    pub fn mesh_peer(id: impl Into<String>, route: Arc<dyn BlobRoute>) -> Self {
+        Self {
+            id: id.into(),
+            kind: BlobRouteKind::MeshPeer,
+            route,
+        }
+    }
+}
+
+#[async_trait]
+impl BlobRoute for NamedBlobRoute {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.route.route(request).await
+    }
+}
+
+impl MeshReadSource for NamedBlobRoute {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn kind(&self) -> BlobRouteKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -359,9 +407,9 @@ pub enum PubsubDeliveryMode {
 
 /// Request dispatch strategy for peer queries.
 ///
-/// `MeshStoreCore` supports two practical retrieval modes:
-/// - Flood (`usize::MAX` fanout): maximize success/latency at bandwidth cost.
-/// - Staged hedging: probe a subset first, then expand.
+/// Requests use bounded staged hedging by default. Callers may explicitly
+/// raise the cap for controlled simulations, but production never needs an
+/// unbounded sentinel.
 #[derive(Debug, Clone, Copy)]
 pub struct RequestDispatchConfig {
     /// Number of peers queried immediately.
@@ -377,10 +425,10 @@ pub struct RequestDispatchConfig {
 impl Default for RequestDispatchConfig {
     fn default() -> Self {
         Self {
-            initial_fanout: usize::MAX,
-            hedge_fanout: usize::MAX,
-            max_fanout: usize::MAX,
-            hedge_interval_ms: 0,
+            initial_fanout: 2,
+            hedge_fanout: 1,
+            max_fanout: 4,
+            hedge_interval_ms: 50,
         }
     }
 }
@@ -2628,7 +2676,10 @@ where
         RouteFetchOutcome::Hit(data)
     }
 
-    async fn request_from_read_sources_inner(&self, hash: &Hash) -> RouteFetchOutcome {
+    async fn request_from_read_sources_inner(&self, request: BlobRequest) -> RouteFetchOutcome {
+        if request.htl == 0 {
+            return RouteFetchOutcome::Miss;
+        }
         let ordered_sources = self.ordered_read_sources().await;
         if ordered_sources.is_empty() {
             return RouteFetchOutcome::Miss;
@@ -2658,25 +2709,34 @@ where
             for source in &ordered_sources[from..to] {
                 let source = Arc::clone(source);
                 let source_id = source.id().to_string();
+                let source_request = BlobRequest {
+                    hash: request.hash,
+                    htl: match source.kind() {
+                        BlobRouteKind::Terminal => request.htl,
+                        BlobRouteKind::MeshPeer => request.htl.saturating_sub(1),
+                    },
+                };
                 self.record_read_source_request(&source_id).await;
                 pending_source_ids.insert(source_id.clone());
-                let hash = *hash;
                 pending.push(tokio::spawn(async move {
                     let started_at = Instant::now();
-                    let result = std::panic::AssertUnwindSafe(source.get(&hash))
+                    let result = std::panic::AssertUnwindSafe(source.route(source_request))
                         .catch_unwind()
                         .await;
                     match result {
-                        Ok(Some(data)) if hashtree_core::sha256(&data) == hash => {
+                        Ok(Ok(BlobReply::Data(data)))
+                            if hashtree_core::sha256(&data) == source_request.hash =>
+                        {
                             SourceFetchOutcome::Hit {
                                 source_id,
                                 data,
                                 elapsed_ms: started_at.elapsed().as_millis().max(1) as u64,
                             }
                         }
-                        Ok(Some(_)) => SourceFetchOutcome::Failure { source_id },
-                        Ok(None) => SourceFetchOutcome::Miss { source_id },
-                        Err(_) => SourceFetchOutcome::Failure { source_id },
+                        Ok(Ok(BlobReply::NoResult)) => SourceFetchOutcome::Miss { source_id },
+                        Ok(Ok(BlobReply::Data(_)) | Err(_)) | Err(_) => {
+                            SourceFetchOutcome::Failure { source_id }
+                        }
                     }
                 }));
             }
@@ -2743,8 +2803,8 @@ where
         }
     }
 
-    async fn request_from_read_sources(&self, hash: &Hash) -> RouteFetchOutcome {
-        let hash_key = hash_to_key(hash);
+    async fn request_from_read_sources(&self, request: BlobRequest) -> RouteFetchOutcome {
+        let hash_key = format!("{}:{}", hash_to_key(&request.hash), request.htl);
         let existing_wait = {
             let mut inflight = self.inflight_source_fetches.lock().await;
             if let Some(existing) = inflight.get_mut(&hash_key) {
@@ -2766,9 +2826,9 @@ where
             return wait.await.unwrap_or(RouteFetchOutcome::Timeout);
         }
 
-        let result = self.request_from_read_sources_inner(hash).await;
+        let result = self.request_from_read_sources_inner(request).await;
         if let RouteFetchOutcome::Hit(hit) = &result {
-            let _ = self.local_store.put(*hash, hit.clone()).await;
+            let _ = self.local_store.put(request.hash, hit.clone()).await;
         }
         self.complete_inflight_source_fetch(&hash_key, result.clone())
             .await;
@@ -2797,11 +2857,16 @@ where
         }
     }
 
-    async fn cancel_losing_route(&self, hash: &Hash, route: &ReadRoute, winner_data: &[u8]) {
+    async fn cancel_losing_route(
+        &self,
+        request: BlobRequest,
+        route: &ReadRoute,
+        winner_data: &[u8],
+    ) {
         match route {
-            ReadRoute::Peers(_) => self.cancel_pending_peer_route(hash).await,
+            ReadRoute::Peers(_) => self.cancel_pending_peer_route(&request.hash).await,
             ReadRoute::Sources => {
-                let hash_key = hash_to_key(hash);
+                let hash_key = format!("{}:{}", hash_to_key(&request.hash), request.htl);
                 self.complete_inflight_source_fetch(
                     &hash_key,
                     RouteFetchOutcome::Hit(winner_data.to_vec()),
@@ -2887,7 +2952,13 @@ where
                 self.request_from_ordered_peers(hash, peer_ids, context.request_htl)
                     .await
             }
-            ReadRoute::Sources => self.request_from_read_sources(hash).await,
+            ReadRoute::Sources => {
+                self.request_from_read_sources(BlobRequest {
+                    hash: *hash,
+                    htl: context.request_htl,
+                })
+                .await
+            }
         }
     }
 
@@ -2915,7 +2986,14 @@ where
                                 first_done = true;
                                 if let RouteFetchOutcome::Hit(data) = &result {
                                     if !second_done {
-                                        self.cancel_losing_route(hash, &second.route, data).await;
+                                        self.cancel_losing_route(
+                                            BlobRequest {
+                                                hash: *hash,
+                                                htl: context.request_htl,
+                                            },
+                                            &second.route,
+                                            data,
+                                        ).await;
                                     }
                                     return result;
                                 }
@@ -2925,7 +3003,14 @@ where
                                 second_done = true;
                                 if let RouteFetchOutcome::Hit(data) = &result {
                                     if !first_done {
-                                        self.cancel_losing_route(hash, &first.route, data).await;
+                                        self.cancel_losing_route(
+                                            BlobRequest {
+                                                hash: *hash,
+                                                htl: context.request_htl,
+                                            },
+                                            &first.route,
+                                            data,
+                                        ).await;
                                     }
                                     return result;
                                 }
@@ -3223,7 +3308,11 @@ where
                         from_peer
                     );
                 }
-                this.request_from_read_sources(&hash).await
+                this.request_from_read_sources(BlobRequest {
+                    hash,
+                    htl: request_htl,
+                })
+                .await
             };
             let requester_ids = this.take_forward_requesters(&hash_key).await;
             match result {

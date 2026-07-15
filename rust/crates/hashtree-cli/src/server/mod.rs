@@ -163,6 +163,7 @@ impl HashtreeServer {
                 http_webrtc_fetch: true,
                 webrtc_peers: None,
                 fips_transport: None,
+                fips_blob_resolver: None,
                 fetch_from_fips_peers: true,
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
@@ -270,6 +271,14 @@ impl HashtreeServer {
         transport: Arc<crate::fips_transport::DaemonFipsTransport>,
     ) -> Self {
         self.state.fips_transport = Some(transport);
+        self
+    }
+
+    pub fn with_fips_blob_resolver(
+        mut self,
+        resolver: Arc<crate::fips_transport::DaemonBlobResolver>,
+    ) -> Self {
+        self.state.fips_blob_resolver = Some(resolver);
         self
     }
 

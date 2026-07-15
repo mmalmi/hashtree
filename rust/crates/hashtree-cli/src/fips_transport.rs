@@ -8,10 +8,14 @@ use crate::config::{Config, NostrEventTransport};
 use crate::nostr_relay::NostrRelay;
 use crate::storage::{HashtreeStore, StorageRouter};
 use anyhow::{Context, Result};
+use hashtree_core::BlobRoute;
 use hashtree_fips_transport::{
     bind_fips_endpoint, BoundFipsEndpoint, FipsEndpointOptions, FipsPeerConfig,
-    HashtreeFipsTransport, SameHostBlobStore, SameHostBlobStoreConfig,
+    HashtreeFipsTransport, PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig,
     DEFAULT_FIPS_DISCOVERY_SCOPE,
+};
+use hashtree_network::{
+    blob_resolver, BlobResolver, MeshReadSource, MeshRoutingConfig, NamedBlobRoute,
 };
 use nostr::nips::nip19::ToBech32;
 use nostr::PublicKey;
@@ -23,7 +27,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub type DaemonFipsTransport = HashtreeFipsTransport<StorageRouter>;
-type DaemonSameHostProvider = SameHostBlobStore<StorageRouter>;
+pub type DaemonBlobResolver = BlobResolver<StorageRouter>;
+type DaemonBlobTransport = TcpBlobTransport<StorageRouter>;
 
 const DAEMON_SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
 
@@ -32,15 +37,16 @@ pub struct DaemonFipsHandle {
     pub endpoint_npub: String,
     pub discovery_scope: String,
     pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,
-    same_host_provider: Mutex<Option<DaemonSameHostProvider>>,
+    pub blob_resolver: Arc<DaemonBlobResolver>,
+    blob_transport: Mutex<Option<Arc<DaemonBlobTransport>>>,
     receiver_task: JoinHandle<()>,
 }
 
 impl DaemonFipsHandle {
     pub fn shutdown(&self) {
         self.receiver_task.abort();
-        if let Ok(mut provider) = self.same_host_provider.lock() {
-            provider.take();
+        if let Ok(mut transport) = self.blob_transport.lock() {
+            transport.take();
         }
     }
 }
@@ -124,7 +130,9 @@ pub async fn start_daemon_fips_transport(
             .with_request_timeout(request_timeout)
             .with_cache_responses(false),
     );
-    let same_host_provider = bind_daemon_same_host_provider(&endpoint, store.store_arc()).await?;
+    let (blob_resolver, blob_transport) =
+        bind_daemon_blob_resolver(&endpoint, store.store_arc(), &peer_configs, request_timeout)
+            .await?;
     if !peer_configs.is_empty() {
         transport.set_peer_configs(peer_configs).await;
     }
@@ -135,23 +143,48 @@ pub async fn start_daemon_fips_transport(
         endpoint_npub: endpoint.local_peer_id,
         discovery_scope: endpoint.discovery_scope,
         nostr_provider,
-        same_host_provider: Mutex::new(Some(same_host_provider)),
+        blob_resolver,
+        blob_transport: Mutex::new(Some(blob_transport)),
         receiver_task,
     }))
 }
 
-async fn bind_daemon_same_host_provider(
+async fn bind_daemon_blob_resolver(
     endpoint: &BoundFipsEndpoint,
     store: Arc<StorageRouter>,
-) -> Result<DaemonSameHostProvider> {
-    SameHostBlobStore::bind(
-        endpoint.native_endpoint.clone(),
-        store,
-        None,
-        SameHostBlobStoreConfig::provider(DAEMON_SAME_HOST_PROVIDER_PRIORITY),
-    )
-    .await
-    .context("Failed to advertise htree's same-host blob provider")
+    peers: &[FipsPeerConfig],
+    request_timeout: Duration,
+) -> Result<(Arc<DaemonBlobResolver>, Arc<DaemonBlobTransport>)> {
+    let resolver = Arc::new(blob_resolver(
+        store.clone(),
+        endpoint.local_peer_id.clone(),
+        request_timeout,
+        MeshRoutingConfig::default(),
+    ));
+    let transport = Arc::new(
+        TcpBlobTransport::bind_advertised_route_with_config(
+            endpoint.native_endpoint.clone(),
+            store,
+            resolver.clone(),
+            TcpBlobTransportConfig::default(),
+            DAEMON_SAME_HOST_PROVIDER_PRIORITY,
+        )
+        .await
+        .context("Failed to advertise htree's blob resolver")?,
+    );
+    let routes: Vec<Arc<dyn MeshReadSource>> = peers
+        .iter()
+        .filter_map(|peer| {
+            let identity = PeerIdentity::from_npub(&peer.npub).ok()?;
+            let route: Arc<dyn BlobRoute> = Arc::new(transport.route_to(identity));
+            Some(
+                Arc::new(NamedBlobRoute::mesh_peer(peer.npub.clone(), route))
+                    as Arc<dyn MeshReadSource>,
+            )
+        })
+        .collect();
+    resolver.set_read_sources(routes).await;
+    Ok((resolver, transport))
 }
 
 pub async fn start_daemon_nostr_provider(
@@ -415,7 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemon_same_host_provider_advertises_and_serves_storage_router() {
+    async fn daemon_blob_resolver_advertises_and_serves_storage_router() {
         let provider_endpoint = local_only_endpoint("htree-provider-test").await;
         let observer_endpoint = local_only_endpoint("iris-drive-observer-test").await;
         let temp = tempfile::tempdir().unwrap();
@@ -423,9 +456,14 @@ mod tests {
         let data = b"served directly from htree StorageRouter".to_vec();
         let hash = Sha256::digest(&data).into();
         store.store_arc().put(hash, data.clone()).await.unwrap();
-        let provider = bind_daemon_same_host_provider(&provider_endpoint, store.store_arc())
-            .await
-            .expect("bind htree provider");
+        let (blob_resolver, provider) = bind_daemon_blob_resolver(
+            &provider_endpoint,
+            store.store_arc(),
+            &[],
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("bind htree provider");
         let transport = Arc::new(HashtreeFipsTransport::new(
             provider_endpoint.endpoint.clone(),
             store.store_arc(),
@@ -436,7 +474,8 @@ mod tests {
             endpoint_npub: provider_endpoint.local_peer_id.clone(),
             discovery_scope: provider_endpoint.discovery_scope.clone(),
             nostr_provider: None,
-            same_host_provider: Mutex::new(Some(provider)),
+            blob_resolver,
+            blob_transport: Mutex::new(Some(provider)),
             receiver_task,
         };
 
@@ -475,6 +514,122 @@ mod tests {
         provider_endpoint.native_endpoint.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn daemon_blob_resolvers_honor_multi_hop_htl_and_cache() {
+        let (source_endpoint, source_addr) = udp_endpoint("htree-source-test").await;
+        let (middle_endpoint, middle_addr) = udp_endpoint("htree-middle-test").await;
+        let (requester_endpoint, requester_addr) = udp_endpoint("htree-requester-test").await;
+        let source_dir = tempfile::tempdir().unwrap();
+        let middle_dir = tempfile::tempdir().unwrap();
+        let requester_dir = tempfile::tempdir().unwrap();
+        let source_store = Arc::new(HashtreeStore::new(source_dir.path()).unwrap());
+        let middle_store = Arc::new(HashtreeStore::new(middle_dir.path()).unwrap());
+        let requester_store = Arc::new(HashtreeStore::new(requester_dir.path()).unwrap());
+        let data = b"canonical multi-hop blob route".to_vec();
+        let hash = Sha256::digest(&data).into();
+        source_store
+            .store_arc()
+            .put(hash, data.clone())
+            .await
+            .unwrap();
+
+        source_endpoint
+            .endpoint
+            .set_peer_configs(vec![FipsPeerConfig {
+                npub: middle_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![middle_addr.clone()],
+            }])
+            .await
+            .unwrap();
+        middle_endpoint
+            .endpoint
+            .set_peer_configs(vec![
+                FipsPeerConfig {
+                    npub: source_endpoint.local_peer_id.clone(),
+                    udp_addresses: vec![source_addr.clone()],
+                },
+                FipsPeerConfig {
+                    npub: requester_endpoint.local_peer_id.clone(),
+                    udp_addresses: vec![requester_addr],
+                },
+            ])
+            .await
+            .unwrap();
+        requester_endpoint
+            .endpoint
+            .set_peer_configs(vec![FipsPeerConfig {
+                npub: middle_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![middle_addr.clone()],
+            }])
+            .await
+            .unwrap();
+
+        let (_source_resolver, source_transport) = bind_daemon_blob_resolver(
+            &source_endpoint,
+            source_store.store_arc(),
+            &[],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let (middle_resolver, middle_transport) = bind_daemon_blob_resolver(
+            &middle_endpoint,
+            middle_store.store_arc(),
+            &[FipsPeerConfig {
+                npub: source_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![source_addr],
+            }],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let (requester_resolver, requester_transport) = bind_daemon_blob_resolver(
+            &requester_endpoint,
+            requester_store.store_arc(),
+            &[FipsPeerConfig {
+                npub: middle_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![middle_addr],
+            }],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+        wait_for_peer(&requester_endpoint, &middle_endpoint.local_peer_id).await;
+        wait_for_peer(&middle_endpoint, &source_endpoint.local_peer_id).await;
+
+        assert_eq!(
+            requester_resolver
+                .route(hashtree_core::BlobRequest { hash, htl: 1 })
+                .await
+                .expect("exhausted search"),
+            hashtree_core::BlobReply::NoResult,
+        );
+        assert_eq!(
+            requester_resolver
+                .route(hashtree_core::BlobRequest { hash, htl: 2 })
+                .await
+                .expect("two-hop search"),
+            hashtree_core::BlobReply::Data(data.clone()),
+        );
+        assert_eq!(
+            middle_store.store_arc().get(&hash).await.unwrap(),
+            Some(data.clone())
+        );
+        assert_eq!(
+            requester_store.store_arc().get(&hash).await.unwrap(),
+            Some(data)
+        );
+
+        drop(requester_transport);
+        drop(middle_transport);
+        drop(source_transport);
+        requester_endpoint.native_endpoint.shutdown().await.unwrap();
+        middle_endpoint.native_endpoint.shutdown().await.unwrap();
+        source_endpoint.native_endpoint.shutdown().await.unwrap();
+        drop(middle_resolver);
+    }
+
     fn provider_advertised(endpoint: &BoundFipsEndpoint, npub: &str) -> bool {
         endpoint
             .native_endpoint
@@ -500,6 +655,48 @@ mod tests {
         options.enable_lan_discovery = false;
         options.share_local_candidates = false;
         bind_fips_endpoint(options).await.unwrap()
+    }
+
+    async fn udp_endpoint(scope: &str) -> (BoundFipsEndpoint, String) {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = socket.local_addr().unwrap();
+        drop(socket);
+        let keys = nostr::Keys::generate();
+        let mut options = FipsEndpointOptions::new(keys.secret_key().to_bech32().unwrap());
+        options.discovery_scope = scope.to_string();
+        options.enable_udp = true;
+        options.udp_bind_addr = Some(addr.to_string());
+        options.enable_webrtc = false;
+        options.enable_local_rendezvous = false;
+        options.enable_lan_discovery = false;
+        options.share_local_candidates = false;
+        let endpoint = bind_fips_endpoint(options).await.unwrap();
+        (endpoint, addr.to_string())
+    }
+
+    async fn wait_for_peer(endpoint: &BoundFipsEndpoint, npub: &str) {
+        let result = timeout(Duration::from_secs(10), async {
+            loop {
+                if endpoint
+                    .native_endpoint
+                    .peers()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|peer| peer.npub == npub && peer.connected)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if result.is_err() {
+            panic!(
+                "FIPS peer {npub} did not connect; peers={:?}",
+                endpoint.native_endpoint.peers().await
+            );
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@
 mod same_host;
 mod tcp_blob;
 
+pub use fips_core::PeerIdentity;
 pub use same_host::{SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError};
 pub use tcp_blob::{
     TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig, TcpBlobTransportError,

@@ -13,6 +13,7 @@
 
 use nostr::{Keys, ToBech32};
 use reqwest::blocking::Client;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -111,7 +112,17 @@ fn wait_for_server_ready(process: &mut Child, port: u16) {
             .try_wait()
             .expect("Failed to poll htree server process")
         {
-            panic!("htree server exited before becoming ready: {status}");
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            if let Some(mut stream) = process.stdout.take() {
+                let _ = stream.read_to_string(&mut stdout);
+            }
+            if let Some(mut stream) = process.stderr.take() {
+                let _ = stream.read_to_string(&mut stderr);
+            }
+            panic!(
+                "htree server exited before becoming ready: {status}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
         }
 
         if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {

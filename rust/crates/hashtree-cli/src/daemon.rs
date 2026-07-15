@@ -928,7 +928,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         }
     }
     if let Some(ref fips_handle) = fips_handle {
-        server = server.with_fips_transport(fips_handle.transport.clone());
+        server = server
+            .with_fips_transport(fips_handle.transport.clone())
+            .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
     }
 
     if let Some(extra) = opts.extra_routes {

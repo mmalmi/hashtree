@@ -40,17 +40,51 @@ impl MockReadSource {
 }
 
 #[async_trait]
-impl MeshReadSource for MockReadSource {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    async fn get(&self, hash: &Hash) -> Option<Vec<u8>> {
+impl BlobRoute for MockReadSource {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
-        self.store.get(hash).await.ok().flatten()
+        Ok(match self.store.get(&request.hash).await? {
+            Some(data) => BlobReply::Data(data),
+            None => BlobReply::NoResult,
+        })
+    }
+}
+
+impl MeshReadSource for MockReadSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+struct RecordingNoResultRoute {
+    calls: AtomicUsize,
+    last_htl: AtomicUsize,
+    delay: Duration,
+}
+
+impl RecordingNoResultRoute {
+    fn new(delay: Duration) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            last_htl: AtomicUsize::new(usize::MAX),
+            delay,
+        }
+    }
+}
+
+#[async_trait]
+impl BlobRoute for RecordingNoResultRoute {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.last_htl
+            .store(usize::from(request.htl), Ordering::Relaxed);
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(BlobReply::NoResult)
     }
 }
 
@@ -202,6 +236,68 @@ async fn blob_route_timeout_and_corruption_are_not_no_result() {
             .is_err(),
         "a corrupt response must be an error",
     );
+}
+
+#[tokio::test]
+async fn mesh_peer_routes_consume_one_htl_but_terminal_routes_do_not() {
+    let peer_store = make_test_store(Arc::new(MemoryStore::new()), "peer-route-htl");
+    let peer = Arc::new(RecordingNoResultRoute::new(Duration::ZERO));
+    peer_store
+        .set_read_sources(vec![Arc::new(NamedBlobRoute::mesh_peer(
+            "peer",
+            peer.clone(),
+        ))])
+        .await;
+    let hash = hashtree_core::sha256(b"route role htl");
+    assert_eq!(
+        peer_store
+            .route(BlobRequest { hash, htl: 3 })
+            .await
+            .expect("peer route miss"),
+        BlobReply::NoResult,
+    );
+    assert_eq!(peer.last_htl.load(Ordering::Relaxed), 2);
+
+    let terminal_store = make_test_store(Arc::new(MemoryStore::new()), "terminal-route-htl");
+    let terminal = Arc::new(RecordingNoResultRoute::new(Duration::ZERO));
+    terminal_store
+        .set_read_sources(vec![Arc::new(NamedBlobRoute::terminal(
+            "terminal",
+            terminal.clone(),
+        ))])
+        .await;
+    assert_eq!(
+        terminal_store
+            .route(BlobRequest { hash, htl: 3 })
+            .await
+            .expect("terminal route miss"),
+        BlobReply::NoResult,
+    );
+    assert_eq!(terminal.last_htl.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn concurrent_searches_with_different_htl_are_not_coalesced() {
+    let store = Arc::new(make_test_store(
+        Arc::new(MemoryStore::new()),
+        "distinct-route-budgets",
+    ));
+    let source = Arc::new(RecordingNoResultRoute::new(Duration::from_millis(20)));
+    store
+        .set_read_sources(vec![Arc::new(NamedBlobRoute::terminal(
+            "terminal",
+            source.clone(),
+        ))])
+        .await;
+    let hash = hashtree_core::sha256(b"same hash different budgets");
+
+    let (short, long) = tokio::join!(
+        store.route(BlobRequest { hash, htl: 1 }),
+        store.route(BlobRequest { hash, htl: 3 }),
+    );
+    assert_eq!(short.expect("short search"), BlobReply::NoResult);
+    assert_eq!(long.expect("long search"), BlobReply::NoResult);
+    assert_eq!(source.calls.load(Ordering::Relaxed), 2);
 }
 
 fn make_test_store_with_routing(
@@ -477,9 +573,9 @@ async fn run_bad_peer_series(strategy: SelectionStrategy) -> usize {
 }
 
 #[test]
-fn test_hedged_wave_plan_flood_all() {
+fn test_default_hedged_wave_plan_is_bounded() {
     let plan = build_hedged_wave_plan(7, RequestDispatchConfig::default());
-    assert_eq!(plan, vec![7]);
+    assert_eq!(plan, vec![2, 1, 1]);
 }
 
 #[test]
