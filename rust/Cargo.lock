@@ -2785,6 +2785,8 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "fips-core"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb5c2cd49701461cfe2a9604eec3ddad6d3fadca67aceb11f472b6e665ecf89"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -2826,6 +2828,8 @@ dependencies = [
 [[package]]
 name = "fips-identity"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e143619aebf9db3129c1d2de67ba223bcf611216efa09a932c98a617e3e4a42b"
 dependencies = [
  "bech32",
  "hex",
@@ -2838,10 +2842,14 @@ dependencies = [
 [[package]]
 name = "fips-tcp"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d18861c5eca7c472fbbdbbfb498f8d2525405081a9a24b42633c600ba6f6e42a"
 
 [[package]]
 name = "fips-tcp-endpoint"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e3e01e352b709b80f4261e2cd7d0ffde2d3aaf175267b3960997e70f7305c12"
 dependencies = [
  "fips-core",
  "fips-tcp",
@@ -5305,6 +5313,8 @@ dependencies = [
 [[package]]
 name = "nostr-pubsub-fips"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2e2904004e5d0e55a676db596f8f052e171eabd236799b5aec7718b04a0a79e"
 dependencies = [
  "async-trait",
  "fips-core",

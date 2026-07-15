@@ -44,14 +44,23 @@ grep -F 'hashtree-fips-transport = { version = "0.3.0", path = "crates/hashtree-
 grep -F 'hashtree-cli = { version = "0.2.83", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null
 
-nostr_pubsub_lock="$(awk '/^\[\[package\]\]$/ { capture = 0 } /^name = "nostr-pubsub"$/ { capture = 1 } capture' "${RUST_DIR}/Cargo.lock")"
-printf '%s\n' "$nostr_pubsub_lock" | grep -Fx 'version = "0.1.10"' >/dev/null
-printf '%s\n' "$nostr_pubsub_lock" | grep -Fx 'source = "registry+https://github.com/rust-lang/crates.io-index"' >/dev/null
-printf '%s\n' "$nostr_pubsub_lock" | grep -Fx 'checksum = "0a3c668aede5ebf20501199206e1853ee8e26f38d476a60f54fb27443dfb552f"' >/dev/null
-nostr_pubsub_social_lock="$(awk '/^\[\[package\]\]$/ { capture = 0 } /^name = "nostr-pubsub-social-graph"$/ { capture = 1 } capture' "${RUST_DIR}/Cargo.lock")"
-printf '%s\n' "$nostr_pubsub_social_lock" | grep -Fx 'version = "0.2.2"' >/dev/null
-printf '%s\n' "$nostr_pubsub_social_lock" | grep -Fx 'source = "registry+https://github.com/rust-lang/crates.io-index"' >/dev/null
-printf '%s\n' "$nostr_pubsub_social_lock" | grep -Fx 'checksum = "9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550"' >/dev/null
+require_registry_lock() {
+    local package="$1" version="$2" checksum="$3" lock
+    lock="$(awk -v package="$package" \
+        '/^\[\[package\]\]$/ { capture = 0 } $0 == "name = \"" package "\"" { capture = 1 } capture' \
+        "${RUST_DIR}/Cargo.lock")"
+    printf '%s\n' "$lock" | grep -Fx "version = \"${version}\"" >/dev/null
+    printf '%s\n' "$lock" | grep -Fx 'source = "registry+https://github.com/rust-lang/crates.io-index"' >/dev/null
+    printf '%s\n' "$lock" | grep -Fx "checksum = \"${checksum}\"" >/dev/null
+}
+
+require_registry_lock fips-core 0.4.0 5eb5c2cd49701461cfe2a9604eec3ddad6d3fadca67aceb11f472b6e665ecf89
+require_registry_lock fips-identity 0.3.1 e143619aebf9db3129c1d2de67ba223bcf611216efa09a932c98a617e3e4a42b
+require_registry_lock fips-tcp 0.2.0 d18861c5eca7c472fbbdbbfb498f8d2525405081a9a24b42633c600ba6f6e42a
+require_registry_lock fips-tcp-endpoint 0.2.0 8e3e01e352b709b80f4261e2cd7d0ffde2d3aaf175267b3960997e70f7305c12
+require_registry_lock nostr-pubsub 0.1.10 0a3c668aede5ebf20501199206e1853ee8e26f38d476a60f54fb27443dfb552f
+require_registry_lock nostr-pubsub-fips 0.3.0 c2e2904004e5d0e55a676db596f8f052e171eabd236799b5aec7718b04a0a79e
+require_registry_lock nostr-pubsub-social-graph 0.2.2 9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550
 
 if printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'cashu-service' >/dev/null; then
     echo "cashu-service is published from the standalone cashu-service repo, not hashtree" >&2
