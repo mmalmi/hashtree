@@ -1,6 +1,10 @@
 use super::*;
 use fips_core::config::{PeerConfig, TransportInstances};
-use fips_core::{encode_nsec, Config, Identity, UdpConfig};
+use fips_core::{
+    encode_nsec, Config, FipsEndpointServiceReceiver, Identity, PeerIdentity, UdpConfig,
+};
+use fips_tcp::wire::{Flags, Segment};
+use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Mutex;
@@ -15,6 +19,19 @@ fn request_matches_shared_codec_vector() {
         hex::encode(encode_blob_request(&BlobRequest { hash, htl: 0 })),
         "48010100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
     );
+}
+
+#[test]
+fn retries_only_transient_connect_readiness_errors() {
+    assert!(transient_connect_error(&AdapterError::Tcp(
+        StackError::ConnectionLimit
+    )));
+    assert!(!transient_connect_error(&AdapterError::Tcp(
+        StackError::InvalidConfig("invalid test config")
+    )));
+    assert!(!transient_connect_error(&AdapterError::Fips(
+        FipsEndpointError::Node(NodeError::AccessDenied("test denial".to_string()))
+    )));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -194,6 +211,115 @@ async fn streams_concurrent_blobs_and_explicit_miss_on_worker() {
     transport_b.shutdown().await.unwrap();
     endpoint_a.shutdown().await.unwrap();
     endpoint_b.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn fresh_get_waits_for_a_real_fips_tcp_service_to_become_ready() {
+    tokio::spawn(fresh_get_during_service_readiness_on_worker())
+        .await
+        .expect("service-readiness worker task panicked");
+}
+
+async fn fresh_get_during_service_readiness_on_worker() {
+    let (provider_endpoint, client_endpoint, provider_peer) = connected_endpoints().await;
+    let receiver = provider_endpoint
+        .register_service_receiver(TCP_BLOB_SERVICE_PORT)
+        .await
+        .expect("reserve provider service before it is ready");
+    let client = Arc::new(
+        TcpBlobTransport::bind_with_config(
+            client_endpoint.clone(),
+            Arc::new(MemoryStore::new()),
+            test_config(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind client blob service"),
+    );
+    let data = b"first request survives provider TCP readiness".to_vec();
+    let data_hash = hash(&data);
+    let fetch = {
+        let client = client.clone();
+        tokio::spawn(async move { client.get(&data_hash, provider_peer).await })
+    };
+
+    reset_initial_sessions(provider_endpoint.clone(), receiver, 2).await;
+    let provider_store = Arc::new(MemoryStore::new());
+    provider_store.put(data_hash, data.clone()).await.unwrap();
+    let provider = timeout(Duration::from_secs(3), async {
+        loop {
+            match TcpBlobTransport::bind_with_config(
+                provider_endpoint.clone(),
+                provider_store.clone(),
+                test_config(Duration::from_secs(5)),
+            )
+            .await
+            {
+                Ok(transport) => break transport,
+                Err(TcpBlobTransportError::Transport(_)) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("provider bind failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("closed readiness receiver was not released");
+
+    assert_eq!(
+        timeout(Duration::from_secs(5), fetch)
+            .await
+            .expect("fresh blob request timed out")
+            .expect("fresh blob task panicked")
+            .expect("fresh blob request failed during provider readiness"),
+        Some(data)
+    );
+
+    provider.shutdown().await.unwrap();
+    match Arc::try_unwrap(client) {
+        Ok(transport) => transport.shutdown().await.unwrap(),
+        Err(_) => panic!("client transport still has task references"),
+    }
+    provider_endpoint.shutdown().await.unwrap();
+    client_endpoint.shutdown().await.unwrap();
+}
+
+async fn reset_initial_sessions(
+    endpoint: Arc<FipsEndpoint>,
+    receiver: FipsEndpointServiceReceiver,
+    count: usize,
+) {
+    timeout(Duration::from_secs(2), async {
+        let mut ports = HashSet::new();
+        let mut datagrams = Vec::new();
+        while ports.len() < count {
+            receiver
+                .recv_batch_into(&mut datagrams, 8)
+                .await
+                .expect("readiness receiver closed");
+            for datagram in datagrams.drain(..) {
+                let request = Segment::decode(datagram.data.as_slice()).expect("decode TCP SYN");
+                if !request.flags.contains(Flags::SYN) || request.flags.contains(Flags::ACK) {
+                    continue;
+                }
+                ports.insert(request.src_port);
+                let mut reset = Segment::new(request.dst_port, request.src_port, 0);
+                reset.ack = Some(request.seq.wrapping_add(1));
+                reset.flags = Flags::RST | Flags::ACK;
+                reset.window = 0;
+                endpoint
+                    .send_datagram(
+                        datagram.source_peer,
+                        TCP_BLOB_SERVICE_PORT,
+                        TCP_BLOB_SERVICE_PORT,
+                        reset.encode().expect("encode TCP reset"),
+                    )
+                    .await
+                    .expect("send TCP reset");
+            }
+        }
+    })
+    .await
+    .expect("client did not make the expected initial sessions");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

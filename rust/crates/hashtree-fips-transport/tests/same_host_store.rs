@@ -160,9 +160,14 @@ async fn live_inbound_policy_serves_only_authorized_peers_on_the_owned_transport
     local.put(content_hash, data.clone()).await.unwrap();
     let requester_identity = PeerIdentity::from_npub(requester_endpoint.npub()).unwrap();
     let authorized = Arc::new(AtomicBool::new(false));
+    let policy_calls = Arc::new(AtomicUsize::new(0));
     let policy: InboundBlobPolicy = {
         let authorized = authorized.clone();
-        Arc::new(move |peer| peer == requester_identity && authorized.load(Ordering::Acquire))
+        let policy_calls = policy_calls.clone();
+        Arc::new(move |peer| {
+            policy_calls.fetch_add(1, Ordering::AcqRel);
+            peer == requester_identity && authorized.load(Ordering::Acquire)
+        })
     };
     let server = SameHostBlobStore::bind_route_with_policy(
         server_endpoint.clone(),
@@ -194,6 +199,11 @@ async fn live_inbound_policy_serves_only_authorized_peers_on_the_owned_transport
             .await
             .is_err(),
         "unauthorized peer reached the inbound blob route"
+    );
+    assert_eq!(
+        policy_calls.load(Ordering::Acquire),
+        1,
+        "an authorization rejection must not be retried as readiness"
     );
     authorized.store(true, Ordering::Release);
     assert_eq!(

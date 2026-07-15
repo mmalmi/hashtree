@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fips_core::discovery::local::LocalInstanceCapability;
-use fips_core::{FipsEndpoint, PeerIdentity};
-use fips_tcp::{Config as TcpConfig, ConnectionId, State};
-use fips_tcp_endpoint::FipsTcpEndpoint;
+use fips_core::{FipsEndpoint, FipsEndpointError, NodeError, PeerIdentity};
+use fips_tcp::{Config as TcpConfig, ConnectionId, StackError, State};
+use fips_tcp_endpoint::{AdapterError, FipsTcpEndpoint};
 use hashtree_core::{
     decode_blob_reply_header, decode_blob_request, encode_blob_reply_header, encode_blob_request,
     BlobCodecError, BlobReply, BlobReplyHeader, BlobRequest, BlobRoute, Hash, MemoryStore, Store,
@@ -35,8 +35,8 @@ const MAX_TCP_CONNECTIONS: usize = 32;
 const MAX_SERVER_CONNECTIONS: usize = 8;
 pub(crate) const MAX_OUTBOUND_GETS: usize = 4;
 const MAX_STORE_LOADS: usize = 4;
-const MAX_SESSION_ATTEMPTS: u8 = 2;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CONNECT_RETRY_DELAY_MS: u64 = 50;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_millis(5_500);
 
 static NEXT_ISN_SEED: AtomicU64 = AtomicU64::new(0x4854_5245_4554_4350);
@@ -313,7 +313,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
             route,
             commands: command_rx,
             pending_commands: VecDeque::with_capacity(PENDING_COMMAND_CAPACITY),
-            active_gets: HashMap::new(),
+            active_gets: Vec::new(),
             servers: HashMap::new(),
             store_loads: JoinSet::new(),
             store_load_connections: HashMap::new(),
@@ -470,17 +470,17 @@ struct PendingGet {
     peer: PeerIdentity,
     blob: BlobRequest,
     reply: oneshot::Sender<Result<BlobReply, TcpBlobTransportError>>,
-    attempts_started: u8,
 }
 
 struct ActiveGet {
     request: PendingGet,
-    connection: ConnectionId,
+    connection: Option<ConnectionId>,
     deadline_ms: u64,
     phase: ClientPhase,
 }
 
 enum ClientPhase {
+    WaitingToConnect { retry_at_ms: u64 },
     Connecting,
     WritingRequest { offset: usize },
     ReadingHeader { bytes: Vec<u8> },
@@ -523,7 +523,7 @@ struct TcpBlobActor {
     route: Arc<dyn BlobRoute>,
     commands: mpsc::Receiver<Command>,
     pending_commands: VecDeque<Command>,
-    active_gets: HashMap<ConnectionId, ActiveGet>,
+    active_gets: Vec<ActiveGet>,
     servers: HashMap<ConnectionId, ServerConnection>,
     store_loads: JoinSet<StoreLoad>,
     store_load_connections: HashMap<TaskId, ConnectionId>,
@@ -615,9 +615,15 @@ impl TcpBlobActor {
                     peer,
                     blob: request,
                     reply,
-                    attempts_started: 0,
                 };
-                self.start_attempt(request, now_ms, None).await;
+                self.active_gets.push(ActiveGet {
+                    request,
+                    connection: None,
+                    deadline_ms: self.deadline_ms(now_ms),
+                    phase: ClientPhase::WaitingToConnect {
+                        retry_at_ms: now_ms,
+                    },
+                });
             }
         }
         false
@@ -637,7 +643,11 @@ impl TcpBlobActor {
         self.store_load_connections.clear();
 
         let mut connections = self.servers.keys().copied().collect::<Vec<_>>();
-        connections.extend(self.active_gets.keys().copied());
+        connections.extend(
+            self.active_gets
+                .iter()
+                .filter_map(|active| active.connection),
+        );
         for connection in connections {
             let _ = self.tcp.close(connection, now_ms).await;
         }
@@ -646,68 +656,78 @@ impl TcpBlobActor {
         self.pending_commands.clear();
     }
 
-    async fn start_attempt(
-        &mut self,
-        mut request: PendingGet,
-        now_ms: u64,
-        mut last_error: Option<TcpBlobTransportError>,
-    ) {
-        if request.reply.is_closed() {
-            return;
-        }
-        while request.attempts_started < MAX_SESSION_ATTEMPTS {
-            request.attempts_started += 1;
-            match self.tcp.connect(request.peer, now_ms).await {
-                Ok(connection) => {
-                    self.active_gets.insert(
-                        connection,
-                        ActiveGet {
-                            request,
-                            connection,
-                            deadline_ms: self.deadline_ms(now_ms),
-                            phase: ClientPhase::Connecting,
-                        },
-                    );
-                    return;
-                }
-                Err(error) => last_error = Some(transport_error(error)),
-            }
-            if request.reply.is_closed() {
-                return;
-            }
-        }
-        let _ = request
-            .reply
-            .send(Err(last_error.unwrap_or(TcpBlobTransportError::Transport(
-                "could not open TCP/FIPS session".to_string(),
-            ))));
-    }
-
     async fn drive_clients(&mut self, now_ms: u64) {
         let active_gets = std::mem::take(&mut self.active_gets);
-        for (_, mut active) in active_gets {
+        for mut active in active_gets {
             if active.request.reply.is_closed() {
-                let _ = self.tcp.close(active.connection, now_ms).await;
+                if let Some(connection) = active.connection {
+                    let _ = self.tcp.close(connection, now_ms).await;
+                }
                 continue;
+            }
+            if now_ms >= active.deadline_ms {
+                if let Some(connection) = active.connection {
+                    let _ = self.tcp.close(connection, now_ms).await;
+                }
+                let _ = active
+                    .request
+                    .reply
+                    .send(Err(TcpBlobTransportError::Timeout));
+                continue;
+            }
+            if let ClientPhase::WaitingToConnect { retry_at_ms } = active.phase {
+                if now_ms < retry_at_ms {
+                    self.active_gets.push(active);
+                    continue;
+                }
+                match self.tcp.connect(active.request.peer, now_ms).await {
+                    Ok(connection) => {
+                        active.connection = Some(connection);
+                        active.phase = ClientPhase::Connecting;
+                    }
+                    Err(error) if transient_connect_error(&error) => {
+                        active.phase = ClientPhase::WaitingToConnect {
+                            retry_at_ms: connect_retry_at(now_ms, active.deadline_ms),
+                        };
+                        self.active_gets.push(active);
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = active.request.reply.send(Err(transport_error(error)));
+                        continue;
+                    }
+                }
             }
             match drive_active_get(&mut self.tcp, &mut active, now_ms, self.idle_timeout_ms).await {
                 ClientDrive::Pending => {
                     if active.request.reply.is_closed() {
-                        let _ = self.tcp.close(active.connection, now_ms).await;
+                        if let Some(connection) = active.connection {
+                            let _ = self.tcp.close(connection, now_ms).await;
+                        }
                     } else {
-                        self.active_gets.insert(active.connection, active);
+                        self.active_gets.push(active);
                     }
                 }
                 ClientDrive::Complete(data) => {
-                    let _ = self.tcp.close(active.connection, now_ms).await;
+                    if let Some(connection) = active.connection {
+                        let _ = self.tcp.close(connection, now_ms).await;
+                    }
                     let _ = active.request.reply.send(Ok(data));
                 }
-                ClientDrive::Failed(error) => {
-                    let _ = self.tcp.close(active.connection, now_ms).await;
-                    if !active.request.reply.is_closed() {
-                        self.start_attempt(active.request, now_ms, Some(error))
-                            .await;
+                ClientDrive::RetryConnect => {
+                    if let Some(connection) = active.connection.take() {
+                        let _ = self.tcp.close(connection, now_ms).await;
                     }
+                    active.phase = ClientPhase::WaitingToConnect {
+                        retry_at_ms: connect_retry_at(now_ms, active.deadline_ms),
+                    };
+                    self.active_gets.push(active);
+                }
+                ClientDrive::Failed(error) => {
+                    if let Some(connection) = active.connection {
+                        let _ = self.tcp.close(connection, now_ms).await;
+                    }
+                    let _ = active.request.reply.send(Err(error));
                 }
             }
         }
@@ -866,6 +886,7 @@ impl TcpBlobActor {
 enum ClientDrive {
     Pending,
     Complete(BlobReply),
+    RetryConnect,
     Failed(TcpBlobTransportError),
 }
 
@@ -875,10 +896,18 @@ async fn drive_active_get(
     now_ms: u64,
     idle_timeout_ms: u64,
 ) -> ClientDrive {
+    let Some(connection) = active.connection else {
+        return ClientDrive::Failed(TcpBlobTransportError::Transport(
+            "TCP/FIPS session was not opened".to_string(),
+        ));
+    };
     if now_ms >= active.deadline_ms {
         return ClientDrive::Failed(TcpBlobTransportError::Timeout);
     }
-    if tcp.state(active.connection).is_none() {
+    if tcp.state(connection).is_none() {
+        if matches!(active.phase, ClientPhase::Connecting) {
+            return ClientDrive::RetryConnect;
+        }
         return ClientDrive::Failed(TcpBlobTransportError::Transport(
             "TCP/FIPS session closed".to_string(),
         ));
@@ -886,18 +915,18 @@ async fn drive_active_get(
 
     match &mut active.phase {
         ClientPhase::Connecting => {
-            if tcp.state(active.connection) == Some(State::Established) {
+            if tcp.state(connection) == Some(State::Established) {
                 active.deadline_ms = refreshed_deadline(now_ms, idle_timeout_ms);
                 active.phase = ClientPhase::WritingRequest { offset: 0 };
             }
             ClientDrive::Pending
         }
+        ClientPhase::WaitingToConnect { .. } => ClientDrive::Failed(
+            TcpBlobTransportError::Transport("TCP/FIPS session was not opened".to_string()),
+        ),
         ClientPhase::WritingRequest { offset } => {
             let request = encode_blob_request(&active.request.blob);
-            match tcp
-                .write(active.connection, &request[*offset..], now_ms)
-                .await
-            {
+            match tcp.write(connection, &request[*offset..], now_ms).await {
                 Ok(written) => {
                     if written > 0 {
                         active.deadline_ms = refreshed_deadline(now_ms, idle_timeout_ms);
@@ -915,11 +944,7 @@ async fn drive_active_get(
         }
         ClientPhase::ReadingHeader { bytes } => {
             match tcp
-                .read(
-                    active.connection,
-                    BLOB_REPLY_HEADER_BYTES - bytes.len(),
-                    now_ms,
-                )
+                .read(connection, BLOB_REPLY_HEADER_BYTES - bytes.len(), now_ms)
                 .await
             {
                 Ok(chunk) => {
@@ -951,7 +976,7 @@ async fn drive_active_get(
                     }
                     Err(error) => return ClientDrive::Failed(error),
                 }
-            } else if tcp.is_read_closed(active.connection) {
+            } else if tcp.is_read_closed(connection) {
                 return ClientDrive::Failed(TcpBlobTransportError::Transport(
                     "TCP/FIPS response closed before its header".to_string(),
                 ));
@@ -960,11 +985,7 @@ async fn drive_active_get(
         }
         ClientPhase::ReadingBody { size, bytes } => {
             match tcp
-                .read(
-                    active.connection,
-                    IO_CHUNK_BYTES.min(*size - bytes.len()),
-                    now_ms,
-                )
+                .read(connection, IO_CHUNK_BYTES.min(*size - bytes.len()), now_ms)
                 .await
             {
                 Ok(chunk) => {
@@ -982,7 +1003,7 @@ async fn drive_active_get(
                 } else {
                     ClientDrive::Failed(TcpBlobTransportError::HashMismatch)
                 }
-            } else if tcp.is_read_closed(active.connection) {
+            } else if tcp.is_read_closed(connection) {
                 ClientDrive::Failed(TcpBlobTransportError::Transport(
                     "TCP/FIPS response closed before its payload".to_string(),
                 ))
@@ -1077,6 +1098,25 @@ async fn drive_server(
 
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().clamp(1, u64::MAX as u128) as u64
+}
+
+fn connect_retry_at(now_ms: u64, deadline_ms: u64) -> u64 {
+    now_ms
+        .saturating_add(CONNECT_RETRY_DELAY_MS)
+        .min(deadline_ms)
+}
+
+fn transient_connect_error(error: &AdapterError) -> bool {
+    matches!(
+        error,
+        AdapterError::Tcp(StackError::ConnectionLimit | StackError::NoEphemeralPort)
+            | AdapterError::Fips(FipsEndpointError::Node(
+                NodeError::PeerNotFound(_)
+                    | NodeError::HandshakeIncomplete(_)
+                    | NodeError::NoSession(_)
+                    | NodeError::LocalRouteUnavailable(_)
+            ))
+    )
 }
 
 fn refreshed_deadline(now_ms: u64, idle_timeout_ms: u64) -> u64 {
