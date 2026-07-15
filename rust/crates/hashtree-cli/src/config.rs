@@ -106,6 +106,9 @@ pub struct ServerConfig {
     /// Unset uses the FIPS well-known address (127.0.0.1:21211).
     #[serde(default)]
     pub fips_local_rendezvous_addr: Option<String>,
+    /// Enable FIPS LAN/mDNS peer discovery.
+    #[serde(default = "default_enable_fips_lan_discovery")]
+    pub enable_fips_lan_discovery: bool,
     /// FIPS Nostr relays used for discovery adverts and encrypted signaling.
     /// Unset uses active [nostr].relays plus FIPS defaults; an explicit empty
     /// list disables relay discovery.
@@ -712,6 +715,10 @@ fn default_enable_fips() -> bool {
     true
 }
 
+fn default_enable_fips_lan_discovery() -> bool {
+    true
+}
+
 fn default_fips_discovery_scope() -> String {
     hashtree_fips_transport::DEFAULT_FIPS_DISCOVERY_SCOPE.to_string()
 }
@@ -794,6 +801,7 @@ impl Default for ServerConfig {
             enable_fips: default_enable_fips(),
             fips_discovery_scope: default_fips_discovery_scope(),
             fips_local_rendezvous_addr: None,
+            enable_fips_lan_discovery: default_enable_fips_lan_discovery(),
             fips_relays: None,
             fips_peers: Vec::new(),
             enable_fips_udp: default_enable_fips_udp(),
@@ -1559,6 +1567,7 @@ decentralized_pubsub_max_event_bytes = 4096
         assert!(server.fips_peers.is_empty());
         assert_eq!(server.fips_discovery_scope, "fips-overlay-v1");
         assert!(server.fips_local_rendezvous_addr.is_none());
+        assert!(server.enable_fips_lan_discovery);
         assert_eq!(server.fips_request_timeout_ms, 5_500);
     }
 
@@ -1570,6 +1579,7 @@ decentralized_pubsub_max_event_bytes = 4096
 enable_fips = true
 fips_discovery_scope = "test-hashtree"
 fips_local_rendezvous_addr = "127.0.0.1:32111"
+enable_fips_lan_discovery = false
 fips_relays = ["wss://fips.example"]
 fips_peers = [
   { npub = "npub1origin", udp_addresses = ["udp:192.0.2.10:2121"] },
@@ -1593,6 +1603,7 @@ fips_request_timeout_ms = 42
             config.server.fips_local_rendezvous_addr.as_deref(),
             Some("127.0.0.1:32111")
         );
+        assert!(!config.server.enable_fips_lan_discovery);
         assert_eq!(
             config.server.fips_relays,
             Some(vec!["wss://fips.example".to_string()])

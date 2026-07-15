@@ -9,6 +9,8 @@
   service shared by local-only root operations and decentralized relay events.
 - Made the fixed loopback UDP rendezvous address optionally configurable for
   isolated full-stack tests while preserving the well-known production default.
+- Made FIPS LAN/mDNS discovery independently disableable so loopback-only labs
+  cannot silently use host-network discovery; the production default remains on.
 - Removed the CLI's `legacy-mesh` feature dependency and obsolete Nostr mesh
   forwarding, fanout, HTL, framing, and payload helpers; canonical Hashtree
   blob routing remains on `BlobResolver` and `fips-tcp`.
