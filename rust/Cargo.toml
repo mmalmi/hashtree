@@ -45,7 +45,7 @@ hashtree-network = { version = "0.2.82", path = "crates/hashtree-network" }
 hashtree-fips-transport = { version = "0.2.82", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.2.82", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.3.0", default-features = false }
-nostr-pubsub = "0.1.9"
+nostr-pubsub = "0.1.10"
 nostr-pubsub-fips = "0.2.3"
 nostr-pubsub-relay = "0.1.9"
 
