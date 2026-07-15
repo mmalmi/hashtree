@@ -30,7 +30,7 @@ hashtree-lmdb = { workspace = true, optional = true }
 hashtree-blossom.workspace = true
 hashtree-config.workspace = true
 hashtree-nostr.workspace = true
-hashtree-fips-transport.workspace = true
+hashtree-fips-transport = { workspace = true, features = ["legacy-mesh"] }
 hashtree-network = { workspace = true, optional = true }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-updater.workspace = true

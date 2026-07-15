@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-fips-transport"
-version.workspace = true
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,26 +11,40 @@ keywords = ["hashtree", "fips", "p2p", "merkle"]
 
 [features]
 default = []
-webrtc = ["fips-core/webrtc-transport"]
+legacy-mesh = [
+    "dep:hashtree-network",
+    "dep:hex",
+    "dep:rmp-serde",
+    "dep:serde",
+    "dep:serde_bytes",
+    "dep:serde_json",
+    "dep:tracing",
+]
+interop-fixture = ["dep:hex", "dep:serde", "dep:serde_json"]
+webrtc = ["legacy-mesh", "fips-core/webrtc-transport"]
 
 [dependencies]
 async-trait.workspace = true
-fips-core = "0.3.99"
+fips-core = "0.4.0"
+fips-tcp = "0.2.0"
+fips-tcp-endpoint = "0.2.0"
 hashtree-core.workspace = true
-hashtree-network.workspace = true
-hex.workspace = true
-rmp-serde.workspace = true
-serde.workspace = true
-serde_bytes = "0.11"
-serde_json.workspace = true
+hashtree-network = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+rmp-serde = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_bytes = { version = "0.11", optional = true }
+serde_json = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
-tracing.workspace = true
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
+hex.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros", "test-util"] }
 
 [[bin]]
 name = "hashtree-fips-stdio-fixture"
 path = "src/bin/stdio_fixture.rs"
+required-features = ["interop-fixture"]

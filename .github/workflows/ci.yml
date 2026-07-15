@@ -29,6 +29,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: ts/pnpm-lock.yaml
 
+      - name: Setup Rust for TCP blob interoperability
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

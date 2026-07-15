@@ -1,44 +1,38 @@
-use async_trait::async_trait;
+use fips_core::config::{PeerConfig, TransportInstances};
+use fips_core::{encode_nsec, Config, FipsEndpoint, Identity, PeerIdentity, UdpConfig};
 use hashtree_core::{Hash, MemoryStore, Store};
-use hashtree_fips_transport::{
-    FipsEndpointIo, FipsEndpointPacket, FipsTransportError, HashtreeFipsTransport,
-};
+use hashtree_fips_transport::{TcpBlobTransport, TcpBlobTransportConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::env;
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::Duration;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
 
-const LOCAL_PEER_ID: &str = "rust";
-const REMOTE_PEER_ID: &str = "ts";
-const RUST_BLOB: &[u8] = b"rust hashtree fips transport fixture blob";
-const LARGE_BLOB_LEN: usize = 2_777;
+const RUST_BLOB: &[u8] = b"rust TCP blob v1 fixture blob";
+const LARGE_BLOB_LEN: usize = 180_017;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum InputMessage {
-    Frame { data: String },
     Fetch { id: String, hash: String },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-enum OutputMessage<'a> {
+enum OutputMessage {
     Ready {
         #[serde(rename = "peerId")]
-        peer_id: &'a str,
+        peer_id: String,
         hash: String,
         data: String,
         #[serde(rename = "largeHash")]
         large_hash: String,
         #[serde(rename = "largeData")]
         large_data: String,
-    },
-    Frame {
-        #[serde(rename = "peerId")]
-        peer_id: &'a str,
-        data: String,
     },
     FetchResult {
         id: String,
@@ -49,67 +43,45 @@ enum OutputMessage<'a> {
     },
 }
 
-struct StdioEndpoint {
-    rx: Mutex<mpsc::UnboundedReceiver<FipsEndpointPacket>>,
-    stdout: Mutex<()>,
-}
-
-#[async_trait]
-impl FipsEndpointIo for StdioEndpoint {
-    async fn send(&self, _peer_id: &str, data: Vec<u8>) -> Result<(), FipsTransportError> {
-        let _guard = self.stdout.lock().await;
-        write_message(&OutputMessage::Frame {
-            peer_id: LOCAL_PEER_ID,
-            data: hex::encode(data),
-        })
-        .map_err(|err| FipsTransportError::Send(err.to_string()))
-    }
-
-    async fn recv(&self) -> Option<FipsEndpointPacket> {
-        self.rx.lock().await.recv().await
-    }
-
-    async fn peer_ids(&self) -> Vec<String> {
-        vec![REMOTE_PEER_ID.to_string()]
-    }
-
-    fn local_peer_id(&self) -> Option<String> {
-        Some(LOCAL_PEER_ID.to_string())
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if let Err(err) = run().await {
+    if let Err(error) = run().await {
         let _ = write_message(&OutputMessage::Error {
-            message: err.to_string(),
+            message: error.to_string(),
         });
         std::process::exit(1);
     }
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let endpoint = Arc::new(StdioEndpoint {
-        rx: Mutex::new(rx),
-        stdout: Mutex::new(()),
-    });
+    let (remote_peer, remote_address) = fixture_args()?;
+    let identity = Identity::generate();
+    let config = endpoint_config(&identity, remote_peer, remote_address);
+    let endpoint = Arc::new(
+        FipsEndpoint::builder()
+            .config(config)
+            .without_system_tun()
+            .bind()
+            .await?,
+    );
     let store = Arc::new(MemoryStore::new());
     let rust_hash = hash(RUST_BLOB);
     let rust_large_blob = large_blob();
     let rust_large_hash = hash(&rust_large_blob);
     store.put(rust_hash, RUST_BLOB.to_vec()).await?;
     store.put(rust_large_hash, rust_large_blob.clone()).await?;
+    let transport = TcpBlobTransport::bind_with_config(
+        endpoint.clone(),
+        store,
+        TcpBlobTransportConfig {
+            idle_timeout: Duration::from_secs(10),
+        },
+    )
+    .await?;
 
-    let transport = Arc::new(
-        HashtreeFipsTransport::new(endpoint.clone(), store)
-            .with_request_timeout(Duration::from_millis(5_000)),
-    );
-    transport.set_peers(vec![REMOTE_PEER_ID.to_string()]).await;
-    transport.start();
-
+    wait_for_peer(&endpoint, remote_peer).await?;
     write_message(&OutputMessage::Ready {
-        peer_id: LOCAL_PEER_ID,
+        peer_id: hex::encode(identity.pubkey_full().serialize()),
         hash: hex::encode(rust_hash),
         data: hex::encode(RUST_BLOB),
         large_hash: hex::encode(rust_large_hash),
@@ -122,43 +94,93 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             continue;
         }
         match serde_json::from_str::<InputMessage>(&line) {
-            Ok(InputMessage::Frame { data }) => {
-                let bytes = hex::decode(data)?;
-                tx.send(FipsEndpointPacket {
-                    peer_id: REMOTE_PEER_ID.to_string(),
-                    data: bytes,
-                })?;
-            }
             Ok(InputMessage::Fetch { id, hash }) => {
-                let Some(hash) = parse_hash(&hash) else {
-                    write_message(&OutputMessage::FetchResult { id, data: None })?;
-                    continue;
+                let result = match parse_hash(&hash) {
+                    Some(hash) => transport.get(&hash, remote_peer).await,
+                    None => Ok(None),
                 };
-                let transport = transport.clone();
-                tokio::spawn(async move {
-                    let result = transport
-                        .get_from_peers(&hash, &[REMOTE_PEER_ID.to_string()])
-                        .await;
-                    let message = match result {
-                        Ok(data) => OutputMessage::FetchResult {
-                            id,
-                            data: data.map(hex::encode),
-                        },
-                        Err(err) => OutputMessage::Error {
-                            message: err.to_string(),
-                        },
-                    };
-                    let _ = write_message(&message);
-                });
+                match result {
+                    Ok(data) => write_message(&OutputMessage::FetchResult {
+                        id,
+                        data: data.map(hex::encode),
+                    })?,
+                    Err(error) => write_message(&OutputMessage::Error {
+                        message: error.to_string(),
+                    })?,
+                }
             }
-            Err(err) => {
-                write_message(&OutputMessage::Error {
-                    message: err.to_string(),
-                })?;
-            }
+            Err(error) => write_message(&OutputMessage::Error {
+                message: error.to_string(),
+            })?,
         }
     }
 
+    transport.shutdown().await?;
+    endpoint.shutdown().await?;
+    Ok(())
+}
+
+fn fixture_args() -> io::Result<(PeerIdentity, SocketAddr)> {
+    let mut args = env::args().skip(1);
+    let npub = args
+        .next()
+        .ok_or_else(|| invalid_input("missing TypeScript peer npub"))?;
+    let address = args
+        .next()
+        .ok_or_else(|| invalid_input("missing TypeScript UDP address"))?
+        .parse::<SocketAddr>()
+        .map_err(|error| invalid_input(format!("invalid TypeScript UDP address: {error}")))?;
+    if args.next().is_some() {
+        return Err(invalid_input("unexpected fixture argument"));
+    }
+    if !address.ip().is_loopback() {
+        return Err(invalid_input("TypeScript UDP address is not loopback"));
+    }
+    let peer = PeerIdentity::from_npub(&npub)
+        .map_err(|error| invalid_input(format!("invalid TypeScript peer npub: {error}")))?;
+    Ok((peer, address))
+}
+
+fn endpoint_config(identity: &Identity, peer: PeerIdentity, peer_address: SocketAddr) -> Config {
+    let mut config = Config::new();
+    config.node.identity.nsec = Some(encode_nsec(&identity.keypair().secret_key()));
+    config.node.discovery.nostr.enabled = false;
+    config.node.discovery.lan.enabled = false;
+    config.node.discovery.local.enabled = false;
+    config.transports.udp = TransportInstances::Single(UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        advertise_on_nostr: Some(false),
+        public: Some(true),
+        outbound_only: Some(false),
+        accept_connections: Some(true),
+        ..UdpConfig::default()
+    });
+    config.peers = vec![PeerConfig::new(
+        peer.npub(),
+        "udp",
+        peer_address.to_string(),
+    )];
+    config
+}
+
+async fn wait_for_peer(
+    endpoint: &FipsEndpoint,
+    remote: PeerIdentity,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if endpoint.peers().await.is_ok_and(|peers| {
+                peers
+                    .iter()
+                    .any(|peer| peer.npub == remote.npub() && peer.connected)
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| invalid_input("FIPS peers did not connect"))?;
     Ok(())
 }
 
@@ -177,7 +199,7 @@ fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<String> {
     rx
 }
 
-fn write_message(message: &OutputMessage<'_>) -> io::Result<()> {
+fn write_message(message: &OutputMessage) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, message)?;
     stdout.write_all(b"\n")?;
@@ -185,10 +207,7 @@ fn write_message(message: &OutputMessage<'_>) -> io::Result<()> {
 }
 
 fn hash(data: &[u8]) -> Hash {
-    let digest = Sha256::digest(data);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+    Sha256::digest(data).into()
 }
 
 fn large_blob() -> Vec<u8> {
@@ -202,7 +221,9 @@ fn parse_hash(hex_hash: &str) -> Option<Hash> {
     if bytes.len() != 32 {
         return None;
     }
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&bytes);
-    Some(hash)
+    bytes.try_into().ok()
+}
+
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }

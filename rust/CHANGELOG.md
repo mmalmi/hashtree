@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0 - Unreleased
+
+### Added
+
+- Added a bounded Rust TCP/FIPS blob service and optional local-first Store
+  wrapper that discovers providers through FIPS 0.4's authenticated same-host
+  capability roster.
+- Added a bidirectional Rust/TypeScript process gate for small and multi-segment
+  hits plus explicit misses over real FIPS and TCP/FIPS implementations.
+
+### Changed
+
+- Made the old Rust mesh adapter an explicit `legacy-mesh` compatibility
+  feature; the TCP blob path has no duplicate framing fallback.
+- Updated the compatibility CLI to `nostr-pubsub-fips` 0.3.0 so every FIPS
+  endpoint in the process uses the FIPS 0.4 type.
+
+### Fixed
+
+- Preserved pins while replacing corrupt cache data, kept mixed
+  miss/provider-failure results as errors, and prevented client-only stores from
+  serving inbound blobs.
+
 ## 0.2.82 - 2026-07-14
 
 ### Added
