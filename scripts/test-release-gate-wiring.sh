@@ -39,6 +39,7 @@ import fs from 'node:fs';
 const packageJson = JSON.parse(fs.readFileSync('ts/package.json', 'utf8'));
 const expected = [
   'pnpm --filter @hashtree/fips-transport... build',
+  'pnpm --filter @hashtree/fips-transport verify:dist',
   'pnpm --filter @hashtree/fips-transport test',
   'pnpm --filter @hashtree/fips-transport lint',
 ].join(' && ');

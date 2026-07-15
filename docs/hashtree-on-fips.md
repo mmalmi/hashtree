@@ -1,9 +1,9 @@
-# Hashtree on FIPS
+# TypeScript Hashtree on FIPS
 
-Hashtree uses FIPS for authenticated identity, discovery, routing, and
-node-to-node datagrams. Blob exchange runs as a reliable TCP/FIPS service above
-those datagrams, so Hashtree does not copy discovery, retransmission, or
-underlay-specific logic.
+The `@hashtree/fips-transport` TypeScript package uses FIPS for authenticated
+identity, discovery, routing, and node-to-node datagrams. Blob exchange runs as
+a reliable TCP/FIPS service above those datagrams, so the adapter does not copy
+discovery, retransmission, or underlay-specific logic.
 
 ## Scope
 
@@ -13,9 +13,9 @@ Public browser providers join the shared FIPS discovery fabric:
 fips-overlay-v1
 ```
 
-Private deployments can select another discovery app. Browser and native
-providers should normally share the generic FIPS fabric instead of creating a
-parallel Hashtree-only WebRTC island.
+Private deployments can select another discovery app. Browser providers should
+normally share the generic FIPS fabric instead of creating a parallel
+Hashtree-only WebRTC island.
 
 ## Blob Service
 
@@ -56,8 +56,7 @@ not require the underlay itself to provide ordered delivery.
 
 ## Verification
 
-The package gate builds the core and transport packages, checks shared Rust/TS
-wire vectors and strict absence semantics, runs a real two-node FIPS worker
-fetch, lints the package, and regenerates the tracked distribution. Additional
-cross-runtime and browser/native scenarios belong in the full-stack integration
-lab.
+The package gate builds the core and transport packages, checks TCP blob vectors
+and strict absence semantics, runs a real two-node FIPS worker fetch, lints the
+package, and verifies the tracked distribution. Rust/TypeScript and broader
+browser/native scenarios belong in the full-stack integration lab.

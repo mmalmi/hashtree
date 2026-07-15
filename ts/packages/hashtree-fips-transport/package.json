@@ -27,6 +27,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "verify:dist": "git diff --exit-code -- dist",
     "lint": "eslint src tests --max-warnings 0",
     "test": "vitest run",
     "test:watch": "vitest"
