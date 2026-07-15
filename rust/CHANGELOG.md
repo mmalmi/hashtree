@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-07-16
+
+### Changed
+
+- Exposed native endpoint configuration independently from the legacy mesh
+  compatibility feature, including endpoint-only WebRTC support.
+
+### Fixed
+
+- Retried only transient pre-establishment TCP/FIPS readiness failures, with a
+  short delay bounded by the existing request deadline; authenticated protocol,
+  hash, and post-establishment failures remain terminal.
+
+## 0.2.85 - 2026-07-16
+
 ### Changed
 
 - Replaced the htree daemon's legacy raw FIPS status and Nostr mesh carrier

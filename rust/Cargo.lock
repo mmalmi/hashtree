@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.84"
+version = "0.2.85"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "fips-core",
