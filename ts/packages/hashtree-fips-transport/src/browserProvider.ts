@@ -9,6 +9,7 @@ import { WebRtcTransport } from '@fips/transport-webrtc';
 import { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
 import {
   createFipsWorkerP2PProvider,
+  type FipsBlobRouteSource,
   type HashtreeWorkerP2PProvider,
 } from './workerProvider.js';
 
@@ -27,6 +28,8 @@ interface BrowserHashtreeFipsProviderBaseOptions {
   relayConnectTimeoutMs?: number;
   iceGatherTimeoutMs?: number;
   requestTimeoutMs?: number;
+  /** Authenticated capability routes or explicitly configured remote Hashtree peers. */
+  providerRoutes?: FipsBlobRouteSource;
   forwarding?: boolean;
   logger?: Logger;
 }
@@ -85,6 +88,7 @@ export async function createBrowserHashtreeFipsProvider(
     node,
     localStore: options.localStore,
     requestTimeoutMs: options.requestTimeoutMs,
+    providerRoutes: options.providerRoutes,
   });
 
   let stopped = false;

@@ -5,11 +5,15 @@ import {
   identityFromSecretKey,
   toHex as fipsToHex,
 } from '@fips/core';
-import { createFipsWorkerP2PProvider } from '../src/workerProvider.js';
+import {
+  HASHTREE_BLOB_CAPABILITY,
+  blobRoutesFromCapabilityRoster,
+  createFipsWorkerP2PProvider,
+} from '../src/workerProvider.js';
 import { MemoryHub, MemoryTransport } from './support/memoryTransport.js';
 
 describe('FIPS worker P2P provider integration', () => {
-  it('fetches a block through two authenticated FIPS nodes', async () => {
+  it('fetches a block through an explicit authenticated Hashtree peer', async () => {
     const hub = new MemoryHub();
     const sourceIdentity = await identityFromSecretKey(secret(1));
     const readerIdentity = await identityFromSecretKey(secret(2));
@@ -30,17 +34,20 @@ describe('FIPS worker P2P provider integration', () => {
       localStore: sourceStore,
       requestTimeoutMs: 2_000,
     });
+    let sourcePeerId = '';
     const readerProvider = createFipsWorkerP2PProvider({
       node: readerNode,
       localStore: readerStore,
       requestTimeoutMs: 2_000,
+      providerRoutes: () => sourcePeerId ? [{ peerId: sourcePeerId, htl: 10 }] : [],
     });
 
     try {
       await Promise.all([sourceNode.start(), readerNode.start()]);
+      sourcePeerId = fipsToHex(sourceIdentity.publicKey);
       await readerNode.connect({
         transport: 'memory',
-        addr: fipsToHex(sourceIdentity.publicKey),
+        addr: sourcePeerId,
       });
       const data = new Uint8Array(180_000);
       data.forEach((_, index) => { data[index] = index % 251; });
@@ -48,10 +55,48 @@ describe('FIPS worker P2P provider integration', () => {
       await sourceStore.put(hash, data);
 
       await expect(readerProvider.listPeerIds()).resolves.toEqual([
-        fipsToHex(sourceIdentity.publicKey),
+        sourcePeerId,
       ]);
       await expect(readerProvider.fetch(toHex(hash))).resolves.toEqual(data);
       await expect(readerStore.get(hash)).resolves.toEqual(data);
+    } finally {
+      sourceProvider.close();
+      readerProvider.close();
+      await Promise.all([sourceNode.stop(), readerNode.stop()]);
+    }
+  });
+
+  it('does not treat every connected FIPS peer as a blob provider', async () => {
+    const hub = new MemoryHub();
+    const sourceIdentity = await identityFromSecretKey(secret(7));
+    const readerIdentity = await identityFromSecretKey(secret(8));
+    const sourceNode = new FipsNode({
+      identity: sourceIdentity,
+      transports: [new MemoryTransport(hub)],
+    });
+    const readerNode = new FipsNode({
+      identity: readerIdentity,
+      transports: [new MemoryTransport(hub)],
+    });
+    const data = new TextEncoder().encode('explicit provider only');
+    const hash = await sha256(data) as Hash;
+    const sourceStore = new MemoryStore();
+    await sourceStore.put(hash, data);
+    const sourceProvider = createFipsWorkerP2PProvider({ node: sourceNode, localStore: sourceStore });
+    const readerProvider = createFipsWorkerP2PProvider({
+      node: readerNode,
+      localStore: new MemoryStore(),
+      requestTimeoutMs: 2_000,
+    });
+
+    try {
+      await Promise.all([sourceNode.start(), readerNode.start()]);
+      const sourcePeerId = fipsToHex(sourceIdentity.publicKey);
+      await readerNode.connect({ transport: 'memory', addr: sourcePeerId });
+
+      await expect(readerProvider.listPeerIds()).resolves.toEqual([]);
+      await expect(readerProvider.fetch(toHex(hash))).rejects.toThrow('no TCP/FIPS blob providers');
+      await expect(readerProvider.fetch(toHex(hash), sourcePeerId)).resolves.toEqual(data);
     } finally {
       sourceProvider.close();
       readerProvider.close();
@@ -126,6 +171,30 @@ describe('FIPS worker P2P provider integration', () => {
 
     provider.close();
     await expect(provider.fetch('00'.repeat(32))).rejects.toThrow('closed');
+  });
+
+  it('derives only exact local capability routes and ranks them by priority', () => {
+    expect(blobRoutesFromCapabilityRoster([
+      {
+        peerId: 'lower',
+        capabilities: [{ name: HASHTREE_BLOB_CAPABILITY, fspPort: 39_018, priority: 1 }],
+      },
+      {
+        peerId: 'wrong-port',
+        capabilities: [{ name: HASHTREE_BLOB_CAPABILITY, fspPort: 39_019, priority: 99 }],
+      },
+      {
+        peerId: 'wrong-name',
+        capabilities: [{ name: 'hashtree.blob/2', fspPort: 39_018, priority: 99 }],
+      },
+      {
+        peerId: 'preferred',
+        capabilities: [{ name: HASHTREE_BLOB_CAPABILITY, fspPort: 39_018, priority: 10 }],
+      },
+    ])).toEqual([
+      { peerId: 'preferred', htl: 0, priority: 10 },
+      { peerId: 'lower', htl: 0, priority: 1 },
+    ]);
   });
 });
 

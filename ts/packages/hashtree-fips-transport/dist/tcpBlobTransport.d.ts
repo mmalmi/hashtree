@@ -3,6 +3,8 @@ import { type Hash, type Store } from '@hashtree/core';
 export declare const TCP_BLOB_SERVICE_PORT = 39018;
 export declare const TCP_BLOB_MAGIC = 72;
 export declare const TCP_BLOB_VERSION = 1;
+export declare const TCP_BLOB_DEFAULT_HTL = 10;
+export declare const TCP_BLOB_MAX_HTL = 10;
 export declare const TCP_BLOB_MAX_BYTES: number;
 export interface TcpBlobTransportOptions {
     endpoint: FipsDatagramEndpoint;
@@ -18,7 +20,7 @@ export declare class TcpBlobTransport {
     private pumping;
     private closed;
     constructor(options: TcpBlobTransportOptions);
-    get(hash: Hash, peerIds: readonly string[]): Promise<Uint8Array | null>;
+    get(hash: Hash, peerIds: readonly string[], htl?: number): Promise<Uint8Array | null>;
     close(): Promise<void>;
     private fetchFromPeer;
     private pump;

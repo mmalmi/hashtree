@@ -1,7 +1,7 @@
 import { type Store } from '@hashtree/core';
 import { FipsNode, type FipsIdentity, type Logger } from '@fips/core';
 import { WebRtcTransport } from '@fips/transport-webrtc';
-import { type HashtreeWorkerP2PProvider } from './workerProvider.js';
+import { type FipsBlobRouteSource, type HashtreeWorkerP2PProvider } from './workerProvider.js';
 interface BrowserHashtreeFipsProviderBaseOptions {
     relays: readonly string[];
     localStore: Store;
@@ -12,6 +12,8 @@ interface BrowserHashtreeFipsProviderBaseOptions {
     relayConnectTimeoutMs?: number;
     iceGatherTimeoutMs?: number;
     requestTimeoutMs?: number;
+    /** Authenticated capability routes or explicitly configured remote Hashtree peers. */
+    providerRoutes?: FipsBlobRouteSource;
     forwarding?: boolean;
     logger?: Logger;
 }

@@ -47,6 +47,7 @@ export async function createBrowserHashtreeFipsProvider(options) {
         node,
         localStore: options.localStore,
         requestTimeoutMs: options.requestTimeoutMs,
+        providerRoutes: options.providerRoutes,
     });
     let stopped = false;
     const stop = async () => {

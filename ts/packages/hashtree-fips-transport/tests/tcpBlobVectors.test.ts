@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  TCP_BLOB_DEFAULT_HTL,
   TCP_BLOB_MAX_BYTES,
+  TCP_BLOB_MAX_HTL,
   TCP_BLOB_SERVICE_PORT,
   decodeTcpBlobRequest,
   decodeTcpBlobResponseHeader,
@@ -17,12 +19,18 @@ describe('TCP/FIPS Hashtree blob v1 vectors', () => {
     expect(toHex(encodeTcpBlobResponseHeader(true, 3))).toBe('48010100000003');
     expect(TCP_BLOB_SERVICE_PORT).toBe(39_018);
     expect(TCP_BLOB_MAX_BYTES).toBe(16 * 1024 * 1024);
+    expect(TCP_BLOB_DEFAULT_HTL).toBe(10);
+    expect(TCP_BLOB_MAX_HTL).toBe(10);
   });
 
   it('round-trips the native HTL boundaries', () => {
     const hash = Uint8Array.from({ length: 32 }, (_, index) => index);
     expect(decodeTcpBlobRequest(encodeTcpBlobRequest(hash, 0))).toEqual({ htl: 0, hash });
-    expect(decodeTcpBlobRequest(encodeTcpBlobRequest(hash, 10))).toEqual({ htl: 10, hash });
+    const request = encodeTcpBlobRequest(hash, TCP_BLOB_MAX_HTL);
+    expect(toHex(request)).toBe(
+      `4801010a${Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')}`,
+    );
+    expect(decodeTcpBlobRequest(request)).toEqual({ htl: TCP_BLOB_MAX_HTL, hash });
   });
 
   it('rejects legacy request framing and invalid HTLs', () => {
@@ -33,9 +41,11 @@ describe('TCP/FIPS Hashtree blob v1 vectors', () => {
     for (const htl of [-1, 0.5, 11, 0xff, 256]) {
       expect(() => encodeTcpBlobRequest(hash, htl)).toThrow('TCP/FIPS blob HTL is invalid');
     }
-    const oversizedHtl = encodeTcpBlobRequest(hash, 10);
-    oversizedHtl[3] = 11;
-    expect(() => decodeTcpBlobRequest(oversizedHtl)).toThrow('TCP/FIPS blob HTL is invalid');
+    for (const htl of [11, 0xff]) {
+      const request = encodeTcpBlobRequest(hash, 0);
+      request[3] = htl;
+      expect(() => decodeTcpBlobRequest(request)).toThrow('TCP/FIPS blob HTL is invalid');
+    }
   });
 
   it('accepts only canonical missing and bounded found response headers', () => {

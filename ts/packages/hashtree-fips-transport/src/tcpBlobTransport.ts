@@ -4,6 +4,8 @@ import { sha256, type Hash, type Store } from '@hashtree/core';
 export const TCP_BLOB_SERVICE_PORT = 39_018;
 export const TCP_BLOB_MAGIC = 0x48;
 export const TCP_BLOB_VERSION = 1;
+export const TCP_BLOB_DEFAULT_HTL = 10;
+export const TCP_BLOB_MAX_HTL = 10;
 const GET = 1;
 const MISSING = 0;
 const FOUND = 1;
@@ -36,31 +38,44 @@ export class TcpBlobTransport {
     this.timer = setInterval(() => void this.pump(), POLL_INTERVAL_MS);
   }
 
-  async get(hash: Hash, peerIds: readonly string[]): Promise<Uint8Array | null> {
+  async get(
+    hash: Hash,
+    peerIds: readonly string[],
+    htl = TCP_BLOB_DEFAULT_HTL,
+  ): Promise<Uint8Array | null> {
+    checkHtl(htl);
     const local = await this.verifiedGet(hash);
     if (local) return local;
     const peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
     if (peers.length === 0) throw new Error('no TCP/FIPS blob providers are available');
     let failures: unknown[] = [];
     for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
-      const results = await Promise.all(
-        peers.map(async (peer) => {
+      const pending = new Map<number, Promise<readonly [number, ProviderResult]>>();
+      for (const [index, peer] of peers.entries()) {
+        pending.set(index, (async () => {
           try {
             const data = await this.fetchFromPeer(
               peer,
               hash,
               Math.max(250, Math.floor(this.timeoutMs / 2)),
+              htl,
             );
-            return data === null
+            const result: ProviderResult = data === null
               ? { kind: 'missing' as const }
               : { kind: 'found' as const, data };
+            return [index, result] as const;
           } catch (error) {
-            return { kind: 'failed' as const, error };
+            return [index, { kind: 'failed' as const, error }] as const;
           }
-        }),
-      );
-      const found = results.find((result) => result.kind === 'found');
-      if (found?.kind === 'found') return found.data;
+        })());
+      }
+      const results: ProviderResult[] = [];
+      while (pending.size > 0) {
+        const [index, result] = await Promise.race(pending.values());
+        pending.delete(index);
+        if (result.kind === 'found') return result.data;
+        results.push(result);
+      }
       failures = results.flatMap((result) => result.kind === 'failed' ? [result.error] : []);
       if (failures.length === 0) return null;
     }
@@ -78,12 +93,13 @@ export class TcpBlobTransport {
     peer: string,
     hash: Hash,
     attemptTimeoutMs: number,
+    htl: number,
   ): Promise<Uint8Array | null> {
     const deadline = Date.now() + attemptTimeoutMs;
     const connection = await this.tcp.connect(peer);
     try {
       await this.waitEstablished(connection, deadline);
-      const request = encodeTcpBlobRequest(hash);
+      const request = encodeTcpBlobRequest(hash, htl);
       await this.writeAll(connection, request, deadline);
       const header = await this.readExact(connection, HEADER_BYTES, deadline);
       const response = decodeTcpBlobResponseHeader(header);
@@ -125,7 +141,8 @@ export class TcpBlobTransport {
 
   private async verifiedGet(hash: Hash): Promise<Uint8Array | null> {
     const data = await this.options.localStore.get(hash);
-    if (!data || !bytesEqual(await sha256(data), hash)) return null;
+    if (!data) return null;
+    if (!bytesEqual(await sha256(data), hash)) throw new Error('local blob hash mismatch');
     return data;
   }
 
@@ -172,11 +189,9 @@ export class TcpBlobTransport {
   }
 }
 
-export function encodeTcpBlobRequest(hash: Uint8Array, htl = 0): Uint8Array {
+export function encodeTcpBlobRequest(hash: Uint8Array, htl = TCP_BLOB_DEFAULT_HTL): Uint8Array {
   if (hash.byteLength !== 32) throw new Error('TCP/FIPS blob hash must be 32 bytes');
-  if (!Number.isInteger(htl) || htl < 0 || htl > 0xff) {
-    throw new Error('TCP/FIPS blob HTL is invalid');
-  }
+  checkHtl(htl);
   const request = new Uint8Array(REQUEST_BYTES);
   request.set([TCP_BLOB_MAGIC, TCP_BLOB_VERSION, GET, htl]);
   request.set(hash, 4);
@@ -192,7 +207,9 @@ export function decodeTcpBlobRequest(request: Uint8Array): { hash: Hash; htl: nu
   ) {
     throw new Error('invalid TCP/FIPS blob request');
   }
-  return { hash: request.slice(4) as Hash, htl: request[3] };
+  const htl = request[3];
+  checkHtl(htl);
+  return { hash: request.slice(4) as Hash, htl };
 }
 
 export function encodeTcpBlobResponseHeader(found: boolean, size: number): Uint8Array {
@@ -233,6 +250,17 @@ export function decodeTcpBlobResponseHeader(header: Uint8Array): TcpBlobResponse
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false;
   return left.every((byte, index) => byte === right[index]);
+}
+
+type ProviderResult =
+  | { kind: 'found'; data: Uint8Array }
+  | { kind: 'missing' }
+  | { kind: 'failed'; error: unknown };
+
+function checkHtl(htl: number): void {
+  if (!Number.isInteger(htl) || htl < 0 || htl > TCP_BLOB_MAX_HTL) {
+    throw new Error('TCP/FIPS blob HTL is invalid');
+  }
 }
 
 function sleep(ms: number): Promise<void> {
