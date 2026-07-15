@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.1 - 2026-07-15
+
+### Changed
+
+- Generalized the authenticated `hashtree.blob/1` TCP/FIPS service from a
+  direct store wrapper to any bounded `BlobRoute`, so a same-host provider can
+  answer locally or continue through its normal Hashtree resolver.
+- Added explicit strong and weak peer-route handles, live authenticated inbound
+  policy, configurable local/standalone HTL, and transport deadlines that
+  preserve the resolver's search budget.
+
+### Fixed
+
+- Rejected oversized requests, responses, and HTL values at every adapter
+  boundary, and kept provider failure distinct from an explicit `NoResult`.
+
+## 0.2.84 - 2026-07-15
+
+### Changed
+
+- Made `BlobRequest { hash, htl }`, `BlobReply::{Data, NoResult}`, and
+  `BlobRoute` the shared retrieval contract across local stores, Hashtree mesh
+  routing, same-host providers, and the daemon's HTTP cache path.
+- Routed daemon FIPS retrieval through the canonical HTL resolver over
+  `fips-tcp`, with exact one-step HTL consumption only at Hashtree mesh
+  forwarding and central hash verification and caching.
+
+### Fixed
+
+- Preserved timeout, corruption, overload, and incomplete searches as retryable
+  failures instead of false absence at the HTTP boundary.
+- Bounded fanout, blob size, HTL, and authenticated inbound work; made hedged
+  source cancellation abort-safe; and prevented same-hash requests with equal
+  or different HTL budgets from overwriting or stranding each other.
+
 ## 0.3.0 - 2026-07-15
 
 ### Added
