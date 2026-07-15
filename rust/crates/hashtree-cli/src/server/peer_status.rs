@@ -250,25 +250,41 @@ pub(super) async fn daemon_status(
         "nostr_relays": state.nostr_relay_urls.len(),
     });
     let fips = if let Some(ref endpoint) = state.fips_endpoint {
-        let peers = endpoint
-            .peers()
-            .await
-            .unwrap_or_default()
+        let native_peers = endpoint.peers().await.unwrap_or_default();
+        let peers = native_peers
+            .iter()
+            .map(|peer| peer.npub.clone())
+            .collect::<Vec<_>>();
+        let connected_peers = native_peers.iter().filter(|peer| peer.connected).count();
+        let peer_statuses = native_peers
             .into_iter()
-            .map(|peer| peer.npub)
+            .map(|peer| {
+                json!({
+                    "npub": peer.npub,
+                    "connected": peer.connected,
+                    "transport_type": peer.transport_type,
+                    "transport_addr": peer.transport_addr,
+                })
+            })
             .collect::<Vec<_>>();
         json!({
             "enabled": true,
             "fetch_from_peers": state.fetch_from_fips_peers,
             "http_fetch": state.fetch_from_fips_peers,
             "total_peers": peers.len(),
+            "connected_peers": connected_peers,
             "peers": peers,
+            "peer_statuses": peer_statuses,
         })
     } else {
         json!({
             "enabled": false,
             "fetch_from_peers": state.fetch_from_fips_peers,
             "http_fetch": state.fetch_from_fips_peers,
+            "total_peers": 0,
+            "connected_peers": 0,
+            "peers": [],
+            "peer_statuses": [],
         })
     };
     let (relay_bytes_sent, relay_bytes_received) = state.ws_relay.upstream_relay_bandwidth();

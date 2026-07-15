@@ -733,8 +733,114 @@ async fn daemon_status_reads_native_fips_endpoint_without_legacy_transport() {
 
     assert_eq!(json["fips"]["enabled"], true);
     assert_eq!(json["fips"]["total_peers"], 0);
+    assert_eq!(json["fips"]["connected_peers"], 0);
+    assert_eq!(json["fips"]["peers"], serde_json::json!([]));
+    assert_eq!(json["fips"]["peer_statuses"], serde_json::json!([]));
     assert_eq!(json["capabilities"]["fips"], true);
     endpoint.native_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn daemon_status_reports_truthful_native_fips_connection_state() {
+    async fn endpoint(
+        keys: &Keys,
+        scope: &str,
+        udp_addr: &str,
+    ) -> hashtree_fips_transport::BoundFipsEndpoint {
+        let mut options = hashtree_fips_transport::FipsEndpointOptions::new(
+            keys.secret_key().to_bech32().unwrap(),
+        );
+        options.discovery_scope = scope.to_string();
+        options.enable_udp = true;
+        options.udp_bind_addr = Some(udp_addr.to_string());
+        options.enable_webrtc = false;
+        options.enable_local_rendezvous = false;
+        options.enable_lan_discovery = false;
+        options.share_local_candidates = false;
+        options.relays.clear();
+        hashtree_fips_transport::bind_fips_endpoint(options)
+            .await
+            .unwrap()
+    }
+
+    fn reserve_udp_addr() -> String {
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string()
+    }
+
+    let temp = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
+    let scope = format!("status-connected-test-{}", uuid::Uuid::new_v4());
+    let left_addr = reserve_udp_addr();
+    let right_addr = reserve_udp_addr();
+    let left = endpoint(&Keys::generate(), &scope, &left_addr).await;
+    let right = endpoint(&Keys::generate(), &scope, &right_addr).await;
+    hashtree_fips_transport::set_fips_peer_configs(
+        left.native_endpoint.as_ref(),
+        vec![hashtree_fips_transport::FipsPeerConfig {
+            npub: right.local_peer_id.clone(),
+            udp_addresses: vec![right_addr.clone()],
+        }],
+    )
+    .await
+    .unwrap();
+    hashtree_fips_transport::set_fips_peer_configs(
+        right.native_endpoint.as_ref(),
+        vec![hashtree_fips_transport::FipsPeerConfig {
+            npub: left.local_peer_id.clone(),
+            udp_addresses: vec![left_addr],
+        }],
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if left
+                .native_endpoint
+                .peers()
+                .await
+                .unwrap()
+                .iter()
+                .any(|peer| peer.npub == right.local_peer_id && peer.connected)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("native FIPS endpoints did not connect");
+
+    let mut state = test_app_state(store, vec![]);
+    state.fips_endpoint = Some(left.native_endpoint.clone());
+    let response = daemon_status(
+        AxumState(state),
+        axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 21417))),
+    )
+    .await
+    .into_response();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["fips"]["total_peers"], 1);
+    assert_eq!(json["fips"]["connected_peers"], 1);
+    assert_eq!(json["fips"]["peers"][0], right.local_peer_id);
+    assert_eq!(
+        json["fips"]["peer_statuses"][0]["npub"],
+        right.local_peer_id
+    );
+    assert_eq!(json["fips"]["peer_statuses"][0]["connected"], true);
+    assert_eq!(json["fips"]["peer_statuses"][0]["transport_type"], "udp");
+    assert_eq!(
+        json["fips"]["peer_statuses"][0]["transport_addr"],
+        right_addr
+    );
+
+    left.native_endpoint.shutdown().await.unwrap();
+    right.native_endpoint.shutdown().await.unwrap();
 }
 
 #[tokio::test]
