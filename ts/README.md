@@ -22,7 +22,7 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 - [`@hashtree/core`](https://www.npmjs.com/package/@hashtree/core) - Core merkle tree library ([source](packages/hashtree))
 - [`@hashtree/merge`](https://www.npmjs.com/package/@hashtree/merge) - Deterministic path-based overlay merge primitives ([source](packages/hashtree-merge))
 - [`@hashtree/nostr`](https://www.npmjs.com/package/@hashtree/nostr) - Nostr ref resolver, event collections, and signed root snapshots ([source](packages/hashtree-nostr))
-- [`@hashtree/fips-transport`](https://www.npmjs.com/package/@hashtree/fips-transport) - Hashtree mesh blob transport over FIPS endpoint bytes ([source](packages/hashtree-fips-transport))
+- [`@hashtree/fips-transport`](https://www.npmjs.com/package/@hashtree/fips-transport) - Hash-verified blobs over reliable TCP/FIPS streams ([source](packages/hashtree-fips-transport))
 - [`@hashtree/git`](https://www.npmjs.com/package/@hashtree/git) - Git/htree interoperability helpers ([source](packages/hashtree-git))
 - [`@hashtree/dexie`](https://www.npmjs.com/package/@hashtree/dexie) - IndexedDB/Dexie storage adapter ([source](packages/hashtree-dexie))
 - [`@hashtree/index`](https://www.npmjs.com/package/@hashtree/index) - B-Tree index structures ([source](packages/hashtree-index))
@@ -49,7 +49,7 @@ npm install @hashtree/core
 # Optional:
 npm install @hashtree/merge  # Path-based overlay merge primitives
 npm install @hashtree/nostr  # Nostr resolver and event collections
-npm install @hashtree/fips-transport  # FIPS endpoint byte transport
+npm install @hashtree/fips-transport  # Reliable TCP/FIPS blob transport
 npm install @hashtree/dexie  # IndexedDB storage
 npm install @hashtree/index  # B-Tree indexes
 npm install @hashtree/worker  # Worker runtime + tree-root helpers
@@ -62,7 +62,9 @@ The `Store` interface is just `get(hash) → bytes` and `put(hash, bytes)`. Impl
 - `MemoryStore` - In-memory (in `@hashtree/core`)
 - `BlossomStore` - Remote blossom server (in `@hashtree/core`)
 - `DexieStore` - IndexedDB via Dexie (in `@hashtree/dexie`)
-- `FipsTransportStore` - P2P network via FIPS endpoint bytes (in `@hashtree/fips-transport`)
+
+P2P reads remain a separate transport concern. `TcpBlobTransport` can read
+from authenticated FIPS peers and cache verified results in any local `Store`.
 
 ## Usage
 
@@ -120,46 +122,34 @@ Wire format: `{t: LinkType, l: [{h: hash, s: size, n?: name, t: linkType, ...}]}
 
 ## P2P Transport (FIPS)
 
-`@hashtree/fips-transport` sends the same `@hashtree/mesh` request/response
-frames over FIPS endpoint bytes. FIPS owns peer discovery, signaling, and
-underlay transports; Hashtree owns hash verification and source selection.
-Browser and native providers join the shared `fips-overlay-v1` FIPS discovery
+`@hashtree/fips-transport` carries blobs on reliable TCP/FIPS streams. FIPS
+owns identity, peer discovery, signaling, routing, and underlay transports;
+TCP/FIPS owns ordered delivery, flow control, and segment retransmission;
+Hashtree owns peer choice, bounded whole-session retry, hash verification, and
+cache writes. Browser providers join the shared `fips-overlay-v1` discovery
 fabric by default.
 
 ```typescript
 import {
-  FipsTransportStore,
-  createFipsNodeEndpoint,
+  TcpBlobTransport,
   DEFAULT_FIPS_DISCOVERY_APP,
 } from '@hashtree/fips-transport';
 
-const endpoint = createFipsNodeEndpoint(fipsNode);
-
-const store = new FipsTransportStore({
-  endpoint,
+const transport = new TcpBlobTransport({
+  endpoint: fipsNode,
   localStore,
-  peers: () => endpoint.listPeerIds?.() ?? [],
 });
 
 console.log(DEFAULT_FIPS_DISCOVERY_APP); // fips-overlay-v1
-const data = await store.get(hash);
+const data = await transport.get(hash, peerIds);
+await transport.close();
 ```
 
-Peers that do not have a blob can stay silent. The read resolves `null` after
-the request timeout without retrying the same peer forever.
-
-**Blob exchange protocol**: FIPS carries Hashtree app-owned endpoint bytes. The
-payload uses two MessagePack-encoded message types with a type prefix byte:
-
-| Type | Byte | Format | Description |
-|------|------|--------|-------------|
-| Request | `0x00` | `{h: hash32, htl?: u8}` | Request data by hash |
-| Response | `0x01` | `{h: hash32, d: bytes}` | Return data |
-
-**Request forwarding**: Mesh-aware peers can forward requests they can't fulfill
-locally. HTL (Hops-To-Live, default `MAX_HTL`, currently 10) limits propagation
-depth. The FIPS transport currently keeps the boundary point-to-point and relies
-on Hashtree's source selection to ask additional peers.
+The protocol uses FIPS service port `39018`. A provider explicitly reports
+found or missing. `null` therefore means every attempted provider reported a
+miss; timeouts, resets, malformed responses, and mixed miss/failure results stay
+errors rather than becoming false absence. See
+[`docs/tcp-fips-blob-v1.md`](../docs/tcp-fips-blob-v1.md) for the wire format.
 
 ## Iris App Repos
 
