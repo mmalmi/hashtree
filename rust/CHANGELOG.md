@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## Adaptive pool storage - 2026-07-16
+
+### Added
+
+- Added `hashtree-lmdb` 0.2.84's application-owned `PoolStore`: persisted
+  member identity and exact placement, hash-verified idempotent writes and
+  moves, shared pins/access metadata, bounded adaptive member ordering, and
+  safe add, drain, rebalance, repair, and remove operations.
+- Added real multiprocess crash, resize, pin/GC, member-refresh, placement, and
+  migration coverage, plus a resumable read-only LMDB migration command and
+  systemd service template.
+
+### Changed
+
+- Made a fresh shared same-host LMDB store one canonical pool while preserving
+  existing single-store layouts until explicitly migrated.
+- Released `hashtree-cli` 0.2.90 with pool status/configuration/maintenance and
+  migration commands.
+
+### Removed
+
+- Removed the four hot/legacy LMDB environment variables and their duplicate
+  read/write/retention branches. Applications now write to one explicit store;
+  the read-only `BlobRouter` continues to treat the complete pool as one opaque
+  route.
+
 ## Blob routing crates - 2026-07-16
 
 ### Changed

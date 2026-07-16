@@ -32,7 +32,7 @@ uuid = { version = "1.0", features = ["v4"] }
 hashtree-core = { version = "0.2.85", path = "crates/hashtree-core" }
 hashtree-index = { version = "0.2.82", path = "crates/hashtree-index" }
 hashtree-collection = { version = "0.2.82", path = "crates/hashtree-collection" }
-hashtree-lmdb = { version = "0.2.83", path = "crates/hashtree-lmdb" }
+hashtree-lmdb = { version = "0.2.84", path = "crates/hashtree-lmdb" }
 hashtree-s3 = { version = "0.2.82", path = "crates/hashtree-s3" }
 hashtree-blossom = { version = "0.2.82", path = "crates/hashtree-blossom" }
 hashtree-sim = { version = "0.2.82", path = "crates/hashtree-sim" }

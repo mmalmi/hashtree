@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.89"
+version = "0.2.90"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3819,7 +3819,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "hashtree-core",

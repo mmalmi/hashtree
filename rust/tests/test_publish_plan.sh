@@ -32,12 +32,12 @@ require_line "${RUST_DIR}/Cargo.toml" 'version = "0.2.82"' \
     "unchanged workspace crates must remain at 0.2.82"
 require_line "${RUST_DIR}/crates/hashtree-core/Cargo.toml" 'version = "0.2.85"' \
     "hashtree-core must release its process-local route context API"
-require_line "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" 'version = "0.2.83"' \
-    "hashtree-lmdb must release its canonical shared-store opener"
+require_line "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" 'version = "0.2.84"' \
+    "hashtree-lmdb must release its adaptive application-owned pool"
 require_line "${RUST_DIR}/crates/hashtree-network/Cargo.toml" 'version = "0.2.84"' \
     "hashtree-network must release the adaptive BlobRouter"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.89"' \
-    "hashtree-cli must release as 0.2.89"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.90"' \
+    "hashtree-cli must release as 0.2.90"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.83"' \
     "unchanged hashtree-embedded must remain at 0.2.83"
 require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.4"' \
@@ -45,7 +45,7 @@ require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = 
 
 grep -F 'hashtree-core = { version = "0.2.85", path = "crates/hashtree-core" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-lmdb = { version = "0.2.83", path = "crates/hashtree-lmdb" }' \
+grep -F 'hashtree-lmdb = { version = "0.2.84", path = "crates/hashtree-lmdb" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-network = { version = "0.2.84", path = "crates/hashtree-network" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
