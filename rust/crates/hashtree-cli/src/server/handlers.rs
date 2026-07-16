@@ -9,6 +9,7 @@ use super::request_paths::{
 };
 use super::ui::root_page;
 use crate::socialgraph;
+use crate::storage::{PinTreeError, PRIORITY_OWN};
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, OriginalUri, Path, Query, State},
@@ -20,8 +21,8 @@ use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use hashtree_core::{
-    from_hex, nhash_decode, sha256, to_hex, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType,
-    Store, TreeEntry,
+    from_hex, nhash_decode, nhash_encode_full, sha256, to_hex, Cid, HashTree, HashTreeConfig,
+    HashTreeError, LinkType, Store, TreeEntry,
 };
 use hashtree_resolver::{
     nostr::{NostrResolverConfig, NostrRootResolver},
@@ -1983,6 +1984,102 @@ pub async fn pin_cid(State(state): State<AppState>, Path(cid): Path<String>) -> 
             "success": false,
             "error": e.to_string()
         })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PinTreeRequest {
+    nhash: String,
+}
+
+/// Validate, index, and pin a complete DAG through the daemon's sole LMDB
+/// writer. This handler is mounted only below strict configured Basic auth.
+pub async fn pin_tree(
+    State(state): State<AppState>,
+    Json(request): Json<PinTreeRequest>,
+) -> Response<Body> {
+    let decoded = match nhash_decode(&request.nhash) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"success": false, "error": format!("invalid nhash: {error}")})),
+            )
+                .into_response();
+        }
+    };
+    let canonical = match nhash_encode_full(&decoded) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"success": false, "error": format!("invalid nhash: {error}")})),
+            )
+                .into_response();
+        }
+    };
+    if canonical != request.nhash {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": "nhash must use canonical encoding"})),
+        )
+            .into_response();
+    }
+
+    let cid = Cid {
+        hash: decoded.hash,
+        key: decoded.decrypt_key,
+    };
+    let store = Arc::clone(&state.store);
+    let limits = store.tree_index_limits();
+    let label = canonical.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        store.pin_and_index_tree(&cid, "pinned", Some(&label), PRIORITY_OWN, limits)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(result)) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "nhash": canonical,
+                "indexed_hashes": result.indexed_hashes,
+                "total_size": result.total_size,
+                "already_pinned": result.already_pinned,
+            })),
+        )
+            .into_response(),
+        Ok(Err(error @ PinTreeError::MissingRoot { .. })) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": error.to_string()})),
+        )
+            .into_response(),
+        Ok(Err(
+            error @ (PinTreeError::NodeLimitExceeded { .. }
+            | PinTreeError::ByteLimitExceeded { .. }),
+        )) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"success": false, "error": error.to_string()})),
+        )
+            .into_response(),
+        Ok(Err(
+            error @ (PinTreeError::MissingDescendant { .. } | PinTreeError::InvalidDag { .. }),
+        )) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"success": false, "error": error.to_string()})),
+        )
+            .into_response(),
+        Ok(Err(error @ PinTreeError::Storage(_))) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": error.to_string()})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": format!("pin worker failed: {error}")})),
+        )
+            .into_response(),
     }
 }
 

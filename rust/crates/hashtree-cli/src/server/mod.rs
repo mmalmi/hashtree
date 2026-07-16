@@ -559,6 +559,11 @@ impl HashtreeServer {
                     .layer(DefaultBodyLimit::max(blossom::MAX_BATCH_UPLOAD_BYTES)),
             )
             .route(
+                "/api/pin-tree",
+                post(handlers::pin_tree)
+                    .layer(DefaultBodyLimit::max(INTERNAL_JSON_BODY_LIMIT_BYTES)),
+            )
+            .route(
                 "/api/cache-tree-root",
                 post(handlers::cache_tree_root)
                     .layer(DefaultBodyLimit::max(INTERNAL_JSON_BODY_LIMIT_BYTES)),
@@ -763,7 +768,8 @@ mod tests {
     use crate::storage::HashtreeStore;
     use async_trait::async_trait;
     use hashtree_core::{
-        from_hex, nhash_encode, sha256, to_hex, DirEntry, HashTree, HashTreeConfig, LinkType,
+        from_hex, nhash_encode, nhash_encode_full, sha256, to_hex, DirEntry, HashTree,
+        HashTreeConfig, LinkType, NHashData,
     };
     use nostr::{nips::nip19::ToBech32, EventBuilder, Keys, Kind, Timestamp};
     use nostr_pubsub::{
@@ -958,6 +964,39 @@ mod tests {
         Ok((port, handle))
     }
 
+    async fn spawn_test_server_with_auth(
+        store: Arc<HashtreeStore>,
+    ) -> Result<(u16, tokio::task::JoinHandle<Result<()>>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = HashtreeServer::new(store, "127.0.0.1:0".to_string())
+            .with_auth("test-user".to_string(), "test-password".to_string());
+        let handle =
+            tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
+        Ok((port, handle))
+    }
+
+    async fn encrypted_test_directory(store: &HashtreeStore) -> Result<(Cid, Cid, Vec<u8>)> {
+        let tree = HashTree::new(
+            HashTreeConfig::new(store.store_arc())
+                .with_chunk_size(4)
+                .with_max_links(2),
+        );
+        let content = b"encrypted descendant content spanning chunks".to_vec();
+        let (file_cid, file_size) = tree.put(&content).await?;
+        let nested_cid = tree
+            .put_directory(vec![DirEntry::from_cid("post.json", &file_cid)
+                .with_size(file_size)
+                .with_link_type(LinkType::File)])
+            .await?;
+        let root_cid = tree
+            .put_directory(vec![
+                DirEntry::from_cid("events", &nested_cid).with_link_type(LinkType::Dir)
+            ])
+            .await?;
+        Ok((root_cid, file_cid, content))
+    }
+
     async fn spawn_test_server_with_nostr_relay(
         store: Arc<HashtreeStore>,
         relay: Arc<NostrRelay>,
@@ -1009,6 +1048,159 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_tree_requires_configured_valid_auth() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let nhash = nhash_encode(&sha256(b"missing"))?;
+        let client = reqwest::Client::new();
+
+        let (port, handle) = spawn_test_server(Arc::clone(&store)).await?;
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+            .json(&json!({"nhash": nhash}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        handle.abort();
+
+        let (port, handle) = spawn_test_server_with_auth(store).await?;
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+            .json(&json!({"nhash": nhash}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_tree_rejects_malformed_noncanonical_and_missing_roots() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let missing_hash = sha256(b"not stored");
+        let canonical = nhash_encode(&missing_hash)?;
+        let (port, handle) = spawn_test_server_with_auth(Arc::clone(&store)).await?;
+        let client = reqwest::Client::new();
+
+        for nhash in ["not-an-nhash".to_string(), format!("hashtree:{canonical}")] {
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+                .basic_auth("test-user", Some("test-password"))
+                .json(&json!({"nhash": nhash}))
+                .send()
+                .await?;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        }
+
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+            .basic_auth("test-user", Some("test-password"))
+            .json(&json!({"nhash": canonical}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(!store.is_pinned(&missing_hash)?);
+        assert!(store.get_tree_meta(&missing_hash)?.is_none());
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_tree_indexes_encrypted_descendants_and_is_idempotent() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let (root_cid, file_cid, expected_content) = encrypted_test_directory(&store).await?;
+        let nhash = nhash_encode_full(&NHashData {
+            hash: root_cid.hash,
+            decrypt_key: root_cid.key,
+        })?;
+        let (port, handle) = spawn_test_server_with_auth(Arc::clone(&store)).await?;
+        let client = reqwest::Client::new();
+
+        for expected_already_pinned in [false, true] {
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+                .basic_auth("test-user", Some("test-password"))
+                .json(&json!({"nhash": nhash}))
+                .send()
+                .await?;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body: serde_json::Value = response.json().await?;
+            assert_eq!(body["already_pinned"], expected_already_pinned);
+            assert!(body["indexed_hashes"].as_u64().unwrap_or_default() > 2);
+        }
+
+        assert!(store.is_pinned(&root_cid.hash)?);
+        assert_eq!(store.list_pins_raw()?, vec![root_cid.hash]);
+        assert_eq!(store.list_indexed_trees()?.len(), 1);
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+        assert_eq!(
+            tree.get(&file_cid, None).await?,
+            Some(expected_content),
+            "encrypted descendant remains readable"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_tree_missing_descendant_leaves_no_pin_or_index() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let (root_cid, file_cid, _) = encrypted_test_directory(&store).await?;
+        assert!(store.router().delete_sync(&file_cid.hash)?);
+        let nhash = nhash_encode_full(&NHashData {
+            hash: root_cid.hash,
+            decrypt_key: root_cid.key,
+        })?;
+        let (port, handle) = spawn_test_server_with_auth(Arc::clone(&store)).await?;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+            .basic_auth("test-user", Some("test-password"))
+            .json(&json!({"nhash": nhash}))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!store.is_pinned(&root_cid.hash)?);
+        assert!(store.get_tree_meta(&root_cid.hash)?.is_none());
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_tree_resource_failure_leaves_no_pin_or_index() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::with_options(
+            temp_dir.path().join("db"),
+            None,
+            8,
+        )?);
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+        let (cid, _) = tree.put(b"larger than the pin tree byte budget").await?;
+        let nhash = nhash_encode_full(&NHashData {
+            hash: cid.hash,
+            decrypt_key: cid.key,
+        })?;
+        let (port, handle) = spawn_test_server_with_auth(Arc::clone(&store)).await?;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/api/pin-tree"))
+            .basic_auth("test-user", Some("test-password"))
+            .json(&json!({"nhash": nhash}))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!store.is_pinned(&cid.hash)?);
+        assert!(store.get_tree_meta(&cid.hash)?.is_none());
         handle.abort();
         Ok(())
     }

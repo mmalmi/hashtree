@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::executor::block_on as sync_block_on;
 use hashtree_core::store::Store;
-use hashtree_core::{to_hex, types::Hash, HashTree, HashTreeConfig, LinkType};
+use hashtree_core::{to_hex, types::Hash, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType};
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -9,6 +9,45 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{BlobMetadata, HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
+
+const MAX_PINNED_TREE_NODES: usize = 10_000_000;
+const MAX_UNBOUNDED_PINNED_TREE_BYTES: u64 = 1 << 50;
+
+/// Resource limits for validating and indexing a complete pinned DAG.
+#[derive(Debug, Clone, Copy)]
+pub struct TreeIndexLimits {
+    pub max_nodes: usize,
+    pub max_bytes: u64,
+}
+
+/// Result of atomically indexing and pinning a complete DAG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinTreeResult {
+    pub indexed_hashes: usize,
+    pub total_size: u64,
+    pub already_pinned: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PinTreeError {
+    #[error("root blob {hash} is missing")]
+    MissingRoot { hash: String },
+    #[error("descendant blob {hash} is missing")]
+    MissingDescendant { hash: String },
+    #[error("invalid DAG node {hash}: {message}")]
+    InvalidDag { hash: String, message: String },
+    #[error("DAG exceeds the {max_nodes} node limit")]
+    NodeLimitExceeded { max_nodes: usize },
+    #[error("DAG exceeds the {max_bytes} byte limit")]
+    ByteLimitExceeded { max_bytes: u64 },
+    #[error("storage error: {0}")]
+    Storage(String),
+}
+
+struct TreeIndexPlan {
+    tracked_hashes: HashSet<Hash>,
+    total_size: u64,
+}
 
 /// Metadata for a synced tree (for eviction tracking)
 #[derive(Debug, Clone, Serialize)]
@@ -596,6 +635,54 @@ impl HashtreeStore {
 
     // === Tree indexing for eviction ===
 
+    /// Bounds complete-DAG indexing by both the configured storage budget and
+    /// an absolute traversal-node ceiling. A zero storage budget means the raw
+    /// store is unbounded, but authenticated requests still retain a hard cap.
+    pub fn tree_index_limits(&self) -> TreeIndexLimits {
+        TreeIndexLimits {
+            max_nodes: MAX_PINNED_TREE_NODES,
+            max_bytes: if self.max_size_bytes == 0 {
+                MAX_UNBOUNDED_PINNED_TREE_BYTES
+            } else {
+                self.max_size_bytes
+            },
+        }
+    }
+
+    /// Validate every referenced blob, then index all descendants and pin the
+    /// root in one LMDB transaction. No pin or index metadata is written if
+    /// traversal, decryption, decoding, or resource validation fails.
+    pub fn pin_and_index_tree(
+        &self,
+        root: &Cid,
+        owner: &str,
+        name: Option<&str>,
+        priority: u8,
+        limits: TreeIndexLimits,
+    ) -> std::result::Result<PinTreeResult, PinTreeError> {
+        let store = self.store_arc();
+        let tree = HashTree::new(HashTreeConfig::new(store).public());
+        let plan = sync_block_on(self.collect_tree_index(&tree, root, limits))?;
+        let already_pinned = self
+            .write_tree_index(
+                &root.hash,
+                &plan.tracked_hashes,
+                plan.total_size,
+                owner,
+                name,
+                priority,
+                None,
+                true,
+            )
+            .map_err(|error| PinTreeError::Storage(error.to_string()))?;
+
+        Ok(PinTreeResult {
+            indexed_hashes: plan.tracked_hashes.len(),
+            total_size: plan.total_size,
+            already_pinned,
+        })
+    }
+
     /// Index a tree after sync - tracks all blobs in the tree for eviction
     ///
     /// If `ref_key` is provided (e.g. "npub.../name"), it will replace any existing
@@ -630,102 +717,201 @@ impl HashtreeStore {
         let store = self.store_arc();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        let (tracked_hashes, total_size) =
-            sync_block_on(async { self.collect_tree_index(&tree, root_hash).await })?;
-
-        let mut wtxn = self.env.write_txn()?;
-
-        // Store blob-tree relationships (64-byte key: blob_hash ++ tree_hash)
-        for tracked_hash in &tracked_hashes {
-            let mut key = [0u8; 64];
-            key[..32].copy_from_slice(tracked_hash);
-            key[32..].copy_from_slice(root_hash);
-            self.blob_trees.put(&mut wtxn, &key[..], &())?;
-        }
-
-        // Store tree metadata
-        let now = unix_timestamp_now();
-        let meta = TreeMeta {
-            owner: owner.to_string(),
-            name: name.map(|s| s.to_string()),
-            synced_at: now,
-            total_size,
+        let plan = sync_block_on(self.collect_tree_index(
+            &tree,
+            &Cid::public(*root_hash),
+            self.tree_index_limits(),
+        ))?;
+        self.write_tree_index(
+            root_hash,
+            &plan.tracked_hashes,
+            plan.total_size,
+            owner,
+            name,
             priority,
-        };
-        let meta_bytes = rmp_serde::to_vec(&meta)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize TreeMeta: {}", e))?;
-        self.tree_meta
-            .put(&mut wtxn, root_hash.as_slice(), &meta_bytes)?;
-
-        // Store ref -> hash mapping if ref_key provided
-        if let Some(key) = ref_key {
-            self.tree_refs.put(&mut wtxn, key, root_hash.as_slice())?;
-        }
-
-        wtxn.commit()?;
+            ref_key,
+            false,
+        )?;
 
         tracing::debug!(
             "Indexed tree {} ({} blobs, {} bytes, priority {})",
             &root_hex[..8],
-            tracked_hashes.len(),
-            total_size,
+            plan.tracked_hashes.len(),
+            plan.total_size,
             priority
         );
 
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn write_tree_index(
+        &self,
+        root_hash: &Hash,
+        tracked_hashes: &HashSet<Hash>,
+        total_size: u64,
+        owner: &str,
+        name: Option<&str>,
+        priority: u8,
+        ref_key: Option<&str>,
+        pin: bool,
+    ) -> Result<bool> {
+        let mut wtxn = self.env.write_txn()?;
+        let already_pinned = self.pins.get(&wtxn, root_hash.as_slice())?.is_some();
+
+        for tracked_hash in tracked_hashes {
+            let mut key = [0u8; 64];
+            key[..32].copy_from_slice(tracked_hash);
+            key[32..].copy_from_slice(root_hash);
+            self.blob_trees.put(&mut wtxn, &key[..], &())?;
+        }
+
+        let meta = TreeMeta {
+            owner: owner.to_string(),
+            name: name.map(str::to_string),
+            synced_at: unix_timestamp_now(),
+            total_size,
+            priority,
+        };
+        let meta_bytes = rmp_serde::to_vec(&meta)
+            .map_err(|error| anyhow::anyhow!("Failed to serialize TreeMeta: {error}"))?;
+        self.tree_meta
+            .put(&mut wtxn, root_hash.as_slice(), &meta_bytes)?;
+
+        if let Some(key) = ref_key {
+            self.tree_refs.put(&mut wtxn, key, root_hash.as_slice())?;
+        }
+        if pin {
+            self.pins.put(&mut wtxn, root_hash.as_slice(), &())?;
+        }
+
+        wtxn.commit()?;
+        Ok(already_pinned)
+    }
+
     async fn collect_tree_index<S: Store>(
         &self,
         tree: &HashTree<S>,
-        root: &Hash,
-    ) -> Result<(HashSet<Hash>, u64)> {
+        root: &Cid,
+        limits: TreeIndexLimits,
+    ) -> std::result::Result<TreeIndexPlan, PinTreeError> {
         let mut hashes = HashSet::new();
+        let mut visited = HashSet::new();
         let mut total_size = 0u64;
-        let mut stack = vec![(*root, true)];
+        let mut stored_size = 0u64;
+        // (cid, count logical bytes, decode/follow tree nodes, require a tree node)
+        let mut stack = vec![(root.clone(), true, true, false)];
 
-        while let Some((hash, count_bytes)) = stack.pop() {
-            hashes.insert(hash);
+        while let Some((cid, count_bytes, follow_tree, require_tree)) = stack.pop() {
+            let visit_key = (cid.hash, cid.key, follow_tree);
+            if !visited.insert(visit_key) {
+                continue;
+            }
+            if visited.len() > limits.max_nodes {
+                return Err(PinTreeError::NodeLimitExceeded {
+                    max_nodes: limits.max_nodes,
+                });
+            }
 
-            let Some(node) = tree
-                .get_tree_node(&hash)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))?
-            else {
-                if count_bytes {
-                    if let Some(size) = self
-                        .router
-                        .blob_size_sync(&hash)
-                        .map_err(|e| anyhow::anyhow!("Failed to get blob size: {}", e))?
-                    {
-                        total_size = total_size.saturating_add(size);
+            let size = self
+                .router
+                .blob_size_sync(&cid.hash)
+                .map_err(|error| PinTreeError::Storage(error.to_string()))?
+                .ok_or_else(|| {
+                    if cid.hash == root.hash {
+                        PinTreeError::MissingRoot {
+                            hash: to_hex(&cid.hash),
+                        }
+                    } else {
+                        PinTreeError::MissingDescendant {
+                            hash: to_hex(&cid.hash),
+                        }
                     }
+                })?;
+            if hashes.insert(cid.hash) {
+                stored_size = stored_size
+                    .checked_add(size)
+                    .filter(|size| *size <= limits.max_bytes)
+                    .ok_or(PinTreeError::ByteLimitExceeded {
+                        max_bytes: limits.max_bytes,
+                    })?;
+            }
+
+            if !follow_tree {
+                continue;
+            }
+
+            let node = tree.get_node(&cid).await.map_err(|error| match error {
+                HashTreeError::Store(message) => PinTreeError::Storage(message),
+                error => PinTreeError::InvalidDag {
+                    hash: to_hex(&cid.hash),
+                    message: error.to_string(),
+                },
+            })?;
+            let Some(node) = node else {
+                if require_tree {
+                    return Err(PinTreeError::InvalidDag {
+                        hash: to_hex(&cid.hash),
+                        message: "directory link does not contain a tree node".to_string(),
+                    });
+                }
+                if count_bytes {
+                    total_size = total_size
+                        .checked_add(size)
+                        .filter(|size| *size <= limits.max_bytes)
+                        .ok_or(PinTreeError::ByteLimitExceeded {
+                            max_bytes: limits.max_bytes,
+                        })?;
                 }
                 continue;
             };
 
+            if visited
+                .len()
+                .saturating_add(stack.len())
+                .saturating_add(node.links.len())
+                > limits.max_nodes
+            {
+                return Err(PinTreeError::NodeLimitExceeded {
+                    max_nodes: limits.max_nodes,
+                });
+            }
+
             for link in &node.links {
-                hashes.insert(link.hash);
                 match link.link_type {
                     LinkType::Blob => {
                         if count_bytes {
-                            total_size = total_size.saturating_add(link.size);
+                            total_size = total_size
+                                .checked_add(link.size)
+                                .filter(|size| *size <= limits.max_bytes)
+                                .ok_or(PinTreeError::ByteLimitExceeded {
+                                    max_bytes: limits.max_bytes,
+                                })?;
                         }
+                        stack.push((link.to_cid(), false, false, false));
                     }
                     LinkType::File => {
                         if count_bytes {
-                            total_size = total_size.saturating_add(link.size);
+                            total_size = total_size
+                                .checked_add(link.size)
+                                .filter(|size| *size <= limits.max_bytes)
+                                .ok_or(PinTreeError::ByteLimitExceeded {
+                                    max_bytes: limits.max_bytes,
+                                })?;
                         }
-                        stack.push((link.hash, false));
+                        stack.push((link.to_cid(), false, true, false));
                     }
                     LinkType::Dir | LinkType::Fanout => {
-                        stack.push((link.hash, count_bytes));
+                        stack.push((link.to_cid(), count_bytes, true, true));
                     }
                 }
             }
         }
 
-        Ok((hashes, total_size))
+        Ok(TreeIndexPlan {
+            tracked_hashes: hashes,
+            total_size,
+        })
     }
 
     /// Unindex a tree - removes blob-tree mappings and deletes orphaned blobs

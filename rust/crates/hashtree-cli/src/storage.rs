@@ -42,7 +42,10 @@ const S3_SYNC_TIMEOUT_MS_ENV: &str = "HTREE_S3_SYNC_TIMEOUT_MS";
 pub use maintenance::{
     compact_lmdb_environments_under, CompactResult, R2ImportOptions, R2ImportResult, VerifyResult,
 };
-pub use retention::{OwnedBlobStats, PinnedItem, StorageByPriority, StorageStats, TreeMeta};
+pub use retention::{
+    OwnedBlobStats, PinTreeError, PinTreeResult, PinnedItem, StorageByPriority, StorageStats,
+    TreeIndexLimits, TreeMeta,
+};
 
 /// Priority levels for tree eviction
 pub const PRIORITY_OTHER: u8 = 64;
