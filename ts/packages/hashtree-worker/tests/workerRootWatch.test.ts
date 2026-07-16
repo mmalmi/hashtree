@@ -94,13 +94,36 @@ class FakeBlossomTransport {
   setServers(_servers: unknown): void {}
 }
 
+class FakeStoreBlobRoute {
+  constructor(readonly id: string, private readonly store: {
+    get(hash: Uint8Array): Promise<Uint8Array | null>;
+  }) {}
+
+  async read(request: { hash: Uint8Array }) {
+    const data = await this.store.get(request.hash);
+    return data === null ? { type: 'no-result' } : { type: 'data', data };
+  }
+}
+
 vi.mock('@hashtree/core', () => ({
+  BLOB_DEFAULT_HTL: 10,
+  BLOB_MAX_HTL: 10,
+  BLOB_NO_RESULT: { type: 'no-result' },
   HashTree: FakeHashTree,
+  StoreBlobRoute: FakeStoreBlobRoute,
+  blobData: (data: Uint8Array) => ({ type: 'data', data }),
+  blobReplyFromNullable: (data: Uint8Array | null | undefined) => (
+    data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
+  ),
+  createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
   decryptChk: vi.fn(),
+  fromHex: vi.fn((value: string) => new Uint8Array(value.length / 2)),
   nhashDecode: vi.fn(),
   nhashEncode: vi.fn(),
+  sha256: vi.fn(async () => new Uint8Array(32)),
   toHex: vi.fn(),
   tryDecodeTreeNode: vi.fn(),
+  verifyBlobData: async (_hash: Uint8Array, data: Uint8Array) => data,
 }));
 
 vi.mock('../src/capabilities/idbStorage.js', () => ({

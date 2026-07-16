@@ -235,11 +235,28 @@ function hashHexForData(data: Uint8Array): string {
   return (data[0] ?? 0).toString(16).padStart(2, '0').repeat(32);
 }
 
+class FakeStoreBlobRoute {
+  constructor(readonly id: string, private readonly store: {
+    get(hash: Uint8Array): Promise<Uint8Array | null>;
+  }) {}
+
+  async read(request: { hash: Uint8Array }) {
+    const data = await this.store.get(request.hash);
+    return data === null ? { type: 'no-result' } : { type: 'data', data: data.slice() };
+  }
+}
+
+async function verifyFakeBlobData(expectedHash: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+  if (bytesToHex(expectedHash) !== hashHexForData(data)) throw new Error('wrong hash');
+  return data.slice();
+}
+
 vi.mock('@hashtree/core', () => ({
   BLOB_DEFAULT_HTL: 10,
   BLOB_MAX_HTL: 10,
   BLOB_NO_RESULT: { type: 'no-result' },
   HashTree: FakeHashTree,
+  StoreBlobRoute: FakeStoreBlobRoute,
   blobData: (data: Uint8Array) => ({ type: 'data', data }),
   blobReplyFromNullable: (data: Uint8Array | null | undefined) => (
     data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
@@ -252,6 +269,7 @@ vi.mock('@hashtree/core', () => ({
   sha256: async (data: Uint8Array) => new Uint8Array(32).fill(data[0] ?? 0),
   toHex: (value: Uint8Array) => bytesToHex(value),
   tryDecodeTreeNode: vi.fn(),
+  verifyBlobData: verifyFakeBlobData,
 }));
 
 vi.mock('../src/capabilities/idbStorage.js', () => ({
@@ -644,7 +662,7 @@ describe('worker peer blob sharing', () => {
     ))).toBe(false);
   });
 
-  it('does not invent a generic p2p route when no provider identity is listed', async () => {
+  it('lets the configured provider handle an empty provider roster as a miss', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -676,10 +694,10 @@ describe('worker peer blob sharing', () => {
     });
     expect(postMessageMock.mock.calls.some(([message]) => (
       (message as { type?: string }).type === 'p2pFetch'
-    ))).toBe(false);
+    ))).toBe(true);
   });
 
-  it('targets specific p2p peer endpoints when the client exposes them', async () => {
+  it('leaves exact p2p peer selection inside the configured provider', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -689,12 +707,13 @@ describe('worker peer blob sharing', () => {
     peerListResponder.peerIds = ['peer-a'];
     peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
       expect(requestedHashHex).toBe(hashHex);
+      expect(peerId).toBeUndefined();
       queueMicrotask(() => {
         target.dispatch({
           type: 'p2pFetchResult',
           id: `peer-hit-${requestId}`,
           requestId,
-          data: peerId === 'peer-a' ? blobData : undefined,
+          data: blobData,
         });
       });
     };
@@ -726,18 +745,10 @@ describe('worker peer blob sharing', () => {
       postMessageMock.mock.calls.some(
         ([message]) => (
           (message as { type?: string; peerId?: string }).type === 'p2pFetch'
-          && (message as { peerId?: string }).peerId === 'peer-a'
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      postMessageMock.mock.calls.some(
-        ([message]) => (
-          (message as { type?: string; peerId?: string }).type === 'p2pFetch'
           && !('peerId' in (message as { peerId?: string }))
         ),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('stores raw blocks locally, uploads them through Blossom, and serves them to peers', async () => {

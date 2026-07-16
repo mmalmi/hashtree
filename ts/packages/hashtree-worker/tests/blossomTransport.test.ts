@@ -105,18 +105,20 @@ describe('BlossomTransport.fetch', () => {
     ], undefined, 25);
 
     const first = transport.fetch(hashHex);
+    const firstRejection = expect(first).rejects.toThrow(/timed out/i);
     await Promise.resolve();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(25);
-    await expect(first).resolves.toBeNull();
+    await firstRejection;
 
     const second = transport.fetch(hashHex);
+    const secondRejection = expect(second).rejects.toThrow(/timed out/i);
     await Promise.resolve();
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     await vi.advanceTimersByTimeAsync(25);
-    await expect(second).resolves.toBeNull();
+    await secondRejection;
   });
 
   it('limits concurrent read fetches across hashes', async () => {
@@ -221,7 +223,7 @@ describe('BlossomTransport.fetch', () => {
       { url: fastBase, read: true, write: false },
     ]);
 
-    await expect(transport.fetch(hashHex)).resolves.toBeNull();
+    await expect(transport.fetch(hashHex)).rejects.toThrow(/slow server offline|uncertain/i);
     await expect(transport.fetch(hashHex)).resolves.toEqual(data);
 
     const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));

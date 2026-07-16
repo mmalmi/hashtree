@@ -199,7 +199,7 @@ export class BlossomTransport {
                 if (settled)
                     return;
                 settled = true;
-                resolve(null);
+                reject(new Error(`Blossom read timed out after ${this.fetchTimeoutMs}ms`));
             }, this.fetchTimeoutMs);
             loader()
                 .then((data) => {

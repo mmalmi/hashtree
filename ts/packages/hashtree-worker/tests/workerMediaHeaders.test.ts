@@ -173,10 +173,21 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
+class FakeStoreBlobRoute {
+  constructor(readonly id: string, private readonly store: FakeStore) {}
+
+  async read(request: { hash: Uint8Array }) {
+    const data = await this.store.get(request.hash);
+    return data === null ? { type: 'no-result' } : { type: 'data', data: data.slice() };
+  }
+}
+
 vi.mock('@hashtree/core', () => ({
   BLOB_DEFAULT_HTL: 10,
+  BLOB_MAX_HTL: 10,
   BLOB_NO_RESULT: { type: 'no-result' },
   HashTree: FakeHashTree,
+  StoreBlobRoute: FakeStoreBlobRoute,
   blobData: (data: Uint8Array) => ({ type: 'data', data }),
   blobReplyFromNullable: (data: Uint8Array | null | undefined) => (
     data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
@@ -189,6 +200,7 @@ vi.mock('@hashtree/core', () => ({
   sha256: async (data: Uint8Array) => new Uint8Array(32).fill(data[0] ?? 0),
   toHex: (data: Uint8Array) => bytesToHex(data),
   tryDecodeTreeNode: vi.fn(() => null),
+  verifyBlobData: async (_hash: Uint8Array, data: Uint8Array) => data.slice(),
 }));
 
 vi.mock('../src/capabilities/idbStorage.js', () => ({
@@ -234,7 +246,7 @@ async function startRoutedMediaRead(
   const ctx = globalThis.self as FakeWorkerGlobal;
   attachHashtreeWorker(ctx);
   workerState.readFileRangeImpl.mockImplementation(async (cid: { hash: Uint8Array }) => (
-    await workerState.stores[1]?.get(cid.hash) ?? null
+    await workerState.stores[0]?.get(cid.hash) ?? null
   ));
 
   ctx.dispatch({
@@ -380,8 +392,8 @@ describe('worker media headers', () => {
       expect(p2pRequest).toMatchObject({
         hashHex: '07'.repeat(32),
         htl: 10,
-        peerId: 'configured-media-peer',
       });
+      expect(p2pRequest).not.toHaveProperty('peerId');
     });
 
     ctx.dispatch({

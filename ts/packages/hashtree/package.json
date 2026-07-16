@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/core",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Simple content-addressed merkle tree with KV storage",
   "type": "module",
   "main": "dist/index.js",

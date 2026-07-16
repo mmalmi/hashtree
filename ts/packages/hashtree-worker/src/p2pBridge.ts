@@ -54,8 +54,8 @@ export class P2PBridge {
       requestId,
       hashHex: toHex(request.hash),
       htl: request.htl,
-      peerId,
     };
+    if (peerId) message.peerId = peerId;
 
     return new Promise((resolve, reject) => {
       const pending: Pending<BlobReply> = { resolve, reject, signal };

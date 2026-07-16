@@ -37,16 +37,20 @@ export { sha256 } from './hash.js';
 // Routed blob retrieval contract
 export {
   BLOB_DEFAULT_HTL,
+  BLOB_MAX_BYTES,
   BLOB_MAX_HTL,
   BLOB_NO_RESULT,
+  StoreBlobRoute,
   blobData,
   blobReplyFromNullable,
   createBlobRequest,
+  verifyBlobData,
 } from './blob-route.js';
 export type {
   BlobReply,
   BlobRequest,
   BlobRoute,
+  BlobRouteContext,
 } from './blob-route.js';
 
 // Encryption utilities

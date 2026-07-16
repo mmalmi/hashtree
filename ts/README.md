@@ -52,6 +52,7 @@ npm install @hashtree/nostr  # Nostr resolver and event collections
 npm install @hashtree/fips-transport  # Reliable TCP/FIPS blob transport
 npm install @hashtree/dexie  # IndexedDB storage
 npm install @hashtree/index  # B-Tree indexes
+npm install @hashtree/mesh  # Adaptive read routing
 npm install @hashtree/worker  # Worker runtime + tree-root helpers
 ```
 
@@ -63,8 +64,20 @@ The `Store` interface is just `get(hash) → bytes` and `put(hash, bytes)`. Impl
 - `BlossomStore` - Remote blossom server (in `@hashtree/core`)
 - `DexieStore` - IndexedDB via Dexie (in `@hashtree/dexie`)
 
-P2P reads remain a separate transport concern. `TcpBlobTransport` can read
-from authenticated FIPS peers and cache verified results in any local `Store`.
+Writes always target the application-selected `Store`. Reads can adapt a store
+with `StoreBlobRoute` and combine it with opaque network routes in the read-only
+`BlobRouter` from `@hashtree/mesh`. A network implementation that owns several
+servers or peers remains one composite route; the outer router never selects
+its internal members.
+
+`BlobRouter` bounds route attempts and concurrency, passes nested routes a
+deadline and attempt budget, and accepts the first centrally hash-verified
+reply. A route-local `NoResult` does not cancel other routes. Timeout,
+corruption, reset, and unreachable-provider results remain errors. Optional
+cache writes go only to the explicitly configured cache store.
+
+P2P remains a separate transport concern. `TcpBlobTransport` reads from exact
+authenticated FIPS providers and can sit behind one composite `BlobRoute`.
 
 ## Usage
 

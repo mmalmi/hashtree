@@ -61,6 +61,14 @@ UDP rendezvous (`127.0.0.1:21211` by default) and ordinary Noise IK establish
 the links; this adapter adds no filesystem registry, bootstrap protocol,
 shared-egress role, write router, or fallback blob framing.
 
+TypeScript follows the same boundary. `StoreBlobRoute` adapts a local `Store`,
+while `@hashtree/mesh`'s read-only `BlobRouter` orders opaque route identities
+and centrally verifies their data. The browser worker composes `idb`, `p2p`,
+and `blossom` routes; IndexedDB remains its explicit write destination. The P2P
+bridge and Blossom store each own their internal provider/server set, so the
+outer router does not infer peers, duplicate provider selection, or route
+writes.
+
 ## Result Semantics
 
 Transport uncertainty must not become false absence:

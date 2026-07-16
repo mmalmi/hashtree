@@ -237,6 +237,63 @@ describe('BlossomStore', () => {
     await expect(hedgedRead).resolves.toEqual(secondData);
   });
 
+  it('returns a miss only when every attempted read server explicitly misses', async () => {
+    const hash = await makeHash();
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(makeResponse(404))));
+    const store = new BlossomStore({
+      servers: [
+        { url: 'https://one.example', read: true },
+        { url: 'https://two.example', read: true },
+      ],
+    });
+
+    await expect(store.get(hash)).resolves.toBeNull();
+  });
+
+  it('preserves network failure as uncertainty when no server returns data', async () => {
+    const hash = await makeHash();
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | RequestInfo) => (
+      String(input).startsWith('https://offline.example/')
+        ? Promise.reject(new Error('network offline'))
+        : Promise.resolve(makeResponse(404))
+    )));
+    const store = new BlossomStore({
+      servers: [
+        { url: 'https://offline.example', read: true },
+        { url: 'https://missing.example', read: true },
+      ],
+    });
+
+    await expect(store.get(hash)).rejects.toThrow(/network offline|uncertain/i);
+  });
+
+  it('preserves corrupt server data as an error rather than a miss', async () => {
+    const hash = await makeHash();
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(makeResponse(
+      200,
+      new Uint8Array([9, 9, 9]),
+    ))));
+    const store = new BlossomStore({
+      servers: [{ url: 'https://corrupt.example', read: true }],
+    });
+
+    await expect(store.get(hash)).rejects.toThrow(/hash mismatch|corrupt/i);
+  });
+
+  it('preserves a malformed successful batch response as an error', async () => {
+    const hash = await makeHash();
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | RequestInfo) => (
+      String(input).endsWith('/blob/batch')
+        ? Promise.resolve(makeResponse(200, new Uint8Array([1, 2, 3])))
+        : Promise.resolve(makeResponse(404))
+    )));
+    const store = new BlossomStore({
+      servers: [{ url: 'https://malformed.example', read: true, preferBatchReads: true }],
+    });
+
+    await expect(store.get(hash)).rejects.toThrow(/batch|malformed|short/i);
+  });
+
   it('aborts stalled upload requests', async () => {
     vi.useFakeTimers();
     const hash = await makeHash();

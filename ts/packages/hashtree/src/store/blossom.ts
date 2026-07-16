@@ -99,7 +99,7 @@ interface ReadServerStats {
 interface InFlightReadRequest {
   server: BlossomServer;
   settled: boolean;
-  promise: Promise<{ serverUrl: string; data: Uint8Array | null }>;
+  promise: Promise<{ serverUrl: string; data: Uint8Array | null; error?: Error }>;
 }
 
 /** Backoff config */
@@ -375,16 +375,17 @@ export class BlossomStore implements StoreWithMeta {
       signal,
     });
     if (!response.ok) {
-      return null;
+      if (response.status === 404) return null;
+      throw new Error(`Blossom batch endpoint ${server.url} returned HTTP ${response.status}`);
     }
 
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.length < 12) {
-      return null;
+      throw new Error(`Blossom batch endpoint ${server.url} returned a short response`);
     }
     for (let i = 0; i < BLOB_BATCH_DOWNLOAD_MAGIC.length; i += 1) {
       if (bytes[i] !== BLOB_BATCH_DOWNLOAD_MAGIC[i]) {
-        return null;
+        throw new Error(`Blossom batch endpoint ${server.url} returned invalid framing`);
       }
     }
 
@@ -393,14 +394,14 @@ export class BlossomStore implements StoreWithMeta {
     let offset = 12;
     for (let i = 0; i < count; i += 1) {
       if (bytes.length - offset < 40) {
-        return null;
+        throw new Error(`Blossom batch endpoint ${server.url} returned a truncated entry`);
       }
       const entryHash = bytes.slice(offset, offset + 32);
       offset += 32;
       const len = Number(view.getBigUint64(offset, false));
       offset += 8;
       if (!Number.isSafeInteger(len) || bytes.length - offset < len) {
-        return null;
+        throw new Error(`Blossom batch endpoint ${server.url} returned an invalid entry length`);
       }
       const data = bytes.slice(offset, offset + len);
       offset += len;
@@ -411,7 +412,7 @@ export class BlossomStore implements StoreWithMeta {
       if (toHex(computed) === hashHex) {
         return data;
       }
-      return null;
+      throw new Error(`Blossom batch endpoint ${server.url} returned data with a hash mismatch`);
     }
 
     return null;
@@ -422,9 +423,15 @@ export class BlossomStore implements StoreWithMeta {
     this.recordReadRequest(server.url);
     const signal = AbortSignal.timeout(this.getTimeoutMs);
     let attemptedBatch = false;
+    let batchError: Error | undefined;
     const tryBatchRead = async (): Promise<Uint8Array | null> => {
       attemptedBatch = true;
-      return this.getFromBatchEndpoint(server, hashHex, signal).catch(() => null);
+      try {
+        return await this.getFromBatchEndpoint(server, hashHex, signal);
+      } catch (error) {
+        batchError = error instanceof Error ? error : new Error(String(error));
+        return null;
+      }
     };
     return {
       server,
@@ -457,7 +464,11 @@ export class BlossomStore implements StoreWithMeta {
             }
             this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: 'Hash mismatch' });
             this.recordReadFailure(server.url);
-            return { serverUrl: server.url, data: null };
+            return {
+              serverUrl: server.url,
+              data: null,
+              error: new Error(`Blossom server ${server.url} returned data with a hash mismatch`),
+            };
           }
 
           const batchData = attemptedBatch ? null : await tryBatchRead();
@@ -470,12 +481,16 @@ export class BlossomStore implements StoreWithMeta {
           if (response.status === 404) {
             this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: '404' });
             this.recordReadMiss(server.url);
-            return { serverUrl: server.url, data: null };
+            return { serverUrl: server.url, data: null, error: batchError };
           }
 
           this.log({ operation: 'get', server: server.url, hash: hashHex, success: false, error: `${response.status}` });
           this.recordReadFailure(server.url);
-          return { serverUrl: server.url, data: null };
+          return {
+            serverUrl: server.url,
+            data: null,
+            error: new Error(`Blossom server ${server.url} returned HTTP ${response.status}`),
+          };
         })
         .catch(async (error) => {
           const batchData = attemptedBatch ? null : await tryBatchRead();
@@ -496,7 +511,11 @@ export class BlossomStore implements StoreWithMeta {
           } else {
             this.recordReadFailure(server.url);
           }
-          return { serverUrl: server.url, data: null };
+          return {
+            serverUrl: server.url,
+            data: null,
+            error: error instanceof Error ? error : new Error(String(error)),
+          };
         }),
     };
   }
@@ -508,7 +527,12 @@ export class BlossomStore implements StoreWithMeta {
   private async waitForNextReadResult(
     requests: InFlightReadRequest[],
     waitMs?: number,
-  ): Promise<{ request: InFlightReadRequest; serverUrl: string; data: Uint8Array | null } | null> {
+  ): Promise<{
+    request: InFlightReadRequest;
+    serverUrl: string;
+    data: Uint8Array | null;
+    error?: Error;
+  } | null> {
     const active = requests.filter((request) => !request.settled);
     if (active.length === 0) {
       return null;
@@ -768,6 +792,7 @@ export class BlossomStore implements StoreWithMeta {
 
     const orderedServers = this.orderedReadServers(readServers);
     const requests: InFlightReadRequest[] = [];
+    const errors: Error[] = [];
     let nextServerIndex = 0;
 
     const launchNext = (count: number): void => {
@@ -788,6 +813,9 @@ export class BlossomStore implements StoreWithMeta {
       if (result?.data) {
         return result.data;
       }
+      if (result?.error) {
+        errors.push(result.error);
+      }
       if (result === null && nextServerIndex < orderedServers.length) {
         launchNext(1);
         continue;
@@ -797,6 +825,9 @@ export class BlossomStore implements StoreWithMeta {
       }
     }
 
+    if (errors.length > 0) {
+      throw new AggregateError(errors, `Blossom availability is uncertain: ${errors[0].message}`);
+    }
     return null;
   }
 

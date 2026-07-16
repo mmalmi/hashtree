@@ -1,18 +1,18 @@
-import type { MeshReadSource } from './capabilities/meshRouterStore.js';
+import type { BlobRequest, BlobRoute, BlobRouteContext } from '@hashtree/core';
 import type { P2PBridge } from './p2pBridge.js';
-/** Turns authenticated provider identities into explicit, independently verified blob routes. */
-export declare class P2PPeerRoutes {
+/** One composite route whose provider owns authenticated peer selection. */
+export declare class P2PPeerRoutes implements BlobRoute {
     private readonly bridge;
     private readonly cacheMs;
+    readonly id = "p2p";
     private peerIds;
-    private listError;
     private refreshedAt;
     private inflight;
     private generation;
     constructor(bridge: P2PBridge, cacheMs?: number);
+    isAvailable: () => boolean;
     setEnabled(enabled: boolean): void;
-    sources(): Promise<MeshReadSource[]>;
+    read(request: BlobRequest, context?: BlobRouteContext): Promise<import("@hashtree/core").BlobReply>;
     peerList(): Promise<string[]>;
-    private refresh;
 }
 //# sourceMappingURL=p2pPeerRoutes.d.ts.map

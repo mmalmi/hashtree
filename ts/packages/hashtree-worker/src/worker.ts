@@ -1,7 +1,9 @@
 /// <reference lib="webworker" />
 
 import {
+  BLOB_NO_RESULT,
   HashTree,
+  StoreBlobRoute,
   blobReplyFromNullable,
   decryptChk,
   fromHex,
@@ -10,10 +12,11 @@ import {
   toHex,
   tryDecodeTreeNode,
   type CID,
-  type BlobRequest,
+  type BlobRoute,
   type Hash,
   type Store,
 } from '@hashtree/core';
+import { BlobRouter, type BlobRouterReadOptions } from '@hashtree/mesh';
 import type {
   BlossomBandwidthState,
   BlobSource,
@@ -28,7 +31,6 @@ import type {
 import { IdbBlobStorage } from './capabilities/idbStorage.js';
 import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blossomTransport.js';
 import { probeConnectivity } from './capabilities/connectivity.js';
-import { MeshRouterStore, type MeshRouterGetOptions } from './capabilities/meshRouterStore.js';
 import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
@@ -44,10 +46,7 @@ const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_TIMEOUT_MS = 20_000;
 const P2P_PEER_LIST_TIMEOUT_MS = 5_000;
 const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
-// Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
-// keeps the local read alive after this delay instead of treating it as a miss.
-const PRIMARY_READ_TIMEOUT_MS = 300;
-const REMOTE_HEDGE_INTERVAL_MS = 250;
+const ROUTE_HEDGE_DELAY_MS = 250;
 
 export interface HashtreeWorkerMessageEndpoint {
   postMessage(message: WorkerResponse): void;
@@ -61,7 +60,7 @@ let endpointListener: EventListener | null = null;
 
 let storage: IdbBlobStorage | null = null;
 let blossom: BlossomTransport | null = null;
-let meshStore: MeshRouterStore | null = null;
+let blobRouter: BlobRouter | null = null;
 let tree: HashTree | null = null;
 let mediaTree: HashTree | null = null;
 let nostrRelays: string[] = [];
@@ -134,7 +133,7 @@ const STARTUP_OPEN_ENDED_RANGE_WINDOW_BYTES = 256 * 1024;
 // offset and expect a substantially larger contiguous window than startup.
 const SEEK_OPEN_ENDED_RANGE_WINDOW_BYTES = 8 * 1024 * 1024;
 const MEDIA_STREAM_PREFETCH = 4;
-const MESH_READ_TIMEOUT_MS = P2P_FETCH_TIMEOUT_MS;
+const BLOB_READ_TIMEOUT_MS = P2P_FETCH_TIMEOUT_MS;
 const MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS = [100, 300, 900] as const;
 const STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS = [250, 1_000, 2_500, 5_000] as const;
 const PEER_SHARED_READ_SOURCE_IDS = ['blossom'] as const;
@@ -416,7 +415,7 @@ function resetState(): void {
   storage?.close();
   storage = null;
   blossom = null;
-  meshStore = null;
+  blobRouter = null;
   tree = null;
   mediaTree = null;
   p2pPeerRoutes.setEnabled(false);
@@ -470,6 +469,12 @@ type LoadedBlobData = {
   sourceId: string;
 };
 
+interface WorkerBlobReadOptions {
+  sourceIds?: readonly string[];
+  skipPrimary?: boolean;
+  htl?: number;
+}
+
 function toBlobSource(sourceId: string): BlobSource {
   return sourceId === 'idb'
     ? 'idb'
@@ -480,10 +485,13 @@ function toBlobSource(sourceId: string): BlobSource {
 
 async function loadBlobData(
   hashHex: string,
-  options: MeshRouterGetOptions = {},
+  options: WorkerBlobReadOptions = {},
 ): Promise<LoadedBlobData | null> {
-  if (!meshStore) return null;
-  const result = await meshStore.getDetailed(fromHex(hashHex) as Hash, options);
+  if (!blobRouter) return null;
+  const result = await blobRouter.getDetailed(
+    fromHex(hashHex) as Hash,
+    toRouterOptions(options),
+  );
   if (!result) {
     emitDiagnostic('debug', 'mesh', 'blob-load-miss', 'Blob was not available from any source', {
       hashHex: hashHex.slice(0, 16),
@@ -492,19 +500,19 @@ async function loadBlobData(
     return null;
   }
 
-  const source = toBlobSource(result.sourceId);
-  emitDiagnostic('debug', 'mesh', 'blob-load-hit', 'Loaded blob from mesh store', {
+  const source = toBlobSource(result.routeId);
+  emitDiagnostic('debug', 'mesh', 'blob-load-hit', 'Loaded blob through the blob router', {
     hashHex: hashHex.slice(0, 16),
     source,
     bytes: result.data.byteLength,
     skipPrimary: options.skipPrimary === true,
   });
-  return { data: result.data, source, sourceId: result.sourceId };
+  return { data: result.data, source, sourceId: result.routeId };
 }
 
 async function hasBlobData(
   hashHex: string,
-  options: MeshRouterGetOptions = {},
+  options: WorkerBlobReadOptions = {},
 ): Promise<{ available: boolean; size?: number; source?: BlobSource }> {
   if (!options.skipPrimary && storage) {
     const cached = await storage.get(hashHex);
@@ -588,55 +596,45 @@ function createStorageStore(): Store {
   };
 }
 
-function createMeshStore(): MeshRouterStore {
-  return new MeshRouterStore({
-    primary: createStorageStore(),
-    primarySourceId: 'idb',
-    requestTimeoutMs: MESH_READ_TIMEOUT_MS,
-    primaryReadTimeoutMs: PRIMARY_READ_TIMEOUT_MS,
-    dispatch: {
-      initialFanout: 1,
-      hedgeFanout: 1,
-      maxFanout: 2,
-      hedgeIntervalMs: REMOTE_HEDGE_INTERVAL_MS,
-    },
-    sourceProviders: [
-      () => p2pPeerRoutes.sources(),
-      () => blossom
-        ? blossom.getReadServers().map((server) => ({
-          id: `blossom:${server.url}`,
-          groupId: 'blossom',
-          canWrite: !!server.write,
-          read: async (request: BlobRequest) => blobReplyFromNullable(
-            blossom
-              ? await blossom.fetchFromServer(toHex(request.hash), server.url)
-              : null,
-          ),
-        }))
-        : [],
-    ],
+function toRouterOptions(options: WorkerBlobReadOptions): BlobRouterReadOptions {
+  const remoteRouteIds = options.sourceIds ?? ['p2p', 'blossom'];
+  return {
+    htl: options.htl,
+    preferredRouteIds: options.skipPrimary ? undefined : ['idb'],
+    allowedRouteIds: options.skipPrimary
+      ? remoteRouteIds
+      : options.sourceIds
+        ? ['idb', ...remoteRouteIds]
+        : undefined,
+  };
+}
+
+function createBlobRouter(primary: Store): BlobRouter {
+  const blossomRoute: BlobRoute = {
+    id: 'blossom',
+    isAvailable: () => !!blossom?.getReadServers().length,
+    read: async (request) => blossom
+      ? blobReplyFromNullable(await blossom.fetch(toHex(request.hash)))
+      : BLOB_NO_RESULT,
+  };
+  return new BlobRouter([
+    new StoreBlobRoute('idb', primary),
+    p2pPeerRoutes,
+    blossomRoute,
+  ], {
+    cache: primary,
+    requestTimeoutMs: BLOB_READ_TIMEOUT_MS,
+    hedgeDelayMs: ROUTE_HEDGE_DELAY_MS,
+    maxInFlight: 2,
   });
 }
 
-function createMediaStore(): Store {
+function createRoutedStore(primary: Store, router: BlobRouter): Store {
   return {
-    put: async (hash: Hash, data: Uint8Array): Promise<boolean> => {
-      if (!meshStore) return false;
-      return await meshStore.put(hash, data);
-    },
-    get: async (hash: Hash): Promise<Uint8Array | null> => {
-      if (!meshStore) return null;
-      const sources = p2pBridge.isEnabled() ? undefined : ['blossom'];
-      return (await meshStore.getDetailed(hash, { sourceIds: sources }))?.data ?? null;
-    },
-    has: async (hash: Hash): Promise<boolean> => {
-      if (!meshStore) return false;
-      return await meshStore.has(hash);
-    },
-    delete: async (hash: Hash): Promise<boolean> => {
-      if (!meshStore) return false;
-      return await meshStore.delete(hash);
-    },
+    put: (hash, data) => primary.put(hash, data),
+    get: (hash) => router.get(hash, ['idb']),
+    has: (hash) => primary.has(hash),
+    delete: (hash) => primary.delete(hash),
   };
 }
 
@@ -1129,16 +1127,17 @@ async function init(config: WorkerConfig, hasP2PProvider = false): Promise<void>
     for (const hashHex of hashHexes) peerShareableHashes.delete(hashHex);
   });
   markEncryptedHashes(await storage.loadPeerShareAuthorizations(), peerShareableHashes);
-  initTreeRootCache(createStorageStore());
+  const primaryStore = createStorageStore();
+  initTreeRootCache(primaryStore);
   blossom = new BlossomTransport(
     config.blossomServers || DEFAULT_BLOSSOM_SERVERS,
     (stats) => {
       publishBlossomBandwidth(stats);
     }
   );
-  meshStore = createMeshStore();
-  tree = new HashTree({ store: meshStore });
-  mediaTree = new HashTree({ store: createMediaStore() });
+  blobRouter = createBlobRouter(primaryStore);
+  tree = new HashTree({ store: createRoutedStore(primaryStore, blobRouter) });
+  mediaTree = tree;
   publishBlossomBandwidth(blossom.getBandwidthStats());
   emitDiagnostic('info', 'worker', 'initialized', 'Hashtree worker initialized', {
     storeName,

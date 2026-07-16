@@ -2,8 +2,37 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.0 - 2026-07-16
+
+### Added
+
+- Added a reusable read-only `BlobRouter` to `@hashtree/mesh` and a terminal
+  `StoreBlobRoute` adapter to `@hashtree/core`. Local stores and composite
+  network providers now share one opaque route contract with stable identities,
+  bounded route context, adaptive ordering, hedging, cooldown, and exploration.
+
+### Changed
+
+- Replaced the worker-only writable mesh router with explicit composition:
+  IndexedDB owns writes, deletes, and local presence while `BlobRouter` owns
+  reads across `idb`, composite `p2p`, and composite `blossom` routes. The
+  worker no longer expands authenticated providers or Blossom servers into
+  outer-router entries.
+- Changed custom `BlobRoute.read(...)` implementations to receive an optional
+  `BlobRouteContext` instead of a bare `AbortSignal`. The context carries the
+  signal, absolute deadline, and bounded attempt budget used by nested routes.
+- Released one immutable bundle containing `@hashtree/core@0.3.0`,
+  `@hashtree/index@0.1.12`, `@hashtree/collection@0.2.8`,
+  `@hashtree/dexie@0.1.8`, `@hashtree/git@0.1.7`,
+  `@hashtree/merge@0.1.2`, `@hashtree/mesh@0.2.0`,
+  `@hashtree/nostr@0.1.18`, `@hashtree/worker@0.4.0`, and
+  `@hashtree/fips-transport@0.4.4` against FIPS TypeScript runtime 0.0.26.
+
 ### Fixed
 
+- Kept Blossom transport failures, timeouts, malformed batch replies, and hash
+  mismatches as errors. Only explicit absence from every attempted server now
+  returns `null`; poisoned bytes are never cached.
 - Corrected Nostr replaceable/addressable storage, snapshots, and worker root
   tracking to use NIP-01's lexically lowest event ID when timestamps tie;
   ordinary chronological event ordering is unchanged.

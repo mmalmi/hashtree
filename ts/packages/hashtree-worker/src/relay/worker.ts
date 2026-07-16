@@ -10,7 +10,8 @@
  * NIP-07 signing/encryption delegated back to main thread.
  */
 
-import { HashTree, BlossomStore, blobReplyFromNullable } from '@hashtree/core';
+import { BLOB_NO_RESULT, HashTree, BlossomStore, blobReplyFromNullable } from '@hashtree/core';
+import { BlobRouter } from '@hashtree/mesh';
 import { DexieStore } from '@hashtree/dexie';
 import type { WorkerRequest, WorkerResponse, WorkerConfig, SignedEvent, BlossomUploadProgress, BlossomServerStatus } from './protocol';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
@@ -60,13 +61,12 @@ const socialGraphDB = new SocialGraphDB();
 import { initMediaHandler, registerMediaPort } from './mediaHandler';
 import { resolveRootPath } from './rootPathResolver';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
-import { MeshRouterStore } from '../capabilities/meshRouterStore';
 import { P2PBridge } from '../p2pBridge';
 import { P2PPeerRoutes } from '../p2pPeerRoutes';
 // Worker state
 let tree: HashTree | null = null;
 let store: DexieStore | null = null;
-let meshStore: MeshRouterStore | null = null;
+let blobRouter: BlobRouter | null = null;
 let blossomStore: BlossomStore | null = null;
 const blossomBandwidthTracker = new BlossomBandwidthTracker((stats) => {
   respond({ type: 'blossomBandwidth', stats });
@@ -714,10 +714,9 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     const storeName = cfg.storeName || 'hashtree-worker';
     store = new DexieStore(storeName);
 
-    meshStore = createMeshStore(store);
+    blobRouter = createBlobRouter(store);
 
-    // Initialize HashTree with the adaptive mesh router store.
-    tree = new HashTree({ store: meshStore });
+    tree = new HashTree({ store: createRoutedStore(store, blobRouter) });
 
     // Initialize tree root cache
     initTreeRootCache(store);
@@ -865,27 +864,33 @@ function createTrackedBlossomStore(servers: NonNullable<WorkerConfig['blossomSer
   });
 }
 
-function createMeshStore(primary: DexieStore): MeshRouterStore {
-  return new MeshRouterStore({
-    primary,
-    primarySourceId: 'idb',
+function createBlobRouter(primary: DexieStore): BlobRouter {
+  return new BlobRouter([
+    {
+      id: 'idb',
+      read: async (request) => blobReplyFromNullable(await primary.get(request.hash)),
+    },
+    p2pPeerRoutes,
+    {
+      id: 'blossom',
+      isAvailable: () => !!blossomStore?.getReadServers().length,
+      read: async (request) => blossomStore
+        ? blobReplyFromNullable(await blossomStore.get(request.hash))
+        : BLOB_NO_RESULT,
+    },
+  ], {
+    cache: primary,
     requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
-    sourceProviders: [
-      () => p2pPeerRoutes.sources(),
-      () => blossomStore
-        ? blossomStore.getReadServers().map((server) => ({
-          id: `blossom:${server.url}`,
-          groupId: 'blossom',
-          canWrite: !!server.write,
-          read: async (request) => blobReplyFromNullable(
-            blossomStore
-              ? await blossomStore.getFromServers(request.hash, [server.url])
-              : null,
-          ),
-        }))
-        : [],
-    ],
   });
+}
+
+function createRoutedStore(primary: DexieStore, router: BlobRouter) {
+  return {
+    put: (hash, data) => primary.put(hash, data),
+    get: (hash) => router.get(hash, ['idb']),
+    has: (hash) => primary.has(hash),
+    delete: (hash) => primary.delete(hash),
+  };
 }
 
 function emitBlossomBandwidthSnapshot(): void {
@@ -900,7 +905,7 @@ async function handleClose(id: string) {
   // Clear caches
   clearMemoryCache();
   store = null;
-  meshStore = null;
+  blobRouter = null;
   tree = null;
   blossomStore = null;
   p2pPeerRoutes.setEnabled(false);
@@ -914,12 +919,12 @@ async function handleClose(id: string) {
 // ============================================================================
 
 async function handleGet(id: string, hash: Uint8Array) {
-  if (!meshStore) {
+  if (!blobRouter) {
     respond({ type: 'result', id, error: 'Store not initialized' });
     return;
   }
 
-  const data = await meshStore.get(hash);
+  const data = await blobRouter.get(hash, ['idb']);
 
   if (data) {
     const transferableData = cloneTransferableBytes(data);
