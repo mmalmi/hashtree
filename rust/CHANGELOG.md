@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.3 - 2026-07-16
+
+### Fixed
+
+- Recognized configured `nostr_relay:<npub>` peer addresses as canonical FIPS
+  relay fallbacks at priority 250 instead of misparsing them as UDP addresses.
+- Required `fips-core` 0.4.3 so an authenticated relay fallback keeps racing
+  available direct and WebRTC upgrades.
+
 ## 0.4.2 - 2026-07-16
 
 ### Fixed

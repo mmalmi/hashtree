@@ -12,6 +12,7 @@ use thiserror::Error;
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "fips-overlay-v1";
 pub const DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS: usize = 8;
+const NOSTR_RELAY_FALLBACK_PRIORITY: u8 = 250;
 
 #[derive(Debug, Error)]
 pub enum FipsTransportError {
@@ -325,7 +326,11 @@ pub(crate) fn peer_address_from_configured_addr(raw: &str) -> Option<PeerAddress
         return None;
     }
     let (transport, addr) = split_configured_transport_addr(trimmed);
-    Some(PeerAddress::new(transport, addr))
+    Some(if transport.eq_ignore_ascii_case("nostr_relay") {
+        PeerAddress::with_priority("nostr_relay", addr, NOSTR_RELAY_FALLBACK_PRIORITY)
+    } else {
+        PeerAddress::new(transport, addr)
+    })
 }
 
 fn split_configured_transport_addr(value: &str) -> (&str, &str) {
@@ -333,7 +338,7 @@ fn split_configured_transport_addr(value: &str) -> (&str, &str) {
         return ("udp", value);
     };
     match transport.to_ascii_lowercase().as_str() {
-        "udp" | "tcp" | "webrtc" | "tor" | "ethernet" | "ble" => (transport, addr),
+        "udp" | "tcp" | "webrtc" | "tor" | "ethernet" | "ble" | "nostr_relay" => (transport, addr),
         _ => ("udp", value),
     }
 }
@@ -341,6 +346,28 @@ fn split_configured_transport_addr(value: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_nostr_relay_address_is_a_low_priority_fallback() {
+        let address = peer_address_from_configured_addr("nostr_relay:npub1relay").unwrap();
+        let mixed_case = peer_address_from_configured_addr("NoStR_ReLaY:npub1mixed").unwrap();
+
+        assert_eq!(address.transport, "nostr_relay");
+        assert_eq!(address.addr, "npub1relay");
+        assert_eq!(address.priority, 250);
+        assert_eq!(mixed_case.transport, "nostr_relay");
+        assert_eq!(mixed_case.addr, "npub1mixed");
+        assert_eq!(mixed_case.priority, 250);
+    }
+
+    #[test]
+    fn unknown_transport_token_remains_a_udp_address() {
+        let address = peer_address_from_configured_addr("future:peer-address").unwrap();
+
+        assert_eq!(address.transport, "udp");
+        assert_eq!(address.addr, "future:peer-address");
+        assert_eq!(address.priority, 100);
+    }
 
     #[test]
     fn relay_discovery_also_enables_the_fips_relay_carrier() {
