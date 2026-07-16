@@ -258,3 +258,34 @@ fn adding_capacity_rebalances_existing_blobs_with_bounded_progress() -> Result<(
     }
     Ok(())
 }
+
+#[test]
+fn mutable_pin_metadata_survives_blob_relocation_and_reopen() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    let source = pool.add_member(member(temp.path().join("source"), 1024 * 1024))?;
+    let data = b"pinned immutable blob".repeat(32);
+    let hash = sha256(&data);
+    assert!(pool.put_sync(hash, &data)?);
+    pool.pin_sync(&hash)?;
+    pool.pin_sync(&hash)?;
+    assert_eq!(pool.pin_count_sync(&hash)?, 2);
+    assert_eq!(pool.stats()?.pinned_count, 1);
+    assert_eq!(pool.stats()?.pinned_bytes, data.len() as u64);
+
+    let target = pool.add_member(member(temp.path().join("target"), 1024 * 1024))?;
+    pool.begin_drain(source)?;
+    let report = pool.maintain(1)?;
+    assert_eq!(report.moved, 1);
+    assert_eq!(pool.blob_location(&hash)?, Some(target));
+    drop(pool);
+
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    assert_eq!(reopened.pin_count_sync(&hash)?, 2);
+    assert_eq!(reopened.get_sync(&hash)?, Some(data));
+    reopened.unpin_sync(&hash)?;
+    reopened.unpin_sync(&hash)?;
+    assert_eq!(reopened.pin_count_sync(&hash)?, 0);
+    Ok(())
+}

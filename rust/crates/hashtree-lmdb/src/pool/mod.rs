@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const CATALOG_DATABASES: u32 = 3;
+const CATALOG_DATABASES: u32 = 4;
 const CATALOG_MAX_READERS: u32 = 1024;
 const DEFAULT_CATALOG_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MIN_MEMBER_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
@@ -294,6 +294,7 @@ pub struct PoolStore {
     manifest_db: Database<Bytes, Bytes>,
     locations: Database<Bytes, Bytes>,
     by_member: Database<Bytes, Unit>,
+    pins: Database<Bytes, Bytes>,
     runtime: RwLock<RuntimeMembers>,
     adaptive: Mutex<AdaptivePoolState>,
 }
@@ -338,6 +339,9 @@ impl PoolStore {
         let by_member = env
             .create_database(&mut wtxn, Some("by_member"))
             .map_err(map_heed)?;
+        let pins = env
+            .create_database(&mut wtxn, Some("pins"))
+            .map_err(map_heed)?;
         if manifest_db
             .get(&wtxn, MANIFEST_KEY)
             .map_err(map_heed)?
@@ -355,6 +359,7 @@ impl PoolStore {
             manifest_db,
             locations,
             by_member,
+            pins,
             runtime: RwLock::new(RuntimeMembers::default()),
             adaptive: Mutex::new(AdaptivePoolState::new(config.member_failure_cooldown)),
         };
@@ -724,8 +729,55 @@ impl PoolStore {
                 deleted |= store.delete_sync(hash)?;
             }
         }
-        self.set_location(*hash, None)?;
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        self.set_location_txn(&mut wtxn, *hash, None)?;
+        self.pins.delete(&mut wtxn, hash).map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)?;
         Ok(deleted)
+    }
+
+    pub fn pin_sync(&self, hash: &Hash) -> Result<(), StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let previous = self
+            .pins
+            .get(&wtxn, hash)
+            .map_err(map_heed)?
+            .map(decode_pin_count)
+            .transpose()?
+            .unwrap_or(0);
+        self.pins
+            .put(&mut wtxn, hash, &previous.saturating_add(1).to_be_bytes())
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)
+    }
+
+    pub fn unpin_sync(&self, hash: &Hash) -> Result<(), StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let count = self
+            .pins
+            .get(&wtxn, hash)
+            .map_err(map_heed)?
+            .map(decode_pin_count)
+            .transpose()?
+            .unwrap_or(0);
+        if count <= 1 {
+            self.pins.delete(&mut wtxn, hash).map_err(map_heed)?;
+        } else {
+            self.pins
+                .put(&mut wtxn, hash, &(count - 1).to_be_bytes())
+                .map_err(map_heed)?;
+        }
+        wtxn.commit().map_err(map_heed)
+    }
+
+    pub fn pin_count_sync(&self, hash: &Hash) -> Result<u32, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        self.pins
+            .get(&rtxn, hash)
+            .map_err(map_heed)?
+            .map(decode_pin_count)
+            .transpose()
+            .map(|count| count.unwrap_or(0))
     }
 
     pub fn list(&self) -> Result<Vec<Hash>, StoreError> {
@@ -749,6 +801,19 @@ impl PoolStore {
             let location = LocationRecord::decode(location)?;
             stats.count = stats.count.saturating_add(1);
             stats.bytes = stats.bytes.saturating_add(location.size());
+        }
+        for item in self.pins.iter(&rtxn).map_err(map_heed)? {
+            let (hash, count) = item.map_err(map_heed)?;
+            if decode_pin_count(count)? == 0 {
+                continue;
+            }
+            let Some(location) = self.locations.get(&rtxn, hash).map_err(map_heed)? else {
+                continue;
+            };
+            stats.pinned_count = stats.pinned_count.saturating_add(1);
+            stats.pinned_bytes = stats
+                .pinned_bytes
+                .saturating_add(LocationRecord::decode(location)?.size());
         }
         Ok(stats)
     }
@@ -1571,27 +1636,15 @@ impl Store for PoolStore {
     }
 
     async fn pin(&self, hash: &Hash) -> Result<(), StoreError> {
-        let member = self
-            .blob_location(hash)?
-            .ok_or_else(|| StoreError::Other("cannot pin a missing pool blob".into()))?;
-        self.get_member(member)?.pin(hash).await
+        self.pin_sync(hash)
     }
 
     async fn unpin(&self, hash: &Hash) -> Result<(), StoreError> {
-        let member = self
-            .blob_location(hash)?
-            .ok_or_else(|| StoreError::Other("cannot unpin a missing pool blob".into()))?;
-        self.get_member(member)?.unpin(hash).await
+        self.unpin_sync(hash)
     }
 
     fn pin_count(&self, hash: &Hash) -> u32 {
-        let Ok(Some(member)) = self.blob_location(hash) else {
-            return 0;
-        };
-        let Ok(store) = self.get_member(member) else {
-            return 0;
-        };
-        store.pin_count(hash)
+        self.pin_count_sync(hash).unwrap_or(0)
     }
 }
 
@@ -1617,6 +1670,12 @@ fn member_hash_key(member: PoolMemberId, hash: Hash) -> [u8; 48] {
     key[..16].copy_from_slice(member.as_bytes());
     key[16..].copy_from_slice(&hash);
     key
+}
+
+fn decode_pin_count(bytes: &[u8]) -> Result<u32, StoreError> {
+    Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
+        StoreError::Other("invalid pool pin count".into())
+    })?))
 }
 
 fn validate_member_config(config: &PoolMemberConfig) -> Result<(), StoreError> {

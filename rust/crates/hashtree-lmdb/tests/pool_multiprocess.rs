@@ -49,6 +49,11 @@ fn pool_process_helper() {
             fs::write(control.join(format!("{id}-result")), location.to_string())
                 .expect("write location");
         }
+        "pin" => {
+            let hash = sha256(SHARED_DATA);
+            pool.pin_sync(&hash).expect("shared pin");
+            fs::write(control.join(format!("{id}-result")), b"pinned").expect("write result");
+        }
         other => panic!("unknown helper mode {other}"),
     }
 }
@@ -124,6 +129,45 @@ fn process_open_before_member_add_refreshes_manifest_and_placement() {
         pool.get_sync(&sha256(REFRESH_DATA)).expect("parent read"),
         Some(REFRESH_DATA.to_vec())
     );
+}
+
+#[test]
+fn concurrent_process_pins_are_catalog_owned_and_exact() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let control = temp.path().join("control");
+    fs::create_dir(&control).expect("control dir");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("member"),
+        1024 * 1024,
+    ))
+    .expect("add member");
+    pool.put_sync(sha256(SHARED_DATA), SHARED_DATA)
+        .expect("seed shared blob");
+    drop(pool);
+
+    let children = (0..4)
+        .map(|id| spawn_helper("pin", &catalog, &control, format!("pin-{id}")))
+        .collect::<Vec<_>>();
+    for id in 0..children.len() {
+        wait_for(&control.join(format!("pin-{id}-ready")));
+    }
+    fs::write(control.join("go"), b"go").expect("release helpers");
+    for (id, child) in children.into_iter().enumerate() {
+        wait_success(child, &format!("pin writer {id}"));
+    }
+
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("reopen pool");
+    assert_eq!(
+        reopened
+            .pin_count_sync(&sha256(SHARED_DATA))
+            .expect("pin count"),
+        4
+    );
+    let stats = reopened.stats().expect("pool stats");
+    assert_eq!(stats.pinned_count, 1);
+    assert_eq!(stats.pinned_bytes, SHARED_DATA.len() as u64);
 }
 
 fn spawn_helper(mode: &str, catalog: &Path, control: &Path, id: String) -> Child {
