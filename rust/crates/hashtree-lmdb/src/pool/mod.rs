@@ -7,7 +7,7 @@ use self::adaptive::AdaptivePoolState;
 use self::gate::ConcurrencyGate;
 use crate::{ExternalBlobOptions, LmdbBlobStore};
 use async_trait::async_trait;
-use hashtree_core::store::{slice_blob_range, Store, StoreError, StoreStats};
+use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{sha256, types::Hash};
 use heed::types::{Bytes, Unit};
 use heed::{Database, EnvOpenOptions};
@@ -18,10 +18,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CATALOG_DATABASES: u32 = 4;
+const CATALOG_DATABASES: u32 = 5;
 const CATALOG_MAX_READERS: u32 = 1024;
 const DEFAULT_CATALOG_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MIN_MEMBER_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
@@ -301,6 +301,7 @@ pub struct PoolStore {
     locations: Database<Bytes, Bytes>,
     by_member: Database<Bytes, Unit>,
     pins: Database<Bytes, Bytes>,
+    last_accessed: Database<Bytes, Bytes>,
     runtime: RwLock<RuntimeMembers>,
     adaptive: Mutex<AdaptivePoolState>,
 }
@@ -348,6 +349,9 @@ impl PoolStore {
         let pins = env
             .create_database(&mut wtxn, Some("pins"))
             .map_err(map_heed)?;
+        let last_accessed = env
+            .create_database(&mut wtxn, Some("last_accessed"))
+            .map_err(map_heed)?;
         if manifest_db
             .get(&wtxn, MANIFEST_KEY)
             .map_err(map_heed)?
@@ -366,6 +370,7 @@ impl PoolStore {
             locations,
             by_member,
             pins,
+            last_accessed,
             runtime: RwLock::new(RuntimeMembers::default()),
             adaptive: Mutex::new(AdaptivePoolState::new(config.member_failure_cooldown)),
         };
@@ -619,9 +624,13 @@ impl PoolStore {
         Ok(inserted)
     }
 
-    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+    pub fn put_many_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
         let mut seen = HashSet::new();
         let mut unique = Vec::with_capacity(items.len());
+        let mut ordered = Vec::with_capacity(items.len());
         for (hash, data) in items {
             if sha256(data) != *hash {
                 return Err(StoreError::Other(
@@ -630,20 +639,23 @@ impl PoolStore {
             }
             if seen.insert(*hash) {
                 unique.push((*hash, data));
+                ordered.push((*hash, data.len() as u64));
             }
         }
 
-        let mut inserted = 0usize;
+        let mut inserted = HashSet::new();
         let mut missing = Vec::new();
         for (hash, data) in unique {
             if self.read_location(&hash)?.is_some() {
-                inserted = inserted.saturating_add(usize::from(self.put_sync(hash, data)?));
+                if self.put_sync(hash, data)? {
+                    inserted.insert(hash);
+                }
             } else {
                 missing.push((hash, data));
             }
         }
         if missing.is_empty() {
-            return Ok(inserted);
+            return Ok(put_many_report(items.len(), &ordered, &inserted));
         }
 
         let mut reserved_bytes = HashMap::new();
@@ -679,7 +691,9 @@ impl PoolStore {
         wtxn.commit().map_err(map_heed)?;
 
         for (hash, data) in raced {
-            inserted = inserted.saturating_add(usize::from(self.put_sync(hash, data)?));
+            if self.put_sync(hash, data)? {
+                inserted.insert(hash);
+            }
         }
 
         let mut by_target: HashMap<PoolMemberId, Vec<(Hash, Vec<u8>)>> = HashMap::new();
@@ -707,7 +721,7 @@ impl PoolStore {
             let bytes = batch.iter().map(|(_, data)| data.len()).sum::<usize>();
             self.record_write(target, started.elapsed(), bytes, success);
             let report = result?;
-            inserted = inserted.saturating_add(report.inserted);
+            inserted.extend(report.inserted_hashes);
             for (hash, _) in &batch {
                 self.read_verified_member(target, &store, hash)?
                     .ok_or_else(|| {
@@ -735,7 +749,12 @@ impl PoolStore {
             }
         }
         wtxn.commit().map_err(map_heed)?;
-        Ok(inserted)
+        Ok(put_many_report(items.len(), &ordered, &inserted))
+    }
+
+    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_report_sync(items)
+            .map(|report| report.inserted)
     }
 
     pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
@@ -767,6 +786,22 @@ impl PoolStore {
 
     pub fn exists(&self, hash: &Hash) -> Result<bool, StoreError> {
         Ok(self.get_sync(hash)?.is_some())
+    }
+
+    pub fn existing_hashes_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        sorted_hashes
+            .iter()
+            .map(|hash| self.locations.get(&rtxn, hash).map(|value| value.is_some()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_heed)
+    }
+
+    pub fn map_size_bytes(&self) -> usize {
+        self.env.info().map_size
     }
 
     pub fn delete_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
@@ -831,6 +866,59 @@ impl PoolStore {
             .map(decode_pin_count)
             .transpose()
             .map(|count| count.unwrap_or(0))
+    }
+
+    pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        if self.locations.get(&wtxn, hash).map_err(map_heed)?.is_none() {
+            return Ok(false);
+        }
+        self.last_accessed
+            .put(&mut wtxn, hash, &now.to_be_bytes())
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)?;
+        Ok(true)
+    }
+
+    pub fn touch_many_accessed_sync(&self, hashes: &[Hash], now: u64) -> Result<usize, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let encoded = now.to_be_bytes();
+        let mut updated = 0usize;
+        let mut seen = HashSet::new();
+        for hash in hashes {
+            if !seen.insert(*hash) || self.locations.get(&wtxn, hash).map_err(map_heed)?.is_none() {
+                continue;
+            }
+            self.last_accessed
+                .put(&mut wtxn, hash, &encoded)
+                .map_err(map_heed)?;
+            updated += 1;
+        }
+        wtxn.commit().map_err(map_heed)?;
+        Ok(updated)
+    }
+
+    pub fn last_accessed_at_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        self.last_accessed
+            .get(&rtxn, hash)
+            .map_err(map_heed)?
+            .map(decode_u64)
+            .transpose()
+    }
+
+    pub fn many_last_accessed_at_sync(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<(Hash, u64)>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let mut values = Vec::new();
+        for hash in hashes {
+            if let Some(value) = self.last_accessed.get(&rtxn, hash).map_err(map_heed)? {
+                values.push((*hash, decode_u64(value)?));
+            }
+        }
+        Ok(values)
     }
 
     pub fn list(&self) -> Result<Vec<Hash>, StoreError> {
@@ -1627,7 +1715,9 @@ impl PoolStore {
         hash: Hash,
         location: Option<LocationRecord>,
     ) -> Result<(), StoreError> {
-        if let Some(previous) = self.locations.get(txn, &hash).map_err(map_heed)? {
+        let previous = self.locations.get(txn, &hash).map_err(map_heed)?;
+        let had_previous = previous.is_some();
+        if let Some(previous) = previous {
             let previous = LocationRecord::decode(previous)?;
             let (members, len) = previous.members();
             for member in members.into_iter().take(len) {
@@ -1646,9 +1736,15 @@ impl PoolStore {
                         .put(txn, &member_hash_key(member, hash), &())
                         .map_err(map_heed)?;
                 }
+                if !had_previous {
+                    self.last_accessed
+                        .put(txn, &hash, &unix_timestamp_now().to_be_bytes())
+                        .map_err(map_heed)?;
+                }
             }
             None => {
                 self.locations.delete(txn, &hash).map_err(map_heed)?;
+                self.last_accessed.delete(txn, &hash).map_err(map_heed)?;
             }
         }
         Ok(())
@@ -1783,6 +1879,38 @@ fn decode_pin_count(bytes: &[u8]) -> Result<u32, StoreError> {
     Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
         StoreError::Other("invalid pool pin count".into())
     })?))
+}
+
+fn decode_u64(bytes: &[u8]) -> Result<u64, StoreError> {
+    Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| {
+        StoreError::Other("invalid pool u64 value".into())
+    })?))
+}
+
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn put_many_report(
+    total: usize,
+    ordered: &[(Hash, u64)],
+    inserted: &HashSet<Hash>,
+) -> PutManyReport {
+    let mut report = PutManyReport {
+        total,
+        ..PutManyReport::default()
+    };
+    for (hash, bytes) in ordered {
+        if inserted.contains(hash) {
+            report.inserted = report.inserted.saturating_add(1);
+            report.inserted_bytes = report.inserted_bytes.saturating_add(*bytes);
+            report.inserted_hashes.push(*hash);
+        }
+    }
+    report
 }
 
 fn validate_member_config(config: &PoolMemberConfig) -> Result<(), StoreError> {

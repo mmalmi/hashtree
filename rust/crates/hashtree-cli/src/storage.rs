@@ -11,7 +11,7 @@ use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
-    ExternalBlobOptions, LmdbBlobStore,
+    ExternalBlobOptions, LmdbBlobStore, PoolStore,
 };
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
@@ -215,6 +215,8 @@ pub enum LocalStore {
     Fs(FsBlobStore),
     #[cfg(feature = "lmdb")]
     Lmdb(LmdbBlobStore),
+    #[cfg(feature = "lmdb")]
+    Pool(Box<PoolStore>),
     #[cfg(feature = "lmdb")]
     TieredLmdb {
         primary: Box<LmdbBlobStore>,
@@ -463,6 +465,7 @@ impl LocalStore {
             StorageBackend::Lmdb => Ok(
                 match open_configured_lmdb_blob_store(path, _map_size_bytes)? {
                     ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
+                    ConfiguredLmdbBlobStore::Pool(store) => LocalStore::Pool(store),
                     ConfiguredLmdbBlobStore::Tiered { primary, legacy } => {
                         LocalStore::TieredLmdb { primary, legacy }
                     }
@@ -482,7 +485,9 @@ impl LocalStore {
         match self {
             LocalStore::Fs(_) => StorageBackend::Fs,
             #[cfg(feature = "lmdb")]
-            LocalStore::Lmdb(_) | LocalStore::TieredLmdb { .. } => StorageBackend::Lmdb,
+            LocalStore::Lmdb(_) | LocalStore::Pool(_) | LocalStore::TieredLmdb { .. } => {
+                StorageBackend::Lmdb
+            }
         }
     }
 
@@ -491,6 +496,8 @@ impl LocalStore {
             LocalStore::Fs(_) => Ok(()),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.force_sync(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.force_sync(),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 primary.force_sync()?;
@@ -505,6 +512,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.put_sync(hash, data),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.put_sync(hash, data),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.put_sync(hash, data),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => primary.put_sync(hash, data),
         }
@@ -534,6 +543,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.put_many_report_sync(items),
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.put_many_report_sync(items),
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => primary.put_many_report_sync(items),
         }
     }
@@ -550,6 +561,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.get_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.get_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.get_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 if let Some(data) = primary.get_sync(hash)? {
@@ -571,6 +584,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.get_range_sync(hash, start, end_inclusive),
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.get_range_sync(hash, start, end_inclusive),
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 if primary.exists(hash)? {
                     return primary.get_range_sync(hash, start, end_inclusive);
@@ -585,6 +600,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.blob_size_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.blob_size_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.blob_size_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 if let Some(size) = primary.blob_size_sync(hash)? {
@@ -601,6 +618,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.touch_accessed_sync(hash, now),
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.touch_accessed_sync(hash, now),
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => {
                 if primary.exists(hash)? {
                     return primary.touch_accessed_sync(hash, now);
@@ -615,6 +634,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.touch_many_accessed_sync(hashes, now),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.touch_many_accessed_sync(hashes, now),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.touch_many_accessed_sync(hashes, now),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => {
                 let mut primary_hashes = Vec::new();
@@ -634,6 +655,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.last_accessed_at_sync(hash),
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.last_accessed_at_sync(hash),
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 if let Some(accessed_at) = primary.last_accessed_at_sync(hash)? {
                     return Ok(Some(accessed_at));
@@ -651,6 +674,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.many_last_accessed_at_sync(hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.many_last_accessed_at_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.many_last_accessed_at_sync(hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 let mut results = primary.many_last_accessed_at_sync(hashes)?;
@@ -673,6 +698,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.exists(hash),
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.exists(hash),
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 Ok(primary.exists(hash)? || legacy.exists(hash)?)
             }
@@ -691,6 +718,8 @@ impl LocalStore {
                 .collect()),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 let mut existing = primary.existing_hashes_in_sorted_candidates(sorted_hashes)?;
@@ -724,6 +753,8 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.delete_sync(hash),
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 let deleted_primary = if primary.exists(hash)? {
                     primary.delete_sync(hash)?
@@ -745,6 +776,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.delete_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => {
                 if primary.exists(hash)? {
@@ -772,6 +805,14 @@ impl LocalStore {
                 Ok(LocalStoreStats {
                     count: stats.count,
                     total_bytes: stats.total_bytes,
+                })
+            }
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => {
+                let stats = store.stats()?;
+                Ok(LocalStoreStats {
+                    count: stats.count as usize,
+                    total_bytes: stats.bytes,
                 })
             }
             #[cfg(feature = "lmdb")]
@@ -807,6 +848,14 @@ impl LocalStore {
                 })
             }
             #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => {
+                let stats = store.stats()?;
+                Ok(LocalStoreStats {
+                    count: stats.count as usize,
+                    total_bytes: stats.bytes,
+                })
+            }
+            #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => {
                 let stats = primary.stats()?;
                 Ok(LocalStoreStats {
@@ -823,6 +872,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.list(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, legacy } => {
                 let mut hashes = primary.list()?;
@@ -843,6 +894,8 @@ impl LocalStore {
             LocalStore::Fs(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.list(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::TieredLmdb { primary, .. } => primary.list(),
         }
@@ -895,6 +948,7 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
         return open_shared_lmdb_blob_store(data_dir, max_size_bytes).map(|store| {
             Arc::new(match store {
                 ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
+                ConfiguredLmdbBlobStore::Pool(store) => LocalStore::Pool(store),
                 ConfiguredLmdbBlobStore::Tiered { primary, legacy } => {
                     LocalStore::TieredLmdb { primary, legacy }
                 }
@@ -3253,6 +3307,7 @@ mod tests {
 
         let map_size = match store.router.local.as_ref() {
             LocalStore::Lmdb(local) => local.map_size_bytes() as u64,
+            LocalStore::Pool(pool) => pool.map_size_bytes() as u64,
             LocalStore::TieredLmdb { primary, .. } => primary.map_size_bytes() as u64,
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };
@@ -3346,6 +3401,7 @@ mod tests {
 
         let map_size = match store {
             LocalStore::Lmdb(local) => local.map_size_bytes() as u64,
+            LocalStore::Pool(pool) => pool.map_size_bytes() as u64,
             LocalStore::TieredLmdb { primary, .. } => primary.map_size_bytes() as u64,
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };

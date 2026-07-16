@@ -1,4 +1,4 @@
-use crate::{ExternalBlobOptions, LmdbBlobStore};
+use crate::{ExternalBlobOptions, LmdbBlobStore, PoolMemberConfig, PoolStore, PoolStoreConfig};
 use async_trait::async_trait;
 use hashtree_core::store::{Store, StoreError};
 use hashtree_core::types::Hash;
@@ -11,6 +11,8 @@ const LMDB_HOT_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR";
 const LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR";
 pub const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
 pub const SHARED_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
+pub const SHARED_BLOB_POOL_DIR_NAME: &str = "blob-pool-v1";
+const DEFAULT_POOL_MEMBER_CAPACITY_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// One canonical LMDB blob layout selected from Hashtree's environment.
 ///
@@ -19,6 +21,7 @@ pub const SHARED_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 /// read route instead of registering each tier separately.
 pub enum ConfiguredLmdbBlobStore {
     Single(LmdbBlobStore),
+    Pool(Box<PoolStore>),
     Tiered {
         primary: Box<LmdbBlobStore>,
         legacy: Box<LmdbBlobStore>,
@@ -29,6 +32,7 @@ impl ConfiguredLmdbBlobStore {
     pub fn put_sync(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
         match self {
             Self::Single(store) => store.put_sync(hash, data),
+            Self::Pool(store) => store.put_sync(hash, data),
             Self::Tiered { primary, .. } => primary.put_sync(hash, data),
         }
     }
@@ -36,6 +40,7 @@ impl ConfiguredLmdbBlobStore {
     pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
         match self {
             Self::Single(store) => store.put_many_sync(items),
+            Self::Pool(store) => store.put_many_sync(items),
             Self::Tiered { primary, .. } => primary.put_many_sync(items),
         }
     }
@@ -43,6 +48,7 @@ impl ConfiguredLmdbBlobStore {
     pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         match self {
             Self::Single(store) => store.get_sync(hash),
+            Self::Pool(store) => store.get_sync(hash),
             Self::Tiered { primary, legacy } => {
                 if let Some(data) = primary.get_sync(hash)? {
                     return Ok(Some(data));
@@ -60,6 +66,7 @@ impl ConfiguredLmdbBlobStore {
     ) -> Result<Option<Vec<u8>>, StoreError> {
         match self {
             Self::Single(store) => store.get_range_sync(hash, start, end_inclusive),
+            Self::Pool(store) => store.get_range_sync(hash, start, end_inclusive),
             Self::Tiered { primary, legacy } => {
                 if let Some(data) = primary.get_range_sync(hash, start, end_inclusive)? {
                     return Ok(Some(data));
@@ -72,6 +79,7 @@ impl ConfiguredLmdbBlobStore {
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
         match self {
             Self::Single(store) => store.blob_size_sync(hash),
+            Self::Pool(store) => store.blob_size_sync(hash),
             Self::Tiered { primary, legacy } => {
                 if let Some(size) = primary.blob_size_sync(hash)? {
                     return Ok(Some(size));
@@ -84,6 +92,7 @@ impl ConfiguredLmdbBlobStore {
     pub fn exists(&self, hash: &Hash) -> Result<bool, StoreError> {
         match self {
             Self::Single(store) => store.exists(hash),
+            Self::Pool(store) => store.exists(hash),
             Self::Tiered { primary, legacy } => Ok(primary.exists(hash)? || legacy.exists(hash)?),
         }
     }
@@ -91,6 +100,7 @@ impl ConfiguredLmdbBlobStore {
     pub fn delete_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
         match self {
             Self::Single(store) => store.delete_sync(hash),
+            Self::Pool(store) => store.delete_sync(hash),
             Self::Tiered { primary, legacy } => {
                 let deleted_primary = if primary.exists(hash)? {
                     primary.delete_sync(hash)?
@@ -142,6 +152,75 @@ impl Store for ConfiguredLmdbBlobStore {
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.delete_sync(hash)
     }
+
+    async fn stats(&self) -> hashtree_core::store::StoreStats {
+        match self {
+            Self::Single(store) => {
+                let Ok(stats) = store.stats() else {
+                    return hashtree_core::store::StoreStats::default();
+                };
+                hashtree_core::store::StoreStats {
+                    count: stats.count as u64,
+                    bytes: stats.total_bytes,
+                    pinned_count: stats.pinned_count as u64,
+                    pinned_bytes: stats.pinned_bytes,
+                }
+            }
+            Self::Pool(store) => store.stats().unwrap_or_default(),
+            Self::Tiered { primary, legacy } => {
+                let Ok(primary) = primary.stats() else {
+                    return hashtree_core::store::StoreStats::default();
+                };
+                let Ok(legacy) = legacy.stats() else {
+                    return hashtree_core::store::StoreStats::default();
+                };
+                hashtree_core::store::StoreStats {
+                    count: primary.count.saturating_add(legacy.count) as u64,
+                    bytes: primary.total_bytes.saturating_add(legacy.total_bytes),
+                    pinned_count: primary.pinned_count.saturating_add(legacy.pinned_count) as u64,
+                    pinned_bytes: primary.pinned_bytes.saturating_add(legacy.pinned_bytes),
+                }
+            }
+        }
+    }
+
+    async fn pin(&self, hash: &Hash) -> Result<(), StoreError> {
+        match self {
+            Self::Single(store) => store.pin(hash).await,
+            Self::Pool(store) => store.pin_sync(hash),
+            Self::Tiered { primary, legacy } => {
+                if primary.exists(hash)? {
+                    primary.pin(hash).await
+                } else {
+                    legacy.pin(hash).await
+                }
+            }
+        }
+    }
+
+    async fn unpin(&self, hash: &Hash) -> Result<(), StoreError> {
+        match self {
+            Self::Single(store) => store.unpin(hash).await,
+            Self::Pool(store) => store.unpin_sync(hash),
+            Self::Tiered { primary, legacy } => {
+                if primary.pin_count(hash) > 0 {
+                    primary.unpin(hash).await
+                } else {
+                    legacy.unpin(hash).await
+                }
+            }
+        }
+    }
+
+    fn pin_count(&self, hash: &Hash) -> u32 {
+        match self {
+            Self::Single(store) => store.pin_count(hash),
+            Self::Pool(store) => store.pin_count_sync(hash).unwrap_or(0),
+            Self::Tiered { primary, legacy } => primary
+                .pin_count(hash)
+                .saturating_add(legacy.pin_count(hash)),
+        }
+    }
 }
 
 /// Open the unbounded LMDB blob environment(s) for a canonical blob path.
@@ -186,10 +265,40 @@ pub fn open_shared_lmdb_blob_store<P: AsRef<Path>>(
     data_dir: P,
     storage_budget_bytes: u64,
 ) -> Result<ConfiguredLmdbBlobStore, StoreError> {
-    open_configured_lmdb_blob_store(
-        data_dir.as_ref().join("blobs"),
-        Some(storage_budget_bytes.max(SHARED_BLOB_MIN_MAP_SIZE_BYTES)),
-    )
+    let data_dir = data_dir.as_ref();
+    let blob_path = data_dir.join("blobs");
+    let map_size_bytes = storage_budget_bytes.max(SHARED_BLOB_MIN_MAP_SIZE_BYTES);
+    if lmdb_hot_blob_dir_for(&blob_path).is_some() {
+        return open_configured_lmdb_blob_store(&blob_path, Some(map_size_bytes));
+    }
+
+    let pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
+    if pool_path.join("data.mdb").exists() {
+        return PoolStore::open(pool_path, PoolStoreConfig::default())
+            .map(Box::new)
+            .map(ConfiguredLmdbBlobStore::Pool);
+    }
+    if blob_path.join("data.mdb").exists() {
+        return open_configured_lmdb_blob_store(&blob_path, Some(map_size_bytes));
+    }
+
+    let pool = PoolStore::open(&pool_path, PoolStoreConfig::default())?;
+    let capacity = if storage_budget_bytes == 0 {
+        DEFAULT_POOL_MEMBER_CAPACITY_BYTES
+    } else {
+        storage_budget_bytes
+    };
+    let external = configured_external_blob_options(&blob_path, None);
+    let member = PoolMemberConfig::new(blob_path, capacity)
+        .with_map_size_bytes(map_size_bytes)
+        .with_external_blobs(
+            external.base_path,
+            external.min_bytes as u64,
+            external.sync,
+            external.pack_target_bytes.map(|bytes| bytes as u64),
+        );
+    pool.add_member(member)?;
+    Ok(ConfiguredLmdbBlobStore::Pool(Box::new(pool)))
 }
 
 fn open_unbounded_lmdb_blob_store(

@@ -5,7 +5,7 @@ mod pool;
 
 pub use configured::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
-    LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES,
+    LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
 pub use pool::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,

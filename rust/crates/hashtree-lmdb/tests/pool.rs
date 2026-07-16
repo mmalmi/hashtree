@@ -209,7 +209,11 @@ fn batch_put_is_hash_verified_globally_idempotent_and_exact() -> Result<(), Stor
         (first_hash, first.clone()),
     ];
 
-    assert_eq!(pool.put_many_sync(&items)?, 2);
+    let report = pool.put_many_report_sync(&items)?;
+    assert_eq!(report.total, 3);
+    assert_eq!(report.inserted, 2);
+    assert_eq!(report.inserted_bytes, (first.len() + second.len()) as u64);
+    assert_eq!(report.inserted_hashes, vec![first_hash, second_hash]);
     assert_eq!(pool.put_many_sync(&items)?, 0);
     assert_eq!(pool.stats()?.count, 2);
     assert_eq!(pool.get_sync(&first_hash)?, Some(first));
@@ -270,6 +274,7 @@ fn mutable_pin_metadata_survives_blob_relocation_and_reopen() -> Result<(), Stor
     assert!(pool.put_sync(hash, &data)?);
     pool.pin_sync(&hash)?;
     pool.pin_sync(&hash)?;
+    assert!(pool.touch_accessed_sync(&hash, 42)?);
     assert_eq!(pool.pin_count_sync(&hash)?, 2);
     assert_eq!(pool.stats()?.pinned_count, 1);
     assert_eq!(pool.stats()?.pinned_bytes, data.len() as u64);
@@ -283,6 +288,7 @@ fn mutable_pin_metadata_survives_blob_relocation_and_reopen() -> Result<(), Stor
 
     let reopened = PoolStore::open(&catalog, PoolStoreConfig::default())?;
     assert_eq!(reopened.pin_count_sync(&hash)?, 2);
+    assert_eq!(reopened.last_accessed_at_sync(&hash)?, Some(42));
     assert_eq!(reopened.get_sync(&hash)?, Some(data));
     reopened.unpin_sync(&hash)?;
     reopened.unpin_sync(&hash)?;
