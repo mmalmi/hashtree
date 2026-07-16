@@ -1671,6 +1671,31 @@ pub async fn run_mesh_pubsub_workload(
     report
 }
 
+async fn collect_mesh_pubsub_payloads(
+    nodes: &[MeshPubsubNode],
+    stream_id: &str,
+    expected_subscribers: &BTreeSet<String>,
+    seen: &mut HashSet<(String, u64)>,
+    report: &mut MeshPubsubPayloadReport,
+) {
+    for node in nodes {
+        for event in node.store.drain_pubsub_events().await {
+            if event.stream_id != stream_id
+                || !expected_subscribers.contains(&node.id)
+                || !seen.insert((node.id.clone(), event.seq))
+            {
+                report.duplicate_deliveries = report.duplicate_deliveries.saturating_add(1);
+                continue;
+            }
+            report.delivered_payloads.push(MeshPubsubPayloadDelivery {
+                subscriber_id: node.id.clone(),
+                seq: event.seq,
+                payload: event.payload,
+            });
+        }
+    }
+}
+
 pub(crate) async fn run_mesh_pubsub_payload_delivery(
     config: MeshPubsubPayloadConfig,
 ) -> MeshPubsubPayloadReport {
@@ -1749,23 +1774,38 @@ pub(crate) async fn run_mesh_pubsub_payload_delivery(
         }
         for _ in 0..config.pump_steps_per_publish {
             pump_mesh(&nodes, 1).await;
-            for node in &nodes {
-                for event in node.store.drain_pubsub_events().await {
-                    if event.stream_id != config.stream_id
-                        || !expected_subscribers.contains(&node.id)
-                        || !seen.insert((node.id.clone(), event.seq))
-                    {
-                        report.duplicate_deliveries = report.duplicate_deliveries.saturating_add(1);
-                        continue;
-                    }
-                    report.delivered_payloads.push(MeshPubsubPayloadDelivery {
-                        subscriber_id: node.id.clone(),
-                        seq: event.seq,
-                        payload: event.payload,
-                    });
-                }
-            }
+            collect_mesh_pubsub_payloads(
+                &nodes,
+                &config.stream_id,
+                &expected_subscribers,
+                &mut seen,
+                &mut report,
+            )
+            .await;
         }
+    }
+
+    // Earlier payloads can finish during a later publish round. Give the final
+    // payload the same bounded opportunity instead of sampling it at an
+    // arbitrary scheduler boundary. The setup budget is already the simulator's
+    // bounded convergence allowance, and this loop exits as soon as all expected
+    // deliveries arrive.
+    let final_settle_steps = config
+        .pump_steps_after_setup
+        .max(config.pump_steps_per_publish);
+    for _ in 0..final_settle_steps {
+        if report.delivered_payloads.len() as u64 >= report.delivery_opportunities {
+            break;
+        }
+        pump_mesh(&nodes, 1).await;
+        collect_mesh_pubsub_payloads(
+            &nodes,
+            &config.stream_id,
+            &expected_subscribers,
+            &mut seen,
+            &mut report,
+        )
+        .await;
     }
 
     for node in &nodes {
@@ -2449,6 +2489,30 @@ pub async fn run_mesh_pubsub_sweep(
 mod tests {
     use super::*;
     use hashtree_network::PubsubSchedulingPolicy;
+
+    #[tokio::test]
+    async fn payload_delivery_gives_the_final_publish_a_settle_window() {
+        let report = run_mesh_pubsub_payload_delivery(MeshPubsubPayloadConfig {
+            seed: 20260705,
+            node_count: 24,
+            subscriber_count: 12,
+            stream_id: "final-settle".to_string(),
+            payloads: (0..4).map(|byte| vec![byte; 512]).collect(),
+            pool: PoolConfig {
+                max_connections: 8,
+                satisfied_connections: 4,
+            },
+            pump_steps_after_setup: 192,
+            pump_steps_per_publish: 1,
+        })
+        .await;
+
+        assert_eq!(report.delivery_opportunities, 48);
+        assert_eq!(
+            report.delivered_payloads.len() as u64,
+            report.delivery_opportunities
+        );
+    }
 
     #[tokio::test]
     async fn production_mesh_pubsub_workload_uses_real_core_delivery() {
