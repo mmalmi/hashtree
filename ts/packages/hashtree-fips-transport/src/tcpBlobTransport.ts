@@ -1,11 +1,17 @@
 import { FipsTcpEndpoint, State, type ConnectionId, type FipsDatagramEndpoint } from '@fips/tcp';
-import { sha256, type Hash, type Store } from '@hashtree/core';
+import {
+  BLOB_DEFAULT_HTL,
+  BLOB_MAX_HTL,
+  sha256,
+  type Hash,
+  type Store,
+} from '@hashtree/core';
 
 export const TCP_BLOB_SERVICE_PORT = 39_018;
 export const TCP_BLOB_MAGIC = 0x48;
 export const TCP_BLOB_VERSION = 1;
-export const TCP_BLOB_DEFAULT_HTL = 10;
-export const TCP_BLOB_MAX_HTL = 10;
+export const TCP_BLOB_DEFAULT_HTL = BLOB_DEFAULT_HTL;
+export const TCP_BLOB_MAX_HTL = BLOB_MAX_HTL;
 const GET = 1;
 const MISSING = 0;
 const FOUND = 1;

@@ -151,14 +151,23 @@ describe('FIPS worker P2P provider integration', () => {
   it('passes explicit and default route HTLs into TCP/FIPS', async () => {
     const identity = await identityFromSecretKey(secret(7));
     const node = new FipsNode({ identity, transports: [] });
-    const provider = createFipsWorkerP2PProvider({ node, localStore: new MemoryStore() });
+    const provider = createFipsWorkerP2PProvider({
+      node,
+      localStore: new MemoryStore(),
+      providerRoutes: [
+        { peerId: 'peer-a', htl: 10 },
+        { peerId: 'local-peer', htl: 0 },
+      ],
+    });
     const get = vi.spyOn(provider.transport, 'get').mockResolvedValue(null);
     const hash = '00'.repeat(32);
 
     try {
-      await expect(provider.fetch(hash, 'peer-a', 0)).resolves.toBeNull();
+      await expect(provider.fetch(hash, 'peer-a', 4)).resolves.toBeNull();
       await expect(provider.fetch(hash, 'peer-a')).resolves.toBeNull();
-      expect(get.mock.calls.map(([, , htl]) => htl)).toEqual([0, 10]);
+      await expect(provider.fetch(hash, 'local-peer', 10)).resolves.toBeNull();
+      expect(get.mock.calls.map(([, , htl]) => htl)).toEqual([4, 10, 0]);
+      expect(() => provider.fetch(hash, 'local-peer', 11)).toThrow('HTL is invalid');
     } finally {
       provider.close();
     }

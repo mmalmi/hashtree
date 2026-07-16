@@ -105,7 +105,7 @@ export async function createBrowserHashtreeFipsProvider(
     throw error;
   }
   return {
-    fetch: (hashHex, peerId) => provider.fetch(hashHex, peerId),
+    fetch: (hashHex, peerId, htl) => provider.fetch(hashHex, peerId, htl),
     listPeerIds: () => provider.listPeerIds(),
     node,
     webRtcTransport,

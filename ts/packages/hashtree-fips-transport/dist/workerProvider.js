@@ -3,8 +3,8 @@ import { TCP_BLOB_DEFAULT_HTL, TCP_BLOB_MAX_HTL, TCP_BLOB_SERVICE_PORT, TcpBlobT
 export const HASHTREE_BLOB_CAPABILITY = 'hashtree.blob/1';
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().
- * Peer selection remains dynamic: the provider reads authenticated FIPS links
- * for every request instead of maintaining a second discovery mesh.
+ * Provider selection comes only from the supplied route source; connected FIPS
+ * peers are never inferred to be Hashtree providers.
  */
 export class FipsWorkerP2PProvider {
     options;
@@ -18,19 +18,22 @@ export class FipsWorkerP2PProvider {
             timeoutMs: options.requestTimeoutMs,
         });
     }
-    fetch(hashHex, peerId) {
+    fetch(hashHex, peerId, htl) {
         if (this.closed)
             return Promise.reject(new Error('FIPS worker P2P provider is closed'));
+        if (htl !== undefined && (!Number.isInteger(htl) || htl < 0 || htl > TCP_BLOB_MAX_HTL)) {
+            throw new Error('TCP/FIPS blob HTL is invalid');
+        }
         const hash = parseHash(hashHex);
-        return this.fetchHash(hash, peerId);
+        return this.fetchHash(hash, peerId, htl);
     }
-    async fetchHash(hash, peerId) {
+    async fetchHash(hash, peerId, requestedHtl) {
         const routes = await this.routes();
         if (peerId) {
             const known = routes.find((route) => route.peerId === peerId);
-            return this.transport.get(hash, [peerId], known?.htl ?? TCP_BLOB_DEFAULT_HTL);
+            return this.transport.get(hash, [peerId], effectiveHtl(known, requestedHtl));
         }
-        return this.fetchRoutes(hash, routes);
+        return this.fetchRoutes(hash, routes, requestedHtl);
     }
     async listPeerIds() {
         if (this.closed)
@@ -49,12 +52,13 @@ export class FipsWorkerP2PProvider {
             return [];
         return normalizeRoutes(typeof source === 'function' ? await source() : source);
     }
-    async fetchRoutes(hash, routes) {
+    async fetchRoutes(hash, routes, requestedHtl) {
         const groups = new Map();
         for (const route of routes) {
-            const peers = groups.get(route.htl) ?? [];
+            const htl = effectiveHtl(route, requestedHtl);
+            const peers = groups.get(htl) ?? [];
             peers.push(route.peerId);
-            groups.set(route.htl, peers);
+            groups.set(htl, peers);
         }
         if (groups.size === 0)
             return this.transport.get(hash, []);
@@ -86,6 +90,12 @@ export class FipsWorkerP2PProvider {
             return null;
         throw new AggregateError(failures, 'TCP/FIPS blob availability is uncertain');
     }
+}
+function effectiveHtl(route, requestedHtl) {
+    // An authenticated same-host route is terminal and must remain local-only.
+    if (route?.htl === 0)
+        return 0;
+    return requestedHtl ?? route?.htl ?? TCP_BLOB_DEFAULT_HTL;
 }
 export function createFipsWorkerP2PProvider(options) {
     return new FipsWorkerP2PProvider(options);

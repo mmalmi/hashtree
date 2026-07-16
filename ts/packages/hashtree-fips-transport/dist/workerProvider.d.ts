@@ -17,7 +17,7 @@ export interface FipsCapabilityAdvertisement {
 }
 export type FipsBlobRouteSource = (() => readonly FipsBlobRoute[] | Promise<readonly FipsBlobRoute[]>) | readonly FipsBlobRoute[];
 export interface HashtreeWorkerP2PProvider {
-    fetch(hashHex: string, peerId?: string): Promise<Uint8Array | null>;
+    fetch(hashHex: string, peerId?: string, htl?: number): Promise<Uint8Array | null>;
     listPeerIds(): string[] | Promise<string[]>;
 }
 export type FipsWorkerNode = FipsDatagramEndpoint;
@@ -30,15 +30,15 @@ export interface FipsWorkerP2PProviderOptions {
 }
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().
- * Peer selection remains dynamic: the provider reads authenticated FIPS links
- * for every request instead of maintaining a second discovery mesh.
+ * Provider selection comes only from the supplied route source; connected FIPS
+ * peers are never inferred to be Hashtree providers.
  */
 export declare class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
     private readonly options;
     readonly transport: TcpBlobTransport;
     private closed;
     constructor(options: FipsWorkerP2PProviderOptions);
-    fetch(hashHex: string, peerId?: string): Promise<Uint8Array | null>;
+    fetch(hashHex: string, peerId?: string, htl?: number): Promise<Uint8Array | null>;
     private fetchHash;
     listPeerIds(): Promise<string[]>;
     close(): void;

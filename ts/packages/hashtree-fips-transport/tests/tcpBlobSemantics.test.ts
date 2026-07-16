@@ -6,7 +6,6 @@ import { TcpBlobTransport } from '../src/tcpBlobTransport.js';
 type FetchFromPeer = (
   peer: string,
   hash: Hash,
-  htl: number,
   timeoutMs: number,
   htl: number,
 ) => Promise<Uint8Array | null>;
@@ -55,7 +54,7 @@ describe('TCP/FIPS blob provider result semantics', () => {
       fetch.mockResolvedValue(null);
 
       await expect(transport.get(hash(), ['peer-a', 'peer-b'], 3)).resolves.toBeNull();
-      expect(fetch.mock.calls.map(([peer, , htl]) => [peer, htl])).toEqual([
+      expect(fetch.mock.calls.map(([peer, , , htl]) => [peer, htl])).toEqual([
         ['peer-a', 3],
         ['peer-b', 3],
       ]);
