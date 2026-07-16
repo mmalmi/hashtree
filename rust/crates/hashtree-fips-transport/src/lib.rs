@@ -14,13 +14,11 @@
 
 mod endpoint;
 mod provider_route;
-mod same_host;
 mod tcp_blob;
 
 pub use endpoint::*;
 pub use fips_core::{FipsEndpoint, NostrRelayAdapter, PeerIdentity};
 pub use provider_route::{FipsBlobRoute, FipsBlobRouteError};
-pub use same_host::{SameHostBlobStore, SameHostBlobStoreConfig, SameHostBlobStoreError};
 pub use tcp_blob::{
     InboundBlobPolicy, TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig,
     TcpBlobTransportError, WeakTcpBlobPeerRoute, TCP_BLOB_CAPABILITY, TCP_BLOB_MAX_BYTES,
