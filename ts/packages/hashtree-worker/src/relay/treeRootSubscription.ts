@@ -150,7 +150,7 @@ function compareReplaceableEvents(left: SignedEvent, right: SignedEvent): number
 
   if (!leftId) return 1;
   if (!rightId) return -1;
-  return rightId.localeCompare(leftId);
+  return leftId.localeCompare(rightId);
 }
 
 function parseLabels(event: SignedEvent): string[] | undefined {

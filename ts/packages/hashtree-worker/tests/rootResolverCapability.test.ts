@@ -273,6 +273,34 @@ describe('rootResolver capability', () => {
     expect(socketSendMock).toHaveBeenCalled();
   });
 
+  it('resolves the lowest-id root when same-second events arrive high-id first', async () => {
+    decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
+    const highHash = 'f'.repeat(64);
+    const lowHash = '0'.repeat(64);
+    socketPlanMock.mockImplementation((socket: FakeWebSocket, url: string) => {
+      if (url !== 'wss://relay.example') {
+        return;
+      }
+      const requestMessages = socketSendMock.mock.calls
+        .filter(([relayUrl]) => relayUrl === 'wss://relay.example')
+        .map(([, data]) => JSON.parse(data as string));
+      const request = requestMessages[requestMessages.length - 1];
+      socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog', highHash, 100)]);
+      socket.emitMessage(['EVENT', request[1], makeEvent('audio-catalog', lowHash, 100)]);
+    });
+
+    const resolved = await resolveRootPathFromRelays(
+      { resolvePath: vi.fn() },
+      ['wss://relay.example'],
+      NPUB,
+      'audio-catalog',
+      200,
+      20,
+    );
+
+    expect(toHex(resolved!.hash)).toBe(lowHash);
+  });
+
   it('returns a cached initial root immediately for live watches', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
     await setCachedRoot(NPUB, 'audio-catalog', { hash: fromHex(ROOT_HASH) });

@@ -117,7 +117,7 @@ pub async fn start_daemon_fips_transport(
     // side winning the offer race.
     options.webrtc_auto_connect = options.enable_webrtc && !peer_configs.is_empty();
     options.webrtc_max_connections = hashtree_fips_transport::DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS;
-    options.open_discovery_max_pending = 0;
+    options.open_discovery_max_pending = config.server.fips_open_discovery_max_pending;
     options.packet_channel_capacity = 1024;
     let endpoint = if let Some(raw) = config.server.fips_local_rendezvous_addr.as_deref() {
         let rendezvous_addr = raw

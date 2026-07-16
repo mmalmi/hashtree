@@ -40,7 +40,7 @@ Out of scope in first wave:
 - File: `rust/crates/hashtree-resolver/src/nostr.rs`
 - Internal interface addition:
   `fn pick_latest_event<'a, I>(events: I) -> Option<&'a Event> where I: IntoIterator<Item=&'a Event>`
-- Ordering fixed to `(created_at, event.id)`.
+- Ordering fixed to newest `created_at`, then lexically lowest `event.id` on ties.
 
 ## Step-by-Step Execution Plan
 

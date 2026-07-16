@@ -94,7 +94,7 @@ function compareReplaceableEvents(left, right) {
         return 1;
     if (!rightId)
         return -1;
-    return rightId.localeCompare(leftId);
+    return leftId.localeCompare(rightId);
 }
 function parseLabels(event) {
     const seen = new Set();

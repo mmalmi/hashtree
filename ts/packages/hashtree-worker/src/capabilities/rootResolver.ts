@@ -58,7 +58,7 @@ function compareReplaceableEventOrder(
     return createdAtDiff;
   }
 
-  return candidateEventId.localeCompare(currentEventId);
+  return currentEventId.localeCompare(candidateEventId);
 }
 
 type ParsedRootPath = {

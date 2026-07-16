@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Corrected Nostr replaceable/addressable storage, snapshots, and worker root
+  tracking to use NIP-01's lexically lowest event ID when timestamps tie;
+  ordinary chronological event ordering is unchanged.
+
 ## TypeScript runtime 0.4.4 - 2026-07-16
 
 ### Fixed

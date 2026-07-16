@@ -32,7 +32,7 @@ function compareReplaceableEventOrder(candidateUpdatedAt, candidateEventId, curr
         return -1;
     if (!currentId)
         return 1;
-    return candidateId.localeCompare(currentId);
+    return currentId.localeCompare(candidateId);
 }
 function notifyUpdate(npub, treeName, cid) {
     for (const listener of updateListeners) {

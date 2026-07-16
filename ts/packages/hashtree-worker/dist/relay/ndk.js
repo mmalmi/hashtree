@@ -514,7 +514,11 @@ export async function republishTree(pubkey, treeName) {
     // Get the most recent event (in case there are multiple)
     let event = null;
     for (const e of events) {
-        if (!event || (e.created_at && event.created_at && e.created_at > event.created_at)) {
+        const candidateCreatedAt = e.created_at ?? 0;
+        const currentCreatedAt = event?.created_at ?? 0;
+        if (!event
+            || candidateCreatedAt > currentCreatedAt
+            || (candidateCreatedAt === currentCreatedAt && e.id < event.id)) {
             event = e;
         }
     }

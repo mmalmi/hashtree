@@ -1551,7 +1551,7 @@ impl<S: Store> NostrEventStore<S> {
             }
             Err(err) => return Err(err),
         };
-        if compare_events(event, &existing) > 0 {
+        if compare_replaceable_events(event, &existing) > 0 {
             return Ok(ReplaceableDecision::Accept {
                 replaced: Some(ExistingReplaceableEvent {
                     event: existing,
@@ -1985,6 +1985,18 @@ fn compare_events(left: &StoredNostrEvent, right: &StoredNostrEvent) -> i8 {
     }
 }
 
+fn compare_replaceable_events(left: &StoredNostrEvent, right: &StoredNostrEvent) -> i8 {
+    match left.created_at.cmp(&right.created_at) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        std::cmp::Ordering::Equal => match right.id.cmp(&left.id) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Greater => 1,
+            std::cmp::Ordering::Equal => 0,
+        },
+    }
+}
+
 fn retain_unique_latest_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostrEvent> {
     let mut winners = BTreeMap::<(ReplaceableSlot, String), StoredNostrEvent>::new();
     let mut seen_ids = HashSet::new();
@@ -2014,7 +2026,7 @@ fn retain_unique_latest_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostr
 
         if let Some(slot) = slot {
             match winners.get(&slot) {
-                Some(current) if compare_events(&event, current) <= 0 => {}
+                Some(current) if compare_replaceable_events(&event, current) <= 0 => {}
                 _ => {
                     winners.insert(slot, event);
                 }

@@ -135,6 +135,44 @@ describe('tree event snapshots', () => {
     expect(toHex(snapshot!.rootCid.hash)).toBe('c'.repeat(64));
   });
 
+  it('fetches the lowest-id snapshot when root events share a timestamp', async () => {
+    const store = new MemoryStore();
+    const tree = new HashTree({ store });
+    const low = makeEvent({
+      id: '0'.repeat(64),
+      created_at: 10,
+      tags: [
+        ['d', 'videos/demo'],
+        ['l', 'hashtree'],
+        ['hash', 'a'.repeat(64)],
+        ['key', '4'.repeat(64)],
+      ],
+    });
+    const high = makeEvent({
+      id: 'f'.repeat(64),
+      created_at: 10,
+      tags: [
+        ['d', 'videos/demo'],
+        ['l', 'hashtree'],
+        ['hash', 'b'.repeat(64)],
+        ['key', '4'.repeat(64)],
+      ],
+    });
+
+    const snapshot = await fetchLatestTreeEventSnapshot(
+      {
+        snapshotTarget: tree,
+        nip19,
+        fetchEvents: async () => [high, low],
+      },
+      nip19.npubEncode('2'.repeat(64)),
+      'videos/demo',
+    );
+
+    expect(snapshot?.event.id).toBe(low.id);
+    expect(toHex(snapshot!.rootCid.hash)).toBe('a'.repeat(64));
+  });
+
   it('watches the latest snapshot until closed', async () => {
     const store = new MemoryStore();
     const emitted: string[] = [];

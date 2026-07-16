@@ -6,6 +6,7 @@ import {
   type CID,
 } from '@hashtree/core';
 import type { StoredNostrEvent } from './events.js';
+import { compareReplaceableEvents } from './eventKeys.js';
 import type { Nip19Like, NostrFilter } from './resolver/nostr.js';
 import {
   HASHTREE_ROOT_KINDS,
@@ -40,13 +41,6 @@ export interface WatchTreeEventSnapshotsConfig extends FetchLatestTreeEventSnaps
     filter: TreeEventSnapshotQuery,
     onEvent: (event: StoredNostrEvent) => void,
   ) => () => void;
-}
-
-function compareEvents(a: StoredNostrEvent, b: StoredNostrEvent): number {
-  if (a.created_at !== b.created_at) {
-    return a.created_at - b.created_at;
-  }
-  return a.id.localeCompare(b.id);
 }
 
 function snapshotInfoFromParsed(
@@ -90,7 +84,7 @@ function isValidTreeEventFor(
 }
 
 export function compareTreeEventSnapshots(a: TreeEventSnapshotInfo, b: TreeEventSnapshotInfo): number {
-  return compareEvents(a.event, b.event);
+  return compareReplaceableEvents(a.event, b.event);
 }
 
 export function isNewerTreeEventSnapshot(
@@ -214,7 +208,7 @@ export async function fetchLatestTreeEventSnapshot(
     return null;
   }
 
-  candidates.sort(compareEvents);
+  candidates.sort(compareReplaceableEvents);
   return storeTreeEventSnapshot(config.snapshotTarget, config.nip19, candidates[candidates.length - 1]!);
 }
 

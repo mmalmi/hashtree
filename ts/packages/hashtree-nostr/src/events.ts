@@ -15,6 +15,7 @@ import {
 } from './eventCollection.js';
 import {
   compareEvents,
+  compareReplaceableEvents,
   createdAtFromIndexKey,
   getDTag,
   isParameterizedReplaceableKind,
@@ -821,7 +822,7 @@ export class NostrEventStore {
 
     try {
       const existingEvent = await this.readStoredEvent(existingCid);
-      if (compareEvents(event, existingEvent) > 0) {
+      if (compareReplaceableEvents(event, existingEvent) > 0) {
         return {
           accept: true,
           replaced: {

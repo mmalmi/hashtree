@@ -215,7 +215,7 @@ where
                     right
                         .created_at
                         .cmp(&left.created_at)
-                        .then_with(|| right.id.cmp(&left.id))
+                        .then_with(|| left.id.cmp(&right.id))
                 });
                 retained.truncate(retention.max_events);
                 event_store.build(None, retained).await
@@ -514,5 +514,49 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(contents, vec!["event-30", "event-20"]);
+    }
+
+    #[tokio::test]
+    async fn bounded_cache_keeps_lowest_id_same_second_replaceable_event() {
+        let bus = HashtreeNostrBoundedEventCache::new(
+            Arc::new(MemoryStore::new()),
+            None,
+            EventSource::local_index("hashtree-cache"),
+            EventRetentionPolicy::new(1, vec![Filter::new().kind(Kind::Metadata)]),
+        );
+        let author = Keys::generate();
+        let first = EventBuilder::new(Kind::Metadata, r#"{"name":"first"}"#)
+            .custom_created_at(Timestamp::from(20))
+            .sign_with_keys(&author)
+            .expect("sign first event");
+        let second = EventBuilder::new(Kind::Metadata, r#"{"name":"second"}"#)
+            .custom_created_at(Timestamp::from(20))
+            .sign_with_keys(&author)
+            .expect("sign second event");
+        let (low, high) = if first.id < second.id {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        for event in [high, low.clone()] {
+            bus.publish(
+                VerifiedEvent::try_from(event).expect("verify event"),
+                EventSource::peer("writer"),
+            )
+            .await
+            .expect("publish event");
+        }
+
+        let query = bus
+            .query(
+                vec![Filter::new().kind(Kind::Metadata)],
+                QueryOptions { limit: Some(10) },
+            )
+            .await
+            .expect("query cache");
+
+        assert_eq!(query.events.len(), 1);
+        assert_eq!(query.events[0].event.as_event().id, low.id);
     }
 }

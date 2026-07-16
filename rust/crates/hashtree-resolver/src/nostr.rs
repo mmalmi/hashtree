@@ -110,10 +110,12 @@ fn pick_latest_event<'a, I>(events: I) -> Option<&'a Event>
 where
     I: IntoIterator<Item = &'a Event>,
 {
-    // NIP-16/NIP-33 ordering: newest created_at, then larger event id.
-    events
-        .into_iter()
-        .max_by_key(|event| (event.created_at, event.id))
+    // NIP-01 ordering: newest created_at, then lowest event id.
+    events.into_iter().max_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| right.id.cmp(&left.id))
+    })
 }
 
 fn next_replaceable_created_at(now: Timestamp, latest_existing: Option<Timestamp>) -> Timestamp {
@@ -135,7 +137,7 @@ fn is_newer_event(
         return false;
     }
     match current_event_id {
-        Some(current_id) => event.id > current_id,
+        Some(current_id) => event.id < current_id,
         None => true,
     }
 }
@@ -197,10 +199,12 @@ fn pick_latest_verified_event<'a, I>(events: I) -> Option<&'a VerifiedEvent>
 where
     I: IntoIterator<Item = &'a VerifiedEvent>,
 {
-    // NIP-16/NIP-33 ordering: newest created_at, then larger event id.
-    events
-        .into_iter()
-        .max_by_key(|event| (event.created_at(), event.id()))
+    // NIP-01 ordering: newest created_at, then lowest event id.
+    events.into_iter().max_by(|left, right| {
+        left.created_at()
+            .cmp(&right.created_at())
+            .then_with(|| right.id().cmp(&left.id()))
+    })
 }
 
 fn is_matching_tree_event(event: &VerifiedEvent, tree_name: &str) -> bool {
@@ -1482,7 +1486,7 @@ mod tests {
         );
 
         let picked = pick_latest_event([&event_a, &event_b]).unwrap();
-        let expected = if event_a.id > event_b.id {
+        let expected = if event_a.id < event_b.id {
             event_a.id
         } else {
             event_b.id
@@ -1513,7 +1517,7 @@ mod tests {
         let mut events = vec![&event_old, &event_new];
         events.sort_by_key(|e| e.id);
         let picked = pick_latest_event(events).unwrap();
-        assert_eq!(picked.id, std::cmp::max(event_old.id, event_new.id));
+        assert_eq!(picked.id, std::cmp::min(event_old.id, event_new.id));
     }
 
     #[test]
@@ -1537,7 +1541,7 @@ mod tests {
         );
 
         let should = is_newer_event(&candidate, current.created_at, Some(current.id));
-        assert_eq!(should, candidate.id > current.id);
+        assert_eq!(should, candidate.id < current.id);
     }
 
     #[test]
@@ -1567,7 +1571,7 @@ mod tests {
         upsert_latest_by_d_tag(&mut by_tag, &second);
 
         let selected = by_tag.get("videos").unwrap();
-        let expected = if first.id() > second.id() {
+        let expected = if first.id() < second.id() {
             first.id()
         } else {
             second.id()
