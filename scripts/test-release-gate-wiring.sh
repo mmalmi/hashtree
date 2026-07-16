@@ -33,6 +33,9 @@ grep -F 'ulimit -Sn 8192' .github/workflows/ci.yml >/dev/null
 grep -F 'rev-parse "${VERSION}^{commit}"' publish_release.sh >/dev/null
 ! grep -F "tags:" .github/workflows/release.yml >/dev/null
 grep -F 'needs: gate' .github/workflows/release.yml >/dev/null
+release_gate_job="$(sed -n '/^  gate:/,/^  build:/p' .github/workflows/release.yml)"
+printf '%s\n' "$release_gate_job" | grep -F '~/.cargo/registry/cache/' >/dev/null
+! printf '%s\n' "$release_gate_job" | grep -F 'rust/target/' >/dev/null
 
 # CI keeps the same coverage while avoiding duplicate dependency installs and
 # a second `cargo test` execution that already overlaps the workspace suite.
