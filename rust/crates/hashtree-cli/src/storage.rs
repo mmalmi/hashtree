@@ -3307,7 +3307,10 @@ mod tests {
 
         let map_size = match store.router.local.as_ref() {
             LocalStore::Lmdb(local) => local.map_size_bytes() as u64,
-            LocalStore::Pool(pool) => pool.map_size_bytes() as u64,
+            LocalStore::Pool(pool) => {
+                pool.largest_member_map_size_bytes()?
+                    .expect("fresh pool should have a blob member") as u64
+            }
             LocalStore::TieredLmdb { primary, .. } => primary.map_size_bytes() as u64,
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };
@@ -3401,7 +3404,10 @@ mod tests {
 
         let map_size = match store {
             LocalStore::Lmdb(local) => local.map_size_bytes() as u64,
-            LocalStore::Pool(pool) => pool.map_size_bytes() as u64,
+            LocalStore::Pool(pool) => {
+                pool.largest_member_map_size_bytes()?
+                    .expect("fresh pool should have a blob member") as u64
+            }
             LocalStore::TieredLmdb { primary, .. } => primary.map_size_bytes() as u64,
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };

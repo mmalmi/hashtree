@@ -40,35 +40,74 @@ use std::sync::Arc;
 let store = Arc::new(open_shared_lmdb_blob_store(data_dir, max_size_bytes)?);
 ```
 
-The returned `ConfiguredLmdbBlobStore` implements `Store`. It owns the configured
-hot and legacy LMDB environments as one composite store, including their distinct
-external-blob directories. The helper also owns the `data_dir/blobs` path, map-size
-floor, environment flags, and deterministic external-marker fallback, so consumers
-do not duplicate those choices. All sharing processes must still receive identical
-`HTREE_LMDB_*` environment overrides and `max_size_bytes`; change those options only
-while the other processes are stopped.
+The returned `ConfiguredLmdbBlobStore` implements `Store`. A fresh shared store is
+a `PoolStore` with a persistent catalog and one default member. Existing single
+LMDB stores remain single stores instead of being silently reclassified. The old
+hot/legacy environment variables are recognized only as a migration bridge.
+
+The pool is one application-owned write destination. Its LMDB members are opaque
+storage resources, and the pool exclusively chooses one member for every blob.
+It persists exact hash placement and member identity, centrally verifies SHA-256
+on writes, reads, and moves, and keeps pin/access metadata in the shared catalog.
+Read-only `BlobRouter` code treats the complete pool as one route; it does not
+select pool members.
+
+Member configuration is explicit and persisted. Operators can override:
+
+- logical capacity, which controls capacity-proportional placement;
+- LMDB map size, independently of capacity for external-pack-backed members;
+- external pack directory, spill threshold, pack target, and sync behavior; and
+- per-member read and write concurrency limits.
+
+These are guardrails, not media classes. The pool does not label a path SSD, HDD,
+local, or remote. Per-process latency, throughput, reliability, cooldown, and
+occasional exploration influence placement among eligible members, but that
+bounded learning is disposable and correctness never depends on it.
+
+Use the CLI to inspect and change membership:
+
+```text
+htree storage pool status
+htree storage pool add PATH --capacity-gb N [member overrides]
+htree storage pool configure MEMBER_ID [--capacity-gb N] [--max-reads N] [--max-writes N]
+htree storage pool drain MEMBER_ID
+htree storage pool maintain --max-items N
+htree storage pool remove MEMBER_ID
+```
+
+Planned removal is `drain`, repeated bounded `maintain`, then `remove`. Every move
+is read, hash-verified, written, hash-verified, catalog-committed, and only then
+deleted from the source. `remove` refuses a non-empty member. Sudden loss is not
+presented as redundancy: hashes placed only on the unavailable member fail until
+that exact member identity returns or another source can supply the bytes.
 
 The immutable blob invariant is narrower than the mutable application state:
 
-- Callers must provide the SHA-256 key for the bytes they write. The backend does
-  not recompute it. Retrieval layers must hash-verify bytes before returning or
-  caching them.
+- `LmdbBlobStore` callers must provide the SHA-256 key for bytes they write. The
+  pooled store recomputes it at its boundary, while retrieval layers still
+  hash-verify any bytes received from another route before return or caching.
 - Access order, aggregate statistics, pin counts, and garbage collection changes
   are transactional shared state. Pin counts are durable application references,
   not process leases: a process dying does not undo a committed pin.
-- `max_bytes` is configured on each store handle. Processes allowed to run garbage
-  collection must use one agreed quota policy because eviction affects every
-  process sharing the path. Quota decisions read the shared persisted totals rather
-  than a process-local byte count.
-- Every process using external blobs or packs must use the canonical opener so
-  marker paths and hot/legacy tier ownership remain identical.
+- Processes allowed to run garbage collection must use one agreed quota policy
+  because eviction affects every process sharing the catalog. Placement capacity
+  is not a second application-level quota or write policy.
+- Every process must use the canonical opener. Stable identity markers prevent a
+  missing mount or newly recreated directory from masquerading as a member.
 
-All simultaneously running processes must open the environment with the same,
-sufficient map size. If another process enlarges the map after a process has opened
+All simultaneously running processes must open each member with the same,
+sufficient map size. If another process enlarges a map after a process has opened
 it, that older handle reports `MDB_MAP_RESIZED`; it must exit and reopen before
 accessing the enlarged environment. Establish a larger map before starting the
-other processes. The default map size is fixed and intentionally large, so ordinary
-same-host sharing does not require runtime resizing.
+other processes. Membership and concurrency changes are generation-tracked and
+refresh safely across live processes; LMDB map resizing is deliberately not a live
+membership operation.
+
+For online imports, `htree storage pool migrate-lmdb` opens the source read-only,
+never resizes it, scans in bounded hash order, and writes only through the target
+pool. Persist its cursor with `--state-file`; replay is idempotent. Because a live
+source can add a hash before the saved cursor, run another complete pass after
+stopping source writes, then verify the final destination before cutover.
 
 ## Features
 

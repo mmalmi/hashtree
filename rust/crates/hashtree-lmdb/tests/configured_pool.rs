@@ -32,6 +32,11 @@ fn fresh_shared_store_uses_and_reopens_one_pool_member() {
         panic!("fresh shared storage must initialize a pool");
     };
     assert_eq!(pool.members().expect("members").len(), 1);
+    assert_eq!(
+        pool.largest_member_map_size_bytes()
+            .expect("member map sizes"),
+        Some((SHARED_BLOB_MIN_MAP_SIZE_BYTES * 4) as usize)
+    );
     assert!(pool.put_sync(hash, &data).expect("pool write"));
     drop(pool);
 
