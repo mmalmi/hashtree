@@ -1,3 +1,4 @@
+use crate::managed_env::ManagedEnv;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::executor::block_on as sync_block_on;
@@ -1319,7 +1320,7 @@ impl Store for StorageRouter {
 
 pub struct HashtreeStore {
     base_path: PathBuf,
-    env: heed::Env,
+    env: ManagedEnv,
     /// Set of pinned hashes (32-byte raw hashes, prevents garbage collection)
     pins: Database<Bytes, Unit>,
     /// Mutable published refs that should stay subscribed and keep following updates
@@ -1478,7 +1479,7 @@ impl HashtreeStore {
         unsafe {
             env_options.flags(env_flags);
         }
-        let env = unsafe { env_options.open(path)? };
+        let env = unsafe { ManagedEnv::open(&env_options, path)? };
         let _ = env.clear_stale_readers();
         if env.info().map_size < metadata_map_size {
             unsafe { env.resize(metadata_map_size) }?;
@@ -2918,6 +2919,33 @@ mod tests {
     use super::*;
     #[cfg(feature = "lmdb")]
     use tempfile::TempDir;
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn drop_closes_mutable_metadata_and_blob_environments() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = temp.path().join("store");
+        let store = HashtreeStore::with_options(&root, None, LMDB_BLOB_MIN_MAP_SIZE_BYTES)?;
+        let metadata_path = std::fs::canonicalize(&root)?;
+        let pool_path = std::fs::canonicalize(root.join("blob-pool-v1"))?;
+        let member_path = std::fs::canonicalize(root.join("blobs"))?;
+
+        drop(store);
+
+        assert!(
+            heed::env_closing_event(metadata_path).is_none(),
+            "mutable application metadata environment must close"
+        );
+        assert!(
+            heed::env_closing_event(pool_path).is_none(),
+            "blob pool catalog environment must close"
+        );
+        assert!(
+            heed::env_closing_event(member_path).is_none(),
+            "blob pool member environment must close"
+        );
+        Ok(())
+    }
 
     #[test]
     fn blob_access_update_gate_deduplicates_and_throttles() {

@@ -11,6 +11,31 @@ const HELPER_HASH: &str = "HASHTREE_POOL_HELPER_HASH";
 const PENDING_DATA: &[u8] = b"pool pending crash recovery bytes";
 
 #[test]
+fn drop_closes_pool_catalog_and_member_environments() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member.clone(), 1024 * 1024))
+        .expect("add member");
+    let data = b"close pool environments";
+    pool.put_sync(sha256(data), data).expect("write blob");
+    let canonical_catalog = fs::canonicalize(&catalog).expect("canonical catalog");
+    let canonical_member = fs::canonicalize(&member).expect("canonical member");
+
+    drop(pool);
+
+    assert!(
+        heed::env_closing_event(canonical_catalog).is_none(),
+        "pool catalog must close"
+    );
+    assert!(
+        heed::env_closing_event(canonical_member).is_none(),
+        "pool member must close"
+    );
+}
+
+#[test]
 #[ignore = "subprocess entry point for pool crash recovery tests"]
 fn pool_pending_helper() {
     let Ok(mode) = std::env::var(HELPER_MODE) else {

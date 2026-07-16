@@ -43,6 +43,7 @@ use nostr_social_graph::{
 };
 use nostr_social_graph_heed::HeedSocialGraph;
 
+use crate::managed_env::ManagedEnv;
 use crate::storage::{LocalStore, StorageRouter};
 
 #[cfg(test)]
@@ -122,6 +123,9 @@ pub struct UpstreamGraphBackendError(String);
 
 pub struct SocialGraphStore {
     graph: StdMutex<HeedSocialGraph>,
+    // `HeedSocialGraph` owns a raw Heed handle. Declaring it before this
+    // managed clone makes Rust drop the graph first, then close Heed's cache.
+    _graph_env_lifecycle: ManagedEnv,
     distance_cache: StdMutex<Option<DistanceCache>>,
     public_events: EventIndexBucket,
     ambient_events: EventIndexBucket,
@@ -368,9 +372,19 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
         )
     }
     .context("open nostr-social-graph heed backend")?;
+    let mut lifecycle_options = heed::EnvOpenOptions::new();
+    lifecycle_options
+        .map_size(graph_map_size)
+        .max_dbs(SOCIALGRAPH_MAX_DBS);
+    unsafe {
+        lifecycle_options.flags(env_flags);
+    }
+    let graph_env_lifecycle = unsafe { ManagedEnv::open(&lifecycle_options, db_dir) }
+        .context("manage nostr-social-graph heed backend lifecycle")?;
 
     Ok(Arc::new(SocialGraphStore {
         graph: StdMutex::new(graph),
+        _graph_env_lifecycle: graph_env_lifecycle,
         distance_cache: StdMutex::new(None),
         public_events: EventIndexBucket {
             event_store: NostrEventStore::new(Arc::clone(&public_store)),
@@ -1769,7 +1783,8 @@ fn ensure_social_graph_mapsize_with_env_flags(
     unsafe {
         options.flags(env_flags);
     }
-    let env = unsafe { options.open(db_dir) }.context("open social graph LMDB env for resize")?;
+    let env = unsafe { ManagedEnv::open(&options, db_dir) }
+        .context("open social graph LMDB env for resize")?;
     if env.info().map_size < map_size {
         unsafe { env.resize(map_size) }.context("resize social graph LMDB env")?;
     }

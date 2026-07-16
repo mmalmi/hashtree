@@ -2,6 +2,8 @@ use anyhow::Result;
 use heed::{CompactionOption, EnvOpenOptions};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use crate::managed_env::ManagedEnv;
 #[cfg(feature = "s3")]
 use std::sync::Arc;
 #[cfg(feature = "s3")]
@@ -973,13 +975,12 @@ fn compact_lmdb_environment_dir(env_dir: &Path, keep_backup: bool) -> Result<Com
     let open_map_size = existing_lmdb_map_size_bytes(&data_path)?;
 
     {
-        let env = unsafe {
-            EnvOpenOptions::new()
-                .map_size(open_map_size)
-                .max_dbs(COMPACT_MAX_DBS)
-                .max_readers(COMPACT_MAX_READERS)
-                .open(env_dir)
-        }?;
+        let mut options = EnvOpenOptions::new();
+        options
+            .map_size(open_map_size)
+            .max_dbs(COMPACT_MAX_DBS)
+            .max_readers(COMPACT_MAX_READERS);
+        let env = unsafe { ManagedEnv::open(&options, env_dir) }?;
         env.force_sync()?;
         env.copy_to_file(&compact_path, CompactionOption::Enabled)?;
     }

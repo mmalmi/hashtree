@@ -15,6 +15,7 @@ pub mod eviction;
 pub mod fetch;
 pub mod fips_transport;
 pub mod ignore_rules;
+mod managed_env;
 pub mod nostr_mirror;
 pub mod nostr_relay;
 pub mod pwa;

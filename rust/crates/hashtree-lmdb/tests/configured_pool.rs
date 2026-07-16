@@ -47,6 +47,29 @@ fn fresh_shared_store_uses_and_reopens_one_pool_member() {
 }
 
 #[test]
+fn fresh_shared_pool_keeps_placement_capacity_above_application_quota() {
+    let temp = TempDir::new().expect("temp dir");
+    let application_quota = 512;
+    let data = vec![7u8; 1024];
+    let hash = sha256(&data);
+    let configured = open_shared_lmdb_blob_store(temp.path(), application_quota)
+        .expect("open fresh shared store");
+    let ConfiguredLmdbBlobStore::Pool(pool) = configured else {
+        panic!("fresh shared storage must initialize a pool");
+    };
+
+    assert!(
+        pool.members().expect("members")[0].capacity_bytes > application_quota,
+        "member placement capacity must not duplicate the application's quota"
+    );
+    assert!(
+        pool.put_sync(hash, &data)
+            .expect("transient over-quota write"),
+        "the application must be able to index and evict after a raw write"
+    );
+}
+
+#[test]
 fn existing_single_lmdb_is_not_silently_reclassified_as_a_pool() {
     let temp = TempDir::new().expect("temp dir");
     let blob_path = temp.path().join("blobs");

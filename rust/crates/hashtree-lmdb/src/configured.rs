@@ -7,7 +7,7 @@ use std::path::Path;
 pub const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
 pub const SHARED_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 pub const SHARED_BLOB_POOL_DIR_NAME: &str = "blob-pool-v1";
-const DEFAULT_POOL_MEMBER_CAPACITY_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const DEFAULT_POOL_MEMBER_HEADROOM_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// One canonical application-owned LMDB blob store.
 pub enum ConfiguredLmdbBlobStore {
@@ -177,11 +177,10 @@ pub fn open_shared_lmdb_blob_store<P: AsRef<Path>>(
     }
 
     let pool = PoolStore::open(&pool_path, PoolStoreConfig::default())?;
-    let capacity = if storage_budget_bytes == 0 {
-        DEFAULT_POOL_MEMBER_CAPACITY_BYTES
-    } else {
-        storage_budget_bytes
-    };
+    // Placement capacity is a member guardrail, not the application's quota.
+    // Keep bounded staging room so Hashtree can finish and index a raw tree
+    // before application-owned retention decides what to evict.
+    let capacity = storage_budget_bytes.saturating_add(DEFAULT_POOL_MEMBER_HEADROOM_BYTES);
     let external = configured_external_blob_options(&blob_path);
     let member = PoolMemberConfig::new(blob_path, capacity)
         .with_map_size_bytes(map_size_bytes)

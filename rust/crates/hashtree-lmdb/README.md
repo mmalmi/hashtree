@@ -61,6 +61,12 @@ Member configuration is explicit and persisted. Operators can override:
 - external pack directory, spill threshold, pack target, and sync behavior; and
 - per-member read and write concurrency limits.
 
+The automatically created first member starts with 10 GiB of bounded staging
+headroom above the application's quota. That keeps placement capacity distinct
+from application retention while a tree is being written and indexed. It is an
+initial guardrail only; operators should configure each member's actual logical
+capacity when adding or resizing storage.
+
 These are guardrails, not media classes. The pool does not label a path SSD, HDD,
 local, or remote. Per-process latency, throughput, reliability, cooldown, and
 occasional exploration influence placement among eligible members, but that

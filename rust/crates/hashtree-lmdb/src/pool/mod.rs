@@ -15,7 +15,7 @@ pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStoreConfig,
 };
-use crate::LmdbBlobStore;
+use crate::{managed_env::ManagedEnv, LmdbBlobStore};
 use async_trait::async_trait;
 use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{sha256, types::Hash};
@@ -43,7 +43,7 @@ struct RuntimeMembers {
 }
 
 pub struct PoolStore {
-    env: heed::Env,
+    env: ManagedEnv,
     manifest_db: Database<Bytes, Bytes>,
     locations: Database<Bytes, Bytes>,
     by_member: Database<Bytes, Unit>,
@@ -75,7 +75,7 @@ impl PoolStore {
         unsafe {
             options.flags(super::env_flags_from_env());
         }
-        let env = unsafe { options.open(path) }.map_err(|error| {
+        let env = unsafe { ManagedEnv::open(&options, path) }.map_err(|error| {
             StoreError::Other(format!("open pool catalog {}: {error}", path.display()))
         })?;
         let _ = env.clear_stale_readers();

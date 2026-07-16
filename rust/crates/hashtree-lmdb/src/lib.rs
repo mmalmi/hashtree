@@ -1,6 +1,7 @@
 //! LMDB-backed content-addressed blob storage.
 
 mod configured;
+mod managed_env;
 mod migration;
 mod pool;
 
@@ -19,6 +20,7 @@ use hashtree_core::store::{PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{to_hex, types::Hash};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
+use managed_env::ManagedEnv;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -160,7 +162,7 @@ struct ExternalPackRef {
 
 /// LMDB-backed blob store implementing hashtree's Store trait.
 pub struct LmdbBlobStore {
-    env: heed::Env,
+    env: ManagedEnv,
     /// Maps SHA256 hash (32 bytes) → blob data
     blobs: Database<Bytes, Bytes>,
     /// Maps SHA256 hash (32 bytes) → [order: u64][size: u64]
@@ -197,7 +199,7 @@ impl LmdbBlobReader {
         unsafe {
             options.flags(env_flags_from_env() | EnvFlags::READ_ONLY);
         }
-        let env = unsafe { options.open(path) }.map_err(map_heed_error)?;
+        let env = unsafe { ManagedEnv::open(&options, path) }.map_err(map_heed_error)?;
         let rtxn = env.read_txn().map_err(map_heed_error)?;
         let open_bytes = |name| -> Result<Database<Bytes, Bytes>, StoreError> {
             env.open_database(&rtxn, Some(name))
@@ -416,7 +418,7 @@ impl LmdbBlobStore {
         unsafe {
             env_options.flags(flags);
         }
-        let env = unsafe { env_options.open(path_ref).map_err(map_heed_error)? };
+        let env = unsafe { ManagedEnv::open(&env_options, path_ref).map_err(map_heed_error)? };
         let _ = env.clear_stale_readers();
         if env.info().map_size < map_size {
             unsafe { env.resize(map_size) }.map_err(map_heed_error)?;
@@ -2975,7 +2977,7 @@ mod tests {
         let mut handles = Vec::with_capacity(READER_THREADS);
 
         for _ in 0..READER_THREADS {
-            let env = store.env.clone();
+            let env = heed::Env::clone(&store.env);
             let start = Arc::clone(&start);
             let release = Arc::clone(&release);
             handles.push(std::thread::spawn(move || -> Result<(), String> {
@@ -3005,6 +3007,35 @@ mod tests {
         );
         assert!(store.exists(&hash)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn managed_environment_closes_after_last_store_handle() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("blobs");
+        let first = LmdbBlobStore::new(&path)?;
+        let hash = sha256(b"shared environment lifecycle");
+        first.put_sync(hash, b"shared environment lifecycle")?;
+        let second = LmdbBlobStore::new(&path)?;
+        let canonical = std::fs::canonicalize(&path)?;
+
+        drop(first);
+        assert!(
+            heed::env_closing_event(&canonical).is_some(),
+            "the environment must remain open while another managed store owns it"
+        );
+        assert_eq!(
+            second.get_sync(&hash)?,
+            Some(b"shared environment lifecycle".to_vec())
+        );
+
+        drop(second);
+        assert!(
+            heed::env_closing_event(&canonical).is_none(),
+            "the last managed store must remove Heed's cached environment"
+        );
         Ok(())
     }
 

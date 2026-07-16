@@ -2162,6 +2162,7 @@ fn test_ensure_social_graph_mapsize_rounds_and_applies() {
     .unwrap();
     assert!(env.info().map_size >= requested as usize);
     assert_eq!(env.info().map_size % page_size_bytes(), 0);
+    let _closing = env.prepare_for_closing();
 }
 
 #[test]
