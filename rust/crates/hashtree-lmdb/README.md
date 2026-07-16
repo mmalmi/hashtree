@@ -111,6 +111,16 @@ other processes. Membership and concurrency changes are generation-tracked and
 refresh safely across live processes; LMDB map resizing is deliberately not a live
 membership operation.
 
+On Darwin, LMDB's default System V semaphore backend uses `SEM_UNDO`, and the
+default per-process `kern.sysv.semume` limit is ten. The bound applies to
+simultaneous lock-owning transactions across distinct environments, not to the
+number of configured pool members. Hashtree therefore coordinates its blob and
+mutable-metadata LMDB wrappers through one process-wide gate: up to four managed
+write transactions may overlap, while short read/open lock acquisition is
+serialized and headroom remains for the social-graph backend. Linux and Windows
+do not receive this Darwin-only bound. Storage membership remains scalable, and
+no daemon or operator sysctl change is required.
+
 For online imports, `htree storage pool migrate-lmdb` opens the source read-only,
 never resizes it, scans in bounded hash order, and writes only through the target
 pool. Persist its cursor with `--state-file`; replay is idempotent. Because a live

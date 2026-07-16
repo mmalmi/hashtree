@@ -48,6 +48,8 @@ pub mod diff;
 mod directory;
 pub mod hash;
 pub mod hashtree;
+#[doc(hidden)]
+pub mod lmdb_runtime;
 pub mod nhash;
 pub mod reader;
 pub mod store;

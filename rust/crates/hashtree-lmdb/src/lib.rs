@@ -2187,6 +2187,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     #[cfg(unix)]
     use std::process::Command;
+    #[cfg(target_os = "macos")]
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Barrier,
@@ -3036,6 +3038,52 @@ mod tests {
             heed::env_closing_event(&canonical).is_none(),
             "the last managed store must remove Heed's cached environment"
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_writers_do_not_exhaust_darwin_sem_undo_slots(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const WRITERS: usize = 16;
+
+        let temp = TempDir::new()?;
+        let stores = (0..WRITERS)
+            .map(|index| LmdbBlobStore::new(temp.path().join(format!("member-{index}"))))
+            .collect::<Result<Vec<_>, _>>()?;
+        let start = Arc::new(Barrier::new(WRITERS));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let handles = stores
+            .into_iter()
+            .map(|store| {
+                let start = Arc::clone(&start);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || -> Result<(), String> {
+                    start.wait();
+                    let txn = store.env.write_txn().map_err(|error| error.to_string())?;
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(75));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    drop(txn);
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let failures = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().expect("writer thread panicked").err())
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "Darwin SEM_UNDO exhaustion rejected managed writers: {}",
+            failures.join(" | ")
+        );
+        assert!(peak.load(Ordering::SeqCst) > 1);
         Ok(())
     }
 
