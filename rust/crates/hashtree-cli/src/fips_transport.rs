@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use hashtree_core::BlobRoute;
 use hashtree_fips_transport::{
     bind_fips_endpoint, bind_fips_endpoint_at_local_rendezvous, set_fips_peer_configs,
-    BoundFipsEndpoint, FipsEndpoint, FipsEndpointOptions, FipsPeerConfig, PeerIdentity,
-    TcpBlobTransport, TcpBlobTransportConfig, DEFAULT_FIPS_DISCOVERY_SCOPE,
+    BoundFipsEndpoint, FipsEndpoint, FipsEndpointOptions, FipsPeerConfig, NostrRelayAdapter,
+    PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig, DEFAULT_FIPS_DISCOVERY_SCOPE,
 };
 use hashtree_network::{
     blob_resolver, BlobResolver, MeshReadSource, MeshRoutingConfig, NamedBlobRoute,
@@ -44,12 +44,21 @@ pub struct DaemonFipsHandle {
     pub pubsub_client: Option<Arc<FipsPubsubClient>>,
     pub blob_resolver: Arc<DaemonBlobResolver>,
     blob_transport: Mutex<Option<Arc<DaemonBlobTransport>>>,
+    relay_adapter: Mutex<Option<NostrRelayAdapter>>,
 }
 
 impl DaemonFipsHandle {
     pub async fn shutdown(&self) {
         if let Ok(mut transport) = self.blob_transport.lock() {
             transport.take();
+        }
+        let relay_adapter = self
+            .relay_adapter
+            .lock()
+            .ok()
+            .and_then(|mut adapter| adapter.take());
+        if let Some(relay_adapter) = relay_adapter {
+            relay_adapter.stop().await;
         }
         if let Err(err) = self.endpoint.shutdown().await {
             tracing::warn!("failed to stop embedded FIPS endpoint: {err}");
@@ -86,6 +95,7 @@ pub async fn start_daemon_fips_transport(
 
     let active_relays = config.nostr.active_relays();
     let relays = config.server.resolved_fips_relays(&active_relays);
+    let relay_carrier_relays = relays.clone();
     let discovery_scope = normalized_discovery_scope(&config.server.fips_discovery_scope);
     let peer_configs = daemon_fips_peer_configs(config, peer_ids);
     let identity_nsec = keys
@@ -119,6 +129,11 @@ pub async fn start_daemon_fips_transport(
         bind_fips_endpoint(options).await
     }
     .context("Failed to start FIPS endpoint")?;
+    let relay_adapter =
+        NostrRelayAdapter::start(endpoint.native_endpoint.clone(), &relay_carrier_relays)
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("Failed to start FIPS Nostr relay carrier")?;
 
     let request_timeout = Duration::from_millis(config.server.fips_request_timeout_ms.max(1));
     let pubsub_client = if daemon_fips_pubsub_required(config) {
@@ -162,6 +177,7 @@ pub async fn start_daemon_fips_transport(
         pubsub_client,
         blob_resolver,
         blob_transport: Mutex::new(Some(blob_transport)),
+        relay_adapter: Mutex::new(relay_adapter),
     }))
 }
 
@@ -676,6 +692,7 @@ mod tests {
             pubsub_client: None,
             blob_resolver,
             blob_transport: Mutex::new(Some(provider)),
+            relay_adapter: Mutex::new(None),
         };
 
         timeout(Duration::from_secs(10), async {

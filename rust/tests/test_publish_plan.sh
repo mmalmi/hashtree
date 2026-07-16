@@ -32,16 +32,16 @@ require_line "${RUST_DIR}/Cargo.toml" 'version = "0.2.82"' \
     "unchanged workspace crates must remain at 0.2.82"
 require_line "${RUST_DIR}/crates/hashtree-core/Cargo.toml" 'version = "0.2.84"' \
     "hashtree-core must remain at its published 0.2.84 wire-contract release"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.85"' \
-    "hashtree-cli must release as 0.2.85"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.86"' \
+    "hashtree-cli must release as 0.2.86"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.83"' \
     "unchanged hashtree-embedded must remain at 0.2.83"
-require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.1"' \
-    "hashtree-fips-transport must release its FIPS 0.4.1 correction"
+require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.2"' \
+    "hashtree-fips-transport must release its relay-carrier correction"
 
 grep -F 'hashtree-core = { version = "0.2.84", path = "crates/hashtree-core" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-fips-transport = { version = "0.4.1", path = "crates/hashtree-fips-transport" }' \
+grep -F 'hashtree-fips-transport = { version = "0.4.2", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-cli = { version = "0.2.83", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null

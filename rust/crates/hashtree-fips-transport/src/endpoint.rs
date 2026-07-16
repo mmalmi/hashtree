@@ -1,7 +1,8 @@
 //! Native embedded FIPS endpoint configuration for Hashtree blob routes.
 
 use fips_core::config::{
-    EthernetConfig, NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances,
+    EthernetConfig, NostrDiscoveryPolicy, NostrRelayConfig, PeerAddress, RoutingMode,
+    TransportInstances,
 };
 use hashtree_core::StoreError;
 use std::collections::HashMap;
@@ -232,7 +233,15 @@ fn fips_endpoint_config_with_local_rendezvous(
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = options.share_local_candidates;
     config.node.discovery.nostr.app = discovery_scope.to_string();
+    let relay_carrier_enabled = !options.relays.is_empty();
     config.node.discovery.nostr.advert_relays = options.relays;
+    if relay_carrier_enabled {
+        config.transports.nostr_relay = TransportInstances::Single(NostrRelayConfig {
+            auto_connect: Some(false),
+            accept_connections: Some(true),
+            ..Default::default()
+        });
+    }
     if let Some(rendezvous_addr) = rendezvous_addr {
         config.node.discovery.local.rendezvous_addr = rendezvous_addr;
     }
@@ -326,5 +335,28 @@ fn split_configured_transport_addr(value: &str) -> (&str, &str) {
     match transport.to_ascii_lowercase().as_str() {
         "udp" | "tcp" | "webrtc" | "tor" | "ethernet" | "ble" => (transport, addr),
         _ => ("udp", value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_discovery_also_enables_the_fips_relay_carrier() {
+        let mut options = FipsEndpointOptions::new(
+            "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqd3c4k5",
+        );
+        options.relays = vec!["ws://127.0.0.1:12345".to_string()];
+        options.enable_udp = false;
+        options.enable_webrtc = true;
+
+        let config =
+            fips_endpoint_config_with_local_rendezvous(options, DEFAULT_FIPS_DISCOVERY_SCOPE, None);
+
+        assert!(
+            !config.transports.nostr_relay.is_empty(),
+            "relay-backed discovery must include the FIPS kind-21060 carrier"
+        );
     }
 }

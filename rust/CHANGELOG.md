@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.4.2 - 2026-07-16
+
+### Fixed
+
+- Enabled the ordinary FIPS Nostr relay carrier whenever an embedded endpoint
+  has relay discovery configured, reusing the canonical bounded
+  `fips-core::NostrRelayAdapter` without changing FMP, FSP, or blob wire
+  formats.
+
+## 0.2.86 - 2026-07-16
+
+### Fixed
+
+- Made the htree daemon own the FIPS relay adapter for its full endpoint
+  lifetime, so browser and native peers can establish the authenticated base
+  session before negotiating WebRTC over the same configured relays.
+- Packaged the daemon with `fips-core` 0.4.2 and
+  `hashtree-fips-transport` 0.4.2 instead of resolving the older WebRTC stack.
+
 ## 0.4.1 - 2026-07-16
 
 ### Fixed
