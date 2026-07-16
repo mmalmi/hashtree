@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::blossom::background_blossom_push;
+use super::blossom::background_blossom_push_with_store;
 use super::content::add_directory_with_progress;
 use super::util::format_bytes;
 
@@ -188,7 +188,7 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         return Ok(());
     }
 
-    let store = HashtreeStore::new(&data_dir)?;
+    let store = Arc::new(HashtreeStore::new(&data_dir)?);
     let site_entry = detect_site_entry_for_path(&path, is_dir);
     let progress = Arc::new(AddProgress::new());
 
@@ -312,8 +312,12 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         write_servers = config.blossom.servers.clone();
         write_servers.extend(config.blossom.write_servers.clone());
         if !write_servers.is_empty() && publish.is_none() {
-            let push_result =
-                background_blossom_push(&data_dir, &cid_for_push, &write_servers).await;
+            let push_result = background_blossom_push_with_store(
+                Arc::clone(&store),
+                &cid_for_push,
+                &write_servers,
+            )
+            .await;
             if let Err(e) = push_result {
                 eprintln!("  file server push failed: {}", e);
             }
@@ -322,7 +326,7 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
 
     if let Some(ref_name) = publish.as_deref() {
         if !local && !write_servers.is_empty() {
-            background_blossom_push(&data_dir, &cid_for_push, &write_servers)
+            background_blossom_push_with_store(Arc::clone(&store), &cid_for_push, &write_servers)
                 .await
                 .context("Failed to push content to file servers")?;
         }

@@ -58,12 +58,12 @@ impl Drop for HttpStatusServer {
     }
 }
 
-fn write_config(config_dir: &Path, relay: &str, file_server: &str) {
+fn write_config(config_dir: &Path, relay: &str, file_server: &str, extra: &str) {
     std::fs::create_dir_all(config_dir).expect("create config dir");
     std::fs::write(
         config_dir.join("config.toml"),
         format!(
-            "[nostr]\nrelays = [\"{relay}\"]\n\n[blossom]\nwrite_servers = [\"{file_server}\"]\n"
+            "[nostr]\nrelays = [\"{relay}\"]\n\n[blossom]\nwrite_servers = [\"{file_server}\"]\n{extra}"
         ),
     )
     .expect("write config");
@@ -76,11 +76,20 @@ fn write_config(config_dir: &Path, relay: &str, file_server: &str) {
 }
 
 fn run_published_add(temp: &TempDir, relay: &str, file_server: &str) -> Output {
+    run_published_add_with_config(temp, relay, file_server, "")
+}
+
+fn run_published_add_with_config(
+    temp: &TempDir,
+    relay: &str,
+    file_server: &str,
+    extra_config: &str,
+) -> Output {
     let config_dir = temp.path().join("config");
     let data_dir = temp.path().join("data");
     let source = temp.path().join("index.html");
     std::fs::write(&source, "<h1>published</h1>").expect("write source");
-    write_config(&config_dir, relay, file_server);
+    write_config(&config_dir, relay, file_server, extra_config);
 
     Command::new(htree_bin())
         .arg("--data-dir")
@@ -144,6 +153,28 @@ fn explicit_publish_reports_success_after_both_stages_accept() {
     assert!(
         output.status.success(),
         "published add failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("published:"));
+}
+
+#[test]
+fn explicit_publish_reuses_a_resized_open_lmdb_store() {
+    let relay = TestRelay::new();
+    let file_server = HttpStatusServer::new("201 Created");
+    let temp = TempDir::new().expect("temp dir");
+
+    let output = run_published_add_with_config(
+        &temp,
+        &relay.url(),
+        &file_server.url,
+        "\n[storage]\nmax_size_gb = 0\n",
+    );
+
+    assert!(
+        output.status.success(),
+        "published add reopened its live LMDB with different options\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
