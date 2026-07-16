@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.88"
+version = "0.2.89"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3702,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.2.84"
+version = "0.2.85"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "fips-core",
@@ -3819,7 +3819,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3835,7 +3835,7 @@ version = "0.2.82"
 
 [[package]]
 name = "hashtree-network"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "anyhow",
  "async-trait",

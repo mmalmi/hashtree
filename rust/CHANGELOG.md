@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## Blob routing crates - 2026-07-16
+
+### Changed
+
+- Added `BlobRouter` as the single adaptive read router across opaque routes,
+  with explicit route preferences, bounded decaying outcomes, cooldown and
+  recovery, route-local misses, bounded hedging, and central hash verification.
+- Made Hashtree mesh resolution one composite route that retains peer selection,
+  cycle suppression, caching, and HTL semantics; only mesh forwarding decrements
+  HTL, while terminal and FIPS routes receive the request unchanged.
+- Added `FipsBlobRoute` 0.4.4 as the sole owner of a deduplicated, bounded union
+  of discovered and explicit FIPS peers, and removed `SameHostBlobStore`.
+- Added `hashtree-lmdb` 0.2.83's canonical shared-store opener and documented
+  the boundary between immutable blob sharing and mutable pins, quota, and GC.
+- Released `hashtree-core` 0.2.85, `hashtree-network` 0.2.84, and
+  `hashtree-cli` 0.2.89 for the unified route contract.
+
+### Fixed
+
+- Made cross-process quota and GC decisions read persisted LMDB totals instead
+  of stale process-local byte counts.
+- Removed the non-WebRTC fallback's duplicate mesh request types and framing;
+  it now re-exports the canonical Hashtree network codec without wire changes.
+
 ## 0.2.88 - 2026-07-16
 
 ### Fixed
