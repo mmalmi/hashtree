@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added a strict-auth daemon endpoint that validates, indexes, and pins a
+  complete encrypted or public DAG atomically, with storage-sized byte bounds,
+  a hard traversal limit, and rollback on missing or invalid descendants.
 - Added an opt-in, bounded `fips_open_discovery_max_pending` daemon setting;
   the default remains closed and configured-peer-only.
 
