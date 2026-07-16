@@ -5,7 +5,7 @@ export interface MeshReadSource extends BlobRoute {
     isAvailable?: () => boolean;
 }
 export type MeshReadEndpoint = MeshReadSource;
-export type MeshReadEndpointProvider = () => MeshReadEndpoint[];
+export type MeshReadEndpointProvider = () => MeshReadEndpoint[] | Promise<MeshReadEndpoint[]>;
 export interface MeshRouterGetOptions {
     sourceIds?: readonly string[];
     skipPrimary?: boolean;

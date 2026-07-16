@@ -28,7 +28,7 @@ import type {
 import { IdbBlobStorage } from './capabilities/idbStorage.js';
 import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blossomTransport.js';
 import { probeConnectivity } from './capabilities/connectivity.js';
-import { MeshRouterStore, type MeshReadSource, type MeshRouterGetOptions } from './capabilities/meshRouterStore.js';
+import { MeshRouterStore, type MeshRouterGetOptions } from './capabilities/meshRouterStore.js';
 import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
@@ -36,6 +36,7 @@ import { streamFileRangeChunks } from './mediaStreaming.js';
 import { parseHttpByteRange } from './httpRange.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
 import { P2PBridge } from './p2pBridge.js';
+import { P2PPeerRoutes } from './p2pPeerRoutes.js';
 
 const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
@@ -43,7 +44,6 @@ const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
 const P2P_FETCH_TIMEOUT_MS = 20_000;
 const P2P_PEER_LIST_TIMEOUT_MS = 5_000;
 const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
-const P2P_PEER_LIST_CACHE_MS = 1_500;
 // Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
 // keeps the local read alive after this delay instead of treating it as a miss.
 const PRIMARY_READ_TIMEOUT_MS = 300;
@@ -70,13 +70,11 @@ let probeIntervalMs = DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;
 let rootWatchCounter = 0;
 let diagnosticsEnabled = false;
 let diagnosticsMirrorToConsole = false;
-let inflightP2PPeerList: Promise<string[]> | null = null;
-let p2pPeerIds: string[] = [];
-let p2pPeerIdsRefreshedAt = 0;
 const p2pBridge = new P2PBridge({
   respond: (message) => respond(message),
   peerListTimeoutMs: P2P_PEER_LIST_TIMEOUT_MS,
 });
+const p2pPeerRoutes = new P2PPeerRoutes(p2pBridge);
 const peerShareableHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
 let putBlobStreamCounter = 0;
@@ -421,9 +419,7 @@ function resetState(): void {
   meshStore = null;
   tree = null;
   mediaTree = null;
-  p2pBridge.setEnabled(false);
-  inflightP2PPeerList = null;
-  p2pPeerIds = [];
+  p2pPeerRoutes.setEnabled(false);
   peerShareableHashes.clear();
   activePutBlobStreams.clear();
   clearMemoryCache();
@@ -464,44 +460,8 @@ function nextRootWatchId(): string {
   return `root_${Date.now()}_${rootWatchCounter}`;
 }
 
-async function requestP2PPeerIds(): Promise<string[]> {
-  if (inflightP2PPeerList) {
-    return inflightP2PPeerList;
-  }
-
-  const pending = p2pBridge.listPeers().finally(() => {
-    if (inflightP2PPeerList === pending) {
-      inflightP2PPeerList = null;
-    }
-  });
-  inflightP2PPeerList = pending;
-  return pending;
-}
-
-async function refreshP2PPeerIds(): Promise<void> {
-  if (!p2pBridge.isEnabled()) {
-    p2pPeerIds = [];
-    return;
-  }
-  if (Date.now() - p2pPeerIdsRefreshedAt < P2P_PEER_LIST_CACHE_MS) {
-    return;
-  }
-
-  try {
-    const peerIds = await requestP2PPeerIds();
-    p2pPeerIds = Array.from(new Set(peerIds.filter((peerId) => `${peerId}`.length > 0))).sort();
-    p2pPeerIdsRefreshedAt = Date.now();
-  } catch {
-    p2pPeerIds = [];
-    p2pPeerIdsRefreshedAt = Date.now();
-  }
-}
-
 function setP2PProviderEnabled(enabled: boolean): void {
-  p2pBridge.setEnabled(enabled);
-  p2pPeerIds = [];
-  p2pPeerIdsRefreshedAt = 0;
-  if (!enabled) inflightP2PPeerList = null;
+  p2pPeerRoutes.setEnabled(enabled);
 }
 
 type LoadedBlobData = {
@@ -523,7 +483,6 @@ async function loadBlobData(
   options: MeshRouterGetOptions = {},
 ): Promise<LoadedBlobData | null> {
   if (!meshStore) return null;
-  await refreshP2PPeerIds();
   const result = await meshStore.getDetailed(fromHex(hashHex) as Hash, options);
   if (!result) {
     emitDiagnostic('debug', 'mesh', 'blob-load-miss', 'Blob was not available from any source', {
@@ -630,23 +589,6 @@ function createStorageStore(): Store {
 }
 
 function createMeshStore(): MeshRouterStore {
-  const p2pSources = (): MeshReadSource[] => {
-    if (!p2pBridge.isEnabled()) return [];
-    const peerSources = p2pPeerIds.map((peerId) => ({
-      id: `peer:${peerId}`,
-      groupId: 'p2p',
-      read: async (request: BlobRequest, signal?: AbortSignal) => p2pBridge.fetch(request, peerId, signal),
-    }));
-    if (peerSources.length > 0) {
-      return peerSources;
-    }
-    return [{
-      id: 'p2p',
-      groupId: 'p2p',
-      read: async (request: BlobRequest, signal) => p2pBridge.fetch(request, undefined, signal),
-    }];
-  };
-
   return new MeshRouterStore({
     primary: createStorageStore(),
     primarySourceId: 'idb',
@@ -659,7 +601,7 @@ function createMeshStore(): MeshRouterStore {
       hedgeIntervalMs: REMOTE_HEDGE_INTERVAL_MS,
     },
     sourceProviders: [
-      p2pSources,
+      () => p2pPeerRoutes.sources(),
       () => blossom
         ? blossom.getReadServers().map((server) => ({
           id: `blossom:${server.url}`,
@@ -1172,7 +1114,7 @@ function registerMediaPort(port: MessagePort): void {
 
 async function init(config: WorkerConfig, hasP2PProvider = false): Promise<void> {
   resetState();
-  p2pBridge.setEnabled(hasP2PProvider);
+  p2pPeerRoutes.setEnabled(hasP2PProvider);
   const storeName = config.storeName || DEFAULT_STORE_NAME;
   const maxBytes = config.storageMaxBytes || DEFAULT_STORAGE_MAX_BYTES;
   probeIntervalMs = config.connectivityProbeIntervalMs || DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;

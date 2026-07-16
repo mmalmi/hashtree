@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const endpointMessages = vi.hoisted(() => [] as unknown[]);
+const p2pPeerIds = vi.hoisted(() => [] as string[]);
 type FakeStore = {
   get(hash: Uint8Array): Promise<Uint8Array | null>;
 };
@@ -22,6 +23,15 @@ class FakeWorkerGlobal {
 
   postMessage(message: unknown): void {
     endpointMessages.push(message);
+    const request = message as { type?: string; requestId?: string };
+    if (request.type === 'p2pPeerList' && request.requestId) {
+      queueMicrotask(() => this.dispatch({
+        type: 'p2pPeerListResult',
+        id: `result-${request.requestId}`,
+        requestId: request.requestId,
+        peerIds: [...p2pPeerIds],
+      }));
+    }
   }
 
   addEventListener(_type: 'message', listener: EventListenerOrEventListenerObject): void {
@@ -259,6 +269,7 @@ describe('worker media headers', () => {
   beforeEach(() => {
     vi.resetModules();
     endpointMessages.length = 0;
+    p2pPeerIds.length = 0;
     workerState.isDirectory = false;
     workerState.isDirectoryPlans = [];
     workerState.readFileRangeImpl.mockReset();
@@ -358,6 +369,7 @@ describe('worker media headers', () => {
   });
 
   it('routes media through the configured P2P provider bridge with native HTL', async () => {
+    p2pPeerIds.push('configured-media-peer');
     const { ctx, mediaPort } = await startRoutedMediaRead('media-with-provider', true);
 
     let p2pRequest: { requestId: string; hashHex: string; htl: number; peerId?: string } | undefined;
@@ -368,7 +380,7 @@ describe('worker media headers', () => {
       expect(p2pRequest).toMatchObject({
         hashHex: '07'.repeat(32),
         htl: 10,
-        peerId: undefined,
+        peerId: 'configured-media-peer',
       });
     });
 

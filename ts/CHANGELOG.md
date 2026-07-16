@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.4.4 - 2026-07-16
+
+### Fixed
+
+- Required the shared worker's main and relay entries to resolve exact P2P
+  provider identities before creating blob routes. An enabled bridge with no
+  listed provider remains Blossom-only instead of issuing an anonymous fetch;
+  configured routes preserve native HTL 10 and central hash verification.
+
+### Changed
+
+- Consolidated peer-list caching and route construction into one shared helper,
+  removing the duplicate and less strict worker implementations.
+
 ## TypeScript runtime 0.4.3 - 2026-07-16
 
 ### Fixed

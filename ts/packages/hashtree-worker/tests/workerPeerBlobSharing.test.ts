@@ -485,6 +485,7 @@ describe('worker peer blob sharing', () => {
 
     const blobData = new Uint8Array([4, 5, 6, 7]);
     const hashHex = hashHexForData(blobData);
+    peerListResponder.peerIds = ['peer-late'];
     peerFetchResponder.handle = (target, requestId) => {
       setTimeout(() => {
         target.dispatch({
@@ -537,6 +538,7 @@ describe('worker peer blob sharing', () => {
     attachHashtreeWorker(ctx);
 
     const hashHex = '35'.repeat(32);
+    peerListResponder.peerIds = ['peer-timeout'];
     let capturedRequestId = '';
     let requestObservedAt = 0;
     peerFetchResponder.handle = (_target, requestId) => {
@@ -593,6 +595,7 @@ describe('worker peer blob sharing', () => {
     attachHashtreeWorker(ctx);
 
     const hashHex = '36'.repeat(32);
+    peerListResponder.peerIds = ['peer-error'];
     peerFetchResponder.handle = (target, requestId) => {
       queueMicrotask(() => {
         target.dispatch({
@@ -641,28 +644,13 @@ describe('worker peer blob sharing', () => {
     ))).toBe(false);
   });
 
-  it('keeps the generic p2p fetch path available while no peers are listed yet', async () => {
+  it('does not invent a generic p2p route when no provider identity is listed', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const blobData = new Uint8Array([6, 7, 8, 9]);
-    const hashHex = hashHexForData(blobData);
-    const requestedPeerIds: Array<string | null> = [];
+    const hashHex = hashHexForData(new Uint8Array([6, 7, 8, 9]));
     peerListResponder.peerIds = [];
-    peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId, htl) => {
-      expect(requestedHashHex).toBe(hashHex);
-      expect(htl).toBe(10);
-      requestedPeerIds.push(peerId ?? null);
-      queueMicrotask(() => {
-        target.dispatch({
-          type: 'p2pFetchResult',
-          id: `peer-${peerId ?? 'generic'}-${requestId}`,
-          requestId,
-          data: peerId ? undefined : blobData,
-        });
-      });
-    };
 
     ctx.dispatch({
       type: 'init',
@@ -684,10 +672,11 @@ describe('worker peer blob sharing', () => {
     expect(await waitForBlobResponse('blob-3b')).toEqual({
       type: 'blob',
       id: 'blob-3b',
-      data: blobData,
-      source: 'p2p',
+      error: 'Blob not found',
     });
-    expect(requestedPeerIds[0]).toBeNull();
+    expect(postMessageMock.mock.calls.some(([message]) => (
+      (message as { type?: string }).type === 'p2pFetch'
+    ))).toBe(false);
   });
 
   it('targets specific p2p peer endpoints when the client exposes them', async () => {

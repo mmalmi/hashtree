@@ -343,7 +343,7 @@ describe('MeshRouterStore', () => {
 
     const first = router.getDetailed(HASH_A, { skipPrimary: true, sourceIds: ['blossom'] });
     const second = router.getDetailed(HASH_A, { skipPrimary: true, sourceIds: ['blossom'] });
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(calls).toBe(1);
 

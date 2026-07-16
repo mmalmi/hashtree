@@ -62,6 +62,7 @@ import { resolveRootPath } from './rootPathResolver';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
 import { MeshRouterStore } from '../capabilities/meshRouterStore';
 import { P2PBridge } from '../p2pBridge';
+import { P2PPeerRoutes } from '../p2pPeerRoutes';
 // Worker state
 let tree: HashTree | null = null;
 let store: DexieStore | null = null;
@@ -78,6 +79,7 @@ const p2pBridge = new P2PBridge({
   fetchTimeoutMs: REMOTE_READ_TIMEOUT_MS,
   peerListTimeoutMs: P2P_PEER_LIST_TIMEOUT_MS,
 });
+const p2pPeerRoutes = new P2PPeerRoutes(p2pBridge);
 const treeRootSubscriptionRefs = new Map<string, number>();
 
 // Storage quota management
@@ -457,7 +459,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         await handleClose(msg.id);
         break;
       case 'setP2PProviderState':
-        p2pBridge.setEnabled(msg.enabled);
+        p2pPeerRoutes.setEnabled(msg.enabled);
         respond({ type: 'void', id: msg.id });
         break;
       case 'setIdentity':
@@ -704,7 +706,7 @@ function respondWithTransfer(msg: WorkerResponse, transfer: Transferable[]) {
 async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean) {
   try {
     _config = cfg;
-    p2pBridge.setEnabled(hasP2PProvider);
+    p2pPeerRoutes.setEnabled(hasP2PProvider);
     blossomBandwidthTracker.reset();
     emitBlossomBandwidthSnapshot();
 
@@ -869,13 +871,7 @@ function createMeshStore(primary: DexieStore): MeshRouterStore {
     primarySourceId: 'idb',
     requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
     sourceProviders: [
-      () => p2pBridge.isEnabled()
-        ? [{
-          id: 'external-p2p',
-          groupId: 'p2p',
-          read: async (request, signal) => p2pBridge.fetch(request, undefined, signal),
-        }]
-        : [],
+      () => p2pPeerRoutes.sources(),
       () => blossomStore
         ? blossomStore.getReadServers().map((server) => ({
           id: `blossom:${server.url}`,
@@ -907,7 +903,7 @@ async function handleClose(id: string) {
   meshStore = null;
   tree = null;
   blossomStore = null;
-  p2pBridge.setEnabled(false);
+  p2pPeerRoutes.setEnabled(false);
   blossomBandwidthTracker.reset();
   _config = null;
   respond({ type: 'void', id });
@@ -1329,7 +1325,7 @@ async function handlePublish(id: string, event: SignedEvent) {
 
 async function handleGetPeerStats(id: string) {
   if (p2pBridge.isEnabled()) {
-    const peerIds = await p2pBridge.listPeers();
+    const peerIds = await p2pPeerRoutes.peerList();
     respond({
       type: 'peerStats',
       id,

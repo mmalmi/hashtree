@@ -213,13 +213,13 @@ export class MeshRouterStore {
         }
         return stableData;
     }
-    getCandidateSources(sourceIds) {
+    async getCandidateSources(sourceIds) {
         const requested = sourceIds && sourceIds.length > 0
             ? new Set(sourceIds)
             : null;
         const combined = new Map();
         for (const provider of this.sourceProviders) {
-            for (const source of provider()) {
+            for (const source of await provider()) {
                 if (!combined.has(source.id)) {
                     combined.set(source.id, source);
                 }
@@ -245,9 +245,9 @@ export class MeshRouterStore {
         });
         return healthy.length > 0 ? healthy : available;
     }
-    orderedSources(sourceIds) {
+    async orderedSources(sourceIds) {
         const now = Date.now();
-        const candidates = this.getCandidateSources(sourceIds);
+        const candidates = await this.getCandidateSources(sourceIds);
         return candidates.sort((left, right) => {
             const leftStats = this.statsBySource.get(left.id) ?? defaultStats();
             const rightStats = this.statsBySource.get(right.id) ?? defaultStats();
@@ -347,7 +347,7 @@ export class MeshRouterStore {
         return result;
     }
     async loadFromSources(hash, options) {
-        const orderedSources = this.orderedSources(options.sourceIds);
+        const orderedSources = await this.orderedSources(options.sourceIds);
         if (orderedSources.length === 0) {
             return { type: 'no-result' };
         }

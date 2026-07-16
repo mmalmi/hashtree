@@ -32,7 +32,7 @@ export interface MeshReadSource extends BlobRoute {
 }
 
 export type MeshReadEndpoint = MeshReadSource;
-export type MeshReadEndpointProvider = () => MeshReadEndpoint[];
+export type MeshReadEndpointProvider = () => MeshReadEndpoint[] | Promise<MeshReadEndpoint[]>;
 
 export interface MeshRouterGetOptions {
   sourceIds?: readonly string[];
@@ -318,13 +318,13 @@ export class MeshRouterStore implements Store {
     return stableData;
   }
 
-  private getCandidateSources(sourceIds?: readonly string[]): MeshReadSource[] {
+  private async getCandidateSources(sourceIds?: readonly string[]): Promise<MeshReadSource[]> {
     const requested = sourceIds && sourceIds.length > 0
       ? new Set(sourceIds)
       : null;
     const combined = new Map<string, MeshReadSource>();
     for (const provider of this.sourceProviders) {
-      for (const source of provider()) {
+      for (const source of await provider()) {
         if (!combined.has(source.id)) {
           combined.set(source.id, source);
         }
@@ -351,9 +351,9 @@ export class MeshRouterStore implements Store {
     return healthy.length > 0 ? healthy : available;
   }
 
-  private orderedSources(sourceIds?: readonly string[]): MeshReadSource[] {
+  private async orderedSources(sourceIds?: readonly string[]): Promise<MeshReadSource[]> {
     const now = Date.now();
-    const candidates = this.getCandidateSources(sourceIds);
+    const candidates = await this.getCandidateSources(sourceIds);
     return candidates.sort((left, right) => {
       const leftStats = this.statsBySource.get(left.id) ?? defaultStats();
       const rightStats = this.statsBySource.get(right.id) ?? defaultStats();
@@ -468,7 +468,7 @@ export class MeshRouterStore implements Store {
     hash: Hash,
     options: MeshRouterGetOptions,
   ): Promise<ReadOutcome> {
-    const orderedSources = this.orderedSources(options.sourceIds);
+    const orderedSources = await this.orderedSources(options.sourceIds);
     if (orderedSources.length === 0) {
       return { type: 'no-result' };
     }
