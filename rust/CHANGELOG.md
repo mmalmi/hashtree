@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.1 - 2026-07-16
+
+### Fixed
+
+- Required `fips-core` 0.4.1 so WebRTC consumers receive the corrected
+  multi-address offer handling instead of retaining the 0.4.0 registry lock.
+
 ## 0.4.0 - 2026-07-16
 
 ### Changed
