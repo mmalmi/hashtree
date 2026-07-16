@@ -21,8 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::add::{run_add, AddOptions};
 use super::args::{
-    Cli, Commands, MirrorCommands, NostrIndexCommands, PrCommands, PwaCommands, ReleaseCommands,
-    SocialGraphCommands, StorageCommands,
+    Cli, Commands, MirrorCommands, NostrIndexCommands, PoolCommands, PrCommands, PwaCommands,
+    ReleaseCommands, SocialGraphCommands, StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -1951,6 +1951,9 @@ pub(crate) async fn run() -> Result<()> {
                         anyhow::bail!("R2 import requires building htree with the s3 feature");
                     }
                 }
+                StorageCommands::Pool { command } => {
+                    run_pool_command(&data_dir, command)?;
+                }
             }
         }
         Commands::Peer { addr } => {
@@ -1987,6 +1990,233 @@ pub(crate) async fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
+    #[cfg(feature = "lmdb")]
+    {
+        use hashtree_lmdb::{
+            PoolMemberConfig, PoolMemberId, PoolStore, PoolStoreConfig, SHARED_BLOB_POOL_DIR_NAME,
+        };
+
+        let pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
+        let open_existing = || -> Result<PoolStore> {
+            if !pool_path.join("data.mdb").exists() {
+                bail!(
+                    "no storage pool exists at {}; add a member first",
+                    pool_path.display()
+                );
+            }
+            PoolStore::open(&pool_path, PoolStoreConfig::default()).map_err(Into::into)
+        };
+        let resolve_path = |path: PathBuf| {
+            if path.is_absolute() {
+                path
+            } else {
+                data_dir.join(path)
+            }
+        };
+        let gib = 1024u64 * 1024 * 1024;
+
+        match command {
+            PoolCommands::Status => {
+                let pool = open_existing()?;
+                let members = pool.members()?;
+                println!("Storage pool: {}", pool_path.display());
+                println!("Members: {}", members.len());
+                for member in members {
+                    println!("  {}", member.id);
+                    println!("    state: {:?}", member.state);
+                    println!("    path: {}", member.path.display());
+                    println!(
+                        "    usage: {} / {} bytes ({} blobs)",
+                        member.logical_bytes, member.capacity_bytes, member.located_blobs
+                    );
+                    println!("    LMDB map: {} bytes", member.map_size_bytes);
+                    if let Some(external) = member.external_blob_dir {
+                        println!("    external path: {}", external.display());
+                        println!(
+                            "    external threshold: {} bytes, sync: {}, pack target: {:?}",
+                            member.external_blob_min_bytes.unwrap_or(0),
+                            member.external_blob_sync,
+                            member.external_pack_target_bytes
+                        );
+                    }
+                    println!(
+                        "    concurrency: {} reads, {} writes per process",
+                        member.max_read_concurrency, member.max_write_concurrency
+                    );
+                    println!("    available: {}", member.available);
+                    if let Some(error) = member.last_error {
+                        println!("    error: {error}");
+                    }
+                }
+            }
+            PoolCommands::Add {
+                path,
+                capacity_gb,
+                map_size_gb,
+                external_dir,
+                external_min_bytes,
+                external_pack_mib,
+                external_no_sync,
+                max_reads,
+                max_writes,
+            } => {
+                if capacity_gb == 0 || max_reads == 0 || max_writes == 0 {
+                    bail!("capacity and concurrency limits must be non-zero");
+                }
+                let pool = PoolStore::open(&pool_path, PoolStoreConfig::default())?;
+                let capacity_bytes = capacity_gb.saturating_mul(gib);
+                let mut member = PoolMemberConfig::new(resolve_path(path), capacity_bytes)
+                    .with_map_size_bytes(map_size_gb.unwrap_or(capacity_gb).saturating_mul(gib));
+                member.max_read_concurrency = max_reads;
+                member.max_write_concurrency = max_writes;
+                if let Some(external_dir) = external_dir {
+                    member = member.with_external_blobs(
+                        resolve_path(external_dir),
+                        external_min_bytes,
+                        !external_no_sync,
+                        external_pack_mib.map(|mib| mib.saturating_mul(1024 * 1024)),
+                    );
+                }
+                let id = pool.add_member(member)?;
+                println!("Added pool member {id}");
+            }
+            PoolCommands::Configure {
+                id,
+                capacity_gb,
+                max_reads,
+                max_writes,
+            } => {
+                let pool = open_existing()?;
+                let id: PoolMemberId = id.parse()?;
+                let member = pool.member(id)?;
+                pool.update_member_limits(
+                    id,
+                    capacity_gb
+                        .map(|value| value.saturating_mul(gib))
+                        .unwrap_or(member.capacity_bytes),
+                    max_reads.unwrap_or(member.max_read_concurrency),
+                    max_writes.unwrap_or(member.max_write_concurrency),
+                )?;
+                println!("Updated pool member {id}");
+            }
+            PoolCommands::Drain { id } => {
+                let pool = open_existing()?;
+                let id: PoolMemberId = id.parse()?;
+                pool.begin_drain(id)?;
+                println!("Pool member {id} is draining");
+            }
+            PoolCommands::Maintain { max_items } => {
+                let pool = open_existing()?;
+                let report = pool.maintain(max_items)?;
+                println!(
+                    "Examined {}, moved {} blobs / {} bytes, {} failures",
+                    report.examined,
+                    report.moved,
+                    report.bytes_moved,
+                    report.failed.len()
+                );
+                for failure in &report.failed {
+                    eprintln!("  {failure}");
+                }
+                if !report.failed.is_empty() {
+                    bail!("pool maintenance completed with failures");
+                }
+            }
+            PoolCommands::MigrateLmdb {
+                source,
+                source_external_dir,
+                state_file,
+                batch_size,
+                max_items,
+                resume,
+            } => {
+                use hashtree_lmdb::{migrate_lmdb_batch, ExternalBlobOptions, LmdbBlobReader};
+
+                if batch_size == 0 || max_items == Some(0) {
+                    bail!("migration batch size and max items must be non-zero");
+                }
+                let pool = open_existing()?;
+                let source = resolve_path(source);
+                let state_file = resolve_path(state_file);
+                let external = source_external_dir.map(|path| ExternalBlobOptions {
+                    base_path: resolve_path(path),
+                    min_bytes: 1,
+                    sync: true,
+                    pack_target_bytes: None,
+                });
+                let reader = LmdbBlobReader::open(&source, external)?;
+                let mut cursor = if resume && state_file.exists() {
+                    let value = std::fs::read_to_string(&state_file)?;
+                    let value = value.trim();
+                    if value.is_empty() || value == "complete" {
+                        None
+                    } else {
+                        Some(from_hex(value).context("invalid migration cursor")?)
+                    }
+                } else {
+                    None
+                };
+                let mut verified = 0usize;
+                let mut inserted = 0usize;
+                let mut inserted_bytes = 0u64;
+                let mut completed = false;
+                loop {
+                    let remaining = max_items
+                        .map(|maximum| maximum.saturating_sub(verified))
+                        .unwrap_or(batch_size);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let limit = batch_size.min(remaining);
+                    let batch = migrate_lmdb_batch(&reader, &pool, cursor, limit)?;
+                    if batch.source_exhausted {
+                        write_pool_migration_cursor(&state_file, "complete")?;
+                        completed = true;
+                        break;
+                    }
+                    verified = verified.saturating_add(batch.verified);
+                    inserted = inserted.saturating_add(batch.inserted);
+                    inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
+                    cursor = batch.last_hash;
+                    let cursor = cursor.expect("non-empty migration batch has a cursor");
+                    write_pool_migration_cursor(&state_file, &hashtree_core::to_hex(&cursor))?;
+                }
+                println!(
+                    "Migration pass: verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, completed: {completed}"
+                );
+                println!("Cursor: {}", state_file.display());
+            }
+            PoolCommands::Remove { id } => {
+                let pool = open_existing()?;
+                let id: PoolMemberId = id.parse()?;
+                pool.remove_member(id)?;
+                println!("Removed pool member {id}");
+            }
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "lmdb"))]
+    {
+        let _ = (data_dir, command);
+        bail!("LMDB support not enabled in this build");
+    }
+}
+
+fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&temporary)?;
+    file.write_all(value.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    std::fs::rename(temporary, path)?;
     Ok(())
 }
 

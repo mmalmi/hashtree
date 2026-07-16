@@ -295,3 +295,26 @@ fn mutable_pin_metadata_survives_blob_relocation_and_reopen() -> Result<(), Stor
     assert_eq!(reopened.pin_count_sync(&hash)?, 0);
     Ok(())
 }
+
+#[test]
+fn pending_write_recovers_on_another_member_after_member_map_failure() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())?;
+    let first = pool.add_member(
+        member(temp.path().join("small-map"), 64 * 1024 * 1024)
+            .with_map_size_bytes(16 * 1024 * 1024),
+    )?;
+    let data = vec![0x5a; 20 * 1024 * 1024];
+    let hash = sha256(&data);
+    assert!(pool.put_sync(hash, &data).is_err());
+    assert_eq!(pool.blob_location(&hash)?, Some(first));
+
+    let second = pool.add_member(
+        member(temp.path().join("large-map"), 64 * 1024 * 1024)
+            .with_map_size_bytes(64 * 1024 * 1024),
+    )?;
+    assert!(pool.put_sync(hash, &data)?);
+    assert_eq!(pool.blob_location(&hash)?, Some(second));
+    assert_eq!(pool.get_sync(&hash)?, Some(data));
+    Ok(())
+}

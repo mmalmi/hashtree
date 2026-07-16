@@ -1,12 +1,14 @@
 //! LMDB-backed content-addressed blob storage.
 
 mod configured;
+mod migration;
 mod pool;
 
 pub use configured::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
     LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
+pub use migration::{migrate_lmdb_batch, PoolMigrationBatch};
 pub use pool::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStore, PoolStoreConfig,
@@ -172,6 +174,77 @@ pub struct LmdbBlobStore {
     max_bytes: AtomicU64,
     next_order: AtomicU64,
     external_blobs: Option<ExternalBlobConfig>,
+}
+
+/// Read-only view of an existing LMDB blob store for online migration and verification.
+///
+/// It adopts the map size published in the LMDB environment instead of requesting
+/// a resize, and intentionally exposes no mutation methods.
+pub struct LmdbBlobReader {
+    store: LmdbBlobStore,
+}
+
+impl LmdbBlobReader {
+    pub fn open<P: AsRef<Path>>(
+        path: P,
+        external_blobs: Option<ExternalBlobOptions>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let mut options = EnvOpenOptions::new();
+        options
+            .max_dbs(DATABASE_COUNT)
+            .max_readers(DEFAULT_MAX_READERS);
+        unsafe {
+            options.flags(env_flags_from_env() | EnvFlags::READ_ONLY);
+        }
+        let env = unsafe { options.open(path) }.map_err(map_heed_error)?;
+        let rtxn = env.read_txn().map_err(map_heed_error)?;
+        let open_bytes = |name| -> Result<Database<Bytes, Bytes>, StoreError> {
+            env.open_database(&rtxn, Some(name))
+                .map_err(map_heed_error)?
+                .ok_or_else(|| StoreError::Other(format!("missing LMDB database {name}")))
+        };
+        let open_unit = |name| -> Result<Database<Bytes, Unit>, StoreError> {
+            env.open_database(&rtxn, Some(name))
+                .map_err(map_heed_error)?
+                .ok_or_else(|| StoreError::Other(format!("missing LMDB database {name}")))
+        };
+        let blobs = open_bytes("blobs")?;
+        let metadata = open_bytes("metadata")?;
+        let eviction_order = open_unit("eviction_order")?;
+        let pins = open_bytes("pins")?;
+        let stats = open_bytes("stats")?;
+        rtxn.commit().map_err(map_heed_error)?;
+        Ok(Self {
+            store: LmdbBlobStore {
+                env,
+                blobs,
+                metadata,
+                eviction_order,
+                pins,
+                stats,
+                max_bytes: AtomicU64::new(0),
+                next_order: AtomicU64::new(0),
+                external_blobs: external_blobs.map(Into::into),
+            },
+        })
+    }
+
+    pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store.get_sync(hash)
+    }
+
+    pub fn scan_hashes_after(
+        &self,
+        after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.store.scan_hashes_after(after, limit)
+    }
+
+    pub fn map_size_bytes(&self) -> usize {
+        self.store.map_size_bytes()
+    }
 }
 
 impl LmdbBlobStore {
@@ -976,6 +1049,18 @@ impl LmdbBlobStore {
         &self,
         items: &[(Hash, Vec<u8>)],
     ) -> Result<PutManyReport, StoreError> {
+        let borrowed = items
+            .iter()
+            .map(|(hash, data)| (*hash, data.as_slice()))
+            .collect::<Vec<_>>();
+        self.put_many_refs_report_sync(&borrowed)
+    }
+
+    /// Sync batch put without requiring callers to clone owned blob buffers.
+    pub fn put_many_refs_report_sync(
+        &self,
+        items: &[(Hash, &[u8])],
+    ) -> Result<PutManyReport, StoreError> {
         let total = items.len();
         if items.is_empty() {
             return Ok(PutManyReport::default());
@@ -988,7 +1073,7 @@ impl LmdbBlobStore {
                 if !seen_missing.insert(*hash) {
                     None
                 } else {
-                    Some((*hash, data.as_slice()))
+                    Some((*hash, *data))
                 }
             })
             .collect::<Vec<_>>();

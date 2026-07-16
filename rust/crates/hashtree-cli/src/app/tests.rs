@@ -35,9 +35,9 @@ use super::storage_stats::{
 use super::util::format_bytes;
 use crate::app::args::{
     CashuCommands, CashuMintCommands, MirrorCommands, NostrIndexCommands, ReleaseCommands,
-    SocialGraphCommands,
+    SocialGraphCommands, StorageCommands,
 };
-use crate::app::args::{Cli, Commands};
+use crate::app::args::{Cli, Commands, PoolCommands};
 #[cfg(feature = "fuse")]
 use crate::app::mount_registry::ActiveMount;
 use clap::{CommandFactory, Parser};
@@ -168,6 +168,71 @@ fn test_nostr_index_import_args() {
     assert!(root.is_none());
     assert_eq!(events_file, PathBuf::from("ratings.json"));
     assert_eq!(out, Some(PathBuf::from("report.json")));
+}
+
+#[test]
+fn test_storage_pool_add_and_migration_args() {
+    let cli = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "add",
+        "/pool/member",
+        "--capacity-gb",
+        "24",
+        "--map-size-gb",
+        "4",
+        "--external-dir",
+        "/pool/packs",
+        "--max-reads",
+        "12",
+        "--max-writes",
+        "3",
+    ])
+    .unwrap();
+    let Commands::Storage {
+        command: StorageCommands::Pool { command },
+    } = cli.command
+    else {
+        panic!("expected storage pool command");
+    };
+    let PoolCommands::Add {
+        capacity_gb,
+        map_size_gb,
+        max_reads,
+        max_writes,
+        ..
+    } = command
+    else {
+        panic!("expected storage pool add command");
+    };
+    assert_eq!(capacity_gb, 24);
+    assert_eq!(map_size_gb, Some(4));
+    assert_eq!(max_reads, 12);
+    assert_eq!(max_writes, 3);
+
+    let cli = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "migrate-lmdb",
+        "--source",
+        "/old/blobs",
+        "--state-file",
+        "/state/legacy.cursor",
+        "--resume",
+    ])
+    .unwrap();
+    let Commands::Storage {
+        command: StorageCommands::Pool { command },
+    } = cli.command
+    else {
+        panic!("expected storage pool command");
+    };
+    assert!(matches!(
+        command,
+        PoolCommands::MigrateLmdb { resume: true, .. }
+    ));
 }
 
 #[test]

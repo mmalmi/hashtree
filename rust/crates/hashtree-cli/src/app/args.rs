@@ -669,6 +669,90 @@ pub(crate) enum StorageCommands {
         #[arg(long, default_value_t = 0)]
         scan_delay_ms: u64,
     },
+    /// Manage the local adaptive LMDB storage pool
+    Pool {
+        #[command(subcommand)]
+        command: PoolCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PoolCommands {
+    /// Show members, placement usage, lifecycle state, and configured limits
+    Status,
+    /// Add one empty storage member; creates the pool catalog if needed
+    Add {
+        /// Empty LMDB directory for this member
+        path: PathBuf,
+        /// Logical member capacity in GB
+        #[arg(long)]
+        capacity_gb: u64,
+        /// LMDB virtual map size in GB (defaults to capacity)
+        #[arg(long)]
+        map_size_gb: Option<u64>,
+        /// Optional directory for large external blob packs
+        #[arg(long)]
+        external_dir: Option<PathBuf>,
+        /// Spill blobs at or above this size
+        #[arg(long, default_value_t = 65_536, requires = "external_dir")]
+        external_min_bytes: u64,
+        /// Target size in MiB for external pack files
+        #[arg(long, requires = "external_dir")]
+        external_pack_mib: Option<u64>,
+        /// Do not fsync external blob files before committing their references
+        #[arg(long, requires = "external_dir")]
+        external_no_sync: bool,
+        /// Per-process concurrent read limit for this member
+        #[arg(long, default_value_t = 64)]
+        max_reads: u32,
+        /// Per-process concurrent write limit for this member
+        #[arg(long, default_value_t = 16)]
+        max_writes: u32,
+    },
+    /// Change capacity and/or per-process concurrency limits
+    Configure {
+        /// Stable member UUID from `storage pool status`
+        id: String,
+        /// New logical member capacity in GB
+        #[arg(long)]
+        capacity_gb: Option<u64>,
+        /// New per-process concurrent read limit
+        #[arg(long)]
+        max_reads: Option<u32>,
+        /// New per-process concurrent write limit
+        #[arg(long)]
+        max_writes: Option<u32>,
+    },
+    /// Stop new placement on a member and begin verified evacuation
+    Drain { id: String },
+    /// Run a bounded drain/rebalance maintenance pass
+    Maintain {
+        #[arg(long, default_value_t = 1_000)]
+        max_items: usize,
+    },
+    /// Hash-verified, resumable copy from an existing LMDB into the pool
+    MigrateLmdb {
+        /// Existing source LMDB directory
+        #[arg(long)]
+        source: PathBuf,
+        /// Existing source external-blob directory, if configured
+        #[arg(long)]
+        source_external_dir: Option<PathBuf>,
+        /// Durable cursor file unique to this source
+        #[arg(long)]
+        state_file: PathBuf,
+        /// Blobs per committed migration batch
+        #[arg(long, default_value_t = 256)]
+        batch_size: usize,
+        /// Stop after this many blobs in this invocation
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Continue an interrupted pass; a completed cursor starts a fresh pass
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Remove a fully drained member from the manifest
+    Remove { id: String },
 }
 
 #[derive(Subcommand)]

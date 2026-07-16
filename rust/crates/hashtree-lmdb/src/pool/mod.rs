@@ -148,6 +148,11 @@ pub struct PoolMemberStatus {
     pub state: PoolMemberState,
     pub path: PathBuf,
     pub capacity_bytes: u64,
+    pub map_size_bytes: u64,
+    pub external_blob_dir: Option<PathBuf>,
+    pub external_blob_min_bytes: Option<u64>,
+    pub external_blob_sync: bool,
+    pub external_pack_target_bytes: Option<u64>,
     pub max_read_concurrency: u32,
     pub max_write_concurrency: u32,
     pub logical_bytes: u64,
@@ -554,6 +559,11 @@ impl PoolStore {
             state: member.state,
             path: member.config.path.clone(),
             capacity_bytes: member.config.capacity_bytes,
+            map_size_bytes: member.config.map_size_bytes,
+            external_blob_dir: member.config.external_blob_dir.clone(),
+            external_blob_min_bytes: member.config.external_blob_min_bytes,
+            external_blob_sync: member.config.external_blob_sync,
+            external_pack_target_bytes: member.config.external_pack_target_bytes,
             max_read_concurrency: member.config.max_read_concurrency,
             max_write_concurrency: member.config.max_write_concurrency,
             logical_bytes,
@@ -619,9 +629,17 @@ impl PoolStore {
 
         let target = location.preferred_member();
         let store = self.get_member(target)?;
-        let inserted = self.write_verified_member(target, &store, hash, data)?;
-        self.finalize_pending(hash, location)?;
-        Ok(inserted)
+        match self.write_verified_member(target, &store, hash, data) {
+            Ok(inserted) => {
+                self.finalize_pending(hash, location)?;
+                Ok(inserted)
+            }
+            Err(_) => {
+                let mut excluded = HashSet::new();
+                excluded.insert(target);
+                self.repair_location_excluding(hash, data, location, excluded)
+            }
+        }
     }
 
     pub fn put_many_report_sync(
@@ -696,17 +714,17 @@ impl PoolStore {
             }
         }
 
-        let mut by_target: HashMap<PoolMemberId, Vec<(Hash, Vec<u8>)>> = HashMap::new();
+        let mut by_target: HashMap<PoolMemberId, Vec<(Hash, &[u8])>> = HashMap::new();
         for (hash, data, target, _) in &plans {
             by_target
                 .entry(*target)
                 .or_default()
-                .push((*hash, (*data).clone()));
+                .push((*hash, data.as_slice()));
         }
         for (target, batch) in by_target {
             let store = self.get_member(target)?;
             let gate = self.member_gate(target, true)?;
-            let _permit = gate.acquire()?;
+            let permit = gate.acquire()?;
             for (hash, _) in &batch {
                 if store
                     .get_sync(hash)?
@@ -716,11 +734,22 @@ impl PoolStore {
                 }
             }
             let started = Instant::now();
-            let result = store.put_many_report_sync(&batch);
+            let result = store.put_many_refs_report_sync(&batch);
             let success = result.is_ok();
             let bytes = batch.iter().map(|(_, data)| data.len()).sum::<usize>();
             self.record_write(target, started.elapsed(), bytes, success);
-            let report = result?;
+            let report = match result {
+                Ok(report) => report,
+                Err(_) => {
+                    drop(permit);
+                    for (hash, data) in batch {
+                        if self.put_sync(hash, data)? {
+                            inserted.insert(hash);
+                        }
+                    }
+                    continue;
+                }
+            };
             inserted.extend(report.inserted_hashes);
             for (hash, _) in &batch {
                 self.read_verified_member(target, &store, hash)?
@@ -1333,6 +1362,16 @@ impl PoolStore {
         exclude: Option<PoolMemberId>,
         reserved_bytes: &HashMap<PoolMemberId, u64>,
     ) -> Result<PoolMemberId, StoreError> {
+        let excluded = exclude.into_iter().collect::<HashSet<_>>();
+        self.choose_write_member_excluding(incoming_bytes, &excluded, reserved_bytes)
+    }
+
+    fn choose_write_member_excluding(
+        &self,
+        incoming_bytes: u64,
+        excluded: &HashSet<PoolMemberId>,
+        reserved_bytes: &HashMap<PoolMemberId, u64>,
+    ) -> Result<PoolMemberId, StoreError> {
         self.refresh_members()?;
         let manifest = self.read_manifest()?;
         let runtime = self
@@ -1340,11 +1379,9 @@ impl PoolStore {
             .read()
             .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
         let mut candidates = Vec::new();
-        for member in manifest
-            .members
-            .iter()
-            .filter(|member| member.state == PoolMemberState::Active && Some(member.id) != exclude)
-        {
+        for member in manifest.members.iter().filter(|member| {
+            member.state == PoolMemberState::Active && !excluded.contains(&member.id)
+        }) {
             let Some(store) = runtime.stores.get(&member.id) else {
                 continue;
             };
@@ -1376,20 +1413,46 @@ impl PoolStore {
         data: &[u8],
         expected: LocationRecord,
     ) -> Result<bool, StoreError> {
+        self.repair_location_excluding(hash, data, expected, HashSet::new())
+    }
+
+    fn repair_location_excluding(
+        &self,
+        hash: Hash,
+        data: &[u8],
+        expected: LocationRecord,
+        mut excluded: HashSet<PoolMemberId>,
+    ) -> Result<bool, StoreError> {
         let preferred = expected.preferred_member();
-        let preferred_store = if self.member_state(preferred)? == Some(PoolMemberState::Active) {
-            self.get_member(preferred).ok()
-        } else {
-            None
-        };
-        let (target, store) = match preferred_store {
-            Some(store) => (preferred, store),
-            None => {
-                let target = self.choose_write_member(data.len() as u64, Some(preferred))?;
-                (target, self.get_member(target)?)
+        let mut next = (!excluded.contains(&preferred)
+            && self.member_state(preferred)? == Some(PoolMemberState::Active))
+        .then_some(preferred);
+        let mut last_error = None;
+        let (target, inserted) = loop {
+            let target = match next.take() {
+                Some(target) => target,
+                None => match self.choose_write_member_excluding(
+                    data.len() as u64,
+                    &excluded,
+                    &HashMap::new(),
+                ) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        return Err(last_error.unwrap_or(error));
+                    }
+                },
+            };
+            let result = self
+                .get_member(target)
+                .and_then(|store| self.write_verified_member(target, &store, hash, data));
+            match result {
+                Ok(inserted) => break (target, inserted),
+                Err(error) => {
+                    excluded.insert(target);
+                    last_error = Some(error);
+                }
             }
         };
-        let inserted = self.write_verified_member(target, &store, hash, data)?;
         let stored = LocationRecord::Stored {
             member: target,
             size: data.len() as u64,
