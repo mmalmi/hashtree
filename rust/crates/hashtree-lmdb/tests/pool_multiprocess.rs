@@ -39,7 +39,11 @@ fn pool_process_helper() {
             .expect("write result");
         }
         "refresh" => {
-            assert_eq!(pool.members().expect("refreshed members").len(), 2);
+            let members = pool.members().expect("refreshed members");
+            assert_eq!(members.len(), 2);
+            assert!(members.iter().any(|member| {
+                member.max_read_concurrency == 3 && member.max_write_concurrency == 2
+            }));
             let hash = sha256(REFRESH_DATA);
             assert!(pool.put_sync(hash, REFRESH_DATA).expect("refreshed put"));
             let location = pool
@@ -121,6 +125,8 @@ fn process_open_before_member_add_refreshes_manifest_and_placement() {
             1024 * 1024,
         ))
         .expect("add second");
+    pool.update_member_limits(second, 1024 * 1024, 3, 2)
+        .expect("update second limits");
     fs::write(control.join("go"), b"go").expect("release helper");
     wait_success(child, "refresh helper");
     let location = fs::read_to_string(control.join("refresh-result")).expect("location result");

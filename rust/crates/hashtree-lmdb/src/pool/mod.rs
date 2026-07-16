@@ -1,8 +1,10 @@
 mod adaptive;
+mod gate;
 #[cfg(test)]
 mod tests;
 
 use self::adaptive::AdaptivePoolState;
+use self::gate::ConcurrencyGate;
 use crate::{ExternalBlobOptions, LmdbBlobStore};
 use async_trait::async_trait;
 use hashtree_core::store::{slice_blob_range, Store, StoreError, StoreStats};
@@ -146,6 +148,8 @@ pub struct PoolMemberStatus {
     pub state: PoolMemberState,
     pub path: PathBuf,
     pub capacity_bytes: u64,
+    pub max_read_concurrency: u32,
+    pub max_write_concurrency: u32,
     pub logical_bytes: u64,
     pub located_blobs: u64,
     pub available: bool,
@@ -286,6 +290,8 @@ impl LocationRecord {
 struct RuntimeMembers {
     generation: Option<u64>,
     stores: HashMap<PoolMemberId, Arc<LmdbBlobStore>>,
+    read_gates: HashMap<PoolMemberId, Arc<ConcurrencyGate>>,
+    write_gates: HashMap<PoolMemberId, Arc<ConcurrencyGate>>,
     errors: HashMap<PoolMemberId, String>,
 }
 
@@ -418,6 +424,19 @@ impl PoolStore {
             .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
         runtime.generation = Some(manifest.generation);
         runtime.stores.insert(id, store);
+        let member = manifest
+            .members
+            .iter()
+            .find(|member| member.id == id)
+            .expect("new pool member is in committed manifest");
+        runtime.read_gates.insert(
+            id,
+            Arc::new(ConcurrencyGate::new(member.config.max_read_concurrency)),
+        );
+        runtime.write_gates.insert(
+            id,
+            Arc::new(ConcurrencyGate::new(member.config.max_write_concurrency)),
+        );
         runtime.errors.remove(&id);
         Ok(id)
     }
@@ -448,6 +467,34 @@ impl PoolStore {
         wtxn.commit().map_err(map_heed)?;
         self.refresh_members()?;
         Ok(())
+    }
+
+    pub fn update_member_limits(
+        &self,
+        id: PoolMemberId,
+        capacity_bytes: u64,
+        max_read_concurrency: u32,
+        max_write_concurrency: u32,
+    ) -> Result<(), StoreError> {
+        if capacity_bytes == 0 || max_read_concurrency == 0 || max_write_concurrency == 0 {
+            return Err(StoreError::Other(
+                "pool member capacity and concurrency limits must be non-zero".into(),
+            ));
+        }
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let mut manifest = self.manifest_from_txn(&wtxn)?;
+        let member = manifest
+            .members
+            .iter_mut()
+            .find(|member| member.id == id)
+            .ok_or_else(|| StoreError::Other(format!("unknown pool member {id}")))?;
+        member.config.capacity_bytes = capacity_bytes;
+        member.config.max_read_concurrency = max_read_concurrency;
+        member.config.max_write_concurrency = max_write_concurrency;
+        manifest.generation = manifest.generation.saturating_add(1);
+        self.put_manifest_txn(&mut wtxn, &manifest)?;
+        wtxn.commit().map_err(map_heed)?;
+        self.refresh_members()
     }
 
     pub fn remove_member(&self, id: PoolMemberId) -> Result<(), StoreError> {
@@ -502,6 +549,8 @@ impl PoolStore {
             state: member.state,
             path: member.config.path.clone(),
             capacity_bytes: member.config.capacity_bytes,
+            max_read_concurrency: member.config.max_read_concurrency,
+            max_write_concurrency: member.config.max_write_concurrency,
             logical_bytes,
             located_blobs,
             available,
@@ -642,6 +691,8 @@ impl PoolStore {
         }
         for (target, batch) in by_target {
             let store = self.get_member(target)?;
+            let gate = self.member_gate(target, true)?;
+            let _permit = gate.acquire()?;
             for (hash, _) in &batch {
                 if store
                     .get_sync(hash)?
@@ -726,6 +777,8 @@ impl PoolStore {
         let mut deleted = false;
         for member in members.into_iter().take(len) {
             if let Ok(store) = self.get_member(member) {
+                let gate = self.member_gate(member, true)?;
+                let _permit = gate.acquire()?;
                 deleted |= store.delete_sync(hash)?;
             }
         }
@@ -967,7 +1020,7 @@ impl PoolStore {
                     self.read_verified_member(target, &target_store, &hash)?
                 {
                     self.complete_move(hash, source, target, size)?;
-                    let _ = source_store.delete_sync(&hash);
+                    let _ = self.delete_member_blob(source, &source_store, &hash);
                     return Ok(Some(target_data.len() as u64));
                 }
                 return Err(StoreError::Other(format!(
@@ -992,7 +1045,7 @@ impl PoolStore {
         }
         self.write_verified_member(target, &target_store, hash, &source_data)?;
         self.complete_move(hash, source, target, size)?;
-        let _ = source_store.delete_sync(&hash);
+        let _ = self.delete_member_blob(source, &source_store, &hash);
         Ok(Some(source_data.len() as u64))
     }
 
@@ -1064,8 +1117,26 @@ impl PoolStore {
             .map(|member| member.id)
             .collect::<HashSet<_>>();
         runtime.stores.retain(|id, _| configured.contains(id));
+        runtime.read_gates.retain(|id, _| configured.contains(id));
+        runtime.write_gates.retain(|id, _| configured.contains(id));
         runtime.errors.retain(|id, _| configured.contains(id));
         for member in &manifest.members {
+            let read_gate = runtime
+                .read_gates
+                .entry(member.id)
+                .or_insert_with(|| {
+                    Arc::new(ConcurrencyGate::new(member.config.max_read_concurrency))
+                })
+                .clone();
+            read_gate.set_limit(member.config.max_read_concurrency)?;
+            let write_gate = runtime
+                .write_gates
+                .entry(member.id)
+                .or_insert_with(|| {
+                    Arc::new(ConcurrencyGate::new(member.config.max_write_concurrency))
+                })
+                .clone();
+            write_gate.set_limit(member.config.max_write_concurrency)?;
             if runtime.stores.contains_key(&member.id) {
                 continue;
             }
@@ -1137,6 +1208,27 @@ impl PoolStore {
             .into_iter()
             .find(|member| member.id == id)
             .map(|member| member.state))
+    }
+
+    fn member_gate(
+        &self,
+        id: PoolMemberId,
+        write: bool,
+    ) -> Result<Arc<ConcurrencyGate>, StoreError> {
+        self.refresh_members()?;
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+        let gates = if write {
+            &runtime.write_gates
+        } else {
+            &runtime.read_gates
+        };
+        gates
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::Other(format!("unknown pool member {id}")))
     }
 
     fn choose_write_member(
@@ -1390,6 +1482,8 @@ impl PoolStore {
         store: &LmdbBlobStore,
         hash: &Hash,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        let gate = self.member_gate(id, false)?;
+        let _permit = gate.acquire()?;
         let started = Instant::now();
         let result = store.get_sync(hash);
         match result {
@@ -1421,6 +1515,8 @@ impl PoolStore {
         hash: Hash,
         data: &[u8],
     ) -> Result<bool, StoreError> {
+        let gate = self.member_gate(id, true)?;
+        let _permit = gate.acquire()?;
         if let Some(existing) = store.get_sync(&hash)? {
             if sha256(&existing) == hash {
                 return Ok(false);
@@ -1442,6 +1538,17 @@ impl PoolStore {
             )));
         }
         Ok(inserted)
+    }
+
+    fn delete_member_blob(
+        &self,
+        id: PoolMemberId,
+        store: &LmdbBlobStore,
+        hash: &Hash,
+    ) -> Result<bool, StoreError> {
+        let gate = self.member_gate(id, true)?;
+        let _permit = gate.acquire()?;
+        store.delete_sync(hash)
     }
 
     fn record_read(&self, id: PoolMemberId, elapsed: Duration, success: bool) {
