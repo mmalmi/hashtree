@@ -18,7 +18,9 @@
 - Required final `fips-core` 0.4.5 and released `hashtree-fips-transport`
   0.4.5 so native CLI packaging uses the verified final FIPS runtime.
 - Released `hashtree-core` 0.2.86 with the shared LMDB runtime needed by the
-  packaged pool store, and moved the CLI release to 0.2.92.
+  packaged pool store, and moved the CLI release to 0.2.93.
+- Gave the 1 MiB TypeScript crypto round-trip an explicit bounded test budget
+  so the full gate remains deterministic on slower hosted runners.
 
 ## Adaptive pool storage - 2026-07-16
 
@@ -36,7 +38,7 @@
 
 - Made a fresh shared same-host LMDB store one canonical pool while preserving
   existing single-store layouts until explicitly migrated.
-- Released `hashtree-cli` 0.2.92 with pool status/configuration/maintenance and
+- Released `hashtree-cli` 0.2.93 with pool status/configuration/maintenance and
   migration commands.
 
 ### Removed

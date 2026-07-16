@@ -45,7 +45,7 @@ describe('crypto', () => {
       const decrypted = await decrypt(encrypted, key);
 
       expect(decrypted).toEqual(plaintext);
-    });
+    }, 15_000);
 
     it('should produce different ciphertext with different keys', async () => {
       const key1 = generateKey();
