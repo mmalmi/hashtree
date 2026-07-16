@@ -662,7 +662,7 @@ describe('worker peer blob sharing', () => {
     ))).toBe(false);
   });
 
-  it('lets the configured provider handle an empty provider roster as a miss', async () => {
+  it('treats an empty configured provider roster as no fetch route', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -694,10 +694,10 @@ describe('worker peer blob sharing', () => {
     });
     expect(postMessageMock.mock.calls.some(([message]) => (
       (message as { type?: string }).type === 'p2pFetch'
-    ))).toBe(true);
+    ))).toBe(false);
   });
 
-  it('leaves exact p2p peer selection inside the configured provider', async () => {
+  it('routes through the exact p2p identity advertised by the configured provider', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -707,7 +707,7 @@ describe('worker peer blob sharing', () => {
     peerListResponder.peerIds = ['peer-a'];
     peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
       expect(requestedHashHex).toBe(hashHex);
-      expect(peerId).toBeUndefined();
+      expect(peerId).toBe('peer-a');
       queueMicrotask(() => {
         target.dispatch({
           type: 'p2pFetchResult',
@@ -745,7 +745,7 @@ describe('worker peer blob sharing', () => {
       postMessageMock.mock.calls.some(
         ([message]) => (
           (message as { type?: string; peerId?: string }).type === 'p2pFetch'
-          && !('peerId' in (message as { peerId?: string }))
+          && (message as { peerId?: string }).peerId === 'peer-a'
         ),
       ),
     ).toBe(true);

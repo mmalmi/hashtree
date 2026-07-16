@@ -392,8 +392,8 @@ describe('worker media headers', () => {
       expect(p2pRequest).toMatchObject({
         hashHex: '07'.repeat(32),
         htl: 10,
+        peerId: 'configured-media-peer',
       });
-      expect(p2pRequest).not.toHaveProperty('peerId');
     });
 
     ctx.dispatch({

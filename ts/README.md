@@ -68,7 +68,9 @@ Writes always target the application-selected `Store`. Reads can adapt a store
 with `StoreBlobRoute` and combine it with opaque network routes in the read-only
 `BlobRouter` from `@hashtree/mesh`. A network implementation that owns several
 servers or peers remains one composite route; the outer router never selects
-its internal members.
+its internal members. The worker's P2P composite uses the same router
+recursively over exact identities advertised by its configured provider; it
+does not fetch anonymously or infer routes from connected peers.
 
 `BlobRouter` bounds route attempts and concurrency, passes nested routes a
 deadline and attempt budget, and accepts the first centrally hash-verified

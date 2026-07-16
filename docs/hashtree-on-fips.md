@@ -67,7 +67,9 @@ and centrally verifies their data. The browser worker composes `idb`, `p2p`,
 and `blossom` routes; IndexedDB remains its explicit write destination. The P2P
 bridge and Blossom store each own their internal provider/server set, so the
 outer router does not infer peers, duplicate provider selection, or route
-writes.
+writes. Inside the P2P composite, a nested `BlobRouter` creates stable routes
+only for exact identities advertised by the configured provider. An empty
+provider roster performs no P2P fetch.
 
 ## Result Semantics
 

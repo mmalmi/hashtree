@@ -30,6 +30,10 @@
 
 ### Fixed
 
+- Kept the worker's composite P2P target backed by stable routes for the exact
+  identities advertised by its configured provider. An empty roster performs
+  no fetch, each request carries native HTL 10, and a corrupt or failed peer
+  cannot prevent another peer from returning centrally verified data.
 - Kept Blossom transport failures, timeouts, malformed batch replies, and hash
   mismatches as errors. Only explicit absence from every attempted server now
   returns `null`; poisoned bytes are never cached.
