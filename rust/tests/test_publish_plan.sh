@@ -32,8 +32,8 @@ require_line "${RUST_DIR}/Cargo.toml" 'version = "0.2.82"' \
     "unchanged workspace crates must remain at 0.2.82"
 require_line "${RUST_DIR}/crates/hashtree-core/Cargo.toml" 'version = "0.2.84"' \
     "hashtree-core must remain at its published 0.2.84 wire-contract release"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.86"' \
-    "hashtree-cli must release as 0.2.86"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.87"' \
+    "hashtree-cli must release as 0.2.87"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.83"' \
     "unchanged hashtree-embedded must remain at 0.2.83"
 require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.3"' \

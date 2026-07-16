@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.87 - 2026-07-16
+
+### Fixed
+
+- Made explicit `htree add --publish` fail unless configured file servers accept
+  the content and a configured Nostr relay accepts the root announcement.
+- Published immutable content before the mutable Nostr root, stopped the
+  resolver on both success and failure, and printed `published:` only after
+  both required stages completed.
+
 ## 0.4.3 - 2026-07-16
 
 ### Fixed
