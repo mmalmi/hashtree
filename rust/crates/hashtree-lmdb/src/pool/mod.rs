@@ -1,4 +1,6 @@
 mod adaptive;
+#[cfg(test)]
+mod tests;
 
 use self::adaptive::AdaptivePoolState;
 use crate::{ExternalBlobOptions, LmdbBlobStore};

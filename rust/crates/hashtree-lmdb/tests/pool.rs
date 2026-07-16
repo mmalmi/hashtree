@@ -116,3 +116,52 @@ fn pool_rejects_mismatched_writes_and_corrupt_member_bytes() -> Result<(), Store
     assert!(reopened.get_sync(&hash).is_err());
     Ok(())
 }
+
+#[test]
+fn unavailable_member_recovers_only_when_its_identity_returns() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let displaced = temp.path().join("member-displaced");
+    let data = b"member replacement bytes".repeat(32);
+    let hash = sha256(&data);
+
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    let member = pool.add_member(PoolMemberConfig::new(member_path.clone(), 1024 * 1024))?;
+    assert!(pool.put_sync(hash, &data)?);
+    drop(pool);
+
+    std::fs::rename(&member_path, &displaced).expect("displace member");
+    std::fs::create_dir(&member_path).expect("leave empty mountpoint");
+    let unavailable = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    assert!(!unavailable.member(member)?.available);
+    assert!(unavailable.get_sync(&hash).is_err());
+
+    std::fs::remove_dir(&member_path).expect("remove empty mountpoint");
+    std::fs::rename(&displaced, &member_path).expect("restore member");
+    assert_eq!(unavailable.get_sync(&hash)?, Some(data));
+    assert!(unavailable.member(member)?.available);
+    Ok(())
+}
+
+#[test]
+fn explicit_capacity_moves_new_writes_to_available_member() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())?;
+    let first_data = b"first capacity blob".repeat(32);
+    let second_data = b"second capacity blob".repeat(32);
+    let first = pool.add_member(PoolMemberConfig::new(
+        temp.path().join("first"),
+        first_data.len() as u64,
+    ))?;
+    assert!(pool.put_sync(sha256(&first_data), &first_data)?);
+    let second = pool.add_member(PoolMemberConfig::new(
+        temp.path().join("second"),
+        second_data.len() as u64 * 2,
+    ))?;
+    let second_hash = sha256(&second_data);
+    assert!(pool.put_sync(second_hash, &second_data)?);
+    assert_eq!(pool.blob_location(&second_hash)?, Some(second));
+    assert_ne!(first, second);
+    Ok(())
+}
