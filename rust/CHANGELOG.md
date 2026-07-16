@@ -12,6 +12,8 @@
 - Corrected replaceable/addressable event resolution, storage, snapshots,
   bounded caches, and worker root tracking to use NIP-01's lexically lowest
   event ID when timestamps tie, without changing ordinary event ordering.
+- Required final `fips-core` 0.4.5 and released `hashtree-fips-transport`
+  0.4.5 so native CLI packaging uses the verified final FIPS runtime.
 
 ## Adaptive pool storage - 2026-07-16
 
@@ -29,7 +31,7 @@
 
 - Made a fresh shared same-host LMDB store one canonical pool while preserving
   existing single-store layouts until explicitly migrated.
-- Released `hashtree-cli` 0.2.90 with pool status/configuration/maintenance and
+- Released `hashtree-cli` 0.2.91 with pool status/configuration/maintenance and
   migration commands.
 
 ### Removed

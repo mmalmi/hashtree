@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-fips-transport"
-version = "0.4.4"
+version = "0.4.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,7 +17,7 @@ webrtc = ["webrtc-endpoint"]
 
 [dependencies]
 async-trait.workspace = true
-fips-core = "0.4.3"
+fips-core = "0.4.5"
 fips-tcp = "0.2.0"
 fips-tcp-endpoint = "0.2.0"
 hashtree-core.workspace = true
