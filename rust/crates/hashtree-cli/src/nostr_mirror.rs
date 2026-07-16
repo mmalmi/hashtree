@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use hashtree_core::{nhash_encode_full, NHashData};
 use hashtree_nostr::{
     CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
     HASHTREE_ROOT_KIND,
@@ -52,6 +54,8 @@ const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
 const MIRROR_UPLOAD_STATE_DIR: &str = "nostr-mirror";
 const MIRROR_UPLOADED_ROOT_SUFFIX: &str = ".uploaded-root";
+const NOSTR_INDEX_STATE_DIR: &str = "nostr-index";
+const NOSTR_INDEX_LATEST_ROOT_FILE: &str = "latest-root.txt";
 const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
 const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
@@ -101,6 +105,23 @@ fn trim_transient_allocations() {
         // It does not touch live allocations and is safe to call after the
         // large, synchronous mirror upload job has dropped its temporary data.
         libc::malloc_trim(0);
+    }
+}
+
+struct RootPublicationDeferral<'a> {
+    count: &'a AtomicUsize,
+}
+
+impl<'a> RootPublicationDeferral<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self { count }
+    }
+}
+
+impl Drop for RootPublicationDeferral<'_> {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -201,6 +222,7 @@ pub struct BackgroundNostrMirror {
     pending_live_events: Mutex<BTreeMap<String, Event>>,
     missing_profile_cursor: Mutex<usize>,
     history_sync_lock: AsyncMutex<()>,
+    root_publication_deferrals: AtomicUsize,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -278,6 +300,7 @@ impl BackgroundNostrMirror {
             pending_live_events: Mutex::new(BTreeMap::new()),
             missing_profile_cursor: Mutex::new(0),
             history_sync_lock: AsyncMutex::new(()),
+            root_publication_deferrals: AtomicUsize::new(0),
             shutdown_tx,
             shutdown_rx,
         })
@@ -364,6 +387,41 @@ impl BackgroundNostrMirror {
         }
         std::fs::write(path, format!("{root}\n"))
             .with_context(|| format!("write uploaded {log_label} state {}", path.display()))
+    }
+
+    fn write_latest_event_root_state(
+        base_path: &std::path::Path,
+        root: Option<&hashtree_core::Cid>,
+    ) -> Result<()> {
+        let path = base_path
+            .join(NOSTR_INDEX_STATE_DIR)
+            .join(NOSTR_INDEX_LATEST_ROOT_FILE);
+        let Some(root) = root else {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+            }
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let encoded = nhash_encode_full(&NHashData {
+            hash: root.hash,
+            decrypt_key: root.key,
+        })
+        .context("encode mirrored Nostr index root")?;
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, format!("{encoded}\n"))
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("remove stale {}", path.display()))?;
+        }
+        std::fs::rename(&tmp_path, &path).with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
     }
 
     pub fn shutdown(&self) {
@@ -1205,6 +1263,7 @@ impl BackgroundNostrMirror {
         if authors.is_empty() {
             return Ok(());
         }
+        let _publication_deferral = RootPublicationDeferral::new(&self.root_publication_deferrals);
 
         info!(
             "Nostr mirror history sync starting: authors={} relays={} negentropy_only={}",
@@ -1217,6 +1276,8 @@ impl BackgroundNostrMirror {
         let mut last_error = None;
         let mut applied_chunks = 0usize;
         let mut failed_chunks = 0usize;
+        let mut authors_since_publish = 0usize;
+        let publish_checkpoint_authors = self.config.history_sync_author_chunk_size.max(1);
         let chunk_size = chunk_size_override
             .unwrap_or(self.config.history_sync_author_chunk_size)
             .max(1);
@@ -1273,7 +1334,7 @@ impl BackgroundNostrMirror {
                 self.apply_history_root_with_options(
                     report.root.as_ref(),
                     update_profile_and_graph,
-                    true,
+                    false,
                     Some(&report.applied_events),
                 )
                 .await?;
@@ -1288,6 +1349,11 @@ impl BackgroundNostrMirror {
                 );
             }
             applied_chunks = applied_chunks.saturating_add(1);
+            authors_since_publish = authors_since_publish.saturating_add(author_count);
+            if authors_since_publish >= publish_checkpoint_authors {
+                self.publish_history_roots(update_profile_and_graph).await;
+                authors_since_publish = 0;
+            }
             trim_transient_allocations();
         }
 
@@ -1302,6 +1368,10 @@ impl BackgroundNostrMirror {
                 applied_chunks, failed_chunks
             );
         }
+        // A remainder smaller than the checkpoint cadence still owns the newest
+        // durable local root. Force one final publication attempt before the
+        // deferral guard lets the periodic publisher resume.
+        self.publish_history_roots(update_profile_and_graph).await;
         Ok(())
     }
 
@@ -1458,6 +1528,11 @@ impl BackgroundNostrMirror {
         if !publish_roots {
             return Ok(());
         }
+        self.publish_history_roots(update_profile_and_graph).await;
+        Ok(())
+    }
+
+    async fn publish_history_roots(&self, update_profile_and_graph: bool) {
         let (event_result, profile_search_result, profiles_by_pubkey_result) = self
             .publish_priority_roots(true, update_profile_and_graph, update_profile_and_graph)
             .await;
@@ -1479,7 +1554,6 @@ impl BackgroundNostrMirror {
                 err
             );
         }
-        Ok(())
     }
 
     async fn subscribe_authors_since(
@@ -1594,6 +1668,10 @@ impl BackgroundNostrMirror {
 
     fn note_public_events_root_change(&self) -> Result<()> {
         let root = self.graph_store.public_events_root()?;
+        if let Err(err) = Self::write_latest_event_root_state(self.store.base_path(), root.as_ref())
+        {
+            warn!("Nostr mirror failed to persist queryable event-root state: {err:#}");
+        }
         Self::note_root_change(
             self.config.published_event_tree_name.as_deref(),
             &self.event_publish_state,
@@ -1747,6 +1825,9 @@ impl BackgroundNostrMirror {
         force: bool,
         publish_before_upload_ready_on_force: bool,
     ) -> Result<()> {
+        if !force && self.root_publication_deferrals.load(Ordering::Acquire) > 0 {
+            return Ok(());
+        }
         let Some(tree_name) = tree_name else {
             return Ok(());
         };

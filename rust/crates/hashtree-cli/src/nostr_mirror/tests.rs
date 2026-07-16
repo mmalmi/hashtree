@@ -318,6 +318,25 @@ fn latest_published_root_event(relay: &TestRelay, tree_name: &str) -> Option<Eve
         .cloned()
 }
 
+fn published_root_from_event(event: &Event) -> hashtree_core::Cid {
+    let tag_value = |name: &str| {
+        event.tags.iter().find_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().is_some_and(|value| value == name))
+                .then(|| values.get(1).cloned())
+                .flatten()
+        })
+    };
+    let hash = tag_value("hash").expect("published root hash tag");
+    let hash = hex::decode(hash).expect("decode published root hash");
+    let hash = <[u8; 32]>::try_from(hash).expect("published root hash length");
+    let key = tag_value("key").map(|key| {
+        let key = hex::decode(key).expect("decode published root key");
+        <[u8; 32]>::try_from(key).expect("published root key length")
+    });
+    hashtree_core::Cid { hash, key }
+}
+
 async fn handle_connection(
     stream: TcpStream,
     events: Arc<Mutex<Vec<Event>>>,
@@ -1566,6 +1585,130 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
 }
 
 #[tokio::test]
+async fn history_sync_coalesces_root_publications_and_flushes_final_root() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock().await;
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let root_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+    let event_store = NostrEventStore::new(store.store_arc());
+    let mut roots = Vec::new();
+    let mut root = None;
+    for number in 0..5 {
+        let author = nostr::Keys::generate();
+        let event = event_builder!(Kind::TextNote, format!("history note {number}"))
+            .custom_created_at(Timestamp::from(10 + number))
+            .sign_with_keys(&author)
+            .expect("history note");
+        root = event_store
+            .build(
+                root.as_ref(),
+                vec![hashtree_nostr::stored_event_from_nostr_sdk_event(&event)],
+            )
+            .await?;
+        roots.push(root.clone().expect("history root"));
+    }
+
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::parse(&root_keys.secret_key().to_bech32()?)
+        .context("parse mirror publish keys")?;
+    let mirror = Arc::new(
+        BackgroundNostrMirror::new(
+            NostrMirrorConfig {
+                relays: Vec::new(),
+                publish_relays: vec![relay.url()],
+                history_sync_author_chunk_size: 3,
+                history_sync_on_start: false,
+                published_event_tree_name: Some("nostr-event-index".to_string()),
+                published_profile_search_tree_name: None,
+                published_profiles_by_pubkey_tree_name: None,
+                ..NostrMirrorConfig::default()
+            },
+            store,
+            graph_store.clone(),
+            Some(publish_keys),
+        )
+        .await?,
+    );
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    let roots = Arc::new(roots);
+    let next_root = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let periodic_publisher = Arc::clone(&mirror);
+    mirror
+        .history_sync_authors_chunked(
+            (0..5).map(|number| format!("author-{number}")).collect(),
+            {
+                let roots = Arc::clone(&roots);
+                let next_root = Arc::clone(&next_root);
+                let periodic_publisher = Arc::clone(&periodic_publisher);
+                move |_current_root, author_chunk| {
+                    let periodic_publisher = Arc::clone(&periodic_publisher);
+                    let index = next_root.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let root = roots[index].clone();
+                    async move {
+                        tokio::time::sleep(MIRROR_ROOT_PUBLISH_DEBOUNCE + Duration::from_millis(5))
+                            .await;
+                        periodic_publisher.maybe_publish_event_root(false).await?;
+                        Ok(CrawlReport {
+                            root: Some(root),
+                            authors_considered: 1,
+                            authors_processed: author_chunk.len(),
+                            events_seen: 1,
+                            events_selected: 1,
+                            live_bytes_selected: 0,
+                            applied_events: Vec::new(),
+                        })
+                    }
+                }
+            },
+            false,
+            Some(1),
+        )
+        .await?;
+
+    assert_eq!(
+        published_root_event_count(&relay, "nostr-event-index"),
+        2,
+        "five one-author fetch chunks with a three-author checkpoint should publish twice"
+    );
+    let published_root = published_root_from_event(
+        &latest_published_root_event(&relay, "nostr-event-index")
+            .expect("final published event root"),
+    );
+    assert_eq!(published_root, roots[4], "remainder batch must be flushed");
+    assert_eq!(graph_store.public_events_root()?, Some(roots[4].clone()));
+    let latest_root =
+        std::fs::read_to_string(tmp.path().join("nostr-index").join("latest-root.txt"))?;
+    let decoded = hashtree_core::nhash_decode(latest_root.trim())?;
+    assert_eq!(
+        hashtree_core::Cid {
+            hash: decoded.hash,
+            key: decoded.decrypt_key,
+        },
+        roots[4],
+        "mirror updates must refresh the default query root pointer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
     let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
@@ -2559,7 +2702,7 @@ fn large_global_recent_history_sync_uses_one_chunk() {
 }
 
 #[test]
-fn full_author_history_flushes_each_author() {
+fn full_author_history_processes_one_author_per_chunk() {
     let config = NostrMirrorConfig {
         history_sync_author_chunk_size: 128,
         ..NostrMirrorConfig::default()
