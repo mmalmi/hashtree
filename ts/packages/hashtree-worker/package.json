@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.2.17",
+  "version": "0.3.0",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -80,10 +80,10 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@hashtree/core": "0.1.8",
-    "@hashtree/dexie": "0.1.5",
-    "@hashtree/mesh": "0.1.3",
-    "@hashtree/nostr": "0.1.15",
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.4.0/hashtree-core-0.2.0.tgz",
+    "@hashtree/dexie": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.4.0/hashtree-dexie-0.1.6.tgz",
+    "@hashtree/mesh": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.4.0/hashtree-mesh-0.1.4.tgz",
+    "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.4.0/hashtree-nostr-0.1.16.tgz",
     "@msgpack/msgpack": "^3.1.2",
     "dexie": "4.4.2",
     "nostr-tools": "^2.18.2"

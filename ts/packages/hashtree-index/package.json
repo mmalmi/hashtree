@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/index",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "B-Tree and index structures for hashtree",
   "type": "module",
   "main": "dist/index.js",
@@ -36,7 +36,7 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@hashtree/core": "workspace:*"
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.4.0/hashtree-core-0.2.0.tgz"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

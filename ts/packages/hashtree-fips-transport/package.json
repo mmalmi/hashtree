@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/fips-transport",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Hashtree blob transport over reliable TCP/FIPS streams",
   "type": "module",
   "main": "dist/index.js",
@@ -46,16 +46,16 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@fips/tcp": "github:mmalmi/fips-tcp#353cd0b9b723edd07b6cdc82c7e826d43b9a0d6e&path:ts",
-    "@hashtree/core": "0.1.8"
+    "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz",
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.4.0/hashtree-core-0.2.0.tgz"
   },
   "peerDependencies": {
-    "@fips/core": ">=0.0.21",
-    "@fips/transport-webrtc": ">=0.0.30"
+    "@fips/core": ">=0.0.24",
+    "@fips/transport-webrtc": ">=0.0.40"
   },
   "devDependencies": {
-    "@fips/core": "file:../../vendor/fips/fips-core-0.0.21.tgz",
-    "@fips/transport-webrtc": "file:../../vendor/fips/fips-transport-webrtc-0.0.30.tgz",
+    "@fips/core": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.24/fips-core-0.0.24.tgz",
+    "@fips/transport-webrtc": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.24/fips-transport-webrtc-0.0.40.tgz",
     "typescript": "^5.3.0",
     "vitest": "^2.0.0"
   }

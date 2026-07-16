@@ -2,14 +2,36 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.4.0 - 2026-07-16
+
+### Added
+
+- Added the shared `BlobRequest` / `BlobReply` / `BlobRoute` contract to
+  `@hashtree/core@0.2.0`, with the native-compatible HTL range and default of
+  `0..10` / `10`.
+- Added bounded, cancellable worker blob routes that preserve route-local
+  misses, surface provider failures, and accept the first centrally
+  hash-verified data reply.
+- Added explicit FIPS provider routes and exact authenticated
+  `hashtree.blob/1` + port `39018` capability filtering. Connected FIPS peers
+  are no longer inferred to be Hashtree providers.
+
 ### Changed
 
-- Prepared the breaking `@hashtree/fips-transport@0.3.0` release around the
+- Released one immutable TypeScript bundle containing `@hashtree/core@0.2.0`,
+  `@hashtree/index@0.1.10`, `@hashtree/collection@0.2.6`,
+  `@hashtree/dexie@0.1.6`, `@hashtree/git@0.1.5`,
+  `@hashtree/mesh@0.1.4`, `@hashtree/nostr@0.1.16`,
+  `@hashtree/worker@0.3.0`, and `@hashtree/fips-transport@0.4.0`.
+- Prepared the breaking `@hashtree/fips-transport@0.4.0` release around the
   reliable TCP/FIPS blob protocol. Removed the obsolete raw endpoint-datagram
   transport/store API and its `@hashtree/mesh` dependency while preserving the
-  browser and worker providers on `TcpBlobTransport`.
+  browser and worker providers on `TcpBlobTransport`. Worker request HTL is
+  carried unchanged through the terminal adapter exactly once.
 - Closed worker providers now reject reads instead of reporting a false content
   miss.
+- Consolidated the two worker P2P bridges into one implementation and removed
+  the parallel framing, timeout, and pending-request logic.
 - Removed the legacy direct Hashtree WebRTC worker mesh, its kind-25050
   signaling/proxy API, and the `@hashtree/worker/p2p` export. Browser mesh
   traffic now enters both worker clients through the FIPS provider interface,

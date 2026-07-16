@@ -16,8 +16,17 @@
       "esbuild"
     ],
     "overrides": {
-      "@fips/core": "file:vendor/fips/fips-core-0.0.21.tgz",
-      "@fips/transport-webrtc": "file:vendor/fips/fips-transport-webrtc-0.0.30.tgz"
+      "@fips/core": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.24/fips-core-0.0.24.tgz",
+      "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz",
+      "@fips/transport-webrtc": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.24/fips-transport-webrtc-0.0.40.tgz",
+      "@hashtree/collection": "link:packages/hashtree-collection",
+      "@hashtree/core": "link:packages/hashtree",
+      "@hashtree/dexie": "link:packages/hashtree-dexie",
+      "@hashtree/git": "link:packages/hashtree-git",
+      "@hashtree/index": "link:packages/hashtree-index",
+      "@hashtree/mesh": "link:packages/hashtree-mesh",
+      "@hashtree/nostr": "link:packages/hashtree-nostr",
+      "@hashtree/worker": "link:packages/hashtree-worker"
     }
   },
   "scripts": {
@@ -29,6 +38,7 @@
     "lint:fix": "eslint packages/hashtree/src --fix",
     "verify:fips-transport": "pnpm --filter @hashtree/fips-transport... build && pnpm --filter @hashtree/fips-transport verify:dist && pnpm --filter @hashtree/fips-transport test && pnpm --filter @hashtree/fips-transport lint",
     "maps:crawl": "pnpm --filter @hashtree/core build && node scripts/maps/crawl-tiles.js",
+    "pack:runtime": "node scripts/pack-runtime.mjs",
     "publish:packages": "bash ./scripts/publish.sh",
     "publish:packages:dry-run": "bash ./scripts/publish.sh --dry-run",
     "publish:packages:plan": "bash ./scripts/publish.sh --plan"
