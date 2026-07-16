@@ -708,7 +708,7 @@ async fn handle_request(
     for (peer_id, tx, protocol) in peers {
         match protocol {
             WsProtocol::HashtreeMsgpack => {
-                let _ = send_msgpack_request(state, peer_id, &hash_bytes).await;
+                send_msgpack_request(state, peer_id, &hash_bytes).await;
             }
             WsProtocol::HashtreeJson => {
                 let _ = tx.send(Message::Text(request_text.clone()));
@@ -934,7 +934,7 @@ async fn send_nostr(state: &AppState, client_id: u64, response: NostrRelayMessag
 }
 
 fn parse_msgpack_message(data: &[u8]) -> Option<DataMessage> {
-    let msg = parse_message(data).ok()?;
+    let msg = parse_message(data)?;
     match msg {
         DataMessage::Request(req) => {
             if req.h.len() == 32 {
@@ -1060,19 +1060,14 @@ async fn send_json(state: &AppState, client_id: u64, response: WsResponse) {
     }
 }
 
-async fn send_msgpack_request(
-    state: &AppState,
-    client_id: u64,
-    hash: &[u8],
-) -> Result<(), rmp_serde::encode::Error> {
+async fn send_msgpack_request(state: &AppState, client_id: u64, hash: &[u8]) {
     let req = DataRequest {
         h: hash.to_vec(),
         htl: MAX_HTL,
         q: None,
     };
-    let wire = encode_request(&req)?;
+    let wire = encode_request(&req);
     send_to_client(state, client_id, Message::Binary(wire)).await;
-    Ok(())
 }
 
 async fn send_msgpack_response(state: &AppState, client_id: u64, hash: &[u8], data: &[u8]) {
@@ -1082,9 +1077,8 @@ async fn send_msgpack_response(state: &AppState, client_id: u64, hash: &[u8], da
         i: None,
         n: None,
     };
-    if let Ok(wire) = encode_response(&res) {
-        send_to_client(state, client_id, Message::Binary(wire)).await;
-    }
+    let wire = encode_response(&res);
+    send_to_client(state, client_id, Message::Binary(wire)).await;
 }
 
 async fn send_binary(state: &AppState, client_id: u64, request_id: u32, payload: Vec<u8>) {
