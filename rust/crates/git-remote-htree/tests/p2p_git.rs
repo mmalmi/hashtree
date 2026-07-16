@@ -9,6 +9,7 @@ use common::test_relay::TestRelay;
 use common::{command_output_with_timeout, create_test_repo};
 use git_remote_htree::nostr_client::KIND_HASHTREE_ROOT;
 use nostr::{Keys, ToBech32};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -230,6 +231,49 @@ enabled = false
 
         panic!("git clone {remote} {dest} failed after retries: {last_stderr}");
     }
+
+    fn git_push_root(
+        &self,
+        args: &[&str],
+        cwd: &Path,
+        relay: &TestRelay,
+        author: &str,
+        repo: &str,
+    ) -> String {
+        let previous_ids = matching_root_event_ids(relay, author, repo);
+        let mut last_error = String::new();
+        for attempt in 1..=5 {
+            match self.git_with_timeout(args, cwd, Duration::from_secs(120)) {
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if out.status.success() || stderr.contains("-> master") {
+                        if let Some(hash) =
+                            wait_for_new_root_event(relay, author, repo, &previous_ids)
+                        {
+                            return hash;
+                        }
+                        last_error = format!(
+                            "push updated the ref but no new {author}/{repo} root reached the relay"
+                        );
+                    } else {
+                        last_error = format!(
+                            "stdout:\n{}\nstderr:\n{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            stderr
+                        );
+                    }
+                }
+                Err(error) => last_error = error,
+            }
+            if attempt < 5 {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        panic!(
+            "git {} did not publish a new root after retries: {last_error}",
+            args.join(" ")
+        );
+    }
 }
 
 impl Drop for TestPeer {
@@ -331,6 +375,98 @@ fn matching_root_events(relay: &TestRelay, pubkey: &str, repo: &str) -> Vec<serd
                     })
         })
         .collect()
+}
+
+fn matching_root_event_ids(relay: &TestRelay, pubkey: &str, repo: &str) -> HashSet<String> {
+    matching_root_events(relay, pubkey, repo)
+        .into_iter()
+        .filter_map(|event| {
+            event
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn wait_for_new_root_event(
+    relay: &TestRelay,
+    pubkey: &str,
+    repo: &str,
+    previous_ids: &HashSet<String>,
+) -> Option<String> {
+    for _ in 0..100 {
+        let newest = matching_root_events(relay, pubkey, repo)
+            .into_iter()
+            .filter(|event| {
+                event
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .is_some_and(|id| !previous_ids.contains(id))
+            })
+            .max_by(|left, right| {
+                left.get("created_at")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0)
+                    .cmp(
+                        &right
+                            .get("created_at")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0),
+                    )
+                    .then_with(|| {
+                        left.get("id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .cmp(
+                                right
+                                    .get("id")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or(""),
+                            )
+                    })
+            });
+        if let Some(hash) = newest
+            .as_ref()
+            .and_then(|event| event.get("content"))
+            .and_then(|content| content.as_str())
+        {
+            return Some(hash.to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+fn wait_for_daemon_root(peer: &TestPeer, owner_npub: &str, repo: &str, hash: &str) -> bool {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("build daemon refresh client");
+    let url = format!(
+        "{}/api/nostr/resolve/{}/{}?refresh=1",
+        peer.api_url(),
+        owner_npub,
+        repo
+    );
+    for _ in 0..10 {
+        let matches = client
+            .get(&url)
+            .send()
+            .and_then(|response| response.json::<serde_json::Value>())
+            .ok()
+            .and_then(|json| {
+                json.get("hash")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+            .is_some_and(|resolved| resolved == hash);
+        if matches {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
 }
 
 fn daemon_refresh(peer: &TestPeer, owner_npub: &str, repo: &str) -> String {
@@ -437,12 +573,12 @@ fn test_p2p_git_roundtrip() {
         &["remote", "add", "origin", "htree://self/shared-repo"],
         repo_a.path(),
     );
-    let push = peer_a.git(&["push", "-u", "origin", "master"], repo_a.path());
-    let stderr = String::from_utf8_lossy(&push.stderr);
-    assert!(
-        push.status.success() || stderr.contains("-> master"),
-        "Initial push failed: {}",
-        stderr
+    let first_a_root = peer_a.git_push_root(
+        &["push", "-u", "origin", "master"],
+        repo_a.path(),
+        &relay,
+        &pubkey_a,
+        "shared-repo",
     );
     println!("   Pushed (count=1)\n");
 
@@ -513,6 +649,10 @@ fn test_p2p_git_roundtrip() {
 
     // === Peer B: Clone the repo ===
     println!("\n3. Peer B: Cloning repo...");
+    assert!(
+        wait_for_daemon_root(&peer_b, &peer_a.npub, "shared-repo", &first_a_root),
+        "Peer B must resolve Peer A's initial root before cloning"
+    );
     let clone_dir_b = TempDir::new().unwrap();
     let repo_b_path = clone_dir_b.path().join("repo");
     peer_b.git_clone_ok_retry(
@@ -544,12 +684,16 @@ fn test_p2p_git_roundtrip() {
         &["remote", "set-url", "origin", "htree://self/shared-repo"],
         &repo_b_path,
     );
-    let push = peer_b.git(&["push", "-u", "origin", "master"], &repo_b_path);
-    let stderr = String::from_utf8_lossy(&push.stderr);
+    let b_root = peer_b.git_push_root(
+        &["push", "-u", "origin", "master"],
+        &repo_b_path,
+        &relay,
+        &pubkey_b,
+        "shared-repo",
+    );
     assert!(
-        push.status.success() || stderr.contains("-> master"),
-        "Peer B push failed: {}",
-        stderr
+        wait_for_daemon_root(&peer_a, &peer_b.npub, "shared-repo", &b_root),
+        "Peer A must resolve Peer B's updated root before pulling"
     );
     println!("   Pushed (count=2)\n");
 
@@ -592,15 +736,12 @@ fn test_p2p_git_roundtrip() {
         &["remote", "set-url", "origin", "htree://self/shared-repo"],
         repo_a.path(),
     );
-    let push = peer_a.git(&["push"], repo_a.path());
-    let stderr = String::from_utf8_lossy(&push.stderr);
-    if !(push.status.success() || stderr.contains("-> master")) {
-        panic!(
-            "Peer A second push failed: {}\n{}",
-            stderr,
-            root_diagnostics(&relay, &peer_a, &pubkey_a, &peer_a.npub)
-        );
-    }
+    let final_a_root =
+        peer_a.git_push_root(&["push"], repo_a.path(), &relay, &pubkey_a, "shared-repo");
+    assert!(
+        wait_for_daemon_root(&peer_b, &peer_a.npub, "shared-repo", &final_a_root),
+        "Peer B must resolve Peer A's final root before pulling"
+    );
     println!("   Pushed (count=3)\n");
 
     // === Peer B: Pull final changes ===
