@@ -26,7 +26,8 @@
       "@hashtree/index": "link:packages/hashtree-index",
       "@hashtree/mesh": "link:packages/hashtree-mesh",
       "@hashtree/nostr": "link:packages/hashtree-nostr",
-      "@hashtree/worker": "link:packages/hashtree-worker"
+      "@hashtree/worker": "link:packages/hashtree-worker",
+      "serialize-javascript": "7.0.7"
     }
   },
   "scripts": {
@@ -44,21 +45,21 @@
     "publish:packages:plan": "bash ./scripts/publish.sh --plan"
   },
   "devDependencies": {
-    "@esbuild/linux-arm64": "^0.27.0",
-    "@playwright/test": "^1.57.0",
-    "@rollup/rollup-linux-arm64-gnu": "^4.53.3",
-    "@rollup/rollup-linux-x64-gnu": "^4.53.3",
+    "@esbuild/linux-arm64": "^0.28.1",
+    "@playwright/test": "^1.61.1",
+    "@rollup/rollup-linux-arm64-gnu": "^4.62.2",
+    "@rollup/rollup-linux-x64-gnu": "^4.62.2",
     "@types/ws": "^8.18.1",
-    "@typescript-eslint/eslint-plugin": "^8.48.0",
-    "@typescript-eslint/parser": "^8.48.0",
-    "@wdio/cli": "^9.22.0",
-    "@wdio/local-runner": "^9.22.0",
-    "@wdio/mocha-framework": "^9.22.0",
-    "@wdio/spec-reporter": "^9.20.0",
-    "eslint": "^9.39.1",
-    "globals": "^16.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.64.0",
+    "@typescript-eslint/parser": "^8.64.0",
+    "@wdio/cli": "^9.29.1",
+    "@wdio/local-runner": "^9.29.1",
+    "@wdio/mocha-framework": "^9.29.1",
+    "@wdio/spec-reporter": "^9.29.1",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
     "nostr-tools": "^2.18.2",
     "typescript": "^5.3.0",
-    "ws": "^8.18.3"
+    "ws": "^8.21.1"
   }
 }

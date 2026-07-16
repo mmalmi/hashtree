@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HashTree, MemoryStore, nhashEncode, toHex, type CID, type HashTree } from '@hashtree/core';
+import { HashTree, MemoryStore, nhashEncode, toHex, type CID } from '@hashtree/core';
 import { nip19 } from 'nostr-tools';
 import { HASHTREE_ROOT_KIND, storeTreeEventSnapshot } from '@hashtree/nostr';
 import { __test__, initMediaHandler, registerMediaPort } from '../src/relay/mediaHandler';
