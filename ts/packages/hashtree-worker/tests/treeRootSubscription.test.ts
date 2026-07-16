@@ -176,7 +176,7 @@ describe('handleTreeRootEvent', () => {
     );
   });
 
-  it('keeps the higher-id root when same-second replaceable events arrive out of order', async () => {
+  it('keeps the lower-id root when same-second replaceable events arrive out of order', async () => {
     const notify = vi.fn();
     setNotifyCallback(notify);
 
@@ -212,9 +212,9 @@ describe('handleTreeRootEvent', () => {
     const cached = await getCachedRootInfo(npub, treeName);
 
     expect(cached).toBeTruthy();
-    expect(toHex(cached!.hash)).toBe(highIdHash);
+    expect(toHex(cached!.hash)).toBe(lowIdHash);
     expect(cached!.updatedAt).toBe(createdAt);
-    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(2);
   });
 
   it('stores a signed root-event snapshot permalink when handling a valid event', async () => {

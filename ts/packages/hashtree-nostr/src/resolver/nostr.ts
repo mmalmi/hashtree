@@ -137,7 +137,7 @@ function compareReplaceableEventOrder(
 
   if (!candidateId) return -1;
   if (!currentId) return 1;
-  return candidateId.localeCompare(currentId);
+  return currentId.localeCompare(candidateId);
 }
 
 function parseLabels(event: NostrEvent): string[] {
@@ -1095,7 +1095,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
 
       // 2. Publish to Nostr - event without hash tag
       // Use now + 1 to ensure delete timestamp is strictly higher than any create event
-      // This is critical for NIP-33: when timestamps are equal, event ID breaks the tie (random)
+      // This is critical for NIP-01: when timestamps are equal, the lowest event ID wins.
       nostrPublish({
         kind: HASHTREE_ROOT_KIND,
         content: '',

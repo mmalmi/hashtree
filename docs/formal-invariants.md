@@ -9,10 +9,10 @@ Status values:
 
 | Invariant | Spec Source | Code Location | Proof Artifact | CI Job | Status |
 | --- | --- | --- | --- | --- | --- |
-| HT-RES-001: Resolve chooses latest by `(created_at, event.id)` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_resolve_tie_breaks_with_event_id` | `resolver-formal` | Verified |
-| HT-RES-002: resolve_shared chooses latest by `(created_at, event.id)` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_resolve_shared_tie_breaks_with_event_id` | `resolver-formal` | Verified |
-| HT-RES-003: subscribe updates only for newer `(created_at, event.id)` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_subscribe_tie_breaks_with_event_id` | `resolver-formal` | Verified |
-| HT-RES-004: list dedupe uses latest `(created_at, event.id)` per `d` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_list_dedupe_tie_breaks_with_event_id` | `resolver-formal` | Verified |
+| HT-RES-001: Resolve chooses newest `created_at`, then lowest `event.id` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_resolve_tie_breaks_with_event_id` | `resolver-formal` | Verified |
+| HT-RES-002: resolve_shared chooses newest `created_at`, then lowest `event.id` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_resolve_shared_tie_breaks_with_event_id` | `resolver-formal` | Verified |
+| HT-RES-003: subscribe updates only for newer timestamps or lower tied `event.id` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_subscribe_tie_breaks_with_event_id` | `resolver-formal` | Verified |
+| HT-RES-004: list dedupe uses newest timestamp and lowest tied `event.id` per `d` | `docs/HTS-01.md` §7 | `rust/crates/hashtree-resolver/src/nostr.rs` | `test_list_dedupe_tie_breaks_with_event_id` | `resolver-formal` | Verified |
 | HT-CORE-001: `decode(encode(node)) == normalized(node)` | `docs/HTS-01.md` §3 | `rust/crates/hashtree-core/src/codec.rs` | `formal_codec_props.rs` | `core-props` | Verified |
 | HT-CORE-002: encoding is deterministic across runs | `docs/HTS-01.md` §3 | `rust/crates/hashtree-core/src/codec.rs` | `formal_codec_props.rs` | `core-props` | Verified |
 | HT-CORE-003: metadata insertion order does not affect encoding | `docs/HTS-01.md` §3 | `rust/crates/hashtree-core/src/codec.rs` | `formal_codec_props.rs` | `core-props` | Verified |

@@ -46,6 +46,14 @@ export function compareEvents(a: StoredNostrEvent, b: StoredNostrEvent): number 
   return a.id.localeCompare(b.id);
 }
 
+export function compareReplaceableEvents(a: StoredNostrEvent, b: StoredNostrEvent): number {
+  if (a.created_at !== b.created_at) {
+    return a.created_at - b.created_at;
+  }
+
+  return b.id.localeCompare(a.id);
+}
+
 export function authorTimeKey(event: StoredNostrEvent): string {
   return `${event.pubkey}:${reverseTimestamp(event.created_at)}:${event.id}`;
 }
@@ -138,7 +146,7 @@ export function retainLatestReplaceableEvents(events: StoredNostrEvent[]): Store
     }
 
     const existing = retained.get(slot);
-    if (!existing || compareEvents(event, existing) > 0) {
+    if (!existing || compareReplaceableEvents(event, existing) > 0) {
       retained.set(slot, event);
     }
   }

@@ -102,4 +102,26 @@ describe('treeRootCache', () => {
     expect(applied.applied).toBe(true);
     expect(applied.record.hash).toEqual(HASH_B);
   });
+
+  it('accepts only the lowest event id for same-second relay roots', async () => {
+    const npub = 'npub-worker-cache-lowest-id';
+    const treeName = 'main';
+
+    await setCachedRoot(npub, treeName, { hash: HASH_A }, 'public', {
+      updatedAt: 100,
+      eventId: 'ff'.repeat(32),
+    });
+    const lower = await setCachedRoot(npub, treeName, { hash: HASH_B }, 'public', {
+      updatedAt: 100,
+      eventId: '00'.repeat(32),
+    });
+    const higher = await setCachedRoot(npub, treeName, { hash: HASH_A }, 'public', {
+      updatedAt: 100,
+      eventId: 'aa'.repeat(32),
+    });
+
+    expect(lower.applied).toBe(true);
+    expect(higher.applied).toBe(false);
+    expect((await getCachedRootInfo(npub, treeName))?.hash).toEqual(HASH_B);
+  });
 });

@@ -102,6 +102,10 @@ pub struct ServerConfig {
     /// FIPS discovery/signaling scope for Hashtree peers.
     #[serde(default = "default_fips_discovery_scope")]
     pub fips_discovery_scope: String,
+    /// Maximum unconfigured peers allowed to enter Nostr discovery concurrently.
+    /// Zero keeps discovery restricted to configured/social-graph peers.
+    #[serde(default)]
+    pub fips_open_discovery_max_pending: usize,
     /// Optional loopback rendezvous address override for isolated local stacks.
     /// Unset uses the FIPS well-known address (127.0.0.1:21211).
     #[serde(default)]
@@ -801,6 +805,7 @@ impl Default for ServerConfig {
             enable_webrtc: default_enable_webrtc(),
             enable_fips: default_enable_fips(),
             fips_discovery_scope: default_fips_discovery_scope(),
+            fips_open_discovery_max_pending: 0,
             fips_local_rendezvous_addr: None,
             enable_fips_lan_discovery: default_enable_fips_lan_discovery(),
             fips_relays: None,
@@ -1567,6 +1572,7 @@ decentralized_pubsub_max_event_bytes = 4096
         assert!(server.fips_relays.is_none());
         assert!(server.fips_peers.is_empty());
         assert_eq!(server.fips_discovery_scope, "fips-overlay-v1");
+        assert_eq!(server.fips_open_discovery_max_pending, 0);
         assert!(server.fips_local_rendezvous_addr.is_none());
         assert!(server.enable_fips_lan_discovery);
         assert_eq!(server.fips_request_timeout_ms, 5_500);
@@ -1579,6 +1585,7 @@ decentralized_pubsub_max_event_bytes = 4096
 [server]
 enable_fips = true
 fips_discovery_scope = "test-hashtree"
+fips_open_discovery_max_pending = 32
 fips_local_rendezvous_addr = "127.0.0.1:32111"
 enable_fips_lan_discovery = false
 fips_relays = ["wss://fips.example"]
@@ -1600,6 +1607,7 @@ fips_request_timeout_ms = 42
 
         assert!(config.server.enable_fips);
         assert_eq!(config.server.fips_discovery_scope, "test-hashtree");
+        assert_eq!(config.server.fips_open_discovery_max_pending, 32);
         assert_eq!(
             config.server.fips_local_rendezvous_addr.as_deref(),
             Some("127.0.0.1:32111")

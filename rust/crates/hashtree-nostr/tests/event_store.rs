@@ -1066,6 +1066,122 @@ fn stale_replaceable_events_do_not_remain_in_general_indexes() {
 }
 
 #[test]
+fn same_second_replaceable_events_prefer_the_lowest_id_in_every_build_order() {
+    block_on(async {
+        let author = "a".repeat(64);
+        let profile_a = canonical_store_event(&author, 10, 0, Vec::new(), r#"{"name":"a"}"#);
+        let profile_b = canonical_store_event(&author, 10, 0, Vec::new(), r#"{"name":"b"}"#);
+        let article_tags = vec![vec!["d".to_string(), "article-1".to_string()]];
+        let article_a =
+            canonical_store_event(&author, 20, 30_023, article_tags.clone(), "article a");
+        let article_b = canonical_store_event(&author, 20, 30_023, article_tags, "article b");
+        let (profile_low, profile_high) = if profile_a.id < profile_b.id {
+            (profile_a, profile_b)
+        } else {
+            (profile_b, profile_a)
+        };
+        let (article_low, article_high) = if article_a.id < article_b.id {
+            (article_a, article_b)
+        } else {
+            (article_b, article_a)
+        };
+
+        let bulk_high_first_store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let bulk_high_first = bulk_high_first_store
+            .build(
+                None,
+                vec![
+                    profile_high.clone(),
+                    article_high.clone(),
+                    profile_low.clone(),
+                    article_low.clone(),
+                ],
+            )
+            .await
+            .unwrap()
+            .expect("high-first bulk root");
+
+        let bulk_low_first_store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let bulk_low_first = bulk_low_first_store
+            .build(
+                None,
+                vec![
+                    article_low.clone(),
+                    profile_low.clone(),
+                    article_high.clone(),
+                    profile_high.clone(),
+                ],
+            )
+            .await
+            .unwrap()
+            .expect("low-first bulk root");
+
+        let incremental_high_first_store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let mut incremental_high_first = None;
+        for event in [
+            profile_high.clone(),
+            article_high.clone(),
+            profile_low.clone(),
+            article_low.clone(),
+        ] {
+            incremental_high_first = Some(
+                incremental_high_first_store
+                    .add(incremental_high_first.as_ref(), event)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let incremental_high_first = incremental_high_first.expect("high-first incremental root");
+
+        let incremental_low_first_store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let mut incremental_low_first = None;
+        for event in [
+            article_low.clone(),
+            profile_low.clone(),
+            article_high,
+            profile_high,
+        ] {
+            incremental_low_first = Some(
+                incremental_low_first_store
+                    .add(incremental_low_first.as_ref(), event)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let incremental_low_first = incremental_low_first.expect("low-first incremental root");
+
+        assert_eq!(cid_to_pair(&bulk_high_first), cid_to_pair(&bulk_low_first));
+        assert_eq!(
+            cid_to_pair(&bulk_high_first),
+            cid_to_pair(&incremental_high_first)
+        );
+        assert_eq!(
+            cid_to_pair(&bulk_high_first),
+            cid_to_pair(&incremental_low_first)
+        );
+        assert_eq!(
+            bulk_high_first_store
+                .get_replaceable(Some(&bulk_high_first), &author, 0)
+                .await
+                .unwrap(),
+            Some(profile_low)
+        );
+        assert_eq!(
+            bulk_high_first_store
+                .get_parameterized_replaceable(
+                    Some(&bulk_high_first),
+                    &author,
+                    30_023,
+                    "article-1",
+                )
+                .await
+                .unwrap(),
+            Some(article_low)
+        );
+    });
+}
+
+#[test]
 fn kind_41_is_treated_as_replaceable() {
     block_on(async {
         let store = NostrEventStore::new(Arc::new(MemoryStore::new()));

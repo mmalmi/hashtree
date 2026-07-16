@@ -62,7 +62,7 @@ function compareReplaceableEventOrder(
 
   if (!candidateId) return -1;
   if (!currentId) return 1;
-  return candidateId.localeCompare(currentId);
+  return currentId.localeCompare(candidateId);
 }
 
 function notifyUpdate(npub: string, treeName: string, cid: CID | null): void {

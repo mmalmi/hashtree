@@ -75,8 +75,8 @@ describe('Rust Nostr interop', () => {
     const other = fixture.events.find((event) => event.pubkey === otherAuthor && event.content === 'other');
     const drafts = fixture.events.filter((event) => event.pubkey === parameterizedAuthor && event.kind === 30_023);
     const parameterizedWinner = [...drafts].sort((left, right) => (
-      left.created_at - right.created_at || left.id.localeCompare(right.id)
-    )).at(-1);
+      right.created_at - left.created_at || left.id.localeCompare(right.id)
+    ))[0];
 
     expect(older).toBeDefined();
     expect(newer).toBeDefined();

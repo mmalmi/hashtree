@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use hashtree_core::{from_hex, nhash_encode, xor_keys, Cid, MemoryStore};
 use hashtree_nostr::{
+    compare_tree_event_snapshots, is_newer_tree_event_snapshot,
     parse_tree_event_snapshot_permalink, read_tree_event_snapshot, resolve_snapshot_root_cid,
     serialize_tree_event_snapshot_permalink, store_tree_event_snapshot, StoredNostrEvent,
     TreeEventSnapshotInfo, TreeEventSnapshotPermalink, HASHTREE_ROOT_KIND,
@@ -82,6 +83,20 @@ fn stores_and_reads_tree_event_snapshots_with_npub_and_snapshot_nhash() {
         );
         assert_eq!(restored, snapshot);
     });
+}
+
+#[test]
+fn same_second_tree_event_snapshots_prefer_the_lowest_id() {
+    let low = snapshot(|snapshot| {
+        snapshot.event.id = "0".repeat(64);
+    });
+    let high = snapshot(|snapshot| {
+        snapshot.event.id = "f".repeat(64);
+    });
+
+    assert!(compare_tree_event_snapshots(&low, &high).is_gt());
+    assert!(is_newer_tree_event_snapshot(&low, &high));
+    assert!(!is_newer_tree_event_snapshot(&high, &low));
 }
 
 #[test]

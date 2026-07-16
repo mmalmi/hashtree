@@ -101,7 +101,7 @@ fn compare_event_order(
     candidate
         .created_at
         .cmp(&current.created_at)
-        .then_with(|| candidate.id.cmp(&current.id))
+        .then_with(|| current.id.cmp(&candidate.id))
 }
 
 fn encode_segment(segment: &str) -> String {

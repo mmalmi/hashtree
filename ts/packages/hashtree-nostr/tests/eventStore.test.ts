@@ -215,7 +215,6 @@ describe('NostrEventStore', () => {
   });
 
   it('tracks the latest parameterized replaceable event using d tags and event id tie-breaks', async () => {
-    const store = new NostrEventStore(new MemoryStore());
     const author = 'd'.repeat(64);
     const first = await makeEvent({
       pubkey: author,
@@ -231,14 +230,52 @@ describe('NostrEventStore', () => {
       content: 'draft omega',
       tags: [['d', 'article-1']],
     });
-    const expected = first.id > second.id ? first : second;
+    const lowest = first.id < second.id ? first : second;
+    const highest = lowest === first ? second : first;
 
-    let root = await store.add(null, first);
-    root = await store.add(root, second);
+    const highFirstStore = new NostrEventStore(new MemoryStore());
+    let highFirstRoot = await highFirstStore.add(null, highest);
+    highFirstRoot = await highFirstStore.add(highFirstRoot, lowest);
+
+    const lowFirstStore = new NostrEventStore(new MemoryStore());
+    let lowFirstRoot = await lowFirstStore.add(null, lowest);
+    lowFirstRoot = await lowFirstStore.add(lowFirstRoot, highest);
 
     await expect(
-      store.getParameterizedReplaceable(root, author, 30_023, 'article-1')
-    ).resolves.toEqual(expected);
+      highFirstStore.getParameterizedReplaceable(highFirstRoot, author, 30_023, 'article-1')
+    ).resolves.toEqual(lowest);
+    await expect(
+      lowFirstStore.getParameterizedReplaceable(lowFirstRoot, author, 30_023, 'article-1')
+    ).resolves.toEqual(lowest);
+    expect(highFirstRoot).toEqual(lowFirstRoot);
+  });
+
+  it('builds the same replaceable index root with the lowest same-second id in either order', async () => {
+    const author = 'e'.repeat(64);
+    const first = await makeEvent({
+      pubkey: author,
+      kind: 0,
+      created_at: 80,
+      content: 'profile alpha',
+    });
+    const second = await makeEvent({
+      pubkey: author,
+      kind: 0,
+      created_at: 80,
+      content: 'profile omega',
+    });
+    const lowest = first.id < second.id ? first : second;
+    const highest = lowest === first ? second : first;
+
+    const highFirstStore = new NostrEventStore(new MemoryStore());
+    const highFirstRoot = await highFirstStore.build(null, [highest, lowest]);
+    const lowFirstStore = new NostrEventStore(new MemoryStore());
+    const lowFirstRoot = await lowFirstStore.build(null, [lowest, highest]);
+
+    expect(highFirstRoot).not.toBeNull();
+    expect(highFirstRoot).toEqual(lowFirstRoot);
+    await expect(highFirstStore.getReplaceable(highFirstRoot, author, 0)).resolves.toEqual(lowest);
+    await expect(lowFirstStore.getReplaceable(lowFirstRoot, author, 0)).resolves.toEqual(lowest);
   });
 
   it('builds deterministic roots from unordered event sets', async () => {

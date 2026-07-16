@@ -518,7 +518,7 @@ describe('NostrRefResolver', () => {
     resolver.stop?.();
   }, 10000);
 
-  it('prefers the higher event id when tree-root events share the same timestamp', async () => {
+  it('prefers the lower event id when tree-root events share the same timestamp', async () => {
     const { subscribe, publish } = createNostrFunctions(ndk);
     const resolver = createNostrRefResolver({
       subscribe,
@@ -566,9 +566,9 @@ describe('NostrRefResolver', () => {
     ];
     await eventB.sign();
 
-    const highEvent = (eventA.id! > eventB.id!) ? eventA : eventB;
-    const lowEvent = highEvent === eventA ? eventB : eventA;
-    const expectedHash = highEvent === eventA ? highHash : lowHash;
+    const lowEvent = (eventA.id! < eventB.id!) ? eventA : eventB;
+    const highEvent = lowEvent === eventA ? eventB : eventA;
+    const expectedHash = lowEvent === eventA ? highHash : lowHash;
 
     await highEvent.publish();
     await new Promise(r => setTimeout(r, 500));
@@ -579,7 +579,7 @@ describe('NostrRefResolver', () => {
     expect(updates.length).toBeGreaterThanOrEqual(1);
     expect(updates[updates.length - 1]).toEqual({
       hash: expectedHash,
-      eventId: highEvent.id!,
+      eventId: lowEvent.id!,
     });
 
     unsubscribe();

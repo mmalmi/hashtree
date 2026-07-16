@@ -254,7 +254,7 @@ where
     events.into_iter().max_by(|a, b| {
         let ordering = a.created_at.cmp(&b.created_at);
         if ordering == std::cmp::Ordering::Equal {
-            a.id.cmp(&b.id)
+            b.id.cmp(&a.id)
         } else {
             ordering
         }

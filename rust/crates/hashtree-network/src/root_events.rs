@@ -73,7 +73,7 @@ where
     events.into_iter().max_by(|a, b| {
         let ordering = a.created_at.cmp(&b.created_at);
         if ordering == std::cmp::Ordering::Equal {
-            a.id.cmp(&b.id)
+            b.id.cmp(&a.id)
         } else {
             ordering
         }
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn pick_latest_event_prefers_higher_event_id_on_timestamp_tie() {
+    fn pick_latest_event_prefers_lower_event_id_on_timestamp_tie() {
         let keys = Keys::generate();
         let created_at = Timestamp::from_secs(1_700_000_000);
         let event_a = EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
@@ -173,7 +173,7 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("event b");
 
-        let expected = if event_a.id > event_b.id {
+        let expected = if event_a.id < event_b.id {
             event_a.id
         } else {
             event_b.id

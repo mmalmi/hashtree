@@ -155,7 +155,7 @@ Event `content` is optional. Producers SHOULD use empty string or root hash for 
 If multiple events match author + `d`:
 
 1. Choose newest `created_at`.
-2. If tied, choose larger event id.
+2. If tied, choose the lexically lowest event id, as specified by NIP-01.
 
 ## 8. Visibility Modes
 

@@ -45,7 +45,7 @@ function compareReplaceableEventOrder(candidateCreatedAt, candidateEventId, curr
     if (createdAtDiff !== 0) {
         return createdAtDiff;
     }
-    return candidateEventId.localeCompare(currentEventId);
+    return currentEventId.localeCompare(candidateEventId);
 }
 function decodeNpub(npub) {
     try {

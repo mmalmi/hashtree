@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Added an opt-in, bounded `fips_open_discovery_max_pending` daemon setting;
+  the default remains closed and configured-peer-only.
+
+### Fixed
+
+- Corrected replaceable/addressable event resolution, storage, snapshots,
+  bounded caches, and worker root tracking to use NIP-01's lexically lowest
+  event ID when timestamps tie, without changing ordinary event ordering.
+
 ## Adaptive pool storage - 2026-07-16
 
 ### Added
