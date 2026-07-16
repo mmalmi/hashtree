@@ -270,6 +270,9 @@ importers:
         specifier: ^2.18.2
         version: 2.18.2(typescript@5.9.3)
     devDependencies:
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       ndk:
         specifier: https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.2/ndk-0.2.1.tgz
         version: https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.2/ndk-0.2.1.tgz(typescript@5.9.3)

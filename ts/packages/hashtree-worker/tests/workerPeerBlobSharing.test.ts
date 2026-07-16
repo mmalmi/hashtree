@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const postMessageMock = vi.hoisted(() => vi.fn());
 const idbDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
+const peerShareableByStore = vi.hoisted(() => new Map<string, Set<string>>());
 const blossomDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
 const peerFetchResponder = vi.hoisted(() => ({
   handle: null as null | ((
@@ -77,12 +78,41 @@ class FakeWorkerGlobal {
   }
 }
 
+type FakeStore = {
+  put(hash: Uint8Array, data: Uint8Array): Promise<boolean>;
+};
+
 class FakeHashTree {
-  constructor(_config: unknown) {}
+  private readonly store: FakeStore;
+
+  constructor(config: { store: FakeStore }) {
+    this.store = config.store;
+  }
+
+  async putBlob(data: Uint8Array): Promise<Uint8Array> {
+    const hash = new Uint8Array(32).fill(data[0] ?? 0);
+    await this.store.put(hash, data);
+    return hash;
+  }
+
+  async putFile(data: Uint8Array): Promise<{ cid: { hash: Uint8Array; key: Uint8Array } }> {
+    const hash = await this.putBlob(data);
+    return { cid: { hash, key: new Uint8Array(32).fill(1) } };
+  }
+
+  async *walkBlocks(cid: { hash: Uint8Array }): AsyncGenerator<{ hash: Uint8Array }> {
+    yield { hash: cid.hash };
+  }
 }
 
 class FakeIdbBlobStorage {
-  constructor(_storeName: string, _maxBytes: number) {}
+  private readonly peerShareable: Set<string>;
+
+  constructor(storeName: string, _maxBytes: number) {
+    const existing = peerShareableByStore.get(storeName) ?? new Set<string>();
+    peerShareableByStore.set(storeName, existing);
+    this.peerShareable = existing;
+  }
 
   close(): void {}
 
@@ -102,7 +132,16 @@ class FakeIdbBlobStorage {
   }
 
   async delete(hashHex: string): Promise<boolean> {
+    this.peerShareable.delete(hashHex);
     return idbDataByHash.delete(hashHex);
+  }
+
+  async authorizePeerSharing(hashHexes: Iterable<string>): Promise<void> {
+    for (const hashHex of hashHexes) this.peerShareable.add(hashHex.toLowerCase());
+  }
+
+  async loadPeerShareAuthorizations(): Promise<string[]> {
+    return [...this.peerShareable];
   }
 
   async putByHash(hashHex: string, data: Uint8Array): Promise<void> {
@@ -291,6 +330,7 @@ describe('worker peer blob sharing', () => {
     vi.resetModules();
     postMessageMock.mockReset();
     idbDataByHash.clear();
+    peerShareableByStore.clear();
     blossomDataByHash.clear();
     peerFetchResponder.handle = null;
     peerListResponder.peerIds = [];
@@ -307,7 +347,7 @@ describe('worker peer blob sharing', () => {
     delete globalThis.self;
   });
 
-  it('serves a peer blob when the encrypted hash is reachable from a read source', async () => {
+  it('serves a remotely verified peer blob only for the current worker session', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -340,6 +380,21 @@ describe('worker peer blob sharing', () => {
       data: blobData,
       source: 'blossom',
     });
+
+    blossomDataByHash.clear();
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-1-restart',
+      p2pProviderEnabled: true,
+      config: { relays: [], blossomServers: [] },
+    });
+    await flush();
+    ctx.dispatch({ type: 'getBlob', id: 'blob-1-after-restart', hashHex, forPeer: true });
+    expect(await waitForBlobResponse('blob-1-after-restart')).toEqual({
+      type: 'blob',
+      id: 'blob-1-after-restart',
+      error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
+    });
   });
 
   it('refuses a peer blob when it is only available from the local encrypted cache', async () => {
@@ -371,6 +426,53 @@ describe('worker peer blob sharing', () => {
     expect(await waitForBlobResponse('blob-2')).toEqual({
       type: 'blob',
       id: 'blob-2',
+      error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
+    });
+  });
+
+  it('restores explicit peer-share authorization after restart without exposing local-only cache', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+    const storeName = 'restart-peer-share';
+    const sharedData = new Uint8Array([21, 1, 2]);
+    const privateData = new Uint8Array([22, 3, 4]);
+    const sharedHashHex = hashHexForData(sharedData);
+    const privateHashHex = hashHexForData(privateData);
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-before-restart',
+      p2pProviderEnabled: true,
+      config: { storeName, relays: [], blossomServers: [] },
+    });
+    await flush();
+    ctx.dispatch({ type: 'putBlob', id: 'put-shared', data: sharedData, upload: true });
+    ctx.dispatch({ type: 'putBlob', id: 'put-private', data: privateData, upload: false });
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(expect.objectContaining({ type: 'blobStored', id: 'put-shared' }));
+      expect(postMessageMock).toHaveBeenCalledWith(expect.objectContaining({ type: 'blobStored', id: 'put-private' }));
+    });
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-after-restart',
+      p2pProviderEnabled: true,
+      config: { storeName, relays: [], blossomServers: [] },
+    });
+    await flush();
+    ctx.dispatch({ type: 'getBlob', id: 'shared-after-restart', hashHex: sharedHashHex, forPeer: true });
+    ctx.dispatch({ type: 'getBlob', id: 'private-after-restart', hashHex: privateHashHex, forPeer: true });
+
+    expect(await waitForBlobResponse('shared-after-restart')).toEqual({
+      type: 'blob',
+      id: 'shared-after-restart',
+      data: sharedData,
+      source: 'idb',
+    });
+    expect(await waitForBlobResponse('private-after-restart')).toEqual({
+      type: 'blob',
+      id: 'private-after-restart',
       error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
     });
   });

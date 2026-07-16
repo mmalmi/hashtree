@@ -9,6 +9,13 @@
 - Enabled `@hashtree/worker@0.3.2` media reads to use the shared P2P bridge
   when an application configures one. Workers without that bridge remain
   Blossom-only; no connected-peer inference or product fallback was added.
+- Persisted peer-share authorization for explicitly uploaded encrypted trees
+  and raw blocks across worker restarts. Ordinary cached and remotely fetched
+  blobs remain session-only and fail closed after restart; stale or malformed
+  authorization metadata is pruned.
+- Replayed the newest configured P2P provider state after both worker clients
+  report ready, preventing startup or replacement races from dropping an
+  enable or disable transition.
 
 ### Changed
 

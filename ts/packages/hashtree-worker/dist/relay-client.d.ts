@@ -10,7 +10,9 @@ export declare class RelayWorkerClient {
     private readonly workerFactory;
     private readonly config;
     private worker;
+    private workerReady;
     private p2pProvider;
+    private p2pProviderEnabledAtInit;
     private initPromise;
     private initPending;
     private pendingRequests;
@@ -36,6 +38,7 @@ export declare class RelayWorkerClient {
     getRelayStats(): Promise<RelayStats[]>;
     setIdentity(pubkey: string, nsecHex?: string): Promise<void>;
     setP2PProvider(provider: WorkerP2PProvider | null): void;
+    private notifyP2PProviderState;
     setBlossomServers(servers: BlossomServerConfig[]): Promise<void>;
     setStorageMaxBytes(maxBytes: number): Promise<void>;
     setRelays(relays: string[]): Promise<void>;

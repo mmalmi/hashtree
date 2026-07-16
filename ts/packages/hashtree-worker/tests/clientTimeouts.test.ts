@@ -96,6 +96,16 @@ class GetBlobWorker extends FakeWorker {
   }
 }
 
+class DelayedReadyWorker extends FakeWorker {
+  override postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
+    if (message.type === 'init') {
+      this.postedMessages.push({ message, transfer });
+      return;
+    }
+    super.postMessage(message, transfer);
+  }
+}
+
 describe('HashtreeWorkerClient timeouts', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -350,6 +360,31 @@ describe('HashtreeWorkerClient timeouts', () => {
       .filter((message) => message.type === 'setP2PProviderState');
     expect(states).toMatchObject([{ enabled: true }, { enabled: false }]);
 
+    await client.close();
+  });
+
+  it('replays the latest p2p provider state after worker initialization', async () => {
+    const worker = new DelayedReadyWorker();
+    const WorkerFactory = class {
+      constructor() {
+        return worker;
+      }
+    } as unknown as new () => Worker;
+    const client = new HashtreeWorkerClient(WorkerFactory);
+    const initializing = client.init();
+    const initRequest = worker.postedMessages[0]?.message;
+    expect(initRequest?.type).toBe('init');
+
+    client.setP2PProvider({ fetch: async () => null, listPeerIds: () => [] });
+    expect(worker.postedMessages.filter(({ message }) => message.type === 'setP2PProviderState')).toEqual([]);
+
+    if (initRequest?.type === 'init') {
+      worker.emitMessage({ type: 'ready', id: initRequest.id });
+    }
+    await initializing;
+
+    expect(worker.postedMessages.filter(({ message }) => message.type === 'setP2PProviderState'))
+      .toMatchObject([{ message: { enabled: true } }]);
     await client.close();
   });
 });

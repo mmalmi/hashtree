@@ -6,6 +6,7 @@ export class HashtreeWorkerClient {
     workerFactory;
     config;
     worker = null;
+    workerReady = false;
     initPromise = null;
     pending = new Map();
     connectivityListeners = new Set();
@@ -29,6 +30,7 @@ export class HashtreeWorkerClient {
         catch (err) {
             throw err instanceof Error ? err : new Error(String(err));
         }
+        const providerEnabledAtInit = this.p2pFetchHandler !== null;
         this.initPromise = new Promise((resolve, reject) => {
             if (!this.worker) {
                 reject(new Error('Failed to create worker'));
@@ -42,6 +44,10 @@ export class HashtreeWorkerClient {
             this.pending.set(id, {
                 resolve: (message) => {
                     if (message.type === 'ready') {
+                        this.workerReady = true;
+                        if ((this.p2pFetchHandler !== null) !== providerEnabledAtInit) {
+                            this.notifyP2PProviderState();
+                        }
                         resolve();
                         return;
                     }
@@ -54,12 +60,13 @@ export class HashtreeWorkerClient {
                 type: 'init',
                 id,
                 config: this.config,
-                p2pProviderEnabled: this.p2pFetchHandler !== null,
+                p2pProviderEnabled: providerEnabledAtInit,
             });
         });
         return this.initPromise;
     }
     spawnWorker() {
+        this.workerReady = false;
         if (this.workerFactory instanceof URL) {
             this.worker = new Worker(this.workerFactory, { type: 'module' });
         }
@@ -114,6 +121,7 @@ export class HashtreeWorkerClient {
             }
         };
         this.worker.onerror = (event) => {
+            this.workerReady = false;
             const errorMessage = event instanceof ErrorEvent ? event.message : 'Worker error';
             this.rejectAllPending(new Error(errorMessage));
         };
@@ -498,6 +506,8 @@ export class HashtreeWorkerClient {
         this.notifyP2PProviderState();
     }
     notifyP2PProviderState() {
+        if (!this.workerReady)
+            return;
         this.worker?.postMessage({
             type: 'setP2PProviderState',
             id: generateRequestId(),
@@ -515,6 +525,7 @@ export class HashtreeWorkerClient {
         this.pendingRootWatchUpdates.clear();
         this.worker?.terminate();
         this.worker = null;
+        this.workerReady = false;
         this.initPromise = null;
         this.rejectAllPending(new Error('Worker closed'));
     }

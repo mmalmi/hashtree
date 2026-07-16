@@ -59,7 +59,9 @@ export class RelayWorkerClient {
   private readonly workerFactory: WorkerFactory;
   private readonly config: RelayWorkerClientConfig;
   private worker: Worker | null = null;
+  private workerReady = false;
   private p2pProvider: WorkerP2PProvider | null = null;
+  private p2pProviderEnabledAtInit = false;
   private initPromise: Promise<void> | null = null;
   private initPending:
     | {
@@ -86,6 +88,7 @@ export class RelayWorkerClient {
       throw err instanceof Error ? err : new Error(String(err));
     }
 
+    this.p2pProviderEnabledAtInit = this.p2pProvider !== null;
     this.initPromise = new Promise<void>((resolve, reject) => {
       if (!this.worker) {
         reject(new Error('Failed to create worker'));
@@ -108,7 +111,7 @@ export class RelayWorkerClient {
         type: 'init',
         id: this.nextRequestId('worker_init'),
         config: this.config,
-        p2pProviderEnabled: this.p2pProvider !== null,
+        p2pProviderEnabled: this.p2pProviderEnabledAtInit,
       } as RelayWorkerRequest);
     });
 
@@ -116,6 +119,7 @@ export class RelayWorkerClient {
   }
 
   private spawnWorker(): void {
+    this.workerReady = false;
     if (this.workerFactory instanceof URL) {
       this.worker = new Worker(this.workerFactory, { type: 'module' });
     } else if (typeof this.workerFactory === 'string') {
@@ -128,6 +132,10 @@ export class RelayWorkerClient {
       const message = event.data;
 
       if (message.type === 'ready') {
+        this.workerReady = true;
+        if ((this.p2pProvider !== null) !== this.p2pProviderEnabledAtInit) {
+          this.notifyP2PProviderState();
+        }
         if (this.initPending) {
           clearTimeout(this.initPending.timeoutId);
           this.initPending.resolve();
@@ -189,6 +197,7 @@ export class RelayWorkerClient {
     };
 
     this.worker.onerror = (event) => {
+      this.workerReady = false;
       const errorMessage = event instanceof ErrorEvent ? event.message : 'Worker error';
       this.rejectAllPending(new Error(errorMessage));
     };
@@ -434,10 +443,15 @@ export class RelayWorkerClient {
 
   setP2PProvider(provider: WorkerP2PProvider | null): void {
     this.p2pProvider = provider;
+    this.notifyP2PProviderState();
+  }
+
+  private notifyP2PProviderState(): void {
+    if (!this.workerReady) return;
     this.worker?.postMessage({
       type: 'setP2PProviderState',
       id: this.nextRequestId('p2p_provider_state'),
-      enabled: provider !== null,
+      enabled: this.p2pProvider !== null,
     } satisfies RelayWorkerRequest);
   }
 
@@ -520,6 +534,7 @@ export class RelayWorkerClient {
     this.p2pProvider = null;
     this.worker?.terminate();
     this.worker = null;
+    this.workerReady = false;
     this.initPromise = null;
     this.initPending = null;
     this.rejectAllPending(new Error('Worker closed'));

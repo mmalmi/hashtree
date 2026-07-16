@@ -11,6 +11,7 @@ export declare class HashtreeWorkerClient {
     private readonly workerFactory;
     private readonly config;
     private worker;
+    private workerReady;
     private initPromise;
     private pending;
     private connectivityListeners;

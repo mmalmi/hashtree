@@ -86,6 +86,16 @@ class FakeRelayWorker {
   }
 }
 
+class DelayedReadyRelayWorker extends FakeRelayWorker {
+  override postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
+    if (message.type === 'init') {
+      this.messages.push(message);
+      return;
+    }
+    super.postMessage(message, transfer);
+  }
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -234,6 +244,29 @@ describe('RelayWorkerClient', () => {
 
     expect(fetch).toHaveBeenCalledOnce();
     expect(listPeerIds).toHaveBeenCalledOnce();
+    await client.close();
+  });
+
+  it('replays the latest p2p provider state after relay worker initialization', async () => {
+    const worker = new DelayedReadyRelayWorker();
+    const client = new RelayWorkerClient((class {
+      constructor() {
+        return worker;
+      }
+    }) as unknown as new () => Worker, {
+      storeName: 'demo-sites-worker',
+      relays: [],
+      pubkey: '11'.repeat(32),
+    });
+    const initializing = client.init();
+
+    client.setP2PProvider({ fetch: async () => null, listPeerIds: () => [] });
+    expect(worker.messages.filter((message) => message.type === 'setP2PProviderState')).toEqual([]);
+
+    worker.emit({ type: 'ready' });
+    await initializing;
+    expect(worker.messages.filter((message) => message.type === 'setP2PProviderState'))
+      .toMatchObject([{ enabled: true }]);
     await client.close();
   });
 

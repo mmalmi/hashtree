@@ -77,8 +77,7 @@ const p2pBridge = new P2PBridge({
   respond: (message) => respond(message),
   peerListTimeoutMs: P2P_PEER_LIST_TIMEOUT_MS,
 });
-const peerShareableEncryptedHashes = new Set<string>();
-const peerShareablePublishedHashes = new Set<string>();
+const peerShareableHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
 let putBlobStreamCounter = 0;
 const activePutBlobStreams = new Map<string, {
@@ -425,8 +424,7 @@ function resetState(): void {
   p2pBridge.setEnabled(false);
   inflightP2PPeerList = null;
   p2pPeerIds = [];
-  peerShareableEncryptedHashes.clear();
-  peerShareablePublishedHashes.clear();
+  peerShareableHashes.clear();
   activePutBlobStreams.clear();
   clearMemoryCache();
   blossomBandwidth = { ...EMPTY_BLOSSOM_BANDWIDTH };
@@ -436,12 +434,13 @@ function resetState(): void {
 }
 
 async function markEncryptedTreeHashesAsPeerShareable(id: CID): Promise<void> {
-  if (!tree) return;
+  if (!tree || !storage) return;
   const hashes: string[] = [];
   for await (const block of tree.walkBlocks(id)) {
     hashes.push(toHex(block.hash));
   }
-  markEncryptedHashes(hashes, peerShareableEncryptedHashes);
+  await storage.authorizePeerSharing(hashes);
+  markEncryptedHashes(hashes, peerShareableHashes);
 }
 
 async function emitConnectivityUpdate(): Promise<void> {
@@ -570,19 +569,16 @@ async function hasBlobData(
 }
 
 async function loadPeerBlobData(hashHex: string): Promise<LoadedBlobData | null> {
-  const trustedEncryptedHash = shouldServeHashToPeer(hashHex, peerShareableEncryptedHashes);
-  const trustedPublishedHash = shouldServeHashToPeer(hashHex, peerShareablePublishedHashes);
+  const trustedHash = shouldServeHashToPeer(hashHex, peerShareableHashes);
   const loaded = await loadBlobData(
     hashHex,
-    trustedEncryptedHash || trustedPublishedHash ? {} : { sourceIds: PEER_SHARED_READ_SOURCE_IDS },
+    trustedHash ? {} : { sourceIds: PEER_SHARED_READ_SOURCE_IDS },
   );
   if (!loaded) {
     return null;
   }
-  if (trustedEncryptedHash || trustedPublishedHash || loaded.sourceId !== 'idb') {
-    if (!trustedEncryptedHash) {
-      markEncryptedHashes([hashHex], trustedPublishedHash ? peerShareablePublishedHashes : peerShareableEncryptedHashes);
-    }
+  if (trustedHash || loaded.sourceId !== 'idb') {
+    markEncryptedHashes([hashHex], peerShareableHashes);
     return loaded;
   }
 
@@ -591,7 +587,7 @@ async function loadPeerBlobData(hashHex: string): Promise<LoadedBlobData | null>
     sourceIds: PEER_SHARED_READ_SOURCE_IDS,
   });
   if (readSourceResult) {
-    markEncryptedHashes([hashHex], peerShareableEncryptedHashes);
+    markEncryptedHashes([hashHex], peerShareableHashes);
     emitDiagnostic('debug', 'mesh', 'peer-blob-share-enabled', 'Allowing peer blob after verifying it is reachable from a read source', {
       hashHex: hashHex.slice(0, 16),
       source: readSourceResult.source,
@@ -1174,7 +1170,7 @@ function registerMediaPort(port: MessagePort): void {
   };
 }
 
-function init(config: WorkerConfig, hasP2PProvider = false): void {
+async function init(config: WorkerConfig, hasP2PProvider = false): Promise<void> {
   resetState();
   p2pBridge.setEnabled(hasP2PProvider);
   const storeName = config.storeName || DEFAULT_STORE_NAME;
@@ -1187,7 +1183,10 @@ function init(config: WorkerConfig, hasP2PProvider = false): void {
     installTypedArraySetDebugHook();
   }
 
-  storage = new IdbBlobStorage(storeName, maxBytes);
+  storage = new IdbBlobStorage(storeName, maxBytes, (hashHexes) => {
+    for (const hashHex of hashHexes) peerShareableHashes.delete(hashHex);
+  });
+  markEncryptedHashes(await storage.loadPeerShareAuthorizations(), peerShareableHashes);
   initTreeRootCache(createStorageStore());
   blossom = new BlossomTransport(
     config.blossomServers || DEFAULT_BLOSSOM_SERVERS,
@@ -1293,7 +1292,10 @@ async function uploadRawBlocks(blocks: StoredRawBlock[]): Promise<void> {
     throw new Error(detail ? `Raw block upload failed: ${detail}` : 'Raw block upload failed');
   }
 
-  markEncryptedHashes(blocks.map(({ hashHex }) => hashHex), peerShareablePublishedHashes);
+  const hashHexes = blocks.map(({ hashHex }) => hashHex);
+  if (!storage) throw new Error('Worker storage not initialized');
+  await storage.authorizePeerSharing(hashHexes);
+  markEncryptedHashes(hashHexes, peerShareableHashes);
 }
 
 async function storeAndMaybeUploadRawBlocks(
@@ -1440,7 +1442,7 @@ function respondBlobStored(id: string, fileCid: CID, upload: boolean): void {
 async function handleRequest(req: WorkerRequest): Promise<void> {
   switch (req.type) {
     case 'init': {
-      init(req.config, req.p2pProviderEnabled === true);
+      await init(req.config, req.p2pProviderEnabled === true);
       respond({ type: 'ready', id: req.id });
       return;
     }

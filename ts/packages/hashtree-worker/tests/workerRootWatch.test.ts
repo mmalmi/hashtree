@@ -66,6 +66,12 @@ class FakeIdbBlobStorage {
     return false;
   }
 
+  async authorizePeerSharing(_hashHexes: Iterable<string>): Promise<void> {}
+
+  async loadPeerShareAuthorizations(): Promise<string[]> {
+    return [];
+  }
+
   async putByHashTrusted(_hashHex: string, _data: Uint8Array): Promise<void> {}
 }
 
