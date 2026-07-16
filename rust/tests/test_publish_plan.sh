@@ -36,8 +36,8 @@ require_line "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" 'version = "0.2.84"' 
     "hashtree-lmdb must release its adaptive application-owned pool"
 require_line "${RUST_DIR}/crates/hashtree-network/Cargo.toml" 'version = "0.2.84"' \
     "hashtree-network must release the adaptive BlobRouter"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.93"' \
-    "hashtree-cli must release as 0.2.93"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.94"' \
+    "hashtree-cli must release as 0.2.94"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.83"' \
     "unchanged hashtree-embedded must remain at 0.2.83"
 require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.5"' \

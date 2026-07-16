@@ -12,6 +12,10 @@
 
 ### Fixed
 
+- Routed advertised same-host FIPS blob requests through the daemon's existing
+  `BlobRouter`, so a local miss can continue to its configured authenticated
+  peer set without decrementing HTL. Released the correction in
+  `hashtree-cli` 0.2.94 without changing the blob wire format.
 - Corrected replaceable/addressable event resolution, storage, snapshots,
   bounded caches, and worker root tracking to use NIP-01's lexically lowest
   event ID when timestamps tie, without changing ordinary event ordering.

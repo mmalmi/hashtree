@@ -191,7 +191,26 @@ async fn bind_daemon_blob_resolver(
     peers: &[FipsPeerConfig],
     request_timeout: Duration,
 ) -> Result<(Arc<DaemonBlobResolver>, Arc<DaemonBlobTransport>)> {
-    let inbound_route: Arc<dyn BlobRoute> = Arc::new(StoreBlobRoute::new(store.clone()));
+    let mut routes = vec![BlobRouteEntry::new(
+        "configured-store",
+        Arc::new(StoreBlobRoute::new(store.clone())),
+    )];
+    let resolver = Arc::new(
+        BlobRouter::new(
+            routes.clone(),
+            Some(store.clone()),
+            BlobRouterConfig {
+                request_timeout,
+                ..Default::default()
+            },
+        )
+        .map_err(anyhow::Error::msg)
+        .context("Failed to configure the daemon blob router")?,
+    );
+    // Advertise the same resolver used by in-process daemon reads. The FIPS
+    // route added below owns only a weak transport reference, so routing an
+    // inbound request through this resolver does not create an Arc cycle.
+    let inbound_route: Arc<dyn BlobRoute> = resolver.clone();
     let transport = Arc::new(
         TcpBlobTransport::bind_advertised_route_with_config(
             endpoint.native_endpoint.clone(),
@@ -207,10 +226,6 @@ async fn bind_daemon_blob_resolver(
         .iter()
         .filter_map(|peer| PeerIdentity::from_npub(&peer.npub).ok())
         .collect();
-    let mut routes = vec![BlobRouteEntry::new(
-        "configured-store",
-        Arc::new(StoreBlobRoute::new(store.clone())),
-    )];
     if !peer_identities.is_empty() {
         let max_provider_attempts = peer_identities.len().min(4);
         let fips_route =
@@ -222,18 +237,11 @@ async fn bind_daemon_blob_resolver(
             Arc::new(fips_route),
         ));
     }
-    let resolver = Arc::new(
-        BlobRouter::new(
-            routes,
-            Some(store),
-            BlobRouterConfig {
-                request_timeout,
-                ..Default::default()
-            },
-        )
+    resolver
+        .set_routes(routes)
+        .await
         .map_err(anyhow::Error::msg)
-        .context("Failed to configure the daemon blob router")?,
-    );
+        .context("Failed to install daemon blob routes")?;
     Ok((resolver, transport))
 }
 
@@ -474,6 +482,22 @@ mod tests {
     use nostr_pubsub::{PubsubProviderMode, QueryOptions};
     use sha2::{Digest, Sha256};
     use tokio::time::timeout;
+
+    struct RecordingStoreRoute {
+        store: Arc<hashtree_core::MemoryStore>,
+        requests: Arc<std::sync::Mutex<Vec<hashtree_core::BlobRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlobRoute for RecordingStoreRoute {
+        async fn route(
+            &self,
+            request: hashtree_core::BlobRequest,
+        ) -> Result<hashtree_core::BlobReply, hashtree_core::StoreError> {
+            self.requests.lock().unwrap().push(request);
+            StoreBlobRoute::new(self.store.clone()).route(request).await
+        }
+    }
 
     #[test]
     fn fips_peer_ids_from_pubkeys_encodes_npbus() {
@@ -760,6 +784,123 @@ mod tests {
         observer_endpoint.native_endpoint.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn daemon_inbound_blob_route_forwards_to_configured_fips_peer() {
+        let scope = format!("htree-inbound-forwarding-{}", uuid::Uuid::new_v4());
+        let (upstream_endpoint, upstream_addr) = udp_endpoint(&scope).await;
+        let (provider_endpoint, provider_addr) = udp_endpoint(&scope).await;
+        let (observer_endpoint, observer_addr) = udp_endpoint(&scope).await;
+        let temp = tempfile::tempdir().unwrap();
+        let provider_store = Arc::new(HashtreeStore::new(temp.path().join("provider")).unwrap());
+        let upstream_store = Arc::new(hashtree_core::MemoryStore::new());
+        let data = b"served through the daemon's configured FIPS peer".to_vec();
+        let hash = Sha256::digest(&data).into();
+        upstream_store.put(hash, data.clone()).await.unwrap();
+        let upstream_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let upstream_transport = Arc::new(
+            TcpBlobTransport::bind_route(
+                upstream_endpoint.native_endpoint.clone(),
+                upstream_store.clone(),
+                Arc::new(RecordingStoreRoute {
+                    store: upstream_store,
+                    requests: upstream_requests.clone(),
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let upstream_peer = FipsPeerConfig {
+            npub: upstream_endpoint.local_peer_id.clone(),
+            udp_addresses: vec![upstream_addr],
+        };
+        set_fips_peer_configs(
+            provider_endpoint.native_endpoint.as_ref(),
+            vec![
+                upstream_peer.clone(),
+                FipsPeerConfig {
+                    npub: observer_endpoint.local_peer_id.clone(),
+                    udp_addresses: vec![observer_addr],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        set_fips_peer_configs(
+            upstream_endpoint.native_endpoint.as_ref(),
+            vec![FipsPeerConfig {
+                npub: provider_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![provider_addr.clone()],
+            }],
+        )
+        .await
+        .unwrap();
+        set_fips_peer_configs(
+            observer_endpoint.native_endpoint.as_ref(),
+            vec![FipsPeerConfig {
+                npub: provider_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![provider_addr],
+            }],
+        )
+        .await
+        .unwrap();
+        let (provider_resolver, provider_transport) = bind_daemon_blob_resolver(
+            &provider_endpoint,
+            provider_store.store_arc(),
+            &[upstream_peer],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let observer_store = Arc::new(hashtree_core::MemoryStore::new());
+        let observer_transport = Arc::new(
+            TcpBlobTransport::bind_route(
+                observer_endpoint.native_endpoint.clone(),
+                observer_store.clone(),
+                Arc::new(StoreBlobRoute::new(observer_store)),
+            )
+            .await
+            .unwrap(),
+        );
+        let observer_route = FipsBlobRoute::explicit(
+            observer_transport.clone(),
+            vec![PeerIdentity::from_npub(&provider_endpoint.local_peer_id).unwrap()],
+            1,
+        )
+        .unwrap();
+
+        wait_for_native_peer(
+            provider_endpoint.native_endpoint.as_ref(),
+            &upstream_endpoint.local_peer_id,
+        )
+        .await;
+        wait_for_native_peer(
+            observer_endpoint.native_endpoint.as_ref(),
+            &provider_endpoint.local_peer_id,
+        )
+        .await;
+        assert_eq!(
+            observer_route
+                .route(hashtree_core::BlobRequest { hash, htl: 10 })
+                .await
+                .unwrap(),
+            hashtree_core::BlobReply::Data(data),
+        );
+        assert_eq!(
+            upstream_requests.lock().unwrap().as_slice(),
+            &[hashtree_core::BlobRequest { hash, htl: 10 }],
+            "FIPS transport hops must preserve the Hashtree HTL",
+        );
+
+        drop(observer_route);
+        drop(observer_transport);
+        drop(provider_resolver);
+        drop(provider_transport);
+        drop(upstream_transport);
+        observer_endpoint.native_endpoint.shutdown().await.unwrap();
+        provider_endpoint.native_endpoint.shutdown().await.unwrap();
+        upstream_endpoint.native_endpoint.shutdown().await.unwrap();
+    }
+
     fn provider_advertised(endpoint: &BoundFipsEndpoint, npub: &str) -> bool {
         endpoint
             .native_endpoint
@@ -787,7 +928,6 @@ mod tests {
         bind_fips_endpoint(options).await.unwrap()
     }
 
-    #[cfg(feature = "experimental-decentralized-pubsub")]
     async fn udp_endpoint(scope: &str) -> (BoundFipsEndpoint, String) {
         let addr = reserve_udp_addr();
         let keys = nostr::Keys::generate();
@@ -803,7 +943,6 @@ mod tests {
         (endpoint, addr)
     }
 
-    #[cfg(feature = "experimental-decentralized-pubsub")]
     fn reserve_udp_addr() -> String {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.local_addr().unwrap().to_string()
@@ -814,7 +953,6 @@ mod tests {
         wait_for_native_peer(endpoint.native_endpoint.as_ref(), npub).await;
     }
 
-    #[cfg(feature = "experimental-decentralized-pubsub")]
     async fn wait_for_native_peer(endpoint: &FipsEndpoint, npub: &str) {
         let result = timeout(Duration::from_secs(10), async {
             loop {
