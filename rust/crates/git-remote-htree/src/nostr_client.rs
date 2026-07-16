@@ -192,13 +192,19 @@ pub struct PullRequestListItem {
     pub created_at: u64,
 }
 
+struct RawRelayQueryResult {
+    events: Vec<Event>,
+    completed: bool,
+}
+
 async fn fetch_events_via_raw_relay_query(
     relays: &[String],
     filter: Filter,
     timeout: Duration,
-) -> Vec<Event> {
+) -> RawRelayQueryResult {
     let request_json = ClientMessage::req(SubscriptionId::generate(), vec![filter]).as_json();
     let mut events_by_id = HashMap::<String, Event>::new();
+    let mut completed = false;
 
     for relay_url in relays {
         let relay_events = match tokio::time::timeout(timeout, async {
@@ -206,6 +212,7 @@ async fn fetch_events_via_raw_relay_query(
             ws.send(WsMessage::Text(request_json.clone())).await?;
 
             let mut relay_events = Vec::new();
+            let mut reached_eose = false;
             while let Some(message) = ws.next().await {
                 let message = message?;
                 let WsMessage::Text(text) = message else {
@@ -214,7 +221,10 @@ async fn fetch_events_via_raw_relay_query(
 
                 match RelayMessage::from_json(text.as_str()) {
                     Ok(RelayMessage::Event { event, .. }) => relay_events.push(event.into_owned()),
-                    Ok(RelayMessage::EndOfStoredEvents(_)) => break,
+                    Ok(RelayMessage::EndOfStoredEvents(_)) => {
+                        reached_eose = true;
+                        break;
+                    }
                     Ok(RelayMessage::Closed { message, .. }) => {
                         debug!("Raw relay PR query closed by {}: {}", relay_url, message);
                         break;
@@ -230,11 +240,14 @@ async fn fetch_events_via_raw_relay_query(
             }
 
             let _ = ws.close(None).await;
-            Ok::<Vec<Event>, anyhow::Error>(relay_events)
+            Ok::<(Vec<Event>, bool), anyhow::Error>((relay_events, reached_eose))
         })
         .await
         {
-            Ok(Ok(events)) => events,
+            Ok(Ok((events, reached_eose))) => {
+                completed |= reached_eose;
+                events
+            }
             Ok(Err(err)) => {
                 debug!("Raw relay PR query failed for {}: {}", relay_url, err);
                 continue;
@@ -250,7 +263,10 @@ async fn fetch_events_via_raw_relay_query(
         }
     }
 
-    events_by_id.into_values().collect()
+    RawRelayQueryResult {
+        events: events_by_id.into_values().collect(),
+        completed,
+    }
 }
 
 async fn connected_relay_count(client: &Client) -> (usize, usize) {
@@ -2220,19 +2236,25 @@ impl NostrClient {
         };
 
         if pr_events.is_empty() {
-            let fallback_events = fetch_events_via_raw_relay_query(
+            let fallback = fetch_events_via_raw_relay_query(
                 &self.relays,
                 pull_request_filter,
                 Duration::from_secs(3),
             )
             .await;
-            if !fallback_events.is_empty() {
+            if !fallback.completed {
+                let _ = client.disconnect().await;
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for a complete PR event query"
+                ));
+            }
+            if !fallback.events.is_empty() {
                 debug!(
                     "Raw relay fallback recovered {} PR event(s) for {}",
-                    fallback_events.len(),
+                    fallback.events.len(),
                     repo_name
                 );
-                pr_events = fallback_events;
+                pr_events = fallback.events;
             }
         }
 
@@ -2280,19 +2302,25 @@ impl NostrClient {
         };
 
         if status_events.is_empty() {
-            let fallback_events = fetch_events_via_raw_relay_query(
+            let fallback = fetch_events_via_raw_relay_query(
                 &self.relays,
                 status_event_filter,
                 Duration::from_secs(3),
             )
             .await;
-            if !fallback_events.is_empty() {
+            if !fallback.completed {
+                let _ = client.disconnect().await;
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for a complete PR status query"
+                ));
+            }
+            if !fallback.events.is_empty() {
                 debug!(
                     "Raw relay fallback recovered {} PR status event(s) for {}",
-                    fallback_events.len(),
+                    fallback.events.len(),
                     repo_name
                 );
-                status_events = fallback_events;
+                status_events = fallback.events;
             }
         }
 
