@@ -3237,7 +3237,7 @@ mod tests {
         let _lock = test_env_lock().lock().await;
         let config_dir = TempDir::new().expect("config dir");
         let _guard = EnvVarGuard::set("HTREE_CONFIG_DIR", config_dir.path());
-        let _flush_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_FLUSH_MS", "200");
+        let _flush_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_FLUSH_MS", "2000");
         let _blobs_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BLOBS", "8");
         let _bytes_guard = EnvVarGuard::set("HTREE_BLOSSOM_REPLICA_COALESCE_MAX_BYTES", "1048576");
 

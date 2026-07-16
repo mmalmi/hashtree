@@ -720,7 +720,10 @@ impl HashtreeStore {
         let plan = sync_block_on(self.collect_tree_index(
             &tree,
             &Cid::public(*root_hash),
-            self.tree_index_limits(),
+            TreeIndexLimits {
+                max_nodes: MAX_PINNED_TREE_NODES,
+                max_bytes: MAX_UNBOUNDED_PINNED_TREE_BYTES,
+            },
         ))?;
         self.write_tree_index(
             root_hash,
