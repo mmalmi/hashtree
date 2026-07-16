@@ -3825,8 +3825,11 @@ dependencies = [
  "hashtree-core",
  "heed",
  "page_size",
+ "rmp-serde",
+ "serde",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -1,10 +1,15 @@
 //! LMDB-backed content-addressed blob storage.
 
 mod configured;
+mod pool;
 
 pub use configured::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
     LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES,
+};
+pub use pool::{
+    PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
+    PoolStore, PoolStoreConfig,
 };
 
 use async_trait::async_trait;
@@ -269,6 +274,25 @@ impl LmdbBlobStore {
         })
     }
 
+    /// Open or create with one exact, manifest-owned map size.
+    ///
+    /// Dynamic pools persist this value so every same-host process opens a member
+    /// with identical LMDB options. Unlike the general constructor, reopening does
+    /// not opportunistically add headroom; resizing is an explicit pool operation.
+    pub fn with_exact_map_size_and_external_blob_options<P: AsRef<Path>>(
+        path: P,
+        map_size: usize,
+        external_blobs: Option<ExternalBlobOptions>,
+    ) -> Result<Self, StoreError> {
+        Self::with_map_size_and_settings_mode(
+            path,
+            map_size,
+            env_flags_from_env(),
+            |_| external_blobs.map(Into::into),
+            false,
+        )
+    }
+
     fn with_map_size_and_settings<P, F>(
         path: P,
         map_size: usize,
@@ -279,12 +303,26 @@ impl LmdbBlobStore {
         P: AsRef<Path>,
         F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
     {
+        Self::with_map_size_and_settings_mode(path, map_size, flags, external_blobs, true)
+    }
+
+    fn with_map_size_and_settings_mode<P, F>(
+        path: P,
+        map_size: usize,
+        flags: EnvFlags,
+        external_blobs: F,
+        add_reopen_headroom: bool,
+    ) -> Result<Self, StoreError>
+    where
+        P: AsRef<Path>,
+        F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
+    {
         let path_ref = path.as_ref();
         std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
         let existing_map_size = std::fs::metadata(path_ref.join("data.mdb"))
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let existing_headroom = if existing_map_size == 0 {
+        let existing_headroom = if existing_map_size == 0 || !add_reopen_headroom {
             0
         } else {
             existing_map_size

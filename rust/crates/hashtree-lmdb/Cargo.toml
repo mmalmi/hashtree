@@ -13,6 +13,9 @@ hashtree-core.workspace = true
 heed.workspace = true
 async-trait.workspace = true
 page_size = "0.6"
+serde.workspace = true
+rmp-serde.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
