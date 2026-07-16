@@ -102,17 +102,17 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
     }
 
     fn provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
-        let mut peers = self.discovered_provider_peers()?;
-        peers.extend(
-            self.explicit
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .iter()
-                .cloned(),
-        );
-        let mut seen = HashSet::new();
-        peers.retain(|peer| seen.insert(peer.npub()));
-        Ok(peers.into_iter().take(self.max_provider_attempts).collect())
+        let discovered = self.discovered_provider_peers()?;
+        let explicit = self
+            .explicit
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Ok(select_provider_peers(
+            discovered,
+            explicit,
+            self.max_provider_attempts,
+        ))
     }
 
     fn discovered_provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
@@ -228,6 +228,45 @@ fn validate_attempts(max_provider_attempts: usize) -> Result<(), FipsBlobRouteEr
     Ok(())
 }
 
+fn select_provider_peers(
+    mut discovered: Vec<PeerIdentity>,
+    mut explicit: Vec<PeerIdentity>,
+    limit: usize,
+) -> Vec<PeerIdentity> {
+    let mut discovered_ids = HashSet::new();
+    discovered.retain(|peer| discovered_ids.insert(peer.npub()));
+    let mut explicit_ids = HashSet::new();
+    explicit.retain(|peer| {
+        let npub = peer.npub();
+        !discovered_ids.contains(&npub) && explicit_ids.insert(npub)
+    });
+
+    let mut selected = Vec::with_capacity(limit);
+    let mut discovered = discovered.into_iter();
+    let mut explicit = explicit.into_iter();
+    loop {
+        let mut added = false;
+        if let Some(peer) = discovered.next() {
+            selected.push(peer);
+            added = true;
+            if selected.len() == limit {
+                break;
+            }
+        }
+        if let Some(peer) = explicit.next() {
+            selected.push(peer);
+            added = true;
+            if selected.len() == limit {
+                break;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +293,24 @@ mod tests {
         route.set_explicit_peers(vec![third]);
         assert_eq!(route.provider_ids().unwrap(), vec![third.npub()]);
         assert!(route.discovered_provider_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bounded_union_interleaves_explicit_peers_without_duplicate_owners() {
+        let discovered = (0..4)
+            .map(|_| PeerIdentity::from_npub(&Identity::generate().npub()).unwrap())
+            .collect::<Vec<_>>();
+        let explicit = (0..2)
+            .map(|_| PeerIdentity::from_npub(&Identity::generate().npub()).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_provider_peers(discovered.clone(), explicit.clone(), 4),
+            vec![discovered[0], explicit[0], discovered[1], explicit[1]],
+        );
+        assert_eq!(
+            select_provider_peers(discovered.clone(), vec![discovered[0], explicit[0]], 2,),
+            vec![discovered[0], explicit[0]],
+        );
     }
 }
