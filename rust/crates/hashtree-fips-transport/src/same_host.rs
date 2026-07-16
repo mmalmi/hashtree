@@ -1,7 +1,6 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use fips_core::discovery::local::rank_capability_providers;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use hashtree_core::store::StoreStats;
 use hashtree_core::{
@@ -9,12 +8,11 @@ use hashtree_core::{
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::task::JoinSet;
 
 use crate::tcp_blob::MAX_OUTBOUND_GETS;
 use crate::{
-    InboundBlobPolicy, TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig,
-    TcpBlobTransportError, WeakTcpBlobPeerRoute, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT,
+    FipsBlobRoute, InboundBlobPolicy, TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig,
+    TcpBlobTransportError, WeakTcpBlobPeerRoute,
 };
 
 fn verify_hash(data: &[u8], expected: &Hash) -> bool {
@@ -99,11 +97,10 @@ pub enum SameHostBlobStoreError {
 /// response. Provider records remain routing hints; ordinary Noise identity and
 /// the TCP blob protocol authenticate the peer and verify the data.
 pub struct SameHostBlobStore<S: Store + ?Sized + 'static> {
-    endpoint: Arc<FipsEndpoint>,
     local: Arc<S>,
     standalone: RwLock<Option<Arc<dyn BlobRoute>>>,
     transport: Arc<TcpBlobTransport<S>>,
-    max_provider_attempts: usize,
+    provider_route: FipsBlobRoute<S>,
     provider_htl: u8,
     standalone_htl: u8,
 }
@@ -177,12 +174,26 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
                 .await?
             }
         };
+        let transport = Arc::new(transport);
+        let provider_route =
+            FipsBlobRoute::discovered(endpoint, transport.clone(), config.max_provider_attempts)
+                .map_err(|error| {
+                    SameHostBlobStoreError::Transport(TcpBlobTransportError::Protocol(
+                        match error {
+                            crate::FipsBlobRouteError::NoProviderAttempts => {
+                                "same-host blob store has no provider attempt budget"
+                            }
+                            crate::FipsBlobRouteError::TooManyProviderAttempts(_) => {
+                                "same-host blob store provider attempt budget is too large"
+                            }
+                        },
+                    ))
+                })?;
         Ok(Self {
-            endpoint,
             local,
             standalone: RwLock::new(standalone),
-            transport: Arc::new(transport),
-            max_provider_attempts: config.max_provider_attempts,
+            transport,
+            provider_route,
             provider_htl: config.provider_htl,
             standalone_htl: config.standalone_htl,
         })
@@ -207,49 +218,18 @@ impl<S: Store + ?Sized + 'static> SameHostBlobStore<S> {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = route;
     }
 
-    fn provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
-        let adverts = self
-            .endpoint
-            .local_instance_advertisements()
-            .map_err(|error| StoreError::Other(format!("same-host discovery failed: {error}")))?;
-        let local_npub = self.endpoint.npub();
-        Ok(rank_capability_providers(&adverts, TCP_BLOB_CAPABILITY)
-            .into_iter()
-            .filter(|advert| advert.npub != local_npub)
-            .filter(|advert| {
-                advert
-                    .capability(TCP_BLOB_CAPABILITY)
-                    .and_then(|capability| capability.fsp_port)
-                    == Some(TCP_BLOB_SERVICE_PORT)
-            })
-            .filter_map(|advert| PeerIdentity::from_npub(&advert.npub).ok())
-            .take(self.max_provider_attempts)
-            .collect())
-    }
-
     async fn discovered_get(&self, hash: &Hash) -> Option<Vec<u8>> {
-        let peers = self.provider_peers().ok()?;
-
-        let mut attempts = JoinSet::new();
-        for peer in peers {
-            let route = self.transport.route_to(peer);
-            let request = BlobRequest {
+        match self
+            .provider_route
+            .route(BlobRequest {
                 hash: *hash,
                 htl: self.provider_htl,
-            };
-            attempts.spawn(async move { route.route(request).await });
+            })
+            .await
+        {
+            Ok(BlobReply::Data(data)) if verify_hash(&data, hash) => Some(data),
+            Ok(BlobReply::Data(_) | BlobReply::NoResult) | Err(_) => None,
         }
-
-        while let Some(result) = attempts.join_next().await {
-            match result {
-                Ok(Ok(BlobReply::Data(data))) if verify_hash(&data, hash) => {
-                    attempts.abort_all();
-                    return Some(data);
-                }
-                Ok(Ok(BlobReply::Data(_) | BlobReply::NoResult) | Err(_)) | Err(_) => {}
-            }
-        }
-        None
     }
 
     async fn standalone_get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {

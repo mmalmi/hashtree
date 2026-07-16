@@ -14,8 +14,8 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use hashtree_core::{BlobRoute, DirEntry, MemoryStore, Store, StoreBlobRoute};
-use hashtree_network::{blob_resolver, MeshReadSource, MeshRoutingConfig, NamedBlobRoute};
+use hashtree_core::{DirEntry, MemoryStore, Store, StoreBlobRoute};
+use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig};
 use http_body_util::BodyExt;
 use nostr::{
     nips::nip19::ToBech32, Alphabet, ClientMessage as NostrClientMessage, EventBuilder,
@@ -947,19 +947,23 @@ async fn blob_resolver_with_source(
     local: Arc<crate::storage::StorageRouter>,
     source: Arc<MemoryStore>,
 ) -> Arc<crate::fips_transport::DaemonBlobResolver> {
-    let resolver = Arc::new(blob_resolver(
-        local,
-        "handler-test",
-        Duration::from_millis(100),
-        MeshRoutingConfig::default(),
-    ));
-    let route: Arc<dyn BlobRoute> = Arc::new(StoreBlobRoute::new(source));
-    resolver
-        .set_read_sources(vec![
-            Arc::new(NamedBlobRoute::mesh_peer("source", route)) as Arc<dyn MeshReadSource>
-        ])
-        .await;
-    resolver
+    Arc::new(
+        BlobRouter::new(
+            vec![
+                BlobRouteEntry::new(
+                    "configured-store",
+                    Arc::new(StoreBlobRoute::new(local.clone())),
+                ),
+                BlobRouteEntry::new("source", Arc::new(StoreBlobRoute::new(source))),
+            ],
+            Some(local),
+            BlobRouterConfig {
+                request_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+        )
+        .expect("test blob router"),
+    )
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@
 //! - **Protocol**: Request/response with hash-based addressing
 //! - **Adaptive Selection**: Intelligent peer selection based on performance
 //!
-pub mod blob_resolver;
+pub mod blob_router;
 pub mod cashu;
 pub mod channel;
 pub mod local_bus;
@@ -35,7 +35,9 @@ pub mod signaling;
 pub mod transport;
 pub mod types;
 
-pub use blob_resolver::{blob_resolver, BlobResolver, RouteOnlyPeerLinks, RouteOnlySignaling};
+pub use blob_router::{
+    BlobRouteEntry, BlobRouteIdentity, BlobRouteOutcomeSnapshot, BlobRouter, BlobRouterConfig,
+};
 pub use cashu::{
     cashu_mint_metadata_path, CashuMintMetadataRecord, CashuMintMetadataStore, CashuQuoteState,
     CashuRoutingConfig, ExpectedSettlement, NegotiatedQuote, CASHU_MINT_METADATA_VERSION,
@@ -48,10 +50,9 @@ pub use mesh_session::{
 };
 pub use mesh_store_core::{
     build_hedged_wave_plan, normalize_dispatch_config, run_hedged_waves, sync_selector_peers,
-    BlobRouteKind, DataPumpStats, HedgedWaveAction, MeshReadSource, MeshRoutingConfig,
-    MeshStoreCore, NamedBlobRoute, PubsubDeliveryMode, PubsubEvent, PubsubPublishStats,
-    RequestDispatchConfig, ResponseBehaviorConfig, SimMeshStore, VerifiedBlockDelivery,
-    VerifiedBlockDeliveryBatch,
+    DataPumpStats, HedgedWaveAction, MeshRoutingConfig, MeshStoreCore, PubsubDeliveryMode,
+    PubsubEvent, PubsubPublishStats, RequestDispatchConfig, ResponseBehaviorConfig, SimMeshStore,
+    VerifiedBlockDelivery, VerifiedBlockDeliveryBatch,
 };
 pub use mock::{
     clear_channel_registry, MockConnectionFactory, MockDataChannel, MockLatencyMode, MockRelay,

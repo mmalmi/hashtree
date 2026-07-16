@@ -5,19 +5,20 @@
 //! and simulation (mocks) use this same code.
 
 use async_trait::async_trait;
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::{Hash as _, Hasher};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, Store, StoreError, BLOB_MAX_BYTES};
+use hashtree_core::{
+    BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Hash, Store, StoreError, BLOB_MAX_BYTES,
+};
 
 use crate::peer_selector::{PeerMetadataSnapshot, PeerSelector, SelectionStrategy};
 use crate::protocol::{
@@ -88,65 +89,6 @@ struct PendingResponseSend {
     queue_sequence: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlobRouteKind {
-    Terminal,
-    MeshPeer,
-}
-
-pub trait MeshReadSource: BlobRoute {
-    fn id(&self) -> &str;
-
-    fn kind(&self) -> BlobRouteKind {
-        BlobRouteKind::Terminal
-    }
-
-    fn is_available(&self) -> bool {
-        true
-    }
-}
-
-pub struct NamedBlobRoute {
-    id: String,
-    kind: BlobRouteKind,
-    route: Arc<dyn BlobRoute>,
-}
-
-impl NamedBlobRoute {
-    pub fn terminal(id: impl Into<String>, route: Arc<dyn BlobRoute>) -> Self {
-        Self {
-            id: id.into(),
-            kind: BlobRouteKind::Terminal,
-            route,
-        }
-    }
-
-    pub fn mesh_peer(id: impl Into<String>, route: Arc<dyn BlobRoute>) -> Self {
-        Self {
-            id: id.into(),
-            kind: BlobRouteKind::MeshPeer,
-            route,
-        }
-    }
-}
-
-#[async_trait]
-impl BlobRoute for NamedBlobRoute {
-    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
-        self.route.route(request).await
-    }
-}
-
-impl MeshReadSource for NamedBlobRoute {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn kind(&self) -> BlobRouteKind {
-        self.kind
-    }
-}
-
 #[derive(Debug, Clone)]
 struct NegotiatedQuote {
     peer_id: String,
@@ -163,239 +105,21 @@ struct IssuedQuote {
     mint_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct AdaptiveSourceStats {
-    requests: u64,
-    successes: u64,
-    misses: u64,
-    failures: u64,
-    timeouts: u64,
-    srtt_ms: f64,
-    rttvar_ms: f64,
-    backoff_level: u32,
-    backed_off_until: Option<Instant>,
-    last_success_at: Option<Instant>,
-    last_failure_at: Option<Instant>,
-}
-
 #[derive(Debug, Clone)]
 enum RouteFetchOutcome {
     Hit(Vec<u8>),
     Miss,
     Timeout,
-    Failure,
 }
 
-impl RouteFetchOutcome {
-    fn combine_without_hit(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Hit(data), _) | (_, Self::Hit(data)) => Self::Hit(data),
-            (Self::Failure, _) | (_, Self::Failure) => Self::Failure,
-            (Self::Timeout, _) | (_, Self::Timeout) => Self::Timeout,
-            (Self::Miss, Self::Miss) => Self::Miss,
-        }
-    }
-}
-
-struct InflightSourceFetch {
-    owner: Arc<()>,
-    waiters: Vec<oneshot::Sender<RouteFetchOutcome>>,
-}
-
-fn complete_inflight_source_fetch(
-    inflight_source_fetches: &StdMutex<HashMap<String, InflightSourceFetch>>,
-    hash_key: &str,
-    expected_owner: &Arc<()>,
-    result: RouteFetchOutcome,
-) {
-    let mut inflight = inflight_source_fetches
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let owns_entry = inflight
-        .get(hash_key)
-        .is_some_and(|entry| Arc::ptr_eq(&entry.owner, expected_owner));
-    let waiters = owns_entry
-        .then(|| inflight.remove(hash_key))
-        .flatten()
-        .map(|inflight| inflight.waiters)
-        .unwrap_or_default();
-    drop(inflight);
-    for waiter in waiters {
-        let _ = waiter.send(result.clone());
-    }
-}
-
-/// Owns one shared source fetch until it completes or its caller is cancelled.
-///
-/// Tokio futures have no asynchronous drop hook, so this deliberately uses a
-/// synchronous mutex around the tiny inflight registry. Dropping an aborted
-/// owner removes the entry and wakes coalesced callers with a non-miss outcome.
-struct InflightSourceFetchGuard<'a> {
-    inflight_source_fetches: &'a StdMutex<HashMap<String, InflightSourceFetch>>,
-    hash_key: String,
-    owner: Arc<()>,
-}
-
-impl InflightSourceFetchGuard<'_> {
-    fn complete(self, result: RouteFetchOutcome) {
-        complete_inflight_source_fetch(
-            self.inflight_source_fetches,
-            &self.hash_key,
-            &self.owner,
-            result,
-        );
-    }
-}
-
-impl Drop for InflightSourceFetchGuard<'_> {
-    fn drop(&mut self) {
-        complete_inflight_source_fetch(
-            self.inflight_source_fetches,
-            &self.hash_key,
-            &self.owner,
-            RouteFetchOutcome::Timeout,
-        );
-    }
-}
-
-enum SourceFetchOutcome {
-    Hit {
-        source_id: String,
-        data: Vec<u8>,
-        elapsed_ms: u64,
-    },
-    Miss {
-        source_id: String,
-    },
-    Failure {
-        source_id: String,
-    },
-}
-
-const INITIAL_SOURCE_BACKOFF_MS: u64 = 250;
-const MAX_SOURCE_BACKOFF_MS: u64 = 10_000;
-const SOURCE_SCORE_TIE_DELTA: f64 = 0.15;
-const RECENT_SOURCE_SUCCESS_WINDOW: Duration = Duration::from_secs(60);
 const ACTIVE_PEER_REQUEST_RANK_PENALTY: usize = 3;
-
-fn source_reliability_score(stats: &AdaptiveSourceStats) -> f64 {
-    (stats.successes as f64 + 1.0) / (stats.requests as f64 + 2.0)
-}
-
-fn source_latency_score(stats: &AdaptiveSourceStats) -> f64 {
-    if stats.srtt_ms <= 0.0 {
-        return 0.5;
-    }
-    (500.0 / (stats.srtt_ms + 50.0)).min(1.0)
-}
-
-fn source_has_history(stats: &AdaptiveSourceStats) -> bool {
-    stats.requests > 0
-        || stats.successes > 0
-        || stats.misses > 0
-        || stats.failures > 0
-        || stats.timeouts > 0
-}
-
-fn adaptive_source_score(stats: &AdaptiveSourceStats, now: Instant) -> f64 {
-    if let Some(backed_off_until) = stats.backed_off_until {
-        if backed_off_until > now {
-            return f64::NEG_INFINITY;
-        }
-    }
-
-    let miss_penalty = if stats.requests > 0 {
-        (stats.misses as f64 / stats.requests as f64) * 0.15
-    } else {
-        0.0
-    };
-    let failure_penalty = if stats.requests > 0 {
-        ((stats.failures + stats.timeouts) as f64 / stats.requests as f64) * 0.3
-    } else {
-        0.0
-    };
-    let recency_bonus = if stats
-        .last_success_at
-        .is_some_and(|last| now.duration_since(last) < RECENT_SOURCE_SUCCESS_WINDOW)
-    {
-        0.1
-    } else {
-        0.0
-    };
-
-    0.6 * source_reliability_score(stats) + 0.3 * source_latency_score(stats) + recency_bonus
-        - miss_penalty
-        - failure_penalty
-}
-
-fn peer_endpoint_has_history(stats: &crate::peer_selector::PeerStats) -> bool {
-    stats.requests_sent > 0 || stats.successes > 0 || stats.failures > 0 || stats.timeouts > 0
-}
-
-fn peer_endpoint_score(stats: &crate::peer_selector::PeerStats, now: Instant) -> f64 {
-    if stats.backed_off_until.is_some_and(|until| until > now) {
-        return f64::NEG_INFINITY;
-    }
-
-    let miss_penalty = 0.0;
-    let failure_penalty = if stats.requests_sent > 0 {
-        ((stats.failures + stats.timeouts) as f64 / stats.requests_sent as f64) * 0.3
-    } else {
-        0.0
-    };
-    let recency_bonus = if stats
-        .last_success
-        .is_some_and(|last| now.duration_since(last) < RECENT_SOURCE_SUCCESS_WINDOW)
-    {
-        0.1
-    } else {
-        0.0
-    };
-
-    0.6 * stats.success_rate()
-        + 0.3
-            * source_latency_score(&AdaptiveSourceStats {
-                srtt_ms: stats.srtt_ms,
-                ..AdaptiveSourceStats::default()
-            })
-        + recency_bonus
-        - miss_penalty
-        - failure_penalty
-}
-
-#[derive(Clone)]
-enum ReadRoute {
-    Peers(Vec<String>),
-    Sources,
-}
-
-impl ReadRoute {
-    fn id(&self) -> &'static str {
-        match self {
-            Self::Peers(_) => "peers",
-            Self::Sources => "sources",
-        }
-    }
-}
-
-struct RankedReadRoute {
-    route: ReadRoute,
-    best_endpoint_id: String,
-    score: f64,
-    has_history: bool,
-}
-
-fn ranked_route_kind(route: &ReadRoute) -> u8 {
-    match route {
-        ReadRoute::Sources => 0,
-        ReadRoute::Peers(_) => 1,
-    }
-}
 
 #[derive(Debug, Clone)]
 struct MeshReadContext {
     exclude_peer_id: Option<String>,
     request_htl: u8,
+    deadline: Option<Instant>,
+    attempt_budget: Option<usize>,
 }
 
 impl Default for MeshReadContext {
@@ -403,6 +127,8 @@ impl Default for MeshReadContext {
         Self {
             exclude_peer_id: None,
             request_htl: MAX_HTL,
+            deadline: None,
+            attempt_budget: None,
         }
     }
 }
@@ -786,12 +512,6 @@ where
     issued_quotes: RwLock<HashMap<(String, String, u64), IssuedQuote>>,
     /// Monotonic quote identifier generator.
     next_quote_id: RwLock<u64>,
-    /// Non-peer read sources such as upstream Blossom servers.
-    read_sources: RwLock<HashMap<String, Arc<dyn MeshReadSource>>>,
-    /// Adaptive health stats for non-peer read sources.
-    read_source_stats: RwLock<HashMap<String, AdaptiveSourceStats>>,
-    /// Shared in-flight upstream reads keyed by hash.
-    inflight_source_fetches: StdMutex<HashMap<String, InflightSourceFetch>>,
     /// Adaptive selector for peer ordering.
     peer_selector: RwLock<PeerSelector>,
     /// Active per-peer in-flight reads so concurrent block fetches spread across peers.
@@ -892,9 +612,6 @@ where
             pending_forward_requests: RwLock::new(HashMap::new()),
             issued_quotes: RwLock::new(HashMap::new()),
             next_quote_id: RwLock::new(1),
-            read_sources: RwLock::new(HashMap::new()),
-            read_source_stats: RwLock::new(HashMap::new()),
-            inflight_source_fetches: StdMutex::new(HashMap::new()),
             peer_selector: RwLock::new(selector),
             peer_active_requests: RwLock::new(HashMap::new()),
             peer_wire_stats: RwLock::new(HashMap::new()),
@@ -2174,172 +1891,6 @@ where
         }
     }
 
-    pub async fn set_read_sources(&self, sources: Vec<Arc<dyn MeshReadSource>>) {
-        let mut by_id = HashMap::new();
-        let mut stats = self.read_source_stats.write().await;
-        for source in sources {
-            let source_id = source.id().to_string();
-            by_id.insert(source_id.clone(), source);
-            stats
-                .entry(source_id)
-                .or_insert_with(AdaptiveSourceStats::default);
-        }
-        *self.read_sources.write().await = by_id;
-    }
-
-    async fn record_read_source_request(&self, source_id: &str) {
-        let mut stats = self.read_source_stats.write().await;
-        stats
-            .entry(source_id.to_string())
-            .or_insert_with(AdaptiveSourceStats::default)
-            .requests += 1;
-    }
-
-    async fn record_read_source_miss(&self, source_id: &str) {
-        let mut stats = self.read_source_stats.write().await;
-        stats
-            .entry(source_id.to_string())
-            .or_insert_with(AdaptiveSourceStats::default)
-            .misses += 1;
-    }
-
-    async fn record_read_source_success(&self, source_id: &str, elapsed_ms: u64) {
-        let now = Instant::now();
-        let mut stats = self.read_source_stats.write().await;
-        let stats = stats
-            .entry(source_id.to_string())
-            .or_insert_with(AdaptiveSourceStats::default);
-        stats.successes += 1;
-        stats.last_success_at = Some(now);
-        stats.backoff_level = 0;
-        stats.backed_off_until = None;
-        if stats.srtt_ms <= 0.0 {
-            stats.srtt_ms = elapsed_ms as f64;
-            stats.rttvar_ms = elapsed_ms as f64 / 2.0;
-            return;
-        }
-        let elapsed = elapsed_ms as f64;
-        stats.rttvar_ms = 0.75 * stats.rttvar_ms + 0.25 * (stats.srtt_ms - elapsed).abs();
-        stats.srtt_ms = 0.875 * stats.srtt_ms + 0.125 * elapsed;
-    }
-
-    async fn record_read_source_failure(&self, source_id: &str) {
-        let now = Instant::now();
-        let mut stats = self.read_source_stats.write().await;
-        let stats = stats
-            .entry(source_id.to_string())
-            .or_insert_with(AdaptiveSourceStats::default);
-        stats.failures += 1;
-        stats.last_failure_at = Some(now);
-        Self::apply_source_backoff(stats, now);
-    }
-
-    async fn record_read_source_timeout(&self, source_id: &str) {
-        let now = Instant::now();
-        let mut stats = self.read_source_stats.write().await;
-        let stats = stats
-            .entry(source_id.to_string())
-            .or_insert_with(AdaptiveSourceStats::default);
-        stats.timeouts += 1;
-        stats.last_failure_at = Some(now);
-        Self::apply_source_backoff(stats, now);
-    }
-
-    fn apply_source_backoff(stats: &mut AdaptiveSourceStats, now: Instant) {
-        stats.backoff_level = stats.backoff_level.saturating_add(1);
-        let backoff_ms = (INITIAL_SOURCE_BACKOFF_MS
-            .saturating_mul(2u64.saturating_pow(stats.backoff_level.saturating_sub(1))))
-        .min(MAX_SOURCE_BACKOFF_MS);
-        stats.backed_off_until = Some(now + Duration::from_millis(backoff_ms));
-    }
-
-    async fn ordered_read_sources(&self) -> Vec<Arc<dyn MeshReadSource>> {
-        let sources = self.read_sources.read().await;
-        if sources.is_empty() {
-            return Vec::new();
-        }
-
-        let mut available: Vec<Arc<dyn MeshReadSource>> = sources
-            .values()
-            .filter(|source| source.is_available())
-            .cloned()
-            .collect();
-        if available.is_empty() {
-            return Vec::new();
-        }
-
-        let now = Instant::now();
-        let stats = self.read_source_stats.read().await;
-        let mut healthy: Vec<Arc<dyn MeshReadSource>> = available
-            .iter()
-            .filter(|source| {
-                stats
-                    .get(source.id())
-                    .and_then(|s| s.backed_off_until)
-                    .is_none_or(|until| until <= now)
-            })
-            .cloned()
-            .collect();
-        if !healthy.is_empty() {
-            available = std::mem::take(&mut healthy);
-        }
-
-        available.sort_by(|left, right| {
-            let left_stats = stats.get(left.id()).cloned().unwrap_or_default();
-            let right_stats = stats.get(right.id()).cloned().unwrap_or_default();
-            adaptive_source_score(&right_stats, now)
-                .partial_cmp(&adaptive_source_score(&left_stats, now))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.id().cmp(right.id()))
-        });
-        available
-    }
-
-    async fn should_probe_multiple_read_sources(
-        &self,
-        ordered_sources: &[Arc<dyn MeshReadSource>],
-    ) -> bool {
-        if ordered_sources.len() <= 1 {
-            return false;
-        }
-        let stats = self.read_source_stats.read().await;
-        let best = stats
-            .get(ordered_sources[0].id())
-            .cloned()
-            .unwrap_or_default();
-        let second = stats
-            .get(ordered_sources[1].id())
-            .cloned()
-            .unwrap_or_default();
-        if !source_has_history(&best) || !source_has_history(&second) {
-            return false;
-        }
-        let now = Instant::now();
-        adaptive_source_score(&best, now) - adaptive_source_score(&second, now)
-            < SOURCE_SCORE_TIE_DELTA
-    }
-
-    async fn source_dispatch_for(&self, source_count: usize) -> RequestDispatchConfig {
-        if source_count == 0 {
-            return self.routing.dispatch;
-        }
-        let ordered_sources = self.ordered_read_sources().await;
-        let probe_multiple = self
-            .should_probe_multiple_read_sources(&ordered_sources)
-            .await;
-        let initial_fanout = if probe_multiple {
-            source_count.min(2)
-        } else {
-            1
-        };
-        RequestDispatchConfig {
-            initial_fanout,
-            hedge_fanout: self.routing.dispatch.hedge_fanout,
-            max_fanout: self.routing.dispatch.max_fanout.min(source_count),
-            hedge_interval_ms: self.routing.dispatch.hedge_interval_ms,
-        }
-    }
-
     /// Get peer count
     pub async fn peer_count(&self) -> usize {
         self.signaling.peer_count().await
@@ -2544,9 +2095,6 @@ where
             RouteFetchOutcome::Timeout => Err(StoreError::Other(
                 "blob retrieval deadline expired before the search completed".to_string(),
             )),
-            RouteFetchOutcome::Failure => Err(StoreError::Other(
-                "blob retrieval failed before the search completed".to_string(),
-            )),
         }
     }
 
@@ -2716,6 +2264,7 @@ where
         hash: &Hash,
         ordered_peer_ids: &[String],
         request_htl: u8,
+        timeout: Duration,
     ) -> RouteFetchOutcome {
         let request_key = PendingRequestKey::new(*hash, request_htl);
         let (owner, rx) = self.register_pending_request(request_key, Vec::new()).await;
@@ -2723,8 +2272,8 @@ where
         let rx = Arc::new(Mutex::new(rx));
         let result = run_hedged_waves(
             ordered_peer_ids.len(),
-            self.routing.dispatch,
-            self.request_timeout,
+            normalize_dispatch_config(self.routing.dispatch, ordered_peer_ids.len()),
+            timeout,
             |range| {
                 let wave_peer_ids = ordered_peer_ids[range].to_vec();
                 let hash = *hash;
@@ -2794,356 +2343,33 @@ where
         RouteFetchOutcome::Hit(data)
     }
 
-    async fn request_from_read_sources_inner(&self, request: BlobRequest) -> RouteFetchOutcome {
-        if request.htl == 0 {
-            return RouteFetchOutcome::Miss;
-        }
-        let ordered_sources = self.ordered_read_sources().await;
-        if ordered_sources.is_empty() {
-            return RouteFetchOutcome::Miss;
-        }
-
-        let dispatch = normalize_dispatch_config(
-            self.source_dispatch_for(ordered_sources.len()).await,
-            ordered_sources.len(),
-        );
-        let wave_plan = build_hedged_wave_plan(ordered_sources.len(), dispatch);
-        if wave_plan.is_empty() {
-            return RouteFetchOutcome::Miss;
-        }
-
-        let deadline = Instant::now() + self.request_timeout;
-        let mut pending = FuturesUnordered::new();
-        let mut pending_source_ids = HashSet::new();
-        let mut saw_timeout = false;
-        let mut saw_failure = false;
-        let mut next_source_idx = 0usize;
-
-        for (wave_idx, wave_size) in wave_plan.iter().copied().enumerate() {
-            let from = next_source_idx;
-            let to = (next_source_idx + wave_size).min(ordered_sources.len());
-            next_source_idx = to;
-
-            for source in &ordered_sources[from..to] {
-                let source = Arc::clone(source);
-                let source_id = source.id().to_string();
-                let source_request = BlobRequest {
-                    hash: request.hash,
-                    htl: match source.kind() {
-                        BlobRouteKind::Terminal => request.htl,
-                        BlobRouteKind::MeshPeer => request.htl.saturating_sub(1),
-                    },
-                };
-                self.record_read_source_request(&source_id).await;
-                pending_source_ids.insert(source_id.clone());
-                pending.push(async move {
-                    let started_at = Instant::now();
-                    let result = std::panic::AssertUnwindSafe(source.route(source_request))
-                        .catch_unwind()
-                        .await;
-                    match result {
-                        Ok(Ok(BlobReply::Data(data)))
-                            if data.len() <= BLOB_MAX_BYTES
-                                && hashtree_core::sha256(&data) == source_request.hash =>
-                        {
-                            SourceFetchOutcome::Hit {
-                                source_id,
-                                data,
-                                elapsed_ms: started_at.elapsed().as_millis().max(1) as u64,
-                            }
-                        }
-                        Ok(Ok(BlobReply::NoResult)) => SourceFetchOutcome::Miss { source_id },
-                        Ok(Ok(BlobReply::Data(_)) | Err(_)) | Err(_) => {
-                            SourceFetchOutcome::Failure { source_id }
-                        }
-                    }
-                });
-            }
-
-            let is_last_wave =
-                wave_idx + 1 == wave_plan.len() || next_source_idx >= ordered_sources.len();
-            let window_end = if is_last_wave {
-                deadline
-            } else {
-                (Instant::now() + Duration::from_millis(dispatch.hedge_interval_ms)).min(deadline)
-            };
-
-            while Instant::now() < window_end {
-                let remaining = window_end.saturating_duration_since(Instant::now());
-                let Some(outcome) = tokio::time::timeout(remaining, pending.next())
-                    .await
-                    .ok()
-                    .flatten()
-                else {
-                    break;
-                };
-                match outcome {
-                    SourceFetchOutcome::Hit {
-                        source_id,
-                        data,
-                        elapsed_ms,
-                    } => {
-                        pending_source_ids.remove(&source_id);
-                        self.record_read_source_success(&source_id, elapsed_ms)
-                            .await;
-                        return RouteFetchOutcome::Hit(data);
-                    }
-                    SourceFetchOutcome::Miss { source_id } => {
-                        pending_source_ids.remove(&source_id);
-                        self.record_read_source_miss(&source_id).await;
-                    }
-                    SourceFetchOutcome::Failure { source_id } => {
-                        pending_source_ids.remove(&source_id);
-                        saw_failure = true;
-                        self.record_read_source_failure(&source_id).await;
-                    }
-                }
-            }
-
-            if Instant::now() >= deadline {
-                break;
-            }
-        }
-
-        for source_id in pending_source_ids {
-            saw_timeout = true;
-            self.record_read_source_timeout(&source_id).await;
-        }
-        if saw_timeout {
-            RouteFetchOutcome::Timeout
-        } else if saw_failure {
-            RouteFetchOutcome::Failure
-        } else {
-            RouteFetchOutcome::Miss
-        }
-    }
-
-    async fn request_from_read_sources(&self, request: BlobRequest) -> RouteFetchOutcome {
-        let hash_key = format!("{}:{}", hash_to_key(&request.hash), request.htl);
-        let (existing_wait, owner_guard) = {
-            let mut inflight = self
-                .inflight_source_fetches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(existing) = inflight.get_mut(&hash_key) {
-                let (tx, rx) = oneshot::channel();
-                existing.waiters.push(tx);
-                (Some(rx), None)
-            } else {
-                let owner = Arc::new(());
-                inflight.insert(
-                    hash_key.clone(),
-                    InflightSourceFetch {
-                        owner: owner.clone(),
-                        waiters: Vec::new(),
-                    },
-                );
-                (
-                    None,
-                    Some(InflightSourceFetchGuard {
-                        inflight_source_fetches: &self.inflight_source_fetches,
-                        hash_key: hash_key.clone(),
-                        owner,
-                    }),
-                )
-            }
-        };
-
-        if let Some(wait) = existing_wait {
-            return match tokio::time::timeout(self.request_timeout, wait).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) | Err(_) => RouteFetchOutcome::Timeout,
-            };
-        }
-
-        let owner_guard = owner_guard.expect("new source fetch owns its inflight entry");
-        let result = self.request_from_read_sources_inner(request).await;
-        if let RouteFetchOutcome::Hit(hit) = &result {
-            let _ = self.local_store.put(request.hash, hit.clone()).await;
-        }
-        owner_guard.complete(result.clone());
-
-        result
-    }
-
-    async fn cancel_pending_peer_route(&self, request_key: PendingRequestKey) {
-        if let Some(pending) = self.pending_requests.write().await.remove(&request_key) {
-            let queried_peers: Vec<_> = pending
-                .iter()
-                .flat_map(|request| request.queried_peers.iter().cloned())
-                .collect();
-            self.release_queried_peer_requests(&queried_peers).await;
-        }
-    }
-
-    async fn cancel_losing_route(&self, request: BlobRequest, route: &ReadRoute) {
-        if matches!(route, ReadRoute::Peers(_)) {
-            self.cancel_pending_peer_route(PendingRequestKey::new(request.hash, request.htl))
-                .await;
-        }
-    }
-
-    async fn ranked_read_routes(&self, context: &MeshReadContext) -> Vec<RankedReadRoute> {
-        let mut routes = Vec::new();
-        let ordered_peers = if should_forward_htl(context.request_htl) {
-            self.ordered_connected_peers(context.exclude_peer_id.as_deref())
-                .await
-        } else {
-            Vec::new()
-        };
-        if !ordered_peers.is_empty() {
-            let best_peer_id = ordered_peers[0].clone();
-            let selector = self.peer_selector.read().await;
-            let best_peer = selector.get_stats(&best_peer_id).cloned();
-            let now = Instant::now();
-            let (score, has_history) = match best_peer.as_ref() {
-                Some(stats) => (
-                    peer_endpoint_score(stats, now),
-                    peer_endpoint_has_history(stats),
-                ),
-                None => (0.0, false),
-            };
-            routes.push(RankedReadRoute {
-                route: ReadRoute::Peers(ordered_peers),
-                best_endpoint_id: format!("peer:{best_peer_id}"),
-                score,
-                has_history,
-            });
-        }
-        let ordered_sources = self.ordered_read_sources().await;
-        if let Some(best_source) = ordered_sources.first() {
-            let stats = self.read_source_stats.read().await;
-            let best_source_stats = stats.get(best_source.id()).cloned().unwrap_or_default();
-            let now = Instant::now();
-            routes.push(RankedReadRoute {
-                route: ReadRoute::Sources,
-                best_endpoint_id: format!("source:{}", best_source.id()),
-                score: adaptive_source_score(&best_source_stats, now),
-                has_history: source_has_history(&best_source_stats),
-            });
-        }
-        if routes.len() <= 1 {
-            return routes;
-        }
-
-        routes.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| ranked_route_kind(&left.route).cmp(&ranked_route_kind(&right.route)))
-                .then_with(|| left.best_endpoint_id.cmp(&right.best_endpoint_id))
-                .then_with(|| left.route.id().cmp(right.route.id()))
-        });
-        routes
-    }
-
-    fn should_probe_multiple_routes(&self, routes: &[RankedReadRoute]) -> bool {
-        if routes.len() <= 1 {
-            return false;
-        }
-        if !routes[0].has_history || !routes[1].has_history {
-            return false;
-        }
-        (routes[0].score - routes[1].score) < SOURCE_SCORE_TIE_DELTA
-    }
-
-    async fn run_read_route(
-        &self,
-        hash: &Hash,
-        route: &ReadRoute,
-        context: &MeshReadContext,
-    ) -> RouteFetchOutcome {
-        match route {
-            ReadRoute::Peers(peer_ids) => {
-                self.request_from_ordered_peers(hash, peer_ids, context.request_htl)
-                    .await
-            }
-            ReadRoute::Sources => {
-                self.request_from_read_sources(BlobRequest {
-                    hash: *hash,
-                    htl: context.request_htl,
-                })
-                .await
-            }
-        }
-    }
-
     async fn request_from_mesh_with_context(
         &self,
         hash: &Hash,
         context: &MeshReadContext,
     ) -> RouteFetchOutcome {
-        let routes = self.ranked_read_routes(context).await;
-        match routes.as_slice() {
-            [] => RouteFetchOutcome::Miss,
-            [ranked] => self.run_read_route(hash, &ranked.route, context).await,
-            [first, second, ..] => {
-                if self.should_probe_multiple_routes(&routes) {
-                    let first_fut = self.run_read_route(hash, &first.route, context);
-                    let second_fut = self.run_read_route(hash, &second.route, context);
-                    tokio::pin!(first_fut);
-                    tokio::pin!(second_fut);
-                    let mut first_done = false;
-                    let mut second_done = false;
-                    let mut combined = RouteFetchOutcome::Miss;
-                    loop {
-                        tokio::select! {
-                            result = &mut first_fut, if !first_done => {
-                                first_done = true;
-                                if matches!(result, RouteFetchOutcome::Hit(_)) {
-                                    if !second_done {
-                                        self.cancel_losing_route(
-                                            BlobRequest {
-                                                hash: *hash,
-                                                htl: context.request_htl,
-                                            },
-                                            &second.route,
-                                        ).await;
-                                    }
-                                    return result;
-                                }
-                                combined = combined.combine_without_hit(result);
-                            }
-                            result = &mut second_fut, if !second_done => {
-                                second_done = true;
-                                if matches!(result, RouteFetchOutcome::Hit(_)) {
-                                    if !first_done {
-                                        self.cancel_losing_route(
-                                            BlobRequest {
-                                                hash: *hash,
-                                                htl: context.request_htl,
-                                            },
-                                            &first.route,
-                                        ).await;
-                                    }
-                                    return result;
-                                }
-                                combined = combined.combine_without_hit(result);
-                            }
-                            else => break,
-                        }
-                        if first_done && second_done {
-                            break;
-                        }
-                    }
-                    combined
-                } else {
-                    let mut combined = self.run_read_route(hash, &first.route, context).await;
-                    if matches!(combined, RouteFetchOutcome::Hit(_)) {
-                        return combined;
-                    }
-                    for ranked in routes.iter().skip(1) {
-                        let result = self.run_read_route(hash, &ranked.route, context).await;
-                        if matches!(result, RouteFetchOutcome::Hit(_)) {
-                            return result;
-                        }
-                        combined = combined.combine_without_hit(result);
-                    }
-                    combined
-                }
-            }
+        if !should_forward_htl(context.request_htl) {
+            return RouteFetchOutcome::Miss;
         }
+        let mut peers = self
+            .ordered_connected_peers(context.exclude_peer_id.as_deref())
+            .await;
+        if let Some(attempt_budget) = context.attempt_budget {
+            peers.truncate(attempt_budget);
+        }
+        if peers.is_empty() {
+            return RouteFetchOutcome::Miss;
+        }
+        let timeout = context
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(self.request_timeout)
+            .min(self.request_timeout);
+        if timeout.is_zero() {
+            return RouteFetchOutcome::Timeout;
+        }
+        self.request_from_ordered_peers(hash, &peers, context.request_htl, timeout)
+            .await
     }
 
     async fn begin_forward_request(
@@ -3440,20 +2666,18 @@ where
                 let context = MeshReadContext {
                     exclude_peer_id: Some(from_peer.clone()),
                     request_htl,
+                    deadline: None,
+                    attempt_budget: None,
                 };
                 this.request_from_mesh_with_context(&hash, &context).await
             } else {
                 if this.debug {
                     println!(
-                        "[MeshStoreCore] Serving request from delinquent peer {} via read sources only",
+                        "[MeshStoreCore] Refusing to forward request from delinquent peer {}",
                         from_peer
                     );
                 }
-                this.request_from_read_sources(BlobRequest {
-                    hash,
-                    htl: request_htl,
-                })
-                .await
+                RouteFetchOutcome::Miss
             };
             let requester_ids = this.take_forward_requesters(request_key).await;
             match result {
@@ -3467,9 +2691,7 @@ where
                             .await;
                     }
                 }
-                RouteFetchOutcome::Miss
-                | RouteFetchOutcome::Timeout
-                | RouteFetchOutcome::Failure => {}
+                RouteFetchOutcome::Miss | RouteFetchOutcome::Timeout => {}
             }
         });
     }
@@ -3726,6 +2948,21 @@ where
     F: PeerLinkFactory + Send + Sync + 'static,
 {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.route_with_context(
+            request,
+            BlobRouteContext {
+                deadline: (Instant::now() + self.request_timeout).into(),
+                attempt_budget: self.routing.dispatch.max_fanout.max(1),
+            },
+        )
+        .await
+    }
+
+    async fn route_with_context(
+        &self,
+        request: BlobRequest,
+        route_context: BlobRouteContext,
+    ) -> Result<BlobReply, StoreError> {
         if request.htl > MAX_HTL {
             return Err(StoreError::Other(format!(
                 "Hashtree blob HTL {} exceeds the maximum of {MAX_HTL}",
@@ -3754,6 +2991,8 @@ where
         let context = MeshReadContext {
             exclude_peer_id: None,
             request_htl: request.htl,
+            deadline: Some(route_context.deadline.into()),
+            attempt_budget: Some(route_context.attempt_budget),
         };
         match self
             .request_from_mesh_with_context(&request.hash, &context)
@@ -3776,9 +3015,6 @@ where
             RouteFetchOutcome::Miss => Ok(BlobReply::NoResult),
             RouteFetchOutcome::Timeout => Err(StoreError::Other(
                 "blob retrieval deadline expired before the search completed".to_string(),
-            )),
-            RouteFetchOutcome::Failure => Err(StoreError::Other(
-                "blob retrieval failed before the search completed".to_string(),
             )),
         }
     }

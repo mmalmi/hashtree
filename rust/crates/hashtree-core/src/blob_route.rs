@@ -1,6 +1,7 @@
 //! One-hop blob routing values and their compact process/network wire codec.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -32,9 +33,29 @@ pub enum BlobReply {
     NoResult,
 }
 
+/// Per-search limits supplied by an outer router to one opaque route.
+///
+/// These limits are process-local and are deliberately not part of the
+/// published [`BlobRequest`] wire format. Terminal routes may ignore the
+/// attempt budget; composite routes use it to bound their own internal peer
+/// selection.
+#[derive(Clone, Copy, Debug)]
+pub struct BlobRouteContext {
+    pub deadline: Instant,
+    pub attempt_budget: usize,
+}
+
 #[async_trait]
 pub trait BlobRoute: Send + Sync {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError>;
+
+    async fn route_with_context(
+        &self,
+        request: BlobRequest,
+        _context: BlobRouteContext,
+    ) -> Result<BlobReply, StoreError> {
+        self.route(request).await
+    }
 }
 
 /// A terminal route that performs exactly one lookup and does not interpret HTL.

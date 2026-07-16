@@ -57,8 +57,9 @@ pub mod visibility;
 // Re-exports for convenience
 pub use blob_route::{
     decode_blob_reply_header, decode_blob_request, encode_blob_reply_header, encode_blob_request,
-    BlobCodecError, BlobReply, BlobReplyHeader, BlobRequest, BlobRoute, StoreBlobRoute,
-    BLOB_DEFAULT_HTL, BLOB_MAX_BYTES, BLOB_MAX_HTL, BLOB_REPLY_HEADER_BYTES, BLOB_REQUEST_BYTES,
+    BlobCodecError, BlobReply, BlobReplyHeader, BlobRequest, BlobRoute, BlobRouteContext,
+    StoreBlobRoute, BLOB_DEFAULT_HTL, BLOB_MAX_BYTES, BLOB_MAX_HTL, BLOB_REPLY_HEADER_BYTES,
+    BLOB_REQUEST_BYTES,
 };
 
 // Main API - unified HashTree
