@@ -87,5 +87,6 @@ grep -F -- "mkdir -p /target-dir/release /target-dir/x86_64-unknown-linux-musl/r
 
 test -f "${OUTPUT_DIR}/hashtree-x86_64-unknown-linux-musl.tar.gz"
 test ! -e "${OUTPUT_DIR}/hashtree-x86_64-unknown-linux-musl.sha256"
+! tar -tzf "${OUTPUT_DIR}/hashtree-x86_64-unknown-linux-musl.tar.gz" | grep -F '/._' >/dev/null
 
 echo "test_build_release_docker_invocation.sh passed"

@@ -394,7 +394,7 @@ package_unix_target() {
 
     (
         cd "$stage_dir"
-        tar -czf "${OUTPUT_DIR}/hashtree-${target}.tar.gz" hashtree
+        COPYFILE_DISABLE=1 tar -czf "${OUTPUT_DIR}/hashtree-${target}.tar.gz" hashtree
     )
 
     rm -rf "$stage_dir"
