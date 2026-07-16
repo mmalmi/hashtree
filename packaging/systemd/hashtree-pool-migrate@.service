@@ -1,0 +1,19 @@
+[Unit]
+Description=Hash-verified Hashtree LMDB migration (%i)
+Documentation=https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=hashtree
+Group=hashtree
+EnvironmentFile=/etc/hashtree/pool-migrate-%i.env
+ExecStart=/usr/local/bin/htree-pool-migration storage pool migrate-lmdb --data-dir ${HTREE_POOL_TARGET_DATA_DIR} --source ${HTREE_POOL_SOURCE_LMDB_DIR} --source-external-dir ${HTREE_POOL_SOURCE_EXTERNAL_DIR} --state-file ${HTREE_POOL_STATE_FILE} --batch-size ${HTREE_POOL_BATCH_SIZE} --resume
+Restart=on-failure
+RestartSec=30s
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+NoNewPrivileges=true
+UMask=0027
