@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.88 - 2026-07-16
+
+### Fixed
+
+- Reused the live LMDB store while `htree add --publish` uploads the new DAG,
+  avoiding a conflicting second environment open after the store resizes.
+- Added a real CLI-process regression covering explicit publication from a
+  resized store through both the file-server and Nostr stages.
+
 ## 0.2.87 - 2026-07-16
 
 ### Fixed
