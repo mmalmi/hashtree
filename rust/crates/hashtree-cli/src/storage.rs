@@ -9,7 +9,10 @@ use hashtree_core::{
 };
 use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
-use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobStore};
+use hashtree_lmdb::{
+    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
+    ExternalBlobOptions, LmdbBlobStore,
+};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
 use lru::LruCache;
@@ -49,7 +52,7 @@ const LMDB_METADATA_MIN_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const LMDB_METADATA_MAX_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const LMDB_METADATA_STORAGE_RATIO_DIVISOR: u64 = 1024;
 const LMDB_METADATA_REOPEN_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
-#[cfg(feature = "lmdb")]
+#[cfg(all(test, feature = "lmdb"))]
 const LMDB_BLOB_MIN_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const ACCESS_UPDATE_INTERVAL_SECS: u64 = 300;
 const ACCESS_UPDATE_GATE_MAX_ENTRIES: usize = 4096;
@@ -373,33 +376,6 @@ fn open_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
     }
 }
 
-#[cfg(feature = "lmdb")]
-fn open_unbounded_lmdb_blob_store<P: AsRef<Path>>(
-    path: P,
-    map_size_bytes: Option<u64>,
-) -> Result<LmdbBlobStore, StoreError> {
-    open_unbounded_lmdb_blob_store_with_external_dir_env(path, map_size_bytes, None)
-}
-
-#[cfg(feature = "lmdb")]
-fn open_unbounded_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
-    path: P,
-    map_size_bytes: Option<u64>,
-    external_dir_env: Option<&str>,
-) -> Result<LmdbBlobStore, StoreError> {
-    std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
-    remove_stale_fs_blob_shards(path.as_ref())?;
-    let external_blobs = Some(external_blob_options_for(path.as_ref(), external_dir_env));
-    match map_size_bytes {
-        Some(map_size_bytes) => {
-            let map_size = usize::try_from(align_lmdb_map_size(map_size_bytes))
-                .map_err(|_| StoreError::Other("LMDB map size exceeds usize".to_string()))?;
-            LmdbBlobStore::with_map_size_and_external_blob_options(path, map_size, external_blobs)
-        }
-        None => LmdbBlobStore::with_external_blob_options(path, external_blobs),
-    }
-}
-
 impl LocalStore {
     /// Create a new unbounded local store.
     ///
@@ -484,36 +460,14 @@ impl LocalStore {
         match backend {
             StorageBackend::Fs => Ok(LocalStore::Fs(FsBlobStore::new(path)?)),
             #[cfg(feature = "lmdb")]
-            StorageBackend::Lmdb => {
-                if let Some(hot_path) = lmdb_hot_blob_dir_for(path.as_ref()) {
-                    let legacy_path = path.as_ref().to_path_buf();
-                    if hot_path != legacy_path {
-                        let primary = open_unbounded_lmdb_blob_store_with_external_dir_env(
-                            &hot_path,
-                            _map_size_bytes,
-                            Some(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV),
-                        )?;
-                        let legacy = open_unbounded_lmdb_blob_store_with_external_dir_env(
-                            &legacy_path,
-                            _map_size_bytes,
-                            Some(LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV),
-                        )?;
-                        tracing::info!(
-                            "Using tiered LMDB blob storage: primary={}, legacy={}",
-                            hot_path.display(),
-                            legacy_path.display()
-                        );
-                        return Ok(LocalStore::TieredLmdb {
-                            primary: Box::new(primary),
-                            legacy: Box::new(legacy),
-                        });
+            StorageBackend::Lmdb => Ok(
+                match open_configured_lmdb_blob_store(path, _map_size_bytes)? {
+                    ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
+                    ConfiguredLmdbBlobStore::Tiered { primary, legacy } => {
+                        LocalStore::TieredLmdb { primary, legacy }
                     }
-                }
-                Ok(LocalStore::Lmdb(open_unbounded_lmdb_blob_store(
-                    path,
-                    _map_size_bytes,
-                )?))
-            }
+                },
+            ),
             #[cfg(not(feature = "lmdb"))]
             StorageBackend::Lmdb => {
                 tracing::warn!(
@@ -929,6 +883,29 @@ impl Store for LocalStore {
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.delete_sync(hash)
     }
+}
+
+fn open_local_blob_store_with_options<P: AsRef<Path>>(
+    data_dir: P,
+    backend: &StorageBackend,
+    max_size_bytes: u64,
+) -> Result<Arc<LocalStore>, StoreError> {
+    #[cfg(feature = "lmdb")]
+    if *backend == StorageBackend::Lmdb {
+        return open_shared_lmdb_blob_store(data_dir, max_size_bytes).map(|store| {
+            Arc::new(match store {
+                ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
+                ConfiguredLmdbBlobStore::Tiered { primary, legacy } => {
+                    LocalStore::TieredLmdb { primary, legacy }
+                }
+            })
+        });
+    }
+
+    #[cfg(not(feature = "lmdb"))]
+    let _ = max_size_bytes;
+
+    LocalStore::new_unbounded(data_dir.as_ref().join("blobs"), backend).map(Arc::new)
 }
 
 #[cfg(feature = "s3")]
@@ -1724,18 +1701,8 @@ impl HashtreeStore {
         // Intentionally keep the raw blob backend unbounded here. HashtreeStore
         // owns quota policy above this layer, where it can coordinate eviction
         // with tree refs, blob ownership, pins, and S3 archival behavior.
-        #[cfg(feature = "lmdb")]
-        let blob_map_size = Some(max_size_bytes.max(LMDB_BLOB_MIN_MAP_SIZE_BYTES));
-        #[cfg(not(feature = "lmdb"))]
-        let blob_map_size = None;
-        let local_store = Arc::new(
-            LocalStore::new_unbounded_with_lmdb_map_size(
-                path.join("blobs"),
-                backend,
-                blob_map_size,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?,
-        );
+        let local_store = open_local_blob_store_with_options(path, backend, max_size_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?;
 
         // Create storage router with optional S3
         #[cfg(feature = "s3")]
@@ -3459,6 +3426,48 @@ mod tests {
 
         let local = store.router.local_store();
         assert!(matches!(local.as_ref(), LocalStore::TieredLmdb { .. }));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn lightweight_shared_helper_matches_daemon_tier_and_external_options() -> Result<()> {
+        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let data_dir = temp.path().join("store");
+        let legacy = data_dir.join("blobs");
+        let hot = temp.path().join("hot-main-blobs");
+        let hot_external = temp.path().join("hot-external");
+        let legacy_external = temp.path().join("legacy-external");
+        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
+        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
+        let _hot_external_guard = EnvGuard::set(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV, &hot_external);
+        let _legacy_external_guard =
+            EnvGuard::set(LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV, &legacy_external);
+        let _min_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV, "1");
+        let _sync_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0");
+
+        let max_size_bytes = 128 * 1024 * 1024;
+        let owner = HashtreeStore::with_options_and_backend(
+            &data_dir,
+            None,
+            max_size_bytes,
+            true,
+            &StorageBackend::Lmdb,
+        )?;
+        let shared = open_shared_lmdb_blob_store(&data_dir, max_size_bytes)?;
+        assert!(matches!(shared, ConfiguredLmdbBlobStore::Tiered { .. }));
+
+        let data = b"one tiered blob visible through the lightweight helper".repeat(4);
+        let hash = sha256(&data);
+        assert!(owner.router().put_sync(hash, &data)?);
+        assert_eq!(shared.get_sync(&hash)?, Some(data));
+        assert!(
+            count_files_under(&hot_external)? > 0,
+            "owner and lightweight opener must agree on the hot external directory"
+        );
+        assert_eq!(count_files_under(&legacy_external)?, 0);
 
         Ok(())
     }

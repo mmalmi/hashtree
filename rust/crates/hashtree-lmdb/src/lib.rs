@@ -1,5 +1,12 @@
 //! LMDB-backed content-addressed blob storage.
 
+mod configured;
+
+pub use configured::{
+    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
+    LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES,
+};
+
 use async_trait::async_trait;
 use hashtree_core::store::{PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{to_hex, types::Hash};
@@ -158,7 +165,6 @@ pub struct LmdbBlobStore {
     /// Small aggregate counters used by quota checks and stats.
     stats: Database<Bytes, Bytes>,
     max_bytes: AtomicU64,
-    current_bytes: AtomicU64,
     next_order: AtomicU64,
     external_blobs: Option<ExternalBlobConfig>,
 }
@@ -213,7 +219,7 @@ impl LmdbBlobStore {
             external_blobs,
         )?;
         store.max_bytes.store(max_bytes, Ordering::Relaxed);
-        let current = store.current_bytes.load(Ordering::Relaxed);
+        let current = store.total_bytes()?;
         if max_bytes > 0 && current > max_bytes {
             let target = max_bytes.saturating_mul(9) / 10;
             store.evict_to_target(current, target)?;
@@ -334,7 +340,6 @@ impl LmdbBlobStore {
             pins,
             stats,
             max_bytes: AtomicU64::new(0),
-            current_bytes: AtomicU64::new(totals.total_bytes),
             next_order: AtomicU64::new(next_order),
             external_blobs: external_blobs(path_ref),
         })
@@ -605,8 +610,15 @@ impl LmdbBlobStore {
         self.env.force_sync().map_err(map_heed_error)
     }
 
+    fn total_bytes(&self) -> Result<u64, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        Ok(Self::read_store_totals(self.stats, &rtxn)?
+            .unwrap_or_default()
+            .total_bytes)
+    }
+
     fn evict_for_write_pressure(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
-        let current = self.current_bytes.load(Ordering::Relaxed);
+        let current = self.total_bytes()?;
         if current == 0 {
             return Ok(0);
         }
@@ -622,7 +634,7 @@ impl LmdbBlobStore {
             return Ok(0);
         }
 
-        let current = self.current_bytes.load(Ordering::Relaxed);
+        let current = self.total_bytes()?;
         if current <= max {
             return Ok(0);
         }
@@ -856,8 +868,6 @@ impl LmdbBlobStore {
             match self.put_sync_attempt(hash, data) {
                 Ok(inserted) => {
                     if inserted {
-                        self.current_bytes
-                            .fetch_add(incoming_bytes, Ordering::Relaxed);
                         self.enforce_max_bytes_after_insert(incoming_bytes)?;
                     }
                     return Ok(inserted);
@@ -905,8 +915,6 @@ impl LmdbBlobStore {
             match self.put_many_sync_attempt(total, &write_items) {
                 Ok(report) => {
                     if report.inserted_bytes > 0 {
-                        self.current_bytes
-                            .fetch_add(report.inserted_bytes, Ordering::Relaxed);
                         self.enforce_max_bytes_after_insert(report.inserted_bytes)?;
                     }
                     return Ok(report);
@@ -1101,13 +1109,10 @@ impl LmdbBlobStore {
             .write_txn()
             .map_err(|e| StoreError::Other(e.to_string()))?;
         let external_path = self.external_blob_path_in_txn(&wtxn, hash)?;
-        let (existed, freed) = self.delete_blob_in_txn(&mut wtxn, hash)?;
+        let (existed, _) = self.delete_blob_in_txn(&mut wtxn, hash)?;
 
         wtxn.commit()
             .map_err(|e| StoreError::Other(e.to_string()))?;
-        if freed > 0 {
-            self.current_bytes.fetch_sub(freed, Ordering::Relaxed);
-        }
         if existed {
             self.remove_external_blob_file(external_path);
         }
@@ -1236,7 +1241,6 @@ impl LmdbBlobStore {
                 let _ = fs::remove_file(path);
             }
             if batch_freed > 0 {
-                self.current_bytes.fetch_sub(batch_freed, Ordering::Relaxed);
                 freed_total = freed_total.saturating_add(batch_freed);
             }
         }
@@ -1975,7 +1979,7 @@ impl Store for LmdbBlobStore {
             return Ok(0);
         }
 
-        let current = self.current_bytes.load(Ordering::Relaxed);
+        let current = self.total_bytes()?;
         if current <= max {
             return Ok(0);
         }
