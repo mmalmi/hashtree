@@ -321,6 +321,12 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
     }
 
     if let Some(ref_name) = publish.as_deref() {
+        if !local && !write_servers.is_empty() {
+            background_blossom_push(&data_dir, &cid_for_push, &write_servers)
+                .await
+                .context("Failed to push content to file servers")?;
+        }
+
         let config = Config::load()?;
         let resolver_config = NostrResolverConfig {
             relays: config.nostr.relays.clone(),
@@ -341,56 +347,31 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         let cid = Cid { hash, key };
         let nostr_key = format!("{}/{}", npub, ref_name);
 
-        match RootResolver::publish(&resolver, &nostr_key, &cid).await {
-            Ok(_) => {
-                print!(
-                    "{}",
-                    render_add_output(
-                        &path_display,
-                        &display_route,
-                        &display_root,
-                        &hash_hex,
-                        key_hex.as_deref(),
-                        site_entry.as_deref(),
-                        Some(PublishedAddSummary {
-                            nostr_key: &nostr_key,
-                            npub: &npub,
-                            ref_name,
-                            identity_was_generated: was_generated,
-                        }),
-                    )
-                );
-            }
-            Err(e) => {
-                print!(
-                    "{}",
-                    render_add_output(
-                        &path_display,
-                        &display_route,
-                        &display_root,
-                        &hash_hex,
-                        key_hex.as_deref(),
-                        site_entry.as_deref(),
-                        None,
-                    )
-                );
-                if was_generated {
-                    println!("  identity: {} (new)", npub);
-                }
-                eprintln!("  publish failed: {}", e);
-            }
+        let publish_result = RootResolver::publish(&resolver, &nostr_key, &cid).await;
+        let stop_result = RootResolver::stop(&resolver).await;
+        let published = publish_result.context("Failed to publish Nostr root")?;
+        stop_result.context("Failed to stop Nostr resolver")?;
+        if !published {
+            anyhow::bail!("No configured Nostr relay accepted the published root");
         }
 
-        let _ = RootResolver::stop(&resolver).await;
-
-        if !local && !write_servers.is_empty() {
-            if let Err(err) = background_blossom_push(&data_dir, &cid_for_push, &write_servers)
-                .await
-                .context("Failed to push content to file servers")
-            {
-                eprintln!("  file server push failed: {}", err);
-            }
-        }
+        print!(
+            "{}",
+            render_add_output(
+                &path_display,
+                &display_route,
+                &display_root,
+                &hash_hex,
+                key_hex.as_deref(),
+                site_entry.as_deref(),
+                Some(PublishedAddSummary {
+                    nostr_key: &nostr_key,
+                    npub: &npub,
+                    ref_name,
+                    identity_was_generated: was_generated,
+                }),
+            )
+        );
     }
 
     Ok(())
