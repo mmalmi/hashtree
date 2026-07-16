@@ -57,6 +57,12 @@ done
 EOF
 chmod +x "${BIN_DIR}/docker"
 
+cat >"${BIN_DIR}/cargo" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'cargo 1.97.1 (test fixture)'
+EOF
+chmod +x "${BIN_DIR}/cargo"
+
 PATH="${BIN_DIR}:$PATH" TEST_LOG_DIR="${LOG_DIR}" "${BUILD_SCRIPT}" \
     --version v0.2.3 \
     --repo-dir "${SOURCE_REPO_DIR}" \
@@ -64,8 +70,7 @@ PATH="${BIN_DIR}:$PATH" TEST_LOG_DIR="${LOG_DIR}" "${BUILD_SCRIPT}" \
     --target-dir "${TARGET_DIR}" \
     --targets "x86_64-unknown-linux-musl" \
     --linux-builder docker \
-    --docker-bin docker \
-    --docker-rust-image rust:test
+    --docker-bin docker
 
 grep -F -- "--platform linux/amd64" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "-v ${SOURCE_REPO_DIR}:/work" "${LOG_DIR}/docker.log" >/dev/null
@@ -73,7 +78,7 @@ grep -F -- "-v ${TARGET_DIR}:/target-dir" "${LOG_DIR}/docker.log" >/dev/null
 ! grep -F -- ":/fips" "${LOG_DIR}/docker.log" >/dev/null
 ! grep -F -- ":/cashu-service" "${LOG_DIR}/docker.log" >/dev/null
 ! grep -F -- ":/nostr-social-graph" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "rust:test" "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- "rust:1.97-alpine3.22" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--target x86_64-unknown-linux-musl" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--jobs \"\${CARGO_BUILD_JOBS:-4}\"" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--locked" "${LOG_DIR}/docker.log" >/dev/null

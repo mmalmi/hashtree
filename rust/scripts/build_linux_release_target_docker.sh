@@ -52,7 +52,12 @@ default_docker_rust_image() {
         version="$("$CARGO_BIN" --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
     fi
     if [ -z "$version" ]; then
-        version="1.94.1"
+        version="1.94"
+    else
+        # Official Rust images publish stable minor tags before every patch-level
+        # Alpine tag. Following the installed patch version made release builds
+        # race Docker Hub whenever rustup advanced first (for example 1.97.1).
+        version="${version%.*}"
     fi
     printf 'rust:%s-alpine3.22\n' "$version"
 }
