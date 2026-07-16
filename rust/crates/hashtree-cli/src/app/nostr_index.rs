@@ -24,6 +24,8 @@ const LATEST_ROOT_FILE: &str = "latest-root.txt";
 const LATEST_REPORT_FILE: &str = "latest-report.json";
 const CHECKPOINT_ROOT_FILE: &str = "checkpoint-root.txt";
 const CHECKPOINT_REPORT_FILE: &str = "checkpoint-report.json";
+const MIRROR_STATE_DIR: &str = "nostr-mirror";
+const MIRROR_UPLOADED_EVENT_ROOT_FILE: &str = "nostr-event-index.uploaded-root";
 const TOP_ITEMS_LIMIT: usize = 20;
 const NEGENTROPY_NIP: u16 = 77;
 
@@ -728,14 +730,18 @@ fn persist_latest_root(data_dir: &Path, root: &Cid) -> Result<()> {
 
 fn load_existing_root(data_dir: &Path) -> Result<Option<Cid>> {
     let index_dir = data_dir.join(INDEX_DIR);
-    let latest_root = index_dir.join(LATEST_ROOT_FILE);
-    if latest_root.exists() {
-        return load_root_from_path(&latest_root);
-    }
-
-    let checkpoint_root = index_dir.join(CHECKPOINT_ROOT_FILE);
-    if checkpoint_root.exists() {
-        return load_root_from_path(&checkpoint_root);
+    for path in [
+        index_dir.join(LATEST_ROOT_FILE),
+        index_dir.join(CHECKPOINT_ROOT_FILE),
+        data_dir
+            .join(MIRROR_STATE_DIR)
+            .join(MIRROR_UPLOADED_EVENT_ROOT_FILE),
+    ] {
+        if path.exists() {
+            if let Some(root) = load_root_from_path(&path)? {
+                return Ok(Some(root));
+            }
+        }
     }
 
     Ok(None)
@@ -1051,6 +1057,50 @@ mod tests {
             &query_output.events[0],
             &["rater", &rater.public_key().to_hex()]
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nostr_index_query_uses_daemon_mirror_root_by_default() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let store = Arc::new(HashtreeStore::new(temp_dir.path()).expect("open store"));
+        let author = Keys::generate();
+        let event = event_builder!(Kind::TextNote, "daemon mirrored note")
+            .custom_created_at(Timestamp::from(42))
+            .sign_with_keys(&author)
+            .expect("sign mirrored note");
+        let event_store = NostrEventStore::new(store.store_arc());
+        let root = event_store
+            .build(
+                None,
+                vec![hashtree_nostr::stored_event_from_nostr_sdk_event(&event)],
+            )
+            .await
+            .expect("build mirrored root")
+            .expect("mirrored root");
+        let mirror_state_dir = temp_dir.path().join("nostr-mirror");
+        std::fs::create_dir_all(&mirror_state_dir).expect("create mirror state dir");
+        std::fs::write(
+            mirror_state_dir.join("nostr-event-index.uploaded-root"),
+            format!("{root}\n"),
+        )
+        .expect("write daemon mirror root");
+        drop(event_store);
+        drop(store);
+
+        let output = run_nostr_index_query(
+            temp_dir.path().to_path_buf(),
+            NostrIndexQueryOptions {
+                root: None,
+                filter_json: r#"{"kinds":[1]}"#.to_string(),
+                limit: 10,
+                out: Some(temp_dir.path().join("daemon-query.json")),
+            },
+        )
+        .await
+        .expect("query daemon mirror root");
+
+        assert_eq!(output.count, 1);
+        assert_eq!(output.events[0].id, event.id.to_hex());
     }
 
     fn signed_rating_fact_event(

@@ -342,7 +342,8 @@ pub struct NostrConfig {
     /// Kinds mirrored from upstream relays for the trusted hashtree index.
     #[serde(default = "default_nostr_mirror_kinds")]
     pub mirror_kinds: Vec<u16>,
-    /// How many graph authors to reconcile before checkpointing the mirror root.
+    /// Authors per ordinary history chunk and between durable mirror-root publications.
+    /// Full-history fetches use one-author chunks but keep this publication cadence.
     #[serde(default = "default_nostr_history_sync_author_chunk_size")]
     pub history_sync_author_chunk_size: usize,
     /// Maximum mirrored history events to fetch per author during history sync.

@@ -37,6 +37,34 @@ const entries = await btree.range(root2, 'a', 'z');
 - Efficient range queries
 - Configurable branching factor
 
+## Ranked document segments
+
+`RankedSearchIndex` builds immutable fielded-search segments without changing the
+legacy `SearchIndex` API. A segment root links separate B-trees for postings,
+per-term document frequency, per-document field lengths, and optional stored
+values. Queries read only the requested term postings and candidate statistics;
+they do not scan stored documents.
+
+```typescript
+import { RankedSearchIndex } from '@hashtree/index';
+
+const search = new RankedSearchIndex(store);
+const segment = await search.buildSegment(events, {
+  fields: {
+    title: { boost: 4, lengthNormalization: 0.3 },
+    content: { boost: 1, lengthNormalization: 0.75 },
+  },
+});
+
+const hits = await search.search(segment, 'offline nostr', { operator: 'and' });
+```
+
+The `hashtree/ranked-search-segment@1` manifest records NFKC/lowercase
+normalization, BM25F parameters, field/corpus length statistics, and positional
+field limits. Quoted phrases are strict and use every position retained within
+the configured field token limit. Hashtags are indexed both as ordinary terms
+and as exact `#tag` terms.
+
 ## License
 
 MIT
