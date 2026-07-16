@@ -38,20 +38,26 @@ Hashtree's canonical decentralized content-routing layer. Only forwarding from
 one Hashtree mesh peer to another consumes one HTL; terminal adapters and FIPS
 routing hops do not consume it.
 
-## Optional Same-host Store
+## Same-host And Standalone Routes
 
-Rust `SameHostBlobStore` wraps an ordinary local `Store`. Local writes,
-deletes, pins, limits, and statistics never depend on another process. On a
-local miss it reads FIPS's authenticated in-memory capability roster, races at
-most four ranked `hashtree.blob/1` providers, accepts only a hash-valid result,
-and caches it while preserving existing pins.
+Trusted same-user processes on one host normally open the application's shared
+LMDB `PoolStore` directly. The pool is the one explicit write destination and
+exclusively selects among its opaque storage members. The read-only `BlobRouter`
+treats that complete pool as one route; it does not choose pool members or own
+writes, deletes, pins, quotas, or garbage collection.
+
+When a process or host boundary is required, `FipsBlobRoute` owns the
+authenticated in-memory capability roster and exclusively selects among its
+`hashtree.blob/1` providers. The outer `BlobRouter` sees that provider set as
+one composite route, passes a deadline and bounded attempt budget, accepts only
+hash-valid data, and remains free to continue to another route.
 
 The provider uses fips-tcp's capability-aware listener bind, so the capability
 appears only after the FSP port is owned and disappears with the listener.
-Client-only stores reject every inbound blob session. FIPS's fixed loopback UDP
-rendezvous (`127.0.0.1:21211` by default) and ordinary Noise IK establish the
-links; this adapter adds no filesystem registry, bootstrap protocol,
-shared-egress role, or fallback blob framing.
+Client-only endpoints reject every inbound blob session. FIPS's fixed loopback
+UDP rendezvous (`127.0.0.1:21211` by default) and ordinary Noise IK establish
+the links; this adapter adds no filesystem registry, bootstrap protocol,
+shared-egress role, write router, or fallback blob framing.
 
 ## Result Semantics
 
@@ -59,10 +65,9 @@ Transport uncertainty must not become false absence:
 
 - An explicit `BlobReply::NoResult` means only that one provider or route
   produced no data. It is never cached and does not cancel other routes.
-- For the optional same-host Store wrapper, no provider, NoResult, timeout,
-  reset, provider death, and malformed or corrupt replies all leave the
-  standalone Store/resolver path available. One local provider cannot suppress
-  standalone storage or mesh lookup.
+- No provider, NoResult, timeout, reset, provider death, and malformed or
+  corrupt replies remain local to the FIPS composite route. They do not suppress
+  a shared-store, terminal, remote, or HTL-resolver route in the active search.
 - A transport failure remains a failure for that route; it is not rewritten as
   NoResult or global absence. If the standalone route also fails, its error is
   returned.
