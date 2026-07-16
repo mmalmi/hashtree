@@ -99,8 +99,9 @@ export interface RootResolveOptions {
 }
 
 export type WorkerRequest =
-  | { type: 'init'; id: string; config: WorkerConfig }
+  | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean }
   | { type: 'close'; id: string }
+  | { type: 'setP2PProviderState'; id: string; enabled: boolean }
   | { type: 'putBlob'; id: string; data: Uint8Array; mimeType?: string; upload?: boolean }
   | { type: 'putBlock'; id: string; data: Uint8Array; hashHex?: string; mimeType?: string; upload?: boolean }
   | { type: 'putBlocks'; id: string; blocks: RawBlockInput[]; upload?: boolean }
@@ -117,6 +118,7 @@ export type WorkerRequest =
       forPeer?: boolean;
       sourceIds?: string[];
       skipPrimary?: boolean;
+      htl?: number;
     }
   | {
       type: 'hasBlob';
@@ -138,7 +140,7 @@ export type WorkerResponse =
   | { type: 'ready'; id: string }
   | { type: 'error'; id?: string; error: string }
   | { type: 'diagnostic'; event: WorkerDiagnosticEvent }
-  | { type: 'p2pFetch'; requestId: string; hashHex: string; peerId?: string }
+  | { type: 'p2pFetch'; requestId: string; hashHex: string; htl: number; peerId?: string }
   | { type: 'p2pPeerList'; requestId: string }
   | { type: 'blobStreamStarted'; id: string; streamId: string }
   | { type: 'blobStored'; id: string; hashHex: string; nhash: string }

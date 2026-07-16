@@ -1,10 +1,7 @@
-import type { Hash, Store } from '@hashtree/core';
+import { type BlobRoute, type Hash, type Store } from '@hashtree/core';
 import { type RequestDispatchConfig } from '@hashtree/mesh';
-export interface MeshReadSource {
-    id: string;
-    groupId?: string;
+export interface MeshReadSource extends BlobRoute {
     canWrite?: boolean;
-    get(hash: Hash): Promise<Uint8Array | null>;
     isAvailable?: () => boolean;
 }
 export type MeshReadEndpoint = MeshReadSource;
@@ -12,6 +9,7 @@ export type MeshReadEndpointProvider = () => MeshReadEndpoint[];
 export interface MeshRouterGetOptions {
     sourceIds?: readonly string[];
     skipPrimary?: boolean;
+    htl?: number;
 }
 export interface MeshRouterGetResult {
     data: Uint8Array;
@@ -55,21 +53,18 @@ export declare class MeshRouterStore implements Store {
     removeSource(sourceId: string): void;
     getDetailed(hash: Hash, options?: MeshRouterGetOptions): Promise<MeshRouterGetResult | null>;
     private loadFromSourcesShared;
+    private finishRead;
     getSourceStats(): Record<string, SourceStats>;
     put(hash: Hash, data: Uint8Array): Promise<boolean>;
     get(hash: Hash): Promise<Uint8Array | null>;
     has(hash: Hash): Promise<boolean>;
     delete(hash: Hash): Promise<boolean>;
     private readPrimary;
-    private primaryResult;
     private pendingReadKey;
+    private verifyData;
     private getCandidateSources;
     private orderedSources;
-    private shouldProbeMultipleSources;
-    private dispatchFor;
     private createInFlightSourceRequest;
-    private sourceGroupKey;
-    private hasPendingCrossGroupRequests;
     private waitForNextResult;
     private loadFromSources;
     private statsFor;

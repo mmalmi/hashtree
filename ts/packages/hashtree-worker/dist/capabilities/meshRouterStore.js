@@ -1,4 +1,4 @@
-import { toHex } from '@hashtree/core';
+import { BLOB_DEFAULT_HTL, createBlobRequest, sha256, toHex, } from '@hashtree/core';
 import { buildHedgedWavePlan, normalizeDispatchConfig, } from '@hashtree/mesh';
 const DEFAULT_DISPATCH = {
     initialFanout: 1,
@@ -10,7 +10,14 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_500;
 const DEFAULT_PRIMARY_READ_TIMEOUT_MS = 300;
 const INITIAL_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 10_000;
-const SCORE_TIE_DELTA = 0.15;
+function errorFrom(error) {
+    return error instanceof Error ? error : new Error(String(error));
+}
+function combineErrors(errors) {
+    if (errors.length === 1)
+        return errors[0];
+    return new AggregateError(errors, `Blob retrieval failed: ${errors.map((error) => error.message).join('; ')}`);
+}
 function defaultStats() {
     return {
         requests: 0,
@@ -30,9 +37,6 @@ function latencyScore(stats) {
     if (stats.srttMs <= 0)
         return 0.5;
     return Math.min(1, 500 / (stats.srttMs + 50));
-}
-function hasHistory(stats) {
-    return stats.requests > 0 || stats.successes > 0 || stats.misses > 0 || stats.failures > 0 || stats.timeouts > 0;
 }
 function scoreSource(stats, now) {
     if (stats.backedOffUntilMs && stats.backedOffUntilMs > now) {
@@ -83,56 +87,45 @@ export class MeshRouterStore {
         this.sources.delete(sourceId);
     }
     async getDetailed(hash, options = {}) {
-        if (!options.skipPrimary) {
-            const primary = this.readPrimary(hash);
-            if (this.primaryReadTimeoutMs <= 0) {
-                const local = await primary;
-                if (local) {
-                    return this.primaryResult(local);
-                }
-                return await this.loadFromSourcesShared(hash, options);
-            }
-            else {
-                const localWindowResult = await Promise.race([
-                    primary.then((data) => ({ kind: 'primary', data })),
-                    new Promise((resolve) => {
-                        setTimeout(() => resolve({ kind: 'timeout' }), this.primaryReadTimeoutMs);
-                    }),
-                ]);
-                if (localWindowResult.kind === 'primary') {
-                    if (localWindowResult.data) {
-                        return this.primaryResult(localWindowResult.data);
-                    }
-                    return await this.loadFromSourcesShared(hash, options);
-                }
-                const remotePromise = this.loadFromSourcesShared(hash, options);
-                const firstResolved = await Promise.race([
-                    primary.then((data) => ({
-                        source: 'primary',
-                        result: data ? this.primaryResult(data) : null,
-                    })),
-                    remotePromise.then((result) => ({
-                        source: 'remote',
-                        result,
-                    })),
-                ]);
-                if (firstResolved.result) {
-                    return firstResolved.result;
-                }
-                if (firstResolved.source === 'primary') {
-                    return await remotePromise;
-                }
-                const eventualPrimary = await primary;
-                return eventualPrimary ? this.primaryResult(eventualPrimary) : null;
-            }
+        const loadRemote = () => this.loadFromSourcesShared(hash, options);
+        if (options.skipPrimary) {
+            return this.finishRead(await loadRemote());
         }
-        return await this.loadFromSourcesShared(hash, options);
+        const primary = this.readPrimary(hash);
+        if (this.primaryReadTimeoutMs <= 0) {
+            const local = await primary;
+            if (local.type === 'data')
+                return local.result;
+            return this.finishRead(local, await loadRemote());
+        }
+        const local = await Promise.race([
+            primary,
+            new Promise((resolve) => {
+                setTimeout(() => resolve(null), this.primaryReadTimeoutMs);
+            }),
+        ]);
+        if (local) {
+            if (local.type === 'data')
+                return local.result;
+            return this.finishRead(local, await loadRemote());
+        }
+        const remote = loadRemote();
+        const first = await Promise.race([
+            primary.then((outcome) => ({ route: 'primary', outcome })),
+            remote.then((outcome) => ({ route: 'remote', outcome })),
+        ]);
+        if (first.outcome.type === 'data')
+            return first.outcome.result;
+        const other = first.route === 'primary' ? await remote : await primary;
+        return this.finishRead(first.outcome, other);
     }
     loadFromSourcesShared(hash, options) {
         const pendingKey = this.pendingReadKey(hash, { ...options, skipPrimary: true });
         let pending = this.inflightReads.get(pendingKey);
         if (!pending) {
-            pending = this.loadFromSources(hash, options).finally(() => {
+            pending = this.loadFromSources(hash, options)
+                .catch((error) => ({ type: 'error', error: errorFrom(error) }))
+                .finally(() => {
                 if (this.inflightReads.get(pendingKey) === pending) {
                     this.inflightReads.delete(pendingKey);
                 }
@@ -140,6 +133,18 @@ export class MeshRouterStore {
             this.inflightReads.set(pendingKey, pending);
         }
         return pending;
+    }
+    finishRead(...outcomes) {
+        const errors = [];
+        for (const outcome of outcomes) {
+            if (outcome.type === 'data')
+                return outcome.result;
+            if (outcome.type === 'error')
+                errors.push(outcome.error);
+        }
+        if (errors.length > 0)
+            throw combineErrors(errors);
+        return null;
     }
     getSourceStats() {
         return Object.fromEntries(Array.from(this.statsBySource.entries()).map(([sourceId, stats]) => [sourceId, { ...stats }]));
@@ -156,25 +161,57 @@ export class MeshRouterStore {
     async delete(hash) {
         return this.primary.delete(hash);
     }
-    async readPrimary(hash) {
-        try {
-            return await this.primary.get(hash);
+    readPrimary(hash) {
+        const read = Promise.resolve()
+            .then(async () => {
+            const data = await this.primary.get(hash);
+            if (data === null)
+                return { type: 'no-result' };
+            return {
+                type: 'data',
+                result: {
+                    data: await this.verifyData(hash, data, this.primarySourceId),
+                    sourceId: this.primarySourceId,
+                },
+            };
+        })
+            .catch((error) => ({ type: 'error', error: errorFrom(error) }));
+        if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+            return read;
         }
-        catch {
-            return null;
-        }
-    }
-    primaryResult(data) {
-        return {
-            data: data.slice(),
-            sourceId: this.primarySourceId,
-        };
+        return new Promise((resolve) => {
+            let settled = false;
+            const timeoutId = setTimeout(() => {
+                if (settled)
+                    return;
+                settled = true;
+                resolve({
+                    type: 'error',
+                    error: new Error(`Blob route ${this.primarySourceId} timed out after ${this.requestTimeoutMs}ms`),
+                });
+            }, this.requestTimeoutMs);
+            void read.then((outcome) => {
+                if (settled)
+                    return;
+                settled = true;
+                clearTimeout(timeoutId);
+                resolve(outcome);
+            });
+        });
     }
     pendingReadKey(hash, options) {
         const sourceKey = options.sourceIds && options.sourceIds.length > 0
             ? [...options.sourceIds].sort().join(',')
             : '*';
-        return `${toHex(hash)}:${options.skipPrimary === true ? 'skip-primary' : 'with-primary'}:${sourceKey}`;
+        return `${toHex(hash)}:${options.htl ?? BLOB_DEFAULT_HTL}:${options.skipPrimary === true ? 'skip-primary' : 'with-primary'}:${sourceKey}`;
+    }
+    async verifyData(expectedHash, data, sourceId) {
+        const stableData = data.slice();
+        const actualHash = await sha256(stableData);
+        if (toHex(actualHash) !== toHex(expectedHash)) {
+            throw new Error(`Blob route ${sourceId} returned corrupt data with a mismatched SHA-256 hash`);
+        }
+        return stableData;
     }
     getCandidateSources(sourceIds) {
         const requested = sourceIds && sourceIds.length > 0
@@ -220,44 +257,19 @@ export class MeshRouterStore {
             return left.id.localeCompare(right.id);
         });
     }
-    shouldProbeMultipleSources(orderedSources) {
-        if (orderedSources.length <= 1)
-            return false;
-        const [best, secondBest] = orderedSources;
-        const bestStats = this.statsBySource.get(best.id) ?? defaultStats();
-        const secondStats = this.statsBySource.get(secondBest.id) ?? defaultStats();
-        if (!hasHistory(bestStats) || !hasHistory(secondStats)) {
-            return false;
-        }
-        const now = Date.now();
-        const diff = scoreSource(bestStats, now) - scoreSource(secondStats, now);
-        return diff < SCORE_TIE_DELTA;
-    }
-    dispatchFor(sourceCount, orderedSources) {
-        const probeMultiple = this.shouldProbeMultipleSources(orderedSources);
-        const initialFanout = probeMultiple
-            ? Math.min(sourceCount, 2)
-            : 1;
-        return {
-            initialFanout,
-            hedgeFanout: this.dispatch.hedgeFanout,
-            maxFanout: Math.min(this.dispatch.maxFanout, sourceCount),
-            hedgeIntervalMs: this.dispatch.hedgeIntervalMs,
-        };
-    }
-    createInFlightSourceRequest(source, hash) {
+    createInFlightSourceRequest(source, request) {
         const startedAt = Date.now();
         this.recordRequest(source.id);
         const task = {
             source,
             settled: false,
-            timeoutRecorded: false,
-            promise: Promise.resolve({ sourceId: source.id, data: null }),
+            promise: Promise.resolve({ type: 'no-result' }),
         };
         task.promise = new Promise((resolve) => {
             let completed = false;
             let timeoutId = null;
-            const finish = (data) => {
+            const controller = new AbortController();
+            const finish = (outcome) => {
                 if (completed) {
                     return;
                 }
@@ -265,61 +277,54 @@ export class MeshRouterStore {
                 if (timeoutId !== null) {
                     clearTimeout(timeoutId);
                 }
-                resolve({ sourceId: source.id, data });
+                resolve(outcome);
             };
             if (Number.isFinite(this.requestTimeoutMs) && this.requestTimeoutMs > 0) {
                 timeoutId = setTimeout(() => {
                     if (completed) {
                         return;
                     }
-                    task.timeoutRecorded = true;
                     this.recordTimeout(source.id);
-                    finish(null);
+                    controller.abort();
+                    finish({
+                        type: 'error',
+                        error: new Error(`Blob route ${source.id} timed out after ${this.requestTimeoutMs}ms`),
+                    });
                 }, this.requestTimeoutMs);
             }
-            void source.get(hash)
-                .then(async (data) => {
+            void Promise.resolve()
+                .then(() => source.read(request, controller.signal))
+                .then(async (reply) => {
                 if (completed) {
                     return;
                 }
                 const elapsedMs = Math.max(1, Date.now() - startedAt);
-                if (data) {
-                    const stableData = data.slice();
-                    completed = true;
-                    if (timeoutId !== null) {
-                        clearTimeout(timeoutId);
-                    }
+                if (reply.type === 'data') {
+                    const stableData = await this.verifyData(request.hash, reply.data, source.id);
+                    if (completed)
+                        return;
                     this.recordSuccess(source.id, elapsedMs);
-                    await this.primary.put(hash, stableData).catch(() => false);
-                    resolve({ sourceId: source.id, data: stableData });
+                    void Promise.resolve()
+                        .then(() => this.primary.put(request.hash, stableData))
+                        .catch(() => false);
+                    finish({
+                        type: 'data',
+                        result: { sourceId: source.id, data: stableData },
+                    });
                     return;
                 }
-                if (!task.timeoutRecorded) {
-                    this.recordMiss(source.id);
-                }
-                finish(null);
+                this.recordMiss(source.id);
+                finish({ type: 'no-result' });
             })
-                .catch(() => {
+                .catch((error) => {
                 if (completed) {
                     return;
                 }
-                if (!task.timeoutRecorded) {
-                    this.recordFailure(source.id);
-                }
-                finish(null);
+                this.recordFailure(source.id);
+                finish({ type: 'error', error: errorFrom(error) });
             });
         });
         return task;
-    }
-    sourceGroupKey(source) {
-        return source.groupId ?? '';
-    }
-    hasPendingCrossGroupRequests(inFlight, nextSources) {
-        if (nextSources.length === 0) {
-            return false;
-        }
-        const nextGroups = new Set(nextSources.map((source) => this.sourceGroupKey(source)));
-        return inFlight.some((task) => !task.settled && !nextGroups.has(this.sourceGroupKey(task.source)));
     }
     async waitForNextResult(inFlight, waitMs) {
         const active = inFlight.filter((task) => !task.settled);
@@ -327,7 +332,7 @@ export class MeshRouterStore {
             return null;
         if (waitMs !== undefined && waitMs <= 0)
             return null;
-        const outcomes = active.map((task) => task.promise.then((value) => ({ task, ...value })));
+        const outcomes = active.map((task) => task.promise.then((outcome) => ({ task, outcome })));
         const result = waitMs === undefined
             ? await Promise.race(outcomes)
             : await Promise.race([
@@ -344,37 +349,31 @@ export class MeshRouterStore {
     async loadFromSources(hash, options) {
         const orderedSources = this.orderedSources(options.sourceIds);
         if (orderedSources.length === 0) {
-            return null;
+            return { type: 'no-result' };
         }
-        const probeMultiple = this.shouldProbeMultipleSources(orderedSources);
-        const dispatch = normalizeDispatchConfig(this.dispatchFor(orderedSources.length, orderedSources), orderedSources.length);
+        const request = createBlobRequest(hash, options.htl);
+        const dispatch = normalizeDispatchConfig(this.dispatch, orderedSources.length);
         const wavePlan = buildHedgedWavePlan(orderedSources.length, dispatch);
         if (wavePlan.length === 0)
-            return null;
+            return { type: 'no-result' };
         const inFlight = [];
+        const errors = [];
         let nextSourceIdx = 0;
+        const accept = (outcome) => {
+            if (outcome.type === 'data')
+                return outcome.result;
+            if (outcome.type === 'error')
+                errors.push(outcome.error);
+            return null;
+        };
         for (let waveIdx = 0; waveIdx < wavePlan.length; waveIdx++) {
             const waveSize = wavePlan[waveIdx];
             const from = nextSourceIdx;
             const to = Math.min(from + waveSize, orderedSources.length);
             const waveSources = orderedSources.slice(from, to);
             nextSourceIdx = to;
-            if (!probeMultiple && this.hasPendingCrossGroupRequests(inFlight, waveSources)) {
-                while (this.hasPendingCrossGroupRequests(inFlight, waveSources)) {
-                    const result = await this.waitForNextResult(inFlight);
-                    if (!result) {
-                        break;
-                    }
-                    if (result.data) {
-                        return {
-                            data: result.data,
-                            sourceId: result.sourceId,
-                        };
-                    }
-                }
-            }
             for (const source of waveSources) {
-                inFlight.push(this.createInFlightSourceRequest(source, hash));
+                inFlight.push(this.createInFlightSourceRequest(source, request));
             }
             const isLastWave = waveIdx === wavePlan.length - 1 || nextSourceIdx >= orderedSources.length;
             const windowEnd = isLastWave ? null : Date.now() + dispatch.hedgeIntervalMs;
@@ -383,21 +382,14 @@ export class MeshRouterStore {
                 const result = await this.waitForNextResult(inFlight, remaining);
                 if (!result)
                     break;
-                if (result.data) {
-                    return {
-                        data: result.data,
-                        sourceId: result.sourceId,
-                    };
-                }
+                const data = accept(result.outcome);
+                if (data)
+                    return { type: 'data', result: data };
             }
         }
-        for (const task of inFlight) {
-            if (task.settled)
-                continue;
-            task.timeoutRecorded = true;
-            this.recordTimeout(task.source.id);
-        }
-        return null;
+        return errors.length > 0
+            ? { type: 'error', error: combineErrors(errors) }
+            : { type: 'no-result' };
     }
     statsFor(sourceId) {
         const stats = this.statsBySource.get(sourceId);

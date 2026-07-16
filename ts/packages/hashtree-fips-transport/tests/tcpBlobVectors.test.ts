@@ -12,20 +12,17 @@ describe('TCP/FIPS Hashtree blob v1 vectors', () => {
   it('matches the Rust request and response-header encoding', () => {
     const hash = Uint8Array.from({ length: 32 }, (_, index) => index);
     expect(toHex(encodeTcpBlobRequest(hash))).toBe(
-      `48010100${Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')}`,
+      `4801010a${Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')}`,
     );
     expect(toHex(encodeTcpBlobResponseHeader(true, 3))).toBe('48010100000003');
     expect(TCP_BLOB_SERVICE_PORT).toBe(39_018);
     expect(TCP_BLOB_MAX_BYTES).toBe(16 * 1024 * 1024);
   });
 
-  it('round-trips an explicit one-byte HTL', () => {
+  it('round-trips the native HTL boundaries', () => {
     const hash = Uint8Array.from({ length: 32 }, (_, index) => index);
-    const request = encodeTcpBlobRequest(hash, 0xff);
-    expect(toHex(request)).toBe(
-      `480101ff${Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')}`,
-    );
-    expect(decodeTcpBlobRequest(request)).toEqual({ htl: 0xff, hash });
+    expect(decodeTcpBlobRequest(encodeTcpBlobRequest(hash, 0))).toEqual({ htl: 0, hash });
+    expect(decodeTcpBlobRequest(encodeTcpBlobRequest(hash, 10))).toEqual({ htl: 10, hash });
   });
 
   it('rejects legacy request framing and invalid HTLs', () => {
@@ -33,9 +30,12 @@ describe('TCP/FIPS Hashtree blob v1 vectors', () => {
     expect(() => decodeTcpBlobRequest(fromHex(`480101${'00'.repeat(32)}`))).toThrow(
       'invalid TCP/FIPS blob request',
     );
-    for (const htl of [-1, 0.5, 256]) {
+    for (const htl of [-1, 0.5, 11, 0xff, 256]) {
       expect(() => encodeTcpBlobRequest(hash, htl)).toThrow('TCP/FIPS blob HTL is invalid');
     }
+    const oversizedHtl = encodeTcpBlobRequest(hash, 10);
+    oversizedHtl[3] = 11;
+    expect(() => decodeTcpBlobRequest(oversizedHtl)).toThrow('TCP/FIPS blob HTL is invalid');
   });
 
   it('accepts only canonical missing and bounded found response headers', () => {

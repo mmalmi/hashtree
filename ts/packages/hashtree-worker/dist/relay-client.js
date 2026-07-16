@@ -41,6 +41,7 @@ export class RelayWorkerClient {
                 type: 'init',
                 id: this.nextRequestId('worker_init'),
                 config: this.config,
+                p2pProviderEnabled: this.p2pProvider !== null,
             });
         });
         return this.initPromise;
@@ -80,7 +81,7 @@ export class RelayWorkerClient {
                 return;
             }
             if (message.type === 'p2pFetch') {
-                void this.handleP2PFetch(message.requestId, message.hashHex, message.peerId);
+                void this.handleP2PFetch(message.requestId, message.hashHex, message.htl, message.peerId);
                 return;
             }
             if (message.type === 'p2pPeerList') {
@@ -113,13 +114,16 @@ export class RelayWorkerClient {
             this.rejectAllPending(new Error(errorMessage));
         };
     }
-    async handleP2PFetch(requestId, hashHex, peerId) {
+    async handleP2PFetch(requestId, hashHex, htl, peerId) {
         if (!this.worker)
             return;
         const id = this.nextRequestId('p2p_fetch_result');
         try {
-            const data = await this.p2pProvider?.fetch(hashHex, peerId) ?? null;
-            if (data && data.byteLength > 0) {
+            if (!this.p2pProvider) {
+                throw new Error('P2P provider is not configured');
+            }
+            const data = await this.p2pProvider.fetch(hashHex, peerId, htl);
+            if (data !== null) {
                 const transferableData = data.slice();
                 this.worker.postMessage({
                     type: 'p2pFetchResult',
@@ -324,6 +328,11 @@ export class RelayWorkerClient {
     }
     setP2PProvider(provider) {
         this.p2pProvider = provider;
+        this.worker?.postMessage({
+            type: 'setP2PProviderState',
+            id: this.nextRequestId('p2p_provider_state'),
+            enabled: provider !== null,
+        });
     }
     async setBlossomServers(servers) {
         const res = await this.request({ type: 'setBlossomServers', servers });

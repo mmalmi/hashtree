@@ -214,6 +214,7 @@ describe('HashtreeWorkerClient timeouts', () => {
       type: 'p2pFetch',
       requestId: 'req-1',
       hashHex: 'deadbeef',
+      htl: 10,
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -283,7 +284,12 @@ describe('HashtreeWorkerClient timeouts', () => {
     client.setP2PProvider(new Provider());
     await client.init();
 
-    worker.emitMessage({ type: 'p2pFetch', requestId: 'bound-fetch', hashHex: 'ab'.repeat(32) });
+    worker.emitMessage({
+      type: 'p2pFetch',
+      requestId: 'bound-fetch',
+      hashHex: 'ab'.repeat(32),
+      htl: 10,
+    });
     worker.emitMessage({ type: 'p2pPeerList', requestId: 'bound-peers' });
     await vi.waitFor(() => {
       expect(worker.postedMessages.some(({ message }) => (
@@ -293,6 +299,56 @@ describe('HashtreeWorkerClient timeouts', () => {
         message.type === 'p2pPeerListResult' && message.peerIds?.[0] === 'fips-peer'
       ))).toBe(true);
     });
+
+    await client.close();
+  });
+
+  it('forwards HTL and preserves a valid empty p2p blob', async () => {
+    const worker = new FakeWorker();
+    const WorkerFactory = class {
+      constructor() {
+        return worker;
+      }
+    } as unknown as new () => Worker;
+    const client = new HashtreeWorkerClient(WorkerFactory);
+    const handler = vi.fn(async () => new Uint8Array(0));
+
+    client.setP2PFetchHandler(handler);
+    await client.init();
+    worker.emitMessage({
+      type: 'p2pFetch',
+      requestId: 'empty-fetch',
+      hashHex: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      htl: 4,
+    });
+
+    await vi.waitFor(() => {
+      expect(handler).toHaveBeenCalledWith(expect.any(String), undefined, 4);
+      expect(worker.postedMessages.some(({ message }) => (
+        message.type === 'p2pFetchResult' && message.data?.byteLength === 0
+      ))).toBe(true);
+    });
+
+    await client.close();
+  });
+
+  it('updates the worker route when a p2p provider is added or removed', async () => {
+    const worker = new FakeWorker();
+    const WorkerFactory = class {
+      constructor() {
+        return worker;
+      }
+    } as unknown as new () => Worker;
+    const client = new HashtreeWorkerClient(WorkerFactory);
+    await client.init();
+
+    client.setP2PProvider({ fetch: async () => null, listPeerIds: () => [] });
+    client.setP2PProvider(null);
+
+    const states = worker.postedMessages
+      .map(({ message }) => message)
+      .filter((message) => message.type === 'setP2PProviderState');
+    expect(states).toMatchObject([{ enabled: true }, { enabled: false }]);
 
     await client.close();
   });

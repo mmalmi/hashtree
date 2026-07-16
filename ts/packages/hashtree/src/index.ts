@@ -34,6 +34,21 @@ export {
 // Hash utilities
 export { sha256 } from './hash.js';
 
+// Routed blob retrieval contract
+export {
+  BLOB_DEFAULT_HTL,
+  BLOB_MAX_HTL,
+  BLOB_NO_RESULT,
+  blobData,
+  blobReplyFromNullable,
+  createBlobRequest,
+} from './blob-route.js';
+export type {
+  BlobReply,
+  BlobRequest,
+  BlobRoute,
+} from './blob-route.js';
+
 // Encryption utilities
 export {
   // CHK (Content Hash Key) encryption - deterministic, enables deduplication

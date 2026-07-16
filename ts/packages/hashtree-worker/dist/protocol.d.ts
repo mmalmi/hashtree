@@ -87,9 +87,14 @@ export type WorkerRequest = {
     type: 'init';
     id: string;
     config: WorkerConfig;
+    p2pProviderEnabled?: boolean;
 } | {
     type: 'close';
     id: string;
+} | {
+    type: 'setP2PProviderState';
+    id: string;
+    enabled: boolean;
 } | {
     type: 'putBlob';
     id: string;
@@ -145,6 +150,7 @@ export type WorkerRequest = {
     forPeer?: boolean;
     sourceIds?: string[];
     skipPrimary?: boolean;
+    htl?: number;
 } | {
     type: 'hasBlob';
     id: string;
@@ -202,6 +208,7 @@ export type WorkerResponse = {
     type: 'p2pFetch';
     requestId: string;
     hashHex: string;
+    htl: number;
     peerId?: string;
 } | {
     type: 'p2pPeerList';

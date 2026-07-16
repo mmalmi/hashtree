@@ -108,6 +108,7 @@ export class RelayWorkerClient {
         type: 'init',
         id: this.nextRequestId('worker_init'),
         config: this.config,
+        p2pProviderEnabled: this.p2pProvider !== null,
       } as RelayWorkerRequest);
     });
 
@@ -152,7 +153,7 @@ export class RelayWorkerClient {
       }
 
       if (message.type === 'p2pFetch') {
-        void this.handleP2PFetch(message.requestId, message.hashHex, message.peerId);
+        void this.handleP2PFetch(message.requestId, message.hashHex, message.htl, message.peerId);
         return;
       }
 
@@ -193,12 +194,20 @@ export class RelayWorkerClient {
     };
   }
 
-  private async handleP2PFetch(requestId: string, hashHex: string, peerId?: string): Promise<void> {
+  private async handleP2PFetch(
+    requestId: string,
+    hashHex: string,
+    htl: number,
+    peerId?: string,
+  ): Promise<void> {
     if (!this.worker) return;
     const id = this.nextRequestId('p2p_fetch_result');
     try {
-      const data = await this.p2pProvider?.fetch(hashHex, peerId) ?? null;
-      if (data && data.byteLength > 0) {
+      if (!this.p2pProvider) {
+        throw new Error('P2P provider is not configured');
+      }
+      const data = await this.p2pProvider.fetch(hashHex, peerId, htl);
+      if (data !== null) {
         const transferableData = data.slice();
         this.worker.postMessage({
           type: 'p2pFetchResult',
@@ -425,6 +434,11 @@ export class RelayWorkerClient {
 
   setP2PProvider(provider: WorkerP2PProvider | null): void {
     this.p2pProvider = provider;
+    this.worker?.postMessage({
+      type: 'setP2PProviderState',
+      id: this.nextRequestId('p2p_provider_state'),
+      enabled: provider !== null,
+    } satisfies RelayWorkerRequest);
   }
 
   async setBlossomServers(servers: BlossomServerConfig[]): Promise<void> {

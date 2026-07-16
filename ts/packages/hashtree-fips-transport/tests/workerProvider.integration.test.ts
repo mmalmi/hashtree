@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MemoryStore, sha256, toHex, type Hash } from '@hashtree/core';
 import {
   FipsNode,
@@ -101,6 +101,22 @@ describe('FIPS worker P2P provider integration', () => {
 
     expect(() => provider.fetch('not-a-hash')).toThrow('32-byte hex');
     provider.close();
+  });
+
+  it('passes explicit and default route HTLs into TCP/FIPS', async () => {
+    const identity = await identityFromSecretKey(secret(7));
+    const node = new FipsNode({ identity, transports: [] });
+    const provider = createFipsWorkerP2PProvider({ node, localStore: new MemoryStore() });
+    const get = vi.spyOn(provider.transport, 'get').mockResolvedValue(null);
+    const hash = '00'.repeat(32);
+
+    try {
+      await expect(provider.fetch(hash, 'peer-a', 0)).resolves.toBeNull();
+      await expect(provider.fetch(hash, 'peer-a')).resolves.toBeNull();
+      expect(get.mock.calls.map(([, , htl]) => htl)).toEqual([0, 10]);
+    } finally {
+      provider.close();
+    }
   });
 
   it('does not report a closed provider as an explicit content miss', async () => {

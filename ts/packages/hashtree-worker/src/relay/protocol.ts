@@ -59,8 +59,9 @@ export interface PeerStats {
 
 export type WorkerRequest =
   // Lifecycle
-  | { type: 'init'; id: string; config: WorkerConfig }
+  | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean }
   | { type: 'close'; id: string }
+  | { type: 'setP2PProviderState'; id: string; enabled: boolean }
   | { type: 'setIdentity'; id: string; pubkey: string; nsec?: string }
 
   // Store operations (low-level hash-based)
@@ -229,7 +230,7 @@ export type WorkerResponse =
   | { type: 'nip44Decrypt'; id: string; pubkey: string; ciphertext: string }
 
   // FIPS-backed P2P provider requests (worker → main thread)
-  | { type: 'p2pFetch'; requestId: string; hashHex: string; peerId?: string }
+  | { type: 'p2pFetch'; requestId: string; hashHex: string; htl: number; peerId?: string }
   | { type: 'p2pPeerList'; requestId: string };
 
 export interface DirEntry {

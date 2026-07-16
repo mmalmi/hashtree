@@ -21,7 +21,11 @@ type PendingRequest = {
 };
 
 export type WorkerFactory = URL | string | (new () => Worker);
-export type P2PFetchHandler = (hashHex: string, peerId?: string) => Promise<Uint8Array | null>;
+export type P2PFetchHandler = (
+  hashHex: string,
+  peerId?: string,
+  htl?: number,
+) => Promise<Uint8Array | null>;
 export type P2PPeerListHandler = () => string[] | Promise<string[]>;
 export interface WorkerP2PProvider {
   fetch: P2PFetchHandler;
@@ -93,6 +97,7 @@ export class HashtreeWorkerClient {
         type: 'init',
         id,
         config: this.config,
+        p2pProviderEnabled: this.p2pFetchHandler !== null,
       } as WorkerRequest);
     });
 
@@ -142,7 +147,7 @@ export class HashtreeWorkerClient {
       }
 
       if (message.type === 'p2pFetch') {
-        void this.handleP2PFetch(message.requestId, message.hashHex, message.peerId);
+        void this.handleP2PFetch(message.requestId, message.hashHex, message.htl, message.peerId);
         return;
       }
 
@@ -191,7 +196,12 @@ export class HashtreeWorkerClient {
     this.pending.delete(id);
   }
 
-  private async handleP2PFetch(requestId: string, hashHex: string, peerId?: string): Promise<void> {
+  private async handleP2PFetch(
+    requestId: string,
+    hashHex: string,
+    htl: number,
+    peerId?: string,
+  ): Promise<void> {
     if (!this.worker) return;
     const id = generateRequestId();
 
@@ -200,13 +210,14 @@ export class HashtreeWorkerClient {
         type: 'p2pFetchResult',
         id,
         requestId,
+        error: 'P2P provider is not configured',
       } as WorkerRequest);
       return;
     }
 
     try {
-      const data = await this.p2pFetchHandler(hashHex, peerId);
-      if (data && data.byteLength > 0) {
+      const data = await this.p2pFetchHandler(hashHex, peerId, htl);
+      if (data !== null) {
         const transferableData = data.slice();
         this.worker.postMessage(
           {
@@ -392,13 +403,14 @@ export class HashtreeWorkerClient {
 
   async getBlob(
     hashHex: string,
-    options: { sourceIds?: readonly string[]; skipPrimary?: boolean } = {},
+    options: { sourceIds?: readonly string[]; skipPrimary?: boolean; htl?: number } = {},
   ): Promise<{ data: Uint8Array; source: BlobSource }> {
     const res = await this.request({
       type: 'getBlob',
       hashHex,
       sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
       skipPrimary: options.skipPrimary,
+      htl: options.htl,
     });
     if (res.type !== 'blob') {
       throw new Error('Unexpected response for getBlob');
@@ -589,6 +601,7 @@ export class HashtreeWorkerClient {
 
   setP2PFetchHandler(handler: P2PFetchHandler | null): void {
     this.p2pFetchHandler = handler;
+    this.notifyP2PProviderState();
   }
 
   setP2PPeerListHandler(handler: P2PPeerListHandler | null): void {
@@ -597,11 +610,20 @@ export class HashtreeWorkerClient {
 
   setP2PProvider(provider: WorkerP2PProvider | null): void {
     this.p2pFetchHandler = provider
-      ? (hashHex, peerId) => provider.fetch(hashHex, peerId)
+      ? (hashHex, peerId, htl) => provider.fetch(hashHex, peerId, htl)
       : null;
     this.p2pPeerListHandler = provider
       ? () => provider.listPeerIds()
       : null;
+    this.notifyP2PProviderState();
+  }
+
+  private notifyP2PProviderState(): void {
+    this.worker?.postMessage({
+      type: 'setP2PProviderState',
+      id: generateRequestId(),
+      enabled: this.p2pFetchHandler !== null,
+    } as WorkerRequest);
   }
 
   async close(): Promise<void> {

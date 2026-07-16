@@ -40,9 +40,14 @@ export type WorkerRequest = {
     type: 'init';
     id: string;
     config: WorkerConfig;
+    p2pProviderEnabled?: boolean;
 } | {
     type: 'close';
     id: string;
+} | {
+    type: 'setP2PProviderState';
+    id: string;
+    enabled: boolean;
 } | {
     type: 'setIdentity';
     id: string;
@@ -435,6 +440,7 @@ export type WorkerResponse = {
     type: 'p2pFetch';
     requestId: string;
     hashHex: string;
+    htl: number;
     peerId?: string;
 } | {
     type: 'p2pPeerList';

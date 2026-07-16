@@ -195,26 +195,31 @@ describe('RelayWorkerClient', () => {
       relays: ['wss://relay.example'],
       pubkey: '11'.repeat(32),
     });
-    const fetch = vi.fn(async (hashHex: string, peerId?: string) => {
+    const fetch = vi.fn(async (hashHex: string, peerId?: string, htl?: number) => {
       expect(hashHex).toBe('ab'.repeat(32));
       expect(peerId).toBe('fips-peer');
-      return new Uint8Array([1, 2, 3]);
+      expect(htl).toBe(5);
+      return new Uint8Array(0);
     });
     const listPeerIds = vi.fn(async () => ['fips-peer']);
     client.setP2PProvider({ fetch, listPeerIds });
 
     await client.init();
+    expect(worker.messages.find((message) => message.type === 'init')).toMatchObject({
+      p2pProviderEnabled: true,
+    });
     worker.emit({
       type: 'p2pFetch',
       requestId: 'fips-fetch',
       hashHex: 'ab'.repeat(32),
+      htl: 5,
       peerId: 'fips-peer',
     });
     await vi.waitFor(() => {
       expect(worker.messages.at(-1)).toMatchObject({
         type: 'p2pFetchResult',
         requestId: 'fips-fetch',
-        data: new Uint8Array([1, 2, 3]),
+        data: new Uint8Array(0),
       });
     });
 

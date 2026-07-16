@@ -2,6 +2,7 @@
 
 import {
   HashTree,
+  blobReplyFromNullable,
   decryptChk,
   fromHex,
   nhashDecode,
@@ -9,6 +10,7 @@ import {
   toHex,
   tryDecodeTreeNode,
   type CID,
+  type BlobRequest,
   type Hash,
   type Store,
 } from '@hashtree/core';
@@ -33,12 +35,13 @@ import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } 
 import { streamFileRangeChunks } from './mediaStreaming.js';
 import { parseHttpByteRange } from './httpRange.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
+import { P2PBridge } from './p2pBridge.js';
 
 const DEFAULT_STORE_NAME = 'hashtree-worker';
 const DEFAULT_STORAGE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS = 20_000;
-const P2P_FETCH_SLOW_LOG_MS = 15_000;
 const P2P_FETCH_TIMEOUT_MS = 20_000;
+const P2P_PEER_LIST_TIMEOUT_MS = 5_000;
 const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
 const P2P_PEER_LIST_CACHE_MS = 1_500;
 // Let IndexedDB start first, but only as a soft hedge window. MeshRouterStore
@@ -64,24 +67,16 @@ let mediaTree: HashTree | null = null;
 let nostrRelays: string[] = [];
 let probeInterval: ReturnType<typeof setInterval> | null = null;
 let probeIntervalMs = DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;
-let p2pFetchCounter = 0;
-let p2pPeerListCounter = 0;
 let rootWatchCounter = 0;
 let diagnosticsEnabled = false;
 let diagnosticsMirrorToConsole = false;
-const pendingP2PFetches = new Map<
-  string,
-  {
-    resolve: (data: Uint8Array | null) => void;
-    slowLogId: ReturnType<typeof setTimeout> | null;
-    timeoutId: ReturnType<typeof setTimeout> | null;
-    startedAt: number;
-  }
->();
-const pendingP2PPeerLists = new Map<string, { resolve: (peerIds: string[]) => void }>();
 let inflightP2PPeerList: Promise<string[]> | null = null;
 let p2pPeerIds: string[] = [];
 let p2pPeerIdsRefreshedAt = 0;
+const p2pBridge = new P2PBridge({
+  respond: (message) => respond(message),
+  peerListTimeoutMs: P2P_PEER_LIST_TIMEOUT_MS,
+});
 const peerShareableEncryptedHashes = new Set<string>();
 const peerShareablePublishedHashes = new Set<string>();
 const activeRootWatches = new Map<string, { close: () => Promise<void> }>();
@@ -427,16 +422,7 @@ function resetState(): void {
   meshStore = null;
   tree = null;
   mediaTree = null;
-  for (const pending of pendingP2PFetches.values()) {
-    if (pending.slowLogId) {
-      clearTimeout(pending.slowLogId);
-    }
-    if (pending.timeoutId) {
-      clearTimeout(pending.timeoutId);
-    }
-  }
-  pendingP2PFetches.clear();
-  pendingP2PPeerLists.clear();
+  p2pBridge.setEnabled(false);
   inflightP2PPeerList = null;
   p2pPeerIds = [];
   peerShareableEncryptedHashes.clear();
@@ -474,63 +460,9 @@ function startConnectivityProbeLoop(): void {
   }, probeIntervalMs);
 }
 
-function nextP2PFetchRequestId(): string {
-  p2pFetchCounter += 1;
-  return `p2p_${Date.now()}_${p2pFetchCounter}`;
-}
-
 function nextRootWatchId(): string {
   rootWatchCounter += 1;
   return `root_${Date.now()}_${rootWatchCounter}`;
-}
-
-function nextP2PPeerListRequestId(): string {
-  p2pPeerListCounter += 1;
-  return `p2p_peers_${Date.now()}_${p2pPeerListCounter}`;
-}
-
-async function requestP2PBlob(hashHex: string, peerId?: string): Promise<Uint8Array | null> {
-  const requestId = nextP2PFetchRequestId();
-  const startedAt = Date.now();
-  emitDiagnostic('debug', 'mesh', 'p2p-fetch-start', 'Requesting blob over P2P', {
-    requestId,
-    hashHex: hashHex.slice(0, 16),
-    peerId: peerId ?? null,
-  });
-  const data = await new Promise<Uint8Array | null>((resolve) => {
-    const slowLogId = setTimeout(() => {
-      if (!pendingP2PFetches.has(requestId)) {
-        return;
-      }
-      emitDiagnostic('warn', 'mesh', 'p2p-fetch-slow', 'P2P blob request is still in flight', {
-        requestId,
-        hashHex: hashHex.slice(0, 16),
-        elapsedMs: Date.now() - startedAt,
-      });
-    }, P2P_FETCH_SLOW_LOG_MS);
-    const timeoutId = setTimeout(() => {
-      const pending = pendingP2PFetches.get(requestId);
-      if (!pending) {
-        return;
-      }
-      pendingP2PFetches.delete(requestId);
-      if (pending.slowLogId) {
-        clearTimeout(pending.slowLogId);
-      }
-      emitDiagnostic('warn', 'mesh', 'p2p-fetch-timeout', 'P2P blob request timed out', {
-        requestId,
-        hashHex: hashHex.slice(0, 16),
-        peerId: peerId ?? null,
-        elapsedMs: Date.now() - startedAt,
-        timeoutMs: P2P_FETCH_TIMEOUT_MS,
-      });
-      pending.resolve(null);
-    }, P2P_FETCH_TIMEOUT_MS);
-    pendingP2PFetches.set(requestId, { resolve, slowLogId, timeoutId, startedAt });
-    respond({ type: 'p2pFetch', requestId, hashHex, peerId });
-  });
-
-  return data;
 }
 
 async function requestP2PPeerIds(): Promise<string[]> {
@@ -538,11 +470,7 @@ async function requestP2PPeerIds(): Promise<string[]> {
     return inflightP2PPeerList;
   }
 
-  const requestId = nextP2PPeerListRequestId();
-  const pending = new Promise<string[]>((resolve) => {
-    pendingP2PPeerLists.set(requestId, { resolve });
-    respond({ type: 'p2pPeerList', requestId });
-  }).finally(() => {
+  const pending = p2pBridge.listPeers().finally(() => {
     if (inflightP2PPeerList === pending) {
       inflightP2PPeerList = null;
     }
@@ -552,6 +480,10 @@ async function requestP2PPeerIds(): Promise<string[]> {
 }
 
 async function refreshP2PPeerIds(): Promise<void> {
+  if (!p2pBridge.isEnabled()) {
+    p2pPeerIds = [];
+    return;
+  }
   if (Date.now() - p2pPeerIdsRefreshedAt < P2P_PEER_LIST_CACHE_MS) {
     return;
   }
@@ -566,44 +498,11 @@ async function refreshP2PPeerIds(): Promise<void> {
   }
 }
 
-function resolveP2PFetch(requestId: string, data?: Uint8Array, error?: string): void {
-  const pending = pendingP2PFetches.get(requestId);
-  if (!pending) return;
-  if (pending.slowLogId) {
-    clearTimeout(pending.slowLogId);
-  }
-  if (pending.timeoutId) {
-    clearTimeout(pending.timeoutId);
-  }
-  pendingP2PFetches.delete(requestId);
-
-  if (error || !data) {
-    emitDiagnostic('debug', 'mesh', 'p2p-fetch-miss', 'P2P blob request completed without data', {
-      requestId,
-      error: error ?? null,
-      elapsedMs: Math.max(0, Date.now() - pending.startedAt),
-    });
-    pending.resolve(null);
-    return;
-  }
-
-  emitDiagnostic('debug', 'mesh', 'p2p-fetch-hit', 'Received blob data over P2P', {
-    requestId,
-    bytes: data.byteLength,
-    elapsedMs: Math.max(0, Date.now() - pending.startedAt),
-  });
-  pending.resolve(data);
-}
-
-function resolveP2PPeerList(requestId: string, peerIds?: string[], error?: string): void {
-  const pending = pendingP2PPeerLists.get(requestId);
-  if (!pending) return;
-  pendingP2PPeerLists.delete(requestId);
-  if (error) {
-    pending.resolve([]);
-    return;
-  }
-  pending.resolve(Array.isArray(peerIds) ? peerIds : []);
+function setP2PProviderEnabled(enabled: boolean): void {
+  p2pBridge.setEnabled(enabled);
+  p2pPeerIds = [];
+  p2pPeerIdsRefreshedAt = 0;
+  if (!enabled) inflightP2PPeerList = null;
 }
 
 type LoadedBlobData = {
@@ -736,10 +635,11 @@ function createStorageStore(): Store {
 
 function createMeshStore(): MeshRouterStore {
   const p2pSources = (): MeshReadSource[] => {
+    if (!p2pBridge.isEnabled()) return [];
     const peerSources = p2pPeerIds.map((peerId) => ({
       id: `peer:${peerId}`,
       groupId: 'p2p',
-      get: async (hash: Hash) => requestP2PBlob(toHex(hash), peerId),
+      read: async (request: BlobRequest, signal?: AbortSignal) => p2pBridge.fetch(request, peerId, signal),
     }));
     if (peerSources.length > 0) {
       return peerSources;
@@ -747,7 +647,7 @@ function createMeshStore(): MeshRouterStore {
     return [{
       id: 'p2p',
       groupId: 'p2p',
-      get: async (hash: Hash) => requestP2PBlob(toHex(hash)),
+      read: async (request: BlobRequest, signal) => p2pBridge.fetch(request, undefined, signal),
     }];
   };
 
@@ -769,7 +669,11 @@ function createMeshStore(): MeshRouterStore {
           id: `blossom:${server.url}`,
           groupId: 'blossom',
           canWrite: !!server.write,
-          get: async (hash: Hash) => blossom ? blossom.fetchFromServer(toHex(hash), server.url) : null,
+          read: async (request: BlobRequest) => blobReplyFromNullable(
+            blossom
+              ? await blossom.fetchFromServer(toHex(request.hash), server.url)
+              : null,
+          ),
         }))
         : [],
     ],
@@ -1271,8 +1175,9 @@ function registerMediaPort(port: MessagePort): void {
   };
 }
 
-function init(config: WorkerConfig): void {
+function init(config: WorkerConfig, hasP2PProvider = false): void {
   resetState();
+  p2pBridge.setEnabled(hasP2PProvider);
   const storeName = config.storeName || DEFAULT_STORE_NAME;
   const maxBytes = config.storageMaxBytes || DEFAULT_STORAGE_MAX_BYTES;
   probeIntervalMs = config.connectivityProbeIntervalMs || DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;
@@ -1536,8 +1441,14 @@ function respondBlobStored(id: string, fileCid: CID, upload: boolean): void {
 async function handleRequest(req: WorkerRequest): Promise<void> {
   switch (req.type) {
     case 'init': {
-      init(req.config);
+      init(req.config, req.p2pProviderEnabled === true);
       respond({ type: 'ready', id: req.id });
+      return;
+    }
+
+    case 'setP2PProviderState': {
+      setP2PProviderEnabled(req.enabled);
+      respond({ type: 'void', id: req.id });
       return;
     }
 
@@ -1658,12 +1569,12 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
     }
 
     case 'p2pFetchResult': {
-      resolveP2PFetch(req.requestId, req.data, req.error);
+      p2pBridge.resolveFetch(req.requestId, req.data, req.error);
       return;
     }
 
     case 'p2pPeerListResult': {
-      resolveP2PPeerList(req.requestId, req.peerIds, req.error);
+      p2pBridge.resolvePeerList(req.requestId, req.peerIds, req.error);
       return;
     }
 
@@ -1672,12 +1583,19 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
         respond({ type: 'blob', id: req.id, error: 'Worker not initialized' });
         return;
       }
-      const loaded = req.forPeer
-        ? await loadPeerBlobData(req.hashHex)
-        : await loadBlobData(req.hashHex, {
-          sourceIds: req.sourceIds,
-          skipPrimary: req.skipPrimary,
-        });
+      let loaded: LoadedBlobData | null;
+      try {
+        loaded = req.forPeer
+          ? await loadPeerBlobData(req.hashHex)
+          : await loadBlobData(req.hashHex, {
+            sourceIds: req.sourceIds,
+            skipPrimary: req.skipPrimary,
+            htl: req.htl,
+          });
+      } catch (error) {
+        respond({ type: 'blob', id: req.id, error: getErrorMessage(error) });
+        return;
+      }
       if (!loaded) {
         respond({
           type: 'blob',

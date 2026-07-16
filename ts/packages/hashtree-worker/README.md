@@ -157,7 +157,9 @@ Behavior:
 ## Transport Notes
 
 - If you expect media or files to keep working through the worker, daemon, or FIPS peers, app-facing URLs should stay in `htree://...` or `/htree/...` form. Raw `https://` Blossom URLs bypass the runtime routing and will fail when a client intentionally has no direct Blossom access.
-- Mesh reads should be treated as liveness-based, not fixed-timeout-based. Slow peers are normal on cold paths; callers should hedge to more peers instead of converting a slow in-flight read into a synthetic not-found.
+- The worker installs a P2P read route only while a provider is configured. Remote routes default to HTL 10; pass HTL 0 only for an exact authenticated local route. The worker forwards HTL unchanged and never decrements it.
+- Every returned blob is SHA-256 verified before caching or returning. A read returns `null` only when every completed route explicitly reports `NoResult`; corruption, timeout, cancellation, and transport failure reject the read.
+- Slow routes are bounded and hedged. A hedge may win, but a route timeout remains an error rather than a synthetic not-found.
 - After bytes or fragments start flowing, prefer idle/progress-based expiry over total wall-clock deadlines. That keeps large media transfers alive without giving malicious peers an unlimited pin.
 - For realistic verification, test cold direct navigation with requester-side Blossom disabled and assert that artwork/audio loads from `/htree/...` without any fallback requests to default Blossom servers.
 

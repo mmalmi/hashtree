@@ -1,9 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryStore, type Hash } from '@hashtree/core';
-import { MeshRouterStore, type MeshReadSource } from '../src/capabilities/meshRouterStore.js';
+import {
+  BLOB_NO_RESULT,
+  blobData,
+  MemoryStore,
+  sha256,
+  type BlobReply,
+  type Hash,
+} from '@hashtree/core';
+import {
+  MeshRouterStore,
+  type MeshReadSource,
+  type MeshRouterGetOptions,
+} from '../src/capabilities/meshRouterStore.js';
 
-const HASH_A = new Uint8Array(32).fill(1) as Hash;
-const HASH_B = new Uint8Array(32).fill(2) as Hash;
+const DATA_A = new Uint8Array([1, 2, 3]);
+const DATA_B = new Uint8Array([4, 5, 6]);
+const HASH_A = await sha256(DATA_A) as Hash;
+const HASH_B = await sha256(DATA_B) as Hash;
+
+function reply(value: Uint8Array | null): BlobReply {
+  return value === null ? BLOB_NO_RESULT : blobData(value);
+}
 
 function delayedSource(
   id: string,
@@ -13,10 +30,10 @@ function delayedSource(
 ): MeshReadSource {
   return {
     id,
-    get: () => {
+    read: () => {
       calls.count += 1;
-      return new Promise<Uint8Array | null>((resolve) => {
-        setTimeout(() => resolve(value), delayMs);
+      return new Promise<BlobReply>((resolve) => {
+        setTimeout(() => resolve(reply(value)), delayMs);
       });
     },
   };
@@ -32,8 +49,8 @@ describe('MeshRouterStore', () => {
     const primary = new MemoryStore();
     const slowCalls = { count: 0 };
     const fastCalls = { count: 0 };
-    const slowData = new Uint8Array([1]);
-    const fastData = new Uint8Array([2]);
+    const slowData = DATA_A;
+    const fastData = DATA_A;
     const router = new MeshRouterStore({
       primary,
       primarySourceId: 'idb',
@@ -50,7 +67,6 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    await vi.advanceTimersByTimeAsync(75);
     await vi.advanceTimersByTimeAsync(50);
     await expect(pending).resolves.toEqual({ data: fastData, sourceId: 'blossom' });
     expect(slowCalls.count).toBe(0);
@@ -63,16 +79,28 @@ describe('MeshRouterStore', () => {
     const primary = new MemoryStore();
     const peerCalls = { count: 0 };
     const blossomCalls = { count: 0 };
-    const peerData = new Uint8Array([11]);
-    const blossomData = new Uint8Array([22]);
+    const peerData = (hash: Hash) => hash === HASH_A ? DATA_A : DATA_B;
+    const blossomData = peerData;
     const router = new MeshRouterStore({
       primary,
       primarySourceId: 'idb',
       primaryReadTimeoutMs: 0,
       requestTimeoutMs: 500,
       sources: [
-        delayedSource('fips', 20, peerData, peerCalls),
-        delayedSource('blossom', 200, blossomData, blossomCalls),
+        {
+          id: 'fips',
+          read: (request) => new Promise((resolve) => {
+            peerCalls.count += 1;
+            setTimeout(() => resolve(blobData(peerData(request.hash))), 20);
+          }),
+        },
+        {
+          id: 'blossom',
+          read: (request) => new Promise((resolve) => {
+            blossomCalls.count += 1;
+            setTimeout(() => resolve(blobData(blossomData(request.hash))), 200);
+          }),
+        },
       ],
     });
 
@@ -82,7 +110,7 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
 
     await vi.advanceTimersByTimeAsync(100);
-    await expect(first).resolves.toEqual({ data: peerData, sourceId: 'fips' });
+    await expect(first).resolves.toEqual({ data: DATA_A, sourceId: 'fips' });
 
     const second = router.getDetailed(HASH_B);
     await Promise.resolve();
@@ -90,13 +118,13 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
 
     await vi.advanceTimersByTimeAsync(100);
-    await expect(second).resolves.toEqual({ data: peerData, sourceId: 'fips' });
+    await expect(second).resolves.toEqual({ data: DATA_B, sourceId: 'fips' });
   });
 
   it('supports remote-only filtered reads without consulting primary storage', async () => {
     const primary = new MemoryStore();
-    const localData = new Uint8Array([5]);
-    const remoteData = new Uint8Array([9]);
+    const localData = DATA_A;
+    const remoteData = DATA_A;
     const blossomCalls = { count: 0 };
     await primary.put(HASH_A, localData);
 
@@ -106,9 +134,9 @@ describe('MeshRouterStore', () => {
       sources: [
         {
           id: 'blossom',
-          get: async () => {
+          read: async () => {
             blossomCalls.count += 1;
-            return remoteData;
+            return blobData(remoteData);
           },
         },
       ],
@@ -124,7 +152,7 @@ describe('MeshRouterStore', () => {
 
   it('falls back to remote sources when primary storage read stalls', async () => {
     vi.useFakeTimers();
-    const remoteData = new Uint8Array([42]);
+    const remoteData = DATA_A;
     const remoteCalls = { count: 0 };
     const primary = {
       put: vi.fn(async () => true),
@@ -165,8 +193,8 @@ describe('MeshRouterStore', () => {
       sources: [
         {
           id: 'p2p',
-          get: () => new Promise<Uint8Array | null>((resolve) => {
-            resolveSource = resolve;
+          read: () => new Promise<BlobReply>((resolve) => {
+            resolveSource = (data) => resolve(reply(data));
           }),
         },
       ],
@@ -174,9 +202,10 @@ describe('MeshRouterStore', () => {
 
     const pending = router.getDetailed(HASH_A);
     let settled = false;
-    void pending.then(() => {
-      settled = true;
-    });
+    void pending.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -184,8 +213,9 @@ describe('MeshRouterStore', () => {
     await vi.advanceTimersByTimeAsync(119);
     expect(settled).toBe(false);
 
+    const rejection = expect(pending).rejects.toThrow(/timed out/i);
     await vi.advanceTimersByTimeAsync(1);
-    await expect(pending).resolves.toBeNull();
+    await rejection;
     expect(router.getSourceStats().p2p?.timeouts).toBe(1);
 
     resolveSource?.(new Uint8Array([99]));
@@ -195,7 +225,7 @@ describe('MeshRouterStore', () => {
 
   it('keeps a slow primary read alive after hedging and prefers its eventual local hit', async () => {
     vi.useFakeTimers();
-    const localData = new Uint8Array([6, 7, 8]);
+    const localData = DATA_A;
     const remoteCalls = { count: 0 };
     const primary = {
       put: vi.fn(async () => true),
@@ -233,8 +263,8 @@ describe('MeshRouterStore', () => {
     const missCalls = { count: 0 };
     const slowWarmMissCalls = { count: 0 };
     const slowCalls = { count: 0 };
-    const warmData = new Uint8Array([7]);
-    const slowData = new Uint8Array([99]);
+    const warmData = DATA_B;
+    const slowData = DATA_A;
     const router = new MeshRouterStore({
       primary,
       primarySourceId: 'idb',
@@ -248,20 +278,20 @@ describe('MeshRouterStore', () => {
       sources: [
         {
           id: 'first-miss',
-          get: async (hash) => {
-            if (hash === HASH_B) {
-              return delayedSource('warm', 10, warmData, warmCalls).get(hash);
+          read: async (request, signal) => {
+            if (request.hash === HASH_B) {
+              return delayedSource('warm', 10, warmData, warmCalls).read(request, signal);
             }
-            return delayedSource('miss', 200, null, missCalls).get(hash);
+            return delayedSource('miss', 200, null, missCalls).read(request, signal);
           },
         },
         {
           id: 'late-hit',
-          get: async (hash) => {
-            if (hash === HASH_B) {
-              return delayedSource('late-warm-miss', 20, null, slowWarmMissCalls).get(hash);
+          read: async (request, signal) => {
+            if (request.hash === HASH_B) {
+              return delayedSource('late-warm-miss', 20, null, slowWarmMissCalls).read(request, signal);
             }
-            return delayedSource('late-hit', 100, slowData, slowCalls).get(hash);
+            return delayedSource('late-hit', 100, slowData, slowCalls).read(request, signal);
           },
         },
       ],
@@ -271,6 +301,7 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(20);
     await expect(warm).resolves.toEqual({ data: warmData, sourceId: 'first-miss' });
     expect(slowWarmMissCalls.count).toBe(0);
@@ -293,17 +324,17 @@ describe('MeshRouterStore', () => {
     vi.useFakeTimers();
     const primary = new MemoryStore();
     let calls = 0;
-    const data = new Uint8Array([77]);
+    const data = DATA_A;
     const router = new MeshRouterStore({
       primary,
       requestTimeoutMs: 500,
       sources: [
         {
           id: 'blossom',
-          get: () => {
+          read: () => {
             calls += 1;
-            return new Promise<Uint8Array | null>((resolve) => {
-              setTimeout(() => resolve(data), 50);
+            return new Promise<BlobReply>((resolve) => {
+              setTimeout(() => resolve(blobData(data)), 50);
             });
           },
         },
@@ -325,7 +356,7 @@ describe('MeshRouterStore', () => {
     vi.useFakeTimers();
     const primary = new MemoryStore();
     let calls = 0;
-    const data = new Uint8Array([88]);
+    const data = DATA_A;
     const router = new MeshRouterStore({
       primary,
       primarySourceId: 'idb',
@@ -334,10 +365,10 @@ describe('MeshRouterStore', () => {
       sources: [
         {
           id: 'p2p',
-          get: () => {
+          read: () => {
             calls += 1;
-            return new Promise<Uint8Array | null>((resolve) => {
-              setTimeout(() => resolve(data), 50);
+            return new Promise<BlobReply>((resolve) => {
+              setTimeout(() => resolve(blobData(data)), 50);
             });
           },
         },
@@ -349,6 +380,7 @@ describe('MeshRouterStore', () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(calls).toBe(1);
 
@@ -361,7 +393,7 @@ describe('MeshRouterStore', () => {
     const primary = new MemoryStore();
     const aCalls = { count: 0 };
     const bCalls = { count: 0 };
-    const aData = new Uint8Array([1, 2, 3]);
+    const aData = DATA_A;
     const router = new MeshRouterStore({
       primary,
       sourceProviders: [
@@ -369,17 +401,17 @@ describe('MeshRouterStore', () => {
           {
             id: 'blossom:https://a.example',
             groupId: 'blossom',
-            get: async () => {
+            read: async () => {
               aCalls.count += 1;
-              return aData;
+              return blobData(aData);
             },
           },
           {
             id: 'peer:nostr-peer',
             groupId: 'p2p',
-            get: async () => {
+            read: async () => {
               bCalls.count += 1;
-              return new Uint8Array([9]);
+              return blobData(new Uint8Array([9]));
             },
           },
         ],
@@ -397,24 +429,202 @@ describe('MeshRouterStore', () => {
 
   it('copies remote source bytes before caching and returning them', async () => {
     const primary = new MemoryStore();
-    const sourceData = new Uint8Array([7, 8, 9]);
+    const sourceData = DATA_A.slice();
     const router = new MeshRouterStore({
       primary,
       sources: [
         {
           id: 'fips',
-          get: async () => sourceData,
+          read: async () => blobData(sourceData),
         },
       ],
     });
 
     const result = await router.getDetailed(HASH_A, { skipPrimary: true });
-    expect(result).toEqual({ data: new Uint8Array([7, 8, 9]), sourceId: 'fips' });
+    expect(result).toEqual({ data: DATA_A, sourceId: 'fips' });
     expect(result?.data).not.toBe(sourceData);
 
     sourceData[0] = 99;
 
-    await expect(primary.get(HASH_A)).resolves.toEqual(new Uint8Array([7, 8, 9]));
-    expect(result?.data).toEqual(new Uint8Array([7, 8, 9]));
+    await expect(primary.get(HASH_A)).resolves.toEqual(DATA_A);
+    expect(result?.data).toEqual(DATA_A);
+  });
+
+  it('rejects when a route fails instead of reporting a route-local miss', async () => {
+    const data = new Uint8Array([1, 2, 3]);
+    const hash = await sha256(data);
+    const router = new MeshRouterStore({
+      primary: new MemoryStore(),
+      primaryReadTimeoutMs: 0,
+      sources: [{
+        id: 'unreachable-peer',
+        read: async () => {
+          throw new Error('peer unreachable');
+        },
+      }],
+    });
+
+    await expect(router.getDetailed(hash)).rejects.toThrow('peer unreachable');
+    expect(router.getSourceStats()['unreachable-peer']?.failures).toBe(1);
+    expect(router.getSourceStats()['unreachable-peer']?.misses).toBe(0);
+  });
+
+  it('rejects a bounded route timeout instead of reporting a miss', async () => {
+    vi.useFakeTimers();
+    const data = new Uint8Array([4, 5, 6]);
+    const hash = await sha256(data);
+    const router = new MeshRouterStore({
+      primary: new MemoryStore(),
+      primaryReadTimeoutMs: 0,
+      requestTimeoutMs: 50,
+      sources: [{
+        id: 'stalled-peer',
+        read: async () => new Promise<BlobReply>(() => {}),
+      }],
+    });
+
+    const pending = router.getDetailed(hash);
+    const rejection = expect(pending).rejects.toThrow(/timed out/i);
+    await vi.advanceTimersByTimeAsync(50);
+
+    await rejection;
+    expect(router.getSourceStats()['stalled-peer']?.timeouts).toBe(1);
+    expect(router.getSourceStats()['stalled-peer']?.misses).toBe(0);
+  });
+
+  it('rejects corrupt source bytes without caching them', async () => {
+    const expected = new Uint8Array([7, 8, 9]);
+    const corrupt = new Uint8Array([9, 8, 7]);
+    const hash = await sha256(expected);
+    const primary = new MemoryStore();
+    const router = new MeshRouterStore({
+      primary,
+      primaryReadTimeoutMs: 0,
+      sources: [{ id: 'corrupt-peer', read: async () => blobData(corrupt) }],
+    });
+
+    await expect(router.getDetailed(hash)).rejects.toThrow(/hash|corrupt|integrity/i);
+    await expect(primary.get(hash)).resolves.toBeNull();
+    expect(router.getSourceStats()['corrupt-peer']?.failures).toBe(1);
+    expect(router.getSourceStats()['corrupt-peer']?.successes).toBe(0);
+  });
+
+  it('returns the first verified data even when an earlier route is corrupt', async () => {
+    vi.useFakeTimers();
+    const valid = new Uint8Array([10, 11, 12]);
+    const hash = await sha256(valid);
+    const router = new MeshRouterStore({
+      primary: new MemoryStore(),
+      primaryReadTimeoutMs: 0,
+      requestTimeoutMs: 500,
+      dispatch: {
+        initialFanout: 1,
+        hedgeFanout: 1,
+        maxFanout: 2,
+        hedgeIntervalMs: 25,
+      },
+      sources: [
+        { id: 'a-corrupt', read: async () => blobData(new Uint8Array([99])) },
+        { id: 'b-valid', read: async () => blobData(valid) },
+      ],
+    });
+
+    const pending = router.getDetailed(hash);
+    await vi.advanceTimersByTimeAsync(25);
+
+    await expect(pending).resolves.toEqual({ data: valid, sourceId: 'b-valid' });
+  });
+
+  it('verifies primary bytes and falls through to a valid route', async () => {
+    const valid = new Uint8Array([13, 14, 15]);
+    const hash = await sha256(valid);
+    const primary = {
+      put: vi.fn(async () => true),
+      get: vi.fn(async () => new Uint8Array([0])),
+      has: vi.fn(async () => true),
+      delete: vi.fn(async () => false),
+    };
+    const router = new MeshRouterStore({
+      primary,
+      primaryReadTimeoutMs: 0,
+      sources: [{ id: 'verified-peer', read: async () => blobData(valid) }],
+    });
+
+    await expect(router.getDetailed(hash)).resolves.toEqual({ data: valid, sourceId: 'verified-peer' });
+  });
+
+  it('passes the bounded HTL unchanged to each route request', async () => {
+    const data = new Uint8Array([16, 17, 18]);
+    const hash = await sha256(data);
+    const read = vi.fn(async () => blobData(data));
+    const router = new MeshRouterStore({
+      primary: new MemoryStore(),
+      primaryReadTimeoutMs: 0,
+      sources: [{ id: 'peer', read }],
+    });
+
+    await router.getDetailed(hash, { skipPrimary: true, htl: 4 } as MeshRouterGetOptions & { htl: number });
+
+    expect(read).toHaveBeenCalledWith({ hash, htl: 4 }, expect.any(AbortSignal));
+  });
+
+  it('keeps primary reads outside remote route HTL validation', async () => {
+    const primary = new MemoryStore();
+    await primary.put(HASH_A, DATA_A);
+    const router = new MeshRouterStore({ primary });
+
+    await expect(router.getDetailed(HASH_A, { htl: 255 })).resolves.toEqual({
+      data: DATA_A,
+      sourceId: 'primary',
+    });
+  });
+
+  it('returns null only after every selected route explicitly misses', async () => {
+    vi.useFakeTimers();
+    const router = new MeshRouterStore({
+      primary: new MemoryStore(),
+      requestTimeoutMs: 100,
+      dispatch: { initialFanout: 2, hedgeFanout: 1, maxFanout: 2, hedgeIntervalMs: 10 },
+      sources: [
+        { id: 'fast-miss', read: async () => BLOB_NO_RESULT },
+        {
+          id: 'slow-miss',
+          read: async () => new Promise<BlobReply>((resolve) => {
+            setTimeout(() => resolve(BLOB_NO_RESULT), 30);
+          }),
+        },
+      ],
+    });
+
+    const pending = router.getDetailed(HASH_A, { skipPrimary: true });
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(29);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it('returns the first verified data without waiting for another route', async () => {
+    vi.useFakeTimers();
+    const router = new MeshRouterStore({
+      primary: new MemoryStore(),
+      requestTimeoutMs: 500,
+      dispatch: { initialFanout: 2, hedgeFanout: 1, maxFanout: 2, hedgeIntervalMs: 10 },
+      sources: [
+        {
+          id: 'fast-data',
+          read: async () => new Promise<BlobReply>((resolve) => {
+            setTimeout(() => resolve(blobData(DATA_A)), 20);
+          }),
+        },
+        { id: 'stalled-route', read: async () => new Promise<BlobReply>(() => {}) },
+      ],
+    });
+
+    const pending = router.getDetailed(HASH_A, { skipPrimary: true });
+    await vi.advanceTimersByTimeAsync(20);
+    await expect(pending).resolves.toEqual({ data: DATA_A, sourceId: 'fast-data' });
+    expect(router.getSourceStats()['stalled-route']?.timeouts).toBe(0);
   });
 });

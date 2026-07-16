@@ -54,6 +54,7 @@ export class HashtreeWorkerClient {
                 type: 'init',
                 id,
                 config: this.config,
+                p2pProviderEnabled: this.p2pFetchHandler !== null,
             });
         });
         return this.initPromise;
@@ -97,7 +98,7 @@ export class HashtreeWorkerClient {
                 return;
             }
             if (message.type === 'p2pFetch') {
-                void this.handleP2PFetch(message.requestId, message.hashHex, message.peerId);
+                void this.handleP2PFetch(message.requestId, message.hashHex, message.htl, message.peerId);
                 return;
             }
             if (message.type === 'p2pPeerList') {
@@ -140,7 +141,7 @@ export class HashtreeWorkerClient {
         pending.reject(error);
         this.pending.delete(id);
     }
-    async handleP2PFetch(requestId, hashHex, peerId) {
+    async handleP2PFetch(requestId, hashHex, htl, peerId) {
         if (!this.worker)
             return;
         const id = generateRequestId();
@@ -149,12 +150,13 @@ export class HashtreeWorkerClient {
                 type: 'p2pFetchResult',
                 id,
                 requestId,
+                error: 'P2P provider is not configured',
             });
             return;
         }
         try {
-            const data = await this.p2pFetchHandler(hashHex, peerId);
-            if (data && data.byteLength > 0) {
+            const data = await this.p2pFetchHandler(hashHex, peerId, htl);
+            if (data !== null) {
                 const transferableData = data.slice();
                 this.worker.postMessage({
                     type: 'p2pFetchResult',
@@ -313,6 +315,7 @@ export class HashtreeWorkerClient {
             hashHex,
             sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
             skipPrimary: options.skipPrimary,
+            htl: options.htl,
         });
         if (res.type !== 'blob') {
             throw new Error('Unexpected response for getBlob');
@@ -480,17 +483,26 @@ export class HashtreeWorkerClient {
     }
     setP2PFetchHandler(handler) {
         this.p2pFetchHandler = handler;
+        this.notifyP2PProviderState();
     }
     setP2PPeerListHandler(handler) {
         this.p2pPeerListHandler = handler;
     }
     setP2PProvider(provider) {
         this.p2pFetchHandler = provider
-            ? (hashHex, peerId) => provider.fetch(hashHex, peerId)
+            ? (hashHex, peerId, htl) => provider.fetch(hashHex, peerId, htl)
             : null;
         this.p2pPeerListHandler = provider
             ? () => provider.listPeerIds()
             : null;
+        this.notifyP2PProviderState();
+    }
+    notifyP2PProviderState() {
+        this.worker?.postMessage({
+            type: 'setP2PProviderState',
+            id: generateRequestId(),
+            enabled: this.p2pFetchHandler !== null,
+        });
     }
     async close() {
         try {

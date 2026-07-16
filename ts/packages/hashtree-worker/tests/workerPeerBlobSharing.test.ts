@@ -4,7 +4,13 @@ const postMessageMock = vi.hoisted(() => vi.fn());
 const idbDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
 const blossomDataByHash = vi.hoisted(() => new Map<string, Uint8Array>());
 const peerFetchResponder = vi.hoisted(() => ({
-  handle: null as null | ((ctx: FakeWorkerGlobal, requestId: string, hashHex: string, peerId?: string) => void),
+  handle: null as null | ((
+    ctx: FakeWorkerGlobal,
+    requestId: string,
+    hashHex: string,
+    peerId?: string,
+    htl?: number,
+  ) => void),
 }));
 const peerListResponder = vi.hoisted(() => ({
   peerIds: [] as string[],
@@ -28,9 +34,15 @@ class FakeWorkerGlobal {
       return;
     }
     if (candidate?.type === 'p2pFetch' && typeof candidate.requestId === 'string') {
-      const request = message as { hashHex?: string; peerId?: string };
+      const request = message as { hashHex?: string; peerId?: string; htl?: number };
       if (peerFetchResponder.handle) {
-        peerFetchResponder.handle(this, candidate.requestId, `${request.hashHex ?? ''}`, request.peerId);
+        peerFetchResponder.handle(
+          this,
+          candidate.requestId,
+          `${request.hashHex ?? ''}`,
+          request.peerId,
+          request.htl,
+        );
         return;
       }
       queueMicrotask(() => {
@@ -180,12 +192,25 @@ function hexToBytes(value: string): Uint8Array {
   return bytes;
 }
 
+function hashHexForData(data: Uint8Array): string {
+  return (data[0] ?? 0).toString(16).padStart(2, '0').repeat(32);
+}
+
 vi.mock('@hashtree/core', () => ({
+  BLOB_DEFAULT_HTL: 10,
+  BLOB_MAX_HTL: 10,
+  BLOB_NO_RESULT: { type: 'no-result' },
   HashTree: FakeHashTree,
+  blobData: (data: Uint8Array) => ({ type: 'data', data }),
+  blobReplyFromNullable: (data: Uint8Array | null | undefined) => (
+    data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
+  ),
+  createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
   decryptChk: vi.fn(),
   fromHex: (value: string) => hexToBytes(value),
   nhashDecode: vi.fn(),
   nhashEncode: ({ hash }: { hash: Uint8Array }) => `nhash1${bytesToHex(hash).slice(0, 8)}`,
+  sha256: async (data: Uint8Array) => new Uint8Array(32).fill(data[0] ?? 0),
   toHex: (value: Uint8Array) => bytesToHex(value),
   tryDecodeTreeNode: vi.fn(),
 }));
@@ -287,14 +312,15 @@ describe('worker peer blob sharing', () => {
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const hashHex = '11'.repeat(32);
     const blobData = new Uint8Array([1, 2, 3, 4]);
+    const hashHex = hashHexForData(blobData);
     idbDataByHash.set(hashHex, blobData);
     blossomDataByHash.set(hashHex, blobData);
 
     ctx.dispatch({
       type: 'init',
       id: 'init-1',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [{ url: 'https://cdn.example', read: true, write: false }],
@@ -321,12 +347,14 @@ describe('worker peer blob sharing', () => {
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const hashHex = '22'.repeat(32);
-    idbDataByHash.set(hashHex, new Uint8Array([9, 8, 7]));
+    const localData = new Uint8Array([9, 8, 7]);
+    const hashHex = hashHexForData(localData);
+    idbDataByHash.set(hashHex, localData);
 
     ctx.dispatch({
       type: 'init',
       id: 'init-2',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [{ url: 'https://cdn.example', read: true, write: false }],
@@ -353,8 +381,8 @@ describe('worker peer blob sharing', () => {
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const hashHex = '33'.repeat(32);
     const blobData = new Uint8Array([4, 5, 6, 7]);
+    const hashHex = hashHexForData(blobData);
     peerFetchResponder.handle = (target, requestId) => {
       setTimeout(() => {
         target.dispatch({
@@ -369,6 +397,7 @@ describe('worker peer blob sharing', () => {
     ctx.dispatch({
       type: 'init',
       id: 'init-3',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [],
@@ -416,6 +445,7 @@ describe('worker peer blob sharing', () => {
     ctx.dispatch({
       type: 'init',
       id: 'init-3c',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [],
@@ -443,11 +473,7 @@ describe('worker peer blob sharing', () => {
     await vi.advanceTimersByTimeAsync(timeoutDelay);
     await Promise.resolve();
     await Promise.resolve();
-    expect(readBlobResponse('blob-3c')).toEqual({
-      type: 'blob',
-      id: 'blob-3c',
-      error: 'Blob not found',
-    });
+    expect(readBlobResponse('blob-3c')?.error).toMatch(/timed out/i);
 
     ctx.dispatch({
       type: 'p2pFetchResult',
@@ -456,11 +482,61 @@ describe('worker peer blob sharing', () => {
       data: new Uint8Array([9, 9, 9]),
     });
     await Promise.resolve();
-    expect(readBlobResponse('blob-3c')).toEqual({
+    expect(readBlobResponse('blob-3c')?.error).toMatch(/timed out/i);
+  });
+
+  it('returns a provider error instead of converting it to Blob not found', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    const hashHex = '36'.repeat(32);
+    peerFetchResponder.handle = (target, requestId) => {
+      queueMicrotask(() => {
+        target.dispatch({
+          type: 'p2pFetchResult',
+          id: `peer-error-${requestId}`,
+          requestId,
+          error: 'peer unreachable',
+        });
+      });
+    };
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-3d',
+      p2pProviderEnabled: true,
+      config: { relays: [], blossomServers: [] },
+    });
+    await flush();
+
+    ctx.dispatch({ type: 'getBlob', id: 'blob-3d', hashHex });
+
+    expect((await waitForBlobResponse('blob-3d')).error).toContain('peer unreachable');
+  });
+
+  it('does not install an auto-fetch route when no p2p provider is configured', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+
+    ctx.dispatch({
+      type: 'init',
+      id: 'init-3e',
+      config: { relays: [], blossomServers: [] },
+    });
+    await flush();
+
+    ctx.dispatch({ type: 'getBlob', id: 'blob-3e', hashHex: '37'.repeat(32) });
+
+    expect(await waitForBlobResponse('blob-3e')).toEqual({
       type: 'blob',
-      id: 'blob-3c',
+      id: 'blob-3e',
       error: 'Blob not found',
     });
+    expect(postMessageMock.mock.calls.some(([message]) => (
+      (message as { type?: string }).type === 'p2pFetch'
+    ))).toBe(false);
   });
 
   it('keeps the generic p2p fetch path available while no peers are listed yet', async () => {
@@ -468,12 +544,13 @@ describe('worker peer blob sharing', () => {
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const hashHex = '34'.repeat(32);
     const blobData = new Uint8Array([6, 7, 8, 9]);
+    const hashHex = hashHexForData(blobData);
     const requestedPeerIds: Array<string | null> = [];
     peerListResponder.peerIds = [];
-    peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
+    peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId, htl) => {
       expect(requestedHashHex).toBe(hashHex);
+      expect(htl).toBe(10);
       requestedPeerIds.push(peerId ?? null);
       queueMicrotask(() => {
         target.dispatch({
@@ -488,6 +565,7 @@ describe('worker peer blob sharing', () => {
     ctx.dispatch({
       type: 'init',
       id: 'init-3b',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [],
@@ -515,8 +593,8 @@ describe('worker peer blob sharing', () => {
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const hashHex = '44'.repeat(32);
     const blobData = new Uint8Array([8, 9, 10]);
+    const hashHex = hashHexForData(blobData);
     peerListResponder.peerIds = ['peer-a'];
     peerFetchResponder.handle = (target, requestId, requestedHashHex, peerId) => {
       expect(requestedHashHex).toBe(hashHex);
@@ -533,6 +611,7 @@ describe('worker peer blob sharing', () => {
     ctx.dispatch({
       type: 'init',
       id: 'init-4',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [],
@@ -575,12 +654,13 @@ describe('worker peer blob sharing', () => {
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
-    const hashHex = '55'.repeat(32);
     const blobData = new Uint8Array([11, 12, 13]);
+    const hashHex = hashHexForData(blobData);
 
     ctx.dispatch({
       type: 'init',
       id: 'init-5',
+      p2pProviderEnabled: true,
       config: {
         relays: [],
         blossomServers: [{ url: 'https://upload.example', read: true, write: true }],

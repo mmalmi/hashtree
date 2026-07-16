@@ -1,7 +1,7 @@
 import { type CID } from '@hashtree/core';
 import type { BlossomBandwidthState, BlossomServerConfig, BlobSource, ConnectivityState, RawBlockInput, RootResolveOptions, StoredBlockResult, WorkerDiagnosticEvent, UploadProgressState, WorkerConfig } from './protocol.js';
 export type WorkerFactory = URL | string | (new () => Worker);
-export type P2PFetchHandler = (hashHex: string, peerId?: string) => Promise<Uint8Array | null>;
+export type P2PFetchHandler = (hashHex: string, peerId?: string, htl?: number) => Promise<Uint8Array | null>;
 export type P2PPeerListHandler = () => string[] | Promise<string[]>;
 export interface WorkerP2PProvider {
     fetch: P2PFetchHandler;
@@ -53,6 +53,7 @@ export declare class HashtreeWorkerClient {
     getBlob(hashHex: string, options?: {
         sourceIds?: readonly string[];
         skipPrimary?: boolean;
+        htl?: number;
     }): Promise<{
         data: Uint8Array;
         source: BlobSource;
@@ -84,6 +85,7 @@ export declare class HashtreeWorkerClient {
     setP2PFetchHandler(handler: P2PFetchHandler | null): void;
     setP2PPeerListHandler(handler: P2PPeerListHandler | null): void;
     setP2PProvider(provider: WorkerP2PProvider | null): void;
+    private notifyP2PProviderState;
     close(): Promise<void>;
 }
 //# sourceMappingURL=client.d.ts.map

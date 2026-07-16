@@ -9,7 +9,7 @@
  * Main thread communicates via postMessage.
  * NIP-07 signing/encryption delegated back to main thread.
  */
-import { HashTree, BlossomStore, toHex } from '@hashtree/core';
+import { HashTree, BlossomStore, blobReplyFromNullable } from '@hashtree/core';
 import { DexieStore } from '@hashtree/dexie';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
 import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
@@ -38,7 +38,7 @@ import { initMediaHandler, registerMediaPort } from './mediaHandler';
 import { resolveRootPath } from './rootPathResolver';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
 import { MeshRouterStore } from '../capabilities/meshRouterStore';
-import { ExternalP2PBridge } from './externalP2P';
+import { P2PBridge } from '../p2pBridge';
 // Worker state
 let tree = null;
 let store = null;
@@ -50,7 +50,7 @@ const blossomBandwidthTracker = new BlossomBandwidthTracker((stats) => {
 let _config = null;
 const P2P_PEER_LIST_TIMEOUT_MS = 5000;
 const REMOTE_READ_TIMEOUT_MS = 15000;
-const externalP2P = new ExternalP2PBridge({
+const p2pBridge = new P2PBridge({
     respond,
     fetchTimeoutMs: REMOTE_READ_TIMEOUT_MS,
     peerListTimeoutMs: P2P_PEER_LIST_TIMEOUT_MS,
@@ -378,10 +378,14 @@ self.onmessage = async (e) => {
         switch (msg.type) {
             // Lifecycle
             case 'init':
-                await handleInit(msg.id, msg.config);
+                await handleInit(msg.id, msg.config, msg.p2pProviderEnabled === true);
                 break;
             case 'close':
                 await handleClose(msg.id);
+                break;
+            case 'setP2PProviderState':
+                p2pBridge.setEnabled(msg.enabled);
+                respond({ type: 'void', id: msg.id });
                 break;
             case 'setIdentity':
                 handleSetIdentity(msg.id, msg.pubkey, msg.nsec);
@@ -568,10 +572,10 @@ self.onmessage = async (e) => {
                 handleDecryptedResponse(msg.id, msg.plaintext, msg.error);
                 break;
             case 'p2pFetchResult':
-                externalP2P.resolveFetch(msg.requestId, msg.data, msg.error);
+                p2pBridge.resolveFetch(msg.requestId, msg.data, msg.error);
                 break;
             case 'p2pPeerListResult':
-                externalP2P.resolvePeerList(msg.requestId, msg.peerIds, msg.error);
+                p2pBridge.resolvePeerList(msg.requestId, msg.peerIds, msg.error);
                 break;
             default:
                 console.warn('[Worker] Unknown message type:', msg.type);
@@ -596,10 +600,10 @@ function respondWithTransfer(msg, transfer) {
 // ============================================================================
 // Lifecycle Handlers
 // ============================================================================
-async function handleInit(id, cfg) {
+async function handleInit(id, cfg, hasP2PProvider) {
     try {
         _config = cfg;
-        externalP2P.setEnabled(true);
+        p2pBridge.setEnabled(hasP2PProvider);
         blossomBandwidthTracker.reset();
         emitBlossomBandwidthSnapshot();
         // Initialize Dexie/IndexedDB store
@@ -742,11 +746,11 @@ function createMeshStore(primary) {
         primarySourceId: 'idb',
         requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
         sourceProviders: [
-            () => externalP2P.isEnabled()
+            () => p2pBridge.isEnabled()
                 ? [{
                         id: 'external-p2p',
                         groupId: 'p2p',
-                        get: async (hash) => externalP2P.fetch(toHex(hash)),
+                        read: async (request, signal) => p2pBridge.fetch(request, undefined, signal),
                     }]
                 : [],
             () => blossomStore
@@ -754,7 +758,9 @@ function createMeshStore(primary) {
                     id: `blossom:${server.url}`,
                     groupId: 'blossom',
                     canWrite: !!server.write,
-                    get: async (hash) => blossomStore ? blossomStore.getFromServers(hash, [server.url]) : null,
+                    read: async (request) => blobReplyFromNullable(blossomStore
+                        ? await blossomStore.getFromServers(request.hash, [server.url])
+                        : null),
                 }))
                 : [],
         ],
@@ -774,7 +780,7 @@ async function handleClose(id) {
     meshStore = null;
     tree = null;
     blossomStore = null;
-    externalP2P.setEnabled(false);
+    p2pBridge.setEnabled(false);
     blossomBandwidthTracker.reset();
     _config = null;
     respond({ type: 'void', id });
@@ -1119,8 +1125,8 @@ async function handlePublish(id, event) {
 // Stats Handlers
 // ============================================================================
 async function handleGetPeerStats(id) {
-    if (externalP2P.isEnabled()) {
-        const peerIds = await externalP2P.listPeers();
+    if (p2pBridge.isEnabled()) {
+        const peerIds = await p2pBridge.listPeers();
         respond({
             type: 'peerStats',
             id,
