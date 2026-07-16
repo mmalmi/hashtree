@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -108,7 +108,7 @@
     "typescript": "^5.3.0",
     "vitest": "^2.1.9",
     "nostr-social-graph": "https://github.com/mmalmi/nostr-social-graph/releases/download/v2.0.0/nostr-social-graph-2.0.0.tgz",
-    "ndk": "https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.0/ndk-0.2.0.tgz",
-    "ndk-cache": "https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.0/ndk-cache-0.2.0.tgz"
+    "ndk": "https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.2/ndk-0.2.1.tgz",
+    "ndk-cache": "https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.2/ndk-cache-0.2.1.tgz"
   }
 }

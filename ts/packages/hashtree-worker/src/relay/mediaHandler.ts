@@ -225,12 +225,6 @@ function cidCacheKey(cid: CID): string {
   return cid.key ? `${toHex(cid.hash)}?k=${toHex(cid.key)}` : toHex(cid.hash);
 }
 
-function sameCid(a: CID | null | undefined, b: CID | null | undefined): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  return cidCacheKey(a) === cidCacheKey(b);
-}
-
 async function resolveSnapshotRoot(nhash: string, linkKey?: string | null): Promise<CID | null> {
   if (!tree) return null;
 

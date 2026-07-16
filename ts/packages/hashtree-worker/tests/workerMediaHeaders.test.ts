@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const endpointMessages = vi.hoisted(() => [] as unknown[]);
+type FakeStore = {
+  get(hash: Uint8Array): Promise<Uint8Array | null>;
+};
 const workerState = vi.hoisted(() => ({
   isDirectory: false,
   isDirectoryPlans: [] as boolean[],
@@ -11,6 +14,7 @@ const workerState = vi.hoisted(() => ({
   readFileStreamPlans: [] as Array<{ chunks?: Uint8Array[]; error?: Error | null }>,
   readFileStreamOffsets: [] as number[],
   resolvePathImpl: vi.fn<(...args: unknown[]) => Promise<{ cid: { hash: Uint8Array }; type: number } | null>>(),
+  stores: [] as FakeStore[],
 }));
 
 class FakeWorkerGlobal {
@@ -53,7 +57,9 @@ class FakeMessagePort {
 }
 
 class FakeHashTree {
-  constructor(_config: unknown) {}
+  constructor(config: { store: FakeStore }) {
+    workerState.stores.push(config.store);
+  }
 
   async isDirectory(): Promise<boolean> {
     if (workerState.isDirectoryPlans.length > 0) {
@@ -132,20 +138,40 @@ class FakeBlossomTransport {
     return [];
   }
 
+  getReadServers(): Array<{ url: string; read: boolean; write: boolean }> {
+    return [];
+  }
+
   setServers(_servers: unknown): void {}
 
   async fetch(_hashHex: string): Promise<Uint8Array | null> {
     return null;
   }
+
+  async fetchFromServer(_hashHex: string, _serverUrl: string): Promise<Uint8Array | null> {
+    return null;
+  }
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 vi.mock('@hashtree/core', () => ({
+  BLOB_DEFAULT_HTL: 10,
+  BLOB_NO_RESULT: { type: 'no-result' },
   HashTree: FakeHashTree,
+  blobData: (data: Uint8Array) => ({ type: 'data', data }),
+  blobReplyFromNullable: (data: Uint8Array | null | undefined) => (
+    data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
+  ),
+  createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
   decryptChk: vi.fn(),
   fromHex: vi.fn(),
-  nhashDecode: vi.fn(() => ({ hash: new Uint8Array([1, 2, 3]) })),
+  nhashDecode: vi.fn(() => ({ hash: new Uint8Array(32).fill(7) })),
   nhashEncode: vi.fn(),
-  toHex: vi.fn(() => 'deadbeef'),
+  sha256: async (data: Uint8Array) => new Uint8Array(32).fill(data[0] ?? 0),
+  toHex: (data: Uint8Array) => bytesToHex(data),
   tryDecodeTreeNode: vi.fn(() => null),
 }));
 
@@ -184,6 +210,45 @@ function flush(): Promise<void> {
   });
 }
 
+async function startRoutedMediaRead(
+  requestId: string,
+  p2pProviderEnabled: boolean,
+): Promise<{ ctx: FakeWorkerGlobal; mediaPort: FakeMessagePort }> {
+  const { attachHashtreeWorker } = await import('../src/worker.js');
+  const ctx = globalThis.self as FakeWorkerGlobal;
+  attachHashtreeWorker(ctx);
+  workerState.readFileRangeImpl.mockImplementation(async (cid: { hash: Uint8Array }) => (
+    await workerState.stores[1]?.get(cid.hash) ?? null
+  ));
+
+  ctx.dispatch({
+    type: 'init',
+    id: `init-${requestId}`,
+    p2pProviderEnabled,
+    config: { relays: [], blossomServers: [] },
+  });
+  await flush();
+
+  const mediaPort = new FakeMessagePort();
+  ctx.dispatch({
+    type: 'registerMediaPort',
+    id: `register-${requestId}`,
+    port: mediaPort,
+  });
+  await flush();
+  mediaPort.dispatch({
+    type: 'hashtree-file',
+    requestId,
+    nhash: 'nhash1media',
+    path: '',
+    start: 0,
+    sizeHint: 4,
+    rangeHeader: 'bytes=0-',
+    mimeType: 'image/jpeg',
+  });
+  return { ctx, mediaPort };
+}
+
 describe('worker media headers', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -197,6 +262,7 @@ describe('worker media headers', () => {
     workerState.fileSize = 512 * 1024;
     workerState.resolvePathImpl.mockReset();
     workerState.readFileStreamChunks = [];
+    workerState.stores = [];
     Object.defineProperty(globalThis, 'self', {
       configurable: true,
       writable: true,
@@ -269,6 +335,54 @@ describe('worker media headers', () => {
         type: 'done',
         requestId: 'audio-1',
       }));
+    });
+  });
+
+  it('keeps media reads Blossom-only when no P2P provider bridge is configured', async () => {
+    const { mediaPort } = await startRoutedMediaRead('media-without-provider', false);
+
+    await vi.waitFor(() => {
+      expect(mediaPort.messages).toContainEqual({
+        type: 'error',
+        requestId: 'media-without-provider',
+        message: 'File not found',
+      });
+    });
+    expect(endpointMessages).not.toContainEqual(expect.objectContaining({ type: 'p2pFetch' }));
+  });
+
+  it('routes media through the configured P2P provider bridge with native HTL', async () => {
+    const { ctx, mediaPort } = await startRoutedMediaRead('media-with-provider', true);
+
+    let p2pRequest: { requestId: string; hashHex: string; htl: number; peerId?: string } | undefined;
+    await vi.waitFor(() => {
+      p2pRequest = endpointMessages.find((message) => (
+        (message as { type?: string }).type === 'p2pFetch'
+      )) as typeof p2pRequest;
+      expect(p2pRequest).toMatchObject({
+        hashHex: '07'.repeat(32),
+        htl: 10,
+        peerId: undefined,
+      });
+    });
+
+    ctx.dispatch({
+      type: 'p2pFetchResult',
+      id: `result-${p2pRequest!.requestId}`,
+      requestId: p2pRequest!.requestId,
+      data: new Uint8Array([7, 8, 9, 10]),
+    });
+
+    await vi.waitFor(() => {
+      expect(mediaPort.messages).toContainEqual(expect.objectContaining({
+        type: 'chunk',
+        requestId: 'media-with-provider',
+        data: new Uint8Array([7, 8, 9, 10]),
+      }));
+      expect(mediaPort.messages).toContainEqual({
+        type: 'done',
+        requestId: 'media-with-provider',
+      });
     });
   });
 

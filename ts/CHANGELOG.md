@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.4.3 - 2026-07-16
+
+### Fixed
+
+- Enabled `@hashtree/worker@0.3.2` media reads to use the shared P2P bridge
+  when an application configures one. Workers without that bridge remain
+  Blossom-only; no connected-peer inference or product fallback was added.
+
+### Changed
+
+- Updated `@hashtree/fips-transport@0.4.3` development and peer requirements
+  to the immutable FIPS TypeScript runtime 0.0.25 (`@fips/core@0.0.25` and
+  `@fips/transport-webrtc@0.0.41`). Blob wire and HTL semantics are unchanged.
+- Updated worker integration tests to the immutable Iris Kit runtime 0.2.2
+  (`ndk@0.2.1` and `ndk-cache@0.2.1`).
+
 ## TypeScript runtime 0.4.2 - 2026-07-16
 
 ### Fixed

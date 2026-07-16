@@ -521,9 +521,8 @@ function createMediaStore() {
         get: async (hash) => {
             if (!meshStore)
                 return null;
-            // Interactive media must not stall behind a peer miss. The routed read
-            // still checks the local primary store before the configured Blossoms.
-            return (await meshStore.getDetailed(hash, { sourceIds: ['blossom'] }))?.data ?? null;
+            const sources = p2pBridge.isEnabled() ? undefined : ['blossom'];
+            return (await meshStore.getDetailed(hash, { sourceIds: sources }))?.data ?? null;
         },
         has: async (hash) => {
             if (!meshStore)
