@@ -62,26 +62,10 @@ const DEFAULT_FILE_METADATA_CACHE_ENTRIES: usize = 128;
 const FILE_METADATA_CACHE_ENTRIES_ENV: &str = "HTREE_FILE_METADATA_CACHE_ENTRIES";
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
 const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
-#[cfg(feature = "lmdb")]
-const LMDB_HOT_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_DIR";
-#[cfg(feature = "lmdb")]
-const LMDB_HOT_BLOB_LEGACY_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_LEGACY_DIR";
-#[cfg(feature = "lmdb")]
-const LMDB_HOT_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR";
-#[cfg(feature = "lmdb")]
-const LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR";
 pub const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
 const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
-#[cfg(all(test, feature = "lmdb"))]
-const LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES";
-#[cfg(all(test, feature = "lmdb"))]
-const LMDB_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_DIR";
-#[cfg(all(test, feature = "lmdb"))]
-const LMDB_EXTERNAL_BLOB_SYNC_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
-#[cfg(all(test, feature = "lmdb"))]
-const LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV: &str = "HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES";
 
 fn slow_owned_blob_batch_log_ms() -> Option<u128> {
     std::env::var(SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV)
@@ -217,11 +201,6 @@ pub enum LocalStore {
     Lmdb(LmdbBlobStore),
     #[cfg(feature = "lmdb")]
     Pool(Box<PoolStore>),
-    #[cfg(feature = "lmdb")]
-    TieredLmdb {
-        primary: Box<LmdbBlobStore>,
-        legacy: Box<LmdbBlobStore>,
-    },
 }
 
 #[cfg(feature = "lmdb")]
@@ -289,36 +268,6 @@ fn remove_stale_fs_blob_shards(path: &Path) -> Result<(), StoreError> {
 }
 
 #[cfg(feature = "lmdb")]
-fn lmdb_hot_blob_dir_for(legacy_path: &Path) -> Option<PathBuf> {
-    if let Ok(expected_legacy) = std::env::var(LMDB_HOT_BLOB_LEGACY_DIR_ENV) {
-        let expected_legacy = expected_legacy.trim();
-        if !expected_legacy.is_empty()
-            && !paths_refer_to_same_location(legacy_path, Path::new(expected_legacy))
-        {
-            return None;
-        }
-    }
-
-    std::env::var(LMDB_HOT_BLOB_DIR_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-#[cfg(feature = "lmdb")]
-fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-#[cfg(feature = "lmdb")]
 fn local_add_external_blob_reopen_options(store_path: &Path) -> ExternalBlobOptions {
     ExternalBlobOptions {
         base_path: store_path.with_file_name(LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME),
@@ -329,26 +278,14 @@ fn local_add_external_blob_reopen_options(store_path: &Path) -> ExternalBlobOpti
 }
 
 #[cfg(feature = "lmdb")]
-fn external_blob_options_for(
-    store_path: &Path,
-    override_dir_env: Option<&str>,
-) -> ExternalBlobOptions {
-    let options = ExternalBlobOptions::from_env(store_path).unwrap_or_else(|| {
+fn external_blob_options_for(store_path: &Path) -> ExternalBlobOptions {
+    ExternalBlobOptions::from_env(store_path).unwrap_or_else(|| {
         // `htree add --local` spills large blobs into this deterministic sibling
         // directory. Keep ordinary opens able to read those markers without
         // changing their write placement; local add opts into packed writes via
         // its process-local environment.
         local_add_external_blob_reopen_options(store_path)
-    });
-    let override_path = override_dir_env
-        .and_then(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    match override_path {
-        Some(path) => options.with_base_path(path),
-        None => options,
-    }
+    })
 }
 
 #[cfg(feature = "lmdb")]
@@ -356,18 +293,9 @@ fn open_lmdb_blob_store<P: AsRef<Path>>(
     path: P,
     map_size_bytes: Option<u64>,
 ) -> Result<LmdbBlobStore, StoreError> {
-    open_lmdb_blob_store_with_external_dir_env(path, map_size_bytes, None)
-}
-
-#[cfg(feature = "lmdb")]
-fn open_lmdb_blob_store_with_external_dir_env<P: AsRef<Path>>(
-    path: P,
-    map_size_bytes: Option<u64>,
-    external_dir_env: Option<&str>,
-) -> Result<LmdbBlobStore, StoreError> {
     std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
     remove_stale_fs_blob_shards(path.as_ref())?;
-    let external_blobs = Some(external_blob_options_for(path.as_ref(), external_dir_env));
+    let external_blobs = Some(external_blob_options_for(path.as_ref()));
     match map_size_bytes {
         Some(map_size_bytes) => {
             LmdbBlobStore::with_max_bytes_and_external_blob_options(path, map_size_bytes, |_| {
@@ -400,36 +328,10 @@ impl LocalStore {
         match backend {
             StorageBackend::Fs => Ok(LocalStore::Fs(FsBlobStore::new(path)?)),
             #[cfg(feature = "lmdb")]
-            StorageBackend::Lmdb => {
-                if let Some(hot_path) = lmdb_hot_blob_dir_for(path.as_ref()) {
-                    let legacy_path = path.as_ref().to_path_buf();
-                    if hot_path != legacy_path {
-                        let primary = open_lmdb_blob_store_with_external_dir_env(
-                            &hot_path,
-                            _map_size_bytes,
-                            Some(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV),
-                        )?;
-                        let legacy = open_lmdb_blob_store_with_external_dir_env(
-                            &legacy_path,
-                            _map_size_bytes,
-                            Some(LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV),
-                        )?;
-                        tracing::info!(
-                            "Using tiered LMDB blob storage: primary={}, legacy={}",
-                            hot_path.display(),
-                            legacy_path.display()
-                        );
-                        return Ok(LocalStore::TieredLmdb {
-                            primary: Box::new(primary),
-                            legacy: Box::new(legacy),
-                        });
-                    }
-                }
-                Ok(LocalStore::Lmdb(open_lmdb_blob_store(
-                    path,
-                    _map_size_bytes,
-                )?))
-            }
+            StorageBackend::Lmdb => Ok(LocalStore::Lmdb(open_lmdb_blob_store(
+                path,
+                _map_size_bytes,
+            )?)),
             #[cfg(not(feature = "lmdb"))]
             StorageBackend::Lmdb => {
                 tracing::warn!(
@@ -451,9 +353,7 @@ impl LocalStore {
     /// Create a local store with an explicit LMDB map size but without adapter-level eviction.
     ///
     /// Higher layers use this when they need a large mmap while enforcing quota
-    /// with richer retention policy. In tiered LMDB mode, both the hot primary
-    /// and cold legacy envs are opened without adapter-level eviction so merely
-    /// enabling the hot tier can never reclaim legacy data on startup.
+    /// with richer retention policy.
     pub fn new_unbounded_with_lmdb_map_size<P: AsRef<Path>>(
         path: P,
         backend: &StorageBackend,
@@ -466,9 +366,6 @@ impl LocalStore {
                 match open_configured_lmdb_blob_store(path, _map_size_bytes)? {
                     ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
                     ConfiguredLmdbBlobStore::Pool(store) => LocalStore::Pool(store),
-                    ConfiguredLmdbBlobStore::Tiered { primary, legacy } => {
-                        LocalStore::TieredLmdb { primary, legacy }
-                    }
                 },
             ),
             #[cfg(not(feature = "lmdb"))]
@@ -485,9 +382,7 @@ impl LocalStore {
         match self {
             LocalStore::Fs(_) => StorageBackend::Fs,
             #[cfg(feature = "lmdb")]
-            LocalStore::Lmdb(_) | LocalStore::Pool(_) | LocalStore::TieredLmdb { .. } => {
-                StorageBackend::Lmdb
-            }
+            LocalStore::Lmdb(_) | LocalStore::Pool(_) => StorageBackend::Lmdb,
         }
     }
 
@@ -498,11 +393,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.force_sync(),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.force_sync(),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                primary.force_sync()?;
-                legacy.force_sync()
-            }
         }
     }
 
@@ -514,8 +404,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.put_sync(hash, data),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.put_sync(hash, data),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => primary.put_sync(hash, data),
         }
     }
 
@@ -544,8 +432,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.put_many_report_sync(items),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.put_many_report_sync(items),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => primary.put_many_report_sync(items),
         }
     }
 
@@ -563,13 +449,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.get_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.get_sync(hash),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                if let Some(data) = primary.get_sync(hash)? {
-                    return Ok(Some(data));
-                }
-                legacy.get_sync(hash)
-            }
         }
     }
 
@@ -585,13 +464,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.get_range_sync(hash, start, end_inclusive),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.get_range_sync(hash, start, end_inclusive),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                if primary.exists(hash)? {
-                    return primary.get_range_sync(hash, start, end_inclusive);
-                }
-                legacy.get_range_sync(hash, start, end_inclusive)
-            }
         }
     }
 
@@ -602,13 +474,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.blob_size_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.blob_size_sync(hash),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                if let Some(size) = primary.blob_size_sync(hash)? {
-                    return Ok(Some(size));
-                }
-                legacy.blob_size_sync(hash)
-            }
         }
     }
 
@@ -619,13 +484,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.touch_accessed_sync(hash, now),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.touch_accessed_sync(hash, now),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => {
-                if primary.exists(hash)? {
-                    return primary.touch_accessed_sync(hash, now);
-                }
-                Ok(false)
-            }
         }
     }
 
@@ -636,16 +494,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.touch_many_accessed_sync(hashes, now),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.touch_many_accessed_sync(hashes, now),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => {
-                let mut primary_hashes = Vec::new();
-                for hash in hashes {
-                    if primary.exists(hash)? {
-                        primary_hashes.push(*hash);
-                    }
-                }
-                primary.touch_many_accessed_sync(&primary_hashes, now)
-            }
         }
     }
 
@@ -656,13 +504,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.last_accessed_at_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.last_accessed_at_sync(hash),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                if let Some(accessed_at) = primary.last_accessed_at_sync(hash)? {
-                    return Ok(Some(accessed_at));
-                }
-                legacy.last_accessed_at_sync(hash)
-            }
         }
     }
 
@@ -676,18 +517,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.many_last_accessed_at_sync(hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.many_last_accessed_at_sync(hashes),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                let mut results = primary.many_last_accessed_at_sync(hashes)?;
-                let found: HashSet<Hash> = results.iter().map(|(hash, _)| *hash).collect();
-                let missing = hashes
-                    .iter()
-                    .copied()
-                    .filter(|hash| !found.contains(hash))
-                    .collect::<Vec<_>>();
-                results.extend(legacy.many_last_accessed_at_sync(&missing)?);
-                Ok(results)
-            }
         }
     }
 
@@ -699,10 +528,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.exists(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.exists(hash),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                Ok(primary.exists(hash)? || legacy.exists(hash)?)
-            }
         }
     }
 
@@ -720,29 +545,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                let mut existing = primary.existing_hashes_in_sorted_candidates(sorted_hashes)?;
-                let missing = sorted_hashes
-                    .iter()
-                    .copied()
-                    .zip(existing.iter().copied())
-                    .filter_map(|(hash, exists)| (!exists).then_some(hash))
-                    .collect::<Vec<_>>();
-                if missing.is_empty() {
-                    return Ok(existing);
-                }
-                let legacy_existing = legacy.existing_hashes_in_sorted_candidates(&missing)?;
-                let legacy_existing_by_hash: HashSet<Hash> = missing
-                    .into_iter()
-                    .zip(legacy_existing)
-                    .filter_map(|(hash, exists)| exists.then_some(hash))
-                    .collect();
-                for (hash, exists) in sorted_hashes.iter().zip(existing.iter_mut()) {
-                    *exists |= legacy_existing_by_hash.contains(hash);
-                }
-                Ok(existing)
-            }
         }
     }
 
@@ -754,20 +556,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.delete_sync(hash),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                let deleted_primary = if primary.exists(hash)? {
-                    primary.delete_sync(hash)?
-                } else {
-                    false
-                };
-                let deleted_legacy = if legacy.exists(hash)? {
-                    legacy.delete_sync(hash)?
-                } else {
-                    false
-                };
-                Ok(deleted_primary || deleted_legacy)
-            }
         }
     }
 
@@ -778,14 +566,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.delete_sync(hash),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => {
-                if primary.exists(hash)? {
-                    primary.delete_sync(hash)
-                } else {
-                    Ok(false)
-                }
-            }
         }
     }
 
@@ -815,21 +595,10 @@ impl LocalStore {
                     total_bytes: stats.bytes,
                 })
             }
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                let primary_stats = primary.stats()?;
-                let legacy_stats = legacy.stats()?;
-                Ok(LocalStoreStats {
-                    count: primary_stats.count.saturating_add(legacy_stats.count),
-                    total_bytes: primary_stats
-                        .total_bytes
-                        .saturating_add(legacy_stats.total_bytes),
-                })
-            }
         }
     }
 
-    /// Get storage statistics for the tier that receives new writes.
+    /// Get storage statistics for the canonical writable store.
     pub fn writable_stats(&self) -> Result<LocalStoreStats, StoreError> {
         match self {
             LocalStore::Fs(store) => {
@@ -855,14 +624,6 @@ impl LocalStore {
                     total_bytes: stats.bytes,
                 })
             }
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => {
-                let stats = primary.stats()?;
-                Ok(LocalStoreStats {
-                    count: stats.count,
-                    total_bytes: stats.total_bytes,
-                })
-            }
         }
     }
 
@@ -874,21 +635,10 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.list(),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, legacy } => {
-                let mut hashes = primary.list()?;
-                let mut seen: HashSet<Hash> = hashes.iter().copied().collect();
-                for hash in legacy.list()? {
-                    if seen.insert(hash) {
-                        hashes.push(hash);
-                    }
-                }
-                Ok(hashes)
-            }
         }
     }
 
-    /// List hashes in the tier that receives new writes.
+    /// List hashes in the canonical writable store.
     pub fn list_writable(&self) -> Result<Vec<Hash>, StoreError> {
         match self {
             LocalStore::Fs(store) => store.list(),
@@ -896,8 +646,6 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.list(),
-            #[cfg(feature = "lmdb")]
-            LocalStore::TieredLmdb { primary, .. } => primary.list(),
         }
     }
 }
@@ -949,9 +697,6 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
             Arc::new(match store {
                 ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
                 ConfiguredLmdbBlobStore::Pool(store) => LocalStore::Pool(store),
-                ConfiguredLmdbBlobStore::Tiered { primary, legacy } => {
-                    LocalStore::TieredLmdb { primary, legacy }
-                }
             })
         });
     }
@@ -3172,64 +2917,7 @@ impl crate::webrtc::ContentStore for HashtreeStore {
 mod tests {
     use super::*;
     #[cfg(feature = "lmdb")]
-    use std::ffi::OsString;
-    #[cfg(feature = "lmdb")]
-    use std::path::Path;
-    #[cfg(feature = "lmdb")]
-    use std::sync::Mutex;
-    #[cfg(feature = "lmdb")]
     use tempfile::TempDir;
-
-    #[cfg(feature = "lmdb")]
-    static HOT_BLOB_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[cfg(feature = "lmdb")]
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    #[cfg(feature = "lmdb")]
-    impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-
-        fn set_value(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    #[cfg(feature = "lmdb")]
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
-    #[cfg(feature = "lmdb")]
-    fn count_files_under(path: &Path) -> Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        let mut count = 0usize;
-        for entry in walkdir::WalkDir::new(path) {
-            let entry = entry?;
-            if entry.file_type().is_file() {
-                count = count.saturating_add(1);
-            }
-        }
-        Ok(count)
-    }
 
     #[test]
     fn blob_access_update_gate_deduplicates_and_throttles() {
@@ -3311,7 +2999,6 @@ mod tests {
                 pool.largest_member_map_size_bytes()?
                     .expect("fresh pool should have a blob member") as u64
             }
-            LocalStore::TieredLmdb { primary, .. } => primary.map_size_bytes() as u64,
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };
 
@@ -3408,7 +3095,6 @@ mod tests {
                 pool.largest_member_map_size_bytes()?
                     .expect("fresh pool should have a blob member") as u64
             }
-            LocalStore::TieredLmdb { primary, .. } => primary.map_size_bytes() as u64,
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };
 
@@ -3436,225 +3122,6 @@ mod tests {
         assert!(store.put_sync(hash, &data)?);
         assert_eq!(store.get_sync(&hash)?, Some(data));
         assert!(!external_path.exists());
-        Ok(())
-    }
-
-    #[cfg(feature = "lmdb")]
-    #[test]
-    fn lmdb_hot_blob_legacy_guard_scopes_tiered_store() -> Result<()> {
-        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
-        let legacy = temp.path().join("legacy-blobs");
-        let unrelated = temp.path().join("unrelated-blobs");
-        let hot = temp.path().join("hot-blobs");
-        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
-        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
-
-        let store = LocalStore::new_with_lmdb_map_size(
-            &legacy,
-            &StorageBackend::Lmdb,
-            Some(128 * 1024 * 1024),
-        )?;
-        assert!(matches!(store, LocalStore::TieredLmdb { .. }));
-
-        let store = LocalStore::new_with_lmdb_map_size(
-            &unrelated,
-            &StorageBackend::Lmdb,
-            Some(128 * 1024 * 1024),
-        )?;
-        assert!(matches!(store, LocalStore::Lmdb(_)));
-
-        Ok(())
-    }
-
-    #[cfg(feature = "lmdb")]
-    #[test]
-    fn hashtree_store_uses_scoped_lmdb_hot_blob_dir() -> Result<()> {
-        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
-        let data_dir = temp.path().join("store");
-        let hot = temp.path().join("hot-main-blobs");
-        let legacy = data_dir.join("blobs");
-        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
-        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
-
-        let store = HashtreeStore::with_options_and_backend(
-            &data_dir,
-            None,
-            128 * 1024 * 1024,
-            true,
-            &StorageBackend::Lmdb,
-        )?;
-
-        let local = store.router.local_store();
-        assert!(matches!(local.as_ref(), LocalStore::TieredLmdb { .. }));
-
-        Ok(())
-    }
-
-    #[cfg(feature = "lmdb")]
-    #[test]
-    fn lightweight_shared_helper_matches_daemon_tier_and_external_options() -> Result<()> {
-        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
-        let data_dir = temp.path().join("store");
-        let legacy = data_dir.join("blobs");
-        let hot = temp.path().join("hot-main-blobs");
-        let hot_external = temp.path().join("hot-external");
-        let legacy_external = temp.path().join("legacy-external");
-        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
-        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
-        let _hot_external_guard = EnvGuard::set(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV, &hot_external);
-        let _legacy_external_guard =
-            EnvGuard::set(LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV, &legacy_external);
-        let _min_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV, "1");
-        let _sync_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0");
-
-        let max_size_bytes = 128 * 1024 * 1024;
-        let owner = HashtreeStore::with_options_and_backend(
-            &data_dir,
-            None,
-            max_size_bytes,
-            true,
-            &StorageBackend::Lmdb,
-        )?;
-        let shared = open_shared_lmdb_blob_store(&data_dir, max_size_bytes)?;
-        assert!(matches!(shared, ConfiguredLmdbBlobStore::Tiered { .. }));
-
-        let data = b"one tiered blob visible through the lightweight helper".repeat(4);
-        let hash = sha256(&data);
-        assert!(owner.router().put_sync(hash, &data)?);
-        assert_eq!(shared.get_sync(&hash)?, Some(data));
-        assert!(
-            count_files_under(&hot_external)? > 0,
-            "owner and lightweight opener must agree on the hot external directory"
-        );
-        assert_eq!(count_files_under(&legacy_external)?, 0);
-
-        Ok(())
-    }
-
-    #[cfg(feature = "lmdb")]
-    #[test]
-    fn tiered_lmdb_uses_distinct_external_blob_dirs() -> Result<()> {
-        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
-        let data_dir = temp.path().join("store");
-        let hot = temp.path().join("hot-main-blobs");
-        let legacy = data_dir.join("blobs");
-        let hot_external = temp.path().join("hot-external");
-        let legacy_external = temp.path().join("legacy-external");
-        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
-        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
-        let _global_external_guard = EnvGuard::set(LMDB_EXTERNAL_BLOB_DIR_ENV, &legacy_external);
-        let _hot_external_guard = EnvGuard::set(LMDB_HOT_EXTERNAL_BLOB_DIR_ENV, &hot_external);
-        let _min_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV, "1");
-        let _sync_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0");
-        let _pack_guard = EnvGuard::set_value(LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV, "1024");
-
-        let store = HashtreeStore::with_options_and_backend(
-            &data_dir,
-            None,
-            128 * 1024 * 1024,
-            true,
-            &StorageBackend::Lmdb,
-        )?;
-        let hot_data = b"hot blob written through primary tier".repeat(4);
-        let hot_hash = sha256(&hot_data);
-        assert_eq!(store.put_cached_blobs(&[(hot_hash, hot_data.clone())])?, 1);
-        assert!(
-            count_files_under(&hot_external.join("packs"))? > 0,
-            "primary hot writes should create external packs under hot external dir"
-        );
-        assert_eq!(
-            count_files_under(&legacy_external.join("packs"))?,
-            0,
-            "hot writes must not spill into the legacy external dir"
-        );
-
-        let legacy_data = b"legacy blob already stored on the old tier".repeat(4);
-        let legacy_hash = sha256(&legacy_data);
-        match store.router.local_store().as_ref() {
-            LocalStore::TieredLmdb { legacy, .. } => {
-                assert_eq!(
-                    legacy.put_many_sync(&[(legacy_hash, legacy_data.clone())])?,
-                    1
-                );
-            }
-            _ => panic!("expected tiered LMDB local store"),
-        }
-        assert!(
-            count_files_under(&legacy_external.join("packs"))? > 0,
-            "legacy writes should keep using the legacy external dir"
-        );
-
-        assert_eq!(store.router().get_sync(&hot_hash)?, Some(hot_data));
-        assert_eq!(store.router().get_sync(&legacy_hash)?, Some(legacy_data));
-
-        Ok(())
-    }
-
-    #[cfg(feature = "lmdb")]
-    #[test]
-    fn tiered_lmdb_legacy_bytes_do_not_drive_hot_quota() -> Result<()> {
-        let _lock = HOT_BLOB_ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
-        let data_dir = temp.path().join("store");
-        let hot = temp.path().join("hot-main-blobs");
-        let legacy = data_dir.join("blobs");
-        let legacy_blob = vec![7u8; 10 * 1024 * 1024];
-        let legacy_hash = sha256(&legacy_blob);
-        let hot_blob = vec![3u8; 8 * 1024 * 1024];
-
-        let _hot_guard = EnvGuard::set(LMDB_HOT_BLOB_DIR_ENV, &hot);
-        let _legacy_guard = EnvGuard::set(LMDB_HOT_BLOB_LEGACY_DIR_ENV, &legacy);
-        let store = HashtreeStore::with_options_and_backend(
-            &data_dir,
-            None,
-            LMDB_BLOB_MIN_MAP_SIZE_BYTES,
-            true,
-            &StorageBackend::Lmdb,
-        )?;
-
-        let local = store.router.local_store();
-        match local.as_ref() {
-            LocalStore::TieredLmdb { primary: _, legacy } => {
-                assert_eq!(legacy.max_bytes(), None);
-                assert!(legacy.put_sync(legacy_hash, &legacy_blob)?);
-            }
-            _ => panic!("expected tiered LMDB local store"),
-        }
-
-        assert!(store.blob_exists(&legacy_hash)?);
-        assert_eq!(
-            store.blob_size(&legacy_hash)?,
-            Some(legacy_blob.len() as u64)
-        );
-        assert_eq!(store.router.writable_stats()?.total_bytes, 0);
-
-        let pubkey = [1u8; 32];
-        let hot_hash_hex = store.put_owned_blob(&hot_blob, &pubkey)?;
-        let hot_hash = from_hex(&hot_hash_hex)?;
-        assert_eq!(store.blob_size(&hot_hash)?, Some(hot_blob.len() as u64));
-        assert!(store.blob_exists(&legacy_hash)?);
-        assert!(!store.router.delete_local_only(&legacy_hash)?);
-        assert!(store.blob_exists(&legacy_hash)?);
-
-        let local = store.router.local_store();
-        match local.as_ref() {
-            LocalStore::TieredLmdb { primary, legacy } => {
-                assert!(primary.exists(&hot_hash)?);
-                assert!(!primary.exists(&legacy_hash)?);
-                assert!(legacy.exists(&legacy_hash)?);
-            }
-            _ => panic!("expected tiered LMDB local store"),
-        }
-
-        let writable_stats = store.router.writable_stats()?;
-        assert_eq!(writable_stats.count, 1);
-        assert_eq!(writable_stats.total_bytes, hot_blob.len() as u64);
-
-        drop(store);
         Ok(())
     }
 

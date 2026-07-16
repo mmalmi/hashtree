@@ -365,8 +365,7 @@ impl HashtreeStore {
 
         drop(rtxn);
 
-        // Get hashes in the writable tier. Cold/legacy tiers are archival in
-        // tiered LMDB mode and must not be reclaimed by local GC.
+        // Get hashes in the canonical writable store.
         let all_hashes = self
             .router
             .list_writable()

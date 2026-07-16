@@ -42,8 +42,10 @@ let store = Arc::new(open_shared_lmdb_blob_store(data_dir, max_size_bytes)?);
 
 The returned `ConfiguredLmdbBlobStore` implements `Store`. A fresh shared store is
 a `PoolStore` with a persistent catalog and one default member. Existing single
-LMDB stores remain single stores instead of being silently reclassified. The old
-hot/legacy environment variables are recognized only as a migration bridge.
+LMDB stores remain single stores instead of being silently reclassified. The
+former hot/legacy environment-variable bridge has been removed. Migrate each old
+LMDB source into the pool with `htree storage pool migrate-lmdb` before cutting
+applications over to the pool.
 
 The pool is one application-owned write destination. Its LMDB members are opaque
 storage resources, and the pool exclusively chooses one member for every blob.

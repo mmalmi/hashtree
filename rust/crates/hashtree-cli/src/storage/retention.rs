@@ -866,8 +866,7 @@ impl HashtreeStore {
     /// 1. Orphaned blobs (not in any indexed tree and not pinned)
     /// 2. Trees by priority (lowest first) and access age (least recent first)
     pub fn evict_if_needed(&self) -> Result<u64> {
-        // Get writable-tier storage used. In tiered LMDB mode the legacy env is
-        // cold archive/read-through data and must not drive hot-cache eviction.
+        // Get storage used by the canonical writable store.
         let stats = self
             .router
             .writable_stats()

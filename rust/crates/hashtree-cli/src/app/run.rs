@@ -2197,7 +2197,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 println!("Removed pool member {id}");
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "lmdb"))]
@@ -2207,6 +2207,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
     }
 }
 
+#[cfg(feature = "lmdb")]
 fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
