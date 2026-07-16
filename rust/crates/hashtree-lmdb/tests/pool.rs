@@ -165,3 +165,96 @@ fn explicit_capacity_moves_new_writes_to_available_member() -> Result<(), StoreE
     assert_ne!(first, second);
     Ok(())
 }
+
+#[test]
+fn valid_put_repairs_a_corrupt_located_copy() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    let owner = pool.add_member(member(&member_path, 1024 * 1024))?;
+    let data = b"repairable pool bytes".repeat(32);
+    let hash = sha256(&data);
+    assert!(pool.put_sync(hash, &data)?);
+    drop(pool);
+
+    let raw = LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+        &member_path,
+        16 * 1024 * 1024,
+        None,
+    )?;
+    assert!(raw.delete_sync(&hash)?);
+    assert!(raw.put_sync(hash, b"corrupt bytes")?);
+    drop(raw);
+
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    assert!(reopened.put_sync(hash, &data)?);
+    assert_eq!(reopened.blob_location(&hash)?, Some(owner));
+    assert_eq!(reopened.get_sync(&hash)?, Some(data));
+    Ok(())
+}
+
+#[test]
+fn batch_put_is_hash_verified_globally_idempotent_and_exact() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())?;
+    pool.add_member(member(temp.path().join("member"), 1024 * 1024))?;
+    let first = b"batch first".repeat(32);
+    let second = b"batch second".repeat(32);
+    let first_hash = sha256(&first);
+    let second_hash = sha256(&second);
+    let items = vec![
+        (first_hash, first.clone()),
+        (second_hash, second.clone()),
+        (first_hash, first.clone()),
+    ];
+
+    assert_eq!(pool.put_many_sync(&items)?, 2);
+    assert_eq!(pool.put_many_sync(&items)?, 0);
+    assert_eq!(pool.stats()?.count, 2);
+    assert_eq!(pool.get_sync(&first_hash)?, Some(first));
+    assert_eq!(pool.get_sync(&second_hash)?, Some(second));
+
+    let invalid = vec![(sha256(b"not these bytes"), b"bad batch bytes".to_vec())];
+    assert!(pool.put_many_sync(&invalid).is_err());
+    assert_eq!(pool.stats()?.count, 2);
+    Ok(())
+}
+
+#[test]
+fn adding_capacity_rebalances_existing_blobs_with_bounded_progress() -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())?;
+    let source = pool.add_member(member(temp.path().join("source"), 1024 * 1024))?;
+    let blobs = (0..20)
+        .map(|index| {
+            let data = format!("rebalance blob {index:04}").repeat(32).into_bytes();
+            (sha256(&data), data)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pool.put_many_sync(&blobs)?, blobs.len());
+    assert_eq!(pool.member(source)?.located_blobs, blobs.len() as u64);
+
+    let target = pool.add_member(member(temp.path().join("target"), 1024 * 1024))?;
+    let mut moved = 0usize;
+    loop {
+        let report = pool.maintain(3)?;
+        assert!(
+            report.failed.is_empty(),
+            "maintenance errors: {:?}",
+            report.failed
+        );
+        assert!(report.moved <= 3, "maintenance must honor its item bound");
+        moved += report.moved;
+        if report.moved == 0 {
+            break;
+        }
+    }
+    assert_eq!(moved, blobs.len() / 2);
+    assert_eq!(pool.member(source)?.located_blobs, blobs.len() as u64 / 2);
+    assert_eq!(pool.member(target)?.located_blobs, blobs.len() as u64 / 2);
+    for (hash, data) in blobs {
+        assert_eq!(pool.get_sync(&hash)?, Some(data));
+    }
+    Ok(())
+}

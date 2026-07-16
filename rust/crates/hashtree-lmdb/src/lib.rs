@@ -897,6 +897,55 @@ impl LmdbBlobStore {
         Ok(hashes)
     }
 
+    /// Scan hashes in lexicographic order without materializing the whole store.
+    ///
+    /// `after` is exclusive, so callers can persist the final returned hash as a
+    /// resumable cursor. Legacy stores without metadata are scanned from the blob
+    /// database instead.
+    pub fn scan_hashes_after(
+        &self,
+        after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<Hash>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        let database = if self.metadata.is_empty(&rtxn).map_err(map_heed_error)? {
+            self.blobs
+        } else {
+            self.metadata
+        };
+        let mut hashes = Vec::with_capacity(limit);
+        let decode_hash = |hash: &[u8]| -> Result<Hash, StoreError> {
+            hash.try_into()
+                .map_err(|_| StoreError::Other("invalid hash length".into()))
+        };
+        match after {
+            Some(after) => {
+                use std::ops::Bound;
+                let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
+                for item in database.range(&rtxn, &range).map_err(map_heed_error)? {
+                    let (hash, _) = item.map_err(map_heed_error)?;
+                    hashes.push(decode_hash(hash)?);
+                    if hashes.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for item in database.iter(&rtxn).map_err(map_heed_error)? {
+                    let (hash, _) = item.map_err(map_heed_error)?;
+                    hashes.push(decode_hash(hash)?);
+                    if hashes.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(hashes)
+    }
+
     /// Sync put operation (for use in sync contexts).
     pub fn put_sync(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
         let incoming_bytes = data.len() as u64;
@@ -2345,6 +2394,33 @@ mod tests {
         assert!(hashes.contains(&h2));
         assert!(hashes.contains(&h3));
 
+        Ok(())
+    }
+
+    #[test]
+    fn scan_hashes_after_is_bounded_ordered_and_resumable() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+        for index in 0..11 {
+            let data = format!("cursor blob {index:02}").into_bytes();
+            store.put_sync(sha256(&data), &data)?;
+        }
+        let mut expected = store.list()?;
+        expected.sort_unstable();
+
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store.scan_hashes_after(cursor, 3)?;
+            assert!(page.len() <= 3);
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().copied();
+            actual.extend(page);
+        }
+        assert_eq!(actual, expected);
+        assert!(store.scan_hashes_after(cursor, 0)?.is_empty());
         Ok(())
     }
 

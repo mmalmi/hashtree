@@ -527,26 +527,15 @@ impl PoolStore {
         }
 
         if let Some(location) = self.read_location(&hash)? {
-            if let Some(data) = self.read_verified_location(&hash, location)? {
-                if matches!(location, LocationRecord::Pending { .. }) {
-                    self.finalize_pending(hash, location)?;
+            match self.read_verified_location(&hash, location) {
+                Ok(Some(found)) => {
+                    if matches!(location, LocationRecord::Pending { .. }) {
+                        self.finalize_pending(hash, location)?;
+                    }
+                    debug_assert_eq!(sha256(&found), hash);
+                    return Ok(false);
                 }
-                debug_assert_eq!(sha256(&data), hash);
-                return Ok(false);
-            }
-
-            let existing_member = location.preferred_member();
-            if self.member_state(existing_member)? == Some(PoolMemberState::Active) {
-                let store = self.get_member(existing_member)?;
-                let inserted = self.write_verified_member(existing_member, &store, hash, data)?;
-                self.set_location(
-                    hash,
-                    Some(LocationRecord::Stored {
-                        member: existing_member,
-                        size: data.len() as u64,
-                    }),
-                )?;
-                return Ok(inserted);
+                Ok(None) | Err(_) => return self.repair_location(hash, data, location),
             }
         }
 
@@ -557,25 +546,139 @@ impl PoolStore {
         };
         let location = self.reserve_if_absent(hash, pending)?;
         if location != pending {
-            if let Some(found) = self.read_verified_location(&hash, location)? {
-                if matches!(location, LocationRecord::Pending { .. }) {
-                    self.finalize_pending(hash, location)?;
+            match self.read_verified_location(&hash, location) {
+                Ok(Some(found)) => {
+                    if matches!(location, LocationRecord::Pending { .. }) {
+                        self.finalize_pending(hash, location)?;
+                    }
+                    debug_assert_eq!(sha256(&found), hash);
+                    return Ok(false);
                 }
-                debug_assert_eq!(sha256(&found), hash);
-                return Ok(false);
+                Ok(None) | Err(_) => return self.repair_location(hash, data, location),
             }
         }
 
         let target = location.preferred_member();
         let store = self.get_member(target)?;
         let inserted = self.write_verified_member(target, &store, hash, data)?;
-        self.set_location(
-            hash,
-            Some(LocationRecord::Stored {
+        self.finalize_pending(hash, location)?;
+        Ok(inserted)
+    }
+
+    pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        let mut seen = HashSet::new();
+        let mut unique = Vec::with_capacity(items.len());
+        for (hash, data) in items {
+            if sha256(data) != *hash {
+                return Err(StoreError::Other(
+                    "pool rejected batch bytes that do not match their hash".into(),
+                ));
+            }
+            if seen.insert(*hash) {
+                unique.push((*hash, data));
+            }
+        }
+
+        let mut inserted = 0usize;
+        let mut missing = Vec::new();
+        for (hash, data) in unique {
+            if self.read_location(&hash)?.is_some() {
+                inserted = inserted.saturating_add(usize::from(self.put_sync(hash, data)?));
+            } else {
+                missing.push((hash, data));
+            }
+        }
+        if missing.is_empty() {
+            return Ok(inserted);
+        }
+
+        let mut reserved_bytes = HashMap::new();
+        let mut assignments = Vec::with_capacity(missing.len());
+        for (hash, data) in missing {
+            let target =
+                self.choose_write_member_with_reserved(data.len() as u64, None, &reserved_bytes)?;
+            let reserved = reserved_bytes.entry(target).or_insert(0u64);
+            *reserved = reserved.saturating_add(data.len() as u64);
+            assignments.push((hash, data, target));
+        }
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let mut plans = Vec::with_capacity(assignments.len());
+        let mut raced = Vec::new();
+        for (hash, data, target) in assignments {
+            if self
+                .locations
+                .get(&wtxn, &hash)
+                .map_err(map_heed)?
+                .is_some()
+            {
+                raced.push((hash, data));
+                continue;
+            }
+            let pending = LocationRecord::Pending {
                 member: target,
                 size: data.len() as u64,
-            }),
-        )?;
+            };
+            self.set_location_txn(&mut wtxn, hash, Some(pending))?;
+            plans.push((hash, data, target, pending));
+        }
+        wtxn.commit().map_err(map_heed)?;
+
+        for (hash, data) in raced {
+            inserted = inserted.saturating_add(usize::from(self.put_sync(hash, data)?));
+        }
+
+        let mut by_target: HashMap<PoolMemberId, Vec<(Hash, Vec<u8>)>> = HashMap::new();
+        for (hash, data, target, _) in &plans {
+            by_target
+                .entry(*target)
+                .or_default()
+                .push((*hash, (*data).clone()));
+        }
+        for (target, batch) in by_target {
+            let store = self.get_member(target)?;
+            for (hash, _) in &batch {
+                if store
+                    .get_sync(hash)?
+                    .is_some_and(|existing| sha256(&existing) != *hash)
+                {
+                    store.delete_sync(hash)?;
+                }
+            }
+            let started = Instant::now();
+            let result = store.put_many_report_sync(&batch);
+            let success = result.is_ok();
+            let bytes = batch.iter().map(|(_, data)| data.len()).sum::<usize>();
+            self.record_write(target, started.elapsed(), bytes, success);
+            let report = result?;
+            inserted = inserted.saturating_add(report.inserted);
+            for (hash, _) in &batch {
+                self.read_verified_member(target, &store, hash)?
+                    .ok_or_else(|| {
+                        StoreError::Other(format!(
+                            "pool member {target} lost a committed batch write"
+                        ))
+                    })?;
+            }
+        }
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        for (hash, _, target, pending) in plans {
+            let Some(current) = self.locations.get(&wtxn, &hash).map_err(map_heed)? else {
+                continue;
+            };
+            if LocationRecord::decode(current)? == pending {
+                self.set_location_txn(
+                    &mut wtxn,
+                    hash,
+                    Some(LocationRecord::Stored {
+                        member: target,
+                        size: pending.size(),
+                    }),
+                )?;
+            }
+        }
+        wtxn.commit().map_err(map_heed)?;
         Ok(inserted)
     }
 
@@ -693,6 +796,40 @@ impl PoolStore {
                 }
             }
         }
+        while report.examined < max_items {
+            let Some((source, target)) = self.rebalance_pair()? else {
+                break;
+            };
+            let hashes = self.member_hashes(source, max_items - report.examined)?;
+            if hashes.is_empty() {
+                break;
+            }
+            let mut progressed = false;
+            for hash in hashes {
+                if report.examined >= max_items {
+                    break;
+                }
+                report.examined += 1;
+                let Some(location) = self.read_location(&hash)? else {
+                    continue;
+                };
+                if !self.move_improves_balance(source, target, location.size())? {
+                    continue;
+                }
+                match self.move_blob(source, target, hash) {
+                    Ok(Some(bytes)) => {
+                        report.moved += 1;
+                        report.bytes_moved = report.bytes_moved.saturating_add(bytes);
+                        progressed = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => report.failed.push(format!("{hash:?}: {error}")),
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
         Ok(report)
     }
 
@@ -708,7 +845,8 @@ impl PoolStore {
             LocationRecord::Pending { member, size } | LocationRecord::Stored { member, size }
                 if member == source =>
             {
-                (self.choose_write_member(size, Some(source))?, size, false)
+                let target = self.choose_write_member(size, Some(source))?;
+                return self.move_blob(source, target, hash);
             }
             LocationRecord::Moving {
                 source: moving_source,
@@ -718,6 +856,43 @@ impl PoolStore {
             _ => return Ok(None),
         };
 
+        self.move_blob_inner(source, target, hash, location, size, moving)
+    }
+
+    fn move_blob(
+        &self,
+        source: PoolMemberId,
+        target: PoolMemberId,
+        hash: Hash,
+    ) -> Result<Option<u64>, StoreError> {
+        let Some(location) = self.read_location(&hash)? else {
+            return Ok(None);
+        };
+        let (actual_target, size, moving) = match location {
+            LocationRecord::Pending { member, size } | LocationRecord::Stored { member, size }
+                if member == source =>
+            {
+                (target, size, false)
+            }
+            LocationRecord::Moving {
+                source: moving_source,
+                target,
+                size,
+            } if moving_source == source => (target, size, true),
+            _ => return Ok(None),
+        };
+        self.move_blob_inner(source, actual_target, hash, location, size, moving)
+    }
+
+    fn move_blob_inner(
+        &self,
+        source: PoolMemberId,
+        target: PoolMemberId,
+        hash: Hash,
+        location: LocationRecord,
+        size: u64,
+        moving: bool,
+    ) -> Result<Option<u64>, StoreError> {
         let source_store = self.get_member(source)?;
         let target_store = self.get_member(target)?;
         let source_data = match self.read_verified_member(source, &source_store, &hash) {
@@ -904,6 +1079,15 @@ impl PoolStore {
         incoming_bytes: u64,
         exclude: Option<PoolMemberId>,
     ) -> Result<PoolMemberId, StoreError> {
+        self.choose_write_member_with_reserved(incoming_bytes, exclude, &HashMap::new())
+    }
+
+    fn choose_write_member_with_reserved(
+        &self,
+        incoming_bytes: u64,
+        exclude: Option<PoolMemberId>,
+        reserved_bytes: &HashMap<PoolMemberId, u64>,
+    ) -> Result<PoolMemberId, StoreError> {
         self.refresh_members()?;
         let manifest = self.read_manifest()?;
         let runtime = self
@@ -923,12 +1107,15 @@ impl PoolStore {
                 Ok(stats) => stats,
                 Err(_) => continue,
             };
+            let effective_bytes = stats
+                .total_bytes
+                .saturating_add(reserved_bytes.get(&member.id).copied().unwrap_or(0));
             if member.config.capacity_bytes > 0
-                && stats.total_bytes.saturating_add(incoming_bytes) > member.config.capacity_bytes
+                && effective_bytes.saturating_add(incoming_bytes) > member.config.capacity_bytes
             {
                 continue;
             }
-            candidates.push((member.id, stats.total_bytes, member.config.capacity_bytes));
+            candidates.push((member.id, effective_bytes, member.config.capacity_bytes));
         }
         drop(runtime);
         self.adaptive
@@ -936,6 +1123,161 @@ impl PoolStore {
             .map_err(|_| StoreError::Other("pool adaptive lock poisoned".into()))?
             .choose_write(&candidates)
             .ok_or_else(|| StoreError::Other("no writable pool member has capacity".into()))
+    }
+
+    fn repair_location(
+        &self,
+        hash: Hash,
+        data: &[u8],
+        expected: LocationRecord,
+    ) -> Result<bool, StoreError> {
+        let preferred = expected.preferred_member();
+        let preferred_store = if self.member_state(preferred)? == Some(PoolMemberState::Active) {
+            self.get_member(preferred).ok()
+        } else {
+            None
+        };
+        let (target, store) = match preferred_store {
+            Some(store) => (preferred, store),
+            None => {
+                let target = self.choose_write_member(data.len() as u64, Some(preferred))?;
+                (target, self.get_member(target)?)
+            }
+        };
+        let inserted = self.write_verified_member(target, &store, hash, data)?;
+        let stored = LocationRecord::Stored {
+            member: target,
+            size: data.len() as u64,
+        };
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let current = self
+            .locations
+            .get(&wtxn, &hash)
+            .map_err(map_heed)?
+            .map(LocationRecord::decode)
+            .transpose()?;
+        if current == Some(expected) {
+            self.set_location_txn(&mut wtxn, hash, Some(stored))?;
+            wtxn.commit().map_err(map_heed)?;
+            return Ok(inserted);
+        }
+        drop(wtxn);
+
+        if let Some(current) = current {
+            if self.read_verified_location(&hash, current)?.is_some() {
+                return Ok(false);
+            }
+        }
+        Err(StoreError::Other(format!(
+            "pool location changed while repairing {hash:?}"
+        )))
+    }
+
+    fn rebalance_pair(&self) -> Result<Option<(PoolMemberId, PoolMemberId)>, StoreError> {
+        let manifest = self.read_manifest()?;
+        let mut members = Vec::new();
+        for member in manifest
+            .members
+            .into_iter()
+            .filter(|member| member.state == PoolMemberState::Active)
+        {
+            let Ok(store) = self.get_member(member.id) else {
+                continue;
+            };
+            let stats = store.stats()?;
+            members.push((member.id, stats.total_bytes, member.config.capacity_bytes));
+        }
+        if members.len() < 2 {
+            return Ok(None);
+        }
+        let total_bytes = members
+            .iter()
+            .map(|(_, bytes, _)| *bytes)
+            .fold(0u64, u64::saturating_add);
+        let total_capacity = members
+            .iter()
+            .map(|(_, _, capacity)| *capacity)
+            .fold(0u64, u64::saturating_add);
+        if total_bytes == 0 || total_capacity == 0 {
+            return Ok(None);
+        }
+        let deviation = |bytes: u64, capacity: u64| -> i128 {
+            i128::from(bytes) * i128::from(total_capacity)
+                - i128::from(total_bytes) * i128::from(capacity)
+        };
+        let source = members
+            .iter()
+            .max_by_key(|(_, bytes, capacity)| deviation(*bytes, *capacity))
+            .copied();
+        let target = members
+            .iter()
+            .min_by_key(|(_, bytes, capacity)| deviation(*bytes, *capacity))
+            .copied();
+        match (source, target) {
+            (
+                Some((source, source_bytes, source_capacity)),
+                Some((target, target_bytes, target_capacity)),
+            ) if source != target
+                && deviation(source_bytes, source_capacity) > 0
+                && deviation(target_bytes, target_capacity) < 0 =>
+            {
+                Ok(Some((source, target)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn move_improves_balance(
+        &self,
+        source: PoolMemberId,
+        target: PoolMemberId,
+        blob_bytes: u64,
+    ) -> Result<bool, StoreError> {
+        let members = self.members()?;
+        let active = members
+            .iter()
+            .filter(|member| member.state == PoolMemberState::Active && member.available)
+            .collect::<Vec<_>>();
+        let Some(source_status) = active.iter().find(|member| member.id == source) else {
+            return Ok(false);
+        };
+        let Some(target_status) = active.iter().find(|member| member.id == target) else {
+            return Ok(false);
+        };
+        if blob_bytes > source_status.logical_bytes
+            || target_status.logical_bytes.saturating_add(blob_bytes) > target_status.capacity_bytes
+        {
+            return Ok(false);
+        }
+        let total_bytes = active
+            .iter()
+            .map(|member| member.logical_bytes)
+            .fold(0u64, u64::saturating_add);
+        let total_capacity = active
+            .iter()
+            .map(|member| member.capacity_bytes)
+            .fold(0u64, u64::saturating_add);
+        if total_capacity == 0 {
+            return Ok(false);
+        }
+        let deviation = |bytes: u64, capacity: u64| -> i128 {
+            i128::from(bytes) * i128::from(total_capacity)
+                - i128::from(total_bytes) * i128::from(capacity)
+        };
+        let before = deviation(source_status.logical_bytes, source_status.capacity_bytes).abs()
+            + deviation(target_status.logical_bytes, target_status.capacity_bytes).abs();
+        let after = deviation(
+            source_status.logical_bytes - blob_bytes,
+            source_status.capacity_bytes,
+        )
+        .abs()
+            + deviation(
+                target_status.logical_bytes.saturating_add(blob_bytes),
+                target_status.capacity_bytes,
+            )
+            .abs();
+        Ok(after < before)
     }
 
     fn read_verified_location(
@@ -1082,10 +1424,21 @@ impl PoolStore {
 
     fn finalize_pending(&self, hash: Hash, pending: LocationRecord) -> Result<(), StoreError> {
         if let LocationRecord::Pending { member, size } = pending {
-            let current = self.read_location(&hash)?;
+            let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+            let current = self
+                .locations
+                .get(&wtxn, &hash)
+                .map_err(map_heed)?
+                .map(LocationRecord::decode)
+                .transpose()?;
             if current == Some(pending) {
-                self.set_location(hash, Some(LocationRecord::Stored { member, size }))?;
+                self.set_location_txn(
+                    &mut wtxn,
+                    hash,
+                    Some(LocationRecord::Stored { member, size }),
+                )?;
             }
+            wtxn.commit().map_err(map_heed)?;
         }
         Ok(())
     }
@@ -1185,13 +1538,7 @@ impl Store for PoolStore {
     }
 
     async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
-        let mut inserted = 0usize;
-        for (hash, data) in items {
-            if self.put_sync(hash, &data)? {
-                inserted += 1;
-            }
-        }
-        Ok(inserted)
+        self.put_many_sync(&items)
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
