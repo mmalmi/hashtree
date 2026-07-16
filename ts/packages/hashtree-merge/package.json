@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/merge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Deterministic path-based merge primitives for hashtree",
   "type": "module",
   "main": "dist/index.js",
@@ -25,7 +25,8 @@
   "author": "Martti Malmi",
   "license": "MIT",
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "publishConfig": {
     "access": "public"

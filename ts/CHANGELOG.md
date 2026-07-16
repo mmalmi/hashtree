@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.4.2 - 2026-07-16
+
+### Fixed
+
+- Included the TypeScript sources referenced by every emitted JavaScript and
+  declaration source map. Consumer builds no longer warn about missing package
+  sources.
+
+### Changed
+
+- Released one immutable bundle containing `@hashtree/core@0.2.1`,
+  `@hashtree/index@0.1.11`, `@hashtree/collection@0.2.7`,
+  `@hashtree/dexie@0.1.7`, `@hashtree/git@0.1.6`,
+  `@hashtree/merge@0.1.2`, `@hashtree/mesh@0.1.5`,
+  `@hashtree/nostr@0.1.17`, `@hashtree/worker@0.3.1`, and
+  `@hashtree/fips-transport@0.4.2`.
+- Removed the duplicate in-repository NDK and NDK cache trees. Worker tests now
+  consume the immutable Iris Kit runtime artifacts, leaving one maintained NDK
+  implementation instead of two 52,500-line copies.
+
 ## TypeScript runtime 0.4.0 - 2026-07-16
 
 ### Added

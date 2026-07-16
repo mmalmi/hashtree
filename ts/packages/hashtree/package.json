@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Simple content-addressed merkle tree with KV storage",
   "type": "module",
   "main": "dist/index.js",
@@ -32,7 +32,8 @@
   "author": "Martti Malmi",
   "license": "MIT",
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "publishConfig": {
     "access": "public"

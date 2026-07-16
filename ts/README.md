@@ -26,11 +26,11 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 - [`@hashtree/git`](https://www.npmjs.com/package/@hashtree/git) - Git/htree interoperability helpers ([source](packages/hashtree-git))
 - [`@hashtree/dexie`](https://www.npmjs.com/package/@hashtree/dexie) - IndexedDB/Dexie storage adapter ([source](packages/hashtree-dexie))
 - [`@hashtree/index`](https://www.npmjs.com/package/@hashtree/index) - B-Tree index structures ([source](packages/hashtree-index))
+- [`@hashtree/mesh`](https://www.npmjs.com/package/@hashtree/mesh) - Transport-neutral blob routing primitives ([source](packages/hashtree-mesh))
 - [`@hashtree/worker`](https://www.npmjs.com/package/@hashtree/worker) - Modular browser worker runtime, including the browser-side `tree-root` registry subpath export ([source](packages/hashtree-worker))
 
-**Internal packages:**
-- [`packages/ndk`](packages/ndk) - Nostr SDK used by Iris apps
-- [`packages/ndk-cache`](packages/ndk-cache) - Cache layer for NDK
+The worker's optional NDK integrations are consumed from the independently
+released Iris Kit packages. Hashtree does not maintain another NDK fork.
 
 ## Portable App Runtime
 

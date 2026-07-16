@@ -1,26 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { runtimePackageDirs } from './runtime-packages.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const destination = resolve(process.argv[2] ?? join(root, 'dist-runtime'));
-const packageDirs = [
-  'hashtree',
-  'hashtree-index',
-  'hashtree-collection',
-  'hashtree-dexie',
-  'hashtree-git',
-  'hashtree-mesh',
-  'hashtree-nostr',
-  'hashtree-worker',
-  'hashtree-fips-transport',
-];
 
 rmSync(destination, { recursive: true, force: true });
 mkdirSync(destination, { recursive: true });
 
-for (const packageDir of packageDirs) {
+for (const packageDir of runtimePackageDirs) {
   const cwd = join(root, 'packages', packageDir);
   execFileSync('pnpm', ['build'], { cwd, stdio: 'inherit' });
   const packed = JSON.parse(execFileSync(
@@ -33,6 +24,7 @@ for (const packageDir of packageDirs) {
     ['-xOf', packed.filename, 'package/package.json'],
     { encoding: 'utf8' },
   ));
+  verifyPackedMapSources(packed);
   for (const [name, specifier] of Object.entries(manifest.dependencies ?? {})) {
     if (/^(?:file|link|workspace):/.test(specifier)) {
       throw new Error(`${manifest.name} packs a local dependency: ${name}=${specifier}`);
@@ -43,4 +35,24 @@ for (const packageDir of packageDirs) {
     version: manifest.version,
     filename: packed.filename,
   })}\n`);
+}
+
+function verifyPackedMapSources(packed) {
+  const paths = new Set(packed.files.map(({ path }) => posix.join('package', path)));
+  for (const { path } of packed.files) {
+    if (!path.endsWith('.map')) continue;
+    const archivePath = posix.join('package', path);
+    const sourceMap = JSON.parse(execFileSync(
+      'tar',
+      ['-xOf', packed.filename, archivePath],
+      { encoding: 'utf8' },
+    ));
+    for (const [index, source] of (sourceMap.sources ?? []).entries()) {
+      if (sourceMap.sourcesContent?.[index] != null || /^[a-z]+:/i.test(source)) continue;
+      const sourcePath = posix.normalize(posix.join(posix.dirname(archivePath), source));
+      if (!paths.has(sourcePath)) {
+        throw new Error(`${packed.filename} omits source-map target ${sourcePath}`);
+      }
+    }
+  }
 }
