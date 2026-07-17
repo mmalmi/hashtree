@@ -31,6 +31,20 @@ reject grep -qF 'legacy-mesh' rust/crates/hashtree-fips-transport/Cargo.toml
 reject grep -qF 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.toml
 reject test -e rust/crates/hashtree-fips-transport/src/legacy_mesh.rs
 
+# Blob retrieval has one request/reply vocabulary. The retired WebRTC mesh
+# codec must not return under a new transport or keep pubsub coupled to blob
+# routing.
+reject test -e rust/crates/hashtree-cli/src/webrtc_stub.rs
+reject test -e rust/crates/hashtree-cli/src/peer_state.rs
+reject test -e ts/packages/hashtree-mesh/src/protocol.ts
+reject test -e ts/packages/hashtree-mesh/src/types.ts
+reject test -e ts/packages/hashtree-mesh/src/peerSelector.ts
+reject grep -RqF 'pub struct DataRequest' rust/crates
+reject grep -RqF 'pub struct DataResponse' rust/crates
+reject grep -RqF 'MSG_TYPE_PUBSUB_' rust/crates/hashtree-network/src
+reject grep -RqF 'interface DataRequest' ts/packages
+reject grep -RqF 'interface DataResponse' ts/packages
+
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.
 grep -F '"${REPO_DIR}/scripts/release-gate.sh"' publish_release.sh >/dev/null

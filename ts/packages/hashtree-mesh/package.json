@@ -1,7 +1,7 @@
 {
   "name": "@hashtree/mesh",
   "version": "0.2.0",
-  "description": "Transport-neutral mesh protocol and routing primitives for hashtree",
+  "description": "Adaptive read routing across opaque Hashtree blob sources",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,8 +25,8 @@
   },
   "keywords": [
     "hashtree",
-    "mesh",
-    "p2p",
+    "blob-router",
+    "adaptive",
     "routing"
   ],
   "author": "Martti Malmi",

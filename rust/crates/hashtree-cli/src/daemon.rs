@@ -18,18 +18,6 @@ use crate::server::{AppState, HashtreeServer};
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
 
-#[cfg(feature = "p2p")]
-use crate::webrtc::{ContentStore, PeerClassifier, WebRTCManager, WebRTCState};
-#[cfg(not(feature = "p2p"))]
-use crate::WebRTCState;
-
-#[cfg(feature = "p2p")]
-struct PeerRouterRuntime {
-    shutdown: Arc<tokio::sync::watch::Sender<bool>>,
-    join: JoinHandle<()>,
-    peer_state_persist: JoinHandle<()>,
-}
-
 struct BackgroundSyncRuntime {
     service: Arc<crate::sync::BackgroundSync>,
     join: Option<JoinHandle<()>>,
@@ -143,7 +131,6 @@ pub struct EmbeddedBackgroundServicesController {
     graph_store_concrete: Arc<socialgraph::SocialGraphStore>,
     graph_store: Arc<dyn socialgraph::SocialGraphBackend>,
     spambox: Option<Arc<dyn socialgraph::SocialGraphBackend>>,
-    webrtc_state: Option<Arc<WebRTCState>>,
     runtime: Mutex<BackgroundServicesRuntime>,
 }
 
@@ -200,7 +187,6 @@ impl EmbeddedBackgroundServicesController {
         graph_store_concrete: Arc<socialgraph::SocialGraphStore>,
         graph_store: Arc<dyn socialgraph::SocialGraphBackend>,
         spambox: Option<Arc<dyn socialgraph::SocialGraphBackend>>,
-        webrtc_state: Option<Arc<WebRTCState>>,
     ) -> Self {
         Self {
             keys,
@@ -209,7 +195,6 @@ impl EmbeddedBackgroundServicesController {
             graph_store_concrete,
             graph_store,
             spambox,
-            webrtc_state,
             runtime: Mutex::new(BackgroundServicesRuntime {
                 crawler: None,
                 mirror: None,
@@ -413,21 +398,15 @@ impl EmbeddedBackgroundServicesController {
                 sync_followed: config.sync.sync_followed,
                 relays: active_relays,
                 max_concurrent: config.sync.max_concurrent,
-                webrtc_timeout_ms: config.sync.webrtc_timeout_ms,
                 blossom_timeout_ms: config.sync.blossom_timeout_ms,
             };
 
             let sync_keys = nostr_sdk::Keys::parse(&self.keys.secret_key().to_bech32()?)
                 .context("Failed to parse keys for sync")?;
             let service = Arc::new(
-                crate::sync::BackgroundSync::new(
-                    sync_config,
-                    self.store.clone(),
-                    sync_keys,
-                    self.webrtc_state.clone(),
-                )
-                .await
-                .context("Failed to create background sync service")?,
+                crate::sync::BackgroundSync::new(sync_config, self.store.clone(), sync_keys)
+                    .await
+                    .context("Failed to create background sync service")?,
             );
             let contacts_file = self.data_dir.join("contacts.json");
             let service_for_task = service.clone();
@@ -446,167 +425,15 @@ impl EmbeddedBackgroundServicesController {
     }
 }
 
-#[cfg(feature = "p2p")]
-pub struct EmbeddedPeerRouterController {
-    keys: Keys,
-    data_dir: PathBuf,
-    state: Arc<WebRTCState>,
-    store: Arc<dyn ContentStore>,
-    peer_classifier: PeerClassifier,
-    nostr_relay: Arc<NostrRelay>,
-    runtime: Mutex<Option<PeerRouterRuntime>>,
-}
-
-#[cfg(feature = "p2p")]
-impl EmbeddedPeerRouterController {
-    pub fn new(
-        keys: Keys,
-        data_dir: PathBuf,
-        state: Arc<WebRTCState>,
-        store: Arc<dyn ContentStore>,
-        peer_classifier: PeerClassifier,
-        nostr_relay: Arc<NostrRelay>,
-    ) -> Self {
-        Self {
-            keys,
-            data_dir,
-            state,
-            store,
-            peer_classifier,
-            nostr_relay,
-            runtime: Mutex::new(None),
-        }
-    }
-
-    pub fn state(&self) -> Arc<WebRTCState> {
-        self.state.clone()
-    }
-
-    pub async fn apply_config(&self, config: &Config) -> Result<bool> {
-        let mut runtime = self.runtime.lock().await;
-        if let Some(runtime_handle) = runtime.take() {
-            if let Err(err) =
-                crate::p2p_common::persist_peer_state(&self.data_dir, &self.state).await
-            {
-                tracing::warn!("Failed to persist mesh peer state before router restart: {err:#}");
-            }
-            let _ = runtime_handle.shutdown.send(true);
-            runtime_handle.peer_state_persist.abort();
-            let mut join = runtime_handle.join;
-            match tokio::time::timeout(std::time::Duration::from_secs(3), &mut join).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::warn!("Peer router task ended with join error: {}", err);
-                }
-                Err(_) => {
-                    tracing::warn!("Timed out waiting for peer router shutdown");
-                    join.abort();
-                }
-            }
-        }
-
-        self.state.reset_runtime_state().await;
-        if let Err(err) = crate::p2p_common::load_peer_state(&self.data_dir, &self.state).await {
-            tracing::warn!("Failed to load persisted mesh peer state: {err:#}");
-        }
-
-        if !crate::p2p_common::peer_router_enabled(config) {
-            return Ok(false);
-        }
-
-        let webrtc_config = crate::p2p_common::default_webrtc_config(config);
-        let mut manager = if config.server.mode.hash_get_enabled() {
-            WebRTCManager::new_with_state_and_store_and_classifier(
-                self.keys.clone(),
-                webrtc_config,
-                self.state.clone(),
-                self.store.clone(),
-                self.peer_classifier.clone(),
-            )
-        } else {
-            let mut manager =
-                WebRTCManager::new_with_state(self.keys.clone(), webrtc_config, self.state.clone());
-            manager.set_peer_classifier(self.peer_classifier.clone());
-            manager
-        };
-        manager
-            .set_nostr_relay(self.nostr_relay.clone() as hashtree_network::SharedMeshRelayClient);
-        let shutdown = manager.shutdown_signal();
-        let join = tokio::spawn(async move {
-            if let Err(err) = manager.run().await {
-                tracing::error!("Peer router error: {}", err);
-            }
-        });
-        let peer_state_persist = crate::p2p_common::spawn_peer_state_persist_task(
-            self.data_dir.clone(),
-            self.state.clone(),
-        );
-        *runtime = Some(PeerRouterRuntime {
-            shutdown,
-            join,
-            peer_state_persist,
-        });
-        Ok(true)
-    }
-
-    pub async fn shutdown(&self) {
-        let mut runtime = self.runtime.lock().await;
-        let Some(runtime_handle) = runtime.take() else {
-            return;
-        };
-
-        if let Err(err) = crate::p2p_common::persist_peer_state(&self.data_dir, &self.state).await {
-            tracing::warn!("Failed to persist mesh peer state during router shutdown: {err:#}");
-        }
-        let _ = runtime_handle.shutdown.send(true);
-        runtime_handle.peer_state_persist.abort();
-        let mut join = runtime_handle.join;
-        match tokio::time::timeout(std::time::Duration::from_secs(3), &mut join).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::warn!("Peer router task ended with join error: {}", err),
-            Err(_) => {
-                tracing::warn!("Timed out waiting for peer router shutdown");
-                join.abort();
-            }
-        }
-
-        self.state.reset_runtime_state().await;
-    }
-}
-
 pub struct EmbeddedDaemonController {
     server_controller: Arc<EmbeddedServerController>,
     fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
     #[cfg(feature = "experimental-decentralized-pubsub")]
     nostr_pubsub_handle: Option<Arc<crate::fips_transport::DaemonNostrPubsubHandle>>,
-    #[cfg(feature = "p2p")]
-    peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
     background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
 }
 
 impl EmbeddedDaemonController {
-    #[cfg(feature = "p2p")]
-    pub fn new(
-        server_controller: Arc<EmbeddedServerController>,
-        fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
-        #[cfg(feature = "experimental-decentralized-pubsub")] nostr_pubsub_handle: Option<
-            Arc<crate::fips_transport::DaemonNostrPubsubHandle>,
-        >,
-        peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
-        background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
-    ) -> Self {
-        Self {
-            server_controller,
-            fips_handle,
-            #[cfg(feature = "experimental-decentralized-pubsub")]
-            nostr_pubsub_handle,
-            #[cfg(feature = "p2p")]
-            peer_router_controller,
-            background_services_controller,
-        }
-    }
-
-    #[cfg(not(feature = "p2p"))]
     pub fn new(
         server_controller: Arc<EmbeddedServerController>,
         fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
@@ -636,10 +463,6 @@ impl EmbeddedDaemonController {
         if let Some(controller) = self.background_services_controller.as_ref() {
             controller.shutdown().await;
         }
-        #[cfg(feature = "p2p")]
-        if let Some(controller) = self.peer_router_controller.as_ref() {
-            controller.shutdown().await;
-        }
     }
 }
 
@@ -660,11 +483,6 @@ pub struct EmbeddedDaemonInfo {
     pub npub: String,
     pub store: Arc<HashtreeStore>,
     pub daemon_controller: Arc<EmbeddedDaemonController>,
-    #[allow(dead_code)]
-    pub webrtc_state: Option<Arc<WebRTCState>>,
-    #[cfg(feature = "p2p")]
-    #[allow(dead_code)]
-    pub peer_router_controller: Option<Arc<EmbeddedPeerRouterController>>,
     #[allow(dead_code)]
     pub background_services_controller: Option<Arc<EmbeddedBackgroundServicesController>>,
 }
@@ -786,76 +604,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         .clone()
         .map(|store| store as Arc<dyn socialgraph::SocialGraphBackend>);
 
-    #[cfg(feature = "p2p")]
-    let (webrtc_state, peer_router_controller): (
-        Option<Arc<WebRTCState>>,
-        Option<Arc<EmbeddedPeerRouterController>>,
-    ) = if let Some(nostr_relay) = nostr_relay.clone() {
-        let router_config = crate::p2p_common::default_webrtc_config(&config);
-        let peer_classifier = crate::p2p_common::build_peer_classifier(
-            opts.data_dir.clone(),
-            Arc::clone(&social_graph_store),
-        );
-        let cashu_payment_client =
-            if config.cashu.default_mint.is_some() || !config.cashu.accepted_mints.is_empty() {
-                match crate::cashu_helper::CashuHelperClient::discover(opts.data_dir.clone()) {
-                    Ok(client) => {
-                        Some(Arc::new(client) as Arc<dyn crate::cashu_helper::CashuPaymentClient>)
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                        "Cashu settlement helper unavailable; paid retrieval stays disabled: {}",
-                        err
-                    );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-        let cashu_mint_metadata =
-            if config.cashu.default_mint.is_some() || !config.cashu.accepted_mints.is_empty() {
-                let metadata_path = crate::webrtc::cashu_mint_metadata_path(&opts.data_dir);
-                match crate::webrtc::CashuMintMetadataStore::load(metadata_path) {
-                    Ok(store) => Some(store),
-                    Err(err) => {
-                        tracing::warn!(
-                        "Failed to load Cashu mint metadata; falling back to in-memory state: {}",
-                        err
-                    );
-                        Some(crate::webrtc::CashuMintMetadataStore::in_memory())
-                    }
-                }
-            } else {
-                None
-            };
-
-        let state = Arc::new(WebRTCState::new_with_routing_and_cashu(
-            router_config.request_selection_strategy,
-            router_config.request_fairness_enabled,
-            router_config.request_dispatch,
-            std::time::Duration::from_millis(router_config.message_timeout_ms),
-            crate::webrtc::CashuRoutingConfig::from(&config.cashu),
-            cashu_payment_client,
-            cashu_mint_metadata,
-        ));
-        let controller = Arc::new(EmbeddedPeerRouterController::new(
-            keys.clone(),
-            opts.data_dir.clone(),
-            state.clone(),
-            Arc::clone(&store) as Arc<dyn ContentStore>,
-            peer_classifier,
-            nostr_relay.clone(),
-        ));
-        controller.apply_config(&config).await?;
-        (Some(state), Some(controller))
-    } else {
-        (None, None)
-    };
-
-    #[cfg(not(feature = "p2p"))]
-    let webrtc_state: Option<Arc<crate::webrtc::WebRTCState>> = None;
-
     let background_services_controller = Arc::new(EmbeddedBackgroundServicesController::new(
         keys.clone(),
         opts.data_dir.clone(),
@@ -863,7 +611,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         graph_store.clone(),
         Arc::clone(&social_graph_store),
         crawler_spambox_backend,
-        webrtc_state.clone(),
     ));
 
     let upstream_blossom = config.blossom.upstream_read_servers(&opts.bind_address);
@@ -923,11 +670,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         server = server.with_nostr_provider(provider);
     }
 
-    if crate::p2p_common::peer_router_enabled(&config) {
-        if let Some(ref state) = webrtc_state {
-            server = server.with_webrtc_peers(state.clone());
-        }
-    }
     if let Some(ref fips_handle) = fips_handle {
         server = server
             .with_fips_endpoint(fips_handle.endpoint.clone())
@@ -965,16 +707,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     });
     let server_controller = Arc::new(EmbeddedServerController::new(server_shutdown, server_join));
     background_services_controller.apply_config(&config).await?;
-    #[cfg(feature = "p2p")]
-    let daemon_controller = Arc::new(EmbeddedDaemonController::new(
-        server_controller,
-        fips_handle.clone(),
-        #[cfg(feature = "experimental-decentralized-pubsub")]
-        nostr_pubsub_handle.clone(),
-        peer_router_controller.clone(),
-        Some(background_services_controller.clone()),
-    ));
-    #[cfg(not(feature = "p2p"))]
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
         fips_handle.clone(),
@@ -995,9 +727,6 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         npub,
         store,
         daemon_controller,
-        webrtc_state,
-        #[cfg(feature = "p2p")]
-        peer_router_controller,
         background_services_controller: Some(background_services_controller),
     })
 }

@@ -50,8 +50,6 @@ async fn embedded_daemon_serves_htree_test() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.stun_port = 0;
 
     let info = hashtree_cli::daemon::start_embedded(hashtree_cli::daemon::EmbeddedDaemonOptions {
         config,
@@ -91,8 +89,6 @@ async fn embedded_daemon_respects_explicit_config_dir_without_env() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.stun_port = 0;
 
     let info = hashtree_cli::daemon::start_embedded(hashtree_cli::daemon::EmbeddedDaemonOptions {
         config,
@@ -149,8 +145,6 @@ async fn embedded_daemon_uses_default_blossom_servers_when_config_is_empty() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.stun_port = 0;
     config.blossom.servers.clear();
     config.blossom.read_servers.clear();
     config.blossom.write_servers.clear();
@@ -197,12 +191,6 @@ async fn embedded_daemon_accepts_ws_route_with_trailing_slash() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.enable_multicast = false;
-    config.server.max_multicast_peers = 0;
-    config.server.enable_bluetooth = false;
-    config.server.max_bluetooth_peers = 0;
-    config.server.stun_port = 0;
     config.nostr.relays.clear();
 
     let info = hashtree_cli::daemon::start_embedded(hashtree_cli::daemon::EmbeddedDaemonOptions {
@@ -267,8 +255,6 @@ async fn embedded_daemon_reports_assist_mode_in_status() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.stun_port = 0;
     config.server.mode = hashtree_cli::config::ServerMode::Assist;
 
     let info = hashtree_cli::daemon::start_embedded(hashtree_cli::daemon::EmbeddedDaemonOptions {
@@ -308,12 +294,6 @@ async fn embedded_daemon_socialgraph_snapshot_is_not_cors_readable() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.enable_multicast = false;
-    config.server.max_multicast_peers = 0;
-    config.server.enable_bluetooth = false;
-    config.server.max_bluetooth_peers = 0;
-    config.server.stun_port = 0;
     config.sync.enabled = false;
     config.nostr.relays.clear();
 
@@ -364,12 +344,6 @@ async fn embedded_daemon_background_services_follow_live_relay_settings() {
     let mut config = hashtree_cli::Config::default();
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_webrtc = false;
-    config.server.enable_multicast = false;
-    config.server.max_multicast_peers = 0;
-    config.server.enable_bluetooth = false;
-    config.server.max_bluetooth_peers = 0;
-    config.server.stun_port = 0;
     config.nostr.enabled = true;
     config.nostr.relays = vec!["ws://127.0.0.1:1".to_string()];
     config.nostr.social_graph_crawl_depth = 1;

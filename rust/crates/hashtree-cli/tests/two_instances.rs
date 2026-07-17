@@ -652,14 +652,6 @@ fn write_test_config_with_relays(
         r#"
 [server]
 enable_auth = false
-stun_port = 0
-enable_webrtc = false
-enable_multicast = false
-max_multicast_peers = 0
-enable_wifi_aware = false
-max_wifi_aware_peers = 0
-enable_bluetooth = false
-max_bluetooth_peers = 0
 public_writes = true
 
 [storage]

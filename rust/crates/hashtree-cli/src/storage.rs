@@ -5,9 +5,7 @@ use futures::executor::block_on as sync_block_on;
 use futures::StreamExt;
 use hashtree_config::StorageBackend;
 use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError};
-use hashtree_core::{
-    from_hex, sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, TreeNode,
-};
+use hashtree_core::{sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, TreeNode};
 use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::{
@@ -2907,14 +2905,6 @@ pub struct BlobMetadata {
     pub size: u64,
     pub mime_type: String,
     pub uploaded: u64,
-}
-
-// Implement ContentStore trait for WebRTC data exchange
-impl crate::webrtc::ContentStore for HashtreeStore {
-    fn get(&self, hash_hex: &str) -> Result<Option<Vec<u8>>> {
-        let hash = from_hex(hash_hex).map_err(|e| anyhow::anyhow!("Invalid hash: {}", e))?;
-        self.get_chunk(&hash)
-    }
 }
 
 #[cfg(test)]

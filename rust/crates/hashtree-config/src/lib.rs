@@ -53,10 +53,6 @@ pub struct ServerConfig {
     pub enable_auth: bool,
     #[serde(default)]
     pub public_writes: bool,
-    #[serde(default)]
-    pub enable_webrtc: bool,
-    #[serde(default)]
-    pub stun_port: u16,
 }
 
 impl Default for ServerConfig {
@@ -65,8 +61,6 @@ impl Default for ServerConfig {
             bind_address: default_bind_address(),
             enable_auth: true,
             public_writes: false,
-            enable_webrtc: false,
-            stun_port: 0,
         }
     }
 }
@@ -355,8 +349,6 @@ pub struct SyncConfig {
     pub sync_followed: bool,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
-    #[serde(default = "default_webrtc_timeout_ms")]
-    pub webrtc_timeout_ms: u64,
     #[serde(default = "default_blossom_timeout_ms")]
     pub blossom_timeout_ms: u64,
 }
@@ -368,7 +360,6 @@ impl Default for SyncConfig {
             sync_own: true,
             sync_followed: false,
             max_concurrent: default_max_concurrent(),
-            webrtc_timeout_ms: default_webrtc_timeout_ms(),
             blossom_timeout_ms: default_blossom_timeout_ms(),
         }
     }
@@ -406,10 +397,6 @@ fn default_check_interval_hours() -> u32 {
 
 fn default_max_concurrent() -> usize {
     4
-}
-
-fn default_webrtc_timeout_ms() -> u64 {
-    5000
 }
 
 fn default_blossom_timeout_ms() -> u64 {

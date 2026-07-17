@@ -114,7 +114,7 @@ async fn fetch_existing_directory_chain<S: Store>(
     parent_segments: &[String],
 ) -> Result<()> {
     fetcher
-        .fetch_chunk_with_store(store, None, &root.hash)
+        .fetch_chunk_with_store(store, &root.hash)
         .await
         .context("Failed to fetch current release root")?;
 
@@ -146,7 +146,7 @@ async fn fetch_existing_directory_chain<S: Store>(
             key: entry.key,
         };
         fetcher
-            .fetch_chunk_with_store(store, None, &child.hash)
+            .fetch_chunk_with_store(store, &child.hash)
             .await
             .with_context(|| format!("Failed to fetch directory node for {}", segment))?;
         current = child;
@@ -239,7 +239,7 @@ pub(crate) async fn publish_release_version(
     let store = Arc::new(HashtreeStore::new(data_dir)?);
     let fetcher = Fetcher::new(FetchConfig::default());
     fetcher
-        .fetch_chunk_with_store(store.as_ref(), None, &release_cid.hash)
+        .fetch_chunk_with_store(store.as_ref(), &release_cid.hash)
         .await
         .context("Failed to fetch release directory root")?;
 

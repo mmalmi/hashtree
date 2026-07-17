@@ -1,6 +1,6 @@
 //! WebSocket-based Nostr relay for testing
 //!
-//! This implements enough of NIP-01 to support the mesh signaling tests.
+//! This implements enough of NIP-01 for resolver and updater integration tests.
 //! It runs as a local server that nostr-sdk clients can connect to.
 
 use axum::{

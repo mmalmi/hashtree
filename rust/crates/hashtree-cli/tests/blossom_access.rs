@@ -51,8 +51,6 @@ impl TestServer {
             r#"
 [server]
 enable_auth = {}
-stun_port = 0
-enable_webrtc = false
 
 [nostr]
 relays = []

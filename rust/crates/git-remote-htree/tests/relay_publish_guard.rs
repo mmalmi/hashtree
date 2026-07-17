@@ -28,7 +28,6 @@ fn test_git_push_fails_when_only_local_relay_confirms_publish() {
         r#"
 [server]
 enable_auth = false
-stun_port = 0
 
 [nostr]
 relays = ["{}", "ws://192.0.2.1:9"]

@@ -58,9 +58,6 @@ struct BrowserSettings {
     nostr_relays: Option<Vec<String>>,
     blossom_read_servers: Option<Vec<String>>,
     blossom_write_servers: Option<Vec<String>>,
-    enable_webrtc: Option<bool>,
-    enable_multicast: Option<bool>,
-    max_multicast_peers: Option<usize>,
     enable_fips: Option<bool>,
     enable_fips_udp: Option<bool>,
     enable_fips_webrtc: Option<bool>,
@@ -219,16 +216,6 @@ fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
     config.blossom.enabled =
         !config.blossom.read_servers.is_empty() || !config.blossom.write_servers.is_empty();
 
-    config.server.enable_webrtc = settings.enable_webrtc.unwrap_or(false);
-    if !config.server.enable_webrtc {
-        config.server.stun_port = 0;
-    }
-
-    config.server.enable_multicast = settings.enable_multicast.unwrap_or(false);
-    if let Some(max_multicast_peers) = settings.max_multicast_peers {
-        config.server.max_multicast_peers = max_multicast_peers;
-    }
-
     if let Some(enable_fips) = settings.enable_fips {
         config.server.enable_fips = enable_fips;
     }
@@ -270,8 +257,6 @@ fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
     }
     config.storage.data_dir = data_dir.to_string_lossy().to_string();
     config.server.enable_auth = false;
-    config.server.enable_bluetooth = false;
-    config.server.max_bluetooth_peers = 0;
     config
 }
 
@@ -289,9 +274,6 @@ fn default_browser_settings() -> BrowserSettings {
         nostr_relays: None,
         blossom_read_servers: None,
         blossom_write_servers: None,
-        enable_webrtc: Some(false),
-        enable_multicast: Some(false),
-        max_multicast_peers: None,
         enable_fips: None,
         enable_fips_udp: None,
         enable_fips_webrtc: None,

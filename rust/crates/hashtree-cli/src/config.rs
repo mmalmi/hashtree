@@ -91,12 +91,6 @@ pub struct ServerConfig {
     pub bind_address: String,
     #[serde(default = "default_enable_auth")]
     pub enable_auth: bool,
-    /// Port for the built-in STUN server (0 = disabled)
-    #[serde(default = "default_stun_port")]
-    pub stun_port: u16,
-    /// Enable WebRTC P2P connections
-    #[serde(default = "default_enable_webrtc")]
-    pub enable_webrtc: bool,
     /// Enable FIPS-backed Hashtree blob exchange.
     #[serde(default = "default_enable_fips")]
     pub enable_fips: bool,
@@ -151,40 +145,6 @@ pub struct ServerConfig {
     /// How long one FIPS blob request waits for a valid response.
     #[serde(default = "default_fips_request_timeout_ms")]
     pub fips_request_timeout_ms: u64,
-    /// Allow HTTP misses to fetch blobs from connected WebRTC peers.
-    #[serde(default = "default_http_webrtc_fetch")]
-    pub http_webrtc_fetch: bool,
-    /// Explicit daemon endpoint URLs this node may share privately with connected peers
-    /// for WebRTC signaling handoff.
-    #[serde(default, alias = "peer_direct_urls", alias = "peer_advertise_urls")]
-    pub peer_signal_urls: Vec<String>,
-    /// Enable LAN multicast discovery/signaling for native peers.
-    #[serde(default = "default_enable_multicast")]
-    pub enable_multicast: bool,
-    /// IPv4 multicast group used for LAN discovery/signaling.
-    #[serde(default = "default_multicast_group")]
-    pub multicast_group: String,
-    /// UDP port used for LAN multicast discovery/signaling.
-    #[serde(default = "default_multicast_port")]
-    pub multicast_port: u16,
-    /// Maximum peers admitted from LAN multicast discovery.
-    /// Set to 0 to disable multicast even when enable_multicast is true.
-    #[serde(default = "default_max_multicast_peers")]
-    pub max_multicast_peers: usize,
-    /// Enable Android Wi-Fi Aware nearby discovery/signaling for native peers.
-    #[serde(default = "default_enable_wifi_aware")]
-    pub enable_wifi_aware: bool,
-    /// Maximum peers admitted from Wi-Fi Aware discovery.
-    /// Set to 0 to disable Wi-Fi Aware even when enable_wifi_aware is true.
-    #[serde(default = "default_max_wifi_aware_peers")]
-    pub max_wifi_aware_peers: usize,
-    /// Enable native Bluetooth discovery/transport for nearby peers.
-    #[serde(default = "default_enable_bluetooth")]
-    pub enable_bluetooth: bool,
-    /// Maximum peers admitted from Bluetooth discovery.
-    /// Set to 0 to disable Bluetooth even when enable_bluetooth is true.
-    #[serde(default = "default_max_bluetooth_peers")]
-    pub max_bluetooth_peers: usize,
     /// Allow anyone with valid Nostr auth to write (default: true)
     /// When false, only social graph members can write
     #[serde(default = "default_public_writes")]
@@ -584,9 +544,6 @@ pub struct SyncConfig {
     /// Max concurrent sync tasks
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
-    /// WebRTC request timeout in milliseconds
-    #[serde(default = "default_webrtc_timeout_ms")]
-    pub webrtc_timeout_ms: u64,
     /// Blossom request timeout in milliseconds
     #[serde(default = "default_blossom_timeout_ms")]
     pub blossom_timeout_ms: u64,
@@ -705,10 +662,6 @@ fn default_max_concurrent() -> usize {
     3
 }
 
-fn default_webrtc_timeout_ms() -> u64 {
-    2000
-}
-
 fn default_blossom_timeout_ms() -> u64 {
     10000
 }
@@ -787,14 +740,6 @@ fn default_enable_auth() -> bool {
     true
 }
 
-fn default_stun_port() -> u16 {
-    3478 // Standard STUN port (RFC 5389)
-}
-
-fn default_enable_webrtc() -> bool {
-    true
-}
-
 fn default_enable_fips() -> bool {
     true
 }
@@ -823,42 +768,6 @@ fn default_fips_request_timeout_ms() -> u64 {
     5_500
 }
 
-fn default_http_webrtc_fetch() -> bool {
-    true
-}
-
-fn default_enable_multicast() -> bool {
-    true
-}
-
-fn default_multicast_group() -> String {
-    "239.255.42.98".to_string()
-}
-
-fn default_multicast_port() -> u16 {
-    48555
-}
-
-fn default_max_multicast_peers() -> usize {
-    12
-}
-
-fn default_enable_wifi_aware() -> bool {
-    false
-}
-
-fn default_max_wifi_aware_peers() -> usize {
-    0
-}
-
-fn default_enable_bluetooth() -> bool {
-    false
-}
-
-fn default_max_bluetooth_peers() -> usize {
-    0
-}
-
 fn default_data_dir() -> String {
     hashtree_config::get_hashtree_dir()
         .join("data")
@@ -880,8 +789,6 @@ impl Default for ServerConfig {
             mode: ServerMode::default(),
             bind_address: default_bind_address(),
             enable_auth: default_enable_auth(),
-            stun_port: default_stun_port(),
-            enable_webrtc: default_enable_webrtc(),
             enable_fips: default_enable_fips(),
             fips_discovery_scope: default_fips_discovery_scope(),
             fips_open_discovery_max_pending: 0,
@@ -897,16 +804,6 @@ impl Default for ServerConfig {
             fips_ethernet_interfaces: Vec::new(),
             fetch_from_fips_peers: default_fetch_from_fips_peers(),
             fips_request_timeout_ms: default_fips_request_timeout_ms(),
-            http_webrtc_fetch: default_http_webrtc_fetch(),
-            peer_signal_urls: Vec::new(),
-            enable_multicast: default_enable_multicast(),
-            multicast_group: default_multicast_group(),
-            multicast_port: default_multicast_port(),
-            max_multicast_peers: default_max_multicast_peers(),
-            enable_wifi_aware: default_enable_wifi_aware(),
-            max_wifi_aware_peers: default_max_wifi_aware_peers(),
-            enable_bluetooth: default_enable_bluetooth(),
-            max_bluetooth_peers: default_max_bluetooth_peers(),
             public_writes: default_public_writes(),
             public_plaintext_reads: default_public_plaintext_reads(),
             socialgraph_snapshot_public: default_socialgraph_snapshot_public(),
@@ -982,7 +879,6 @@ impl Default for SyncConfig {
             sync_own: default_sync_own(),
             sync_followed: default_sync_followed(),
             max_concurrent: default_max_concurrent(),
-            webrtc_timeout_ms: default_webrtc_timeout_ms(),
             blossom_timeout_ms: default_blossom_timeout_ms(),
         }
     }
@@ -1248,14 +1144,6 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.server.bind_address, "127.0.0.1:8080");
         assert!(config.server.enable_auth);
-        assert!(config.server.enable_multicast);
-        assert_eq!(config.server.multicast_group, "239.255.42.98");
-        assert_eq!(config.server.multicast_port, 48555);
-        assert_eq!(config.server.max_multicast_peers, 12);
-        assert!(!config.server.enable_wifi_aware);
-        assert_eq!(config.server.max_wifi_aware_peers, 0);
-        assert!(!config.server.enable_bluetooth);
-        assert_eq!(config.server.max_bluetooth_peers, 0);
         assert!(!config.server.public_plaintext_reads);
         assert_eq!(config.storage.max_size_gb, 10);
         assert!(config.storage.evict_orphans);
@@ -1437,30 +1325,6 @@ evict_orphans = false
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.storage.evict_orphans);
-    }
-
-    #[test]
-    fn test_server_config_deserialize_with_multicast() {
-        let toml_str = r#"
-[server]
-enable_multicast = true
-multicast_group = "239.255.42.99"
-multicast_port = 49001
-max_multicast_peers = 12
-enable_wifi_aware = true
-max_wifi_aware_peers = 5
-enable_bluetooth = true
-max_bluetooth_peers = 6
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.server.enable_multicast);
-        assert_eq!(config.server.multicast_group, "239.255.42.99");
-        assert_eq!(config.server.multicast_port, 49_001);
-        assert_eq!(config.server.max_multicast_peers, 12);
-        assert!(config.server.enable_wifi_aware);
-        assert_eq!(config.server.max_wifi_aware_peers, 5);
-        assert!(config.server.enable_bluetooth);
-        assert_eq!(config.server.max_bluetooth_peers, 6);
     }
 
     #[test]

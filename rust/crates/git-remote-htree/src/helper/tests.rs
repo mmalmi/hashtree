@@ -1242,7 +1242,6 @@ fn write_test_config_for_servers(
         r#"
 [server]
 enable_auth = false
-stun_port = 0
 
 [nostr]
 relays = []

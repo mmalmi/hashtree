@@ -42,9 +42,9 @@
 
   <rect x="50" y="529" width="800" height="118" class="layer mesh"/>
   <text x="75" y="562" class="name">Mesh Retrieval Layer</text>
-  <text x="75" y="584" class="desc">MeshStoreCore routes hash requests over peers and local stores</text>
-  <text x="75" y="604" class="desc">MeshRouter composes SignalingTransport with PeerLink / PeerLinkFactory</text>
-  <text x="75" y="624" class="desc">Adaptive selection, hello discovery, offer/answer negotiation</text>
+  <text x="75" y="584" class="desc">BlobRouter routes hash-verified reads across opaque BlobRoute sources</text>
+  <text x="75" y="604" class="desc">FIPS owns transport addresses; composite routes exclusively select their peers</text>
+  <text x="75" y="624" class="desc">Bounded adaptive ordering never changes correctness or global absence</text>
   <text x="825" y="562" class="scope" text-anchor="end">transport-generic</text>
 
   <rect x="50" y="668" width="800" height="74" class="layer xport"/>

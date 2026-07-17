@@ -68,8 +68,8 @@ The main Rust daemon already has the right miss-and-fill structure:
 
 This suggests a clean direction:
 
-- generalize "upstream blob fetch" into "upstream content source"
-- add a torrent-backed source alongside WebRTC peers and Blossom servers
+- implement a torrent-backed opaque `BlobRoute`
+- add it alongside the FIPS composite route and Blossom terminal routes
 - keep the reader logic largely unchanged
 
 ## Architectural Decision

@@ -2672,8 +2672,6 @@ mod tests {
             daemon_started_at: 1_700_000_000,
             peer_mode: crate::config::ServerMode::Normal,
             hash_get_enabled: true,
-            http_webrtc_fetch: true,
-            webrtc_peers: None,
             fips_endpoint: None,
             fips_blob_resolver: None,
             fetch_from_fips_peers: true,

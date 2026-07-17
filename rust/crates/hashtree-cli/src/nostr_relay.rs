@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Mutex, Semaphore};
 
-#[cfg(feature = "experimental-decentralized-pubsub")]
-use hashtree_network::{MeshEventStore, MeshRelayClient};
 use nostr::{ClientMessage as NostrClientMessage, JsonUtil, RelayMessage as NostrRelayMessage};
 use nostr::{Event, EventId, Filter as NostrFilter, SubscriptionId};
 
@@ -1328,60 +1326,6 @@ mod imp {
 }
 
 pub use imp::NostrRelay;
-
-#[cfg(feature = "experimental-decentralized-pubsub")]
-#[async_trait::async_trait]
-impl MeshEventStore for NostrRelay {
-    async fn ingest_trusted_event(&self, event: Event) -> anyhow::Result<()> {
-        NostrRelay::ingest_trusted_event(self, event).await
-    }
-
-    async fn query_events(&self, filter: &NostrFilter, limit: usize) -> Vec<Event> {
-        NostrRelay::query_events(self, filter, limit).await
-    }
-}
-
-#[cfg(feature = "experimental-decentralized-pubsub")]
-#[async_trait::async_trait]
-impl MeshRelayClient for NostrRelay {
-    fn next_client_id(&self) -> u64 {
-        NostrRelay::next_client_id(self)
-    }
-
-    async fn register_client(
-        &self,
-        client_id: u64,
-        sender: mpsc::UnboundedSender<String>,
-        pubkey: Option<String>,
-    ) {
-        NostrRelay::register_client(self, client_id, sender, pubkey).await
-    }
-
-    async fn unregister_client(&self, client_id: u64) {
-        NostrRelay::unregister_client(self, client_id).await
-    }
-
-    async fn handle_client_message(&self, client_id: u64, msg: NostrClientMessage<'static>) {
-        NostrRelay::handle_client_message(self, client_id, msg).await
-    }
-
-    async fn register_subscription_query(
-        &self,
-        client_id: u64,
-        subscription_id: SubscriptionId,
-        filters: Vec<NostrFilter>,
-    ) -> std::result::Result<Vec<Event>, &'static str> {
-        NostrRelay::register_subscription_query(self, client_id, subscription_id, filters).await
-    }
-
-    async fn ingest_trusted_event_from_peer(
-        &self,
-        event: Event,
-        peer_id: Option<String>,
-    ) -> anyhow::Result<()> {
-        NostrRelay::ingest_trusted_event_from_bluetooth(self, event, peer_id).await
-    }
-}
 
 #[cfg(test)]
 #[path = "nostr_relay/tests.rs"]

@@ -46,8 +46,6 @@ impl TestPeer {
 [server]
 bind_address = "127.0.0.1:{port}"
 enable_auth = false
-stun_port = 0
-enable_webrtc = true
 fips_udp_bind_addr = "127.0.0.1:{fips_udp_port}"
 fips_udp_public = true
 fips_udp_external_addr = "127.0.0.1:{fips_udp_port}"

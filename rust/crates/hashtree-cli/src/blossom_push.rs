@@ -47,7 +47,7 @@ async fn ensure_local_blob_for_push(
 
     if let Some(fetcher) = fetcher {
         let data = fetcher
-            .fetch_chunk(None, &to_hex(&cid.hash))
+            .fetch_chunk(&to_hex(&cid.hash))
             .await
             .with_context(|| format!("failed to hydrate missing local blob {}", cid))?;
         store

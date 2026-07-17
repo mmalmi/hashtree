@@ -176,21 +176,6 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
             if hash_get { "enabled" } else { "disabled" }
         ));
     }
-    if let Some(http_webrtc_fetch) = status
-        .get("capabilities")
-        .and_then(|value| value.get("http_webrtc_fetch"))
-        .and_then(|value| value.as_bool())
-    {
-        lines.push(format!(
-            "  HTTP WebRTC fetch: {}",
-            if http_webrtc_fetch {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        ));
-    }
-
     if let Some(storage) = status.get("storage") {
         lines.push(String::new());
         lines.push("Storage:".to_string());
@@ -210,35 +195,6 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
     }
     append_upstream_status(&mut lines, status);
     append_http_status(&mut lines, status);
-
-    if let Some(webrtc) = status.get("webrtc") {
-        lines.push(String::new());
-        lines.push("WebRTC:".to_string());
-        if webrtc
-            .get("enabled")
-            .and_then(|e| e.as_bool())
-            .unwrap_or(false)
-        {
-            lines.push("  Enabled: yes".to_string());
-            if let Some(total) = webrtc.get("total_peers") {
-                lines.push(format!("  Total peers: {}", total));
-            }
-            if let Some(connected) = webrtc.get("connected") {
-                lines.push(format!("  Connected: {}", connected));
-            }
-            if let Some(dc) = webrtc.get("with_data_channel") {
-                lines.push(format!("  With data channel: {}", dc));
-            }
-            if let Some(sent) = webrtc.get("bytes_sent").and_then(|b| b.as_u64()) {
-                lines.push(format!("  Bytes sent: {}", format_bytes(sent)));
-            }
-            if let Some(received) = webrtc.get("bytes_received").and_then(|b| b.as_u64()) {
-                lines.push(format!("  Bytes received: {}", format_bytes(received)));
-            }
-        } else {
-            lines.push("  Enabled: no".to_string());
-        }
-    }
 
     if let Some(upstream) = status.get("upstream") {
         if let Some(count) = upstream.get("blossom_servers").and_then(|c| c.as_u64()) {

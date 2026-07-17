@@ -1,7 +1,7 @@
 use super::auth::AppState;
 use super::mime::get_mime_type;
 use super::nostr_query::query_events_for_local_request;
-pub(super) use super::peer_status::{daemon_status, webrtc_peers};
+pub(super) use super::peer_status::daemon_status;
 use super::request_paths::{
     parse_api_resolve_request_path, parse_bare_npub_request_path, parse_mutable_htree_request_path,
     parse_resolve_request_path, parse_virtual_tree_root, request_virtual_tree_root,
@@ -309,32 +309,6 @@ pub async fn iris_store_delete(
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(Body::from(format!("delete task failed: {error}")))
             .unwrap(),
-    }
-}
-
-pub async fn p2p_signal(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
-    #[cfg(feature = "p2p")]
-    {
-        let Some(webrtc_state) = state.webrtc_peers.as_ref() else {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        };
-        let Ok(event) = serde_json::from_slice::<nostr_sdk::nostr::Event>(&body) else {
-            return StatusCode::BAD_REQUEST.into_response();
-        };
-        if webrtc_state
-            .submit_direct_signaling_event("webrtc-signal".to_string(), event)
-            .await
-        {
-            StatusCode::ACCEPTED.into_response()
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE.into_response()
-        }
-    }
-
-    #[cfg(not(feature = "p2p"))]
-    {
-        let _ = (state, body);
-        StatusCode::NOT_FOUND.into_response()
     }
 }
 

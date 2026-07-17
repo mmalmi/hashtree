@@ -287,14 +287,6 @@ fn write_test_config(
         r#"
 [server]
 enable_auth = false
-stun_port = 0
-enable_webrtc = false
-enable_multicast = false
-max_multicast_peers = 0
-enable_wifi_aware = false
-max_wifi_aware_peers = 0
-enable_bluetooth = false
-max_bluetooth_peers = 0
 public_writes = true
 
 [storage]
@@ -314,7 +306,6 @@ enabled = true
 sync_own = false
 sync_followed = false
 max_concurrent = 1
-webrtc_timeout_ms = 250
 blossom_timeout_ms = 2000
 "#
     );

@@ -21,12 +21,12 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 **npm packages:**
 - [`@hashtree/core`](https://www.npmjs.com/package/@hashtree/core) - Core merkle tree library ([source](packages/hashtree))
 - [`@hashtree/merge`](https://www.npmjs.com/package/@hashtree/merge) - Deterministic path-based overlay merge primitives ([source](packages/hashtree-merge))
+- [`@hashtree/mesh`](https://www.npmjs.com/package/@hashtree/mesh) - Adaptive read-only `BlobRouter` across opaque routes ([source](packages/hashtree-mesh))
 - [`@hashtree/nostr`](https://www.npmjs.com/package/@hashtree/nostr) - Nostr ref resolver, event collections, and signed root snapshots ([source](packages/hashtree-nostr))
 - [`@hashtree/fips-transport`](https://www.npmjs.com/package/@hashtree/fips-transport) - Hash-verified blobs over reliable TCP/FIPS streams ([source](packages/hashtree-fips-transport))
 - [`@hashtree/git`](https://www.npmjs.com/package/@hashtree/git) - Git/htree interoperability helpers ([source](packages/hashtree-git))
 - [`@hashtree/dexie`](https://www.npmjs.com/package/@hashtree/dexie) - IndexedDB/Dexie storage adapter ([source](packages/hashtree-dexie))
 - [`@hashtree/index`](https://www.npmjs.com/package/@hashtree/index) - B-Tree index structures ([source](packages/hashtree-index))
-- [`@hashtree/mesh`](https://www.npmjs.com/package/@hashtree/mesh) - Transport-neutral blob routing primitives ([source](packages/hashtree-mesh))
 - [`@hashtree/worker`](https://www.npmjs.com/package/@hashtree/worker) - Modular browser worker runtime, including the browser-side `tree-root` registry subpath export ([source](packages/hashtree-worker))
 
 The worker's optional NDK integrations are consumed from the independently

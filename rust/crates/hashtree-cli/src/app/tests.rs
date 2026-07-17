@@ -26,7 +26,6 @@ use super::run::{
 use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_info_target,
     resolve_load_target_cid, root_daemon_override_enabled, stored_published_pin_hash,
-    warn_if_stun_unavailable,
 };
 use super::storage_stats::{
     classify_storage_bucket, render_storage_inventory, AuthorSummary, PinnedDetail, StorageBucket,
@@ -42,7 +41,7 @@ use crate::app::args::{Cli, Commands, PoolCommands};
 use crate::app::mount_registry::ActiveMount;
 use clap::{CommandFactory, Parser};
 use hashtree_cli::config::ServerMode;
-use hashtree_cli::{Config as AppConfig, FetchConfig, Fetcher, HashtreeStore, NostrToBech32};
+use hashtree_cli::{FetchConfig, Fetcher, HashtreeStore, NostrToBech32};
 use hashtree_core::{nhash_decode, Cid};
 use hashtree_updater::UpdateRef;
 use nostr::{Keys, Kind};
@@ -310,21 +309,6 @@ fn test_daemon_launch_state_roundtrip() {
     write_daemon_launch_state(&state_path, &state).unwrap();
     let reloaded = read_daemon_launch_state(&state_path).unwrap();
     assert_eq!(reloaded, state);
-}
-
-#[test]
-fn test_warn_if_stun_unavailable_disables_stun_listener_when_feature_missing() {
-    let mut config = AppConfig::default();
-    config.server.enable_webrtc = true;
-    config.server.stun_port = 3478;
-
-    warn_if_stun_unavailable(&mut config);
-
-    #[cfg(not(feature = "stun"))]
-    assert_eq!(config.server.stun_port, 0);
-
-    #[cfg(feature = "stun")]
-    assert_eq!(config.server.stun_port, 3478);
 }
 
 #[test]

@@ -33,10 +33,9 @@ the requested hash before returning or caching them. The exact wire format and
 shared vectors are in
 [`tcp-fips-blob-v1.md`](tcp-fips-blob-v1.md).
 
-Direct same-host requests use HTL `0`. The `hashtree-network` HTL mesh remains
-Hashtree's canonical decentralized content-routing layer. Only forwarding from
-one Hashtree mesh peer to another consumes one HTL; terminal adapters and FIPS
-routing hops do not consume it.
+Direct same-host requests use HTL `0`. The existing HTL resolver is adapted as
+one composite `BlobRoute`. Only forwarding from one Hashtree mesh peer to
+another consumes one HTL; terminal adapters and FIPS routing hops do not.
 
 ## Same-host And Standalone Routes
 

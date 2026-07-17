@@ -8,15 +8,12 @@ mod nostr_query;
 mod peer_status;
 mod request_paths;
 mod status_metrics;
-#[cfg(feature = "p2p")]
-pub mod stun;
 mod ui;
 pub mod ws_relay;
 
 use crate::nostr_relay::NostrRelay;
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
-use crate::webrtc::WebRTCState;
 use anyhow::Result;
 use axum::{
     body::Body,
@@ -160,8 +157,6 @@ impl HashtreeServer {
                 daemon_started_at: current_unix_secs(),
                 peer_mode: crate::config::ServerMode::Normal,
                 hash_get_enabled: true,
-                http_webrtc_fetch: true,
-                webrtc_peers: None,
                 fips_endpoint: None,
                 fips_blob_resolver: None,
                 fetch_from_fips_peers: true,
@@ -256,11 +251,6 @@ impl HashtreeServer {
         self
     }
 
-    pub fn with_http_webrtc_fetch(mut self, enabled: bool) -> Self {
-        self.state.http_webrtc_fetch = enabled;
-        self
-    }
-
     pub fn with_fetch_from_fips_peers(mut self, enabled: bool) -> Self {
         self.state.fetch_from_fips_peers = enabled;
         self
@@ -279,12 +269,6 @@ impl HashtreeServer {
         resolver: Arc<crate::fips_transport::DaemonBlobResolver>,
     ) -> Self {
         self.state.fips_blob_resolver = Some(resolver);
-        self
-    }
-
-    /// Set WebRTC state for P2P peer queries
-    pub fn with_webrtc_peers(mut self, webrtc_state: Arc<WebRTCState>) -> Self {
-        self.state.webrtc_peers = Some(webrtc_state);
         self
     }
 
@@ -506,9 +490,7 @@ impl HashtreeServer {
             .route("/health", get(handlers::health_check))
             .route("/api/pins", get(handlers::list_pins))
             .route("/api/stats", get(handlers::storage_stats))
-            .route("/api/peers", get(handlers::webrtc_peers))
             .route("/api/status", get(handlers::daemon_status))
-            .route("/api/p2p/signal", post(handlers::p2p_signal))
             .route("/api/socialgraph", get(handlers::socialgraph_stats))
             .route(
                 "/api/socialgraph/snapshot",

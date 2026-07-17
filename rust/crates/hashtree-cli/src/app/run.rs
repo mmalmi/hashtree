@@ -3,8 +3,6 @@ use clap::Parser;
 use hashtree_cli::config::{
     ensure_auth_cookie, ensure_keys, ensure_keys_string, parse_npub, pubkey_bytes,
 };
-#[cfg(feature = "p2p")]
-use hashtree_cli::WebRTCManager;
 use hashtree_cli::{
     spawn_background_eviction_task, Config, FetchConfig, FetchProgress, Fetcher, HashtreeServer,
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, NostrToBech32, RootResolver,
@@ -176,16 +174,6 @@ fn clear_stale_mountpoint(path: &std::path::Path) -> Result<bool> {
     }
 }
 
-pub(crate) fn warn_if_stun_unavailable(_config: &mut Config) {
-    #[cfg(not(feature = "stun"))]
-    if _config.server.enable_webrtc && _config.server.stun_port > 0 {
-        eprintln!(
-            "warning: STUN server support is not built into this htree binary; disabling local STUN listener"
-        );
-        _config.server.stun_port = 0;
-    }
-}
-
 fn normalized_pin_label(input: &str) -> String {
     input
         .strip_prefix("htree://")
@@ -345,7 +333,6 @@ pub(crate) async fn run() -> Result<()> {
             }
             // Load or create config
             let mut config = Config::load()?;
-            warn_if_stun_unavailable(&mut config);
 
             // Override relays if specified on command line
             if let Some(relays_str) = relays_override.as_deref() {
@@ -493,150 +480,6 @@ pub(crate) async fn run() -> Result<()> {
                 .clone()
                 .map(|store| store as Arc<dyn hashtree_cli::socialgraph::SocialGraphBackend>);
 
-            #[cfg(feature = "p2p")]
-            let peer_router_enabled = hashtree_cli::p2p_common::peer_router_enabled(&config);
-
-            // Start STUN server and WebRTC if P2P feature enabled
-            #[cfg(feature = "p2p")]
-            let (stun_handle, webrtc_handle, webrtc_state, peer_state_persist_handle) = {
-                // Start STUN server if configured
-                let stun_handle = if hashtree_cli::p2p_common::should_start_stun_server(&config) {
-                    let stun_addr: std::net::SocketAddr =
-                        format!("0.0.0.0:{}", config.server.stun_port)
-                            .parse()
-                            .context("Invalid STUN bind address")?;
-                    Some(
-                        hashtree_cli::server::stun::start_stun_server(stun_addr)
-                            .await
-                            .context("Failed to start STUN server")?,
-                    )
-                } else {
-                    None
-                };
-
-                // Start WebRTC signaling manager if enabled
-                let (webrtc_handle, webrtc_state, peer_state_persist_handle) =
-                    if peer_router_enabled {
-                        let webrtc_config =
-                            hashtree_cli::p2p_common::default_webrtc_config(&config);
-                        let peer_classifier = hashtree_cli::p2p_common::build_peer_classifier(
-                            data_dir.clone(),
-                            Arc::clone(&social_graph_store),
-                        );
-                        let cashu_payment_client = if config.cashu.default_mint.is_some()
-                            || !config.cashu.accepted_mints.is_empty()
-                        {
-                            match hashtree_cli::cashu_helper::CashuHelperClient::discover(
-                                data_dir.clone(),
-                            ) {
-                                Ok(client) => Some(Arc::new(client)
-                                    as Arc<dyn hashtree_cli::cashu_helper::CashuPaymentClient>),
-                                Err(err) => {
-                                    tracing::warn!(
-                                    "Cashu settlement helper unavailable; paid retrieval stays disabled: {}",
-                                    err
-                                );
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
-                        let cashu_mint_metadata = if config.cashu.default_mint.is_some()
-                            || !config.cashu.accepted_mints.is_empty()
-                        {
-                            let metadata_path =
-                                hashtree_cli::webrtc::cashu_mint_metadata_path(&data_dir);
-                            match hashtree_cli::webrtc::CashuMintMetadataStore::load(metadata_path)
-                            {
-                                Ok(store) => Some(store),
-                                Err(err) => {
-                                    tracing::warn!(
-                                    "Failed to load Cashu mint metadata; falling back to in-memory state: {}",
-                                    err
-                                );
-                                    Some(hashtree_cli::webrtc::CashuMintMetadataStore::in_memory())
-                                }
-                            }
-                        } else {
-                            None
-                        };
-
-                        let mut manager = if config.server.mode.hash_get_enabled() {
-                            let content_store =
-                                hashtree_cli::webrtc_store::CachedWebRtcContentStore::new(
-                                    Arc::clone(&store),
-                                );
-                            WebRTCManager::new_with_store_and_classifier_and_cashu(
-                                keys.clone(),
-                                webrtc_config,
-                                Arc::new(content_store) as Arc<dyn hashtree_cli::ContentStore>,
-                                peer_classifier,
-                                hashtree_cli::webrtc::CashuRoutingConfig::from(&config.cashu),
-                                cashu_payment_client,
-                                cashu_mint_metadata,
-                            )
-                        } else {
-                            let manager = WebRTCManager::new_with_classifier(
-                                keys.clone(),
-                                webrtc_config,
-                                peer_classifier,
-                            );
-                            let _ = cashu_payment_client;
-                            let _ = cashu_mint_metadata;
-                            manager
-                        };
-                        if let Some(nostr_relay) = nostr_relay.as_ref() {
-                            manager.set_nostr_relay(
-                                nostr_relay.clone() as hashtree_network::SharedMeshRelayClient
-                            );
-                        }
-
-                        // Get the WebRTC state before spawning (for HTTP handler to query peers)
-                        let webrtc_state = manager.state();
-                        if let Err(err) =
-                            hashtree_cli::p2p_common::load_peer_state(&data_dir, &webrtc_state)
-                                .await
-                        {
-                            tracing::warn!("Failed to load persisted mesh peer state: {err:#}");
-                        }
-                        let peer_state_persist_handle =
-                            hashtree_cli::p2p_common::spawn_peer_state_persist_task(
-                                data_dir.clone(),
-                                webrtc_state.clone(),
-                            );
-
-                        // Spawn the manager in a background task
-                        let handle = tokio::spawn(async move {
-                            if let Err(e) = manager.run().await {
-                                tracing::error!("Peer router error: {}", e);
-                            }
-                        });
-                        (
-                            Some(handle),
-                            Some(webrtc_state),
-                            Some(peer_state_persist_handle),
-                        )
-                    } else {
-                        (None, None, None)
-                    };
-                (
-                    stun_handle,
-                    webrtc_handle,
-                    webrtc_state,
-                    peer_state_persist_handle,
-                )
-            };
-
-            #[cfg(not(feature = "p2p"))]
-            #[allow(clippy::type_complexity)]
-            let (stun_handle, webrtc_handle, webrtc_state, peer_state_persist_handle): (
-                Option<tokio::task::JoinHandle<()>>,
-                Option<tokio::task::JoinHandle<()>>,
-                Option<Arc<hashtree_cli::webrtc::WebRTCState>>,
-                Option<tokio::task::JoinHandle<()>>,
-            ) = (None, None, None, None);
-
             // Keep client-visible Blossom endpoints available to the daemon,
             // except for its own listener, which would recurse on a miss.
             let upstream_blossom = config.blossom.upstream_read_servers(&bind_address);
@@ -672,7 +515,6 @@ pub(crate) async fn run() -> Result<()> {
             let mut server = HashtreeServer::new(Arc::clone(&store), bind_address.clone())
                 .with_server_mode(config.server.mode)
                 .with_hash_get_enabled(config.server.mode.hash_get_enabled())
-                .with_http_webrtc_fetch(config.server.http_webrtc_fetch)
                 .with_fetch_from_fips_peers(config.server.fetch_from_fips_peers)
                 .with_allowed_pubkeys(allowed_pubkeys.clone())
                 .with_max_upload_bytes((config.blossom.max_upload_mb as usize) * 1024 * 1024)
@@ -704,10 +546,6 @@ pub(crate) async fn run() -> Result<()> {
                 server = server.with_nostr_provider(provider);
             }
 
-            // Add WebRTC peer state for P2P queries from HTTP handler
-            if let Some(ref webrtc_state) = webrtc_state {
-                server = server.with_webrtc_peers(webrtc_state.clone());
-            }
             if let Some(ref fips_handle) = fips_handle {
                 server = server
                     .with_fips_endpoint(fips_handle.endpoint.clone())
@@ -722,7 +560,6 @@ pub(crate) async fn run() -> Result<()> {
                     graph_store.clone(),
                     Arc::clone(&social_graph_store),
                     crawler_spambox_backend,
-                    webrtc_state.clone(),
                 ),
             );
 
@@ -784,28 +621,6 @@ pub(crate) async fn run() -> Result<()> {
                 );
             }
             println!("Git remote: http://{}/git/<pubkey>/<repo>", bind_address);
-            #[cfg(feature = "p2p")]
-            if let Some(ref handle) = stun_handle {
-                println!("STUN server: {}", handle.addr);
-            }
-            #[cfg(feature = "p2p")]
-            if config.server.enable_webrtc {
-                println!("WebRTC: enabled (P2P connections)");
-            }
-            #[cfg(feature = "p2p")]
-            if config.server.enable_multicast && config.server.max_multicast_peers > 0 {
-                println!(
-                    "Multicast: enabled (max {} peers)",
-                    config.server.max_multicast_peers
-                );
-            }
-            #[cfg(feature = "p2p")]
-            if config.server.enable_bluetooth && config.server.max_bluetooth_peers > 0 {
-                println!(
-                    "Bluetooth: enabled (max {} peers)",
-                    config.server.max_bluetooth_peers
-                );
-            }
             println!(
                 "Social graph: enabled (social_graph_crawl_depth={}, max_write_distance={})",
                 config.nostr.social_graph_crawl_depth, config.nostr.max_write_distance
@@ -883,36 +698,6 @@ pub(crate) async fn run() -> Result<()> {
             }
 
             background_services_controller.shutdown().await;
-
-            #[cfg(feature = "p2p")]
-            if let Some(ref state) = webrtc_state {
-                if let Err(err) =
-                    hashtree_cli::p2p_common::persist_peer_state(&data_dir, state).await
-                {
-                    tracing::warn!("Failed to persist mesh peer state during shutdown: {err:#}");
-                }
-            }
-
-            #[cfg(feature = "p2p")]
-            if let Some(handle) = peer_state_persist_handle {
-                handle.abort();
-            }
-
-            // Shutdown WebRTC manager
-            #[cfg(feature = "p2p")]
-            if let Some(handle) = webrtc_handle {
-                handle.abort();
-            }
-
-            // Shutdown STUN server
-            #[cfg(feature = "p2p")]
-            if let Some(handle) = stun_handle {
-                handle.shutdown();
-            }
-
-            // Suppress unused variable warnings when p2p is disabled
-            #[cfg(not(feature = "p2p"))]
-            let _ = (stun_handle, webrtc_handle, peer_state_persist_handle);
         }
         #[cfg(feature = "fuse")]
         Commands::Mount {
@@ -2298,19 +2083,19 @@ pub(crate) async fn resolve_load_target_cid(
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Path not found in directory: {}", path))?;
             fetcher
-                .fetch_cid_tree_with_progress(store, None, &resolved_cid, progress)
+                .fetch_cid_tree_with_progress(store, &resolved_cid, progress)
                 .await?;
             return Ok(resolved_cid);
         }
 
         fetcher
-            .fetch_cid_tree_with_progress(store, None, &cid, progress)
+            .fetch_cid_tree_with_progress(store, &cid, progress)
             .await?;
         return Ok(cid);
     }
 
     fetcher
-        .fetch_cid_tree_with_progress(store, None, &cid, progress)
+        .fetch_cid_tree_with_progress(store, &cid, progress)
         .await?;
     Ok(cid)
 }
@@ -2326,11 +2111,11 @@ pub(crate) async fn resolve_cat_target_cid(
             let resolved_cid = resolve_path_with_fetch(fetcher, store, &cid, path)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Path not found in directory: {}", path))?;
-            fetcher.fetch_cid_tree(store, None, &resolved_cid).await?;
+            fetcher.fetch_cid_tree(store, &resolved_cid).await?;
             return Ok(resolved_cid);
         }
 
-        fetcher.fetch_cid_tree(store, None, &cid).await?;
+        fetcher.fetch_cid_tree(store, &cid).await?;
         return Ok(cid);
     }
 
@@ -2338,7 +2123,7 @@ pub(crate) async fn resolve_cat_target_cid(
         anyhow::bail!("Cannot cat a directory; specify a file path or use `htree get`");
     }
 
-    fetcher.fetch_cid_tree(store, None, &cid).await?;
+    fetcher.fetch_cid_tree(store, &cid).await?;
     Ok(cid)
 }
 
@@ -2378,7 +2163,7 @@ async fn ensure_root_chunk_loaded(
     cid: &Cid,
 ) -> Result<()> {
     fetcher
-        .fetch_chunk_with_store(store, None, &cid.hash)
+        .fetch_chunk_with_store(store, &cid.hash)
         .await
         .with_context(|| format!("Failed to fetch {}", format_cid_for_display(cid)))?;
     Ok(())
@@ -2396,7 +2181,7 @@ async fn fetch_missing_chunk(
     let hash =
         from_hex(missing).with_context(|| format!("Invalid missing chunk hash {}", missing))?;
     fetcher
-        .fetch_chunk_with_store(store, None, &hash)
+        .fetch_chunk_with_store(store, &hash)
         .await
         .with_context(|| format!("Failed to fetch missing chunk {}", missing))?;
     Ok(())

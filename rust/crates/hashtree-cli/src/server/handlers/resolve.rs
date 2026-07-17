@@ -1,7 +1,9 @@
 use super::super::auth::{AppState, CachedResolvedPathEntry, CachedTreeRootEntry, LookupResult};
 use super::super::nostr_query::query_events_for_local_request;
 use super::{list_directory_with_fetch, resolve_path_with_fetch};
-use crate::webrtc::{build_root_filter, pick_latest_event, root_event_from_peer, PeerRootEvent};
+use crate::root_events::{
+    build_root_filter, pick_latest_event, root_event_from_peer, PeerRootEvent,
+};
 use anyhow::Result;
 use git_remote_htree::nostr_client::is_hashtree_root_kind;
 use hashtree_core::{from_hex, to_hex, Cid, HashTree, LinkType, Store, TreeEntry};
@@ -141,48 +143,6 @@ pub(super) async fn resolve_root_without_cache(
         .is_some_and(|provider| provider.mode() == nostr_pubsub::PubsubProviderMode::LocalOnly)
     {
         return None;
-    }
-
-    if let Some(ref webrtc_state) = state.webrtc_peers {
-        if let Some((source, root)) = webrtc_state
-            .resolve_root_from_local_buses_with_source(pubkey, treename, Duration::from_secs(2))
-            .await
-        {
-            if let Some(mut cid) = peer_root_to_cid(&root) {
-                if cid.key.is_none() {
-                    cid.key = link_key;
-                }
-                put_cached_tree_root(
-                    state,
-                    cache_key.clone(),
-                    cid.clone(),
-                    source,
-                    Some(root.clone()),
-                );
-                return Some(ResolvedRoot {
-                    cid,
-                    source,
-                    root_event: Some(root),
-                });
-            }
-        }
-
-        if let Some(root) = webrtc_state
-            .resolve_root_from_peers(pubkey, treename, Duration::from_secs(4))
-            .await
-        {
-            if let Some(mut cid) = peer_root_to_cid(&root) {
-                if cid.key.is_none() {
-                    cid.key = link_key;
-                }
-                put_cached_tree_root(state, cache_key, cid.clone(), "webrtc", Some(root.clone()));
-                return Some(ResolvedRoot {
-                    cid,
-                    source: "webrtc",
-                    root_event: Some(root),
-                });
-            }
-        }
     }
 
     None

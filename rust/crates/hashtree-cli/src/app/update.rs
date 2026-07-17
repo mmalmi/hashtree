@@ -43,11 +43,7 @@ impl Store for FetchingStore {
         if let Some(data) = self.store.store_arc().get(hash).await? {
             return Ok(Some(data));
         }
-        match self
-            .fetcher
-            .fetch_chunk_with_store(&self.store, None, hash)
-            .await
-        {
+        match self.fetcher.fetch_chunk_with_store(&self.store, hash).await {
             Ok(data) => Ok(Some(data)),
             Err(_) => Ok(None),
         }

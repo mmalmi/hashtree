@@ -87,29 +87,30 @@ The `Store` trait is just `get(hash) → bytes` and `put(hash, bytes)`. The core
 - `hashtree-fs` - Filesystem helpers and tree traversal
 - `hashtree-resolver` - Nostr-based tree resolution
 - `hashtree-blossom` - Blossom client/server helpers
-- `hashtree-network` - Mesh routing, signaling, peer links, and store composition
+- `hashtree-network` - Adaptive ordering across opaque, read-only blob routes
 - `hashtree-updater` - App update discovery, platform asset selection, and install helpers backed by `npub/tree/path` release roots
 - `hashtree-lmdb` - LMDB storage backend
 - `hashtree-s3` - S3 storage backend
 - `hashtree-config` - Config loading and defaults
 - `hashtree-cli` - Command-line interface and daemon
 - `hashtree-cashu-cli` - Cashu wallet helper for `htree cashu`
-- `hashtree-sim` - P2P network simulation (Freenet-style HTL forwarding)
+- `hashtree-sim` - Loopback Nostr relay fixture for integration tests
 - `git-remote-htree` - Git remote helper (`htree://` protocol)
 
-## P2P Daemon
+## Daemon
 
-Run `htree start` to enable P2P sharing via WebRTC:
+Run `htree start` to serve local storage and enable configured FIPS blob routes:
 
 ```bash
 htree start                  # Start daemon (default port 8080)
 htree reload                 # Reload config by restarting daemonized instance
-htree status                 # Check daemon status, connected peers
+htree status                 # Check daemon and FIPS route status
 ```
 
-The daemon acts as a local Blossom server and connects to peers via WebRTC (signaled over Nostr). Git operations automatically use the daemon when running.
-
-WebRTC transport falls back to Blossom servers when data isn't found on peers or WebRTC isn't available.
+The daemon acts as a local Blossom server. Remote blob reads use the canonical
+`BlobRequest`/`BlobReply` service over FIPS; FIPS owns transport addresses and
+may use UDP, WebRTC, or another underlay. Git operations automatically use the
+daemon when running.
 
 ## Git Remote Helper
 

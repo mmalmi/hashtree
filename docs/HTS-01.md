@@ -13,7 +13,7 @@ This document specifies:
 3. `nhash` identifiers and `npub/path` references.
 4. Mutable root publication on Nostr.
 5. `htree://` URL profile.
-6. Optional WebRTC blob exchange profile.
+6. Canonical blob request/reply service profile.
 
 ## 2. Content Addressing Model
 
@@ -211,38 +211,24 @@ Current git mapping at tree root:
 
 Repository publication uses Section 7 with `d=<repo_path>`.
 
-## 11. WebRTC Blob Exchange Profile (Optional)
+## 11. Blob Request/Reply Service
 
-Binary frame format:
+Blob retrieval uses one vocabulary on every in-process and transported route:
 
-1. First byte: message type.
-2. Remaining bytes: MessagePack map body.
+- `BlobRequest { hash: bytes32, htl: u8 }`
+- `BlobReply::Data(bytes)`
+- `BlobReply::NoResult`
 
-Types:
+The published TCP/FIPS wire request is exactly 36 bytes and the reply starts
+with a seven-byte header. The exact bytes and shared vectors are specified in
+[`tcp-fips-blob-v1.md`](tcp-fips-blob-v1.md). In-process routes use the same
+types without serialization.
 
-- `0x00` request: `{h: bytes32, htl?: u8}`
-- `0x01` response: `{h: bytes32, d: bytes, i?: u32, n?: u32}`
+Every Data reply MUST be SHA-256 verified against the requested hash before it
+is returned or cached. `NoResult` means only that the active route did not
+produce this hash; it MUST NOT become a permanent negative cache or proof of
+global absence.
 
-`i`/`n` are fragment index and total for chunked responses.
-Recommended fragment size: `32 KiB`.
-
-### 11.1 `htl` Behavior
-
-`htl` (hops-to-live) is forwarding budget for one request.
-`MAX_HTL` is profile default max (currently `10`).
-
-Rules:
-
-1. If omitted, receiver MUST treat `htl` as `MAX_HTL`.
-2. Peer MAY forward only if `htl > 0`.
-3. Forwarder MUST decrement `htl` before forwarding.
-4. Freenet-style decrement policy:
-   - `2..(MAX_HTL-1)`: decrement by `1`.
-   - `MAX_HTL`: probabilistic decrement per peer (commonly 50%).
-   - `1`: probabilistic decrement to `0` per peer (commonly 25%).
-5. `htl = 0` MUST NOT be forwarded.
-
-### 11.2 `htl` Rationale
-
-`htl` bounds request spread so misses do not flood the network.
-Probabilistic decrement at `MAX_HTL` and `1` reduces simple origin/distance probing.
+Only forwarding from one Hashtree mesh peer to another decrements `htl`.
+Terminal routes and FIPS transport hops do not. A request at `htl = 0` MUST NOT
+be forwarded to another Hashtree mesh peer.

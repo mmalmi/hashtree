@@ -621,8 +621,6 @@ impl TestServer {
 [server]
 bind_address = "127.0.0.1:0"
 enable_auth = false
-stun_port = 0
-enable_webrtc = false
 public_writes = true
 
 [nostr]
@@ -763,7 +761,6 @@ write_servers = ["{url}"]
 [server]
 bind_address = "127.0.0.1:0"
 enable_auth = false
-stun_port = 0
 
 [nostr]
 {relays}
@@ -831,7 +828,6 @@ social_graph_crawl_depth = 0
             r#"
 [server]
 enable_auth = false
-stun_port = 0
 
 [nostr]
 relays = ["{}"]

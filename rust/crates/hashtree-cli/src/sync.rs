@@ -4,7 +4,7 @@
 //! 1. Own trees (all visibility levels) - highest priority
 //! 2. Followed users' public trees - lower priority
 //!
-//! Uses WebRTC peers first, falls back to Blossom HTTP servers
+//! Blob reads use configured Blossom HTTP servers.
 
 use anyhow::Result;
 use git_remote_htree::nostr_client::{hashtree_root_kinds, is_hashtree_root_kind, load_keys};
@@ -19,7 +19,6 @@ use tracing::{error, info, warn};
 
 use crate::fetch::{FetchConfig, Fetcher};
 use crate::storage::{HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
-use crate::webrtc::WebRTCState;
 
 /// Sync priority levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,8 +57,6 @@ pub struct SyncConfig {
     pub relays: Vec<String>,
     /// Max concurrent sync tasks
     pub max_concurrent: usize,
-    /// Timeout for WebRTC requests (ms)
-    pub webrtc_timeout_ms: u64,
     /// Timeout for Blossom requests (ms)
     pub blossom_timeout_ms: u64,
 }
@@ -74,7 +71,6 @@ impl Default for SyncConfig {
                 .map(|s| s.to_string())
                 .collect(),
             max_concurrent: 3,
-            webrtc_timeout_ms: 2000,
             blossom_timeout_ms: 10000,
         }
     }
@@ -88,7 +84,6 @@ impl SyncConfig {
             sync_followed: true,
             relays: config.nostr.relays.clone(),
             max_concurrent: 3,
-            webrtc_timeout_ms: 2000,
             blossom_timeout_ms: 10000,
         }
     }
@@ -262,7 +257,6 @@ fn apply_synced_tree_update(store: &HashtreeStore, task: &SyncTask) -> Result<()
 pub struct BackgroundSync {
     config: SyncConfig,
     store: Arc<HashtreeStore>,
-    webrtc_state: Option<Arc<WebRTCState>>,
     /// Nostr client for subscriptions
     client: Client,
     /// Our public key
@@ -294,12 +288,7 @@ pub struct BackgroundSync {
 
 impl BackgroundSync {
     /// Create a new background sync service
-    pub async fn new(
-        config: SyncConfig,
-        store: Arc<HashtreeStore>,
-        keys: Keys,
-        webrtc_state: Option<Arc<WebRTCState>>,
-    ) -> Result<Self> {
+    pub async fn new(config: SyncConfig, store: Arc<HashtreeStore>, keys: Keys) -> Result<Self> {
         let my_pubkey = keys.public_key();
         let client = Client::new(keys);
 
@@ -318,7 +307,6 @@ impl BackgroundSync {
         // Create fetcher with config
         // BlossomClient auto-loads servers from ~/.hashtree/config.toml
         let fetch_config = FetchConfig {
-            webrtc_timeout: Duration::from_millis(config.webrtc_timeout_ms),
             blossom_timeout: Duration::from_millis(config.blossom_timeout_ms),
         };
         let fetcher = Arc::new(Fetcher::new(fetch_config));
@@ -326,7 +314,6 @@ impl BackgroundSync {
         Ok(Self {
             config,
             store,
-            webrtc_state,
             client,
             my_pubkey,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -369,7 +356,6 @@ impl BackgroundSync {
         let queue = self.queue.clone();
         let syncing = self.syncing.clone();
         let store = self.store.clone();
-        let webrtc_state = self.webrtc_state.clone();
         let fetcher = self.fetcher.clone();
         let max_concurrent = self.config.max_concurrent;
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -414,13 +400,11 @@ impl BackgroundSync {
                             // Spawn sync task
                             let syncing_clone = syncing.clone();
                             let store_clone = store.clone();
-                            let webrtc_clone = webrtc_state.clone();
                             let fetcher_clone = fetcher.clone();
 
                             tokio::spawn(async move {
                                 let result = fetcher_clone.fetch_cid_tree(
                                     &store_clone,
-                                    webrtc_clone.as_ref(),
                                     &task.cid,
                                 ).await;
 

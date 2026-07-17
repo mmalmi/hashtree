@@ -35,7 +35,6 @@ hashtree-collection = { version = "0.2.82", path = "crates/hashtree-collection" 
 hashtree-lmdb = { version = "0.2.85", path = "crates/hashtree-lmdb" }
 hashtree-s3 = { version = "0.2.82", path = "crates/hashtree-s3" }
 hashtree-blossom = { version = "0.2.82", path = "crates/hashtree-blossom" }
-hashtree-sim = { version = "0.2.82", path = "crates/hashtree-sim" }
 hashtree-resolver = { version = "0.2.82", path = "crates/hashtree-resolver" }
 hashtree-config = { version = "0.2.82", path = "crates/hashtree-config" }
 hashtree-fs = { version = "0.2.82", path = "crates/hashtree-fs" }

@@ -1,11 +1,8 @@
 use super::*;
 use crate::nostr_relay::{NostrRelay, NostrRelayConfig};
+use crate::root_events::PeerRootEvent;
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
-use crate::webrtc::{
-    ConnectionState, PeerDirection, PeerEntry, PeerPool, PeerRootEvent, PeerSignalPath,
-    PeerTransport, WebRTCState,
-};
 use axum::{
     body::{to_bytes, Body},
     extract::{Path as AxumPath, State as AxumState},
@@ -24,7 +21,7 @@ use nostr::{
 };
 use sha2::Digest;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     time::{Duration, Instant},
 };
@@ -254,8 +251,6 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         daemon_started_at: 1_700_000_000,
         peer_mode: crate::config::ServerMode::Normal,
         hash_get_enabled: true,
-        http_webrtc_fetch: true,
-        webrtc_peers: None,
         fips_endpoint: None,
         fips_blob_resolver: None,
         fetch_from_fips_peers: true,
@@ -429,33 +424,6 @@ fn allow_plaintext_read_author(state: &mut AppState, keys: &Keys) -> String {
     npub
 }
 
-async fn sample_webrtc_state() -> Arc<WebRTCState> {
-    let state = Arc::new(WebRTCState::new());
-    let peer_id = crate::webrtc::PeerId::new(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-    );
-    let peer_key = peer_id.to_string();
-    let signal_paths = BTreeSet::from([PeerSignalPath::Relay, PeerSignalPath::Multicast]);
-    state.peers.write().await.insert(
-        peer_key.clone(),
-        PeerEntry {
-            peer_id,
-            direction: PeerDirection::Outbound,
-            state: ConnectionState::Connected,
-            last_seen: Instant::now(),
-            peer: None,
-            pool: PeerPool::Follows,
-            transport: PeerTransport::WebRtc,
-            signal_paths,
-            bytes_sent: 64,
-            bytes_received: 128,
-        },
-    );
-    state.record_sent(&peer_key, 16).await;
-    state.record_received(&peer_key, 32).await;
-    state
-}
-
 async fn test_nostr_relay(dir: &TempDir, allowed_pubkey: String) -> Arc<NostrRelay> {
     let graph_store =
         socialgraph::open_social_graph_store_with_mapsize(dir.path(), Some(128 * 1024 * 1024))
@@ -547,50 +515,10 @@ async fn test_query_upstream_blossom_no_servers() {
 }
 
 #[tokio::test]
-async fn await_webrtc_peer_response_returns_success() {
-    let result = await_webrtc_peer_response(
-        async { Some((b"ok".to_vec(), "peer-a".to_string())) },
-        "abcd1234",
-        Duration::from_millis(10),
-    )
-    .await;
-
-    assert_eq!(result, Some((b"ok".to_vec(), "peer-a".to_string())));
-}
-
-#[tokio::test]
-async fn webrtc_peers_reports_transport_and_signal_paths() {
+async fn daemon_status_exposes_fips_relay_and_queue_metadata() {
     let temp = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
     let mut state = test_app_state(store, vec![]);
-    state.webrtc_peers = Some(sample_webrtc_state().await);
-
-    let response = webrtc_peers(AxumState(state)).await.into_response();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    assert_eq!(json["enabled"], true);
-    assert_eq!(json["transport_counts"]["webrtc"], 1);
-    assert_eq!(json["transport_counts"]["bluetooth"], 0);
-    assert_eq!(json["bytes_sent"], 16);
-    assert_eq!(json["bytes_received"], 32);
-    assert_eq!(json["peers"][0]["transport"], "webrtc");
-    assert_eq!(json["peers"][0]["bytes_sent"], 80);
-    assert_eq!(json["peers"][0]["bytes_received"], 160);
-    assert_eq!(
-        json["peers"][0]["signal_paths"],
-        json!(["relay", "multicast"])
-    );
-}
-
-#[tokio::test]
-async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
-    let temp = TempDir::new().unwrap();
-    let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
-    let mut state = test_app_state(store, vec![]);
-    state.webrtc_peers = Some(sample_webrtc_state().await);
     state.nostr_relay_urls = vec![
         "wss://relay.damus.io".to_string(),
         "wss://nos.lol".to_string(),
@@ -615,13 +543,6 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["mesh"]["enabled"], true);
-    assert_eq!(json["mesh"]["transport_counts"]["webrtc"], 1);
-    assert_eq!(json["mesh"]["bytes_sent"], 16);
-    assert_eq!(json["mesh"]["bytes_received"], 32);
-    assert_eq!(json["mesh"]["peers"][0]["transport"], "webrtc");
-    assert_eq!(json["mesh"]["peers"][0]["capabilities"]["hash_get"], true);
-    assert_eq!(json["webrtc"], json["mesh"]);
     assert_eq!(json["relay"]["enabled"], true);
     assert_eq!(json["relay"]["bytes_sent"], 512);
     assert_eq!(json["relay"]["bytes_received"], 1024);
@@ -633,7 +554,6 @@ async fn daemon_status_exposes_mesh_alias_with_transport_metadata() {
     assert_eq!(json["upstream"]["blossom_fetch"]["miss_cache_hits"], 0);
     assert_eq!(json["mode"], "normal");
     assert_eq!(json["capabilities"]["hash_get"], true);
-    assert_eq!(json["capabilities"]["http_webrtc_fetch"], true);
     assert_eq!(json["daemon_started_at"], 1_700_000_000u64);
     assert!(json["uptime_seconds"].as_u64().unwrap() > 0);
     assert!(json["queues"]["blob_reads"]["limit"].as_u64().unwrap() > 0);
@@ -864,18 +784,6 @@ async fn daemon_status_reports_assist_mode_and_disabled_hash_get() {
 
     assert_eq!(json["mode"], "assist");
     assert_eq!(json["capabilities"]["hash_get"], false);
-}
-
-#[tokio::test]
-async fn await_webrtc_peer_response_times_out() {
-    let result = await_webrtc_peer_response(
-        std::future::pending::<Option<(Vec<u8>, String)>>(),
-        "abcd1234",
-        Duration::from_millis(10),
-    )
-    .await;
-
-    assert!(result.is_none());
 }
 
 #[tokio::test]
@@ -3798,7 +3706,7 @@ async fn cached_root_preserves_encrypted_key_metadata_for_followup_resolves() {
         &state,
         tree_root_cache_key("npub1example", "video", None),
         cid.clone(),
-        "webrtc",
+        "nostr",
         Some(root_event.clone()),
     );
 

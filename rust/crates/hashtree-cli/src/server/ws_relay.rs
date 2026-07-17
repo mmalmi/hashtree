@@ -6,55 +6,21 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
-use hashtree_core::{from_hex, sha256};
 use nostr::{
     ClientMessage as NostrClientMessage, Filter as NostrFilter, JsonUtil as NostrJsonUtil,
     RelayMessage as NostrRelayMessage, SubscriptionId,
 };
-use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
-use super::auth::{AppState, PendingRequest, UpstreamNostrSubscription, WsProtocol};
+use super::auth::{AppState, UpstreamNostrSubscription};
 use crate::diagnostics::{
     nostr_filters_summary, process_memory_snapshot, trim_process_allocations,
 };
-use crate::webrtc::types::{
-    encode_request, encode_response, parse_message, DataMessage, DataRequest, DataResponse, MAX_HTL,
-};
-use hex::encode as hex_encode;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum WsClientMessage {
-    #[serde(rename = "req")]
-    Request { id: u32, hash: String },
-    #[serde(rename = "res")]
-    Response { id: u32, hash: String, found: bool },
-}
-
 #[derive(Debug)]
 enum WsTextMessage<'a> {
-    Hashtree(WsClientMessage),
     Nostr(Box<NostrClientMessage<'a>>),
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct WsRequest {
-    #[serde(rename = "type")]
-    kind: String,
-    id: u32,
-    hash: String,
-}
-
-#[derive(Debug, Serialize)]
-struct WsResponse {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    id: u32,
-    hash: String,
-    found: bool,
 }
 
 pub async fn ws_data(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -83,11 +49,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_pubkey: Option
         let mut clients = state.ws_relay.clients.lock().await;
         clients.insert(client_id, tx);
     }
-    {
-        let mut protocols = state.ws_relay.client_protocols.lock().await;
-        protocols.insert(client_id, WsProtocol::HashtreeJson);
-    }
-
     let mut nostr_rx = if let Some(relay) = state.nostr_relay.clone() {
         let (nostr_tx, nostr_rx) = mpsc::unbounded_channel::<String>();
         relay
@@ -138,15 +99,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_pubkey: Option
         let mut clients = state.ws_relay.clients.lock().await;
         clients.remove(&client_id);
     }
-    {
-        let mut protocols = state.ws_relay.client_protocols.lock().await;
-        protocols.remove(&client_id);
-    }
-    {
-        let mut pending = state.ws_relay.pending.lock().await;
-        pending.retain(|(peer_id, _), _| *peer_id != client_id);
-    }
-
     if let Some(relay) = &state.nostr_relay {
         relay.unregister_client(client_id).await;
     }
@@ -158,10 +110,6 @@ fn parse_ws_text_message(text: &str) -> Option<WsTextMessage<'static>> {
         if let Ok(msg) = NostrClientMessage::from_json(trimmed) {
             return Some(WsTextMessage::Nostr(Box::new(msg)));
         }
-    }
-
-    if let Ok(msg) = serde_json::from_str::<WsClientMessage>(text) {
-        return Some(WsTextMessage::Hashtree(msg));
     }
 
     None
@@ -477,24 +425,6 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
         Message::Text(text) => {
             if let Some(msg) = parse_ws_text_message(&text) {
                 match msg {
-                    WsTextMessage::Hashtree(msg) => {
-                        set_client_protocol(state, client_id, WsProtocol::HashtreeJson).await;
-                        match msg {
-                            WsClientMessage::Request { id, hash } => {
-                                handle_request(
-                                    client_id,
-                                    id,
-                                    hash,
-                                    WsProtocol::HashtreeJson,
-                                    state,
-                                )
-                                .await;
-                            }
-                            WsClientMessage::Response { id, hash, found } => {
-                                handle_response(client_id, id, hash, found, state).await;
-                            }
-                        }
-                    }
                     WsTextMessage::Nostr(msg) => {
                         if let Some(relay) = &state.nostr_relay {
                             match *msg {
@@ -589,300 +519,10 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                 }
             }
         }
-        Message::Binary(data) => {
-            handle_binary(client_id, data, state).await;
-        }
+        Message::Binary(_) => {}
         Message::Close(_) => {}
         _ => {}
     }
-}
-
-async fn handle_request(
-    client_id: u64,
-    request_id: u32,
-    hash: String,
-    origin_protocol: WsProtocol,
-    state: &AppState,
-) {
-    let hash_hex = hash.to_lowercase();
-    let hash_bytes = match from_hex(&hash_hex) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            if origin_protocol == WsProtocol::HashtreeJson {
-                send_json(
-                    state,
-                    client_id,
-                    WsResponse {
-                        kind: "res",
-                        id: request_id,
-                        hash,
-                        found: false,
-                    },
-                )
-                .await;
-            }
-            return;
-        }
-    };
-
-    if let Ok(Some(data)) = state.store.get_blob(&hash_bytes) {
-        match origin_protocol {
-            WsProtocol::HashtreeJson => {
-                send_json(
-                    state,
-                    client_id,
-                    WsResponse {
-                        kind: "res",
-                        id: request_id,
-                        hash: hash.clone(),
-                        found: true,
-                    },
-                )
-                .await;
-                send_binary(state, client_id, request_id, data).await;
-            }
-            WsProtocol::HashtreeMsgpack => {
-                send_msgpack_response(state, client_id, &hash_bytes, &data).await;
-            }
-            WsProtocol::Unknown => {}
-        }
-        return;
-    }
-
-    let peers: Vec<(u64, mpsc::UnboundedSender<Message>, WsProtocol)> = {
-        let clients = state.ws_relay.clients.lock().await;
-        let protocols = state.ws_relay.client_protocols.lock().await;
-        clients
-            .iter()
-            .filter(|(id, _)| **id != client_id)
-            .filter_map(|(id, tx)| {
-                let protocol = protocols.get(id).copied().unwrap_or(WsProtocol::Unknown);
-                match protocol {
-                    WsProtocol::HashtreeJson | WsProtocol::HashtreeMsgpack => {
-                        Some((*id, tx.clone(), protocol))
-                    }
-                    WsProtocol::Unknown => None,
-                }
-            })
-            .collect()
-    };
-
-    if peers.is_empty() {
-        if origin_protocol == WsProtocol::HashtreeJson {
-            send_json(
-                state,
-                client_id,
-                WsResponse {
-                    kind: "res",
-                    id: request_id,
-                    hash,
-                    found: false,
-                },
-            )
-            .await;
-        }
-        return;
-    }
-
-    {
-        let mut pending = state.ws_relay.pending.lock().await;
-        for (peer_id, _, _) in &peers {
-            pending.insert(
-                (*peer_id, request_id),
-                PendingRequest {
-                    origin_id: client_id,
-                    hash: hash.clone(),
-                    found: false,
-                    origin_protocol,
-                },
-            );
-        }
-    }
-
-    let request_text = serde_json::to_string(&WsRequest {
-        kind: "req".to_string(),
-        id: request_id,
-        hash: hash.clone(),
-    })
-    .unwrap_or_else(|_| String::new());
-    for (peer_id, tx, protocol) in peers {
-        match protocol {
-            WsProtocol::HashtreeMsgpack => {
-                send_msgpack_request(state, peer_id, &hash_bytes).await;
-            }
-            WsProtocol::HashtreeJson => {
-                let _ = tx.send(Message::Text(request_text.clone()));
-            }
-            WsProtocol::Unknown => {}
-        }
-    }
-
-    let timeout_state = state.clone();
-    let timeout_hash = hash.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let mut pending = timeout_state.ws_relay.pending.lock().await;
-        let still_pending = pending
-            .iter()
-            .any(|((_, id), p)| *id == request_id && p.origin_id == client_id);
-        let already_found = pending
-            .iter()
-            .any(|((_, id), p)| *id == request_id && p.origin_id == client_id && p.found);
-        if !still_pending || already_found {
-            return;
-        }
-        let origin_protocol = pending
-            .iter()
-            .find(|((_, id), p)| *id == request_id && p.origin_id == client_id)
-            .map(|(_, p)| p.origin_protocol)
-            .unwrap_or(WsProtocol::HashtreeJson);
-        pending.retain(|(_, id), p| !(*id == request_id && p.origin_id == client_id));
-        drop(pending);
-        if origin_protocol == WsProtocol::HashtreeJson {
-            send_json(
-                &timeout_state,
-                client_id,
-                WsResponse {
-                    kind: "res",
-                    id: request_id,
-                    hash: timeout_hash,
-                    found: false,
-                },
-            )
-            .await;
-        }
-    });
-}
-
-async fn handle_response(
-    client_id: u64,
-    request_id: u32,
-    _hash: String,
-    found: bool,
-    state: &AppState,
-) {
-    let pending_entry = {
-        let pending = state.ws_relay.pending.lock().await;
-        pending
-            .get(&(client_id, request_id))
-            .map(|p| (p.origin_id, p.hash.clone(), p.origin_protocol))
-    };
-
-    let Some((origin_id, pending_hash, origin_protocol)) = pending_entry else {
-        return;
-    };
-
-    if found {
-        // Legacy JSON peers send a `found` control message before sending the
-        // binary body. Do not forward success until the body hashes correctly.
-        return;
-    }
-
-    let mut pending = state.ws_relay.pending.lock().await;
-    pending.remove(&(client_id, request_id));
-    let has_remaining = pending
-        .iter()
-        .any(|((_, id), p)| *id == request_id && p.origin_id == origin_id);
-    drop(pending);
-
-    if !has_remaining && origin_protocol == WsProtocol::HashtreeJson {
-        send_json(
-            state,
-            origin_id,
-            WsResponse {
-                kind: "res",
-                id: request_id,
-                hash: pending_hash,
-                found: false,
-            },
-        )
-        .await;
-    }
-}
-
-fn payload_matches_hash(hash: &[u8], data: &[u8]) -> bool {
-    hash.len() == 32 && sha256(data).as_slice() == hash
-}
-
-async fn handle_binary(client_id: u64, data: Vec<u8>, state: &AppState) {
-    if let Some(msg) = parse_msgpack_message(&data) {
-        set_client_protocol(state, client_id, WsProtocol::HashtreeMsgpack).await;
-        match msg {
-            DataMessage::Request(req) => {
-                let hash_hex = hex_encode(&req.h);
-                let request_id = state.ws_relay.next_request_id();
-                handle_request(
-                    client_id,
-                    request_id,
-                    hash_hex,
-                    WsProtocol::HashtreeMsgpack,
-                    state,
-                )
-                .await;
-            }
-            DataMessage::Response(res) => {
-                handle_msgpack_response(client_id, res, state).await;
-            }
-            DataMessage::QuoteRequest(_)
-            | DataMessage::QuoteResponse(_)
-            | DataMessage::Payment(_)
-            | DataMessage::PaymentAck(_)
-            | DataMessage::Chunk(_)
-            | DataMessage::PeerHints(_)
-            | DataMessage::PubsubInterest(_)
-            | DataMessage::PubsubFrame(_)
-            | DataMessage::PubsubInventory(_)
-            | DataMessage::PubsubWant(_) => {}
-        }
-        return;
-    }
-
-    // Legacy binary: [4-byte LE request_id][data]
-    if data.len() < 4 {
-        return;
-    }
-    let request_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    let pending_entry = {
-        let pending = state.ws_relay.pending.lock().await;
-        pending
-            .get(&(client_id, request_id))
-            .map(|p| (p.origin_id, p.hash.clone(), p.origin_protocol))
-    };
-    let Some((origin_id, hash_hex, origin_protocol)) = pending_entry else {
-        return;
-    };
-
-    let Ok(hash_bytes) = from_hex(&hash_hex) else {
-        return;
-    };
-    let payload = &data[4..];
-    if !payload_matches_hash(&hash_bytes, payload) {
-        return;
-    }
-
-    match origin_protocol {
-        WsProtocol::HashtreeJson => {
-            send_json(
-                state,
-                origin_id,
-                WsResponse {
-                    kind: "res",
-                    id: request_id,
-                    hash: hash_hex.clone(),
-                    found: true,
-                },
-            )
-            .await;
-            send_binary(state, origin_id, request_id, payload.to_vec()).await;
-        }
-        WsProtocol::HashtreeMsgpack => {
-            send_msgpack_response(state, origin_id, &hash_bytes, payload).await;
-        }
-        WsProtocol::Unknown => {}
-    }
-
-    let mut pending = state.ws_relay.pending.lock().await;
-    pending.retain(|(_, id), p| !(*id == request_id && p.origin_id == origin_id));
 }
 
 async fn handle_nostr_message(client_id: u64, msg: NostrClientMessage<'_>, state: &AppState) {
@@ -933,161 +573,6 @@ async fn send_nostr(state: &AppState, client_id: u64, response: NostrRelayMessag
     send_to_client(state, client_id, Message::Text(text)).await;
 }
 
-fn parse_msgpack_message(data: &[u8]) -> Option<DataMessage> {
-    let msg = parse_message(data)?;
-    match msg {
-        DataMessage::Request(req) => {
-            if req.h.len() == 32 {
-                Some(DataMessage::Request(req))
-            } else {
-                None
-            }
-        }
-        DataMessage::Response(res) => {
-            if res.h.len() == 32 {
-                Some(DataMessage::Response(res))
-            } else {
-                None
-            }
-        }
-        DataMessage::QuoteRequest(req) => {
-            if req.h.len() == 32 {
-                Some(DataMessage::QuoteRequest(req))
-            } else {
-                None
-            }
-        }
-        DataMessage::QuoteResponse(res) => {
-            if res.h.len() == 32 {
-                Some(DataMessage::QuoteResponse(res))
-            } else {
-                None
-            }
-        }
-        DataMessage::Payment(req) => {
-            if req.h.len() == 32 {
-                Some(DataMessage::Payment(req))
-            } else {
-                None
-            }
-        }
-        DataMessage::PaymentAck(res) => {
-            if res.h.len() == 32 {
-                Some(DataMessage::PaymentAck(res))
-            } else {
-                None
-            }
-        }
-        DataMessage::Chunk(chunk) => {
-            if chunk.h.len() == 32 {
-                Some(DataMessage::Chunk(chunk))
-            } else {
-                None
-            }
-        }
-        DataMessage::PeerHints(_)
-        | DataMessage::PubsubInterest(_)
-        | DataMessage::PubsubFrame(_)
-        | DataMessage::PubsubInventory(_)
-        | DataMessage::PubsubWant(_) => Some(msg),
-    }
-}
-
-async fn handle_msgpack_response(client_id: u64, res: DataResponse, state: &AppState) {
-    let hash_hex = hex_encode(&res.h);
-    let data = res.d.clone();
-    let hash_bytes = res.h.clone();
-
-    if !payload_matches_hash(&hash_bytes, &data) {
-        return;
-    }
-
-    let mut responses: Vec<(u64, u32, WsProtocol)> = Vec::new();
-    let mut seen = HashSet::new();
-    {
-        let pending = state.ws_relay.pending.lock().await;
-        for ((peer_id, request_id), p) in pending.iter() {
-            if *peer_id != client_id {
-                continue;
-            }
-            if p.hash != hash_hex {
-                continue;
-            }
-            if seen.insert((p.origin_id, *request_id)) {
-                responses.push((p.origin_id, *request_id, p.origin_protocol));
-            }
-        }
-    }
-
-    if responses.is_empty() {
-        return;
-    }
-
-    for (origin_id, request_id, protocol) in &responses {
-        match protocol {
-            WsProtocol::HashtreeJson => {
-                send_json(
-                    state,
-                    *origin_id,
-                    WsResponse {
-                        kind: "res",
-                        id: *request_id,
-                        hash: hash_hex.clone(),
-                        found: true,
-                    },
-                )
-                .await;
-                send_binary(state, *origin_id, *request_id, data.clone()).await;
-            }
-            WsProtocol::HashtreeMsgpack => {
-                send_msgpack_response(state, *origin_id, &hash_bytes, &data).await;
-            }
-            WsProtocol::Unknown => {}
-        }
-    }
-
-    let completed: HashSet<(u64, u32)> = responses
-        .into_iter()
-        .map(|(origin_id, request_id, _)| (origin_id, request_id))
-        .collect();
-    let mut pending = state.ws_relay.pending.lock().await;
-    pending.retain(|(_, id), p| !completed.contains(&(p.origin_id, *id)));
-}
-
-async fn send_json(state: &AppState, client_id: u64, response: WsResponse) {
-    if let Ok(text) = serde_json::to_string(&response) {
-        send_to_client(state, client_id, Message::Text(text)).await;
-    }
-}
-
-async fn send_msgpack_request(state: &AppState, client_id: u64, hash: &[u8]) {
-    let req = DataRequest {
-        h: hash.to_vec(),
-        htl: MAX_HTL,
-        q: None,
-    };
-    let wire = encode_request(&req);
-    send_to_client(state, client_id, Message::Binary(wire)).await;
-}
-
-async fn send_msgpack_response(state: &AppState, client_id: u64, hash: &[u8], data: &[u8]) {
-    let res = DataResponse {
-        h: hash.to_vec(),
-        d: data.to_vec(),
-        i: None,
-        n: None,
-    };
-    let wire = encode_response(&res);
-    send_to_client(state, client_id, Message::Binary(wire)).await;
-}
-
-async fn send_binary(state: &AppState, client_id: u64, request_id: u32, payload: Vec<u8>) {
-    let mut packet = Vec::with_capacity(4 + payload.len());
-    packet.extend_from_slice(&request_id.to_le_bytes());
-    packet.extend_from_slice(&payload);
-    send_to_client(state, client_id, Message::Binary(packet)).await;
-}
-
 async fn send_to_client(state: &AppState, client_id: u64, msg: Message) {
     let sender = {
         let clients = state.ws_relay.clients.lock().await;
@@ -1096,11 +581,6 @@ async fn send_to_client(state: &AppState, client_id: u64, msg: Message) {
     if let Some(tx) = sender {
         let _ = tx.send(msg);
     }
-}
-
-async fn set_client_protocol(state: &AppState, client_id: u64, protocol: WsProtocol) {
-    let mut protocols = state.ws_relay.client_protocols.lock().await;
-    protocols.insert(client_id, protocol);
 }
 
 #[cfg(test)]
@@ -1123,15 +603,6 @@ mod tests {
         match parse_ws_text_message(msg) {
             Some(WsTextMessage::Nostr(_)) => {}
             other => panic!("expected Nostr message, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_ws_text_message_detects_hashtree_request() {
-        let msg = r#"{"type":"req","id":1,"hash":"abcd"}"#;
-        match parse_ws_text_message(msg) {
-            Some(WsTextMessage::Hashtree(_)) => {}
-            other => panic!("expected Hashtree message, got {:?}", other),
         }
     }
 
@@ -1247,8 +718,6 @@ mod tests {
             daemon_started_at: 1_700_000_000,
             peer_mode: crate::config::ServerMode::Normal,
             hash_get_enabled: true,
-            http_webrtc_fetch: true,
-            webrtc_peers: None,
             fips_endpoint: None,
             fips_blob_resolver: None,
             fetch_from_fips_peers: true,
@@ -1302,137 +771,6 @@ mod tests {
             )),
             cid_size_cache: Arc::new(std::sync::Mutex::new(super::super::auth::new_lookup_cache())),
         })
-    }
-
-    async fn ws_integrity_test_state(tmp: &TempDir) -> Result<AppState> {
-        let graph_store = {
-            let _guard = crate::socialgraph::test_lock().await;
-            crate::socialgraph::open_test_social_graph_store_with_mapsize(
-                tmp.path(),
-                Some(128 * 1024 * 1024),
-            )?
-        };
-        let backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = graph_store;
-        let relay = Arc::new(NostrRelay::new(
-            backend,
-            tmp.path().to_path_buf(),
-            HashSet::new(),
-            None,
-            NostrRelayConfig {
-                spambox_db_max_bytes: 0,
-                ..Default::default()
-            },
-        )?);
-        test_app_state(tmp, relay, String::new())
-    }
-
-    async fn seed_pending_json_blob_request(
-        state: &AppState,
-        peer_id: u64,
-        origin_id: u64,
-        request_id: u32,
-        hash_hex: String,
-    ) -> mpsc::UnboundedReceiver<Message> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        state.ws_relay.clients.lock().await.insert(origin_id, tx);
-        state.ws_relay.pending.lock().await.insert(
-            (peer_id, request_id),
-            PendingRequest {
-                origin_id,
-                hash: hash_hex,
-                found: false,
-                origin_protocol: WsProtocol::HashtreeJson,
-            },
-        );
-        rx
-    }
-
-    #[tokio::test]
-    async fn json_found_response_waits_for_valid_binary_payload() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let state = ws_integrity_test_state(&tmp).await?;
-        let expected_hash = hex_encode(sha256(b"expected"));
-        let peer_id = 7;
-        let origin_id = 11;
-        let request_id = 42;
-        let mut rx = seed_pending_json_blob_request(
-            &state,
-            peer_id,
-            origin_id,
-            request_id,
-            expected_hash.clone(),
-        )
-        .await;
-
-        handle_response(peer_id, request_id, expected_hash, true, &state).await;
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
-                .await
-                .is_err()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn legacy_binary_response_with_wrong_hash_is_not_forwarded() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let state = ws_integrity_test_state(&tmp).await?;
-        let expected_hash = hex_encode(sha256(b"expected"));
-        let peer_id = 7;
-        let origin_id = 11;
-        let request_id = 42;
-        let mut rx =
-            seed_pending_json_blob_request(&state, peer_id, origin_id, request_id, expected_hash)
-                .await;
-        let mut wire = request_id.to_le_bytes().to_vec();
-        wire.extend_from_slice(b"wrong bytes");
-
-        handle_binary(peer_id, wire, &state).await;
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
-                .await
-                .is_err()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn msgpack_response_with_wrong_hash_is_not_forwarded() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let state = ws_integrity_test_state(&tmp).await?;
-        let expected_hash = sha256(b"expected");
-        let peer_id = 7;
-        let origin_id = 11;
-        let request_id = 42;
-        let mut rx = seed_pending_json_blob_request(
-            &state,
-            peer_id,
-            origin_id,
-            request_id,
-            hex_encode(expected_hash),
-        )
-        .await;
-
-        handle_msgpack_response(
-            peer_id,
-            DataResponse {
-                h: expected_hash.to_vec(),
-                d: b"wrong bytes".to_vec(),
-                i: None,
-                n: None,
-            },
-            &state,
-        )
-        .await;
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
-                .await
-                .is_err()
-        );
-        Ok(())
     }
 
     #[tokio::test]

@@ -3,7 +3,6 @@ use crate::fips_transport::DaemonBlobResolver;
 use crate::server::blob_read::{
     acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY,
 };
-use crate::webrtc::WebRTCState;
 use hashtree_core::{Link, TreeNode};
 use serde::{Deserialize, Serialize};
 
@@ -40,35 +39,11 @@ pub(super) async fn fetch_and_cache_blob_with_source(
     );
 
     enum FetchResult {
-        WebRtc { data: Vec<u8>, peer_id: String },
         Fips { data: Vec<u8> },
         Upstream { data: Vec<u8>, server: String },
     }
 
     let mut fetches: Vec<BoxFuture<'static, Result<Option<FetchResult>, String>>> = Vec::new();
-
-    if state.hash_get_enabled && state.http_webrtc_fetch {
-        if let Some(ref webrtc_state) = state.webrtc_peers {
-            tracing::info!(
-                "[htree-fetch] Querying mesh peers for {}",
-                &hash_hex[..16.min(hash_hex.len())]
-            );
-            let webrtc_state = webrtc_state.clone();
-            let peer_hash_hex = hash_hex.clone();
-            fetches.push(
-                async move {
-                    let query_hash_hex = peer_hash_hex.clone();
-                    await_fetch_task("webrtc", &peer_hash_hex, async move {
-                        Ok(query_webrtc_peers(&webrtc_state, &query_hash_hex)
-                            .await
-                            .map(|(data, peer_id)| FetchResult::WebRtc { data, peer_id }))
-                    })
-                    .await
-                }
-                .boxed(),
-            );
-        }
-    }
 
     if state.hash_get_enabled && state.fetch_from_fips_peers {
         if let Some(ref resolver) = state.fips_blob_resolver {
@@ -161,20 +136,6 @@ pub(super) async fn fetch_and_cache_blob_with_source(
 
     if let Some(result) = first_available_fetch(fetches).await? {
         match result {
-            FetchResult::WebRtc { data, peer_id } => {
-                tracing::info!(
-                    "[htree-fetch] Got {} bytes from peer {} for {}",
-                    data.len(),
-                    peer_id,
-                    &hash_hex[..16.min(hash_hex.len())]
-                );
-                let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
-                if let Err(e) = result {
-                    tracing::warn!("[htree-fetch] Failed to cache peer data: {}", e);
-                    return Err(format!("failed to cache peer data: {e}"));
-                }
-                return Ok(Some(BlobSource::WebRtc(peer_id)));
-            }
             FetchResult::Fips { data } => {
                 tracing::info!(
                     "[htree-fetch] Got {} bytes from FIPS peers for {}",
@@ -1161,30 +1122,8 @@ pub(super) async fn root_is_directory_with_fetch<S: Store>(
     }
 }
 
-#[cfg(test)]
-pub(super) async fn await_webrtc_peer_response<F>(
-    future: F,
-    hash_hex: &str,
-    timeout: Duration,
-) -> Option<(Vec<u8>, String)>
-where
-    F: std::future::Future<Output = Option<(Vec<u8>, String)>>,
-{
-    match tokio::time::timeout(timeout, future).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::warn!(
-                "[htree-fetch] Mesh peer query timed out for {}",
-                &hash_hex[..16.min(hash_hex.len())]
-            );
-            None
-        }
-    }
-}
-
 pub(super) enum BlobSource {
     Local,
-    WebRtc(String),
     Fips,
     Upstream(String),
 }
@@ -1193,7 +1132,6 @@ impl BlobSource {
     pub(super) fn to_header_value(&self) -> String {
         match self {
             BlobSource::Local => "local".to_string(),
-            BlobSource::WebRtc(peer_id) => format!("webrtc:{peer_id}"),
             BlobSource::Fips => "fips".to_string(),
             BlobSource::Upstream(server) => format!("upstream:{server}"),
         }
@@ -1220,28 +1158,6 @@ pub(super) async fn query_fips_peers(
         Ok(hashtree_core::BlobReply::NoResult) => Ok(None),
         Err(err) => Err(format!("FIPS peer fetch failed: {err}")),
     }
-}
-
-pub(super) async fn query_webrtc_peers(
-    webrtc_state: &Arc<WebRTCState>,
-    hash_hex: &str,
-) -> Option<(Vec<u8>, String)> {
-    if let Some((data, peer_id)) = webrtc_state.request_from_peers_with_source(hash_hex).await {
-        tracing::info!(
-            "Got {} bytes from peer {} for hash {}",
-            data.len(),
-            peer_id,
-            &hash_hex[..16.min(hash_hex.len())]
-        );
-        return Some((data, peer_id));
-    }
-
-    tracing::debug!(
-        "No connected mesh peer returned hash {}",
-        &hash_hex[..16.min(hash_hex.len())]
-    );
-
-    None
 }
 
 enum UpstreamBlossomQueryResult {

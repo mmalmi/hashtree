@@ -1,9 +1,9 @@
 use crate::blob_cache::BlobCache;
 use crate::fips_transport::DaemonBlobResolver;
 use crate::nostr_relay::NostrRelay;
+use crate::root_events::PeerRootEvent;
 use crate::socialgraph;
 use crate::storage::HashtreeStore;
-use crate::webrtc::{PeerRootEvent, WebRTCState};
 use axum::{
     body::Body,
     extract::ws::Message,
@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc, Mutex as StdMutex,
 };
 use std::time::{Duration, Instant};
@@ -122,20 +122,6 @@ pub struct CachedTreeRootEntry {
 pub type SharedBlobFetch = Shared<BoxFuture<'static, Result<bool, String>>>;
 pub type SharedBlobRead = Shared<BoxFuture<'static, Result<Option<Vec<u8>>, String>>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WsProtocol {
-    HashtreeJson,
-    HashtreeMsgpack,
-    Unknown,
-}
-
-pub struct PendingRequest {
-    pub origin_id: u64,
-    pub hash: String,
-    pub found: bool,
-    pub origin_protocol: WsProtocol,
-}
-
 pub struct UpstreamNostrSubscription {
     pub close_tx: watch::Sender<bool>,
     pub tasks: Vec<JoinHandle<()>>,
@@ -208,13 +194,10 @@ impl UpstreamBlossomFetchMetrics {
 
 pub struct WsRelayState {
     pub clients: Mutex<HashMap<u64, mpsc::UnboundedSender<Message>>>,
-    pub pending: Mutex<HashMap<(u64, u32), PendingRequest>>,
-    pub client_protocols: Mutex<HashMap<u64, WsProtocol>>,
     pub upstream_nostr_subscriptions: Mutex<HashMap<(u64, String), UpstreamNostrSubscription>>,
     pub upstream_seen_events: Mutex<HashMap<(u64, String), HashSet<String>>>,
     pub upstream_pending_eose: Mutex<HashMap<(u64, String), usize>>,
     pub next_client_id: AtomicU64,
-    pub next_request_id: AtomicU32,
     pub upstream_relay_bytes_sent: AtomicU64,
     pub upstream_relay_bytes_received: AtomicU64,
 }
@@ -223,13 +206,10 @@ impl WsRelayState {
     pub fn new() -> Self {
         Self {
             clients: Mutex::new(HashMap::new()),
-            pending: Mutex::new(HashMap::new()),
-            client_protocols: Mutex::new(HashMap::new()),
             upstream_nostr_subscriptions: Mutex::new(HashMap::new()),
             upstream_seen_events: Mutex::new(HashMap::new()),
             upstream_pending_eose: Mutex::new(HashMap::new()),
             next_client_id: AtomicU64::new(1),
-            next_request_id: AtomicU32::new(1),
             upstream_relay_bytes_sent: AtomicU64::new(0),
             upstream_relay_bytes_received: AtomicU64::new(0),
         }
@@ -237,10 +217,6 @@ impl WsRelayState {
 
     pub fn next_id(&self) -> u64 {
         self.next_client_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    pub fn next_request_id(&self) -> u32 {
-        self.next_request_id.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn note_upstream_relay_send(&self, bytes: usize) {
@@ -269,11 +245,6 @@ pub struct AppState {
     pub daemon_started_at: u64,
     pub peer_mode: crate::config::ServerMode,
     pub hash_get_enabled: bool,
-    /// Whether HTTP cache misses should ask connected WebRTC peers before
-    /// falling back to upstream Blossom.
-    pub http_webrtc_fetch: bool,
-    /// WebRTC peer state for forwarding requests to connected P2P peers
-    pub webrtc_peers: Option<Arc<WebRTCState>>,
     /// Native authenticated FIPS endpoint used by blob routes and services.
     pub fips_endpoint: Option<Arc<hashtree_fips_transport::FipsEndpoint>>,
     /// Canonical Hashtree resolver whose peer routes run over fips-tcp.
@@ -330,7 +301,7 @@ pub struct AppState {
     pub social_graph_root: Option<[u8; 32]>,
     /// Allow public access to social graph snapshot endpoint
     pub socialgraph_snapshot_public: bool,
-    /// Nostr relay state for /ws and WebRTC Nostr messages
+    /// Nostr relay state for `/ws` messages.
     pub nostr_relay: Option<Arc<NostrRelay>>,
     /// Selected provider for Hashtree Nostr root/site lookup and publication.
     pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,

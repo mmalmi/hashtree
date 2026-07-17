@@ -195,8 +195,8 @@ jobs:
           path: rust/target/debug/deps/
           retention-days: 7
 
-  mesh-formal:
-    name: Mesh Formal
+  blob-router:
+    name: Blob Router
     runs-on: ubuntu-latest
     continue-on-error: true
     defaults:
@@ -218,28 +218,23 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/target/
-          key: ${{ runner.os }}-mesh-formal-${{ hashFiles('rust/Cargo.lock') }}
+          key: ${{ runner.os }}-blob-router-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mesh-formal-
+            ${{ runner.os }}-blob-router-
 
-      - name: Run mesh formal integration tests
-        run: cargo test -p hashtree-network --test formal_mesh_props -- --nocapture
+      - name: Run adaptive blob router integration tests
+        run: cargo test -p hashtree-network --test blob_router -- --nocapture
 
-      - name: Run mesh validation tests
-        run: |
-          cargo test -p hashtree-network test_mesh_frame -- --nocapture
-          cargo test -p hashtree-network test_timed_seen_set -- --nocapture
-
-      - name: Upload mesh formal artifacts
+      - name: Upload blob-router artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mesh-formal-artifacts
+          name: blob-router-artifacts
           path: rust/target/debug/deps/
           retention-days: 7
 
-  ts-mesh-formal:
-    name: TS Mesh Formal
+  ts-nostr-formal:
+    name: TS Nostr Formal
     runs-on: ubuntu-latest
     continue-on-error: true
     defaults:

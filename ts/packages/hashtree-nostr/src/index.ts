@@ -1,9 +1,8 @@
 /**
  * @hashtree/nostr - Nostr integration for hashtree
  *
- * Provides Nostr ref resolving and event storage. Transport-neutral mesh
- * primitives are re-exported for compatibility; blob transport now lives in
- * @hashtree/fips-transport so FIPS owns peer discovery and WebRTC/UDP links.
+ * Provides Nostr ref resolving and event storage. Blob transport lives in
+ * @hashtree/fips-transport; Nostr event distribution is independent of blob routing.
  */
 
 export const DEFAULT_RELAYS: string[] = [
@@ -13,8 +12,6 @@ export const DEFAULT_RELAYS: string[] = [
   'wss://temp.iris.to',
   'wss://relay.snort.social',
 ];
-
-export * from '@hashtree/mesh';
 
 // Ref resolvers
 export {

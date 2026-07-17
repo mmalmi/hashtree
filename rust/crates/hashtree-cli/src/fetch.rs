@@ -1,9 +1,8 @@
-//! Remote content fetching with WebRTC and Blossom fallback
+//! Remote content fetching through configured Blossom read servers.
 //!
 //! Provides shared logic for fetching content from:
 //! 1. Local storage (first)
-//! 2. WebRTC peers (second)
-//! 3. Blossom HTTP servers (fallback)
+//! 2. Blossom HTTP servers
 
 use anyhow::Result;
 use hashtree_blossom::BlossomClient;
@@ -17,7 +16,6 @@ use tracing::debug;
 
 use crate::config::Config as CliConfig;
 use crate::storage::HashtreeStore;
-use crate::webrtc::WebRTCState;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 fn child_cid(parent: &Cid, link: &Link) -> Cid {
@@ -74,8 +72,6 @@ impl FetchProgress {
 /// Configuration for remote fetching
 #[derive(Clone)]
 pub struct FetchConfig {
-    /// Timeout for WebRTC requests
-    pub webrtc_timeout: Duration,
     /// Timeout for Blossom requests
     pub blossom_timeout: Duration,
 }
@@ -83,7 +79,6 @@ pub struct FetchConfig {
 impl Default for FetchConfig {
     fn default() -> Self {
         Self {
-            webrtc_timeout: Duration::from_millis(2000),
             blossom_timeout: Duration::from_millis(10000),
         }
     }
@@ -91,7 +86,6 @@ impl Default for FetchConfig {
 
 /// Fetcher for remote content
 pub struct Fetcher {
-    config: FetchConfig,
     blossom: BlossomClient,
 }
 
@@ -104,7 +98,7 @@ impl Fetcher {
         let blossom = BlossomClient::new(keys).with_timeout(config.blossom_timeout);
         let blossom = with_local_daemon_read(blossom);
 
-        Self { config, blossom }
+        Self { blossom }
     }
 
     /// Create a new fetcher with specific keys (for authenticated uploads)
@@ -112,7 +106,7 @@ impl Fetcher {
         let blossom = BlossomClient::new(keys).with_timeout(config.blossom_timeout);
         let blossom = with_local_daemon_read(blossom);
 
-        Self { config, blossom }
+        Self { blossom }
     }
 
     /// Get the underlying BlossomClient
@@ -120,34 +114,14 @@ impl Fetcher {
         &self.blossom
     }
 
-    /// Fetch a single chunk by hash, trying WebRTC first then Blossom
-    pub async fn fetch_chunk(
-        &self,
-        webrtc_state: Option<&Arc<WebRTCState>>,
-        hash_hex: &str,
-    ) -> Result<Vec<u8>> {
+    /// Fetch a single chunk by hash.
+    pub async fn fetch_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
         let short_hash = if hash_hex.len() >= 12 {
             &hash_hex[..12]
         } else {
             hash_hex
         };
 
-        // Try WebRTC first
-        if let Some(state) = webrtc_state {
-            debug!("Trying WebRTC for {}", short_hash);
-            let webrtc_result = tokio::time::timeout(
-                self.config.webrtc_timeout,
-                state.request_from_peers(hash_hex),
-            )
-            .await;
-
-            if let Ok(Some(data)) = webrtc_result {
-                debug!("Got {} from WebRTC ({} bytes)", short_hash, data.len());
-                return Ok(data);
-            }
-        }
-
-        // Fallback to Blossom
         debug!("Trying Blossom for {}", short_hash);
         match self.blossom.download(hash_hex).await {
             Ok(data) => {
@@ -169,7 +143,6 @@ impl Fetcher {
     pub async fn fetch_chunk_with_store(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         hash: &[u8; 32],
     ) -> Result<Vec<u8>> {
         // Check local storage first
@@ -179,7 +152,7 @@ impl Fetcher {
 
         // Fetch remotely and store
         let hash_hex = to_hex(hash);
-        let data = self.fetch_chunk(webrtc_state, &hash_hex).await?;
+        let data = self.fetch_chunk(&hash_hex).await?;
         store.put_cached_blob(&data)?;
         Ok(data)
     }
@@ -189,21 +162,18 @@ impl Fetcher {
     pub async fn fetch_tree(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         root_hash: &[u8; 32],
     ) -> Result<(usize, u64)> {
-        self.fetch_cid_tree(store, webrtc_state, &Cid::public(*root_hash))
-            .await
+        self.fetch_cid_tree(store, &Cid::public(*root_hash)).await
     }
 
     /// Fetch an entire tree from a CID, preserving decryption keys for encrypted trees.
     pub async fn fetch_cid_tree(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         root_cid: &Cid,
     ) -> Result<(usize, u64)> {
-        self.fetch_cid_tree_with_progress(store, webrtc_state, root_cid, None)
+        self.fetch_cid_tree_with_progress(store, root_cid, None)
             .await
     }
 
@@ -211,11 +181,10 @@ impl Fetcher {
     pub async fn fetch_cid_tree_with_progress(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         root_cid: &Cid,
         progress: Option<&FetchProgress>,
     ) -> Result<(usize, u64)> {
-        self.fetch_cid_tree_parallel_with_progress(store, webrtc_state, root_cid, 1, progress)
+        self.fetch_cid_tree_parallel_with_progress(store, root_cid, 1, progress)
             .await
     }
 
@@ -225,11 +194,10 @@ impl Fetcher {
     pub async fn fetch_tree_parallel(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         root_hash: &[u8; 32],
         concurrency: usize,
     ) -> Result<(usize, u64)> {
-        self.fetch_cid_tree_parallel(store, webrtc_state, &Cid::public(*root_hash), concurrency)
+        self.fetch_cid_tree_parallel(store, &Cid::public(*root_hash), concurrency)
             .await
     }
 
@@ -237,11 +205,10 @@ impl Fetcher {
     pub async fn fetch_cid_tree_parallel(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         root_cid: &Cid,
         concurrency: usize,
     ) -> Result<(usize, u64)> {
-        self.fetch_cid_tree_parallel_with_progress(store, webrtc_state, root_cid, concurrency, None)
+        self.fetch_cid_tree_parallel_with_progress(store, root_cid, concurrency, None)
             .await
     }
 
@@ -249,7 +216,6 @@ impl Fetcher {
     pub async fn fetch_cid_tree_parallel_with_progress(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         root_cid: &Cid,
         concurrency: usize,
         progress: Option<&FetchProgress>,
@@ -285,20 +251,7 @@ impl Fetcher {
 
                     let hash_hex = to_hex(&cid.hash);
                     let blossom = self.blossom.clone();
-                    let webrtc = webrtc_state.map(Arc::clone);
-                    let timeout = self.config.webrtc_timeout;
-
                     let fut = async move {
-                        // Try WebRTC first
-                        if let Some(state) = &webrtc {
-                            if let Ok(Some(data)) =
-                                tokio::time::timeout(timeout, state.request_from_peers(&hash_hex))
-                                    .await
-                            {
-                                return (cid, Ok(data));
-                            }
-                        }
-                        // Fallback to Blossom
                         let data = blossom.download(&hash_hex).await;
                         (cid, data)
                     };
@@ -353,7 +306,6 @@ impl Fetcher {
     pub async fn fetch_file(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         hash: &[u8; 32],
     ) -> Result<Option<Vec<u8>>> {
         // First, try to get from local storage
@@ -362,7 +314,7 @@ impl Fetcher {
         }
 
         // Fetch the tree
-        self.fetch_tree(store, webrtc_state, hash).await?;
+        self.fetch_tree(store, hash).await?;
 
         // Now try to read the file
         store.get_file(hash)
@@ -372,7 +324,6 @@ impl Fetcher {
     pub async fn fetch_directory(
         &self,
         store: &HashtreeStore,
-        webrtc_state: Option<&Arc<WebRTCState>>,
         hash: &[u8; 32],
     ) -> Result<Option<crate::storage::DirectoryListing>> {
         // First, try to get from local storage
@@ -381,7 +332,7 @@ impl Fetcher {
         }
 
         // Fetch the tree
-        self.fetch_tree(store, webrtc_state, hash).await?;
+        self.fetch_tree(store, hash).await?;
 
         // Now try to get the directory listing
         store.get_directory_listing(hash)

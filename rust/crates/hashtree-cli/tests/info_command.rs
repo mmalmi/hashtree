@@ -87,9 +87,7 @@ fn info_handles_directory_roots() {
     let hash_hex = store.upload_dir(&site_dir).expect("upload dir");
 
     let mut config = Config::default();
-    config.server.enable_webrtc = false;
     config.server.enable_auth = false;
-    config.server.stun_port = 0;
     config.sync.enabled = false;
     write_config_file(&config_dir, &config);
 
@@ -126,8 +124,6 @@ async fn info_fetches_missing_hash_via_local_daemon() {
     let mut daemon_config = Config::default();
     daemon_config.storage.data_dir = daemon_data_dir.to_string_lossy().to_string();
     daemon_config.server.enable_auth = false;
-    daemon_config.server.enable_webrtc = false;
-    daemon_config.server.stun_port = 0;
     daemon_config.sync.enabled = false;
 
     let daemon =
@@ -177,8 +173,6 @@ async fn info_fetches_missing_hash_via_local_daemon() {
     let mut cli_config = Config::default();
     cli_config.server.bind_address = format!("127.0.0.1:{}", daemon.port);
     cli_config.server.enable_auth = false;
-    cli_config.server.enable_webrtc = false;
-    cli_config.server.stun_port = 0;
     cli_config.sync.enabled = false;
     write_config_file(&config_dir, &cli_config);
 

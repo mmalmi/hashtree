@@ -3841,29 +3841,10 @@ version = "0.2.82"
 name = "hashtree-network"
 version = "0.2.85"
 dependencies = [
- "anyhow",
  "async-trait",
- "bytes",
- "cashu-service",
  "futures",
- "hashtree-blossom",
  "hashtree-core",
- "hashtree-sim",
- "hex",
- "lazy_static",
- "nostr-sdk",
- "rand 0.8.6",
- "rmp-serde",
- "rustls 0.23.40",
- "serde",
- "serde_bytes",
- "serde_json",
- "socket2 0.5.10",
- "tempfile",
- "thiserror 1.0.69",
  "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3932,17 +3913,8 @@ dependencies = [
 name = "hashtree-sim"
 version = "0.2.82"
 dependencies = [
- "anyhow",
- "async-trait",
  "axum",
  "futures",
- "hashtree-core",
- "hashtree-network",
- "hashtree-nostr",
- "hashtree-resolver",
- "nostr",
- "nostr-sdk",
- "rand 0.8.6",
  "serde",
  "serde_json",
  "tokio",

@@ -22,7 +22,6 @@ relays = [
 ]
 
 [server]
-enable_webrtc = true
 public_writes = false
 
 [sync]

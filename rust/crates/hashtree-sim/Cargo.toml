@@ -6,38 +6,16 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Simulation tools for hashtree P2P protocols"
+description = "Small local fixtures for Hashtree integration tests"
 publish = false
 
 [dependencies]
-# Core hashtree crates
-hashtree-core.workspace = true
-hashtree-network = { path = "../hashtree-network" }
-hashtree-nostr.workspace = true
-
-# Serialization
+axum.workspace = true
+futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-anyhow = { workspace = true, optional = true }
-async-trait.workspace = true
-
-# Simulation
-rand = "0.8"
-
-# Async runtime
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "net", "test-util"] }
-
-# WebSocket relay for testing
-axum = { workspace = true }
-futures = { workspace = true }
-
-# Optional dependencies for nostr integration tests
-hashtree-resolver = { path = "../hashtree-resolver", optional = true, features = ["nostr"] }
-nostr-sdk = { workspace = true, optional = true }
-nostr = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
 
 [features]
 default = []
-nostr = ["dep:hashtree-resolver", "dep:nostr-sdk", "dep:anyhow"]
-
-[dev-dependencies]
+nostr = []

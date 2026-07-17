@@ -470,7 +470,7 @@
         <article class="node router">
           <h2>Mesh retrieval + router</h2>
           <p>
-            <code>MeshStore</code>, <code>MeshStoreCore</code>, and <code>MeshRouter</code>
+            <code>BlobRouter</code> and opaque <code>BlobRoute</code> implementations
             handle routed lookups, discovery, negotiation, and transport-generic peer links.
           </p>
           <div class="tag-row">
@@ -582,7 +582,7 @@
               <line x1="430" y1="302" x2="430" y2="326" class="conn"/>
               <rect x="100" y="404" width="660" height="54" class="layer mesh"/>
               <text x="430" y="425" text-anchor="middle" class="label">Mesh + Retrieval Layer</text>
-              <text x="430" y="440" text-anchor="middle" class="sub">MeshStore, MeshStoreCore, and MeshRouter handle routed lookups and adaptive peer selection</text>
+              <text x="430" y="440" text-anchor="middle" class="sub">BlobRouter orders opaque routes; each composite route owns its peer selection</text>
               <text x="430" y="452" text-anchor="middle" class="sub">Discovery, negotiation, and byte transport stay abstract behind shared traits</text>
               <line x1="430" y1="458" x2="430" y2="482" class="conn"/>
               <line x1="170" y1="482" x2="690" y2="482" class="conn"/>
@@ -671,9 +671,9 @@
               <text x="825" y="423" class="scope" text-anchor="end">verified by hash</text>
               <rect x="50" y="529" width="800" height="118" class="layer mesh"/>
               <text x="75" y="562" class="name">Mesh Retrieval Layer</text>
-              <text x="75" y="584" class="desc">MeshStoreCore routes hash requests over peers and local stores</text>
-              <text x="75" y="604" class="desc">MeshRouter composes SignalingTransport with PeerLink / PeerLinkFactory</text>
-              <text x="75" y="624" class="desc">Adaptive selection, hello discovery, offer/answer negotiation</text>
+              <text x="75" y="584" class="desc">BlobRouter routes hash-verified reads across opaque BlobRoute sources</text>
+              <text x="75" y="604" class="desc">FIPS owns transport addresses; composite routes exclusively select their peers</text>
+              <text x="75" y="624" class="desc">Bounded adaptive ordering never changes correctness or global absence</text>
               <text x="825" y="562" class="scope" text-anchor="end">transport-generic</text>
               <rect x="50" y="668" width="800" height="74" class="layer xport"/>
               <text x="75" y="701" class="name">Backing Media and Stores</text>

@@ -172,5 +172,5 @@ jobs:
           cargo build --manifest-path ../rust/Cargo.toml --release -p hashtree-cli --bin htree
           cargo build --manifest-path ../rust/Cargo.toml --release -p git-remote-htree
 
-      - name: Run mesh smoke test
-        run: cargo test --manifest-path ../rust/Cargo.toml -p hashtree-network --test formal_mesh_props -- --nocapture
+      - name: Run adaptive blob router smoke test
+        run: cargo test --manifest-path ../rust/Cargo.toml -p hashtree-network --test blob_router -- --nocapture
