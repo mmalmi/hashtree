@@ -14,6 +14,11 @@
 
 ### Fixed
 
+- Released `hashtree-network` 0.2.85 with consistent mesh-event HTL semantics:
+  publishers preserve the initial inventory budget, forwarding peers consume
+  it, and bounded deduplication accepts a later copy only when it carries more
+  remaining budget. Long first-arrival paths can no longer suppress a valid
+  shorter subscription route.
 - Corrected the GitHub release bootstrap to fetch archives from GitHub's flat
   release directory while preserving the `/assets` default used by htree-hosted
   releases. Added an exact installer smoke test and changelog-backed release

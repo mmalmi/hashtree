@@ -3838,7 +3838,7 @@ version = "0.2.82"
 
 [[package]]
 name = "hashtree-network"
-version = "0.2.84"
+version = "0.2.85"
 dependencies = [
  "anyhow",
  "async-trait",

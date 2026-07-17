@@ -687,6 +687,102 @@ async fn test_pubsub_inv_want_publish_sends_inventory_before_payload() {
 }
 
 #[tokio::test]
+async fn test_pubsub_inventory_origin_preserves_forwarding_budget() {
+    let _guard = mock_network_lock().lock().await;
+    crate::mock::clear_channel_registry().await;
+
+    let relay = crate::mock::MockRelay::new();
+    let publisher = make_shared_test_node(relay.clone(), "publisher", MeshRoutingConfig::default());
+    let subscriber = make_shared_test_node(relay, "subscriber", MeshRoutingConfig::default());
+    let nodes = [&publisher, &subscriber];
+
+    for node in &nodes {
+        node.transport.connect(&[]).await.expect("connect");
+        node.store.start().await.expect("start");
+    }
+    pump_test_network(&nodes, 24).await;
+
+    subscriber.store.subscribe_pubsub("author:alice").await;
+    pump_test_network(&nodes, 24).await;
+    publisher.store.htl_configs.write().await.insert(
+        "subscriber".to_string(),
+        PeerHTLConfig::from_flags(true, true),
+    );
+
+    publisher
+        .store
+        .publish_pubsub("author:alice", 1, b"forwarding-budget".to_vec())
+        .await;
+
+    let channel = subscriber
+        .store
+        .signaling()
+        .get_channel("publisher")
+        .await
+        .expect("publisher channel");
+    let message = channel.try_recv().expect("publisher inventory");
+    let DataMessage::PubsubInventory(inventory) =
+        parse_message(&message).expect("decode inventory")
+    else {
+        panic!("publisher should send inventory before payload");
+    };
+    assert_eq!(inventory.htl, MESH_EVENT_POLICY.max_htl);
+
+    crate::mock::clear_channel_registry().await;
+}
+
+#[tokio::test]
+async fn test_pubsub_inventory_accepts_a_later_higher_budget_route() {
+    let store = Arc::new(make_test_store(
+        Arc::new(MemoryStore::new()),
+        "inventory-router",
+    ));
+    let low_budget = create_pubsub_inventory("author:alice", 7, "publisher", 512, 1);
+    let high_budget = create_pubsub_inventory("author:alice", 7, "publisher", 512, 3);
+
+    store
+        .handle_pubsub_inventory_message("long-route", low_budget.clone(), 64)
+        .await;
+    assert_eq!(
+        store
+            .pubsub_inventory_routes
+            .read()
+            .await
+            .get("publisher:author:alice:7")
+            .map(String::as_str),
+        Some("long-route")
+    );
+
+    store
+        .handle_pubsub_inventory_message("short-route", high_budget, 64)
+        .await;
+    assert_eq!(
+        store
+            .pubsub_inventory_routes
+            .read()
+            .await
+            .get("publisher:author:alice:7")
+            .map(String::as_str),
+        Some("short-route"),
+        "a duplicate with more forwarding budget must replace the exhausted route"
+    );
+
+    store
+        .handle_pubsub_inventory_message("stale-route", low_budget, 64)
+        .await;
+    assert_eq!(
+        store
+            .pubsub_inventory_routes
+            .read()
+            .await
+            .get("publisher:author:alice:7")
+            .map(String::as_str),
+        Some("short-route"),
+        "an equal or lower budget must remain deduplicated"
+    );
+}
+
+#[tokio::test]
 async fn test_pubsub_inv_want_inventory_follows_subscription_state() {
     let _guard = mock_network_lock().lock().await;
     crate::mock::clear_channel_registry().await;

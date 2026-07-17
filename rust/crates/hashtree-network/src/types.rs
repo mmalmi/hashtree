@@ -591,7 +591,7 @@ pub const MESH_MAX_HTL: u8 = 6;
 /// TTL/capacity dedupe structure for forwarded mesh frames/events.
 #[derive(Debug)]
 pub struct TimedSeenSet {
-    entries: HashMap<String, Instant>,
+    entries: HashMap<String, (Instant, u8)>,
     order: VecDeque<(String, Instant)>,
     ttl: Duration,
     capacity: usize,
@@ -616,7 +616,7 @@ impl TimedSeenSet {
             if self
                 .entries
                 .get(&key)
-                .map(|ts| *ts == inserted_at)
+                .map(|(ts, _rank)| *ts == inserted_at)
                 .unwrap_or(false)
             {
                 self.entries.remove(&key);
@@ -628,7 +628,7 @@ impl TimedSeenSet {
                 if self
                     .entries
                     .get(&key)
-                    .map(|ts| *ts == inserted_at)
+                    .map(|(ts, _rank)| *ts == inserted_at)
                     .unwrap_or(false)
                 {
                     self.entries.remove(&key);
@@ -640,12 +640,25 @@ impl TimedSeenSet {
     }
 
     pub fn insert_if_new(&mut self, key: String) -> bool {
+        self.insert_if_new_or_higher(key, 0)
+    }
+
+    /// Insert an unseen key, or refresh it when the new bounded rank is higher.
+    ///
+    /// This preserves ordinary deduplication for equal/lower-ranked copies while
+    /// allowing a later message with more remaining forwarding budget to recover
+    /// from a first arrival on a longer route.
+    pub fn insert_if_new_or_higher(&mut self, key: String, rank: u8) -> bool {
         let now = Instant::now();
         self.prune(now);
-        if self.entries.contains_key(&key) {
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|(_inserted_at, existing_rank)| *existing_rank >= rank)
+        {
             return false;
         }
-        self.entries.insert(key.clone(), now);
+        self.entries.insert(key.clone(), (now, rank));
         self.order.push_back((key, now));
         self.prune(now);
         true

@@ -984,6 +984,7 @@ where
         &self,
         inv: &PubsubInventory,
         peer_ids: &[String],
+        consume_forwarding_hop: bool,
     ) -> PubsubPublishStats {
         if peer_ids.is_empty() || !should_forward_htl(inv.htl) {
             return PubsubPublishStats::default();
@@ -994,7 +995,11 @@ where
             ..Default::default()
         };
         for peer_id in peer_ids {
-            let send_htl = self.decrement_pubsub_htl_for_peer(peer_id, inv.htl).await;
+            let send_htl = if consume_forwarding_hop {
+                self.decrement_pubsub_htl_for_peer(peer_id, inv.htl).await
+            } else {
+                inv.htl
+            };
             if !should_forward_htl(send_htl) {
                 continue;
             }
@@ -1318,7 +1323,8 @@ where
                     self.routing.pubsub_initial_htl(),
                 );
                 let peers = self.interested_pubsub_peers(&inv.stream_id, None).await;
-                self.send_pubsub_inventory_to_peers(&inv, &peers).await
+                self.send_pubsub_inventory_to_peers(&inv, &peers, false)
+                    .await
             }
         }
     }
@@ -2812,15 +2818,13 @@ where
             .pubsub_seen_inventories
             .lock()
             .await
-            .insert_if_new(key.clone())
+            .insert_if_new_or_higher(key.clone(), inv.htl)
         {
             return;
         }
         {
             let mut routes = self.pubsub_inventory_routes.write().await;
-            routes
-                .entry(key.clone())
-                .or_insert_with(|| from_peer.to_string());
+            routes.insert(key.clone(), from_peer.to_string());
         }
 
         let local_interested = self
@@ -2849,7 +2853,7 @@ where
             return;
         }
         let _ = self
-            .send_pubsub_inventory_to_peers(&inv, &downstream_peers)
+            .send_pubsub_inventory_to_peers(&inv, &downstream_peers, true)
             .await;
     }
 
