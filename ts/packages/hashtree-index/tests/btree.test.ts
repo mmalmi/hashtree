@@ -112,6 +112,45 @@ describe('BTree', () => {
       expect(await btree.get(root, 'dup')).toBe('2');
       expect(await btree.get(root, 'a')).toBe('x');
     });
+
+    it('should bulk-build sorted async entries without buffering the full input', async () => {
+      const put = vi.spyOn(store, 'put');
+      let wroteBeforeInputCompleted = false;
+      async function* sortedEntries(): AsyncGenerator<[string, string]> {
+        for (let index = 0; index < 200; index += 1) {
+          if (index < 199 && put.mock.calls.length > 0) {
+            wroteBeforeInputCompleted = true;
+          }
+          yield [index.toString().padStart(4, '0'), `value-${index}`];
+        }
+      }
+
+      const root = await btree.buildSortedAsync(sortedEntries());
+      const reference = await new BTree(new MemoryStore(), { order: 4 }).build(
+        Array.from({ length: 200 }, (_, index): [string, string] => [
+          index.toString().padStart(4, '0'),
+          `value-${index}`,
+        ]),
+      );
+
+      expect(root).not.toBeNull();
+      expect(root?.hash).toEqual(reference?.hash);
+      expect(wroteBeforeInputCompleted).toBe(true);
+      expect(await btree.get(root, '0000')).toBe('value-0');
+      expect(await btree.get(root, '0199')).toBe('value-199');
+    });
+
+    it('should reject duplicate or descending sorted async entries', async () => {
+      await expect(btree.buildSortedAsync(async function* () {
+        yield ['a', '1'] as [string, string];
+        yield ['a', '2'] as [string, string];
+      }())).rejects.toThrow('strictly increasing');
+
+      await expect(btree.buildSortedAsync(async function* () {
+        yield ['b', '2'] as [string, string];
+        yield ['a', '1'] as [string, string];
+      }())).rejects.toThrow('strictly increasing');
+    });
   });
 
   describe('node splitting', () => {

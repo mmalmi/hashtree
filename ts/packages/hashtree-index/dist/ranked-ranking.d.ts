@@ -12,6 +12,8 @@ export declare function scoreTopCandidates(options: {
     fields: ReadonlyMap<string, RankedSearchSegmentManifest['fields'][number]>;
     selectedFields: ReadonlySet<string>;
     manifest: RankedSearchSegmentManifest;
+    corpusDocuments: number;
+    k1: number;
     limit: number;
 }): Promise<ScoredCandidate[]>;
 export {};

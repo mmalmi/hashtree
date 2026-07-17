@@ -6,6 +6,7 @@ export type { BTreeLinkEntriesOptions, BTreeOperationOptions, BTreeSampleOptions
 export type { SearchIndexOptions, SearchOptions, SearchResult, SearchLinkResult } from './search.js';
 export type {
   RankedSearchBuildOptions,
+  RankedSearchCorpusStatistics,
   RankedSearchDocument,
   RankedSearchFieldManifest,
   RankedSearchFieldOptions,
@@ -13,5 +14,7 @@ export type {
   RankedSearchIndexOptions,
   RankedSearchOptions,
   RankedSearchResult,
+  RankedSearchScoringContext,
   RankedSearchSegmentManifest,
+  RankedTermStats,
 } from './ranked-types.js';

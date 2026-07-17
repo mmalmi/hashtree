@@ -29,6 +29,8 @@ export interface RankedSearchOptions {
     operator?: 'or' | 'and';
     /** Restrict matching and ranking to these configured fields. */
     fields?: readonly string[];
+    /** Catalog-wide statistics used to make scores comparable across segments. */
+    scoringContext?: RankedSearchScoringContext;
 }
 export interface RankedSearchResult {
     id: string;
@@ -54,6 +56,16 @@ export interface RankedSearchSegmentManifest {
     k1: number;
     maxTokensPerField: number;
     fields: RankedSearchFieldManifest[];
+}
+export interface RankedSearchCorpusStatistics {
+    documentCount: number;
+    k1: number;
+    fields: readonly RankedSearchFieldManifest[];
+}
+export interface RankedSearchScoringContext {
+    corpus: RankedSearchCorpusStatistics;
+    /** Global statistics for the query terms; unrelated vocabulary may be omitted. */
+    termStatistics: ReadonlyMap<string, RankedTermStats>;
 }
 export interface RankedPostingField {
     frequency: number;

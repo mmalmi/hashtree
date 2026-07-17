@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RankedSearchIndex,
   type RankedSearchBuildOptions,
+  type RankedSearchCorpusStatistics,
   type RankedSearchDocument,
+  type RankedSearchScoringContext,
+  type RankedTermStats,
 } from '../src/index.js';
 
 const buildOptions: RankedSearchBuildOptions = {
@@ -202,7 +205,143 @@ describe('RankedSearchIndex', () => {
     await expect(index.buildSegment(duplicate, buildOptions))
       .rejects.toThrow('Duplicate ranked search document id: same');
   });
+
+  it('streams and reads exact term statistics', async () => {
+    const root = await index.buildSegment([
+      document('both', 'needle', 'needle body', 'both'),
+      document('title', 'needle', 'background', 'title'),
+      document('other', 'background', 'other', 'other'),
+    ], buildOptions);
+
+    const streamed = new Map<string, RankedTermStats>();
+    for await (const [term, statistics] of index.streamTermStatistics(root)) {
+      streamed.set(term, statistics);
+    }
+    const selected = await index.readTermStatistics(root, ['needle', 'missing']);
+
+    expect([...streamed.keys()]).toEqual([...streamed.keys()].sort());
+    expect(selected.get('needle')).toEqual({
+      documentFrequency: 2,
+      fieldSets: [
+        { fields: ['body', 'title'], documentFrequency: 1 },
+        { fields: ['title'], documentFrequency: 1 },
+      ],
+    });
+    expect(selected.has('missing')).toBe(false);
+  });
+
+  it('keeps global BM25F scores identical across segment splits', async () => {
+    const documents = [
+      document('newer', 'needle', '', 'newer'),
+      document('older', 'needle', '', 'older'),
+      ...Array.from({ length: 50 }, (_, number) =>
+        document(`noise-${number.toString().padStart(2, '0')}`, 'background', '', `noise-${number}`)),
+    ];
+    const fullRoot = await index.buildSegment(documents, buildOptions);
+    const newerRoot = await index.buildSegment(documents.slice(0, 1), buildOptions);
+    const olderRoot = await index.buildSegment(documents.slice(1), buildOptions);
+    const scoringContext = await scoringContextFor(index, fullRoot, ['needle']);
+
+    const unsharded = await index.search(fullRoot, 'needle', { scoringContext });
+    const sharded = [
+      ...await index.search(newerRoot, 'needle', { scoringContext }),
+      ...await index.search(olderRoot, 'needle', { scoringContext }),
+    ].sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
+
+    expect(sharded.map((result) => result.id)).toEqual(unsharded.map((result) => result.id));
+    expect(sharded.map((result) => result.score)).toEqual(unsharded.map((result) => result.score));
+  });
+
+  it('uses global field-set document frequencies for selected fields', async () => {
+    const documents = [
+      document('both', 'needle', 'needle', 'both'),
+      document('title', 'needle', 'background', 'title'),
+      document('body', 'background', 'needle', 'body'),
+    ];
+    const fullRoot = await index.buildSegment(documents, buildOptions);
+    const splitRoot = await index.buildSegment(documents.slice(0, 1), buildOptions);
+    const scoringContext = await scoringContextFor(index, fullRoot, ['needle']);
+
+    const fullBody = await index.search(fullRoot, 'needle', {
+      fields: ['body'],
+      scoringContext,
+    });
+    const splitBody = await index.search(splitRoot, 'needle', {
+      fields: ['body'],
+      scoringContext,
+    });
+    const fullTitle = await index.search(fullRoot, 'needle', {
+      fields: ['title'],
+      scoringContext,
+    });
+    const splitTitle = await index.search(splitRoot, 'needle', {
+      fields: ['title'],
+      scoringContext,
+    });
+
+    expect(splitBody[0].score).toBe(fullBody.find((result) => result.id === 'both')?.score);
+    expect(splitTitle[0].score).toBe(fullTitle.find((result) => result.id === 'both')?.score);
+    expect(splitBody[0].score).not.toBe(splitTitle[0].score);
+  });
+
+  it('rejects tampered global scoring statistics', async () => {
+    const fullRoot = await index.buildSegment([
+      document('one', 'needle', '', 'one'),
+      document('two', 'background', '', 'two'),
+    ], buildOptions);
+    const splitRoot = await index.buildSegment([
+      document('one', 'needle', '', 'one'),
+    ], buildOptions);
+    const valid = await scoringContextFor(index, fullRoot, ['needle']);
+
+    await expect(index.search(splitRoot, 'needle', {
+      scoringContext: {
+        ...valid,
+        corpus: { ...valid.corpus, documentCount: 0 },
+      },
+    })).rejects.toThrow('document count');
+    await expect(index.search(splitRoot, 'needle', {
+      scoringContext: {
+        ...valid,
+        corpus: {
+          ...valid.corpus,
+          fields: valid.corpus.fields.map((field) => field.name === 'title'
+            ? { ...field, totalLength: 0 }
+            : field),
+        },
+      },
+    })).rejects.toThrow('field totals');
+    await expect(index.search(splitRoot, 'needle', {
+      scoringContext: { ...valid, termStatistics: new Map() },
+    })).rejects.toThrow('Missing global ranked term statistics');
+    await expect(index.search(splitRoot, 'needle', {
+      scoringContext: {
+        ...valid,
+        termStatistics: new Map([['needle', {
+          documentFrequency: 0,
+          fieldSets: [],
+        }]]),
+      },
+    })).rejects.toThrow('term statistics');
+  });
 });
+
+async function scoringContextFor(
+  index: RankedSearchIndex,
+  root: CID,
+  terms: readonly string[],
+): Promise<RankedSearchScoringContext> {
+  const manifest = await index.readManifest(root);
+  const corpus: RankedSearchCorpusStatistics = {
+    documentCount: manifest.documentCount,
+    k1: manifest.k1,
+    fields: manifest.fields,
+  };
+  return {
+    corpus,
+    termStatistics: await index.readTermStatistics(root, terms),
+  };
+}
 
 function document(
   id: string,

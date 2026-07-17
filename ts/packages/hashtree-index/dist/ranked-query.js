@@ -1,5 +1,6 @@
 import { collectRankedCandidates, hasMissingRequiredTerm, loadSelectedFrequencies, } from './ranked-candidates.js';
 import { scoreTopCandidates } from './ranked-ranking.js';
+import { prepareRankedScoringContext } from './ranked-scoring-context.js';
 import { readRankedSegment } from './ranked-segment.js';
 import { parseRankedQuery } from './ranked-tokenize.js';
 export async function queryRankedSegment(btree, tree, root, query, options) {
@@ -24,10 +25,18 @@ export async function queryRankedSegment(btree, tree, root, query, options) {
     if (selectedFields.size === 0)
         return [];
     const operator = normalizeOperator(options.operator);
-    const frequencies = await loadSelectedFrequencies(btree, roots.terms, parsed.terms, selectedFields, fields, manifest.documentCount);
-    if (hasMissingRequiredTerm(parsed, frequencies, operator))
+    const localFrequencies = await loadSelectedFrequencies(btree, roots.terms, parsed.terms, selectedFields, fields, manifest.documentCount);
+    const scoring = options.scoringContext
+        ? prepareRankedScoringContext(options.scoringContext, manifest, parsed.terms, selectedFields, localFrequencies)
+        : {
+            corpusDocuments: manifest.documentCount,
+            k1: manifest.k1,
+            fields,
+            frequencies: localFrequencies,
+        };
+    if (hasMissingRequiredTerm(parsed, localFrequencies, operator))
         return [];
-    const candidates = await collectRankedCandidates(btree, roots.postings, parsed.terms, frequencies, selectedFields, operator);
+    const candidates = await collectRankedCandidates(btree, roots.postings, parsed.terms, localFrequencies, selectedFields, operator);
     if (candidates.size === 0)
         return [];
     const top = await scoreTopCandidates({
@@ -35,10 +44,12 @@ export async function queryRankedSegment(btree, tree, root, query, options) {
         documentsRoot: roots.documents,
         candidates,
         parsed,
-        frequencies,
-        fields,
+        frequencies: scoring.frequencies,
+        fields: scoring.fields,
         selectedFields,
         manifest,
+        corpusDocuments: scoring.corpusDocuments,
+        k1: scoring.k1,
         limit,
     });
     return await Promise.all(top.map(async (result) => {
