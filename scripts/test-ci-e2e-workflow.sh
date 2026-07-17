@@ -12,5 +12,7 @@ grep -F 'timeout-minutes: 75' .github/workflows/ci.yml >/dev/null
 grep -F 'name: Rust E2E Smoke Tests' .github/workflows/ci.yml >/dev/null
 grep -F 'libdbus-1-dev' .github/workflows/ci.yml >/dev/null
 grep -F 'cargo test --manifest-path ../rust/Cargo.toml -p hashtree-network --test formal_mesh_props' .github/workflows/ci.yml >/dev/null
+grep -F 'pnpm --filter @hashtree/collection build' .github/workflows/formal-verify.yml >/dev/null
+grep -F 'pnpm --filter @hashtree/mesh build' .github/workflows/formal-verify.yml >/dev/null
 
 echo "CI E2E workflow checks passed."

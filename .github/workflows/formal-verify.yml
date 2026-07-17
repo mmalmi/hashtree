@@ -268,6 +268,8 @@ jobs:
         run: |
           pnpm --filter @hashtree/core build
           pnpm --filter @hashtree/index build
+          pnpm --filter @hashtree/collection build
+          pnpm --filter @hashtree/mesh build
 
       - name: Run hashtree-nostr formal tests
         run: pnpm --filter @hashtree/nostr test
