@@ -167,12 +167,7 @@ pub fn open_shared_lmdb_blob_store<P: AsRef<Path>>(
     let blob_path = data_dir.join("blobs");
     let map_size_bytes = storage_budget_bytes.max(SHARED_BLOB_MIN_MAP_SIZE_BYTES);
     let pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
-    if pool_path.join("data.mdb").exists() {
-        return PoolStore::open(pool_path, PoolStoreConfig::default())
-            .map(Box::new)
-            .map(ConfiguredLmdbBlobStore::Pool);
-    }
-    if blob_path.join("data.mdb").exists() {
+    if !pool_path.join("data.mdb").exists() && blob_path.join("data.mdb").exists() {
         return open_configured_lmdb_blob_store(&blob_path, Some(map_size_bytes));
     }
 
@@ -190,7 +185,7 @@ pub fn open_shared_lmdb_blob_store<P: AsRef<Path>>(
             external.sync,
             external.pack_target_bytes.map(|bytes| bytes as u64),
         );
-    pool.add_member(member)?;
+    pool.ensure_initial_member(member)?;
     Ok(ConfiguredLmdbBlobStore::Pool(Box::new(pool)))
 }
 

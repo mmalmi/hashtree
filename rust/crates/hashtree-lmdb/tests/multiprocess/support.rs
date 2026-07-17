@@ -167,6 +167,16 @@ async fn multiprocess_helper() {
                 Some(COMMITTED_DATA.to_vec())
             );
         }
+        "initialize-shared-pool" => {
+            fs::write(marker(&control, "ready"), b"ready").expect("opener ready");
+            wait_for(&control.join("go"));
+            let store = open_shared_lmdb_blob_store(&db, SHARED_BLOB_MIN_MAP_SIZE_BYTES)
+                .expect("concurrent canonical open");
+            let hash = compute_sha256(SHARED_DATA);
+            let _ = store
+                .put_sync(hash, SHARED_DATA)
+                .expect("concurrent canonical write");
+        }
         "open-map" => {
             let map_size = env_usize(TEST_MAP_SIZE_ENV);
             let store = LmdbBlobStore::with_map_size(&db, map_size).expect("open requested map");

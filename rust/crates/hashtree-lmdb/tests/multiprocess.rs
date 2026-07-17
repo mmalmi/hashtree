@@ -3,7 +3,8 @@ mod support;
 
 use hashtree_core::Store;
 use hashtree_lmdb::{
-    compute_sha256, open_shared_lmdb_blob_store, LmdbBlobStore, SHARED_BLOB_MIN_MAP_SIZE_BYTES,
+    compute_sha256, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore, LmdbBlobStore, PoolStore,
+    PoolStoreConfig, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
 use std::fs;
 use support::*;
@@ -145,6 +146,52 @@ fn committed_child_write_is_visible_after_process_exit_and_reopen() {
     assert_eq!(
         store.get_sync(&hash).expect("parent read"),
         Some(COMMITTED_DATA.to_vec())
+    );
+}
+
+#[test]
+fn concurrent_shared_openers_finish_an_incomplete_pool_initialization() {
+    let temp = TempDir::new().expect("temp dir");
+    let data_dir = temp.path().join("data");
+    let control = temp.path().join("control");
+    fs::create_dir_all(&control).expect("create control dir");
+    let empty = PoolStore::open(
+        data_dir.join(SHARED_BLOB_POOL_DIR_NAME),
+        PoolStoreConfig::default(),
+    )
+    .expect("create catalog before its initial member");
+    assert!(empty.members().expect("empty members").is_empty());
+    drop(empty);
+
+    let openers = (0..4)
+        .map(|id| spawn_helper("initialize-shared-pool", &data_dir, &control, id))
+        .collect::<Vec<_>>();
+    for id in 0..openers.len() {
+        wait_for(&control.join(format!("{id}-ready")));
+    }
+    fs::write(control.join("go"), b"go").expect("release openers");
+    for (id, child) in openers.into_iter().enumerate() {
+        wait_success(child, &format!("shared opener {id}"));
+    }
+
+    let reopened = open_shared_lmdb_blob_store(&data_dir, SHARED_BLOB_MIN_MAP_SIZE_BYTES)
+        .expect("reopen initialized shared pool");
+    let ConfiguredLmdbBlobStore::Pool(pool) = reopened else {
+        panic!("incomplete shared pool must remain a pool");
+    };
+    let members = pool.members().expect("initialized members");
+    assert_eq!(
+        members.len(),
+        1,
+        "exactly one initial member must be committed"
+    );
+    let marker = fs::read_to_string(members[0].path.join(".hashtree-pool-member-v1"))
+        .expect("member marker");
+    assert_eq!(marker.trim(), members[0].id.to_string());
+    let hash = compute_sha256(SHARED_DATA);
+    assert_eq!(
+        pool.get_sync(&hash).expect("read concurrent write"),
+        Some(SHARED_DATA.to_vec())
     );
 }
 

@@ -48,7 +48,35 @@ const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_secs(30)
 const MIRROR_RECONNECT_HISTORY_SYNC_COOLDOWN: Duration = Duration::from_millis(100);
 
 const KIND_LONG_FORM_CONTENT: u16 = 30_023;
-const DEFAULT_HISTORY_KINDS: [u16; 7] = [0, 1, 3, 6, 7, 9735, KIND_LONG_FORM_CONTENT];
+const KIND_PICTURE_FIRST: u16 = 20;
+const KIND_COMMENT: u16 = 1_111;
+const FULL_ARCHIVE_HISTORY_KINDS: [u16; 9] = [
+    1,
+    5,
+    6,
+    7,
+    16,
+    KIND_PICTURE_FIRST,
+    KIND_COMMENT,
+    9_735,
+    KIND_LONG_FORM_CONTENT,
+];
+const LEGACY_TEXT_HISTORY_KINDS: [u16; 2] = [1, KIND_LONG_FORM_CONTENT];
+const DEFAULT_HISTORY_KINDS: [u16; 13] = [
+    0,
+    1,
+    3,
+    5,
+    6,
+    7,
+    16,
+    KIND_PICTURE_FIRST,
+    KIND_COMMENT,
+    9_735,
+    10_000,
+    30_000,
+    KIND_LONG_FORM_CONTENT,
+];
 const DEFAULT_EVENT_TREE_NAME: &str = "nostr-event-index";
 const DEFAULT_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 const DEFAULT_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
@@ -60,11 +88,11 @@ const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
 const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES: usize = 0;
-const FULL_TEXT_HISTORY_PRIORITY_MAX_DISTANCE: u32 = 1;
-const FULL_TEXT_HISTORY_PRIORITY_SAMPLE_LIMIT: usize = 32;
-const LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER: usize = 8;
-const LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 16;
-const LARGE_HISTORY_SYNC_MAX_RELAY_PAGES: usize = 20;
+const DEFAULT_ARCHIVE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
+const DEFAULT_ARCHIVE_HISTORY_MAX_RELAY_PAGES: usize = 0;
+const ARCHIVE_HISTORY_PRIORITY_MAX_DISTANCE: u32 = 1;
+const ARCHIVE_HISTORY_PRIORITY_SAMPLE_LIMIT: usize = 32;
+const FULL_ARCHIVE_FETCH_TIMEOUT_MAX_MULTIPLIER: usize = 4;
 
 #[cfg(not(test))]
 const MIRROR_MISSING_PROFILE_BACKFILL_INTERVAL: Duration = Duration::from_secs(300);
@@ -149,6 +177,8 @@ pub struct NostrMirrorConfig {
     pub history_sync_on_reconnect: bool,
     pub full_text_note_history_follow_distance: Option<u32>,
     pub full_text_note_history_max_relay_pages: usize,
+    pub archive_history_follow_distance: Option<u32>,
+    pub archive_history_max_relay_pages: usize,
     pub published_event_tree_name: Option<String>,
     pub published_profile_search_tree_name: Option<String>,
     pub published_profiles_by_pubkey_tree_name: Option<String>,
@@ -176,6 +206,8 @@ impl Default for NostrMirrorConfig {
                 DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE,
             ),
             full_text_note_history_max_relay_pages: DEFAULT_FULL_TEXT_NOTE_HISTORY_MAX_RELAY_PAGES,
+            archive_history_follow_distance: Some(DEFAULT_ARCHIVE_HISTORY_FOLLOW_DISTANCE),
+            archive_history_max_relay_pages: DEFAULT_ARCHIVE_HISTORY_MAX_RELAY_PAGES,
             published_event_tree_name: Some(DEFAULT_EVENT_TREE_NAME.to_string()),
             published_profile_search_tree_name: Some(DEFAULT_PROFILE_SEARCH_TREE_NAME.to_string()),
             published_profiles_by_pubkey_tree_name: Some(
@@ -208,6 +240,13 @@ struct HistorySyncPlan {
     per_author_event_limit: usize,
     relay_page_size: usize,
     max_relay_pages: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveHistorySettings {
+    follow_distance: u32,
+    max_relay_pages: usize,
+    kinds: Vec<u16>,
 }
 
 pub struct BackgroundNostrMirror {
@@ -713,9 +752,8 @@ impl BackgroundNostrMirror {
     }
 
     async fn run_startup_history_sync(&self, initial_authors: Vec<String>) -> Result<()> {
-        self.history_sync_full_text_notes_for_reachable_authors()
-            .await?;
         self.history_sync_authors(initial_authors).await?;
+        self.history_sync_archive_for_reachable_authors().await?;
         if self.should_backfill_missing_profiles(None) {
             let missing_profile_authors = self
                 .collect_missing_profile_authors(self.config.missing_profile_backfill_batch_size)?;
@@ -738,7 +776,7 @@ impl BackgroundNostrMirror {
         self: &Arc<Self>,
         label: &'static str,
         authors: Vec<String>,
-        include_full_text_notes: bool,
+        include_archive_history: bool,
         wait_for_existing_sync: bool,
     ) {
         let mirror = Arc::clone(self);
@@ -751,7 +789,7 @@ impl BackgroundNostrMirror {
                 if wait_for_existing_sync {
                     let _guard = mirror.history_sync_lock.lock().await;
                     if let Err(err) = mirror
-                        .run_author_history_sync(authors, include_full_text_notes)
+                        .run_author_history_sync(authors, include_archive_history)
                         .await
                     {
                         warn!("Nostr mirror {label} failed: {:#}", err);
@@ -764,7 +802,7 @@ impl BackgroundNostrMirror {
                     return;
                 };
                 if let Err(err) = mirror
-                    .run_author_history_sync(authors, include_full_text_notes)
+                    .run_author_history_sync(authors, include_archive_history)
                     .await
                 {
                     warn!("Nostr mirror {label} failed: {:#}", err);
@@ -776,13 +814,13 @@ impl BackgroundNostrMirror {
     async fn run_author_history_sync(
         &self,
         authors: Vec<String>,
-        include_full_text_notes: bool,
+        include_archive_history: bool,
     ) -> Result<()> {
-        if include_full_text_notes {
-            self.history_sync_full_text_notes_for_authors(authors.clone())
-                .await?;
+        self.history_sync_authors(authors.clone()).await?;
+        if include_archive_history {
+            self.history_sync_archive_for_authors(authors).await?;
         }
-        self.history_sync_authors(authors).await
+        Ok(())
     }
 
     fn spawn_missing_profile_backfill(self: &Arc<Self>, authors: Vec<String>) {
@@ -862,7 +900,7 @@ impl BackgroundNostrMirror {
         Ok(authors)
     }
 
-    async fn prioritize_full_text_note_history_authors(
+    async fn prioritize_archive_history_authors(
         &self,
         authors: Vec<String>,
     ) -> Result<Vec<String>> {
@@ -881,7 +919,7 @@ impl BackgroundNostrMirror {
                     .unwrap_or(u32::MAX),
                 None => u32::MAX,
             };
-            let indexed_text_sample = if distance <= FULL_TEXT_HISTORY_PRIORITY_MAX_DISTANCE {
+            let indexed_text_sample = if distance <= ARCHIVE_HISTORY_PRIORITY_MAX_DISTANCE {
                 sampled = sampled.saturating_add(1);
                 event_store
                     .list_by_author_and_kind(
@@ -889,7 +927,7 @@ impl BackgroundNostrMirror {
                         &author,
                         Kind::TextNote.as_u16() as u32,
                         ListEventsOptions {
-                            limit: Some(FULL_TEXT_HISTORY_PRIORITY_SAMPLE_LIMIT),
+                            limit: Some(ARCHIVE_HISTORY_PRIORITY_SAMPLE_LIMIT),
                             ..ListEventsOptions::default()
                         },
                     )
@@ -899,7 +937,7 @@ impl BackgroundNostrMirror {
                     })?
                     .len()
             } else {
-                FULL_TEXT_HISTORY_PRIORITY_SAMPLE_LIMIT
+                ARCHIVE_HISTORY_PRIORITY_SAMPLE_LIMIT
             };
             prioritized.push((distance, indexed_text_sample, index, author));
         }
@@ -911,9 +949,9 @@ impl BackgroundNostrMirror {
                 .then_with(|| left.2.cmp(&right.2))
         });
         info!(
-            "Nostr mirror full text content history prioritized authors: authors={} sampled_distance_le_{}={}",
+            "Nostr mirror configured archive history prioritized authors: authors={} sampled_distance_le_{}={}",
             prioritized.len(),
-            FULL_TEXT_HISTORY_PRIORITY_MAX_DISTANCE,
+            ARCHIVE_HISTORY_PRIORITY_MAX_DISTANCE,
             sampled
         );
         Ok(prioritized
@@ -922,43 +960,53 @@ impl BackgroundNostrMirror {
             .collect())
     }
 
-    fn full_text_note_history_follow_distance(&self) -> Option<u32> {
-        let distance = self.config.full_text_note_history_follow_distance?;
-        if self
-            .config
-            .kinds
-            .iter()
-            .any(|kind| *kind == Kind::TextNote.as_u16() || *kind == KIND_LONG_FORM_CONTENT)
-        {
-            Some(distance.min(self.config.max_follow_distance))
-        } else {
-            None
-        }
+    fn full_archive_history_kinds_for_config(config: &NostrMirrorConfig) -> Vec<u16> {
+        FULL_ARCHIVE_HISTORY_KINDS
+            .into_iter()
+            .filter(|kind| config.kinds.contains(kind))
+            .collect()
     }
 
-    fn full_text_note_history_max_relay_pages(&self) -> Option<usize> {
-        Self::full_text_note_history_max_relay_pages_for_config(&self.config)
+    fn legacy_text_history_kinds_for_config(config: &NostrMirrorConfig) -> Vec<u16> {
+        LEGACY_TEXT_HISTORY_KINDS
+            .into_iter()
+            .filter(|kind| config.kinds.contains(kind))
+            .collect()
     }
 
-    fn full_text_note_history_max_relay_pages_for_config(
+    fn archive_history_settings_for_config(
         config: &NostrMirrorConfig,
-    ) -> Option<usize> {
-        let pages = config.full_text_note_history_max_relay_pages;
-        if pages == 0 {
-            None
-        } else {
-            Some(pages)
+    ) -> Option<ArchiveHistorySettings> {
+        let (follow_distance, max_relay_pages, kinds) =
+            if config.archive_history_max_relay_pages > 0 {
+                (
+                    config.archive_history_follow_distance?,
+                    config.archive_history_max_relay_pages,
+                    Self::full_archive_history_kinds_for_config(config),
+                )
+            } else {
+                (
+                    config.full_text_note_history_follow_distance?,
+                    config.full_text_note_history_max_relay_pages,
+                    Self::legacy_text_history_kinds_for_config(config),
+                )
+            };
+        if max_relay_pages == 0 || kinds.is_empty() {
+            return None;
         }
+        Some(ArchiveHistorySettings {
+            follow_distance: follow_distance.min(config.max_follow_distance),
+            max_relay_pages,
+            kinds,
+        })
     }
 
-    fn is_text_content_history_kind(kind: u16) -> bool {
-        kind == Kind::TextNote.as_u16() || kind == KIND_LONG_FORM_CONTENT
+    fn archive_history_settings(&self) -> Option<ArchiveHistorySettings> {
+        Self::archive_history_settings_for_config(&self.config)
     }
 
     fn history_sync_kinds_for_config(config: &NostrMirrorConfig) -> Vec<u16> {
-        let mut kinds = config.kinds.clone();
-        kinds.retain(|kind| !Self::is_text_content_history_kind(*kind));
-        kinds
+        config.kinds.clone()
     }
 
     fn collect_missing_profile_authors(&self, limit: usize) -> Result<Vec<String>> {
@@ -1048,7 +1096,7 @@ impl BackgroundNostrMirror {
 
     fn history_sync_plan_for(
         config: &NostrMirrorConfig,
-        authors: usize,
+        _authors: usize,
         kinds: &[u16],
     ) -> HistorySyncPlan {
         let author_batch_size = config.author_batch_size.max(1);
@@ -1066,17 +1114,6 @@ impl BackgroundNostrMirror {
             };
         }
 
-        if authors > author_batch_size.saturating_mul(LARGE_HISTORY_SYNC_AUTHOR_MULTIPLIER) {
-            return HistorySyncPlan {
-                relay_fetch_mode: RelayFetchMode::GlobalRecent,
-                author_batch_size,
-                per_author_event_limit: per_author_event_limit
-                    .clamp(1, LARGE_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT),
-                relay_page_size,
-                max_relay_pages: LARGE_HISTORY_SYNC_MAX_RELAY_PAGES,
-            };
-        }
-
         HistorySyncPlan {
             relay_fetch_mode: RelayFetchMode::AuthorBatches,
             author_batch_size,
@@ -1090,26 +1127,38 @@ impl BackgroundNostrMirror {
         Self::history_sync_plan_for(&self.config, authors, kinds)
     }
 
+    fn full_archive_history_plan(
+        mut plan: HistorySyncPlan,
+        max_relay_pages: usize,
+    ) -> HistorySyncPlan {
+        plan.relay_fetch_mode = RelayFetchMode::AuthorBatches;
+        plan.max_relay_pages = max_relay_pages.max(1);
+        plan.per_author_event_limit = plan
+            .per_author_event_limit
+            .max(plan.relay_page_size.saturating_mul(plan.max_relay_pages));
+        plan
+    }
+
+    fn full_archive_fetch_timeout(base: Duration, max_relay_pages: usize) -> Duration {
+        let multiplier = max_relay_pages.clamp(1, FULL_ARCHIVE_FETCH_TIMEOUT_MAX_MULTIPLIER) as u32;
+        base.checked_mul(multiplier).unwrap_or(Duration::MAX)
+    }
+
     fn history_sync_chunk_size_for_config(
         config: &NostrMirrorConfig,
-        authors: usize,
-        kinds: &[u16],
+        _authors: usize,
+        _kinds: &[u16],
         full_author_history: bool,
         chunk_size_override: Option<usize>,
     ) -> usize {
-        let configured_chunk_size = chunk_size_override
+        let configured = chunk_size_override
             .unwrap_or(config.history_sync_author_chunk_size)
             .max(1);
         if full_author_history {
-            return 1;
+            configured.min(config.author_batch_size.max(1))
+        } else {
+            configured
         }
-        if !full_author_history
-            && Self::history_sync_plan_for(config, authors, kinds).relay_fetch_mode
-                == RelayFetchMode::GlobalRecent
-        {
-            return authors.max(1);
-        }
-        configured_chunk_size
     }
 
     async fn history_sync_authors(&self, authors: Vec<String>) -> Result<()> {
@@ -1130,38 +1179,28 @@ impl BackgroundNostrMirror {
             .await
     }
 
-    async fn history_sync_full_text_notes_for_reachable_authors(&self) -> Result<()> {
-        let Some(distance) = self.full_text_note_history_follow_distance() else {
+    async fn history_sync_archive_for_reachable_authors(&self) -> Result<()> {
+        let Some(settings) = self.archive_history_settings() else {
+            info!("Nostr mirror configured archive history sync skipped: disabled settings");
             return Ok(());
         };
-        if self.full_text_note_history_max_relay_pages().is_none() {
-            info!("Nostr mirror full text content history sync skipped: max_relay_pages=0");
-            return Ok(());
-        }
+        let distance = settings.follow_distance;
         info!(
-            "Nostr mirror full text content history author collection starting: max_follow_distance={distance}"
+            "Nostr mirror configured archive history author collection starting: max_follow_distance={distance}"
         );
         let authors = self
-            .prioritize_full_text_note_history_authors(
-                self.collect_authors_with_max_distance(distance)?,
-            )
+            .prioritize_archive_history_authors(self.collect_authors_with_max_distance(distance)?)
             .await?;
-        let Some(max_relay_pages) = self.full_text_note_history_max_relay_pages() else {
-            info!("Nostr mirror full text content history sync skipped: max_relay_pages=0");
-            return Ok(());
-        };
-        self.history_sync_distance_filtered_full_text_notes(authors, distance, max_relay_pages)
+        self.history_sync_distance_filtered_archive(authors, settings)
             .await
     }
 
-    async fn history_sync_full_text_notes_for_authors(&self, authors: Vec<String>) -> Result<()> {
-        let Some(distance) = self.full_text_note_history_follow_distance() else {
+    async fn history_sync_archive_for_authors(&self, authors: Vec<String>) -> Result<()> {
+        let Some(settings) = self.archive_history_settings() else {
+            info!("Nostr mirror configured archive history sync skipped: disabled settings");
             return Ok(());
         };
-        let Some(max_relay_pages) = self.full_text_note_history_max_relay_pages() else {
-            info!("Nostr mirror full text content history sync skipped: max_relay_pages=0");
-            return Ok(());
-        };
+        let distance = settings.follow_distance;
         let mut close_authors = Vec::new();
         for author in authors {
             let Some(pubkey) = decode_hex_pubkey(&author) else {
@@ -1179,39 +1218,38 @@ impl BackgroundNostrMirror {
             return Ok(());
         }
         let close_authors = self
-            .prioritize_full_text_note_history_authors(close_authors)
+            .prioritize_archive_history_authors(close_authors)
             .await?;
 
-        self.history_sync_distance_filtered_full_text_notes(
-            close_authors,
-            distance,
-            max_relay_pages,
-        )
-        .await
+        self.history_sync_distance_filtered_archive(close_authors, settings)
+            .await
     }
 
-    async fn history_sync_distance_filtered_full_text_notes(
+    async fn history_sync_distance_filtered_archive(
         &self,
         close_authors: Vec<String>,
-        distance: u32,
-        max_relay_pages: usize,
+        settings: ArchiveHistorySettings,
     ) -> Result<()> {
         if close_authors.is_empty() {
             return Ok(());
         }
 
         info!(
-            "Nostr mirror full text content history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
+            "Nostr mirror configured archive history sync starting: authors={} max_follow_distance={} max_relay_pages={}",
             close_authors.len(),
-            distance,
-            max_relay_pages
+            settings.follow_distance,
+            settings.max_relay_pages
         );
-        let kinds = [Kind::TextNote.as_u16(), KIND_LONG_FORM_CONTENT];
+        info!(
+            "Nostr mirror configured archive per-kind sync starting: kinds={:?} authors={}",
+            settings.kinds,
+            close_authors.len()
+        );
         self.history_sync_authors_with_kinds_and_mode(
             close_authors,
-            &kinds,
+            &settings.kinds,
             true,
-            Some(max_relay_pages),
+            Some(settings.max_relay_pages),
         )
         .await
     }
@@ -1360,7 +1398,9 @@ impl BackgroundNostrMirror {
         if applied_chunks == 0 {
             return Err(last_error
                 .unwrap_or_else(|| anyhow::anyhow!("mirror history sync made no progress"))
-                .context("run mirror history sync"));
+                .context(format!(
+                    "mirror history sync failed: applied_chunks=0 failed_chunks={failed_chunks}"
+                )));
         }
         if failed_chunks > 0 {
             warn!(
@@ -1372,6 +1412,13 @@ impl BackgroundNostrMirror {
         // durable local root. Force one final publication attempt before the
         // deferral guard lets the periodic publisher resume.
         self.publish_history_roots(update_profile_and_graph).await;
+        if failed_chunks > 0 {
+            return Err(last_error
+                .unwrap_or_else(|| anyhow::anyhow!("mirror history sync skipped chunks"))
+                .context(format!(
+                    "mirror history sync incomplete: applied_chunks={applied_chunks} failed_chunks={failed_chunks}"
+                )));
+        }
         Ok(())
     }
 
@@ -1387,9 +1434,16 @@ impl BackgroundNostrMirror {
         let mut report = None;
         let mut plan = self.history_sync_plan(authors.len(), kinds);
         if full_author_history {
-            plan.relay_fetch_mode = RelayFetchMode::AuthorBatches;
-            plan.max_relay_pages = max_relay_pages.unwrap_or(plan.max_relay_pages);
+            plan = Self::full_archive_history_plan(
+                plan,
+                max_relay_pages.unwrap_or(plan.max_relay_pages),
+            );
         }
+        let fetch_timeout = if full_author_history {
+            Self::full_archive_fetch_timeout(self.config.fetch_timeout, plan.max_relay_pages)
+        } else {
+            self.config.fetch_timeout
+        };
         for attempt in 0..3 {
             let mut last_logged_authors = 0usize;
             let bridge = NostrBridge::new(
@@ -1403,8 +1457,9 @@ impl BackgroundNostrMirror {
                     max_follow_distance: None,
                     author_batch_size: plan.author_batch_size,
                     per_author_event_limit: plan.per_author_event_limit,
+                    per_author_kind_event_limit: Some(plan.per_author_event_limit),
                     per_author_live_bytes: None,
-                    fetch_timeout: self.config.fetch_timeout,
+                    fetch_timeout,
                     kinds: Some(kinds.to_vec()),
                     relay_fetch_mode: plan.relay_fetch_mode,
                     require_negentropy: self.config.require_negentropy,
@@ -1438,19 +1493,10 @@ impl BackgroundNostrMirror {
                     }
                 },
             );
-            let crawl_result: Result<CrawlReport> = if full_author_history {
-                let timeout = self.config.fetch_timeout.saturating_mul(4);
-                match tokio::time::timeout(timeout, crawl).await {
-                    Ok(result) => result.map_err(Into::into),
-                    Err(_) => Err(anyhow::anyhow!(
-                        "full author history crawl timed out after {:?} for {} author(s)",
-                        timeout,
-                        authors.len()
-                    )),
-                }
-            } else {
-                crawl.await.map_err(Into::into)
-            };
+            // Reconciliation and each fallback relay page are already bounded.
+            // A second fixed timeout around the whole batched crawl can only
+            // abort valid multi-author, multi-kind work in the middle of a pass.
+            let crawl_result: Result<CrawlReport> = crawl.await.map_err(Into::into);
 
             match crawl_result {
                 Ok(next_report) => {
@@ -1459,9 +1505,6 @@ impl BackgroundNostrMirror {
                 }
                 Err(err) => {
                     last_error = Some(err);
-                    if full_author_history {
-                        break;
-                    }
                     if attempt < 2 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }

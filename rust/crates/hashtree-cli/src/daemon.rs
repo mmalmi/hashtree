@@ -326,6 +326,8 @@ impl EmbeddedBackgroundServicesController {
             full_text_note_history_max_relay_pages: config
                 .nostr
                 .full_text_note_history_max_relay_pages,
+            archive_history_follow_distance: config.nostr.archive_history_follow_distance,
+            archive_history_max_relay_pages: config.nostr.archive_history_max_relay_pages,
             ..crate::nostr_mirror::NostrMirrorConfig::default()
         }
     }
@@ -1068,9 +1070,11 @@ mod tests {
     }
 
     #[test]
-    fn nostr_mirror_config_allows_disabling_full_note_paging() {
+    fn nostr_mirror_config_maps_legacy_and_complete_archive_settings() {
         let mut config = Config::default();
         config.nostr.full_text_note_history_max_relay_pages = 0;
+        config.nostr.archive_history_follow_distance = None;
+        config.nostr.archive_history_max_relay_pages = 0;
 
         let mirror_config = EmbeddedBackgroundServicesController::nostr_mirror_config(
             &config,
@@ -1078,14 +1082,20 @@ mod tests {
         );
 
         assert_eq!(mirror_config.full_text_note_history_max_relay_pages, 0);
+        assert_eq!(mirror_config.archive_history_follow_distance, None);
+        assert_eq!(mirror_config.archive_history_max_relay_pages, 0);
 
         config.nostr.full_text_note_history_max_relay_pages = 64;
+        config.nostr.archive_history_follow_distance = Some(1);
+        config.nostr.archive_history_max_relay_pages = 32;
         let mirror_config = EmbeddedBackgroundServicesController::nostr_mirror_config(
             &config,
             &["wss://relay.example".to_string()],
         );
 
         assert_eq!(mirror_config.full_text_note_history_max_relay_pages, 64);
+        assert_eq!(mirror_config.archive_history_follow_distance, Some(1));
+        assert_eq!(mirror_config.archive_history_max_relay_pages, 32);
     }
 
     #[test]

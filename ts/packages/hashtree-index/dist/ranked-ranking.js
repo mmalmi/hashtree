@@ -39,7 +39,8 @@ async function scoreBatch(batch, top, options) {
                 frequencies: options.frequencies,
                 fields: options.fields,
                 selectedFields: options.selectedFields,
-                manifest: options.manifest,
+                corpusDocuments: options.corpusDocuments,
+                k1: options.k1,
             }),
             matchedTerms: item.matchedTerms,
             matchedPhrases: item.matchedPhrases,
@@ -65,9 +66,9 @@ function scoreCandidate(options) {
             document: options.document,
             fields: options.fields,
             selectedFields: options.selectedFields,
-            corpusDocuments: options.manifest.documentCount,
+            corpusDocuments: options.corpusDocuments,
             documentFrequency,
-            k1: options.manifest.k1,
+            k1: options.k1,
         });
     }
     return score;

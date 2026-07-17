@@ -29,6 +29,8 @@ export async function scoreTopCandidates(options: {
   fields: ReadonlyMap<string, RankedSearchSegmentManifest['fields'][number]>;
   selectedFields: ReadonlySet<string>;
   manifest: RankedSearchSegmentManifest;
+  corpusDocuments: number;
+  k1: number;
   limit: number;
 }): Promise<ScoredCandidate[]> {
   const top: ScoredCandidate[] = [];
@@ -70,7 +72,8 @@ async function scoreBatch(
         frequencies: options.frequencies,
         fields: options.fields,
         selectedFields: options.selectedFields,
-        manifest: options.manifest,
+        corpusDocuments: options.corpusDocuments,
+        k1: options.k1,
       }),
       matchedTerms: item.matchedTerms,
       matchedPhrases: item.matchedPhrases,
@@ -97,7 +100,8 @@ function scoreCandidate(options: {
   frequencies: ReadonlyMap<string, number>;
   fields: ReadonlyMap<string, RankedSearchSegmentManifest['fields'][number]>;
   selectedFields: ReadonlySet<string>;
-  manifest: RankedSearchSegmentManifest;
+  corpusDocuments: number;
+  k1: number;
 }): number {
   let score = 0;
   for (const term of options.matchedTerms) {
@@ -109,9 +113,9 @@ function scoreCandidate(options: {
       document: options.document,
       fields: options.fields,
       selectedFields: options.selectedFields,
-      corpusDocuments: options.manifest.documentCount,
+      corpusDocuments: options.corpusDocuments,
       documentFrequency,
-      k1: options.manifest.k1,
+      k1: options.k1,
     });
   }
   return score;

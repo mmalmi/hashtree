@@ -329,6 +329,74 @@ export class BTree {
     return this.buildTree(items, (chunk) => this.createLeafWithLink(chunk), true);
   }
 
+  /**
+   * Bulk-build from strictly increasing, unique entries without retaining the
+   * complete input. Each tree level buffers at most one node beyond maxKeys.
+   */
+  async buildSortedAsync(
+    items: AsyncIterable<[string, string]> | Iterable<[string, string]>,
+  ): Promise<CID | null> {
+    const levels: BuiltNode[][] = [];
+    const leafEntries: Array<[string, string]> = [];
+
+    const appendNode = async (level: number, node: BuiltNode): Promise<void> => {
+      const nodes = levels[level] ?? [];
+      levels[level] = nodes;
+      nodes.push(node);
+      if (nodes.length <= this.maxKeys) return;
+
+      const children = nodes.splice(0, this.maxKeys);
+      await appendNode(level + 1, {
+        firstKey: children[0].firstKey,
+        cid: await this.createInternalNode(children),
+        count: children.reduce((sum, child) => sum + child.count, 0),
+      });
+    };
+
+    const flushLeaf = async (): Promise<void> => {
+      if (leafEntries.length === 0) return;
+      const entries = leafEntries.splice(0, this.maxKeys);
+      await appendNode(0, {
+        firstKey: entries[0][0],
+        cid: await this.createLeaf(entries),
+        count: 0,
+      });
+    };
+
+    let previousKey: string | undefined;
+    for await (const entry of items) {
+      const [key] = entry;
+      if (previousKey !== undefined && compareKeys(previousKey, key) >= 0) {
+        throw new Error('Sorted BTree entries must have strictly increasing unique keys');
+      }
+      previousKey = key;
+      leafEntries.push(entry);
+      if (leafEntries.length > this.maxKeys) {
+        await flushLeaf();
+      }
+    }
+    await flushLeaf();
+
+    for (let level = 0; level < levels.length; level += 1) {
+      const nodes = levels[level];
+      if (!nodes || nodes.length === 0) continue;
+      const hasHigherNodes = levels.slice(level + 1).some((higher) => higher.length > 0);
+      if (!hasHigherNodes) {
+        if (nodes.length === 1) return nodes[0].cid;
+        return await this.createInternalNode(nodes);
+      }
+
+      const children = nodes.splice(0);
+      await appendNode(level + 1, {
+        firstKey: children[0].firstKey,
+        cid: await this.createInternalNode(children),
+        count: children.reduce((sum, child) => sum + child.count, 0),
+      });
+    }
+
+    return null;
+  }
+
   private async buildTree<T>(
     items: Iterable<[string, T]>,
     createLeaf: (items: Array<[string, T]>) => Promise<CID>,

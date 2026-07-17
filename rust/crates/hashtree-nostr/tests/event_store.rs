@@ -574,6 +574,27 @@ fn lossy_author_listing_skips_missing_event_blobs() {
             .list_by_author(Some(&root), &author, ListEventsOptions::default())
             .await
             .is_err());
+        assert!(nostr_store
+            .list_by_author_and_kind(Some(&root), &author, 1, ListEventsOptions::default())
+            .await
+            .is_err());
+        assert!(nostr_store
+            .list_by_author_and_kind_lossy(Some(&root), &author, 1, ListEventsOptions::default(),)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            nostr_store
+                .list_by_author_and_kind_lossy(
+                    Some(&root),
+                    &author,
+                    0,
+                    ListEventsOptions::default(),
+                )
+                .await
+                .unwrap(),
+            vec![older.clone()]
+        );
         assert_eq!(
             nostr_store
                 .list_by_author_lossy(Some(&root), &author, ListEventsOptions::default())

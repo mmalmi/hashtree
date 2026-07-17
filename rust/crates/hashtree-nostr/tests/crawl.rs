@@ -42,11 +42,14 @@ fn t_tag(value: &str) -> Tag {
 struct SharedRelayState {
     events: Vec<Event>,
     requested_id_batches: Vec<Vec<String>>,
+    filter_requests: usize,
     supports_negentropy: bool,
     negentropy_open_attempts: usize,
     negentropy_sessions_started: usize,
     server_page_cap: Option<usize>,
     disconnect_on_id_request: bool,
+    id_response_cap: Option<usize>,
+    non_id_response_cap: Option<usize>,
 }
 
 struct TestRelay {
@@ -130,6 +133,29 @@ impl TestRelay {
         relay
     }
 
+    fn with_partial_id_responses(id_response_cap: usize) -> Self {
+        let relay = Self::with_options(true, None);
+        relay
+            .state
+            .lock()
+            .expect("relay state lock")
+            .id_response_cap = Some(id_response_cap);
+        relay
+    }
+
+    fn with_partial_id_and_paging_responses(
+        id_response_cap: usize,
+        non_id_response_cap: usize,
+    ) -> Self {
+        let relay = Self::with_partial_id_responses(id_response_cap);
+        relay
+            .state
+            .lock()
+            .expect("relay state lock")
+            .non_id_response_cap = Some(non_id_response_cap);
+        relay
+    }
+
     fn url(&self) -> String {
         format!("ws://127.0.0.1:{}", self.port)
     }
@@ -140,6 +166,10 @@ impl TestRelay {
             .expect("relay state lock")
             .requested_id_batches
             .clone()
+    }
+
+    fn filter_requests(&self) -> usize {
+        self.state.lock().expect("relay state lock").filter_requests
     }
 
     fn negentropy_sessions_started(&self) -> usize {
@@ -297,6 +327,9 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                     .into_iter()
                     .map(|filter| filter.into_owned())
                     .collect::<Vec<_>>();
+                if filters.iter().all(|filter| filter.ids.is_none()) {
+                    state.lock().expect("relay state lock").filter_requests += 1;
+                }
                 record_requested_ids(&state, &filters);
                 let disconnect_on_id_request = {
                     let guard = state.lock().expect("relay state lock");
@@ -307,7 +340,19 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                     let _ = write.close().await;
                     break;
                 }
-                for event in matching_events(&state, &filters) {
+                let mut events = matching_events(&state, &filters);
+                let response_cap = {
+                    let guard = state.lock().expect("relay state lock");
+                    if filters.iter().any(|filter| filter.ids.as_ref().is_some()) {
+                        guard.id_response_cap
+                    } else {
+                        guard.non_id_response_cap
+                    }
+                };
+                if let Some(cap) = response_cap {
+                    events.truncate(cap);
+                }
+                for event in events {
                     send_relay_message(
                         &mut write,
                         RelayMessage::event(subscription_id.clone(), event),
@@ -333,7 +378,7 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                 if !supports_negentropy {
                     send_relay_message(
                         &mut write,
-                        RelayMessage::notice("negentropy not supported"),
+                        RelayMessage::notice("bad msg: unknown cmd negentropy"),
                     )
                     .await;
                     continue;
@@ -824,6 +869,428 @@ async fn full_author_history_retains_per_author_limit() -> io::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_author_history_retains_more_than_256_events_across_pages() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let events = (20..277)
+        .map(|created_at| {
+            event_builder!(Kind::TextNote, format!("note {created_at}"))
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&alice_keys)
+                .expect("note")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 257);
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(events);
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 1,
+            per_author_event_limit: 257,
+            per_author_kind_event_limit: Some(257),
+            full_author_history: true,
+            relay_page_size: 128,
+            max_relay_pages: 3,
+            kinds: Some(vec![1]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    // Inclusive timestamp pagination re-fetches the boundary event on each
+    // later page so same-second peers cannot be skipped.
+    assert_eq!(report.events_seen, 259);
+    assert_eq!(report.events_selected, 257);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_author_history_keeps_same_second_page_boundary_events() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let events = [100, 100, 100, 100, 90, 89]
+        .into_iter()
+        .enumerate()
+        .map(|(index, created_at)| {
+            event_builder!(Kind::TextNote, format!("note {index}"))
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&alice_keys)
+                .expect("note")
+        })
+        .collect::<Vec<_>>();
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(events);
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 1,
+            per_author_event_limit: 6,
+            per_author_kind_event_limit: Some(6),
+            full_author_history: true,
+            relay_page_size: 3,
+            max_relay_pages: 2,
+            kinds: Some(vec![1]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    assert_eq!(report.events_selected, 6);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_author_history_runs_separate_per_kind_passes() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let events = [
+        (Kind::TextNote, "note 30", 30),
+        (Kind::TextNote, "note 20", 20),
+        (Kind::TextNote, "note 10", 10),
+        (Kind::EventDeletion, "deletion", 5),
+    ]
+    .into_iter()
+    .map(|(kind, content, created_at)| {
+        event_builder!(kind, content)
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(&alice_keys)
+            .expect("event")
+    })
+    .collect::<Vec<_>>();
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(events);
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 1,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            full_author_history: true,
+            relay_page_size: 2,
+            max_relay_pages: 1,
+            kinds: Some(vec![1, 5]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    assert_eq!(report.events_seen, 3);
+    assert_eq!(report.events_selected, 3);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_kind_quota_isolated_by_author_at_the_relay() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(
+        Kind::ContactList,
+        "",
+        [p_tag(alice_keys.public_key()), p_tag(bob_keys.public_key()),],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let mut events = Vec::new();
+    for (keys, start) in [(&alice_keys, 100), (&bob_keys, 90)] {
+        for created_at in start..start + 6 {
+            events.push(
+                event_builder!(Kind::TextNote, format!("busy {created_at}"))
+                    .custom_created_at(Timestamp::from_secs(created_at))
+                    .sign_with_keys(keys)
+                    .expect("text note"),
+            );
+        }
+        events.push(
+            event_builder!(Kind::EventDeletion, "quiet older event")
+                .custom_created_at(Timestamp::from_secs(1))
+                .sign_with_keys(keys)
+                .expect("deletion"),
+        );
+    }
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(events);
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 3,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1, 5]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    assert_eq!(report.events_selected, 6);
+    for pubkey in [
+        alice_keys.public_key().to_hex(),
+        bob_keys.public_key().to_hex(),
+    ] {
+        assert!(report
+            .applied_events
+            .iter()
+            .any(|event| event.pubkey == pubkey && event.kind == 5));
+    }
+    assert!(relay.filter_requests() > 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sparse_per_kind_sync_uses_one_relay_filter_per_kind() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(
+        Kind::ContactList,
+        "",
+        [p_tag(alice_keys.public_key()), p_tag(bob_keys.public_key()),],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 3,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1, 5]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    assert_eq!(report.events_selected, 0);
+    assert_eq!(relay.filter_requests(), 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saturated_negentropy_splits_fully_local_cap_to_find_quiet_author() -> io::Result<()> {
+    let relay = TestRelay::with_negentropy(true);
+    let relay_url = relay.url();
+
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(
+        Kind::ContactList,
+        "",
+        [p_tag(alice_keys.public_key()), p_tag(bob_keys.public_key()),],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let mut hot_events = Vec::new();
+    for created_at in 100..106 {
+        hot_events.push(
+            event_builder!(Kind::TextNote, format!("hot {created_at}"))
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&alice_keys)
+                .expect("hot text note"),
+        );
+    }
+    let quiet_event = event_builder!(Kind::TextNote, "quiet older event")
+        .custom_created_at(Timestamp::from_secs(1))
+        .sign_with_keys(&bob_keys)
+        .expect("quiet text note");
+    let mut relay_events = hot_events.clone();
+    relay_events.push(quiet_event.clone());
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(relay_events);
+
+    let store = Arc::new(MemoryStore::new());
+    let existing_root = NostrEventStore::new(store.clone())
+        .build(None, hot_events.iter().map(stored_event_from_nostr))
+        .await
+        .expect("existing root");
+    let bridge = NostrBridge::new(
+        store,
+        CrawlConfig {
+            relays: vec![relay_url],
+            author_batch_size: 3,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1]),
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge
+        .crawl(&graph, existing_root.as_ref())
+        .await
+        .expect("crawl report");
+    assert_eq!(report.events_selected, 3);
+    assert!(report.applied_events.iter().any(|event| {
+        event.id == quiet_event.id.to_hex() && event.pubkey == bob_keys.public_key().to_hex()
+    }));
+    assert!(relay.negentropy_open_attempts() > 1);
+    assert!(relay.negentropy_sessions_started() > 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeat_crawl_does_not_split_rich_local_state_against_sparse_relay() -> io::Result<()> {
+    let relay = TestRelay::with_negentropy(true);
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(
+        Kind::ContactList,
+        "",
+        [p_tag(alice_keys.public_key()), p_tag(bob_keys.public_key()),],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let mut events = Vec::new();
+    for (author_index, keys) in [&root_keys, &alice_keys, &bob_keys].into_iter().enumerate() {
+        for offset in 0..2 {
+            events.push(
+                event_builder!(Kind::TextNote, format!("{author_index}-{offset}"))
+                    .custom_created_at(Timestamp::from_secs(
+                        100 + (author_index * 2 + offset) as u64,
+                    ))
+                    .sign_with_keys(keys)
+                    .expect("text note"),
+            );
+        }
+    }
+    let sparse_event_id = events[0].id;
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(events);
+
+    let store = Arc::new(MemoryStore::new());
+    let bridge = NostrBridge::new(
+        store,
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_batch_size: 3,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1]),
+            require_negentropy: true,
+            ..CrawlConfig::default()
+        },
+    );
+    let first = bridge.crawl(&graph, None).await.expect("first crawl");
+    let first_root = first.root.expect("first root");
+    assert_eq!(first.events_selected, 6);
+
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .retain(|event| event.id == sparse_event_id);
+    let sessions_before = relay.negentropy_sessions_started();
+    let second = bridge
+        .crawl(&graph, Some(&first_root))
+        .await
+        .expect("repeat crawl");
+
+    assert_eq!(second.events_selected, 6);
+    assert!(second.applied_events.is_empty());
+    assert_eq!(relay.negentropy_sessions_started() - sessions_before, 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_author_history_can_skip_paging_fallback() -> io::Result<()> {
     let relay = TestRelay::new();
     let relay_url = relay.url();
@@ -922,6 +1389,7 @@ async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()
             relay_page_size: 2,
             max_relay_pages: 10,
             per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
             kinds: Some(vec![1]),
             ..CrawlConfig::default()
         },
@@ -932,7 +1400,6 @@ async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()
         .await
         .expect("crawl report");
     assert_eq!(report.events_selected, 2);
-    assert_eq!(report.events_seen, 2);
     assert!(relay.negentropy_sessions_started() >= 1);
 
     let requested_ids = relay
@@ -949,6 +1416,7 @@ async fn full_author_history_uses_negentropy_with_local_items() -> io::Result<()
     let mut actual_requested_ids = requested_ids;
     actual_requested_ids.sort();
     assert_eq!(actual_requested_ids, expected_missing_ids);
+    assert_eq!(report.events_seen, 2);
 
     Ok(())
 }
@@ -1003,6 +1471,35 @@ async fn caches_relays_that_do_not_support_negentropy() -> io::Result<()> {
 
     let report = bridge.crawl(&graph, None).await.expect("crawl report");
     assert_eq!(report.events_selected, 2);
+    assert_eq!(relay.negentropy_open_attempts(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn require_negentropy_errors_when_no_relay_supports_it() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let root_keys = Keys::generate();
+    let graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_batch_size: 1,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1]),
+            require_negentropy: true,
+            ..CrawlConfig::default()
+        },
+    );
+
+    let error = bridge
+        .crawl(&graph, None)
+        .await
+        .expect_err("unsupported-only batch must be retryable");
+    assert!(error
+        .to_string()
+        .contains("does not support required negentropy"));
     assert_eq!(relay.negentropy_open_attempts(), 1);
 
     Ok(())
@@ -1143,6 +1640,155 @@ async fn relay_disconnect_during_missing_id_fetch_does_not_abort_crawl() -> io::
     assert_eq!(retained[0].id, note.id.to_hex());
     assert!(flaky_relay.negentropy_sessions_started() >= 1);
     assert!(good_relay.negentropy_sessions_started() >= 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_missing_id_response_keeps_batch_retryable() -> io::Result<()> {
+    let relay = TestRelay::with_partial_id_responses(1);
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let notes = [20, 21]
+        .into_iter()
+        .map(|created_at| {
+            event_builder!(Kind::TextNote, format!("note {created_at}"))
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&alice_keys)
+                .expect("text note")
+        })
+        .collect::<Vec<_>>();
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .extend(notes);
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_batch_size: 2,
+            per_author_event_limit: 4,
+            per_author_kind_event_limit: Some(4),
+            kinds: Some(vec![1]),
+            require_negentropy: true,
+            ..CrawlConfig::default()
+        },
+    );
+
+    let error = bridge
+        .crawl(&graph, None)
+        .await
+        .expect_err("partial ID response must not complete the batch");
+    assert!(error.to_string().contains("omitted 1 of 2"));
+    assert_eq!(relay.requested_id_batches().len(), 3);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_history_partial_id_fallback_preserves_negentropy_support() -> io::Result<()> {
+    let relay = TestRelay::with_partial_id_responses(1);
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    for (kind, prefix) in [(Kind::TextNote, "note"), (Kind::EventDeletion, "delete")] {
+        for created_at in [20, 21] {
+            relay.state.lock().expect("relay state lock").events.push(
+                event_builder!(kind, format!("{prefix} {created_at}"))
+                    .custom_created_at(Timestamp::from_secs(created_at))
+                    .sign_with_keys(&alice_keys)
+                    .expect("archive event"),
+            );
+        }
+    }
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_batch_size: 2,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1, 5]),
+            full_author_history: true,
+            relay_page_size: 10,
+            max_relay_pages: 1,
+            ..CrawlConfig::default()
+        },
+    );
+
+    let report = bridge
+        .crawl(&graph, None)
+        .await
+        .expect("full-history crawl");
+    assert_eq!(report.events_selected, 4);
+    assert_eq!(
+        relay.requested_id_batches().len(),
+        2,
+        "both kind passes should retain proven negentropy support after paging fallback"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_history_rejects_incomplete_paging_fallback() -> io::Result<()> {
+    let relay = TestRelay::with_partial_id_and_paging_responses(1, 1);
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+    for created_at in [20, 21] {
+        relay.state.lock().expect("relay state lock").events.push(
+            event_builder!(Kind::TextNote, format!("note {created_at}"))
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&alice_keys)
+                .expect("text note"),
+        );
+    }
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_batch_size: 2,
+            per_author_event_limit: 2,
+            per_author_kind_event_limit: Some(2),
+            kinds: Some(vec![1]),
+            full_author_history: true,
+            relay_page_size: 10,
+            max_relay_pages: 1,
+            ..CrawlConfig::default()
+        },
+    );
+
+    let error = bridge
+        .crawl(&graph, None)
+        .await
+        .expect_err("paging fallback must recover every reconciled ID");
+    assert!(error
+        .to_string()
+        .contains("paging fallback omitted 1 of 2 reconciled event IDs"));
 
     Ok(())
 }
@@ -1569,6 +2215,8 @@ async fn global_recent_scan_stops_after_max_events_seen() -> io::Result<()> {
     );
 
     let report = bridge.crawl(&graph, None).await.expect("crawl report");
+    // The inclusive boundary event is fetched twice but consumes the event
+    // budget only once, so the second page contributes two new IDs.
     assert_eq!(report.events_seen, 4);
     assert_eq!(report.events_selected, 4);
 

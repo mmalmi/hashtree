@@ -84,6 +84,11 @@ export declare class BTree {
     mergeLinks(base: CID | null, other: CID | null, preferOther?: boolean): Promise<CID | null>;
     build(items: Iterable<[string, string]>): Promise<CID | null>;
     buildLinks(items: Iterable<[string, CID]>): Promise<CID | null>;
+    /**
+     * Bulk-build from strictly increasing, unique entries without retaining the
+     * complete input. Each tree level buffers at most one node beyond maxKeys.
+     */
+    buildSortedAsync(items: AsyncIterable<[string, string]> | Iterable<[string, string]>): Promise<CID | null>;
     private buildTree;
     private cidEquals;
     private createLeafWithLink;
