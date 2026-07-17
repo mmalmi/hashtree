@@ -469,10 +469,9 @@ mod tests {
                 > 0,
             "browser mode should keep default file servers for content fetches",
         );
-        assert_eq!(
-            payload["mesh"]["enabled"].as_bool(),
-            Some(false),
-            "browser mode should still keep peer discovery off until enabled",
+        assert!(
+            payload.get("mesh").is_none() && payload.get("webrtc").is_none(),
+            "the daemon status must not expose the removed legacy mesh status",
         );
     }
 
@@ -595,7 +594,10 @@ mod tests {
 
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(2));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
-        assert_eq!(payload["mesh"]["enabled"].as_bool(), Some(false));
+        assert!(
+            payload.get("mesh").is_none() && payload.get("webrtc").is_none(),
+            "legacy WebRTC settings must not recreate legacy mesh status",
+        );
     }
 
     #[test]
@@ -702,10 +704,9 @@ mod tests {
 
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(1));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
-        assert_eq!(
-            payload["mesh"]["enabled"].as_bool(),
-            Some(false),
-            "embedded non-P2P builds keep mesh disabled even when browser settings request WebRTC",
+        assert!(
+            payload.get("mesh").is_none() && payload.get("webrtc").is_none(),
+            "reload must not recreate legacy mesh status when browser settings request WebRTC",
         );
         assert!(
             !reloaded_status.base_url.is_empty(),
