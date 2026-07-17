@@ -1,4 +1,4 @@
-import { MemoryStore, type CID } from '@hashtree/core';
+import { HashTree, MemoryStore, type CID } from '@hashtree/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RankedSearchIndex,
@@ -158,6 +158,188 @@ describe('RankedSearchIndex', () => {
     expect(orResults.map((result) => result.id)).toEqual(['doc-000', 'doc-001']);
     expect(andReads).toBeLessThan(orReads / 2);
   });
+
+  it('bounds common-term top-k reads without scanning the posting list', async () => {
+    const productionIndex = new RankedSearchIndex(store, { order: 64 });
+    const documents = [
+      ...Array.from({ length: 32 }, (_, number) =>
+        document(
+          `fast-${number.toString().padStart(4, '0')}`,
+          'common',
+          '',
+          `fast-${number}`,
+        )),
+      ...Array.from({ length: 2016 }, (_, number) =>
+        document(
+          `slow-${number.toString().padStart(4, '0')}`,
+          `common ${'padding '.repeat(48)}`,
+          '',
+          `slow-${number}`,
+        )),
+    ];
+    const root = await productionIndex.buildSegment(documents, buildOptions);
+    const get = vi.spyOn(store, 'get');
+
+    const results = await productionIndex.search(root, 'common', { limit: 10 });
+    const acceleratedReads = get.mock.calls.length;
+    const legacyRoot = await withoutTopK(store, root);
+    get.mockClear();
+    const legacyResults = await productionIndex.search(legacyRoot, 'common', { limit: 10 });
+    const legacyReads = get.mock.calls.length;
+
+    expect(results.map((result) => result.id)).toEqual(
+      documents.slice(0, 10).map((item) => item.id),
+    );
+    expect(results).toEqual(legacyResults);
+    expect(acceleratedReads).toBeLessThan(documents.length / 6);
+    expect(acceleratedReads).toBeLessThan(legacyReads / 8);
+  });
+
+  it('omits sparse vocabulary blocks and keeps mixed common-rare queries bounded', async () => {
+    const productionIndex = new RankedSearchIndex(store, { order: 64 });
+    const documents = Array.from({ length: 1024 }, (_, number) => document(
+      `vocab-${number.toString().padStart(4, '0')}`,
+      [
+        ...Array.from({ length: number < 32 ? 33 - number : 1 }, () => 'common'),
+        `topicx${number % 16}`,
+        `rarex${number.toString().padStart(4, '0')}`,
+        `authorx${number.toString().padStart(4, '0')}`,
+      ].join(' '),
+      '',
+      `vocab-${number}`,
+    ));
+    const root = await productionIndex.buildSegment(documents, buildOptions);
+    const legacyRoot = await withoutTopK(store, root);
+    const acceleratedStorage = await reachableStats(store, root);
+    const legacyStorage = await reachableStats(store, legacyRoot);
+    const topKManifest = await readTopKManifest(store, root);
+    const get = vi.spyOn(store, 'get');
+
+    const results = await productionIndex.search(root, 'common rarex0007', { limit: 10 });
+    const acceleratedReads = get.mock.calls.length;
+    get.mockClear();
+    const legacyResults = await productionIndex.search(
+      legacyRoot,
+      'common rarex0007',
+      { limit: 10 },
+    );
+    const legacyReads = get.mock.calls.length;
+
+    expect(results).toEqual(legacyResults);
+    expect(results[0].id).toBe('vocab-0007');
+    expect(acceleratedReads).toBeLessThan(legacyReads / 8);
+    expect(topKManifest).toMatchObject({
+      format: 'hashtree/ranked-top-k@1',
+      minimumDocumentFrequency: 128,
+      termCount: 1,
+      blockCount: 32,
+      postingCount: 1024,
+    });
+    expect(acceleratedStorage.blocks).toBeGreaterThan(legacyStorage.blocks);
+    expect(acceleratedStorage.bytes - legacyStorage.bytes)
+      .toBeLessThan(legacyStorage.bytes / 10);
+  });
+
+  it('keeps exact id ordering for equal-score common terms', async () => {
+    const productionIndex = new RankedSearchIndex(store, { order: 64 });
+    const documents = Array.from({ length: 2048 }, (_, number) =>
+      document(
+        `same-${number.toString().padStart(4, '0')}`,
+        'common',
+        '',
+        `same-${number}`,
+      ));
+    const root = await productionIndex.buildSegment(documents, buildOptions);
+    const results = await productionIndex.search(root, 'common', { limit: 10 });
+
+    expect(results.map((result) => result.id)).toEqual(
+      documents.slice(0, 10).map((item) => item.id),
+    );
+  });
+
+  it('keeps accelerated scores and ordering exact with legacy segment reads', async () => {
+    const documents = Array.from({ length: 256 }, (_, number) => document(
+      `doc-${number.toString().padStart(4, '0')}`,
+      [
+        'common',
+        ...(number % 3 === 0 ? ['alpha'] : []),
+        ...(number % 5 === 0 ? ['beta'] : []),
+        ...Array.from({ length: number % 11 }, () => 'padding'),
+      ].join(' '),
+      number % 7 === 0 ? 'common alpha body' : `background ${'tail '.repeat(number % 13)}`,
+      `value-${number}`,
+    ));
+    const fullRoot = await index.buildSegment(documents, buildOptions);
+    const root = await index.buildSegment(documents.slice(0, 128), buildOptions);
+    const legacyRoot = await withoutTopK(store, root);
+    const scoringContext = await scoringContextFor(
+      index,
+      fullRoot,
+      ['common', 'alpha', 'beta'],
+    );
+
+    for (const [query, options] of [
+      ['common', { limit: 10, scoringContext }],
+      ['common alpha beta', { limit: 17, scoringContext }],
+      ['"common alpha"', { limit: 25, scoringContext }],
+      ['common alpha', { limit: 12, fields: ['body'], scoringContext }],
+    ] as const) {
+      expect(await index.search(root, query, options))
+        .toEqual(await index.search(legacyRoot, query, options));
+    }
+    expect((await index.readManifest(root)).format).toBe('hashtree/ranked-search-segment@1');
+  });
+
+  it('matches legacy search across deterministic global multi-field query fuzz', async () => {
+    const fuzzIndex = new RankedSearchIndex(store, { order: 64 });
+    const options: RankedSearchBuildOptions = {
+      fields: {
+        title: { boost: 3.7, lengthNormalization: 1 },
+        body: { boost: 0.9, lengthNormalization: 0.37 },
+      },
+      k1: 1.63,
+      maxTokensPerField: 128,
+    };
+    const documents = generatedDocuments(512, 0x5eed1234);
+    const fullRoot = await fuzzIndex.buildSegment(documents, options);
+    const root = await fuzzIndex.buildSegment(documents.slice(0, 384), options);
+    const legacyRoot = await withoutTopK(store, root);
+    const scoringContext = await scoringContextFor(fuzzIndex, fullRoot, [
+      'common',
+      'alpha',
+      'beta',
+      'gamma',
+      'delta',
+      '#nostr',
+      'rarex0007',
+    ]);
+    const queries = [
+      'common',
+      'common alpha',
+      'beta gamma delta',
+      '"common alpha"',
+      '#nostr common',
+      'common rarex0007',
+      'alpha delta',
+      '"beta gamma" common',
+    ] as const;
+
+    for (let iteration = 0; iteration < 48; iteration += 1) {
+      const query = queries[iteration % queries.length];
+      const fields = iteration % 3 === 0
+        ? ['title'] as const
+        : iteration % 3 === 1
+          ? ['body'] as const
+          : undefined;
+      const searchOptions = {
+        limit: 1 + (iteration * 7) % 37,
+        ...(fields ? { fields } : {}),
+        ...(iteration % 2 === 0 ? { scoringContext } : {}),
+      };
+      expect(await fuzzIndex.search(root, query, searchOptions))
+        .toEqual(await fuzzIndex.search(legacyRoot, query, searchOptions));
+    }
+  }, 20_000);
 
   it('builds the same content-addressed root regardless of input ordering', async () => {
     const documents = [
@@ -352,9 +534,70 @@ function document(
   return { id, fields: { title, body }, value };
 }
 
+function generatedDocuments(count: number, seed: number): RankedSearchDocument[] {
+  let state = seed >>> 0;
+  const next = (): number => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state;
+  };
+  return Array.from({ length: count }, (_, number) => {
+    const title = ['common'];
+    const body: string[] = [];
+    if (next() % 2 === 0) title.push('alpha');
+    if (next() % 3 !== 0) title.push('beta', 'gamma');
+    if (next() % 4 === 0) title.push('#nostr');
+    if (next() % 2 === 0) body.push('common');
+    if (next() % 3 === 0) body.push('alpha', 'delta');
+    if (next() % 5 !== 0) body.push('beta', 'gamma');
+    title.push(...Array.from({ length: next() % 9 }, () => 'padding'));
+    body.push(...Array.from({ length: next() % 13 }, () => 'tail'));
+    title.push(`rarex${number.toString().padStart(4, '0')}`);
+    return document(
+      `fuzz-${number.toString().padStart(4, '0')}`,
+      title.join(' '),
+      body.join(' '),
+      `fuzz-${number}`,
+    );
+  });
+}
+
 function cidBytes(cid: CID): { hash: number[]; key?: number[] } {
   return {
     hash: [...cid.hash],
     ...(cid.key ? { key: [...cid.key] } : {}),
   };
+}
+
+async function withoutTopK(store: MemoryStore, root: CID): Promise<CID> {
+  const tree = new HashTree({ store });
+  const entries = await tree.listDirectory(root);
+  return (await tree.putDirectory(
+    entries.filter((entry) => entry.name !== 'top-k-roots' && entry.name !== 'top-k.json'),
+  )).cid;
+}
+
+async function reachableStats(
+  store: MemoryStore,
+  root: CID,
+): Promise<{ blocks: number; bytes: number }> {
+  const tree = new HashTree({ store });
+  let blocks = 0;
+  let bytes = 0;
+  for await (const block of tree.walkBlocks(root)) {
+    blocks += 1;
+    bytes += block.data.length;
+  }
+  return { blocks, bytes };
+}
+
+async function readTopKManifest(
+  store: MemoryStore,
+  root: CID,
+): Promise<Record<string, unknown>> {
+  const tree = new HashTree({ store });
+  const entry = (await tree.listDirectory(root)).find((item) => item.name === 'top-k.json');
+  if (!entry) throw new Error('missing ranked top-k test manifest');
+  const bytes = await tree.readFile(entry.cid);
+  if (!bytes) throw new Error('unreadable ranked top-k test manifest');
+  return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
 }

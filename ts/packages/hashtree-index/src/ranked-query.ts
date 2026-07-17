@@ -3,15 +3,17 @@ import { BTree } from './btree.js';
 import {
   collectRankedCandidates,
   hasMissingRequiredTerm,
-  loadSelectedFrequencies,
+  loadTermFrequencies,
 } from './ranked-candidates.js';
 import { scoreTopCandidates } from './ranked-ranking.js';
 import { prepareRankedScoringContext } from './ranked-scoring-context.js';
 import { readRankedSegment } from './ranked-segment.js';
 import { parseRankedQuery } from './ranked-tokenize.js';
+import { queryRankedTopK } from './ranked-top-k-query.js';
 import type {
   RankedSearchOptions,
   RankedSearchResult,
+  RankedSearchSegmentManifest,
 } from './ranked-types.js';
 
 export async function queryRankedSegment(
@@ -26,7 +28,7 @@ export async function queryRankedSegment(
   const parsed = parseRankedQuery(query);
   if (parsed.terms.length === 0) return [];
 
-  const { manifest, roots } = await readRankedSegment(tree, root);
+  const { manifest, roots, topKManifest } = await readRankedSegment(tree, root);
   if (manifest.documentCount === 0 || manifest.postingCount === 0) return [];
   if (!roots.documents) throw new Error('Missing ranked search document index');
   if (!roots.postings || !roots.terms) throw new Error('Missing ranked search postings index');
@@ -38,7 +40,7 @@ export async function queryRankedSegment(
   const selectedFields = selectFields(fields, options.fields);
   if (selectedFields.size === 0) return [];
   const operator = normalizeOperator(options.operator);
-  const localFrequencies = await loadSelectedFrequencies(
+  const localTermFrequencies = await loadTermFrequencies(
     btree,
     roots.terms,
     parsed.terms,
@@ -46,6 +48,7 @@ export async function queryRankedSegment(
     fields,
     manifest.documentCount,
   );
+  const localFrequencies = localTermFrequencies.selected;
   const scoring = options.scoringContext
     ? prepareRankedScoringContext(
         options.scoringContext,
@@ -61,33 +64,85 @@ export async function queryRankedSegment(
         frequencies: localFrequencies,
       };
   if (hasMissingRequiredTerm(parsed, localFrequencies, operator)) return [];
+  const top = roots.topK && topKManifest && Number.isFinite(limit) && operator === 'or'
+    ? await queryRankedTopK({
+        btree,
+        tree,
+        topKRoots: roots.topK,
+        topKManifest,
+        postingsRoot: roots.postings,
+        documentsRoot: roots.documents,
+        parsed,
+        localFrequencies,
+        localDocumentFrequencies: localTermFrequencies.all,
+        frequencies: scoring.frequencies,
+        fields: scoring.fields,
+        selectedFields,
+        manifest,
+        corpusDocuments: scoring.corpusDocuments,
+        k1: scoring.k1,
+        operator,
+        limit,
+      })
+    : await queryUnbounded(
+        btree,
+        roots.postings,
+        roots.documents,
+        parsed,
+        localFrequencies,
+        scoring.frequencies,
+        scoring.fields,
+        selectedFields,
+        manifest,
+        scoring.corpusDocuments,
+        scoring.k1,
+        operator,
+        limit,
+      );
+  if (top.length === 0) return [];
+  return await Promise.all(top.map(async (result) => {
+    const value = roots.values ? await btree.get(roots.values, result.id) : null;
+    return { ...result, ...(value !== null ? { value } : {}) };
+  }));
+}
+
+async function queryUnbounded(
+  btree: BTree,
+  postingsRoot: NonNullable<Awaited<ReturnType<typeof readRankedSegment>>['roots']['postings']>,
+  documentsRoot: NonNullable<Awaited<ReturnType<typeof readRankedSegment>>['roots']['documents']>,
+  parsed: ReturnType<typeof parseRankedQuery>,
+  localFrequencies: ReadonlyMap<string, number>,
+  frequencies: ReadonlyMap<string, number>,
+  fields: ReadonlyMap<string, RankedSearchSegmentManifest['fields'][number]>,
+  selectedFields: ReadonlySet<string>,
+  manifest: RankedSearchSegmentManifest,
+  corpusDocuments: number,
+  k1: number,
+  operator: 'or' | 'and',
+  limit: number,
+): Promise<Omit<RankedSearchResult, 'value'>[]> {
   const candidates = await collectRankedCandidates(
     btree,
-    roots.postings,
+    postingsRoot,
     parsed.terms,
     localFrequencies,
     selectedFields,
     operator,
   );
   if (candidates.size === 0) return [];
-
-  const top = await scoreTopCandidates({
+  return await scoreTopCandidates({
     btree,
-    documentsRoot: roots.documents,
+    documentsRoot,
     candidates,
     parsed,
-    frequencies: scoring.frequencies,
-    fields: scoring.fields,
+    frequencies,
+    fields,
     selectedFields,
     manifest,
-    corpusDocuments: scoring.corpusDocuments,
-    k1: scoring.k1,
+    corpusDocuments,
+    k1,
     limit,
   });
-  return await Promise.all(top.map(async (result) => {
-    const value = roots.values ? await btree.get(roots.values, result.id) : null;
-    return { ...result, ...(value !== null ? { value } : {}) };
-  }));
 }
 
 function selectFields<T>(
