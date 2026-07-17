@@ -238,7 +238,8 @@ jobs:
           set -euo pipefail
           bash rust/scripts/write_release_bootstrap_installer.sh \
             --path artifacts/hashtree/install.sh \
-            --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"
+            --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}" \
+            --asset-base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"
 
       - name: Prepare release assets and notes
         id: release_assets

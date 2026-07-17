@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.96 - 2026-07-17
+
 ### Added
 
 - Added a strict-auth daemon endpoint that validates, indexes, and pins a
@@ -12,9 +14,14 @@
 
 ### Fixed
 
+- Corrected the GitHub release bootstrap to fetch archives from GitHub's flat
+  release directory while preserving the `/assets` default used by htree-hosted
+  releases. Added an exact installer smoke test and changelog-backed release
+  notes so publication fails before creating an unusable immutable release.
 - Required `fips-core` 0.4.6 and released `hashtree-fips-transport` 0.4.6
-  plus `hashtree-cli` 0.2.95, keeping session-control handshake futures within
-  Tokio's default worker stack without changing FMP, FSP, or blob wire formats.
+  plus the superseding `hashtree-cli` 0.2.96 artifact release, keeping
+  session-control handshake futures within Tokio's default worker stack without
+  changing FMP, FSP, or blob wire formats.
 - Routed advertised same-host FIPS blob requests through the daemon's existing
   `BlobRouter`, so a local miss can continue to its configured authenticated
   peer set without decrementing HTL. Released the correction in

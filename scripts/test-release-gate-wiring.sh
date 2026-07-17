@@ -40,6 +40,7 @@ grep -F 'ulimit -Sn 8192' .github/workflows/ci.yml >/dev/null
 grep -F 'rev-parse "${VERSION}^{commit}"' publish_release.sh >/dev/null
 reject grep -qF "tags:" .github/workflows/release.yml
 grep -F 'needs: gate' .github/workflows/release.yml >/dev/null
+grep -F -- '--asset-base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"' .github/workflows/release.yml >/dev/null
 release_gate_job="$(sed -n '/^  gate:/,/^  build:/p' .github/workflows/release.yml)"
 printf '%s\n' "$release_gate_job" | grep -F '~/.cargo/registry/cache/' >/dev/null
 if printf '%s\n' "$release_gate_job" | grep -qF 'rust/target/'; then

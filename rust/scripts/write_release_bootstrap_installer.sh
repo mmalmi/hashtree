@@ -3,16 +3,20 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: rust/scripts/write_release_bootstrap_installer.sh --path <path> --base-url <url>
+Usage: rust/scripts/write_release_bootstrap_installer.sh --path <path> --base-url <url> [options]
 
 Writes the top-level install.sh bootstrap used by release directories. The
 script downloads the platform archive from the same release root and then
 delegates to the packaged installer inside the archive.
+
+Options:
+  --asset-base-url <url>  Override the archive directory (default: BASE_URL/assets)
 EOF
 }
 
 PATH_ARG=""
 BASE_URL=""
+ASSET_BASE_URL=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -22,6 +26,10 @@ while [ $# -gt 0 ]; do
             ;;
         --base-url)
             BASE_URL="${2:-}"
+            shift 2
+            ;;
+        --asset-base-url)
+            ASSET_BASE_URL="${2:-}"
             shift 2
             ;;
         -h|--help)
@@ -41,6 +49,10 @@ if [ -z "$PATH_ARG" ] || [ -z "$BASE_URL" ]; then
     exit 1
 fi
 
+if [ -z "$ASSET_BASE_URL" ]; then
+    ASSET_BASE_URL="${BASE_URL}/assets"
+fi
+
 CACHE_BUSTER="${BASE_URL##*/}"
 
 mkdir -p "$(dirname "$PATH_ARG")"
@@ -50,7 +62,7 @@ cat >"$PATH_ARG" <<EOF
 set -eu
 
 BASE_URL="${BASE_URL}"
-ASSET_BASE_URL="\${BASE_URL}/assets"
+ASSET_BASE_URL="${ASSET_BASE_URL}"
 ASSET_URL_SUFFIX="?v=${CACHE_BUSTER}"
 
 # The release root that serves this bootstrap is the trust boundary. Same-origin

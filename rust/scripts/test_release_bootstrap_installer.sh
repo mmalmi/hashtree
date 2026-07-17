@@ -68,6 +68,7 @@ archive="hashtree-${target}.tar.gz"
     cd "${TMP_DIR}/package"
     tar -czf "${ASSETS_DIR}/${archive}" hashtree
 )
+cp "${ASSETS_DIR}/${archive}" "${TMP_DIR}/${archive}"
 
 "$WRITER" \
     --path "${TMP_DIR}/install.sh" \
@@ -88,5 +89,15 @@ done
 
 HASHTREE_TEST_MARKER="$MARKER" sh "${TMP_DIR}/install.sh" >"${TMP_DIR}/good.out" 2>"${TMP_DIR}/good.err"
 grep -F "installed" "$MARKER" >/dev/null
+
+"$WRITER" \
+    --path "${TMP_DIR}/install-flat.sh" \
+    --base-url "http://127.0.0.1:${PORT}/release" \
+    --asset-base-url "http://127.0.0.1:${PORT}"
+
+HASHTREE_TEST_MARKER="$MARKER" sh "${TMP_DIR}/install-flat.sh" \
+    >"${TMP_DIR}/flat.out" 2>"${TMP_DIR}/flat.err"
+grep -F "installed" "$MARKER" >/dev/null
+grep -F "ASSET_BASE_URL=\"http://127.0.0.1:${PORT}\"" "${TMP_DIR}/install-flat.sh" >/dev/null
 
 echo "test_release_bootstrap_installer.sh passed"
