@@ -25,9 +25,11 @@
   atomic location switch, and delete the source only afterward. Interrupted
   target writes are verified and reused after restart.
 - Kept multiprocess balancers under one expiring catalog lease while allowing
-  every process to batch its own samples. Foreground load throttles new move
-  batches, and correctness remains independent of all heat and performance
-  observations.
+  every process to batch its own samples. Long moves heartbeat ownership,
+  process death still expires it, and corrupt interrupted target copies are
+  discarded and rebuilt from the authoritative source. Foreground load
+  throttles new move batches, and correctness remains independent of all heat
+  and performance observations.
 
 ## 0.2.96 - 2026-07-17
 

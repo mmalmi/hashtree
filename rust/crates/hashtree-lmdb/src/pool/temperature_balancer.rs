@@ -30,6 +30,10 @@ impl PoolStore {
             return Ok(report);
         }
         report.lease_acquired = true;
+        let _lease = super::temperature_worker::TemperatureLeaseHeartbeat::start(
+            std::sync::Arc::downgrade(&self.inner),
+            self.temperature_config.lease_duration,
+        )?;
         self.balance_temperature_owned(now, sampled, report)
     }
 

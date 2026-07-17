@@ -34,7 +34,8 @@ new batches when foreground member load reaches the configured threshold.
 Minimum residence time, distinct high/low watermarks, and a required measured
 performance gain prevent oscillation. A short persisted lease gives one
 same-host process ownership of relocation while every process may batch its own
-read samples.
+read samples. The owner heartbeats the lease during long streamed moves;
+process death still makes ownership expire.
 
 No catalog-wide scan runs at startup. Catalog size may be tens of millions of
 locations while startup and each cycle remain bounded by configuration.

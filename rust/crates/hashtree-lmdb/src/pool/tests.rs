@@ -10,6 +10,67 @@ const HELPER_READY: &str = "HASHTREE_POOL_HELPER_READY";
 const HELPER_HASH: &str = "HASHTREE_POOL_HELPER_HASH";
 const PENDING_DATA: &[u8] = b"pool pending crash recovery bytes";
 
+#[derive(serde::Serialize)]
+struct LegacyPoolMemberConfig {
+    path: PathBuf,
+    capacity_bytes: u64,
+    map_size_bytes: u64,
+    external_blob_dir: Option<PathBuf>,
+    external_blob_min_bytes: Option<u64>,
+    external_blob_sync: bool,
+    external_pack_target_bytes: Option<u64>,
+    max_read_concurrency: u32,
+    max_write_concurrency: u32,
+}
+
+#[derive(serde::Serialize)]
+struct LegacyMemberRecord {
+    id: PoolMemberId,
+    state: PoolMemberState,
+    config: LegacyPoolMemberConfig,
+}
+
+#[derive(serde::Serialize)]
+struct LegacyPoolManifest {
+    version: u32,
+    generation: u64,
+    members: Vec<LegacyMemberRecord>,
+}
+
+#[test]
+fn manifests_without_temperature_watermarks_use_safe_defaults() {
+    let legacy = LegacyPoolManifest {
+        version: 1,
+        generation: 7,
+        members: vec![LegacyMemberRecord {
+            id: PoolMemberId([7; 16]),
+            state: PoolMemberState::Active,
+            config: LegacyPoolMemberConfig {
+                path: PathBuf::from("member"),
+                capacity_bytes: 1_000,
+                map_size_bytes: MIN_MEMBER_MAP_SIZE_BYTES,
+                external_blob_dir: None,
+                external_blob_min_bytes: None,
+                external_blob_sync: true,
+                external_pack_target_bytes: None,
+                max_read_concurrency: 8,
+                max_write_concurrency: 4,
+            },
+        }],
+    };
+    let bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy manifest");
+    let decoded = decode_manifest(&bytes).expect("decode legacy manifest");
+    assert_eq!(decoded.generation, 7);
+    assert_eq!(
+        decoded.members[0].config.temperature_low_watermark_percent,
+        70
+    );
+    assert_eq!(
+        decoded.members[0].config.temperature_high_watermark_percent,
+        85
+    );
+}
+
 #[test]
 fn drop_closes_pool_catalog_and_member_environments() {
     let temp = TempDir::new().expect("temp dir");
@@ -203,6 +264,12 @@ fn temperature_lease_has_exact_multiprocess_ownership_and_expiry() {
     assert!(!second
         .try_acquire_temperature_lease(100)
         .expect("contended lease"));
+    assert!(first
+        .renew_temperature_lease(200)
+        .expect("renew owned lease"));
+    assert!(!second
+        .try_acquire_temperature_lease(250)
+        .expect("renewed lease remains contended"));
     first.release_temperature_lease().expect("release lease");
     assert!(second
         .try_acquire_temperature_lease(100)
@@ -210,6 +277,31 @@ fn temperature_lease_has_exact_multiprocess_ownership_and_expiry() {
     assert!(first
         .try_acquire_temperature_lease(1_000)
         .expect("expired lease"));
+}
+
+#[test]
+fn long_temperature_cycle_heartbeats_its_process_lease() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let mut config = PoolStoreConfig::default();
+    config.temperature.interval = Duration::from_secs(60 * 60);
+    config.temperature.lease_duration = Duration::from_secs(1);
+    let first = PoolStore::open(&catalog, config.clone()).expect("first pool");
+    let second = PoolStore::open(&catalog, config).expect("second pool");
+    let now = unix_timestamp_now();
+    assert!(first
+        .try_acquire_temperature_lease(now)
+        .expect("first lease"));
+    let heartbeat = super::temperature_worker::TemperatureLeaseHeartbeat::start(
+        std::sync::Arc::downgrade(&first.inner),
+        Duration::from_secs(1),
+    )
+    .expect("start lease heartbeat");
+    thread::sleep(Duration::from_millis(1_600));
+    assert!(!second
+        .try_acquire_temperature_lease(unix_timestamp_now())
+        .expect("heartbeat preserves ownership"));
+    drop(heartbeat);
 }
 
 #[test]
@@ -335,7 +427,7 @@ fn high_watermark_pressure_demotes_until_low_watermark() {
 
 #[test]
 fn interrupted_streamed_move_resumes_from_persisted_state() {
-    for scenario in ["present", "deleted", "unavailable"] {
+    for scenario in ["present", "deleted", "unavailable", "corrupt-target"] {
         let temp = TempDir::new().expect("temp dir");
         let catalog = temp.path().join("catalog");
         let source_path = temp.path().join("source");
@@ -377,6 +469,14 @@ fn interrupted_streamed_move_resumes_from_persisted_state() {
                 config.temperature.copy_chunk_bytes,
             )
             .expect("stream target copy");
+        if scenario == "corrupt-target" {
+            target_store
+                .delete_sync(&hash)
+                .expect("delete valid target");
+            target_store
+                .put_sync(hash, &vec![0xa5; data.len()])
+                .expect("install corrupt target");
+        }
         if scenario == "deleted" {
             source_store.delete_sync(&hash).expect("delete source");
         }

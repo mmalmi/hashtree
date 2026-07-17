@@ -286,10 +286,33 @@ impl PoolStore {
         }
         let mut lease = [0u8; 24];
         lease[..16].copy_from_slice(self.temperature_owner.as_bytes());
-        lease[16..].copy_from_slice(
-            &now.saturating_add(self.temperature_config.lease_duration.as_secs().max(1))
-                .to_be_bytes(),
-        );
+        lease[16..].copy_from_slice(&temperature_lease_expiry(self, now).to_be_bytes());
+        self.temperature_state
+            .put(&mut wtxn, LEASE_KEY, &lease)
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)?;
+        Ok(true)
+    }
+
+    pub(super) fn renew_temperature_lease(&self, now: u64) -> Result<bool, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let Some(bytes) = self
+            .temperature_state
+            .get(&wtxn, LEASE_KEY)
+            .map_err(map_heed)?
+        else {
+            return Ok(false);
+        };
+        if bytes.len() != 24 {
+            return Err(StoreError::Other("invalid temperature lease".into()));
+        }
+        let owner = PoolMemberId(bytes[..16].try_into().expect("checked lease length"));
+        if owner != self.temperature_owner {
+            return Ok(false);
+        }
+        let mut lease = [0u8; 24];
+        lease[..16].copy_from_slice(self.temperature_owner.as_bytes());
+        lease[16..].copy_from_slice(&temperature_lease_expiry(self, now).to_be_bytes());
         self.temperature_state
             .put(&mut wtxn, LEASE_KEY, &lease)
             .map_err(map_heed)?;
@@ -319,4 +342,16 @@ pub(super) fn move_state_key(hash: Hash) -> [u8; 33] {
     key[0] = MOVE_KEY_PREFIX;
     key[1..].copy_from_slice(&hash);
     key
+}
+
+fn temperature_lease_expiry(pool: &PoolStore, now: u64) -> u64 {
+    // Lease storage uses whole seconds. One clock tick of grace prevents a
+    // subsecond heartbeat from becoming expired at the same encoded second.
+    now.saturating_add(
+        pool.temperature_config
+            .lease_duration
+            .as_secs()
+            .max(1)
+            .saturating_add(1),
+    )
 }

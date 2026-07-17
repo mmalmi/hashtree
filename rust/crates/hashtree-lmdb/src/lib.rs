@@ -1187,8 +1187,12 @@ impl LmdbBlobStore {
             )));
         }
         if target.blob_size_sync(hash)?.is_some() {
-            target.verify_blob_streaming(hash, expected_size, chunk_bytes)?;
-            return Ok(false);
+            match target.verify_blob_streaming(hash, expected_size, chunk_bytes) {
+                Ok(()) => return Ok(false),
+                Err(_) => {
+                    target.delete_sync(hash)?;
+                }
+            }
         }
 
         let external = target
@@ -1295,6 +1299,10 @@ impl LmdbBlobStore {
             .map_err(map_heed_error)?;
         target.write_metadata_for_inserted_blobs(&mut wtxn, &[(*hash, expected_size)])?;
         wtxn.commit().map_err(map_heed_error)?;
+        if let Err(error) = target.verify_blob_streaming(hash, expected_size, chunk_bytes) {
+            let _ = target.delete_sync(hash);
+            return Err(error);
+        }
         Ok(true)
     }
 
