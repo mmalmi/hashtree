@@ -332,6 +332,7 @@ pub(crate) async fn run_socialgraph_index(
             max_follow_distance: options.max_follow_distance,
             author_batch_size: options.author_batch_size,
             per_author_event_limit: options.per_author_event_limit,
+            per_author_kind_event_limit: None,
             per_author_live_bytes: options.per_author_live_bytes,
             fetch_timeout: options.fetch_timeout,
             relay_event_max_size: options.relay_event_max_bytes,

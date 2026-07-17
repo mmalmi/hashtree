@@ -347,7 +347,7 @@ pub struct NostrConfig {
     #[serde(default = "default_nostr_mirror_kinds")]
     pub mirror_kinds: Vec<u16>,
     /// Authors per ordinary history chunk and between durable mirror-root publications.
-    /// Full-history fetches use one-author chunks but keep this publication cadence.
+    /// Archive sync caps each durable chunk to one configured relay author batch.
     #[serde(default = "default_nostr_history_sync_author_chunk_size")]
     pub history_sync_author_chunk_size: usize,
     /// Maximum mirrored history events to fetch per author during history sync.
@@ -356,14 +356,24 @@ pub struct NostrConfig {
     /// Run a catch-up history sync after relay reconnects.
     #[serde(default = "default_nostr_history_sync_on_reconnect")]
     pub history_sync_on_reconnect: bool,
-    /// Fetch complete kind-1 history for authors up to this follow distance.
-    /// Set to null to disable.
+    /// Legacy maximum follow distance for complete kind-1 and kind-30023 text history.
+    /// Set to null to disable the legacy text-only archive pass.
     #[serde(default = "default_nostr_full_text_note_history_follow_distance")]
     pub full_text_note_history_follow_distance: Option<u32>,
-    /// Maximum relay pages per author for startup text-note history fetches.
-    /// Set to 0 to skip the expensive startup text-note catch-up.
+    /// Legacy maximum relay pages per author and text kind for startup history fetches.
+    /// Set to 0 to disable the legacy text-only archive pass.
     #[serde(default = "default_nostr_full_text_note_history_max_relay_pages")]
     pub full_text_note_history_max_relay_pages: usize,
+    /// Maximum follow distance for the complete post, deletion, repost, reaction, zap,
+    /// comment, picture, and article archive.
+    /// Used instead of the legacy text-only settings when archive_history_max_relay_pages
+    /// is greater than zero. Set to null to disable the complete archive pass.
+    #[serde(default = "default_nostr_archive_history_follow_distance")]
+    pub archive_history_follow_distance: Option<u32>,
+    /// Maximum relay pages per author and kind for the complete startup archive pass.
+    /// Set to 0 to leave the new archive pass disabled; bounded recent sync still runs.
+    #[serde(default = "default_nostr_archive_history_max_relay_pages")]
+    pub archive_history_max_relay_pages: usize,
     /// Enable experimental decentralized Nostr event pubsub when compiled with
     /// the experimental-decentralized-pubsub feature.
     #[serde(default, alias = "relayless_pubsub")]
@@ -673,7 +683,9 @@ fn default_nostr_overmute_threshold() -> f64 {
 }
 
 fn default_nostr_mirror_kinds() -> Vec<u16> {
-    vec![0, 1, 3, 6, 7, 9_735, 30_023]
+    vec![
+        0, 1, 3, 5, 6, 7, 16, 20, 1_111, 9_735, 10_000, 30_000, 30_023,
+    ]
 }
 
 fn default_nostr_history_sync_author_chunk_size() -> usize {
@@ -689,6 +701,14 @@ fn default_nostr_full_text_note_history_follow_distance() -> Option<u32> {
 }
 
 fn default_nostr_full_text_note_history_max_relay_pages() -> usize {
+    0
+}
+
+fn default_nostr_archive_history_follow_distance() -> Option<u32> {
+    Some(2)
+}
+
+fn default_nostr_archive_history_max_relay_pages() -> usize {
     0
 }
 
@@ -871,6 +891,8 @@ impl Default for NostrConfig {
                 default_nostr_full_text_note_history_follow_distance(),
             full_text_note_history_max_relay_pages:
                 default_nostr_full_text_note_history_max_relay_pages(),
+            archive_history_follow_distance: default_nostr_archive_history_follow_distance(),
+            archive_history_max_relay_pages: default_nostr_archive_history_max_relay_pages(),
             decentralized_pubsub: false,
             decentralized_pubsub_max_event_bytes:
                 default_nostr_decentralized_pubsub_max_event_bytes(),
@@ -1196,13 +1218,15 @@ mod tests {
         assert_eq!(config.nostr.overmute_threshold, 1.0);
         assert_eq!(
             config.nostr.mirror_kinds,
-            vec![0, 1, 3, 6, 7, 9_735, 30_023]
+            vec![0, 1, 3, 5, 6, 7, 16, 20, 1_111, 9_735, 10_000, 30_000, 30_023]
         );
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
         assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(2));
         assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 0);
+        assert_eq!(config.nostr.archive_history_follow_distance, Some(2));
+        assert_eq!(config.nostr.archive_history_max_relay_pages, 0);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
             config.nostr.bootstrap_follows,
@@ -1276,13 +1300,15 @@ relays = ["wss://relay.damus.io"]
         assert_eq!(config.nostr.overmute_threshold, 1.0);
         assert_eq!(
             config.nostr.mirror_kinds,
-            vec![0, 1, 3, 6, 7, 9_735, 30_023]
+            vec![0, 1, 3, 5, 6, 7, 16, 20, 1_111, 9_735, 10_000, 30_000, 30_023]
         );
         assert_eq!(config.nostr.history_sync_author_chunk_size, 5_000);
         assert_eq!(config.nostr.history_sync_per_author_event_limit, 256);
         assert!(config.nostr.history_sync_on_reconnect);
         assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(2));
         assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 0);
+        assert_eq!(config.nostr.archive_history_follow_distance, Some(2));
+        assert_eq!(config.nostr.archive_history_max_relay_pages, 0);
         assert!(config.nostr.socialgraph_root.is_none());
         assert_eq!(
             config.nostr.bootstrap_follows,
@@ -1308,6 +1334,8 @@ history_sync_per_author_event_limit = 128
 history_sync_on_reconnect = false
 full_text_note_history_follow_distance = 1
 full_text_note_history_max_relay_pages = 64
+archive_history_follow_distance = 2
+archive_history_max_relay_pages = 32
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.nostr.enabled);
@@ -1327,6 +1355,8 @@ full_text_note_history_max_relay_pages = 64
         assert!(!config.nostr.history_sync_on_reconnect);
         assert_eq!(config.nostr.full_text_note_history_follow_distance, Some(1));
         assert_eq!(config.nostr.full_text_note_history_max_relay_pages, 64);
+        assert_eq!(config.nostr.archive_history_follow_distance, Some(2));
+        assert_eq!(config.nostr.archive_history_max_relay_pages, 32);
     }
 
     #[test]

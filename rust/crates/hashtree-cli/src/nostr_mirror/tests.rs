@@ -409,6 +409,14 @@ async fn handle_connection(
                             ))
                             .await;
                     }
+                    nostr::ClientMessage::NegOpen { .. } => {
+                        let _ = write
+                            .send(Message::Text(
+                                nostr::RelayMessage::notice("bad msg: unknown cmd negentropy")
+                                    .as_json(),
+                            ))
+                            .await;
+                    }
                     nostr::ClientMessage::Event(event) => {
                         let event = event.into_owned();
                         events.lock().expect("relay events").push(event.clone());
@@ -1543,7 +1551,7 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
     .await?;
     let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    mirror
+    let result = mirror
         .history_sync_authors_chunked(
             vec!["author-a".to_string(), "author-b".to_string()],
             {
@@ -1570,9 +1578,14 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
                 }
             },
             true,
-            None,
+            Some(1),
         )
-        .await?;
+        .await;
+
+    let error = result.expect_err("a skipped durable chunk must make the sync retryable");
+    let error = format!("{error:#}");
+    assert!(error.contains("applied_chunks=1 failed_chunks=1"));
+    assert!(error.contains("boom"));
 
     let alice_hex = alice_keys.public_key().to_hex();
     assert!(graph_store.latest_profile_event(&alice_hex)?.is_some());
@@ -2117,7 +2130,7 @@ async fn full_text_history_prioritizes_low_indexed_direct_follows() -> Result<()
     let prolific = prolific_keys.public_key().to_hex();
     let sparse = sparse_keys.public_key().to_hex();
     let prioritized = mirror
-        .prioritize_full_text_note_history_authors(vec![prolific.clone(), sparse.clone()])
+        .prioritize_archive_history_authors(vec![prolific.clone(), sparse.clone()])
         .await?;
     assert_eq!(prioritized, vec![sparse, prolific]);
     Ok(())
@@ -2629,13 +2642,13 @@ fn text_note_history_sync_is_event_root_only() {
 }
 
 #[test]
-fn zero_full_text_history_pages_disables_startup_text_history() {
+fn zero_archive_pages_disable_startup_archive_pass() {
     let config = NostrMirrorConfig {
         full_text_note_history_max_relay_pages: 0,
         ..NostrMirrorConfig::default()
     };
     assert_eq!(
-        BackgroundNostrMirror::full_text_note_history_max_relay_pages_for_config(&config),
+        BackgroundNostrMirror::archive_history_settings_for_config(&config),
         None
     );
 
@@ -2644,20 +2657,62 @@ fn zero_full_text_history_pages_disables_startup_text_history() {
         ..NostrMirrorConfig::default()
     };
     assert_eq!(
-        BackgroundNostrMirror::full_text_note_history_max_relay_pages_for_config(&config),
-        Some(3)
+        BackgroundNostrMirror::archive_history_settings_for_config(&config),
+        Some(ArchiveHistorySettings {
+            follow_distance: 2,
+            max_relay_pages: 3,
+            kinds: vec![1, 30_023],
+        })
     );
 }
 
 #[test]
-fn general_history_sync_excludes_text_content_kinds() {
+fn complete_archive_settings_override_legacy_text_only_settings() {
+    let config = NostrMirrorConfig {
+        max_follow_distance: 2,
+        full_text_note_history_follow_distance: Some(1),
+        full_text_note_history_max_relay_pages: 64,
+        archive_history_follow_distance: Some(4),
+        archive_history_max_relay_pages: 3,
+        ..NostrMirrorConfig::default()
+    };
+
+    assert_eq!(
+        BackgroundNostrMirror::archive_history_settings_for_config(&config),
+        Some(ArchiveHistorySettings {
+            follow_distance: 2,
+            max_relay_pages: 3,
+            kinds: vec![1, 5, 6, 7, 16, 20, 1_111, 9_735, 30_023],
+        })
+    );
+}
+
+#[test]
+fn enabled_complete_archive_with_null_distance_does_not_run_legacy_pass() {
+    let config = NostrMirrorConfig {
+        full_text_note_history_follow_distance: Some(1),
+        full_text_note_history_max_relay_pages: 64,
+        archive_history_follow_distance: None,
+        archive_history_max_relay_pages: 3,
+        ..NostrMirrorConfig::default()
+    };
+
+    assert_eq!(
+        BackgroundNostrMirror::archive_history_settings_for_config(&config),
+        None
+    );
+}
+
+#[test]
+fn general_history_sync_keeps_bounded_content_regardless_of_full_history_settings() {
     let config = NostrMirrorConfig {
         full_text_note_history_max_relay_pages: 0,
         ..NostrMirrorConfig::default()
     };
     let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
-    assert!(!kinds.contains(&Kind::TextNote.as_u16()));
-    assert!(!kinds.contains(&30_023));
+    for content_kind in [Kind::TextNote.as_u16(), 20, 1_111, 30_023] {
+        assert!(kinds.contains(&content_kind));
+    }
     assert!(kinds.contains(&Kind::Metadata.as_u16()));
     assert!(kinds.contains(&Kind::ContactList.as_u16()));
 
@@ -2666,14 +2721,67 @@ fn general_history_sync_excludes_text_content_kinds() {
         ..NostrMirrorConfig::default()
     };
     let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
-    assert!(!kinds.contains(&Kind::TextNote.as_u16()));
-    assert!(!kinds.contains(&30_023));
+    for content_kind in [Kind::TextNote.as_u16(), 20, 1_111, 30_023] {
+        assert!(kinds.contains(&content_kind));
+    }
     assert!(kinds.contains(&Kind::Metadata.as_u16()));
     assert!(kinds.contains(&Kind::ContactList.as_u16()));
+
+    let config = NostrMirrorConfig {
+        full_text_note_history_follow_distance: None,
+        full_text_note_history_max_relay_pages: 3,
+        ..NostrMirrorConfig::default()
+    };
+    let kinds = BackgroundNostrMirror::history_sync_kinds_for_config(&config);
+    for archive_kind in [1, 5, 6, 7, 16, 20, 1_111, 9_735, 30_023] {
+        assert!(kinds.contains(&archive_kind));
+    }
 }
 
 #[test]
-fn large_history_sync_prefers_global_recent() {
+fn full_archive_history_uses_only_enabled_archive_kinds() {
+    let config = NostrMirrorConfig {
+        kinds: vec![0, 5, 6, 7, 16, 20, 1_111, 9_735, 10_000, 30_000, 30_023],
+        ..NostrMirrorConfig::default()
+    };
+
+    assert_eq!(
+        BackgroundNostrMirror::full_archive_history_kinds_for_config(&config),
+        vec![5, 6, 7, 16, 20, 1_111, 9_735, 30_023]
+    );
+}
+
+#[test]
+fn full_archive_plan_scales_event_limit_and_timeout_with_page_budget() {
+    let config = NostrMirrorConfig {
+        history_sync_per_author_event_limit: 256,
+        fetch_timeout: Duration::from_secs(15),
+        ..NostrMirrorConfig::default()
+    };
+    let plan = BackgroundNostrMirror::history_sync_plan_for(&config, 1, &[1]);
+    let plan = BackgroundNostrMirror::full_archive_history_plan(plan, 3);
+
+    assert_eq!(plan.per_author_event_limit, 3_000);
+    assert_eq!(
+        BackgroundNostrMirror::full_archive_fetch_timeout(config.fetch_timeout, 3),
+        Duration::from_secs(45)
+    );
+    assert_eq!(
+        BackgroundNostrMirror::full_archive_fetch_timeout(config.fetch_timeout, 64),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn default_mirror_covers_social_records_and_visible_post_kinds() {
+    assert_eq!(
+        NostrMirrorConfig::default().kinds,
+        vec![0, 1, 3, 5, 6, 7, 16, 20, 1_111, 9_735, 10_000, 30_000, 30_023]
+    );
+}
+
+#[test]
+fn large_history_sync_queries_configured_authors_in_batches() {
     let config = NostrMirrorConfig::default();
     let plan = BackgroundNostrMirror::history_sync_plan_for(
         &config,
@@ -2681,13 +2789,15 @@ fn large_history_sync_prefers_global_recent() {
         &config.kinds,
     );
 
-    assert_eq!(plan.relay_fetch_mode, RelayFetchMode::GlobalRecent);
-    assert_eq!(plan.per_author_event_limit, 16);
-    assert_eq!(plan.max_relay_pages, 20);
+    assert_eq!(plan.relay_fetch_mode, RelayFetchMode::AuthorBatches);
+    assert_eq!(
+        plan.per_author_event_limit,
+        config.history_sync_per_author_event_limit
+    );
 }
 
 #[test]
-fn large_global_recent_history_sync_uses_one_chunk() {
+fn large_history_sync_keeps_bounded_chunks() {
     let config = NostrMirrorConfig {
         history_sync_author_chunk_size: 128,
         ..NostrMirrorConfig::default()
@@ -2698,20 +2808,52 @@ fn large_global_recent_history_sync_uses_one_chunk() {
         &config, authors, &kinds, false, None,
     );
 
-    assert_eq!(chunk_size, authors);
+    assert_eq!(chunk_size, 128);
 }
 
 #[test]
-fn full_author_history_processes_one_author_per_chunk() {
+fn full_archive_reuses_bounded_chunk_clients_at_social_graph_scale() {
     let config = NostrMirrorConfig {
-        history_sync_author_chunk_size: 128,
+        history_sync_author_chunk_size: 5_000,
         ..NostrMirrorConfig::default()
     };
-    let kinds = [Kind::TextNote.as_u16(), 30_023];
-    let authors = config.author_batch_size * 9;
+    let kinds = BackgroundNostrMirror::full_archive_history_kinds_for_config(&config);
+    let authors = 24_240;
     let chunk_size = BackgroundNostrMirror::history_sync_chunk_size_for_config(
         &config, authors, &kinds, true, None,
     );
 
-    assert_eq!(chunk_size, 1);
+    assert_eq!(kinds, vec![1, 5, 6, 7, 16, 20, 1_111, 9_735, 30_023]);
+    assert_eq!(chunk_size, 256);
+    assert_eq!(authors.div_ceil(chunk_size), 95);
+}
+
+#[test]
+fn bounded_recent_starts_with_batched_per_kind_queries_at_social_graph_scale() {
+    let config = NostrMirrorConfig {
+        history_sync_author_chunk_size: 5_000,
+        author_batch_size: 256,
+        ..NostrMirrorConfig::default()
+    };
+    let authors = 24_240usize;
+    let chunk_size = BackgroundNostrMirror::history_sync_chunk_size_for_config(
+        &config,
+        authors,
+        &config.kinds,
+        false,
+        None,
+    );
+    let mut author_batches = 0usize;
+    let mut remaining = authors;
+    while remaining > 0 {
+        let chunk_authors = remaining.min(chunk_size);
+        author_batches =
+            author_batches.saturating_add(chunk_authors.div_ceil(config.author_batch_size));
+        remaining -= chunk_authors;
+    }
+    let initial_queries_per_relay = author_batches.saturating_mul(config.kinds.len());
+
+    assert_eq!(author_batches, 97);
+    assert_eq!(initial_queries_per_relay, 1_261);
+    assert!(initial_queries_per_relay < authors * config.kinds.len());
 }
