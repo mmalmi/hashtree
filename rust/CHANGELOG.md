@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.2.100 - 2026-07-17
+
+### Added
+
+- Released `hashtree-network` 0.2.87 with `RoutedStore`, the canonical
+  Store-shaped facade for centrally verified routed reads and mutations owned
+  only by the application's explicit primary Store. It replaces the deleted
+  transport-owned same-host adapter without introducing a write router.
+- Added a bounded Hashtree mesh-forwarding owner that consumes exactly one HTL
+  before handing a request to the FIPS composite route, coalesces equal
+  in-flight work, and suppresses lower-budget cycle re-entry. FIPS carriers and
+  terminal routes continue to preserve HTL unchanged.
+
+### Changed
+
+- Released `hashtree-cli` 0.2.100 and `hashtree-embedded` 0.2.86 with the same
+  three-node `2 -> 1 -> 0` forwarding and exhaustion behavior. The FIPS
+  composite remains the sole owner of its peer set and preserves its bounded
+  discovery-rank, explicit-peer interleave, and first-valid race policy.
+- Documented that production paid blob retrieval never existed: the deleted
+  quote/chunk path was called only by the simulator. Cashu wallet operations
+  remain available, but paid blob retrieval remains unimplemented; obsolete
+  paid-blob policy fields are now ignored as legacy TOML rather than implying a
+  configured incentive route.
+
 ## 0.2.99 - 2026-07-17
 
 ### Changed

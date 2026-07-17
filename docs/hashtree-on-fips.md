@@ -35,7 +35,11 @@ shared vectors are in
 
 Direct same-host requests use HTL `0`. The existing HTL resolver is adapted as
 one composite `BlobRoute`. Only forwarding from one Hashtree mesh peer to
-another consumes one HTL; terminal adapters and FIPS routing hops do not.
+another consumes one HTL; terminal adapters and FIPS routing hops do not. The
+Hashtree forwarding wrapper coalesces equal in-flight requests and rejects a
+lower-HTL re-entry for the same hash as a route-local miss, so a cycle does not
+repeat provider work until exhaustion. This state is bounded and ephemeral;
+HTL still bounds correctness when the tracking table is full.
 
 ## Same-host And Standalone Routes
 
@@ -47,11 +51,23 @@ writes, deletes, pins, quotas, or garbage collection.
 Pool placement and its bounded automatic temperature balancer are documented
 in [`pool-store.md`](pool-store.md).
 
+Applications that need the ordinary `Store` shape use
+`hashtree_network::RoutedStore`: `get` and `has` use the hash-verifying router,
+while every mutation, pin, capacity setting, and GC action delegates only to the
+application's explicit primary store. It is not a write router.
+
 When a process or host boundary is required, `FipsBlobRoute` owns the
 authenticated in-memory capability roster and exclusively selects among its
 `hashtree.blob/1` providers. The outer `BlobRouter` sees that provider set as
 one composite route, passes a deadline and bounded attempt budget, accepts only
 hash-valid data, and remains free to continue to another route.
+
+The composite deliberately preserves the FIPS-era provider policy: capability
+providers are ranked by FIPS discovery, explicit application peers are
+deduplicated and interleaved, the bounded attempt budget truncates that union,
+and the selected providers race with first valid data winning. FIPS owns
+reachability and replacement; the outer router learns only the composite route's
+outcomes. There is no second outer route or second selection owner for any peer.
 
 The provider uses fips-tcp's capability-aware listener bind, so the capability
 appears only after the FSP port is owned and disappears with the listener.
@@ -86,6 +102,20 @@ Transport uncertainty must not become false absence:
 
 These rules let callers continue to another source without recording a slow,
 broken, or empty peer as proof that content does not exist.
+
+## Paid Retrieval Status
+
+The retired DataQuote/DataPayment/DataChunk framing was not a released daemon
+read path: repository history has no production caller of `get_with_quote`; its
+only caller was the simulator. Hashtree therefore exposes Cashu wallet/config
+helpers but, as of the 2026-07-17 native cleanup, configures no paid blob route.
+The obsolete quote/chunk policy fields are accepted as unknown legacy TOML and
+ignored.
+
+A future paid provider belongs behind one opaque `BlobRoute` and must own its
+quote, token transfer, replay protection, and recovery protocol. It must still
+return the unchanged `BlobReply`, leaving central size/hash verification to
+`BlobRouter`; it must not restore the deleted blob framing or peer selector.
 
 ## Browser And Worker Providers
 

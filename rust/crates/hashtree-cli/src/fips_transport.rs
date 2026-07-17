@@ -15,7 +15,7 @@ use hashtree_fips_transport::{
     NostrRelayAdapter, PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig,
     DEFAULT_FIPS_DISCOVERY_SCOPE,
 };
-use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig};
+use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig, MeshForwardingRoute};
 use nostr::nips::nip19::ToBech32;
 use nostr::PublicKey;
 #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -234,7 +234,7 @@ async fn bind_daemon_blob_resolver(
                 .context("Failed to configure the daemon FIPS blob route")?;
         routes.push(BlobRouteEntry::new(
             "configured-fips-peers",
-            Arc::new(fips_route),
+            Arc::new(MeshForwardingRoute::new(Arc::new(fips_route))),
         ));
     }
     resolver
@@ -785,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemon_inbound_blob_route_forwards_to_configured_fips_peer() {
+    async fn daemon_mesh_forwarding_observes_two_one_zero_and_exhaustion() {
         let scope = format!("htree-inbound-forwarding-{}", uuid::Uuid::new_v4());
         let (upstream_endpoint, upstream_addr) = udp_endpoint(&scope).await;
         let (provider_endpoint, provider_addr) = udp_endpoint(&scope).await;
@@ -861,12 +861,13 @@ mod tests {
             .await
             .unwrap(),
         );
-        let observer_route = FipsBlobRoute::explicit(
+        let observer_fips_route = FipsBlobRoute::explicit(
             observer_transport.clone(),
             vec![PeerIdentity::from_npub(&provider_endpoint.local_peer_id).unwrap()],
             1,
         )
         .unwrap();
+        let observer_route = MeshForwardingRoute::new(Arc::new(observer_fips_route));
 
         wait_for_native_peer(
             provider_endpoint.native_endpoint.as_ref(),
@@ -880,15 +881,34 @@ mod tests {
         .await;
         assert_eq!(
             observer_route
-                .route(hashtree_core::BlobRequest { hash, htl: 10 })
+                .route(hashtree_core::BlobRequest { hash, htl: 0 })
+                .await
+                .unwrap(),
+            hashtree_core::BlobReply::NoResult,
+        );
+        assert!(upstream_requests.lock().unwrap().is_empty());
+        assert_eq!(
+            observer_route
+                .route(hashtree_core::BlobRequest { hash, htl: 1 })
+                .await
+                .unwrap(),
+            hashtree_core::BlobReply::NoResult,
+        );
+        assert!(
+            upstream_requests.lock().unwrap().is_empty(),
+            "HTL 1 reaches the intermediate daemon as 0 and cannot be forwarded"
+        );
+        assert_eq!(
+            observer_route
+                .route(hashtree_core::BlobRequest { hash, htl: 2 })
                 .await
                 .unwrap(),
             hashtree_core::BlobReply::Data(data),
         );
         assert_eq!(
             upstream_requests.lock().unwrap().as_slice(),
-            &[hashtree_core::BlobRequest { hash, htl: 10 }],
-            "FIPS transport hops must preserve the Hashtree HTL",
+            &[hashtree_core::BlobRequest { hash, htl: 0 }],
+            "three Hashtree nodes must observe the two-to-one-to-zero forwarding budget while each FIPS carrier preserves its request",
         );
 
         drop(observer_route);

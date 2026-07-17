@@ -20,7 +20,10 @@ pub enum FipsBlobRouteError {
 }
 
 /// One opaque BlobRoute whose sole responsibility is selecting a bounded set
-/// of FIPS peers. FIPS continues to own all transport addresses and paths.
+/// of FIPS peers. Discovery-ranked providers and explicit peers are
+/// deduplicated, interleaved, truncated to the attempt budget, and raced with
+/// first valid data winning. FIPS continues to own all transport addresses,
+/// reachability, and replacement; no outer route selects these peers again.
 pub struct FipsBlobRoute<S: Store + ?Sized + 'static> {
     discovery: Option<Arc<FipsEndpoint>>,
     explicit: RwLock<Vec<PeerIdentity>>,
@@ -296,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_union_interleaves_explicit_peers_without_duplicate_owners() {
+    fn preserved_bounded_rank_and_interleave_has_one_owner_per_peer() {
         let discovered = (0..4)
             .map(|_| PeerIdentity::from_npub(&Identity::generate().npub()).unwrap())
             .collect::<Vec<_>>();
