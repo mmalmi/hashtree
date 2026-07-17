@@ -1,5 +1,6 @@
 import { encodeDocumentStats, encodePosting, encodeTermStats, normalizeRankedBuildOptions, RANKED_SEARCH_SEGMENT_FORMAT, } from './ranked-schema.js';
 import { writeRankedSegment } from './ranked-segment.js';
+import { buildRankedTopK, } from './ranked-top-k.js';
 import { tokenizeRankedField } from './ranked-tokenize.js';
 const POSTING_SEPARATOR = '\0';
 export async function buildRankedSegment(btree, tree, documents, options) {
@@ -10,6 +11,7 @@ export async function buildRankedSegment(btree, tree, documents, options) {
     const documentStats = [];
     const values = [];
     const termStatistics = new Map();
+    const topKEntries = new Map();
     const fieldTotals = new Map(config.fields.map((field) => [field.name, 0]));
     const populatedFields = new Map(config.fields.map((field) => [field.name, 0]));
     for (const document of sortedDocuments) {
@@ -24,21 +26,29 @@ export async function buildRankedSegment(btree, tree, documents, options) {
             }
             addFieldPostings(documentPostings, field.name, tokenized.occurrences);
         }
-        documentStats.push([document.id, encodeDocumentStats({ lengths })]);
+        const stats = { lengths };
+        documentStats.push([document.id, encodeDocumentStats(stats)]);
         if (document.value !== undefined)
             values.push([document.id, document.value]);
         for (const [term, posting] of documentPostings) {
             postings.push([`${term}${POSTING_SEPARATOR}${document.id}`, encodePosting(posting)]);
             addTermStatistics(termStatistics, term, posting);
+            const entries = topKEntries.get(term) ?? [];
+            entries.push({ id: document.id, posting, document: stats });
+            topKEntries.set(term, entries);
         }
     }
     const manifest = buildManifest(config, sortedDocuments.length, termStatistics.size, postings.length, values.length, fieldTotals, populatedFields);
-    const termStats = [...termStatistics].map(([term, stats]) => [
+    const decodedTermStats = new Map([...termStatistics].map(([term, stats]) => [
         term,
-        encodeTermStats({
+        {
             documentFrequency: stats.documentFrequency,
             fieldSets: [...stats.fieldSets.values()].sort((left, right) => compareStrings(JSON.stringify(left.fields), JSON.stringify(right.fields))),
-        }),
+        },
+    ]));
+    const termStats = [...decodedTermStats].map(([term, stats]) => [
+        term,
+        encodeTermStats(stats),
     ]);
     const [postingsRoot, termsRoot, documentsRoot, valuesRoot] = await Promise.all([
         btree.build(postings),
@@ -46,12 +56,14 @@ export async function buildRankedSegment(btree, tree, documents, options) {
         btree.build(documentStats),
         btree.build(values),
     ]);
+    const topK = await buildRankedTopK(btree, tree, topKEntries, decodedTermStats, manifest);
     return await writeRankedSegment(tree, manifest, {
         postings: postingsRoot,
         terms: termsRoot,
         documents: documentsRoot,
         values: valuesRoot,
-    });
+        topK: topK.roots,
+    }, topK.roots ? topK.manifest : null);
 }
 function addTermStatistics(statistics, term, posting) {
     const fields = Object.keys(posting.fields).sort(compareStrings);

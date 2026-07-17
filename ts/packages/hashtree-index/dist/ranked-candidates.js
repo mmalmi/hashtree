@@ -1,8 +1,9 @@
 import { decodePosting, decodeTermStats } from './ranked-schema.js';
 const POSTING_SEPARATOR = '\0';
 const READ_BATCH_SIZE = 64;
-export async function loadSelectedFrequencies(btree, termsRoot, terms, selectedFields, configuredFields, documentCount) {
+export async function loadTermFrequencies(btree, termsRoot, terms, selectedFields, configuredFields, documentCount) {
     const frequencies = new Map();
+    const documentFrequencies = new Map();
     const rawStats = await Promise.all(terms.map((term) => btree.get(termsRoot, term)));
     for (let index = 0; index < terms.length; index += 1) {
         const raw = rawStats[index];
@@ -14,6 +15,7 @@ export async function loadSelectedFrequencies(btree, termsRoot, terms, selectedF
         if (stats.documentFrequency > documentCount) {
             throw new Error(`Invalid ranked search document frequency: ${term}`);
         }
+        documentFrequencies.set(term, stats.documentFrequency);
         const frequency = stats.fieldSets
             .filter((fieldSet) => fieldSet.fields.some((field) => selectedFields.has(field)))
             .reduce((total, fieldSet) => total + fieldSet.documentFrequency, 0);
@@ -23,7 +25,7 @@ export async function loadSelectedFrequencies(btree, termsRoot, terms, selectedF
         if (frequency > 0)
             frequencies.set(term, frequency);
     }
-    return frequencies;
+    return { selected: frequencies, all: documentFrequencies };
 }
 export function hasMissingRequiredTerm(parsed, frequencies, operator) {
     if (operator === 'and' && parsed.terms.some((term) => !frequencies.has(term)))
@@ -91,7 +93,7 @@ function validateTermFields(stats, fields, term) {
         }
     }
 }
-function postingMatchesFields(posting, fields) {
+export function postingMatchesFields(posting, fields) {
     return Object.keys(posting.fields).some((field) => fields.has(field));
 }
 function postingKey(term, id) {
