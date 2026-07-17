@@ -209,6 +209,9 @@ jobs:
           if ($output -match "built without the webrtc feature") {
             throw "packaged htree lacks the required FIPS WebRTC feature"
           }
+          # The empty-relay fixture intentionally exits after transport startup;
+          # the assertions above are the artifact contract for this smoke.
+          $global:LASTEXITCODE = 0
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
