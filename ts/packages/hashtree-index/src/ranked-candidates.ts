@@ -14,15 +14,19 @@ export type RankedCandidate = {
   postings: Map<string, RankedPosting>;
 };
 
-export async function loadSelectedFrequencies(
+export async function loadTermFrequencies(
   btree: BTree,
   termsRoot: CID,
   terms: readonly string[],
   selectedFields: ReadonlySet<string>,
   configuredFields: ReadonlyMap<string, unknown>,
   documentCount: number,
-): Promise<Map<string, number>> {
+): Promise<{
+  selected: Map<string, number>;
+  all: Map<string, number>;
+}> {
   const frequencies = new Map<string, number>();
+  const documentFrequencies = new Map<string, number>();
   const rawStats = await Promise.all(terms.map((term) => btree.get(termsRoot, term)));
   for (let index = 0; index < terms.length; index += 1) {
     const raw = rawStats[index];
@@ -33,6 +37,7 @@ export async function loadSelectedFrequencies(
     if (stats.documentFrequency > documentCount) {
       throw new Error(`Invalid ranked search document frequency: ${term}`);
     }
+    documentFrequencies.set(term, stats.documentFrequency);
     const frequency = stats.fieldSets
       .filter((fieldSet) => fieldSet.fields.some((field) => selectedFields.has(field)))
       .reduce((total, fieldSet) => total + fieldSet.documentFrequency, 0);
@@ -41,7 +46,7 @@ export async function loadSelectedFrequencies(
     }
     if (frequency > 0) frequencies.set(term, frequency);
   }
-  return frequencies;
+  return { selected: frequencies, all: documentFrequencies };
 }
 
 export function hasMissingRequiredTerm(
@@ -147,7 +152,10 @@ function validateTermFields(
   }
 }
 
-function postingMatchesFields(posting: RankedPosting, fields: ReadonlySet<string>): boolean {
+export function postingMatchesFields(
+  posting: RankedPosting,
+  fields: ReadonlySet<string>,
+): boolean {
   return Object.keys(posting.fields).some((field) => fields.has(field));
 }
 
