@@ -40,6 +40,8 @@ grep -F 'ulimit -Sn 8192' .github/workflows/ci.yml >/dev/null
 grep -F 'rev-parse "${VERSION}^{commit}"' publish_release.sh >/dev/null
 reject grep -qF "tags:" .github/workflows/release.yml
 grep -F 'needs: gate' .github/workflows/release.yml >/dev/null
+grep -F 'os: ubuntu-24.04-arm' .github/workflows/release.yml >/dev/null
+reject grep -qF 'docker/setup-qemu-action' .github/workflows/release.yml
 grep -F -- '--asset-base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"' .github/workflows/release.yml >/dev/null
 release_gate_job="$(sed -n '/^  gate:/,/^  build:/p' .github/workflows/release.yml)"
 printf '%s\n' "$release_gate_job" | grep -F '~/.cargo/registry/cache/' >/dev/null
