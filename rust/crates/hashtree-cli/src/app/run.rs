@@ -637,8 +637,9 @@ pub(crate) async fn run() -> Result<()> {
                 Option<tokio::task::JoinHandle<()>>,
             ) = (None, None, None, None);
 
-            // Combine legacy servers with configured public read servers.
-            let upstream_blossom = config.blossom.all_read_servers();
+            // Keep client-visible Blossom endpoints available to the daemon,
+            // except for its own listener, which would recurse on a miss.
+            let upstream_blossom = config.blossom.upstream_read_servers(&bind_address);
             let blossom_replica_queue_bytes = hashtree_cli::server::bounded_upload_queue_bytes(
                 config
                     .blossom

@@ -3,6 +3,7 @@ use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::{Keys, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -438,6 +439,21 @@ impl BlossomConfig {
         servers
     }
 
+    /// Read alternatives for the daemon's HTTP server, excluding the server
+    /// itself. CLI clients may intentionally use the local daemon as their
+    /// configured Blossom endpoint, but the daemon must not recursively query
+    /// that endpoint when a blob is absent locally.
+    pub fn upstream_read_servers(&self, bind_address: &str) -> Vec<String> {
+        let Some((bind_host, bind_port)) = parse_bind_authority(bind_address) else {
+            return self.all_read_servers();
+        };
+
+        self.all_read_servers()
+            .into_iter()
+            .filter(|server| !is_bound_http_server(server, &bind_host, bind_port))
+            .collect()
+    }
+
     pub fn all_write_servers(&self) -> Vec<String> {
         if !self.enabled {
             return Vec::new();
@@ -450,6 +466,49 @@ impl BlossomConfig {
         servers.sort();
         servers.dedup();
         servers
+    }
+}
+
+fn parse_bind_authority(bind_address: &str) -> Option<(String, u16)> {
+    if let Ok(address) = bind_address.parse::<SocketAddr>() {
+        return Some((address.ip().to_string(), address.port()));
+    }
+
+    let url = reqwest::Url::parse(&format!("http://{bind_address}")).ok()?;
+    Some((url.host_str()?.to_string(), url.port_or_known_default()?))
+}
+
+fn is_bound_http_server(server: &str, bind_host: &str, bind_port: u16) -> bool {
+    let Ok(url) = reqwest::Url::parse(server) else {
+        return false;
+    };
+    if url.scheme() != "http" || url.port_or_known_default() != Some(bind_port) {
+        return false;
+    }
+    let Some(upstream_host) = url.host_str() else {
+        return false;
+    };
+    let upstream_host = upstream_host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(upstream_host);
+    if upstream_host.eq_ignore_ascii_case(bind_host) {
+        return true;
+    }
+
+    let bind_ip = bind_host.parse::<IpAddr>().ok();
+    let upstream_ip = upstream_host.parse::<IpAddr>().ok();
+    let upstream_is_localhost = upstream_host.eq_ignore_ascii_case("localhost");
+    match bind_ip {
+        Some(ip) if ip.is_unspecified() => {
+            upstream_is_localhost
+                || upstream_ip
+                    .is_some_and(|candidate| candidate.is_loopback() || candidate.is_unspecified())
+        }
+        Some(ip) if ip.is_loopback() => {
+            upstream_is_localhost || upstream_ip.is_some_and(|candidate| candidate.is_loopback())
+        }
+        _ => false,
     }
 }
 
@@ -1484,6 +1543,64 @@ chunk_target_bytes = 65536
         let write = config.all_write_servers();
         assert!(write.contains(&"https://legacy.server".to_string()));
         assert!(write.contains(&"https://upload.iris.to".to_string()));
+    }
+
+    #[test]
+    fn daemon_blossom_upstreams_exclude_its_own_loopback_http_endpoint() {
+        let config = BlossomConfig {
+            servers: Vec::new(),
+            read_servers: vec![
+                "http://127.0.0.1:19092".to_string(),
+                "http://localhost:19092/".to_string(),
+                "http://127.0.0.1:19093".to_string(),
+                "https://127.0.0.1:19092".to_string(),
+                "https://read.example".to_string(),
+            ],
+            write_servers: Vec::new(),
+            ..BlossomConfig::default()
+        };
+
+        let upstreams = config.upstream_read_servers("127.0.0.1:19092");
+
+        assert!(!upstreams
+            .iter()
+            .any(|server| server == "http://127.0.0.1:19092"));
+        assert!(!upstreams
+            .iter()
+            .any(|server| server == "http://localhost:19092/"));
+        assert!(upstreams
+            .iter()
+            .any(|server| server == "http://127.0.0.1:19093"));
+        assert!(upstreams
+            .iter()
+            .any(|server| server == "https://127.0.0.1:19092"));
+        assert!(upstreams
+            .iter()
+            .any(|server| server == "https://read.example"));
+    }
+
+    #[test]
+    fn wildcard_daemon_bind_excludes_loopback_self_but_keeps_remote_upstreams() {
+        let config = BlossomConfig {
+            servers: Vec::new(),
+            read_servers: vec![
+                "http://localhost:8080".to_string(),
+                "http://[::1]:8080".to_string(),
+                "http://192.0.2.10:8080".to_string(),
+            ],
+            write_servers: Vec::new(),
+            ..BlossomConfig::default()
+        };
+
+        let upstreams = config.upstream_read_servers("0.0.0.0:8080");
+
+        assert!(!upstreams
+            .iter()
+            .any(|server| server == "http://localhost:8080"));
+        assert!(!upstreams.iter().any(|server| server == "http://[::1]:8080"));
+        assert!(upstreams
+            .iter()
+            .any(|server| server == "http://192.0.2.10:8080"));
     }
 
     #[test]

@@ -866,7 +866,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         webrtc_state.clone(),
     ));
 
-    let upstream_blossom = config.blossom.all_read_servers();
+    let upstream_blossom = config.blossom.upstream_read_servers(&opts.bind_address);
     let blossom_replica_queue_bytes = crate::server::bounded_upload_queue_bytes(
         config
             .blossom
