@@ -45,6 +45,8 @@ LMDB `PoolStore` directly. The pool is the one explicit write destination and
 exclusively selects among its opaque storage members. The read-only `BlobRouter`
 treats that complete pool as one route; it does not choose pool members or own
 writes, deletes, pins, quotas, or garbage collection.
+Pool placement and its bounded automatic temperature balancer are documented
+in [`pool-store.md`](pool-store.md).
 
 When a process or host boundary is required, `FipsBlobRoute` owns the
 authenticated in-memory capability roster and exclusively selects among its

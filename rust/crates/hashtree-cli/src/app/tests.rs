@@ -188,6 +188,10 @@ fn test_storage_pool_add_and_migration_args() {
         "12",
         "--max-writes",
         "3",
+        "--temperature-low-percent",
+        "60",
+        "--temperature-high-percent",
+        "80",
     ])
     .unwrap();
     let Commands::Storage {
@@ -201,6 +205,8 @@ fn test_storage_pool_add_and_migration_args() {
         map_size_gb,
         max_reads,
         max_writes,
+        temperature_low_percent,
+        temperature_high_percent,
         ..
     } = command
     else {
@@ -210,6 +216,36 @@ fn test_storage_pool_add_and_migration_args() {
     assert_eq!(map_size_gb, Some(4));
     assert_eq!(max_reads, 12);
     assert_eq!(max_writes, 3);
+    assert_eq!(temperature_low_percent, 60);
+    assert_eq!(temperature_high_percent, 80);
+
+    let cli = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "balance-temperature",
+        "--max-moves",
+        "7",
+        "--max-bytes-gb",
+        "2",
+        "--max-concurrency",
+        "3",
+    ])
+    .unwrap();
+    let Commands::Storage {
+        command: StorageCommands::Pool { command },
+    } = cli.command
+    else {
+        panic!("expected storage pool command");
+    };
+    assert!(matches!(
+        command,
+        PoolCommands::BalanceTemperature {
+            max_moves: Some(7),
+            max_bytes_gb: Some(2),
+            max_concurrency: Some(3),
+        }
+    ));
 
     let cli = Cli::try_parse_from([
         "htree",

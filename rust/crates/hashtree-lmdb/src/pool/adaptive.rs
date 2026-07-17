@@ -35,6 +35,12 @@ impl MemberOutcome {
     fn cooling(&self, now: Instant) -> bool {
         self.cooldown_until.is_some_and(|until| until > now)
     }
+
+    fn comparable_latency(&self, other: &Self) -> Option<(f64, f64)> {
+        self.read_latency_micros
+            .zip(other.read_latency_micros)
+            .or_else(|| self.write_nanos_per_byte.zip(other.write_nanos_per_byte))
+    }
 }
 
 #[derive(Debug)]
@@ -164,6 +170,61 @@ impl AdaptivePoolState {
     pub(super) fn retain(&mut self, configured: &std::collections::HashSet<PoolMemberId>) {
         self.outcomes.retain(|id, _| configured.contains(id));
     }
+
+    pub(super) fn meaningfully_faster(
+        &self,
+        target: PoolMemberId,
+        source: PoolMemberId,
+        hysteresis_percent: u8,
+    ) -> bool {
+        let now = Instant::now();
+        let Some(target) = self.outcomes.get(&target) else {
+            return false;
+        };
+        let Some(source) = self.outcomes.get(&source) else {
+            return false;
+        };
+        if target.cooling(now)
+            || (target.failures > 0.0 && target.reliability() + 0.05 < source.reliability())
+        {
+            return false;
+        }
+        let Some((target_latency, source_latency)) = target.comparable_latency(source) else {
+            return false;
+        };
+        target_latency * (100.0 + f64::from(hysteresis_percent)) <= source_latency * 100.0
+    }
+
+    pub(super) fn order_temperature_targets(&self, ids: &mut [PoolMemberId]) {
+        let now = Instant::now();
+        ids.sort_by(|left, right| {
+            let left = self.outcomes.get(left).cloned().unwrap_or_default();
+            let right = self.outcomes.get(right).cloned().unwrap_or_default();
+            left.cooling(now)
+                .cmp(&right.cooling(now))
+                .then_with(|| {
+                    right
+                        .reliability()
+                        .partial_cmp(&left.reliability())
+                        .unwrap_or(Ordering::Equal)
+                })
+                .then_with(
+                    || match (left.read_latency_micros, right.read_latency_micros) {
+                        (Some(left), Some(right)) => {
+                            left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+                        }
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => left
+                            .write_nanos_per_byte
+                            .unwrap_or(f64::MAX)
+                            .partial_cmp(&right.write_nanos_per_byte.unwrap_or(f64::MAX))
+                            .unwrap_or(Ordering::Equal),
+                    },
+                )
+                .then_with(|| left.samples.cmp(&right.samples))
+        });
+    }
 }
 
 fn fill_bucket(used: u64, capacity: u64) -> u16 {
@@ -224,5 +285,21 @@ mod tests {
         state.retain(&HashSet::from([retained]));
         assert!(state.outcomes.contains_key(&retained));
         assert!(!state.outcomes.contains_key(&removed));
+    }
+
+    #[test]
+    fn temperature_moves_require_a_measured_hysteretic_speed_gain() {
+        let slow = id(1);
+        let slightly_faster = id(2);
+        let fast = id(3);
+        let mut state = AdaptivePoolState::new(Duration::from_secs(1));
+        state.record_read(slow, Duration::from_millis(100), true);
+        state.record_read(slightly_faster, Duration::from_millis(90), true);
+        state.record_read(fast, Duration::from_millis(50), true);
+        assert!(!state.meaningfully_faster(slightly_faster, slow, 20));
+        assert!(state.meaningfully_faster(fast, slow, 20));
+        let mut ordered = [slow, fast, slightly_faster];
+        state.order_temperature_targets(&mut ordered);
+        assert_eq!(ordered, [fast, slightly_faster, slow]);
     }
 }

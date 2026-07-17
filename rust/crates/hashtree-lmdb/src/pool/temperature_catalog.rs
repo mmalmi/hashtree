@@ -1,0 +1,322 @@
+use super::temperature::{AccessRecord, TemperatureCandidate};
+use super::{map_heed, LocationRecord, PoolMemberId, PoolStore};
+use hashtree_core::store::StoreError;
+use hashtree_core::types::Hash;
+use std::ops::Bound;
+
+const CURSOR_KEY: &[u8] = b"temperature-cursor-v1";
+const LEASE_KEY: &[u8] = b"temperature-lease-v1";
+const MOVE_KEY_PREFIX: u8 = b'm';
+
+impl PoolStore {
+    pub(super) fn begin_move_record(
+        &self,
+        hash: Hash,
+        expected: LocationRecord,
+        moving: LocationRecord,
+    ) -> Result<bool, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let current = self
+            .locations
+            .get(&wtxn, &hash)
+            .map_err(map_heed)?
+            .map(LocationRecord::decode)
+            .transpose()?;
+        if current != Some(expected) && current != Some(moving) {
+            return Ok(false);
+        }
+        if current != Some(moving) {
+            self.set_location_txn(&mut wtxn, hash, Some(moving))?;
+        }
+        self.temperature_state
+            .put(&mut wtxn, &move_state_key(hash), &moving.encode())
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)?;
+        Ok(true)
+    }
+
+    pub(super) fn finish_move_record(
+        &self,
+        hash: Hash,
+        source: PoolMemberId,
+        target: PoolMemberId,
+        size: u64,
+    ) -> Result<(), StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let current = self
+            .locations
+            .get(&wtxn, &hash)
+            .map_err(map_heed)?
+            .map(LocationRecord::decode)
+            .transpose()?;
+        match current {
+            Some(LocationRecord::Moving {
+                source: actual_source,
+                target: actual_target,
+                ..
+            }) if actual_source == source && actual_target == target => {
+                self.set_location_txn(
+                    &mut wtxn,
+                    hash,
+                    Some(LocationRecord::Stored {
+                        member: target,
+                        size,
+                    }),
+                )?;
+                if let Some(mut access) = self
+                    .last_accessed
+                    .get(&wtxn, &hash)
+                    .map_err(map_heed)?
+                    .and_then(AccessRecord::decode)
+                {
+                    access.mark_moved(super::unix_timestamp_now());
+                    self.last_accessed
+                        .put(&mut wtxn, &hash, &access.encode())
+                        .map_err(map_heed)?;
+                }
+            }
+            Some(LocationRecord::Stored { member, .. }) if member == target => {}
+            other => {
+                return Err(StoreError::Other(format!(
+                    "pool location changed while moving {hash:?}: {other:?}"
+                )))
+            }
+        }
+        self.temperature_state
+            .delete(&mut wtxn, &move_state_key(hash))
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)
+    }
+
+    pub(super) fn active_moves(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Hash, LocationRecord)>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let mut moves = Vec::with_capacity(limit);
+        for item in self
+            .temperature_state
+            .prefix_iter(&rtxn, &[MOVE_KEY_PREFIX])
+            .map_err(map_heed)?
+        {
+            let (key, value) = item.map_err(map_heed)?;
+            if key.len() != 33 {
+                return Err(StoreError::Other("invalid pool move-state key".into()));
+            }
+            let hash: Hash = key[1..]
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid pool move-state hash".into()))?;
+            moves.push((hash, LocationRecord::decode(value)?));
+            if moves.len() >= limit {
+                break;
+            }
+        }
+        Ok(moves)
+    }
+
+    pub(super) fn flush_sampled_accesses(
+        &self,
+        now: u64,
+    ) -> Result<Vec<TemperatureCandidate>, StoreError> {
+        let samples = self
+            .temperature
+            .lock()
+            .map_err(|_| StoreError::Other("pool temperature lock poisoned".into()))?
+            .samples
+            .drain(self.temperature_config.access_flush_batch);
+        if samples.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let half_life = self.temperature_config.heat_half_life.as_secs().max(1);
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let mut candidates = Vec::with_capacity(samples.len());
+        for sample in samples {
+            let Some(location) = self
+                .locations
+                .get(&wtxn, &sample.hash)
+                .map_err(map_heed)?
+                .map(LocationRecord::decode)
+                .transpose()?
+            else {
+                continue;
+            };
+            let mut access = self
+                .last_accessed
+                .get(&wtxn, &sample.hash)
+                .map_err(map_heed)?
+                .and_then(AccessRecord::decode)
+                .unwrap_or_else(|| AccessRecord::new(sample.observed_at));
+            access.record_samples(sample.samples, sample.observed_at, half_life);
+            let encoded = access.encode();
+            self.last_accessed
+                .put(&mut wtxn, &sample.hash, &encoded)
+                .map_err(map_heed)?;
+            candidates.push(TemperatureCandidate {
+                hash: sample.hash,
+                member: location.preferred_member(),
+                size: location.size(),
+                heat: access.decayed_heat(now, half_life),
+                last_accessed_at: access.last_accessed_at,
+                placed_at: access.placed_at,
+            });
+        }
+        wtxn.commit().map_err(map_heed)?;
+        Ok(candidates)
+    }
+
+    pub(super) fn scan_temperature_candidates(
+        &self,
+        now: u64,
+    ) -> Result<Vec<TemperatureCandidate>, StoreError> {
+        let limit = self.temperature_config.scan_items_per_cycle;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let after = self
+            .temperature_state
+            .get(&rtxn, CURSOR_KEY)
+            .map_err(map_heed)?
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map_err(|_| StoreError::Other("invalid temperature cursor".into()))
+            })
+            .transpose()?;
+        let mut entries = Vec::with_capacity(limit);
+        self.collect_temperature_range(&rtxn, after, limit, &mut entries)?;
+        if entries.len() < limit && after.is_some() {
+            self.collect_temperature_range(&rtxn, None, limit - entries.len(), &mut entries)?;
+        }
+        let half_life = self.temperature_config.heat_half_life.as_secs().max(1);
+        for candidate in &mut entries {
+            let access = self
+                .last_accessed
+                .get(&rtxn, &candidate.hash)
+                .map_err(map_heed)?
+                .and_then(AccessRecord::decode)
+                .unwrap_or_else(|| AccessRecord::new(now));
+            candidate.heat = access.decayed_heat(now, half_life);
+            candidate.last_accessed_at = access.last_accessed_at;
+            candidate.placed_at = access.placed_at;
+        }
+        drop(rtxn);
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        if let Some(last) = entries.last().map(|candidate| candidate.hash) {
+            self.temperature_state
+                .put(&mut wtxn, CURSOR_KEY, &last)
+                .map_err(map_heed)?;
+        } else {
+            self.temperature_state
+                .delete(&mut wtxn, CURSOR_KEY)
+                .map_err(map_heed)?;
+        }
+        wtxn.commit().map_err(map_heed)?;
+        Ok(entries)
+    }
+
+    fn collect_temperature_range(
+        &self,
+        rtxn: &heed::RoTxn<'_>,
+        after: Option<Hash>,
+        limit: usize,
+        entries: &mut Vec<TemperatureCandidate>,
+    ) -> Result<(), StoreError> {
+        let mut push = |hash: &[u8], location: &[u8]| -> Result<bool, StoreError> {
+            let hash: Hash = hash
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid pool location hash".into()))?;
+            if entries.iter().any(|candidate| candidate.hash == hash) {
+                return Ok(false);
+            }
+            let location = LocationRecord::decode(location)?;
+            entries.push(TemperatureCandidate {
+                hash,
+                member: location.preferred_member(),
+                size: location.size(),
+                heat: 0,
+                last_accessed_at: 0,
+                placed_at: 0,
+            });
+            Ok(entries.len() >= limit)
+        };
+
+        match after {
+            Some(after) => {
+                let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
+                for item in self.locations.range(rtxn, &range).map_err(map_heed)? {
+                    let (hash, location) = item.map_err(map_heed)?;
+                    if push(hash, location)? {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for item in self.locations.iter(rtxn).map_err(map_heed)? {
+                    let (hash, location) = item.map_err(map_heed)?;
+                    if push(hash, location)? {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn try_acquire_temperature_lease(&self, now: u64) -> Result<bool, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        if let Some(bytes) = self
+            .temperature_state
+            .get(&wtxn, LEASE_KEY)
+            .map_err(map_heed)?
+        {
+            if bytes.len() != 24 {
+                return Err(StoreError::Other("invalid temperature lease".into()));
+            }
+            let owner = PoolMemberId(bytes[..16].try_into().expect("checked lease length"));
+            let expires = u64::from_be_bytes(bytes[16..].try_into().expect("checked lease length"));
+            if owner != self.temperature_owner && expires > now {
+                return Ok(false);
+            }
+        }
+        let mut lease = [0u8; 24];
+        lease[..16].copy_from_slice(self.temperature_owner.as_bytes());
+        lease[16..].copy_from_slice(
+            &now.saturating_add(self.temperature_config.lease_duration.as_secs().max(1))
+                .to_be_bytes(),
+        );
+        self.temperature_state
+            .put(&mut wtxn, LEASE_KEY, &lease)
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_temperature_lease(&self) -> Result<(), StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let owned = self
+            .temperature_state
+            .get(&wtxn, LEASE_KEY)
+            .map_err(map_heed)?
+            .is_some_and(|bytes| bytes.starts_with(self.temperature_owner.as_bytes()));
+        if owned {
+            self.temperature_state
+                .delete(&mut wtxn, LEASE_KEY)
+                .map_err(map_heed)?;
+        }
+        wtxn.commit().map_err(map_heed)
+    }
+}
+
+pub(super) fn move_state_key(hash: Hash) -> [u8; 33] {
+    let mut key = [0u8; 33];
+    key[0] = MOVE_KEY_PREFIX;
+    key[1..].copy_from_slice(&hash);
+    key
+}

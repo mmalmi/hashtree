@@ -4,6 +4,10 @@ mod gate;
 mod maintenance;
 mod member;
 mod model;
+mod temperature;
+mod temperature_balancer;
+mod temperature_catalog;
+mod temperature_worker;
 #[cfg(test)]
 mod tests;
 
@@ -13,8 +17,10 @@ use self::member::{open_member_store, prepare_member_paths, validate_member_conf
 use self::model::{LocationRecord, MemberRecord, PoolManifest, MIN_MEMBER_MAP_SIZE_BYTES};
 pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
-    PoolStoreConfig,
+    PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
+use self::temperature::TemperatureRuntime;
+use self::temperature_worker::TemperatureWorker;
 use crate::{managed_env::ManagedEnv, LmdbBlobStore};
 use async_trait::async_trait;
 use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError, StoreStats};
@@ -23,11 +29,13 @@ use heed::types::{Bytes, Unit};
 use heed::{Database, EnvOpenOptions};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Deref;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const CATALOG_DATABASES: u32 = 5;
+const CATALOG_DATABASES: u32 = 6;
 const CATALOG_MAX_READERS: u32 = 1024;
 const MANIFEST_KEY: &[u8] = b"pool-manifest-v1";
 const MEMBER_MARKER_NAME: &str = ".hashtree-pool-member-v1";
@@ -42,15 +50,36 @@ struct RuntimeMembers {
     errors: HashMap<PoolMemberId, String>,
 }
 
+#[derive(Clone)]
 pub struct PoolStore {
+    inner: Arc<PoolStoreInner>,
+}
+
+#[doc(hidden)]
+pub struct PoolStoreInner {
     env: ManagedEnv,
     manifest_db: Database<Bytes, Bytes>,
     locations: Database<Bytes, Bytes>,
     by_member: Database<Bytes, Unit>,
     pins: Database<Bytes, Bytes>,
     last_accessed: Database<Bytes, Bytes>,
+    temperature_state: Database<Bytes, Bytes>,
     runtime: RwLock<RuntimeMembers>,
     adaptive: Mutex<AdaptivePoolState>,
+    temperature_config: PoolTemperatureConfig,
+    temperature: Mutex<TemperatureRuntime>,
+    temperature_access_counter: AtomicU64,
+    temperature_owner: PoolMemberId,
+    temperature_cycle: Mutex<()>,
+    temperature_worker: TemperatureWorker,
+}
+
+impl Deref for PoolStore {
+    type Target = PoolStoreInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 fn validate_new_member_paths(
@@ -84,6 +113,7 @@ fn validate_new_member_paths(
 
 impl PoolStore {
     pub fn open<P: AsRef<Path>>(path: P, config: PoolStoreConfig) -> Result<Self, StoreError> {
+        config.temperature.validate()?;
         let path = path.as_ref();
         fs::create_dir_all(path).map_err(StoreError::Io)?;
         let existing_size = fs::metadata(path.join("data.mdb"))
@@ -128,6 +158,9 @@ impl PoolStore {
         let last_accessed = env
             .create_database(&mut wtxn, Some("last_accessed"))
             .map_err(map_heed)?;
+        let temperature_state = env
+            .create_database(&mut wtxn, Some("temperature_state"))
+            .map_err(map_heed)?;
         if manifest_db
             .get(&wtxn, MANIFEST_KEY)
             .map_err(map_heed)?
@@ -140,18 +173,41 @@ impl PoolStore {
         }
         wtxn.commit().map_err(map_heed)?;
 
+        let temperature_config = config.temperature.clone();
         let store = Self {
-            env,
-            manifest_db,
-            locations,
-            by_member,
-            pins,
-            last_accessed,
-            runtime: RwLock::new(RuntimeMembers::default()),
-            adaptive: Mutex::new(AdaptivePoolState::new(config.member_failure_cooldown)),
+            inner: Arc::new(PoolStoreInner {
+                env,
+                manifest_db,
+                locations,
+                by_member,
+                pins,
+                last_accessed,
+                temperature_state,
+                runtime: RwLock::new(RuntimeMembers::default()),
+                adaptive: Mutex::new(AdaptivePoolState::new(config.member_failure_cooldown)),
+                temperature: Mutex::new(TemperatureRuntime::new(
+                    temperature_config.candidate_capacity,
+                )),
+                temperature_config,
+                temperature_access_counter: AtomicU64::new(0),
+                temperature_owner: PoolMemberId::new(),
+                temperature_cycle: Mutex::new(()),
+                temperature_worker: TemperatureWorker::default(),
+            }),
         };
         store.refresh_members()?;
+        store.start_temperature_worker()?;
         Ok(store)
+    }
+
+    fn start_temperature_worker(&self) -> Result<(), StoreError> {
+        if !self.temperature_config.enabled {
+            return Ok(());
+        }
+        self.temperature_worker.start(
+            Arc::downgrade(&self.inner),
+            self.temperature_config.interval,
+        )
     }
 
     pub fn add_member(&self, config: PoolMemberConfig) -> Result<PoolMemberId, StoreError> {
@@ -289,6 +345,32 @@ impl PoolStore {
         self.refresh_members()
     }
 
+    pub fn update_member_temperature_watermarks(
+        &self,
+        id: PoolMemberId,
+        low_percent: u8,
+        high_percent: u8,
+    ) -> Result<(), StoreError> {
+        if low_percent >= high_percent || high_percent > 100 {
+            return Err(StoreError::Other(
+                "pool temperature watermarks must satisfy 0 <= low < high <= 100".into(),
+            ));
+        }
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let mut manifest = self.manifest_from_txn(&wtxn)?;
+        let member = manifest
+            .members
+            .iter_mut()
+            .find(|member| member.id == id)
+            .ok_or_else(|| StoreError::Other(format!("unknown pool member {id}")))?;
+        member.config.temperature_low_watermark_percent = low_percent;
+        member.config.temperature_high_watermark_percent = high_percent;
+        manifest.generation = manifest.generation.saturating_add(1);
+        self.put_manifest_txn(&mut wtxn, &manifest)?;
+        wtxn.commit().map_err(map_heed)?;
+        self.refresh_members()
+    }
+
     pub fn remove_member(&self, id: PoolMemberId) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let mut manifest = self.manifest_from_txn(&wtxn)?;
@@ -348,6 +430,8 @@ impl PoolStore {
             external_pack_target_bytes: member.config.external_pack_target_bytes,
             max_read_concurrency: member.config.max_read_concurrency,
             max_write_concurrency: member.config.max_write_concurrency,
+            temperature_low_watermark_percent: member.config.temperature_low_watermark_percent,
+            temperature_high_watermark_percent: member.config.temperature_high_watermark_percent,
             logical_bytes,
             located_blobs,
             available,
@@ -576,6 +660,9 @@ impl PoolStore {
         if data.is_some() && matches!(location, LocationRecord::Pending { .. }) {
             self.finalize_pending(*hash, location)?;
         }
+        if data.is_some() {
+            self.sample_temperature_access(*hash, location);
+        }
         Ok(data)
     }
 
@@ -697,8 +784,19 @@ impl PoolStore {
         if self.locations.get(&wtxn, hash).map_err(map_heed)?.is_none() {
             return Ok(false);
         }
+        let previous = self
+            .last_accessed
+            .get(&wtxn, hash)
+            .map_err(map_heed)?
+            .and_then(self::temperature::AccessRecord::decode)
+            .unwrap_or_else(|| self::temperature::AccessRecord::new(now));
+        let access = self::temperature::AccessRecord {
+            last_accessed_at: now,
+            ..previous
+        }
+        .encode();
         self.last_accessed
-            .put(&mut wtxn, hash, &now.to_be_bytes())
+            .put(&mut wtxn, hash, &access)
             .map_err(map_heed)?;
         wtxn.commit().map_err(map_heed)?;
         Ok(true)
@@ -706,15 +804,25 @@ impl PoolStore {
 
     pub fn touch_many_accessed_sync(&self, hashes: &[Hash], now: u64) -> Result<usize, StoreError> {
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
-        let encoded = now.to_be_bytes();
         let mut updated = 0usize;
         let mut seen = HashSet::new();
         for hash in hashes {
             if !seen.insert(*hash) || self.locations.get(&wtxn, hash).map_err(map_heed)?.is_none() {
                 continue;
             }
+            let previous = self
+                .last_accessed
+                .get(&wtxn, hash)
+                .map_err(map_heed)?
+                .and_then(self::temperature::AccessRecord::decode)
+                .unwrap_or_else(|| self::temperature::AccessRecord::new(now));
+            let access = self::temperature::AccessRecord {
+                last_accessed_at: now,
+                ..previous
+            }
+            .encode();
             self.last_accessed
-                .put(&mut wtxn, hash, &encoded)
+                .put(&mut wtxn, hash, &access)
                 .map_err(map_heed)?;
             updated += 1;
         }
@@ -727,7 +835,11 @@ impl PoolStore {
         self.last_accessed
             .get(&rtxn, hash)
             .map_err(map_heed)?
-            .map(decode_u64)
+            .map(|bytes| {
+                self::temperature::AccessRecord::decode(bytes)
+                    .map(|access| access.last_accessed_at)
+                    .ok_or_else(|| StoreError::Other("invalid pool access record".into()))
+            })
             .transpose()
     }
 
@@ -739,7 +851,9 @@ impl PoolStore {
         let mut values = Vec::new();
         for hash in hashes {
             if let Some(value) = self.last_accessed.get(&rtxn, hash).map_err(map_heed)? {
-                values.push((*hash, decode_u64(value)?));
+                let access = self::temperature::AccessRecord::decode(value)
+                    .ok_or_else(|| StoreError::Other("invalid pool access record".into()))?;
+                values.push((*hash, access.last_accessed_at));
             }
         }
         Ok(values)
@@ -957,6 +1071,7 @@ impl PoolStore {
             .read()
             .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
         let mut candidates = Vec::new();
+        let mut below_high_watermark = Vec::new();
         for member in manifest.members.iter().filter(|member| {
             member.state == PoolMemberState::Active && !excluded.contains(&member.id)
         }) {
@@ -976,8 +1091,23 @@ impl PoolStore {
                 continue;
             }
             candidates.push((member.id, effective_bytes, member.config.capacity_bytes));
+            let projected_fill = effective_bytes
+                .saturating_add(incoming_bytes)
+                .saturating_mul(100)
+                .saturating_div(member.config.capacity_bytes)
+                .min(100);
+            if projected_fill <= u64::from(member.config.temperature_high_watermark_percent) {
+                below_high_watermark.push((
+                    member.id,
+                    effective_bytes,
+                    member.config.capacity_bytes,
+                ));
+            }
         }
         drop(runtime);
+        if !below_high_watermark.is_empty() {
+            candidates = below_high_watermark;
+        }
         self.adaptive
             .lock()
             .map_err(|_| StoreError::Other("pool adaptive lock poisoned".into()))?
@@ -1193,6 +1323,25 @@ impl PoolStore {
             self.record_read(id, Duration::ZERO, false);
         }
     }
+
+    fn sample_temperature_access(&self, hash: Hash, location: LocationRecord) {
+        if !self.temperature_config.enabled {
+            return;
+        }
+        let sample_rate = u64::from(self.temperature_config.read_sample_rate.max(1));
+        let access = self
+            .temperature_access_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if !access.is_multiple_of(sample_rate) {
+            return;
+        }
+        if let Ok(mut temperature) = self.temperature.lock() {
+            temperature
+                .samples
+                .observe(hash, location, unix_timestamp_now());
+        }
+    }
 }
 
 #[async_trait]
@@ -1274,12 +1423,6 @@ fn member_hash_key(member: PoolMemberId, hash: Hash) -> [u8; 48] {
 fn decode_pin_count(bytes: &[u8]) -> Result<u32, StoreError> {
     Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
         StoreError::Other("invalid pool pin count".into())
-    })?))
-}
-
-fn decode_u64(bytes: &[u8]) -> Result<u64, StoreError> {
-    Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| {
-        StoreError::Other("invalid pool u64 value".into())
     })?))
 }
 

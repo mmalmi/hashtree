@@ -1,3 +1,5 @@
+use super::temperature::AccessRecord;
+use super::temperature_catalog::move_state_key;
 use super::{
     decode_manifest, encode_manifest, map_heed, member_hash_key, unix_timestamp_now,
     LocationRecord, PoolManifest, PoolMemberId, PoolStore, MANIFEST_KEY,
@@ -82,32 +84,33 @@ impl PoolStore {
         Ok(())
     }
 
-    pub(super) fn set_location(
-        &self,
-        hash: Hash,
-        location: Option<LocationRecord>,
-    ) -> Result<(), StoreError> {
-        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
-        self.set_location_txn(&mut wtxn, hash, location)?;
-        wtxn.commit().map_err(map_heed)
-    }
-
     pub(super) fn set_location_txn(
         &self,
         txn: &mut heed::RwTxn<'_>,
         hash: Hash,
         location: Option<LocationRecord>,
     ) -> Result<(), StoreError> {
-        let previous = self.locations.get(txn, &hash).map_err(map_heed)?;
+        let previous = self
+            .locations
+            .get(txn, &hash)
+            .map_err(map_heed)?
+            .map(LocationRecord::decode)
+            .transpose()?;
         let had_previous = previous.is_some();
         if let Some(previous) = previous {
-            let previous = LocationRecord::decode(previous)?;
             let (members, len) = previous.members();
             for member in members.into_iter().take(len) {
                 self.by_member
                     .delete(txn, &member_hash_key(member, hash))
                     .map_err(map_heed)?;
             }
+        }
+        if previous.is_some_and(|previous| matches!(previous, LocationRecord::Moving { .. }))
+            && previous != location
+        {
+            self.temperature_state
+                .delete(txn, &move_state_key(hash))
+                .map_err(map_heed)?;
         }
         match location {
             Some(location) => {
@@ -120,8 +123,9 @@ impl PoolStore {
                         .map_err(map_heed)?;
                 }
                 if !had_previous {
+                    let access = AccessRecord::new(unix_timestamp_now()).encode();
                     self.last_accessed
-                        .put(txn, &hash, &unix_timestamp_now().to_be_bytes())
+                        .put(txn, &hash, &access)
                         .map_err(map_heed)?;
                 }
             }

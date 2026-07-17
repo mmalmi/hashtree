@@ -70,6 +70,10 @@ pub struct PoolMemberConfig {
     pub external_pack_target_bytes: Option<u64>,
     pub max_read_concurrency: u32,
     pub max_write_concurrency: u32,
+    #[serde(default = "default_temperature_low_watermark_percent")]
+    pub temperature_low_watermark_percent: u8,
+    #[serde(default = "default_temperature_high_watermark_percent")]
+    pub temperature_high_watermark_percent: u8,
 }
 
 impl PoolMemberConfig {
@@ -84,6 +88,8 @@ impl PoolMemberConfig {
             external_pack_target_bytes: None,
             max_read_concurrency: 64,
             max_write_concurrency: 16,
+            temperature_low_watermark_percent: default_temperature_low_watermark_percent(),
+            temperature_high_watermark_percent: default_temperature_high_watermark_percent(),
         }
     }
 
@@ -105,12 +111,102 @@ impl PoolMemberConfig {
         self.external_pack_target_bytes = pack_target_bytes.filter(|value| *value > 0);
         self
     }
+
+    pub fn with_temperature_watermarks(mut self, low_percent: u8, high_percent: u8) -> Self {
+        self.temperature_low_watermark_percent = low_percent;
+        self.temperature_high_watermark_percent = high_percent;
+        self
+    }
+}
+
+fn default_temperature_low_watermark_percent() -> u8 {
+    70
+}
+
+fn default_temperature_high_watermark_percent() -> u8 {
+    85
+}
+
+#[derive(Debug, Clone)]
+pub struct PoolTemperatureConfig {
+    pub enabled: bool,
+    pub interval: Duration,
+    pub read_sample_rate: u32,
+    pub heat_half_life: Duration,
+    pub access_flush_batch: usize,
+    pub scan_items_per_cycle: usize,
+    pub candidate_capacity: usize,
+    pub max_moves_per_cycle: usize,
+    pub max_bytes_per_cycle: u64,
+    pub max_concurrent_moves: usize,
+    pub minimum_residence: Duration,
+    pub promotion_hysteresis_percent: u8,
+    pub foreground_load_percent: u8,
+    pub lease_duration: Duration,
+    pub copy_chunk_bytes: usize,
+}
+
+impl Default for PoolTemperatureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval: Duration::from_secs(30),
+            read_sample_rate: 64,
+            heat_half_life: Duration::from_secs(6 * 60 * 60),
+            access_flush_batch: 512,
+            scan_items_per_cycle: 2_048,
+            candidate_capacity: 4_096,
+            max_moves_per_cycle: 8,
+            max_bytes_per_cycle: 1024 * 1024 * 1024,
+            max_concurrent_moves: 2,
+            minimum_residence: Duration::from_secs(6 * 60 * 60),
+            promotion_hysteresis_percent: 20,
+            foreground_load_percent: 25,
+            lease_duration: Duration::from_secs(120),
+            copy_chunk_bytes: 1024 * 1024,
+        }
+    }
+}
+
+impl PoolTemperatureConfig {
+    pub(super) fn validate(&self) -> Result<(), StoreError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.interval.is_zero()
+            || self.read_sample_rate == 0
+            || self.heat_half_life.is_zero()
+            || self.access_flush_batch == 0
+            || self.scan_items_per_cycle == 0
+            || self.candidate_capacity == 0
+            || self.max_moves_per_cycle == 0
+            || self.max_bytes_per_cycle == 0
+            || self.max_concurrent_moves == 0
+            || self.lease_duration.is_zero()
+            || self.copy_chunk_bytes == 0
+        {
+            return Err(StoreError::Other(
+                "enabled pool temperature budgets and intervals must be non-zero".into(),
+            ));
+        }
+        if self.foreground_load_percent == 0
+            || self.foreground_load_percent > 100
+            || self.promotion_hysteresis_percent > 100
+        {
+            return Err(StoreError::Other(
+                "pool temperature percentages must be within their documented 1..=100 bounds"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct PoolStoreConfig {
     pub catalog_map_size_bytes: u64,
     pub member_failure_cooldown: Duration,
+    pub temperature: PoolTemperatureConfig,
 }
 
 impl Default for PoolStoreConfig {
@@ -118,6 +214,7 @@ impl Default for PoolStoreConfig {
         Self {
             catalog_map_size_bytes: DEFAULT_CATALOG_MAP_SIZE_BYTES,
             member_failure_cooldown: Duration::from_secs(5),
+            temperature: PoolTemperatureConfig::default(),
         }
     }
 }
@@ -135,10 +232,27 @@ pub struct PoolMemberStatus {
     pub external_pack_target_bytes: Option<u64>,
     pub max_read_concurrency: u32,
     pub max_write_concurrency: u32,
+    pub temperature_low_watermark_percent: u8,
+    pub temperature_high_watermark_percent: u8,
     pub logical_bytes: u64,
     pub located_blobs: u64,
     pub available: bool,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PoolTemperatureReport {
+    pub sampled_accesses_flushed: usize,
+    pub scanned: usize,
+    pub candidates: usize,
+    pub moved: usize,
+    pub attempted_moves: usize,
+    pub peak_concurrent_moves: usize,
+    pub bytes_moved: u64,
+    pub resumed: usize,
+    pub throttled: bool,
+    pub lease_acquired: bool,
+    pub failed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

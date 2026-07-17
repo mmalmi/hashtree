@@ -708,8 +708,14 @@ pub(crate) enum PoolCommands {
         /// Per-process concurrent write limit for this member
         #[arg(long, default_value_t = 16)]
         max_writes: u32,
+        /// Prefer writes elsewhere and stop promotion at this fill percentage
+        #[arg(long, default_value_t = 85)]
+        temperature_high_percent: u8,
+        /// Under pressure, demote cold blobs until this fill percentage
+        #[arg(long, default_value_t = 70)]
+        temperature_low_percent: u8,
     },
-    /// Change capacity and/or per-process concurrency limits
+    /// Change capacity, concurrency, and/or temperature watermarks
     Configure {
         /// Stable member UUID from `storage pool status`
         id: String,
@@ -722,6 +728,12 @@ pub(crate) enum PoolCommands {
         /// New per-process concurrent write limit
         #[arg(long)]
         max_writes: Option<u32>,
+        /// New automatic promotion high watermark percentage
+        #[arg(long)]
+        temperature_high_percent: Option<u8>,
+        /// New automatic cold-demotion low watermark percentage
+        #[arg(long)]
+        temperature_low_percent: Option<u8>,
     },
     /// Stop new placement on a member and begin verified evacuation
     Drain { id: String },
@@ -729,6 +741,18 @@ pub(crate) enum PoolCommands {
     Maintain {
         #[arg(long, default_value_t = 1_000)]
         max_items: usize,
+    },
+    /// Run one bounded automatic temperature-balancing cycle now
+    BalanceTemperature {
+        /// Maximum blobs attempted in this cycle
+        #[arg(long)]
+        max_moves: Option<usize>,
+        /// Maximum GiB streamed in this cycle
+        #[arg(long)]
+        max_bytes_gb: Option<u64>,
+        /// Maximum simultaneous streamed moves
+        #[arg(long)]
+        max_concurrency: Option<usize>,
     },
     /// Hash-verified, resumable copy from an existing LMDB into the pool
     MigrateLmdb {

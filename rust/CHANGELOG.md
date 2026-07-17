@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.2.97 - 2026-07-17
+
+### Added
+
+- Released `hashtree-lmdb` 0.2.85 with an automatic, multi-terabyte-safe
+  `PoolStore` temperature balancer. Reads feed sampled bounded CLOCK queues;
+  decaying heat is flushed in batches, and a persisted incremental cursor keeps
+  startup and cycle work independent of total pool size.
+- Added adaptive hot promotion and cold capacity demotion without media labels.
+  Per-member high/low watermarks preserve fast-member headroom, while minimum
+  residence and measured performance hysteresis prevent thrashing.
+- Added configurable cycle, byte, concurrency, sample, scan, heat, foreground
+  load, lease, residence, and stream-chunk bounds. `htree storage pool` now
+  exposes member watermarks and an explicit bounded `balance-temperature`
+  command; the application still owns one Store and one write destination.
+
+### Fixed
+
+- Made every relocation persist and resume `Moving(source, target)` state,
+  stream source bytes in bounded chunks, verify size and SHA-256 before the
+  atomic location switch, and delete the source only afterward. Interrupted
+  target writes are verified and reused after restart.
+- Kept multiprocess balancers under one expiring catalog lease while allowing
+  every process to batch its own samples. Foreground load throttles new move
+  batches, and correctness remains independent of all heat and performance
+  observations.
+
 ## 0.2.96 - 2026-07-17
 
 ### Added

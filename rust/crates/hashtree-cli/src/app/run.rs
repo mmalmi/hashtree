@@ -2048,6 +2048,11 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         "    concurrency: {} reads, {} writes per process",
                         member.max_read_concurrency, member.max_write_concurrency
                     );
+                    println!(
+                        "    temperature watermarks: {}% low / {}% high",
+                        member.temperature_low_watermark_percent,
+                        member.temperature_high_watermark_percent
+                    );
                     println!("    available: {}", member.available);
                     if let Some(error) = member.last_error {
                         println!("    error: {error}");
@@ -2064,6 +2069,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 external_no_sync,
                 max_reads,
                 max_writes,
+                temperature_high_percent,
+                temperature_low_percent,
             } => {
                 if capacity_gb == 0 || max_reads == 0 || max_writes == 0 {
                     bail!("capacity and concurrency limits must be non-zero");
@@ -2074,6 +2081,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     .with_map_size_bytes(map_size_gb.unwrap_or(capacity_gb).saturating_mul(gib));
                 member.max_read_concurrency = max_reads;
                 member.max_write_concurrency = max_writes;
+                member = member
+                    .with_temperature_watermarks(temperature_low_percent, temperature_high_percent);
                 if let Some(external_dir) = external_dir {
                     member = member.with_external_blobs(
                         resolve_path(external_dir),
@@ -2090,6 +2099,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 capacity_gb,
                 max_reads,
                 max_writes,
+                temperature_high_percent,
+                temperature_low_percent,
             } => {
                 let pool = open_existing()?;
                 let id: PoolMemberId = id.parse()?;
@@ -2102,6 +2113,14 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     max_reads.unwrap_or(member.max_read_concurrency),
                     max_writes.unwrap_or(member.max_write_concurrency),
                 )?;
+                if temperature_high_percent.is_some() || temperature_low_percent.is_some() {
+                    pool.update_member_temperature_watermarks(
+                        id,
+                        temperature_low_percent.unwrap_or(member.temperature_low_watermark_percent),
+                        temperature_high_percent
+                            .unwrap_or(member.temperature_high_watermark_percent),
+                    )?;
+                }
                 println!("Updated pool member {id}");
             }
             PoolCommands::Drain { id } => {
@@ -2125,6 +2144,42 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 }
                 if !report.failed.is_empty() {
                     bail!("pool maintenance completed with failures");
+                }
+            }
+            PoolCommands::BalanceTemperature {
+                max_moves,
+                max_bytes_gb,
+                max_concurrency,
+            } => {
+                let mut config = PoolStoreConfig::default();
+                if let Some(max_moves) = max_moves {
+                    config.temperature.max_moves_per_cycle = max_moves;
+                }
+                if let Some(max_bytes_gb) = max_bytes_gb {
+                    config.temperature.max_bytes_per_cycle = max_bytes_gb.saturating_mul(gib);
+                }
+                if let Some(max_concurrency) = max_concurrency {
+                    config.temperature.max_concurrent_moves = max_concurrency;
+                }
+                let pool = PoolStore::open(&pool_path, config)?;
+                let report = pool.balance_temperature()?;
+                println!(
+                    "Scanned {}, considered {} candidates, attempted {} / moved {} blobs and {} bytes (peak concurrency {}, resumed {}, throttled {}, lease {})",
+                    report.scanned,
+                    report.candidates,
+                    report.attempted_moves,
+                    report.moved,
+                    report.bytes_moved,
+                    report.peak_concurrent_moves,
+                    report.resumed,
+                    report.throttled,
+                    report.lease_acquired
+                );
+                for failure in &report.failed {
+                    eprintln!("  {failure}");
+                }
+                if !report.failed.is_empty() {
+                    bail!("pool temperature balance completed with failures");
                 }
             }
             PoolCommands::MigrateLmdb {

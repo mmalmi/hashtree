@@ -17,6 +17,13 @@ pub(super) fn validate_member_config(config: &PoolMemberConfig) -> Result<(), St
             "pool member concurrency limits must be non-zero".into(),
         ));
     }
+    if config.temperature_low_watermark_percent >= config.temperature_high_watermark_percent
+        || config.temperature_high_watermark_percent > 100
+    {
+        return Err(StoreError::Other(
+            "pool temperature watermarks must satisfy 0 <= low < high <= 100".into(),
+        ));
+    }
     if config.external_blob_dir.is_some() != config.external_blob_min_bytes.is_some() {
         return Err(StoreError::Other(
             "pool external blob directory and threshold must be configured together".into(),

@@ -46,6 +46,21 @@ impl ConcurrencyGate {
         state.in_flight += 1;
         Ok(ConcurrencyPermit { gate: self })
     }
+
+    pub(super) fn load_percent(&self) -> Result<u8, StoreError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| StoreError::Other("pool concurrency gate poisoned".into()))?;
+        if state.limit == 0 {
+            return Ok(100);
+        }
+        Ok(state
+            .in_flight
+            .saturating_mul(100)
+            .saturating_div(state.limit)
+            .min(100) as u8)
+    }
 }
 
 pub(super) struct ConcurrencyPermit<'a> {

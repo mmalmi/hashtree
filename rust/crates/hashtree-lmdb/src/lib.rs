@@ -12,7 +12,7 @@ pub use configured::{
 pub use migration::{migrate_lmdb_batch, PoolMigrationBatch};
 pub use pool::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
-    PoolStore, PoolStoreConfig,
+    PoolStore, PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
 
 use async_trait::async_trait;
@@ -21,6 +21,7 @@ use hashtree_core::{to_hex, types::Hash};
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
 use managed_env::ManagedEnv;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -1168,6 +1169,187 @@ impl LmdbBlobStore {
         let end_exclusive = usize::try_from(actual_end.saturating_add(1))
             .map_err(|_| StoreError::Other("blob range end is too large".to_string()))?;
         Ok(Some(blob[start..end_exclusive].to_vec()))
+    }
+
+    pub(crate) fn copy_blob_to_sync(
+        &self,
+        target: &LmdbBlobStore,
+        hash: &Hash,
+        expected_size: u64,
+        chunk_bytes: usize,
+    ) -> Result<bool, StoreError> {
+        let actual_size = self
+            .blob_size_sync(hash)?
+            .ok_or_else(|| StoreError::Other("source blob disappeared during move".into()))?;
+        if actual_size != expected_size {
+            return Err(StoreError::Other(format!(
+                "source blob size changed during move: expected {expected_size}, found {actual_size}"
+            )));
+        }
+        if target.blob_size_sync(hash)?.is_some() {
+            target.verify_blob_streaming(hash, expected_size, chunk_bytes)?;
+            return Ok(false);
+        }
+
+        let external = target
+            .external_blobs
+            .as_ref()
+            .filter(|config| expected_size >= config.min_bytes as u64);
+        if let Some(config) = external {
+            return self.copy_blob_to_external_target(
+                target,
+                hash,
+                expected_size,
+                chunk_bytes,
+                config,
+            );
+        }
+
+        let capacity = usize::try_from(expected_size)
+            .map_err(|_| StoreError::Other("inline move exceeds addressable memory".into()))?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(capacity)
+            .map_err(|error| StoreError::Other(format!("reserve inline move buffer: {error}")))?;
+        let actual_hash = self.stream_blob_chunks(hash, expected_size, chunk_bytes, |chunk| {
+            data.extend_from_slice(chunk);
+            Ok(())
+        })?;
+        if actual_hash != *hash {
+            return Err(StoreError::Other(
+                "source returned corrupt bytes during move".into(),
+            ));
+        }
+        let inserted = target.put_sync(*hash, &data)?;
+        target.verify_blob_streaming(hash, expected_size, chunk_bytes)?;
+        Ok(inserted)
+    }
+
+    fn copy_blob_to_external_target(
+        &self,
+        target: &LmdbBlobStore,
+        hash: &Hash,
+        expected_size: u64,
+        chunk_bytes: usize,
+        config: &ExternalBlobConfig,
+    ) -> Result<bool, StoreError> {
+        let path = Self::external_blob_path_for_config(config, hash);
+        let parent = path
+            .parent()
+            .ok_or_else(|| StoreError::Other("external blob path has no parent".into()))?;
+        fs::create_dir_all(parent)?;
+        let temp_path = unique_temp_path(&path);
+        let mut file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        let actual_hash = self.stream_blob_chunks(hash, expected_size, chunk_bytes, |chunk| {
+            file.write_all(chunk).map_err(StoreError::Io)
+        });
+        let actual_hash = match actual_hash {
+            Ok(actual_hash) => actual_hash,
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&temp_path);
+                return Err(error);
+            }
+        };
+        if actual_hash != *hash {
+            drop(file);
+            let _ = fs::remove_file(&temp_path);
+            return Err(StoreError::Other(
+                "source returned corrupt bytes during move".into(),
+            ));
+        }
+        file.flush()?;
+        if config.sync {
+            file.sync_all()?;
+        }
+        drop(file);
+
+        let mut wtxn = target.env.write_txn().map_err(map_heed_error)?;
+        if target
+            .blobs
+            .get(&wtxn, hash)
+            .map_err(map_heed_error)?
+            .is_some()
+        {
+            drop(wtxn);
+            let _ = fs::remove_file(&temp_path);
+            target.verify_blob_streaming(hash, expected_size, chunk_bytes)?;
+            return Ok(false);
+        }
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        if config.sync {
+            File::open(parent)?.sync_all()?;
+        }
+        let marker = Self::external_blob_ref(hash);
+        target
+            .blobs
+            .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, hash, &marker)
+            .map_err(map_heed_error)?;
+        target.write_metadata_for_inserted_blobs(&mut wtxn, &[(*hash, expected_size)])?;
+        wtxn.commit().map_err(map_heed_error)?;
+        Ok(true)
+    }
+
+    pub(crate) fn verify_blob_streaming(
+        &self,
+        hash: &Hash,
+        expected_size: u64,
+        chunk_bytes: usize,
+    ) -> Result<(), StoreError> {
+        let size = self
+            .blob_size_sync(hash)?
+            .ok_or_else(|| StoreError::Other("target blob disappeared during move".into()))?;
+        if size != expected_size {
+            return Err(StoreError::Other(format!(
+                "target blob size mismatch: expected {expected_size}, found {size}"
+            )));
+        }
+        if self.stream_blob_chunks(hash, size, chunk_bytes, |_| Ok(()))? != *hash {
+            return Err(StoreError::Other(
+                "target returned corrupt bytes during move".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn stream_blob_chunks(
+        &self,
+        hash: &Hash,
+        expected_size: u64,
+        chunk_bytes: usize,
+        mut consume: impl FnMut(&[u8]) -> Result<(), StoreError>,
+    ) -> Result<Hash, StoreError> {
+        let chunk_bytes = u64::try_from(chunk_bytes.max(1)).unwrap_or(u64::MAX);
+        let mut offset = 0u64;
+        let mut hasher = Sha256::new();
+        while offset < expected_size {
+            let end = offset
+                .saturating_add(chunk_bytes)
+                .min(expected_size)
+                .saturating_sub(1);
+            let chunk = self
+                .get_range_sync(hash, offset, end)?
+                .ok_or_else(|| StoreError::Other("blob disappeared during streamed move".into()))?;
+            let expected_chunk = end.saturating_sub(offset).saturating_add(1);
+            if chunk.len() as u64 != expected_chunk {
+                return Err(StoreError::Other(format!(
+                    "short streamed blob read: expected {expected_chunk}, found {}",
+                    chunk.len()
+                )));
+            }
+            hasher.update(&chunk);
+            consume(&chunk)?;
+            offset = end.saturating_add(1);
+        }
+        Ok(hasher.finalize().into())
     }
 
     pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {

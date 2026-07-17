@@ -8,6 +8,23 @@ impl PoolStore {
         if max_items == 0 {
             return Ok(report);
         }
+        for (hash, location) in self.active_moves(max_items)? {
+            if report.examined >= max_items {
+                return Ok(report);
+            }
+            report.examined += 1;
+            let LocationRecord::Moving { source, target, .. } = location else {
+                continue;
+            };
+            match self.move_blob(source, target, hash) {
+                Ok(Some(bytes)) => {
+                    report.moved += 1;
+                    report.bytes_moved = report.bytes_moved.saturating_add(bytes);
+                }
+                Ok(None) => {}
+                Err(error) => report.failed.push(format!("{hash:?}: {error}")),
+            }
+        }
         let draining = self
             .read_manifest()?
             .members
@@ -96,7 +113,7 @@ impl PoolStore {
         self.move_blob_inner(source, target, hash, location, size, moving)
     }
 
-    fn move_blob(
+    pub(super) fn move_blob(
         &self,
         source: PoolMemberId,
         target: PoolMemberId,
@@ -130,42 +147,76 @@ impl PoolStore {
         size: u64,
         moving: bool,
     ) -> Result<Option<u64>, StoreError> {
-        let source_store = self.get_member(source)?;
         let target_store = self.get_member(target)?;
-        let source_data = match self.read_verified_member(source, &source_store, &hash) {
-            Ok(Some(data)) => data,
-            Ok(None) | Err(_) if moving => {
-                if let Some(target_data) =
-                    self.read_verified_member(target, &target_store, &hash)?
-                {
-                    self.complete_move(hash, source, target, size)?;
-                    let _ = self.delete_member_blob(source, &source_store, &hash);
-                    return Ok(Some(target_data.len() as u64));
-                }
-                return Err(StoreError::Other(format!(
-                    "draining source {source} does not contain the blob"
-                )));
-            }
-            Ok(None) => {
-                return Err(StoreError::Other(format!(
-                    "draining source {source} does not contain the blob"
-                )))
+        let source_store = match self.get_member(source) {
+            Ok(store) => store,
+            Err(_) if moving => {
+                target_store.verify_blob_streaming(
+                    &hash,
+                    size,
+                    self.temperature_config.copy_chunk_bytes,
+                )?;
+                self.complete_move(hash, source, target, size)?;
+                return Ok(Some(size));
             }
             Err(error) => return Err(error),
         };
+        let source_size = match source_store.blob_size_sync(&hash) {
+            Ok(size) => size,
+            Err(_) if moving => {
+                target_store.verify_blob_streaming(
+                    &hash,
+                    size,
+                    self.temperature_config.copy_chunk_bytes,
+                )?;
+                self.complete_move(hash, source, target, size)?;
+                let _ = self.delete_member_blob(source, &source_store, &hash);
+                return Ok(Some(size));
+            }
+            Err(error) => return Err(error),
+        };
+        if source_size.is_none() && moving {
+            target_store.verify_blob_streaming(
+                &hash,
+                size,
+                self.temperature_config.copy_chunk_bytes,
+            )?;
+            self.complete_move(hash, source, target, size)?;
+            let _ = self.delete_member_blob(source, &source_store, &hash);
+            return Ok(Some(size));
+        }
+        let source_size = source_size.ok_or_else(|| {
+            StoreError::Other(format!(
+                "draining source {source} does not contain the blob"
+            ))
+        })?;
+        if source_size != size {
+            return Err(StoreError::Other(format!(
+                "pool source {source} size mismatch: catalog={size}, member={source_size}"
+            )));
+        }
 
         let moving = LocationRecord::Moving {
             source,
             target,
             size,
         };
-        if location != moving {
-            self.set_location(hash, Some(moving))?;
+        if !self.begin_move_record(hash, location, moving)? {
+            return Ok(None);
         }
-        self.write_verified_member(target, &target_store, hash, &source_data)?;
+        let source_gate = self.member_gate(source, false)?;
+        let target_gate = self.member_gate(target, true)?;
+        let _source_permit = source_gate.acquire()?;
+        let _target_permit = target_gate.acquire()?;
+        source_store.copy_blob_to_sync(
+            &target_store,
+            &hash,
+            size,
+            self.temperature_config.copy_chunk_bytes,
+        )?;
         self.complete_move(hash, source, target, size)?;
         let _ = self.delete_member_blob(source, &source_store, &hash);
-        Ok(Some(source_data.len() as u64))
+        Ok(Some(size))
     }
 
     fn complete_move(
@@ -177,20 +228,11 @@ impl PoolStore {
     ) -> Result<(), StoreError> {
         let current = self.read_location(&hash)?;
         match current {
-            Some(LocationRecord::Moving {
-                source: actual_source,
-                target: actual_target,
-                ..
-            }) if actual_source == source && actual_target == target => self.set_location(
-                hash,
-                Some(LocationRecord::Stored {
-                    member: target,
-                    size,
-                }),
-            ),
-            Some(LocationRecord::Stored { member, .. }) if member == target => Ok(()),
+            Some(LocationRecord::Moving { .. }) | Some(LocationRecord::Stored { .. }) => {
+                self.finish_move_record(hash, source, target, size)
+            }
             other => Err(StoreError::Other(format!(
-                "pool location changed while moving {hash:?}: {other:?}"
+                "pool location disappeared while moving {hash:?}: {other:?}"
             ))),
         }
     }
