@@ -39,7 +39,7 @@ hashtree-sim = { version = "0.2.82", path = "crates/hashtree-sim" }
 hashtree-resolver = { version = "0.2.82", path = "crates/hashtree-resolver" }
 hashtree-config = { version = "0.2.82", path = "crates/hashtree-config" }
 hashtree-fs = { version = "0.2.82", path = "crates/hashtree-fs" }
-hashtree-nostr = { version = "0.2.82", path = "crates/hashtree-nostr" }
+hashtree-nostr = { version = "0.2.83", path = "crates/hashtree-nostr" }
 hashtree-nostr-pubsub = { version = "0.2.82", path = "crates/hashtree-nostr-pubsub" }
 hashtree-network = { version = "0.2.85", path = "crates/hashtree-network" }
 hashtree-fips-transport = { version = "0.4.6", path = "crates/hashtree-fips-transport" }

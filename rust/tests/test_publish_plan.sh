@@ -36,6 +36,8 @@ require_line "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" 'version = "0.2.84"' 
     "hashtree-lmdb must release its adaptive application-owned pool"
 require_line "${RUST_DIR}/crates/hashtree-network/Cargo.toml" 'version = "0.2.85"' \
     "hashtree-network must release bounded HTL-aware pubsub inventory routing"
+require_line "${RUST_DIR}/crates/hashtree-nostr/Cargo.toml" 'version = "0.2.83"' \
+    "hashtree-nostr must release optional negentropy timeout fallback"
 require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.96"' \
     "hashtree-cli must release as 0.2.96"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.83"' \
@@ -48,6 +50,8 @@ grep -F 'hashtree-core = { version = "0.2.86", path = "crates/hashtree-core" }' 
 grep -F 'hashtree-lmdb = { version = "0.2.84", path = "crates/hashtree-lmdb" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-network = { version = "0.2.85", path = "crates/hashtree-network" }' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'hashtree-nostr = { version = "0.2.83", path = "crates/hashtree-nostr" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-fips-transport = { version = "0.4.6", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null

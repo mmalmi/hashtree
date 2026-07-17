@@ -1681,7 +1681,18 @@ impl<S: Store> NostrBridge<S> {
                         })
                 }
             }
-            Err(err) => Err(err),
+            Err(err) if self.config.require_negentropy => Err(err),
+            // Some ordinary relays silently ignore NIP-77. Optional
+            // reconciliation must not disable the configured bounded REQ path.
+            Err(_) => self
+                .fetch_full_filter(client, relay, filter)
+                .await
+                .map(|events| RelayFetchResult {
+                    events_seen: events.len(),
+                    events,
+                    supports_negentropy: false,
+                    remote_cardinality: None,
+                }),
         }
     }
 
@@ -1945,9 +1956,18 @@ impl<S: Store> NostrBridge<S> {
                 .iter()
                 .flat_map(|(_, items)| items.iter().cloned())
                 .collect::<Vec<_>>();
-            let missing = self
+            let missing = match self
                 .reconcile_missing_ids(client, relay, filter, local_items)
-                .await?;
+                .await
+            {
+                Ok(missing) => missing,
+                Err(err) if self.config.require_negentropy || self.config.max_relay_pages == 0 => {
+                    return Err(err);
+                }
+                // Full-history callers explicitly configured a finite paging
+                // fallback, so a silent NIP-77 relay can still make progress.
+                Err(_) => None,
+            };
             let Some(reconciliation) = missing else {
                 relay_support = Some(false);
                 if self.config.require_negentropy {

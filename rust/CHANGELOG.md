@@ -14,6 +14,9 @@
 
 ### Fixed
 
+- Released `hashtree-nostr` 0.2.83 so optional negentropy timeouts fall back
+  to the configured bounded relay query or paging path. Strict negentropy and
+  failures after a relay advertises exact missing IDs still remain errors.
 - Released `hashtree-network` 0.2.85 with consistent mesh-event HTL semantics:
   publishers preserve the initial inventory budget, forwarding peers consume
   it, and bounded deduplication accepts a later copy only when it carries more

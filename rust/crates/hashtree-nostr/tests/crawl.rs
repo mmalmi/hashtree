@@ -44,6 +44,7 @@ struct SharedRelayState {
     requested_id_batches: Vec<Vec<String>>,
     filter_requests: usize,
     supports_negentropy: bool,
+    silently_ignores_negentropy: bool,
     negentropy_open_attempts: usize,
     negentropy_sessions_started: usize,
     server_page_cap: Option<usize>,
@@ -121,6 +122,16 @@ impl TestRelay {
 
     fn with_page_cap(server_page_cap: usize) -> Self {
         Self::with_options(false, Some(server_page_cap))
+    }
+
+    fn with_silent_negentropy_rejection() -> Self {
+        let relay = Self::with_options(false, None);
+        relay
+            .state
+            .lock()
+            .expect("relay state lock")
+            .silently_ignores_negentropy = true;
+        relay
     }
 
     fn with_negentropy_disconnect_on_id_request() -> Self {
@@ -370,12 +381,15 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<SharedRelayState>
                 let subscription_id = subscription_id.into_owned();
                 let filter = filter.into_owned();
                 let initial_message = initial_message.into_owned();
-                let supports_negentropy = {
+                let (supports_negentropy, silently_ignores_negentropy) = {
                     let mut guard = state.lock().expect("relay state lock");
                     guard.negentropy_open_attempts += 1;
-                    guard.supports_negentropy
+                    (guard.supports_negentropy, guard.silently_ignores_negentropy)
                 };
                 if !supports_negentropy {
+                    if silently_ignores_negentropy {
+                        continue;
+                    }
                     send_relay_message(
                         &mut write,
                         RelayMessage::notice("bad msg: unknown cmd negentropy"),
@@ -1503,6 +1517,79 @@ async fn require_negentropy_errors_when_no_relay_supports_it() -> io::Result<()>
     assert_eq!(relay.negentropy_open_attempts(), 1);
 
     Ok(())
+}
+
+async fn assert_silent_negentropy_fallback(mut config: CrawlConfig) -> io::Result<()> {
+    let relay = TestRelay::with_silent_negentropy_rejection();
+    let root_keys = Keys::generate();
+    let note = event_builder!(Kind::TextNote, "fallback note")
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&root_keys)
+        .expect("note");
+    relay
+        .state
+        .lock()
+        .expect("relay state lock")
+        .events
+        .push(note.clone());
+
+    config.relays = vec![relay.url()];
+    let graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let store = Arc::new(MemoryStore::new());
+    let bridge = NostrBridge::new(store.clone(), config);
+
+    let report = bridge
+        .crawl(&graph, None)
+        .await
+        .expect("configured fallback should recover optional reconciliation timeout");
+    let root = report.root.expect("index root");
+    let retained = NostrEventStore::new(store)
+        .list_recent(
+            Some(&root),
+            ListEventsOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list retained");
+
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, note.id.to_hex());
+    assert!(relay.negentropy_open_attempts() >= 1);
+    assert!(relay.filter_requests() >= 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn optional_negentropy_timeout_falls_back_to_bounded_relay_query() -> io::Result<()> {
+    assert_silent_negentropy_fallback(CrawlConfig {
+        author_batch_size: 1,
+        per_author_event_limit: 4,
+        kinds: Some(vec![1]),
+        fetch_timeout: Duration::from_millis(100),
+        require_negentropy: false,
+        ..CrawlConfig::default()
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn optional_full_history_timeout_falls_back_to_bounded_paging() -> io::Result<()> {
+    assert_silent_negentropy_fallback(CrawlConfig {
+        author_batch_size: 1,
+        per_author_event_limit: 4,
+        per_author_kind_event_limit: Some(4),
+        full_author_history: true,
+        relay_page_size: 4,
+        max_relay_pages: 1,
+        kinds: Some(vec![1]),
+        fetch_timeout: Duration::from_millis(100),
+        require_negentropy: false,
+        ..CrawlConfig::default()
+    })
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
