@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -233,6 +233,11 @@ struct RootPublishState {
     missing_blob_rebuild_required: bool,
 }
 
+struct RootUploadTask {
+    cancel: watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HistorySyncPlan {
     relay_fetch_mode: RelayFetchMode,
@@ -262,6 +267,8 @@ pub struct BackgroundNostrMirror {
     missing_profile_cursor: Mutex<usize>,
     history_sync_lock: AsyncMutex<()>,
     root_publication_deferrals: AtomicUsize,
+    root_upload_tasks: Mutex<Vec<RootUploadTask>>,
+    shutting_down: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -340,6 +347,8 @@ impl BackgroundNostrMirror {
             missing_profile_cursor: Mutex::new(0),
             history_sync_lock: AsyncMutex::new(()),
             root_publication_deferrals: AtomicUsize::new(0),
+            root_upload_tasks: Mutex::new(Vec::new()),
+            shutting_down: AtomicBool::new(false),
             shutdown_tx,
             shutdown_rx,
         })
@@ -464,7 +473,29 @@ impl BackgroundNostrMirror {
     }
 
     pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let tasks = self.root_upload_tasks.lock().expect("root upload tasks");
+        for task in tasks.iter() {
+            let _ = task.cancel.send(true);
+        }
         let _ = self.shutdown_tx.send(true);
+    }
+
+    async fn finish_root_upload_tasks(&self) {
+        let tasks = {
+            let mut tasks = self.root_upload_tasks.lock().expect("root upload tasks");
+            tasks.drain(..).collect::<Vec<_>>()
+        };
+        for mut task in tasks {
+            let _ = task.cancel.send(true);
+            if tokio::time::timeout(Duration::from_secs(3), &mut task.join)
+                .await
+                .is_err()
+            {
+                warn!("Timed out waiting for Nostr mirror root upload shutdown");
+                task.join.abort();
+            }
+        }
     }
 
     fn sync_publish_roots_from_store(&self) -> Result<()> {
@@ -728,6 +759,7 @@ impl BackgroundNostrMirror {
                 err
             );
         }
+        self.finish_root_upload_tasks().await;
         let _ = self.client.disconnect().await;
         if let Some(client) = self.publish_client.as_ref() {
             let _ = client.disconnect().await;
@@ -2048,7 +2080,9 @@ impl BackgroundNostrMirror {
         publish_state: &Arc<Mutex<RootPublishState>>,
         log_label: &str,
     ) -> bool {
-        if self.config.blossom_write_servers.is_empty() {
+        if self.config.blossom_write_servers.is_empty()
+            || self.shutting_down.load(Ordering::Acquire)
+        {
             return false;
         }
 
@@ -2075,23 +2109,28 @@ impl BackgroundNostrMirror {
         let root = pending_root.clone();
         let publish_state = Arc::clone(publish_state);
         let log_label = log_label.to_string();
-        tokio::task::spawn_blocking(move || {
+        let (cancel, mut cancelled) = watch::channel(false);
+        let task = tokio::task::spawn_blocking(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build nostr mirror root upload runtime");
-            runtime.block_on(async move {
-                let result = background_blossom_push_incremental_with_store(
-                    store,
-                    root.clone(),
-                    previous_uploaded_root,
-                    &servers,
-                )
-                .await;
-                let mut state = publish_state.lock().expect("root publish state");
-                if state.upload_in_progress_root.as_ref() == Some(&root) {
-                    state.upload_in_progress_root = None;
+            let result = runtime.block_on(async {
+                tokio::select! {
+                    result = background_blossom_push_incremental_with_store(
+                        store,
+                        root.clone(),
+                        previous_uploaded_root,
+                        &servers,
+                    ) => Some(result),
+                    _ = cancelled.changed() => None,
                 }
+            });
+            let mut state = publish_state.lock().expect("root publish state");
+            if state.upload_in_progress_root.as_ref() == Some(&root) {
+                state.upload_in_progress_root = None;
+            }
+            if let Some(result) = result {
                 match result {
                     Ok(()) => {
                         if let Err(err) =
@@ -2128,9 +2167,17 @@ impl BackgroundNostrMirror {
                         );
                     }
                 }
-            });
+            }
+            drop(state);
             trim_transient_allocations();
         });
+        let mut tasks = self.root_upload_tasks.lock().expect("root upload tasks");
+        tasks.retain(|task| !task.join.is_finished());
+        let task = RootUploadTask { cancel, join: task };
+        if self.shutting_down.load(Ordering::Acquire) {
+            let _ = task.cancel.send(true);
+        }
+        tasks.push(task);
 
         true
     }

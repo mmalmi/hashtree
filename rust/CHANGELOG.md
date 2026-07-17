@@ -18,6 +18,8 @@
   listener from recursively querying itself on a local miss; the daemon now
   keeps that endpoint for explicit client writes while excluding it only from
   its upstream read alternatives.
+- Made background mirror DAG uploads owned, cancellable tasks so daemon reload
+  and shutdown cannot wait indefinitely for unreachable Blossom servers.
 - Released `hashtree-nostr` 0.2.83 so optional negentropy timeouts fall back
   to the configured bounded relay query or paging path. Strict negentropy and
   failures after a relay advertises exact missing IDs still remain errors.
