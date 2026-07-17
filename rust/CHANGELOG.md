@@ -12,6 +12,9 @@
 
 ### Fixed
 
+- Required `fips-core` 0.4.6 and released `hashtree-fips-transport` 0.4.6
+  plus `hashtree-cli` 0.2.95, keeping session-control handshake futures within
+  Tokio's default worker stack without changing FMP, FSP, or blob wire formats.
 - Routed advertised same-host FIPS blob requests through the daemon's existing
   `BlobRouter`, so a local miss can continue to its configured authenticated
   peer set without decrementing HTL. Released the correction in
