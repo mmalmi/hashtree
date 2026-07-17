@@ -4,25 +4,32 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
+reject() {
+    if "$@"; then
+        printf 'forbidden release-gate condition matched: %s\n' "$*" >&2
+        exit 1
+    fi
+}
+
 bash rust/tests/test_publish_plan.sh
 
 # A clean checkout must resolve every non-workspace Rust dependency without
 # sibling repositories mounted beside hashtree.
-! grep -F 'path = "../../cashu-service/' rust/Cargo.toml >/dev/null
-! grep -F 'path = "../../../../fips/' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-! grep -F 'FIPS_DIR' rust/scripts/build_release_artifacts.sh >/dev/null
-! grep -F 'FIPS_DIR' rust/scripts/build_linux_release_target_docker.sh >/dev/null
-! grep -F 'for sibling in' rust/scripts/build_linux_release_target_docker.sh >/dev/null
-! grep -F 'requiredSiblingSourceDirs' rust/scripts/build_windows_vm_artifacts.mjs >/dev/null
+reject grep -qF 'path = "../../cashu-service/' rust/Cargo.toml
+reject grep -qF 'path = "../../../../fips/' rust/crates/hashtree-fips-transport/Cargo.toml
+reject grep -qF 'FIPS_DIR' rust/scripts/build_release_artifacts.sh
+reject grep -qF 'FIPS_DIR' rust/scripts/build_linux_release_target_docker.sh
+reject grep -qF 'for sibling in' rust/scripts/build_linux_release_target_docker.sh
+reject grep -qF 'requiredSiblingSourceDirs' rust/scripts/build_windows_vm_artifacts.mjs
 
 # The reusable blob transport has one implementation and does not pull the
 # separate Hashtree HTL router into the carrier layer.
 grep -F 'default = []' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'required-features = ["interop-fixture"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'webrtc = ["webrtc-endpoint"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-! grep -F 'legacy-mesh' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-! grep -F 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-! test -e rust/crates/hashtree-fips-transport/src/legacy_mesh.rs
+reject grep -qF 'legacy-mesh' rust/crates/hashtree-fips-transport/Cargo.toml
+reject grep -qF 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.toml
+reject test -e rust/crates/hashtree-fips-transport/src/legacy_mesh.rs
 
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.
@@ -31,17 +38,20 @@ grep -F 'export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target}"' 
 grep -F 'ensure_test_fd_limit' scripts/release-gate.sh >/dev/null
 grep -F 'ulimit -Sn 8192' .github/workflows/ci.yml >/dev/null
 grep -F 'rev-parse "${VERSION}^{commit}"' publish_release.sh >/dev/null
-! grep -F "tags:" .github/workflows/release.yml >/dev/null
+reject grep -qF "tags:" .github/workflows/release.yml
 grep -F 'needs: gate' .github/workflows/release.yml >/dev/null
 release_gate_job="$(sed -n '/^  gate:/,/^  build:/p' .github/workflows/release.yml)"
 printf '%s\n' "$release_gate_job" | grep -F '~/.cargo/registry/cache/' >/dev/null
-! printf '%s\n' "$release_gate_job" | grep -F 'rust/target/' >/dev/null
+if printf '%s\n' "$release_gate_job" | grep -qF 'rust/target/'; then
+    echo 'release gate cache must not retain rust/target/' >&2
+    exit 1
+fi
 
 # CI keeps the same coverage while avoiding duplicate dependency installs and
 # a second `cargo test` execution that already overlaps the workspace suite.
 [ "$(grep -c 'pnpm install --frozen-lockfile' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -Ec 'cargo test --workspace( --locked)?$' .github/workflows/ci.yml)" -eq 1 ]
-! grep -F 'cargo test --workspace --tests' .github/workflows/ci.yml >/dev/null
+reject grep -qF 'cargo test --workspace --tests' .github/workflows/ci.yml
 [ "$(grep -h 'libwebkit2gtk-4.1-dev' .github/workflows/ci.yml .github/workflows/release.yml | wc -l | tr -d ' ')" -eq 2 ]
 
 # The independently consumable FIPS transport has one canonical TypeScript
@@ -85,8 +95,11 @@ grep -F -- '-p hashtree-cli' .github/workflows/release.yml >/dev/null
 # No Svelte component exists in this TypeScript workspace, so loading the
 # Svelte lint plugin only adds an undeclared peer and makes clean CI installs
 # fail before linting the actual sources.
-! find ts -type f -name '*.svelte' -print -quit | grep -q .
-! grep -F "eslint-plugin-svelte" ts/package.json ts/eslint.config.js >/dev/null
-! grep -F "svelte-eslint-parser" ts/package.json ts/eslint.config.js >/dev/null
+if find ts -type f -name '*.svelte' -print -quit | grep -q .; then
+    echo 'Svelte source unexpectedly exists in the TypeScript workspace' >&2
+    exit 1
+fi
+reject grep -qF "eslint-plugin-svelte" ts/package.json ts/eslint.config.js
+reject grep -qF "svelte-eslint-parser" ts/package.json ts/eslint.config.js
 
 echo "release gate wiring checks passed"
