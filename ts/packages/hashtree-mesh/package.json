@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/mesh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Adaptive read routing across opaque Hashtree blob sources",
   "type": "module",
   "main": "dist/index.js",

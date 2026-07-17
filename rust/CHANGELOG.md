@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.2.98 - 2026-07-17
+
+### Changed
+
+- Released `hashtree-network` 0.2.86 as the read-only adaptive `BlobRouter`
+  crate. Route implementations own transport addresses and composite peer
+  selection; the outer router retains bounded, decaying route outcomes and
+  centrally verifies every Data reply.
+- Released `hashtree-config` 0.2.83, `hashtree-embedded` 0.2.84, and
+  `hashtree-cli` 0.2.98 without the retired direct-WebRTC/STUN/multicast peer
+  settings or status surfaces. FIPS WebRTC remains available strictly as a
+  FIPS-owned underlay.
+
+### Removed
+
+- Deleted the duplicate `DataRequest`/`DataResponse` MessagePack framing,
+  response fragmentation, raw data-channel carrier, private mesh pubsub,
+  WebRTC compatibility stub, dormant paid-peer wrapper, and their simulations.
+  Nostr events remain owned by Nostr providers; blob reads retain the published
+  `BlobRequest`/`BlobReply` TCP/FIPS wire format and HTL semantics.
+
 ## 0.2.97 - 2026-07-17
 
 ### Added

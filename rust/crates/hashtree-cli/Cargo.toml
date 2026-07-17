@@ -1,12 +1,12 @@
 [package]
 name = "hashtree-cli"
-version = "0.2.97"
+version = "0.2.98"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Hashtree daemon and CLI - content-addressed storage with P2P sync"
+description = "Hashtree daemon and CLI with content-addressed storage and adaptive blob routing"
 default-run = "htree"
 
 [[bin]]

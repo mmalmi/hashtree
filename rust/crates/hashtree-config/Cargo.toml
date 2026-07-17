@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-config"
-version.workspace = true
+version = "0.2.83"
 edition.workspace = true
 description = "Shared configuration for hashtree tools"
 license.workspace = true

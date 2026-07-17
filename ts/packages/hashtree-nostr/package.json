@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/nostr",
-  "version": "0.1.18",
+  "version": "0.2.0",
   "description": "Nostr integration for hashtree - ref resolver and event collections",
   "type": "module",
   "main": "dist/index.js",

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.1 - 2026-07-17
+
+### Changed
+
+- Released `@hashtree/mesh@0.3.0` as the generic adaptive, read-only
+  `BlobRouter` surface. `@hashtree/worker@0.4.1` keeps its explicit IndexedDB
+  write destination and consumes the router without another write or peer
+  selection layer.
+- Released `@hashtree/nostr@0.2.0` without re-exporting blob routing. Nostr
+  event resolution and distribution remain independent of the blob route
+  graph.
+
+### Removed
+
+- Deleted the old `DataRequest`/`DataResponse` MessagePack framing, response
+  fragmentation, private mesh pubsub messages, and the obsolete peer selector.
+  The native-compatible `BlobRequest`/`BlobReply` contract and TCP/FIPS wire
+  vectors are unchanged.
+
 ## TypeScript runtime 0.5.0 - 2026-07-16
 
 ### Added
