@@ -40,10 +40,10 @@ require_line "${RUST_DIR}/crates/hashtree-network/Cargo.toml" 'version = "0.2.86
     "hashtree-network must release as the read-only BlobRouter crate"
 require_line "${RUST_DIR}/crates/hashtree-nostr/Cargo.toml" 'version = "0.2.83"' \
     "hashtree-nostr must release optional negentropy timeout fallback"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.98"' \
-    "hashtree-cli must release as 0.2.98"
-require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.84"' \
-    "hashtree-embedded must release without retired browser peer settings"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.99"' \
+    "hashtree-cli must release as 0.2.99"
+require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.85"' \
+    "hashtree-embedded must release with the FIPS WebRTC underlay"
 require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.6"' \
     "hashtree-fips-transport must release its composite BlobRoute"
 
@@ -59,7 +59,7 @@ grep -F 'hashtree-nostr = { version = "0.2.83", path = "crates/hashtree-nostr" }
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-fips-transport = { version = "0.4.6", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-cli = { version = "0.2.98", path = "../hashtree-cli", default-features = false, features = ["lmdb"] }' \
+grep -F 'hashtree-cli = { version = "0.2.99", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null
 
 require_registry_lock() {

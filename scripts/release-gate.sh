@@ -56,6 +56,7 @@ bash "$repo_root/scripts/test-release-gate-wiring.sh"
 bash "$repo_root/rust/tests/test_build_release_artifacts.sh"
 bash "$repo_root/rust/tests/test_build_release_invocation.sh"
 bash "$repo_root/rust/tests/test_build_release_docker_invocation.sh"
+bash "$repo_root/rust/tests/test_release_webrtc_smoke.sh"
 node --test "$repo_root/rust/tests/test_build_windows_vm_artifacts.mjs"
 
 pnpm --dir "$repo_root/ts" install --frozen-lockfile

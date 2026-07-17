@@ -108,6 +108,9 @@ grep -F 'name: Build release binaries (Windows)' .github/workflows/release.yml >
 grep -F -- '-p git-remote-htree' .github/workflows/release.yml >/dev/null
 grep -F -- '-p hashtree-cashu-cli' .github/workflows/release.yml >/dev/null
 grep -F -- '-p hashtree-cli' .github/workflows/release.yml >/dev/null
+grep -F -- '--features hashtree-cli/fips-webrtc' .github/workflows/release.yml >/dev/null
+grep -F 'smoke_release_webrtc_unix.sh' .github/workflows/release.yml >/dev/null
+grep -F 'WebRTC transport started' .github/workflows/release.yml >/dev/null
 
 # No Svelte component exists in this TypeScript workspace, so loading the
 # Svelte lint plugin only adds an undeclared peer and makes clean CI installs

@@ -2262,6 +2262,12 @@ async fn upload_decoded_blob_batch(
 
     match stored {
         Ok(Ok((report, items))) => {
+            for ((sha256_hex, _), (_, data)) in replica_specs.iter().zip(&items) {
+                state
+                    .blob_cache
+                    .put_size(sha256_hex.clone(), Some(data.len() as u64));
+                state.blob_cache.put_body(sha256_hex.clone(), data);
+            }
             let uploaded = report.inserted;
             if uploaded > 0 {
                 let inserted: HashSet<_> = report.inserted_hashes.iter().copied().collect();
@@ -2973,7 +2979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_blob_batch_binary_stores_multiple_blobs() {
+    async fn upload_blob_batch_binary_replaces_cached_misses_after_commit() {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = Arc::new(
             HashtreeStore::with_options(temp_dir.path(), None, 128 * 1024 * 1024).expect("store"),
@@ -3003,7 +3009,18 @@ mod tests {
             (&second, Some("application/octet-stream")),
         ]);
 
-        let response = upload_blob_batch_binary(State(state), headers, body)
+        let first_hash_hex = hex::encode(first_hash);
+        let client = axum::extract::ConnectInfo("127.0.0.1:12345".parse().unwrap());
+        let miss = head_blob(
+            State(state.clone()),
+            Path(format!("{first_hash_hex}.bin")),
+            client,
+        )
+        .await
+        .into_response();
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+
+        let response = upload_blob_batch_binary(State(state.clone()), headers, body)
             .await
             .into_response();
 
@@ -3019,6 +3036,15 @@ mod tests {
         assert_eq!(parsed.blobs[1].sha256, hex::encode(second_hash));
         assert!(store.blob_exists(&first_hash).expect("first exists"));
         assert!(store.blob_exists(&second_hash).expect("second exists"));
+
+        let immediate_head = head_blob(State(state), Path(format!("{first_hash_hex}.bin")), client)
+            .await
+            .into_response();
+        assert_eq!(
+            immediate_head.status(),
+            StatusCode::OK,
+            "a committed batch write must replace a cached preflight miss",
+        );
     }
 
     #[tokio::test]

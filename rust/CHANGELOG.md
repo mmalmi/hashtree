@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.2.99 - 2026-07-17
+
+### Changed
+
+- Published CLI artifacts now compile the FIPS WebRTC underlay on all five
+  targets while continuing to omit optional FUSE integration. Every builder
+  extracts its finished archive and starts that exact `htree` binary, requiring
+  the WebRTC transport to initialize before the artifact can be released.
+- Released `hashtree-embedded` 0.2.85 with the same FIPS WebRTC feature so
+  application-owned embedded daemons and the standalone CLI expose one
+  consistent native transport boundary.
+
+### Fixed
+
+- Replaced cached Blossom `HEAD` misses immediately after a hash-verified batch
+  commit. A concurrent Git push can no longer mistake a freshly stored old-tree
+  blob for missing and abandon its bounded diff upload.
+
 ## 0.2.98 - 2026-07-17
 
 ### Changed

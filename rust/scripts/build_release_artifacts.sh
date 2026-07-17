@@ -74,14 +74,14 @@ require_command() {
 target_release_features() {
     case "$1" in
         x86_64-unknown-linux-musl|aarch64-unknown-linux-musl)
-            # Release artifacts omit optional FUSE support; source builds can
-            # opt in with `--features lmdb,fuse` on systems with libfuse.
-            printf '%s\n' ""
+            # Browser/native interoperability is part of the published CLI;
+            # FUSE remains optional because it needs host libraries.
+            printf '%s\n' "hashtree-cli/fips-webrtc"
             ;;
         x86_64-apple-darwin|aarch64-apple-darwin)
             # macOS release artifacts intentionally omit FUSE so `htree` still
             # launches on systems without macFUSE installed.
-            printf '%s\n' ""
+            printf '%s\n' "hashtree-cli/fips-webrtc"
             ;;
         *)
             printf '%s\n' ""

@@ -142,6 +142,7 @@ cargo build --release --target ${TARGET} --target-dir /target-dir \\
     -p git-remote-htree \\
     -p hashtree-cashu-cli \\
     -p hashtree-cli \\
+    --features hashtree-cli/fips-webrtc \\
     \$locked_flag
 EOF
 
