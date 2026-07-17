@@ -53,6 +53,35 @@ pub struct PoolStore {
     adaptive: Mutex<AdaptivePoolState>,
 }
 
+fn validate_new_member_paths(
+    manifest: &PoolManifest,
+    config: &PoolMemberConfig,
+) -> Result<(), StoreError> {
+    if manifest
+        .members
+        .iter()
+        .any(|member| member.config.path == config.path)
+    {
+        return Err(StoreError::Other(format!(
+            "pool member path is already configured: {}",
+            config.path.display()
+        )));
+    }
+    if let Some(external) = config.external_blob_dir.as_ref() {
+        if manifest
+            .members
+            .iter()
+            .any(|member| member.config.external_blob_dir.as_ref() == Some(external))
+        {
+            return Err(StoreError::Other(format!(
+                "pool external blob path is already configured: {}",
+                external.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl PoolStore {
     pub fn open<P: AsRef<Path>>(path: P, config: PoolStoreConfig) -> Result<Self, StoreError> {
         let path = path.as_ref();
@@ -126,36 +155,47 @@ impl PoolStore {
     }
 
     pub fn add_member(&self, config: PoolMemberConfig) -> Result<PoolMemberId, StoreError> {
-        validate_member_config(&config)?;
-        let manifest = self.read_manifest()?;
-        if manifest
-            .members
-            .iter()
-            .any(|member| member.config.path == config.path)
-        {
-            return Err(StoreError::Other(format!(
-                "pool member path is already configured: {}",
-                config.path.display()
-            )));
-        }
-        if let Some(external) = config.external_blob_dir.as_ref() {
-            if manifest
-                .members
-                .iter()
-                .any(|member| member.config.external_blob_dir.as_ref() == Some(external))
-            {
-                return Err(StoreError::Other(format!(
-                    "pool external blob path is already configured: {}",
-                    external.display()
-                )));
-            }
-        }
+        self.add_member_inner(config, false)?
+            .ok_or_else(|| StoreError::Other("pool member was not added".into()))
+    }
 
+    pub(crate) fn ensure_initial_member(
+        &self,
+        config: PoolMemberConfig,
+    ) -> Result<Option<PoolMemberId>, StoreError> {
+        if !self.read_manifest()?.members.is_empty() {
+            self.refresh_members()?;
+            return Ok(None);
+        }
+        self.add_member_inner(config, true)
+    }
+
+    fn add_member_inner(
+        &self,
+        config: PoolMemberConfig,
+        only_if_empty: bool,
+    ) -> Result<Option<PoolMemberId>, StoreError> {
+        validate_member_config(&config)?;
+        let wtxn = self.env.write_txn().map_err(map_heed)?;
+        let manifest = self.manifest_from_txn(&wtxn)?;
+        if only_if_empty && !manifest.members.is_empty() {
+            drop(wtxn);
+            self.refresh_members()?;
+            return Ok(None);
+        }
+        validate_new_member_paths(&manifest, &config)?;
         let id = prepare_member_paths(&config, PoolMemberId::new())?;
+        drop(wtxn);
         let store = Arc::new(open_member_store(id, &config)?);
 
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let mut manifest = self.manifest_from_txn(&wtxn)?;
+        if only_if_empty && !manifest.members.is_empty() {
+            drop(wtxn);
+            self.refresh_members()?;
+            return Ok(None);
+        }
+        validate_new_member_paths(&manifest, &config)?;
         if manifest.members.iter().any(|member| member.id == id) {
             return Err(StoreError::Other(format!(
                 "pool member identity is already configured: {id}"
@@ -190,7 +230,7 @@ impl PoolStore {
             Arc::new(ConcurrencyGate::new(member.config.max_write_concurrency)),
         );
         runtime.errors.remove(&id);
-        Ok(id)
+        Ok(Some(id))
     }
 
     pub fn begin_drain(&self, id: PoolMemberId) -> Result<(), StoreError> {
