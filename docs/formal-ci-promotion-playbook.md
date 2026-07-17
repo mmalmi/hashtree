@@ -17,7 +17,7 @@ Promote formal verification checks from advisory to hard gate after proving stab
    - `Core Integrity`
 3. If/when available, also require:
    - `git-formal`
-   - `mesh-formal`
+   - `Blob Router`
 4. Announce promotion in release notes/changelog.
 
 ## Rollback Procedure
