@@ -634,42 +634,17 @@ fn reference_success_rate(stats: &SimStats) -> f64 {
 
 #[tokio::test]
 async fn test_mesh_sim_goofballs_reduce_reference_success() {
-    let honest_config = SimConfig {
-        node_count: 80,
-        duration: Duration::from_secs(5),
-        seed: 1234,
-        pool: PoolConfig {
-            max_connections: 16,
-            satisfied_connections: 8,
-        },
-        discovery_interval_ms: 100,
-        hello_reannounce_interval_ms: 400,
-        churn_rate: 0.02,
-        allow_rejoin: true,
-        network_latency_ms: 30,
-        retrieval_probe_count: 24,
-        retrieval_payload_bytes: 1024,
-        retrieval_timeout_ms: 700,
-        max_events_retained: 20_000,
-        retrieval_timing_mode: RetrievalTimingMode::VirtualSteps,
-        retrieval_poll_interval_ms: 5,
-        strategy_mix: vec![NodeStrategyProfile {
-            name: "reference".to_string(),
-            weight: 1,
-            pool: PoolConfig {
-                max_connections: 18,
-                satisfied_connections: 9,
-            },
-            selection_strategy: SelectionStrategy::Weighted,
-            fairness_enabled: true,
-            dispatch: RequestDispatchConfig::default(),
-            response_behavior: ResponseBehaviorConfig::default(),
-        }],
-        reference_strategy: Some("reference".to_string()),
-        cashu_incentives: None,
-    };
-
-    let mixed_config = mixed_bad_actor_config(honest_config.seed, SelectionStrategy::Weighted);
+    let mut mixed_config = mixed_bad_actor_config(1234, SelectionStrategy::Weighted);
+    mixed_config.retrieval_probe_count = 64;
+    for strategy in &mut mixed_config.strategy_mix {
+        if strategy.name != "reference" {
+            strategy.response_behavior.drop_response_prob = 1.0;
+        }
+    }
+    let mut honest_config = mixed_config.clone();
+    for strategy in &mut honest_config.strategy_mix {
+        strategy.response_behavior = ResponseBehaviorConfig::default();
+    }
 
     let honest = Simulation::new(honest_config);
     honest.run().await;
@@ -680,6 +655,12 @@ async fn test_mesh_sim_goofballs_reduce_reference_success() {
     mixed.run().await;
     let mixed_stats = mixed.get_stats().await;
     let mixed_ref = reference_success_rate(&mixed_stats);
+
+    assert_eq!(
+        honest_stats.strategy_retrieval["reference"].probes,
+        mixed_stats.strategy_retrieval["reference"].probes,
+        "paired simulations must exercise the same reference workload"
+    );
 
     assert!(
             mixed_ref < honest_ref,

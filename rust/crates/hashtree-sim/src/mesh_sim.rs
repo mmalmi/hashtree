@@ -6,6 +6,7 @@
 use crate::cashu_test_mint::{MintError, MintStats};
 use crate::mint_client::{LocalMintClient, MintClient};
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -506,7 +507,7 @@ impl Simulation {
             }
 
             if hello_interval_ticks > 0 && tick % hello_interval_ticks == 0 {
-                self.broadcast_hellos().await;
+                self.broadcast_hellos(tick / hello_interval_ticks).await;
             }
 
             // Process messages, apply churn
@@ -726,13 +727,18 @@ impl Simulation {
         self.record_new_connections(time_ms).await;
     }
 
-    async fn broadcast_hellos(&self) {
+    async fn broadcast_hellos(&self, round: u64) {
         let stores: Vec<Arc<SimMeshStore<MemoryStore>>> = {
             let nodes = self.nodes.read().await;
-            nodes
-                .values()
-                .map(|running| running.store.clone())
-                .collect()
+            let mut stores: Vec<_> = nodes
+                .iter()
+                .map(|(node_id, running)| (node_id.clone(), running.store.clone()))
+                .collect();
+            stores.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            let mut rng =
+                StdRng::seed_from_u64(self.config.seed ^ round.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            stores.shuffle(&mut rng);
+            stores.into_iter().map(|(_, store)| store).collect()
         };
         for store in stores {
             let _ = store.send_hello().await;
@@ -920,6 +926,8 @@ impl Simulation {
             return;
         }
 
+        let mut connected_pairs = connected_pairs;
+        connected_pairs.sort_unstable();
         let mut latencies_ms = Vec::with_capacity(self.config.retrieval_probe_count);
         let mut strategy_latencies: HashMap<String, Vec<u64>> = HashMap::new();
         for probe_idx in 0..self.config.retrieval_probe_count {
@@ -1130,7 +1138,8 @@ impl Simulation {
             return;
         }
 
-        let node_ids: Vec<String> = self.nodes.read().await.keys().cloned().collect();
+        let mut node_ids: Vec<String> = self.nodes.read().await.keys().cloned().collect();
+        node_ids.sort_unstable();
         let mut to_remove = Vec::new();
 
         {
