@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "fips-core",

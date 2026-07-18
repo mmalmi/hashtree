@@ -44,8 +44,8 @@ require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.100"' 
     "hashtree-cli must release as 0.2.100"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.86"' \
     "hashtree-embedded must release the corrected mesh forwarding boundary"
-require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.7"' \
-    "hashtree-fips-transport must release hedged provider reads"
+require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.8"' \
+    "hashtree-fips-transport must release idle-safe adaptive polling"
 
 grep -F 'hashtree-core = { version = "0.2.86", path = "crates/hashtree-core" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
@@ -57,7 +57,7 @@ grep -F 'hashtree-network = { version = "0.2.87", path = "crates/hashtree-networ
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-nostr = { version = "0.2.83", path = "crates/hashtree-nostr" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-fips-transport = { version = "0.4.7", path = "crates/hashtree-fips-transport" }' \
+grep -F 'hashtree-fips-transport = { version = "0.4.8", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-cli = { version = "0.2.100", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null

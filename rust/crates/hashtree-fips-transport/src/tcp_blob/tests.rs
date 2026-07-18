@@ -12,6 +12,18 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 
 #[test]
+fn tcp_blob_poll_interval_backs_off_without_application_work() {
+    assert_eq!(tcp_blob_poll_interval(false), IDLE_POLL_INTERVAL);
+    assert!(IDLE_POLL_INTERVAL >= Duration::from_millis(250));
+}
+
+#[test]
+fn tcp_blob_poll_interval_stays_responsive_during_application_work() {
+    assert_eq!(tcp_blob_poll_interval(true), ACTIVE_POLL_INTERVAL);
+    assert_eq!(ACTIVE_POLL_INTERVAL, Duration::from_millis(10));
+}
+
+#[test]
 fn request_matches_shared_codec_vector() {
     let hash = std::array::from_fn(|index| index as u8);
 

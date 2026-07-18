@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, Id as TaskId, JoinError, JoinHandle, JoinSet};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 
 /// Reserved discovery capability for this protocol.
 ///
@@ -35,7 +35,8 @@ const MAX_TCP_CONNECTIONS: usize = 32;
 const MAX_SERVER_CONNECTIONS: usize = 8;
 pub(crate) const MAX_OUTBOUND_GETS: usize = 4;
 const MAX_STORE_LOADS: usize = 4;
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CONNECT_RETRY_DELAY_MS: u64 = 50;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_millis(5_500);
 
@@ -533,11 +534,9 @@ struct TcpBlobActor {
 
 impl TcpBlobActor {
     async fn run(mut self) -> Result<(), TcpBlobTransportError> {
-        let mut ticker = tokio::time::interval(POLL_INTERVAL);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
         loop {
             let now_ms = self.now_ms();
+            let poll_interval = tcp_blob_poll_interval(self.has_application_work());
             tokio::select! {
                 received = self.tcp.receive(now_ms) => {
                     received.map_err(transport_error)?;
@@ -551,7 +550,7 @@ impl TcpBlobActor {
                 completed = self.store_loads.join_next_with_id(), if !self.store_loads.is_empty() => {
                     self.handle_store_load_completion(completed, now_ms).await;
                 }
-                _ = ticker.tick() => {
+                _ = tokio::time::sleep(poll_interval) => {
                     self.tcp.poll(now_ms).await.map_err(transport_error)?;
                 }
             }
@@ -569,6 +568,13 @@ impl TcpBlobActor {
 
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    fn has_application_work(&self) -> bool {
+        !self.pending_commands.is_empty()
+            || !self.active_gets.is_empty()
+            || !self.servers.is_empty()
+            || !self.store_loads.is_empty()
     }
 
     fn deadline_ms(&self, now_ms: u64) -> u64 {
@@ -880,6 +886,14 @@ impl TcpBlobActor {
             abort.abort();
             self.store_load_connections.remove(task_id);
         }
+    }
+}
+
+fn tcp_blob_poll_interval(has_application_work: bool) -> Duration {
+    if has_application_work {
+        ACTIVE_POLL_INTERVAL
+    } else {
+        IDLE_POLL_INTERVAL
     }
 }
 

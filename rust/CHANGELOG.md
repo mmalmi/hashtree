@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Released `hashtree-fips-transport` 0.4.8 with adaptive TCP blob polling:
+  active transfers retain the 10 ms service cadence while transports without
+  application work back off to 250 ms, eliminating needless mobile idle CPU.
 - Released `hashtree-fips-transport` 0.4.7 with bounded 100 ms provider
   hedging, so a failed or slow first TCP/FIPS provider cannot starve a healthy
   peer during a multi-provider blob read.
