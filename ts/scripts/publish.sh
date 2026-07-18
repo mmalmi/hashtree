@@ -39,6 +39,7 @@ PACKAGES=(
     "@hashtree/collection"
     "@hashtree/mesh"
     "@hashtree/nostr"
+    "@hashtree/nostr-pubsub"
     "@hashtree/worker"
 )
 

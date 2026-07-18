@@ -26,6 +26,7 @@
       "@hashtree/index": "link:packages/hashtree-index",
       "@hashtree/mesh": "link:packages/hashtree-mesh",
       "@hashtree/nostr": "link:packages/hashtree-nostr",
+      "@hashtree/nostr-pubsub": "link:packages/hashtree-nostr-pubsub",
       "@hashtree/worker": "link:packages/hashtree-worker",
       "serialize-javascript": "7.0.7"
     }
@@ -37,6 +38,7 @@
     "test:watch": "pnpm --filter @hashtree/core test:watch",
     "lint": "eslint packages/hashtree/src",
     "lint:fix": "eslint packages/hashtree/src --fix",
+    "verify:nostr-pubsub": "pnpm --filter @hashtree/nostr-pubsub check && pnpm --filter @hashtree/nostr-pubsub test && pnpm --filter @hashtree/nostr-pubsub build",
     "verify:fips-transport": "pnpm --filter @hashtree/fips-transport... build && pnpm --filter @hashtree/fips-transport verify:dist && pnpm --filter @hashtree/fips-transport test && pnpm --filter @hashtree/fips-transport lint",
     "maps:crawl": "pnpm --filter @hashtree/core build && node scripts/maps/crawl-tiles.js",
     "pack:runtime": "node scripts/pack-runtime.mjs",

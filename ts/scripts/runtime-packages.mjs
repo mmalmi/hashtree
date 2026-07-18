@@ -7,6 +7,7 @@ export const runtimePackageDirs = [
   'hashtree-merge',
   'hashtree-mesh',
   'hashtree-nostr',
+  'hashtree-nostr-pubsub',
   'hashtree-worker',
   'hashtree-fips-transport',
 ];

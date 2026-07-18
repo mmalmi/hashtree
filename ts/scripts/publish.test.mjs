@@ -28,6 +28,7 @@ test('publish plan lists hashtree npm packages in dependency order', () => {
     '@hashtree/collection',
     '@hashtree/mesh',
     '@hashtree/nostr',
+    '@hashtree/nostr-pubsub',
     '@hashtree/worker',
   ]);
 });

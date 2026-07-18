@@ -162,6 +162,31 @@ describe('NostrEventStore', () => {
     await expect(store.query(root, { ids: [older.id, newest.id] }, { limit: 1 })).resolves.toEqual([newest]);
   });
 
+  it('applies limits after residual query predicates', async () => {
+    const store = new NostrEventStore(new MemoryStore());
+    const author = 'a'.repeat(64);
+    const matching = await makeEvent({
+      pubkey: author,
+      created_at: 10,
+      kind: 1,
+      tags: [['t', 'wanted']],
+    });
+    const newerNonMatching = await makeEvent({
+      pubkey: author,
+      created_at: 20,
+      kind: 1,
+      tags: [['t', 'other']],
+    });
+
+    const root = await store.build(null, [matching, newerNonMatching]);
+
+    await expect(store.query(root, {
+      authors: author,
+      kinds: 1,
+      tags: { t: 'wanted' },
+    }, { limit: 1 })).resolves.toEqual([matching]);
+  });
+
   it('streams planned queries for direct per-author lookups', async () => {
     const store = new NostrEventStore(new MemoryStore());
     const author = 'f'.repeat(64);
@@ -248,6 +273,22 @@ describe('NostrEventStore', () => {
       lowFirstStore.getParameterizedReplaceable(lowFirstRoot, author, 30_023, 'article-1')
     ).resolves.toEqual(lowest);
     expect(highFirstRoot).toEqual(lowFirstRoot);
+  });
+
+  it('reads an addressable event whose d-tag value is empty', async () => {
+    const store = new NostrEventStore(new MemoryStore());
+    const author = 'd'.repeat(64);
+    const event = await makeEvent({
+      pubkey: author,
+      kind: 30_023,
+      created_at: 75,
+      content: 'default article',
+      tags: [['d', '']],
+    });
+
+    const root = await store.add(null, event);
+
+    await expect(store.getParameterizedReplaceable(root, author, 30_023, '')).resolves.toEqual(event);
   });
 
   it('builds the same replaceable index root with the lowest same-second id in either order', async () => {

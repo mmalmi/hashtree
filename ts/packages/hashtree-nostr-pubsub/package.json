@@ -1,0 +1,57 @@
+{
+  "name": "@hashtree/nostr-pubsub",
+  "version": "0.1.0",
+  "description": "Hashtree Nostr event-index reader for nostr-pubsub",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit && pnpm lint",
+    "lint": "eslint src tests",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "hashtree",
+    "nostr",
+    "pubsub",
+    "index",
+    "router"
+  ],
+  "author": "Martti Malmi",
+  "license": "MIT",
+  "repository": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree",
+  "homepage": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/ts/packages/hashtree-nostr-pubsub",
+  "bugs": {
+    "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
+  },
+  "dependencies": {
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.1/hashtree-core-0.3.0.tgz",
+    "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.2/hashtree-nostr-0.2.1.tgz"
+  },
+  "peerDependencies": {
+    "nostr-tools": ">=2.18.2 <3"
+  },
+  "devDependencies": {
+    "eslint": "^10.7.0",
+    "nostr-tools": "^2.18.2",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -67,6 +67,8 @@ export interface ListEventsOptions {
   limit?: number;
   since?: number;
   until?: number;
+  /** Throw when a selected event blob is missing or unreadable instead of skipping it. */
+  strict?: boolean;
 }
 
 export type NostrEventQueryValue<T> = T | readonly T[];
@@ -550,10 +552,6 @@ export class NostrEventStore {
     kind: number,
     dTag: string
   ): Promise<StoredNostrEvent | null> {
-    if (dTag.length === 0) {
-      throw new Error('Parameterized replaceable events require a non-empty d tag');
-    }
-
     const source = this.collectionSourceFromManifest(await this.getManifest(root));
     const eventCid = await source.getIndexLink(
       MANIFEST_PARAMETERIZED_REPLACEABLE,
@@ -647,20 +645,10 @@ export class NostrEventStore {
   ): Promise<StoredNostrEvent[]> {
     const events: StoredNostrEvent[] = [];
     const entries = indexName === MANIFEST_BY_ID
-      ? await source.queryById({
-        prefix,
-        limit: options.limit !== undefined && options.since === undefined && options.until === undefined
-          ? options.limit
-          : undefined,
-      })
-      : await source.queryIndex(indexName, {
-        prefix,
-        limit: options.limit !== undefined && options.since === undefined && options.until === undefined
-          ? options.limit
-          : undefined,
-      });
+      ? source.streamQueryById({ prefix })
+      : source.streamQueryIndex(indexName, { prefix });
 
-    for (const { key, cid: eventCid } of entries) {
+    for await (const { key, cid: eventCid } of entries) {
       const createdAt = createdAtFromIndexKey(key);
       if (options.until !== undefined && createdAt > options.until) {
         continue;
@@ -668,7 +656,7 @@ export class NostrEventStore {
       if (options.since !== undefined && createdAt < options.since) {
         break;
       }
-      const event = await this.tryReadStoredEvent(eventCid);
+      const event = await this.tryReadStoredEvent(eventCid, options.strict);
       if (!event) {
         continue;
       }
@@ -705,7 +693,7 @@ export class NostrEventStore {
         break;
       }
 
-      const event = await this.tryReadStoredEvent(eventCid);
+      const event = await this.tryReadStoredEvent(eventCid, options.strict);
       if (!event) {
         continue;
       }
@@ -757,10 +745,13 @@ export class NostrEventStore {
     return this.decodeEvent(data);
   }
 
-  private async tryReadStoredEvent(eventCid: CID): Promise<StoredNostrEvent | null> {
+  private async tryReadStoredEvent(eventCid: CID, strict = false): Promise<StoredNostrEvent | null> {
     try {
       return await this.readStoredEvent(eventCid);
     } catch (error) {
+      if (strict) {
+        throw error;
+      }
       if (error instanceof Error && error.message === 'Stored Nostr event blob is missing') {
         return null;
       }

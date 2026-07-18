@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add `@hashtree/nostr-pubsub`, a single multi-root Nostr event reader with
+  additive partitions, replica failover, signature verification, cancellation,
+  deterministic merging, and explicit incomplete-query diagnostics.
+- Make strict Nostr event-index reads available to adapters, apply query limits
+  after residual predicates, and support addressable events with an empty `d`
+  tag value in `@hashtree/nostr` 0.2.1.
+
 ## TypeScript runtime 0.5.1 - 2026-07-17
 
 ### Changed
