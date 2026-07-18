@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.101 - 2026-07-18
+
 ### Added
 
 - Added bounded, resumable full-history Nostr indexing for explicit author
