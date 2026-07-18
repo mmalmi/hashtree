@@ -12,14 +12,19 @@ use hashtree_core::{BlobRoute, StoreBlobRoute};
 use hashtree_fips_transport::{
     bind_fips_endpoint, bind_fips_endpoint_at_local_rendezvous, set_fips_peer_configs,
     BoundFipsEndpoint, FipsBlobRoute, FipsEndpoint, FipsEndpointOptions, FipsPeerConfig,
-    NostrRelayAdapter, PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig,
-    DEFAULT_FIPS_DISCOVERY_SCOPE,
+    PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig, DEFAULT_FIPS_DISCOVERY_SCOPE,
 };
 use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig, MeshForwardingRoute};
+use hashtree_nostr_pubsub::HashtreeNostrBoundedEventCache;
 use nostr::nips::nip19::ToBech32;
 use nostr::PublicKey;
+use nostr_pubsub::{
+    EventBus, EventPolicyContext, EventRetentionPolicy, EventSource, NostrPubsubRouter,
+    PolicyDecision, PubsubPolicy, RouterLiveSource, RouterPublishSource, RouterQuerySource,
+    SourcePolicyContext, SourceRoute,
+};
 #[cfg(feature = "experimental-decentralized-pubsub")]
-use nostr_pubsub::{EventBus, EventSource, Filter, VerifiedEvent};
+use nostr_pubsub::{Filter, VerifiedEvent};
 use nostr_pubsub_fips::{FipsPubsubClient, FipsPubsubClientOptions};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -31,33 +36,25 @@ use tokio::task::JoinHandle;
 
 pub type DaemonBlobResolver = BlobRouter;
 type DaemonBlobTransport = TcpBlobTransport<StorageRouter>;
+pub type DaemonNostrCache = HashtreeNostrBoundedEventCache<StorageRouter>;
 
 const DAEMON_SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
+const DAEMON_NOSTR_CACHE_EVENTS: usize = 4_096;
 const BLOB_RESOLVER_REPLY_MARGIN: Duration = Duration::from_secs(1);
 
 pub struct DaemonFipsHandle {
     pub endpoint: Arc<FipsEndpoint>,
     pub endpoint_npub: String,
     pub discovery_scope: String,
-    pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,
     pub pubsub_client: Option<Arc<FipsPubsubClient>>,
     pub blob_resolver: Arc<DaemonBlobResolver>,
     blob_transport: Mutex<Option<Arc<DaemonBlobTransport>>>,
-    relay_adapter: Mutex<Option<NostrRelayAdapter>>,
 }
 
 impl DaemonFipsHandle {
     pub async fn shutdown(&self) {
         if let Ok(mut transport) = self.blob_transport.lock() {
             transport.take();
-        }
-        let relay_adapter = self
-            .relay_adapter
-            .lock()
-            .ok()
-            .and_then(|mut adapter| adapter.take());
-        if let Some(relay_adapter) = relay_adapter {
-            relay_adapter.stop().await;
         }
         if let Err(err) = self.endpoint.shutdown().await {
             tracing::warn!("failed to stop embedded FIPS endpoint: {err}");
@@ -94,7 +91,6 @@ pub async fn start_daemon_fips_transport(
 
     let active_relays = config.nostr.active_relays();
     let relays = config.server.resolved_fips_relays(&active_relays);
-    let relay_carrier_relays = relays.clone();
     let discovery_scope = normalized_discovery_scope(&config.server.fips_discovery_scope);
     let peer_configs = daemon_fips_peer_configs(config, peer_ids);
     let identity_nsec = keys
@@ -128,12 +124,6 @@ pub async fn start_daemon_fips_transport(
         bind_fips_endpoint(options).await
     }
     .context("Failed to start FIPS endpoint")?;
-    let relay_adapter =
-        NostrRelayAdapter::start(endpoint.native_endpoint.clone(), &relay_carrier_relays)
-            .await
-            .map_err(anyhow::Error::msg)
-            .context("Failed to start FIPS Nostr relay carrier")?;
-
     let request_timeout = Duration::from_millis(config.server.fips_request_timeout_ms.max(1));
     let pubsub_client = if daemon_fips_pubsub_required(config) {
         let options = FipsPubsubClientOptions {
@@ -141,7 +131,7 @@ pub async fn start_daemon_fips_transport(
             max_frame_bytes: config
                 .nostr
                 .decentralized_pubsub_max_event_bytes
-                .min(nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES),
+                .min(nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES),
             ..Default::default()
         };
         Some(Arc::new(
@@ -152,13 +142,6 @@ pub async fn start_daemon_fips_transport(
     } else {
         None
     };
-    let nostr_provider =
-        (config.nostr.event_transport == NostrEventTransport::FipsLocalOnly).then(|| {
-            pubsub_client
-                .as_ref()
-                .expect("FIPS local-only transport starts the shared pubsub client")
-                .clone() as Arc<dyn nostr_pubsub::PubsubProvider>
-        });
     if !peer_configs.is_empty() {
         set_fips_peer_configs(endpoint.native_endpoint.as_ref(), peer_configs.clone())
             .await
@@ -172,11 +155,9 @@ pub async fn start_daemon_fips_transport(
         endpoint: endpoint.native_endpoint,
         endpoint_npub: endpoint.local_peer_id,
         discovery_scope: endpoint.discovery_scope,
-        nostr_provider,
         pubsub_client,
         blob_resolver,
         blob_transport: Mutex::new(Some(blob_transport)),
-        relay_adapter: Mutex::new(relay_adapter),
     }))
 }
 
@@ -251,33 +232,96 @@ fn blob_transport_config(resolver_timeout: Duration) -> TcpBlobTransportConfig {
     }
 }
 
+pub fn new_daemon_nostr_cache(store: Arc<StorageRouter>) -> Arc<DaemonNostrCache> {
+    Arc::new(
+        HashtreeNostrBoundedEventCache::new(
+            store,
+            None,
+            EventSource::local_index("hashtree-nostr-cache"),
+            EventRetentionPolicy::new(DAEMON_NOSTR_CACHE_EVENTS, Vec::new()),
+        )
+        .with_priority(nostr_pubsub::SOURCE_PRIORITY_LOCAL_INDEX),
+    )
+}
+
+struct AllowDaemonPubsubRoutes;
+
+#[async_trait::async_trait]
+impl PubsubPolicy for AllowDaemonPubsubRoutes {
+    async fn check_event(
+        &self,
+        _context: EventPolicyContext<'_>,
+    ) -> nostr_pubsub::Result<PolicyDecision> {
+        Ok(PolicyDecision::allow_with_priority(0))
+    }
+
+    async fn check_source(
+        &self,
+        _context: SourcePolicyContext<'_>,
+    ) -> nostr_pubsub::Result<PolicyDecision> {
+        Ok(PolicyDecision::allow_with_priority(0))
+    }
+}
+
 pub async fn start_daemon_nostr_provider(
     config: &Config,
     fips_handle: Option<&DaemonFipsHandle>,
+    cache: Option<Arc<DaemonNostrCache>>,
 ) -> Result<Option<Arc<dyn nostr_pubsub::PubsubProvider>>> {
-    match config.nostr.event_transport {
+    let mut router = NostrPubsubRouter::new(Arc::new(AllowDaemonPubsubRoutes));
+    if let Some(cache) = cache {
+        let route = cache
+            .source_route("hashtree-local-cache")
+            .context("Failed to configure Hashtree Nostr cache route")?;
+        router = router.with_query_source(RouterQuerySource::new(route, cache));
+    }
+
+    let router = match config.nostr.event_transport {
         NostrEventTransport::Relay => {
             let relays = config.nostr.active_relays();
             if relays.is_empty() {
                 return Ok(None);
             }
-            let event_bus = nostr_pubsub_relay::RelayEventBus::new(
-                relays,
-                Duration::from_millis(config.server.fips_request_timeout_ms.max(1)),
-            )
-            .await
-            .context("Failed to start Nostr relay event provider")?;
-            Ok(Some(Arc::new(event_bus)))
+            let route = SourceRoute::relay(relays.join(","))
+                .with_dataset("configured-relays")
+                .context("Failed to configure Nostr relay route")?;
+            let event_bus = Arc::new(
+                nostr_pubsub_relay::RelayEventBus::new(
+                    relays.clone(),
+                    Duration::from_millis(config.server.fips_request_timeout_ms.max(1)),
+                )
+                .await
+                .context("Failed to start Nostr relay event provider")?,
+            );
+            router
+                .with_query_source(RouterQuerySource::new(
+                    route.clone(),
+                    Arc::clone(&event_bus),
+                ))
+                .with_publish_source(RouterPublishSource::new(
+                    route.clone(),
+                    Arc::clone(&event_bus),
+                ))
+                .with_live_source(RouterLiveSource::new(route, event_bus))
         }
-        NostrEventTransport::FipsLocalOnly => fips_handle
-            .and_then(|handle| handle.nostr_provider.clone())
-            .map(Some)
-            .ok_or_else(|| {
+        NostrEventTransport::FipsLocalOnly => {
+            let client = fips_handle
+                .and_then(|handle| handle.pubsub_client.clone())
+                .ok_or_else(|| {
                 anyhow::anyhow!(
                     "nostr.event_transport=fips-local-only requires the local FIPS Nostr pubsub provider"
                 )
-            }),
-    }
+                })?;
+            let route = SourceRoute::fips_peer_default("connected-fips-mesh")
+                .with_dataset("fips-mesh")
+                .context("Failed to configure FIPS Nostr route")?;
+            router
+                .with_query_source(RouterQuerySource::new(route.clone(), Arc::clone(&client)))
+                .with_publish_source(RouterPublishSource::new(route.clone(), Arc::clone(&client)))
+                .with_live_source(RouterLiveSource::new(route, client))
+        }
+    };
+    Ok(Some(Arc::new(router)))
 }
 
 #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -285,6 +329,7 @@ pub async fn start_daemon_nostr_pubsub(
     config: &Config,
     fips_handle: Option<&DaemonFipsHandle>,
     relay: Option<Arc<NostrRelay>>,
+    cache: Arc<DaemonNostrCache>,
 ) -> Result<Option<Arc<DaemonNostrPubsubHandle>>> {
     if !daemon_decentralized_pubsub_ready(config, fips_handle.is_some(), relay.is_some()) {
         return Ok(None);
@@ -302,8 +347,9 @@ pub async fn start_daemon_nostr_pubsub(
         Arc::clone(&client),
         Arc::clone(&fips_handle.endpoint),
         Arc::clone(&relay),
+        Arc::clone(&cache),
     );
-    let outbound_task = spawn_daemon_nostr_pubsub_outbound(Arc::clone(&client), outbound_rx);
+    let outbound_task = spawn_daemon_nostr_pubsub_outbound(Arc::clone(&client), outbound_rx, cache);
 
     Ok(Some(Arc::new(DaemonNostrPubsubHandle {
         _client: client,
@@ -323,6 +369,7 @@ fn spawn_daemon_nostr_pubsub_ingest(
     client: Arc<FipsPubsubClient>,
     endpoint: Arc<FipsEndpoint>,
     relay: Arc<NostrRelay>,
+    cache: Arc<DaemonNostrCache>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -345,18 +392,25 @@ fn spawn_daemon_nostr_pubsub_ingest(
                         let Some(delivery) = delivery else {
                             break;
                         };
-                        let source = delivery.source.id.as_str().to_string();
-                        let event = delivery.event.into_event();
+                        let source = delivery.source.clone();
+                        let source_id = source.id.as_str().to_string();
+                        let verified = delivery.event;
+                        let event = verified.as_event().clone();
                         let event_id = event.id.to_hex();
                         match relay.ingest_peer_event_silent(event).await {
-                            Ok(true) => tracing::debug!(
-                                source,
-                                event_id,
-                                "ingested decentralized Nostr pubsub event"
-                            ),
+                            Ok(true) => {
+                                if let Err(error) = cache.publish(verified, source).await {
+                                    tracing::warn!(event_id, %error, "failed to cache decentralized Nostr event");
+                                }
+                                tracing::debug!(
+                                    source = source_id,
+                                    event_id,
+                                    "ingested decentralized Nostr pubsub event"
+                                );
+                            }
                             Ok(false) => {}
                             Err(err) => tracing::warn!(
-                                source,
+                                source = source_id,
                                 event_id,
                                 "nostr decentralized pubsub ingest failed: {err:#}"
                             ),
@@ -392,6 +446,7 @@ async fn connected_fips_peer_ids(endpoint: &FipsEndpoint) -> Vec<String> {
 fn spawn_daemon_nostr_pubsub_outbound(
     client: Arc<FipsPubsubClient>,
     mut outbound_rx: mpsc::UnboundedReceiver<nostr::Event>,
+    cache: Arc<DaemonNostrCache>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = outbound_rx.recv().await {
@@ -403,10 +458,11 @@ fn spawn_daemon_nostr_pubsub_outbound(
                     continue;
                 }
             };
-            match client
-                .publish(verified, EventSource::local_index("htree-relay"))
-                .await
-            {
+            let source = EventSource::local_index("htree-relay");
+            if let Err(error) = cache.publish(verified.clone(), source.clone()).await {
+                tracing::warn!(event_id, %error, "failed to cache outbound Nostr event");
+            }
+            match client.publish(verified, source).await {
                 Ok(report) => tracing::debug!(
                     event_id,
                     accepted = report.accepted,
@@ -523,7 +579,7 @@ mod tests {
         let mut config = Config::default();
         config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
 
-        let error = start_daemon_nostr_provider(&config, None)
+        let error = start_daemon_nostr_provider(&config, None, None)
             .await
             .err()
             .expect("missing local FIPS provider must fail");
@@ -567,19 +623,22 @@ mod tests {
         config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
         config.nostr.decentralized_pubsub = true;
 
+        let cache = new_daemon_nostr_cache(store.store_arc());
         let daemon = start_daemon_fips_transport(&config, &daemon_keys, store, Vec::new())
             .await
             .unwrap()
             .expect("daemon FIPS endpoint");
-        let provider = start_daemon_nostr_provider(&config, Some(&daemon))
-            .await
-            .unwrap()
-            .expect("FIPS root provider");
-        assert_eq!(provider.mode(), PubsubProviderMode::LocalOnly);
-        let decentralized = start_daemon_nostr_pubsub(&config, Some(&daemon), Some(relay.clone()))
-            .await
-            .unwrap()
-            .expect("decentralized pubsub");
+        let provider =
+            start_daemon_nostr_provider(&config, Some(&daemon), Some(Arc::clone(&cache)))
+                .await
+                .unwrap()
+                .expect("FIPS root provider");
+        assert_eq!(provider.mode(), PubsubProviderMode::Router);
+        let decentralized =
+            start_daemon_nostr_pubsub(&config, Some(&daemon), Some(relay.clone()), cache)
+                .await
+                .unwrap()
+                .expect("decentralized pubsub");
 
         set_fips_peer_configs(
             remote_endpoint.native_endpoint.as_ref(),
@@ -725,11 +784,9 @@ mod tests {
             endpoint: provider_endpoint.native_endpoint.clone(),
             endpoint_npub: provider_endpoint.local_peer_id.clone(),
             discovery_scope: provider_endpoint.discovery_scope.clone(),
-            nostr_provider: None,
             pubsub_client: None,
             blob_resolver,
             blob_transport: Mutex::new(Some(provider)),
-            relay_adapter: Mutex::new(None),
         };
 
         timeout(Duration::from_secs(10), async {

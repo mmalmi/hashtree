@@ -489,7 +489,7 @@ impl NostrConfig {
 }
 
 fn default_nostr_decentralized_pubsub_max_event_bytes() -> usize {
-    nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES
+    nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES
 }
 
 // Keep in sync with hashtree-config/src/lib.rs
@@ -1431,7 +1431,7 @@ chunk_target_bytes = 65536
         assert!(enabled.decentralized_pubsub);
         assert_eq!(
             enabled.decentralized_pubsub_max_event_bytes,
-            nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES
+            nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES
         );
         assert_eq!(
             enabled.decentralized_pubsub_enabled(),

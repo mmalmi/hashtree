@@ -498,9 +498,12 @@ pub(crate) async fn run() -> Result<()> {
                 fips_peer_ids,
             )
             .await?;
+            let nostr_cache =
+                hashtree_cli::fips_transport::new_daemon_nostr_cache(store.store_arc());
             let nostr_provider = hashtree_cli::fips_transport::start_daemon_nostr_provider(
                 &config,
                 fips_handle.as_ref(),
+                Some(Arc::clone(&nostr_cache)),
             )
             .await?;
             #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -508,6 +511,7 @@ pub(crate) async fn run() -> Result<()> {
                 &config,
                 fips_handle.as_ref(),
                 nostr_relay.clone(),
+                nostr_cache,
             )
             .await?;
 

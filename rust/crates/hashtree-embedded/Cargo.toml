@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-embedded"
-version = "0.2.86"
+version = "0.2.87"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ description = "Embedded Hashtree daemon runtime for native hosts"
 
 [dependencies]
 anyhow.workspace = true
-hashtree-cli = { version = "0.2.100", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }
+hashtree-cli = { version = "0.2.101", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }
 hashtree-core.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

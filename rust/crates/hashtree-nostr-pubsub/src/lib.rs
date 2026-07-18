@@ -10,7 +10,7 @@ use hashtree_nostr::{
 };
 use nostr_pubsub::{
     EventBus, EventRetentionPolicy, EventSource, PublishReport, PubsubError, QueryEvent,
-    QueryOptions, QueryReport, Result, VerifiedEvent,
+    QueryOptions, QueryReport, Result, SourceRoute, VerifiedEvent, CAP_HASHTREE_FETCH,
 };
 use tokio::sync::Mutex;
 
@@ -48,6 +48,13 @@ impl<S> HashtreeNostrIndexEventBus<S> {
 
     pub fn source(&self) -> &EventSource {
         &self.source
+    }
+
+    pub fn source_route(&self, dataset_id: impl Into<String>) -> Result<SourceRoute> {
+        SourceRoute::from_source(self.source.clone())
+            .with_priority(self.priority)
+            .with_capability(CAP_HASHTREE_FETCH)
+            .with_dataset(dataset_id)
     }
 }
 
@@ -119,6 +126,13 @@ impl<S> HashtreeNostrBoundedEventCache<S> {
 
     pub fn retention(&self) -> &EventRetentionPolicy {
         &self.retention
+    }
+
+    pub fn source_route(&self, dataset_id: impl Into<String>) -> Result<SourceRoute> {
+        SourceRoute::from_source(self.source.clone())
+            .with_priority(self.priority)
+            .with_capability(CAP_HASHTREE_FETCH)
+            .with_dataset(dataset_id)
     }
 }
 
@@ -327,10 +341,33 @@ mod tests {
 
     use hashtree_core::MemoryStore;
     use hashtree_nostr::{stored_event_from_nostr_sdk_event, NostrEventStore};
-    use nostr_pubsub::{EventBus, EventRetentionPolicy, EventSource, QueryOptions, VerifiedEvent};
+    use nostr_pubsub::{
+        EventBus, EventRetentionPolicy, EventSource, QueryOptions, VerifiedEvent,
+        CAP_HASHTREE_FETCH,
+    };
     use nostr_sdk::{EventBuilder, Filter, Keys, Kind, Timestamp};
 
     use super::{HashtreeNostrBoundedEventCache, HashtreeNostrIndexEventBus};
+
+    #[test]
+    fn source_routes_identify_hashtree_datasets_and_capability() {
+        let source = EventSource::local_index("hashtree-cache");
+        let bus = HashtreeNostrBoundedEventCache::new(
+            Arc::new(MemoryStore::new()),
+            None,
+            source.clone(),
+            EventRetentionPolicy::new(4, Vec::new()),
+        )
+        .with_priority(15);
+
+        let route = bus.source_route("account-events").expect("valid route");
+
+        assert_eq!(route.source, source);
+        assert_eq!(route.dataset_id, "account-events");
+        assert_eq!(route.priority, 15);
+        assert_eq!(route.capabilities, vec![CAP_HASHTREE_FETCH]);
+        assert!(bus.source_route("").is_err());
+    }
 
     #[tokio::test]
     async fn event_bus_queries_historical_index_with_normal_nostr_filter() {

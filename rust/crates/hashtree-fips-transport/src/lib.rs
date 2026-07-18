@@ -17,7 +17,7 @@ mod provider_route;
 mod tcp_blob;
 
 pub use endpoint::*;
-pub use fips_core::{FipsEndpoint, NostrRelayAdapter, PeerIdentity};
+pub use fips_core::{FipsEndpoint, PeerIdentity};
 pub use provider_route::{FipsBlobRoute, FipsBlobRouteError};
 pub use tcp_blob::{
     InboundBlobPolicy, TcpBlobPeerRoute, TcpBlobTransport, TcpBlobTransportConfig,

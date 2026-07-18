@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- Prepared `hashtree-nostr-pubsub` 0.2.83, `hashtree-cli` 0.2.101, and
+  `hashtree-embedded` 0.2.87 with the
+  transport-neutral Nostr router: bounded Hashtree index queries are merged
+  with the explicitly selected FIPS or traditional-relay backend, while
+  publish and live routes remain explicit and globally deduplicate event IDs.
+- Prepared `hashtree-fips-transport` 0.4.9 for FIPS 0.4.11: configured
+  Nostr relays remain ordinary discovery/signaling relays, while the removed
+  `nostr_relay` packet transport and kind-21060 adapter are no longer exposed
+  or accepted as peer addresses.
 - Released `hashtree-fips-transport` 0.4.8 with adaptive TCP blob polling:
   active transfers retain the 10 ms service cadence while transports without
   application work back off to 250 ms, eliminating needless mobile idle CPU.

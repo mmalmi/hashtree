@@ -40,12 +40,14 @@ require_line "${RUST_DIR}/crates/hashtree-network/Cargo.toml" 'version = "0.2.87
     "hashtree-network must release routed reads and mesh forwarding ownership"
 require_line "${RUST_DIR}/crates/hashtree-nostr/Cargo.toml" 'version = "0.2.83"' \
     "hashtree-nostr must release optional negentropy timeout fallback"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.100"' \
-    "hashtree-cli must release as 0.2.100"
-require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.86"' \
-    "hashtree-embedded must release the corrected mesh forwarding boundary"
-require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.8"' \
-    "hashtree-fips-transport must release idle-safe adaptive polling"
+require_line "${RUST_DIR}/crates/hashtree-nostr-pubsub/Cargo.toml" 'version = "0.2.83"' \
+    "hashtree-nostr-pubsub must release transport-neutral route metadata"
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.101"' \
+    "hashtree-cli must release the transport-neutral Nostr router"
+require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.87"' \
+    "hashtree-embedded must release the transport-neutral Nostr router"
+require_line "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" 'version = "0.4.9"' \
+    "hashtree-fips-transport must release relay-free FIPS 0.4.11 support"
 
 grep -F 'hashtree-core = { version = "0.2.86", path = "crates/hashtree-core" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
@@ -57,9 +59,11 @@ grep -F 'hashtree-network = { version = "0.2.87", path = "crates/hashtree-networ
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'hashtree-nostr = { version = "0.2.83", path = "crates/hashtree-nostr" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-fips-transport = { version = "0.4.8", path = "crates/hashtree-fips-transport" }' \
+grep -F 'hashtree-nostr-pubsub = { version = "0.2.83", path = "crates/hashtree-nostr-pubsub" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'hashtree-cli = { version = "0.2.100", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }' \
+grep -F 'hashtree-fips-transport = { version = "0.4.9", path = "crates/hashtree-fips-transport" }' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'hashtree-cli = { version = "0.2.101", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }' \
     "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" >/dev/null
 
 require_registry_lock() {
@@ -72,12 +76,13 @@ require_registry_lock() {
     printf '%s\n' "$lock" | grep -Fx "checksum = \"${checksum}\"" >/dev/null
 }
 
-require_registry_lock fips-core 0.4.6 12cc0df5e04a1aae16efa85313976e87eb037d6e7955b8a035febd91b00383dc
+require_registry_lock fips-core 0.4.11 7256624419545fcdc2c0512810ee468b5a3097f1b05f06b576709f377f30947c
 require_registry_lock fips-identity 0.3.1 e143619aebf9db3129c1d2de67ba223bcf611216efa09a932c98a617e3e4a42b
 require_registry_lock fips-tcp 0.2.0 d18861c5eca7c472fbbdbbfb498f8d2525405081a9a24b42633c600ba6f6e42a
 require_registry_lock fips-tcp-endpoint 0.2.0 8e3e01e352b709b80f4261e2cd7d0ffde2d3aaf175267b3960997e70f7305c12
-require_registry_lock nostr-pubsub 0.1.11 f3c509d68c8de0f87de781630cca6d3d4e61b2fe8a1ba3d21463efd7bc4780c6
-require_registry_lock nostr-pubsub-fips 0.3.1 5663a6108ae432879d6d7441036b979605fc032011c0a6e81dbf1798ce844f6c
+require_registry_lock nostr-pubsub 0.1.13 84bfacf8bb4c535ad4c80dc14bdef1dfe94b2b7064f8bf83509a137f8068e0e1
+require_registry_lock nostr-pubsub-fips 0.4.1 b537942272dbf79ad8ff4176766f6f1c7c49e0a28fe2d4feacea0a3f45b15125
+require_registry_lock nostr-pubsub-relay 0.1.11 8641200920d163b2d82c34e6f15605cff93a0546e3e0087fce8f3bddaa2329ca
 require_registry_lock nostr-pubsub-social-graph 0.2.2 9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550
 
 if printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'cashu-service' >/dev/null; then
@@ -98,18 +103,21 @@ core_line="$(plan_line hashtree-core)"
 collection_line="$(plan_line hashtree-collection)"
 nostr_line="$(plan_line hashtree-nostr)"
 transport_line="$(plan_line hashtree-fips-transport)"
+nostr_pubsub_line="$(plan_line hashtree-nostr-pubsub)"
 cli_line="$(plan_line hashtree-cli)"
 cashu_cli_line="$(plan_line hashtree-cashu-cli)"
 embedded_line="$(plan_line hashtree-embedded)"
 
 if [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$collection_line" ] || \
-    [ -z "$nostr_line" ] || [ -z "$transport_line" ] || [ -z "$cli_line" ] || \
+    [ -z "$nostr_line" ] || [ -z "$transport_line" ] || \
+    [ -z "$nostr_pubsub_line" ] || [ -z "$cli_line" ] || \
     [ -z "$cashu_cli_line" ] || [ -z "$embedded_line" ]; then
     echo "Failed to find a required crate in the publish plan" >&2
     exit 1
 fi
 
 if [ "$core_line" -ge "$transport_line" ] || [ "$transport_line" -ge "$cli_line" ] || \
+    [ "$nostr_pubsub_line" -ge "$cli_line" ] || \
     [ "$cli_line" -ge "$embedded_line" ]; then
     echo "registry release order must be core -> transport -> CLI -> embedded" >&2
     exit 1

@@ -1,8 +1,7 @@
 //! Native embedded FIPS endpoint configuration for Hashtree blob routes.
 
 use fips_core::config::{
-    EthernetConfig, NostrDiscoveryPolicy, NostrRelayConfig, PeerAddress, RoutingMode,
-    TransportInstances,
+    EthernetConfig, NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances,
 };
 use hashtree_core::StoreError;
 use std::collections::HashMap;
@@ -12,7 +11,6 @@ use thiserror::Error;
 
 pub const DEFAULT_FIPS_DISCOVERY_SCOPE: &str = "fips-overlay-v1";
 pub const DEFAULT_FIPS_WEBRTC_MAX_CONNECTIONS: usize = 8;
-const NOSTR_RELAY_FALLBACK_PRIORITY: u8 = 250;
 
 #[derive(Debug, Error)]
 pub enum FipsTransportError {
@@ -234,15 +232,7 @@ fn fips_endpoint_config_with_local_rendezvous(
     config.node.discovery.nostr.open_discovery_max_pending = options.open_discovery_max_pending;
     config.node.discovery.nostr.share_local_candidates = options.share_local_candidates;
     config.node.discovery.nostr.app = discovery_scope.to_string();
-    let relay_carrier_enabled = !options.relays.is_empty();
     config.node.discovery.nostr.advert_relays = options.relays;
-    if relay_carrier_enabled {
-        config.transports.nostr_relay = TransportInstances::Single(NostrRelayConfig {
-            auto_connect: Some(false),
-            accept_connections: Some(true),
-            ..Default::default()
-        });
-    }
     if let Some(rendezvous_addr) = rendezvous_addr {
         config.node.discovery.local.rendezvous_addr = rendezvous_addr;
     }
@@ -325,12 +315,14 @@ pub(crate) fn peer_address_from_configured_addr(raw: &str) -> Option<PeerAddress
     if trimmed.is_empty() {
         return None;
     }
+    if trimmed
+        .split_once(':')
+        .is_some_and(|(transport, _)| transport.eq_ignore_ascii_case("nostr_relay"))
+    {
+        return None;
+    }
     let (transport, addr) = split_configured_transport_addr(trimmed);
-    Some(if transport.eq_ignore_ascii_case("nostr_relay") {
-        PeerAddress::with_priority("nostr_relay", addr, NOSTR_RELAY_FALLBACK_PRIORITY)
-    } else {
-        PeerAddress::new(transport, addr)
-    })
+    Some(PeerAddress::new(transport, addr))
 }
 
 fn split_configured_transport_addr(value: &str) -> (&str, &str) {
@@ -338,7 +330,7 @@ fn split_configured_transport_addr(value: &str) -> (&str, &str) {
         return ("udp", value);
     };
     match transport.to_ascii_lowercase().as_str() {
-        "udp" | "tcp" | "webrtc" | "tor" | "ethernet" | "ble" | "nostr_relay" => (transport, addr),
+        "udp" | "tcp" | "webrtc" | "tor" | "ethernet" | "ble" => (transport, addr),
         _ => ("udp", value),
     }
 }
@@ -348,16 +340,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_nostr_relay_address_is_a_low_priority_fallback() {
-        let address = peer_address_from_configured_addr("nostr_relay:npub1relay").unwrap();
-        let mixed_case = peer_address_from_configured_addr("NoStR_ReLaY:npub1mixed").unwrap();
-
-        assert_eq!(address.transport, "nostr_relay");
-        assert_eq!(address.addr, "npub1relay");
-        assert_eq!(address.priority, 250);
-        assert_eq!(mixed_case.transport, "nostr_relay");
-        assert_eq!(mixed_case.addr, "npub1mixed");
-        assert_eq!(mixed_case.priority, 250);
+    fn configured_nostr_relay_packet_addresses_are_rejected() {
+        assert!(peer_address_from_configured_addr("nostr_relay:npub1relay").is_none());
+        assert!(peer_address_from_configured_addr("NoStR_ReLaY:npub1mixed").is_none());
     }
 
     #[test]
@@ -370,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_discovery_also_enables_the_fips_relay_carrier() {
+    fn relays_configure_discovery_without_a_fips_packet_carrier() {
         let mut options = FipsEndpointOptions::new(
             "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqd3c4k5",
         );
@@ -381,9 +366,11 @@ mod tests {
         let config =
             fips_endpoint_config_with_local_rendezvous(options, DEFAULT_FIPS_DISCOVERY_SCOPE, None);
 
-        assert!(
-            !config.transports.nostr_relay.is_empty(),
-            "relay-backed discovery must include the FIPS kind-21060 carrier"
+        assert!(config.node.discovery.nostr.enabled);
+        assert!(config.node.discovery.nostr.advertise);
+        assert_eq!(
+            config.node.discovery.nostr.advert_relays,
+            vec!["ws://127.0.0.1:12345"]
         );
     }
 }

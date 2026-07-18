@@ -629,13 +629,19 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     )
     .await?
     .map(Arc::new);
-    let nostr_provider =
-        crate::fips_transport::start_daemon_nostr_provider(&config, fips_handle.as_deref()).await?;
+    let nostr_cache = crate::fips_transport::new_daemon_nostr_cache(store.store_arc());
+    let nostr_provider = crate::fips_transport::start_daemon_nostr_provider(
+        &config,
+        fips_handle.as_deref(),
+        Some(Arc::clone(&nostr_cache)),
+    )
+    .await?;
     #[cfg(feature = "experimental-decentralized-pubsub")]
     let nostr_pubsub_handle = crate::fips_transport::start_daemon_nostr_pubsub(
         &config,
         fips_handle.as_deref(),
         nostr_relay.clone(),
+        nostr_cache,
     )
     .await?;
 

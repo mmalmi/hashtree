@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-cli"
-version = "0.2.100"
+version = "0.2.101"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,6 +30,7 @@ hashtree-lmdb = { workspace = true, optional = true }
 hashtree-blossom.workspace = true
 hashtree-config.workspace = true
 hashtree-nostr.workspace = true
+hashtree-nostr-pubsub.workspace = true
 hashtree-fips-transport.workspace = true
 hashtree-network.workspace = true
 hashtree-resolver = { workspace = true, features = ["nostr"] }
