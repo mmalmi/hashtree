@@ -21,6 +21,7 @@ const RELAY_QUERY_ATTEMPTS: usize = 3;
 const RELAY_QUERY_RETRY_DELAY: Duration = Duration::from_millis(100);
 const RELAY_BATCH_TIMEOUT_MULTIPLIER: u32 = 16;
 const RELAY_BATCH_TIMEOUT_MAX: Duration = Duration::from_secs(300);
+const OPTIONAL_RELAY_CONNECTION_WAIT: Duration = Duration::from_millis(250);
 const METADATA_KIND: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayFetchMode {
@@ -691,7 +692,14 @@ impl<S: Store> NostrBridge<S> {
                 .map_err(|err| CrawlError::Nostr(err.to_string()))?;
         }
         client.connect().await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        let connection_wait = if self.require_all_relays {
+            self.config.fetch_timeout
+        } else {
+            self.config
+                .fetch_timeout
+                .min(OPTIONAL_RELAY_CONNECTION_WAIT)
+        };
+        client.wait_for_connection(connection_wait).await;
         Ok(client)
     }
 
@@ -699,12 +707,15 @@ impl<S: Store> NostrBridge<S> {
         if !self.require_all_relays {
             return Ok(());
         }
-        let connected = client
-            .relay(relay)
-            .await
-            .map(|relay| relay.is_connected())
-            .unwrap_or(false);
-        if !connected {
+        let relay_handle = client.relay(relay).await.map_err(|err| {
+            CrawlError::Nostr(format!("required relay {relay} is unavailable: {err}"))
+        })?;
+        if !relay_handle.is_connected() {
+            relay_handle
+                .wait_for_connection(self.config.fetch_timeout)
+                .await;
+        }
+        if !relay_handle.is_connected() {
             return Err(CrawlError::Nostr(format!(
                 "required relay {relay} is not connected"
             )));
@@ -2471,8 +2482,10 @@ mod tests {
 
     use hashtree_core::MemoryStore;
     use nostr_sdk::pool::{Output, Reconciliation};
-    use nostr_sdk::{Keys, RelayUrl};
+    use nostr_sdk::{Client, Keys, RelayUrl};
     use nostr_social_graph::{NostrEvent, SocialGraphBackend as NostrSocialGraphBackend};
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::accept_async;
 
     use super::{
         reconciliation_supported, retry_relay_query, CrawlConfig, CrawlError, NostrBridge,
@@ -2481,6 +2494,47 @@ mod tests {
 
     #[derive(Default)]
     struct FakeGraphBackend;
+
+    #[tokio::test]
+    async fn required_relay_waits_for_handshake_in_progress() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay");
+        let relay_url = format!("ws://{}", listener.local_addr().expect("relay address"));
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (handshake_tx, handshake_rx) = oneshot::channel();
+        let relay_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept relay client");
+            accepted_tx.send(()).expect("signal TCP accept");
+            handshake_rx.await.expect("release WebSocket handshake");
+            let _websocket = accept_async(stream).await.expect("accept WebSocket");
+            std::future::pending::<()>().await;
+        });
+
+        let client = Client::new(Keys::generate());
+        client.add_relay(&relay_url).await.expect("add relay");
+        client.connect().await;
+        accepted_rx.await.expect("client reached relay");
+
+        let bridge = NostrBridge::new(
+            Arc::new(MemoryStore::new()),
+            CrawlConfig {
+                relays: vec![relay_url.clone()],
+                fetch_timeout: Duration::from_secs(1),
+                ..CrawlConfig::default()
+            },
+        )
+        .requiring_all_relays();
+        let readiness = bridge.require_connected_relay(&client, &relay_url);
+        tokio::pin!(readiness);
+        assert!(futures::poll!(readiness.as_mut()).is_pending());
+
+        handshake_tx.send(()).expect("release relay handshake");
+        readiness.await.expect("required relay becomes ready");
+
+        client.disconnect().await;
+        relay_task.abort();
+    }
 
     #[test]
     fn reconciliation_output_distinguishes_unsupported_from_failed_and_skipped() {

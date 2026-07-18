@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.102 - 2026-07-18
+
+### Fixed
+
+- Strict all-relay Nostr crawls now wait within the existing fetch timeout for
+  startup and reconnecting WebSocket handshakes before rejecting a relay. This
+  removes the fixed 250 ms startup race without weakening checkpoint coverage.
+
 ## 0.2.101 - 2026-07-18
 
 ### Added
