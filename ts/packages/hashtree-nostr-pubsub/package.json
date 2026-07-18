@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/nostr-pubsub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Hashtree Nostr event-index reader for nostr-pubsub",
   "type": "module",
   "main": "dist/index.js",

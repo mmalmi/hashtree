@@ -35,12 +35,15 @@ interface PartitionResult {
 }
 
 const DEFAULT_LOCAL_INDEX_PRIORITY = 300;
+const DEFAULT_MAX_CONCURRENT_PARTITIONS = 8;
+const MAX_CONCURRENT_PARTITIONS = 64;
 
 export class HashtreeNostrEventReader implements NostrEventReaderContract {
   private readonly store;
   private readonly rootProvider;
   private readonly source;
   private readonly priority;
+  private readonly maxConcurrentPartitions;
 
   constructor(options: HashtreeNostrEventReaderOptions) {
     this.store = options.store;
@@ -50,6 +53,9 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
       kind: 'local-index' as const,
     };
     this.priority = options.priority ?? DEFAULT_LOCAL_INDEX_PRIORITY;
+    this.maxConcurrentPartitions = normalizePartitionConcurrency(
+      options.maxConcurrentPartitions,
+    );
   }
 
   async query(
@@ -66,18 +72,31 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
       cancellation,
     );
     const partitions = groupPartitions(roots);
-    const results = await Promise.all(
-      partitions.map((replicas) => this.queryPartition(replicas, filters, limit, cancellation)),
-    );
+    const reports = new Array<HashtreeNostrPartitionReport>(partitions.length);
+    let merged: NostrVerifiedEvent[] = [];
+    let nextPartition = 0;
+    const workerCount = Math.min(this.maxConcurrentPartitions, partitions.length);
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (nextPartition < partitions.length) {
+        const partitionIndex = nextPartition;
+        nextPartition += 1;
+        const result = await this.queryPartition(
+          partitions[partitionIndex]!,
+          filters,
+          limit,
+          cancellation,
+        );
+        reports[partitionIndex] = result.report;
+        merged = mergeVerifiedEvents(merged, result.events, limit);
+      }
+    }));
     cancellation.throwIfCancelled();
 
-    const merged = mergeVerifiedEvents(results.flatMap((result) => result.events), limit);
     const events: NostrReaderQueryEvent[] = merged.map((event) => ({
       event,
       source: this.source,
       priority: this.priority,
     }));
-    const reports = results.map((result) => result.report);
 
     return {
       events,
@@ -204,16 +223,31 @@ function dedupeStoredEvents(events: StoredNostrEvent[]): StoredNostrEvent[] {
 }
 
 function mergeVerifiedEvents(
-  events: NostrVerifiedEvent[],
+  retained: NostrVerifiedEvent[],
+  incoming: NostrVerifiedEvent[],
   limit: number | undefined,
 ): NostrVerifiedEvent[] {
   const byId = new Map<string, NostrVerifiedEvent>();
-  for (const event of events) {
+  for (const event of retained) {
+    byId.set(event.id, event);
+  }
+  for (const event of incoming) {
     const current = byId.get(event.id);
     if (!current || compareEventPayload(event, current) < 0) byId.set(event.id, event);
   }
   const ordered = [...byId.values()].sort(compareNewestFirst);
   return limit === undefined ? ordered : ordered.slice(0, limit);
+}
+
+function normalizePartitionConcurrency(configured: number | undefined): number {
+  if (configured === undefined) return DEFAULT_MAX_CONCURRENT_PARTITIONS;
+  if (!Number.isFinite(configured)) {
+    throw new RangeError('Hashtree Nostr partition concurrency must be finite');
+  }
+  return Math.min(
+    MAX_CONCURRENT_PARTITIONS,
+    Math.max(1, Math.floor(configured)),
+  );
 }
 
 function compareNewestFirst(left: NostrVerifiedEvent, right: NostrVerifiedEvent): number {

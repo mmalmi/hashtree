@@ -28,7 +28,10 @@ Distinct `partitionId` values are additive and queried concurrently. Entries
 with the same partition ID are replicas tried in order until one proves a
 complete result, including a valid empty result. Results are signature-checked,
 merged by event ID, deterministically ordered newest first, and globally
-limited.
+limited. Additive reads use at most eight concurrent partitions by default
+(`maxConcurrentPartitions`, clamped to 1...64). When a global limit is present,
+the reader incrementally retains only the merged top-k events instead of every
+partition result.
 
 A single `CID` or `null` is accepted as the `roots` value. For a very large or
 catalog-backed index, implement `HashtreeNostrRootProvider`; its `snapshot`

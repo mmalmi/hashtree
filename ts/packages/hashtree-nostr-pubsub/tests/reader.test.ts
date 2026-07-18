@@ -119,6 +119,32 @@ describe('HashtreeNostrEventReader', () => {
     expect(report.partitions).toHaveLength(3);
   });
 
+  it('bounds partition concurrency while incrementally retaining the global top-k', async () => {
+    const tracker = new ConcurrentReadTracker();
+    const roots = await Promise.all(Array.from({ length: 7 }, async (_, index) => {
+      const built = await buildIndex([event(index % 2 === 0 ? aliceKey : bobKey, 10 + index)]);
+      return {
+        partitionId: `partition-${index}`,
+        root: built.root,
+        store: new TrackedFirstReadStore(built.store, tracker),
+      };
+    }));
+    const reader = new HashtreeNostrEventReader({
+      store: new MemoryStore(),
+      roots,
+      maxConcurrentPartitions: 2,
+    });
+
+    const report = await reader.query([{}], { limit: 3 });
+
+    expect(tracker.peak).toBe(2);
+    expect(tracker.started).toBe(7);
+    expect(report.events.map(({ event: candidate }) => candidate.created_at)).toEqual([16, 15, 14]);
+    expect(report.partitions.map(({ partitionId }) => partitionId)).toEqual(
+      roots.map(({ partitionId }) => partitionId),
+    );
+  });
+
   it('fails over an unavailable replica and a corrupt replica in order', async () => {
     const valid = event(aliceKey, 10);
     const good = await buildIndex([valid]);
@@ -334,6 +360,46 @@ class GatedStore implements Store {
     if (this.firstRead) {
       this.firstRead = false;
       await this.gate.arrive();
+    }
+    return await this.store.get(hash);
+  }
+
+  async has(hash: Hash): Promise<boolean> {
+    return await this.store.has(hash);
+  }
+
+  async put(hash: Hash, data: Uint8Array): Promise<boolean> {
+    return await this.store.put(hash, data);
+  }
+
+  async delete(hash: Hash): Promise<boolean> {
+    return await this.store.delete(hash);
+  }
+}
+
+class ConcurrentReadTracker {
+  started = 0;
+  active = 0;
+  peak = 0;
+
+  async track(): Promise<void> {
+    this.started += 1;
+    this.active += 1;
+    this.peak = Math.max(this.peak, this.active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    this.active -= 1;
+  }
+}
+
+class TrackedFirstReadStore implements Store {
+  private firstRead = true;
+
+  constructor(private readonly store: Store, private readonly tracker: ConcurrentReadTracker) {}
+
+  async get(hash: Hash): Promise<Uint8Array | null> {
+    if (this.firstRead) {
+      this.firstRead = false;
+      await this.tracker.track();
     }
     return await this.store.get(hash);
   }

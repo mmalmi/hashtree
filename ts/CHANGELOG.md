@@ -2,9 +2,24 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.3 - 2026-07-18
+
+### Changed
+
+- Bound `@hashtree/nostr-pubsub` additive partition reads to configurable
+  worker concurrency and incrementally retain only the global top-k events,
+  preventing root-count-proportional in-flight I/O and event retention.
+
+## TypeScript runtime 0.5.2 - 2026-07-18
+
+### Added
+
 - Add `@hashtree/nostr-pubsub`, a single multi-root Nostr event reader with
   additive partitions, replica failover, signature verification, cancellation,
   deterministic merging, and explicit incomplete-query diagnostics.
+
+### Fixed
+
 - Make strict Nostr event-index reads available to adapters, apply query limits
   after residual predicates, and support addressable events with an empty `d`
   tag value in `@hashtree/nostr` 0.2.1.

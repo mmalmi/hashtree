@@ -43,6 +43,8 @@ export interface HashtreeNostrEventReaderOptions {
   source?: NostrEventSource;
   sourceId?: string;
   priority?: number;
+  /** Bounds additive partition reads. Clamped to 1...64; defaults to 8. */
+  maxConcurrentPartitions?: number;
 }
 
 export type HashtreeNostrReplicaStatus =
