@@ -7,9 +7,12 @@ use fips_core::{FipsEndpoint, PeerIdentity};
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Store, StoreError};
 use thiserror::Error;
 use tokio::task::JoinSet;
+use tokio::time::Duration;
 
 use crate::tcp_blob::MAX_OUTBOUND_GETS;
 use crate::{TcpBlobTransport, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT};
+
+const PROVIDER_HEDGE_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum FipsBlobRouteError {
@@ -157,9 +160,15 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             .ok_or_else(|| StoreError::Other("TCP/FIPS blob transport is closed".to_string()))?;
 
         let mut attempts = JoinSet::new();
-        for peer in peers {
+        for (index, peer) in peers.into_iter().enumerate() {
             let route = transport.route_to(peer);
-            attempts.spawn(async move { route.route(request).await });
+            attempts.spawn(async move {
+                let delay = PROVIDER_HEDGE_DELAY.saturating_mul(index as u32);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                route.route(request).await
+            });
         }
 
         let mut first_error = None;

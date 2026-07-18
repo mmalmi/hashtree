@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Released `hashtree-fips-transport` 0.4.7 with bounded 100 ms provider
+  hedging, so a failed or slow first TCP/FIPS provider cannot starve a healthy
+  peer during a multi-provider blob read.
+
 ## 0.2.100 - 2026-07-17
 
 ### Added

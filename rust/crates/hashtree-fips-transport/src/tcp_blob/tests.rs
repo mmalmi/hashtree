@@ -214,6 +214,98 @@ async fn streams_concurrent_blobs_and_explicit_miss_on_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn hedged_reads_do_not_let_a_failing_provider_starve_a_healthy_peer() {
+    let source_identity = Identity::generate();
+    let failing_identity = Identity::generate();
+    let client_identity = Identity::generate();
+    let source_address = reserve_udp_address();
+    let failing_address = reserve_udp_address();
+    let client_address = reserve_udp_address();
+    let source_endpoint = bind_endpoint(
+        &source_identity,
+        source_address,
+        &[(&client_identity, client_address)],
+    )
+    .await;
+    let failing_endpoint = bind_endpoint(
+        &failing_identity,
+        failing_address,
+        &[(&client_identity, client_address)],
+    )
+    .await;
+    let client_endpoint = bind_endpoint(
+        &client_identity,
+        client_address,
+        &[
+            (&source_identity, source_address),
+            (&failing_identity, failing_address),
+        ],
+    )
+    .await;
+    wait_for_peer(&source_endpoint, &client_identity.npub()).await;
+    wait_for_peer(&failing_endpoint, &client_identity.npub()).await;
+    wait_for_peer(&client_endpoint, &source_identity.npub()).await;
+    wait_for_peer(&client_endpoint, &failing_identity.npub()).await;
+
+    let data = b"healthy response raced against another provider failure".to_vec();
+    let data_hash = hash(&data);
+    let source_store = Arc::new(MemoryStore::new());
+    source_store.put(data_hash, data.clone()).await.unwrap();
+    let source = TcpBlobTransport::bind_with_config(
+        source_endpoint.clone(),
+        source_store,
+        test_config(Duration::from_secs(2)),
+    )
+    .await
+    .unwrap();
+    let failing = TcpBlobTransport::bind_route_with_config(
+        failing_endpoint.clone(),
+        Arc::new(MemoryStore::new()),
+        Arc::new(RecordingRoute::new([0x11; 32], Vec::new(), data_hash)),
+        test_config(Duration::from_secs(2)),
+    )
+    .await
+    .unwrap();
+    let client = Arc::new(
+        TcpBlobTransport::bind_with_config(
+            client_endpoint.clone(),
+            Arc::new(MemoryStore::new()),
+            test_config(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap(),
+    );
+    let source_peer = PeerIdentity::from_npub(&source_identity.npub()).unwrap();
+    let failing_peer = PeerIdentity::from_npub(&failing_identity.npub()).unwrap();
+    let route =
+        crate::FipsBlobRoute::explicit(client.clone(), vec![failing_peer, source_peer], 2).unwrap();
+
+    assert_eq!(
+        route
+            .route(BlobRequest {
+                hash: data_hash,
+                htl: 0,
+            })
+            .await
+            .expect("healthy hedged provider failed"),
+        BlobReply::Data(data.clone()),
+    );
+
+    drop(route);
+    Arc::try_unwrap(client)
+        .ok()
+        .expect("provider route retained the client transport")
+        .shutdown()
+        .await
+        .unwrap();
+    failing.shutdown().await.unwrap();
+    source.shutdown().await.unwrap();
+    client_endpoint.shutdown().await.unwrap();
+    failing_endpoint.shutdown().await.unwrap();
+    source_endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn fresh_get_waits_for_a_real_fips_tcp_service_to_become_ready() {
     tokio::spawn(fresh_get_during_service_readiness_on_worker())
         .await
@@ -697,6 +789,36 @@ async fn connected_endpoints() -> (Arc<FipsEndpoint>, Arc<FipsEndpoint>, PeerIde
     wait_for_peer(&endpoint_b, &identity_a.npub()).await;
     let peer_a = PeerIdentity::from_npub(&identity_a.npub()).unwrap();
     (endpoint_a, endpoint_b, peer_a)
+}
+
+async fn bind_endpoint(
+    identity: &Identity,
+    bind_address: SocketAddr,
+    peers: &[(&Identity, SocketAddr)],
+) -> Arc<FipsEndpoint> {
+    let mut config = Config::new();
+    config.node.identity.nsec = Some(encode_nsec(&identity.keypair().secret_key()));
+    config.node.discovery.nostr.enabled = false;
+    config.node.discovery.lan.enabled = false;
+    config.node.discovery.local.enabled = false;
+    config.transports.udp = TransportInstances::Single(UdpConfig {
+        bind_addr: Some(bind_address.to_string()),
+        advertise_on_nostr: Some(false),
+        public: Some(true),
+        ..UdpConfig::default()
+    });
+    config.peers = peers
+        .iter()
+        .map(|(peer, address)| PeerConfig::new(peer.npub(), "udp", address.to_string()))
+        .collect();
+    Arc::new(
+        FipsEndpoint::builder()
+            .config(config)
+            .without_system_tun()
+            .bind()
+            .await
+            .expect("bind test endpoint"),
+    )
 }
 
 fn reserve_udp_address() -> SocketAddr {
