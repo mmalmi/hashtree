@@ -41,6 +41,7 @@ fn t_tag(value: &str) -> Tag {
 #[derive(Debug, Default)]
 struct SharedRelayState {
     events: Vec<Event>,
+    negentropy_only_events: Vec<Event>,
     requested_id_batches: Vec<Vec<String>>,
     filter_requests: usize,
     supports_negentropy: bool,
@@ -249,6 +250,15 @@ fn build_negentropy_storage(
     filter: &Filter,
 ) -> NegentropyStorageVector {
     let mut events = matching_events(state, std::slice::from_ref(filter));
+    events.extend(
+        state
+            .lock()
+            .expect("relay state lock")
+            .negentropy_only_events
+            .iter()
+            .filter(|event| filter.match_event(event, Default::default()))
+            .cloned(),
+    );
     events.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
@@ -1957,6 +1967,64 @@ async fn full_history_rejects_incomplete_paging_fallback() -> io::Result<()> {
     assert!(error
         .to_string()
         .contains("paging fallback omitted 1 of 2 reconciled event IDs"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_history_accepts_ids_omitted_by_both_direct_fetch_and_paging() -> io::Result<()> {
+    let relay = TestRelay::with_negentropy(true);
+    let root_keys = Keys::generate();
+    let alice_keys = Keys::generate();
+    let mut graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let contact_list = event_builder!(Kind::ContactList, "", [p_tag(alice_keys.public_key())],)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&root_keys)
+        .expect("contact list");
+    graph.handle_event(&graph_event_from_nostr(&contact_list), true, 1.0);
+
+    let served = [20, 21]
+        .into_iter()
+        .map(|created_at| {
+            event_builder!(Kind::TextNote, format!("served note {created_at}"))
+                .custom_created_at(Timestamp::from_secs(created_at))
+                .sign_with_keys(&alice_keys)
+                .expect("served text note")
+        })
+        .collect::<Vec<_>>();
+    let unservable = event_builder!(Kind::TextNote, "negentropy-only note")
+        .custom_created_at(Timestamp::from_secs(22))
+        .sign_with_keys(&alice_keys)
+        .expect("negentropy-only text note");
+    {
+        let mut state = relay.state.lock().expect("relay state lock");
+        state.events.extend(served.clone());
+        state.negentropy_only_events.push(unservable);
+    }
+
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_batch_size: 2,
+            per_author_event_limit: 4,
+            per_author_kind_event_limit: Some(4),
+            kinds: Some(vec![1]),
+            full_author_history: true,
+            relay_page_size: 10,
+            max_relay_pages: 4,
+            ..CrawlConfig::default()
+        },
+    )
+    .requiring_all_relays();
+
+    let report = bridge
+        .crawl(&graph, None)
+        .await
+        .expect("matching direct and paging omissions should be accepted");
+    assert_eq!(report.events_selected, served.len());
+    assert_eq!(relay.requested_id_batches().len(), 1);
+    assert_eq!(relay.requested_id_batches()[0].len(), served.len() + 1);
 
     Ok(())
 }

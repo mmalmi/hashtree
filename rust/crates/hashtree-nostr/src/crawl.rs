@@ -221,6 +221,13 @@ struct RelayFetchResult {
 }
 
 #[derive(Debug)]
+struct MissingIdFetch {
+    fetched: RelayFetchResult,
+    omitted_ids: BTreeSet<String>,
+    expected_count: usize,
+}
+
+#[derive(Debug)]
 struct ReconciliationResult {
     remote_missing: Vec<EventId>,
     remote_cardinality: usize,
@@ -1887,16 +1894,39 @@ impl<S: Store> NostrBridge<S> {
         relay: &str,
         missing_ids: Vec<EventId>,
     ) -> Result<RelayFetchResult> {
+        let result = self
+            .fetch_missing_ids_with_omissions(client, relay, missing_ids)
+            .await?;
+        if !result.omitted_ids.is_empty() {
+            return Err(CrawlError::Nostr(format!(
+                "relay {relay} omitted {} of {} reconciled event IDs",
+                result.omitted_ids.len(),
+                result.expected_count
+            )));
+        }
+        Ok(result.fetched)
+    }
+
+    async fn fetch_missing_ids_with_omissions(
+        &self,
+        client: &Client,
+        relay: &str,
+        missing_ids: Vec<EventId>,
+    ) -> Result<MissingIdFetch> {
         let expected_ids = missing_ids
             .iter()
             .map(EventId::to_hex)
             .collect::<BTreeSet<_>>();
         if expected_ids.is_empty() {
-            return Ok(RelayFetchResult {
-                events_seen: 0,
-                events: Vec::new(),
-                supports_negentropy: true,
-                remote_cardinality: None,
+            return Ok(MissingIdFetch {
+                fetched: RelayFetchResult {
+                    events_seen: 0,
+                    events: Vec::new(),
+                    supports_negentropy: true,
+                    remote_cardinality: None,
+                },
+                omitted_ids: BTreeSet::new(),
+                expected_count: 0,
             });
         }
 
@@ -1928,22 +1958,21 @@ impl<S: Store> NostrBridge<S> {
                 out.insert(stored.id.clone(), stored);
             }
         }
-        let missing_count = expected_ids
+        let omitted_ids = expected_ids
             .iter()
             .filter(|event_id| !out.contains_key(*event_id))
-            .count();
-        if missing_count > 0 {
-            return Err(CrawlError::Nostr(format!(
-                "relay {relay} omitted {missing_count} of {} reconciled event IDs",
-                expected_ids.len()
-            )));
-        }
+            .cloned()
+            .collect();
         let events_seen = out.len();
-        Ok(RelayFetchResult {
-            events_seen,
-            events: out.into_values().collect(),
-            supports_negentropy: true,
-            remote_cardinality: None,
+        Ok(MissingIdFetch {
+            fetched: RelayFetchResult {
+                events_seen,
+                events: out.into_values().collect(),
+                supports_negentropy: true,
+                remote_cardinality: None,
+            },
+            omitted_ids,
+            expected_count: expected_ids.len(),
         })
     }
 
@@ -2026,7 +2055,7 @@ impl<S: Store> NostrBridge<S> {
                 if self.config.max_relay_pages == 0 {
                     continue;
                 }
-                let fetched = self
+                let (fetched, _) = self
                     .fetch_full_history_by_paging_from_relay(
                         client,
                         relay,
@@ -2071,7 +2100,7 @@ impl<S: Store> NostrBridge<S> {
                 if self.config.max_relay_pages == 0 {
                     continue;
                 }
-                let fetched = self
+                let (fetched, _) = self
                     .fetch_full_history_by_paging_from_relay(
                         client,
                         relay,
@@ -2104,12 +2133,61 @@ impl<S: Store> NostrBridge<S> {
 
             let expected_missing = reconciliation.remote_missing;
             let fetched = match self
-                .fetch_missing_ids(client, relay, expected_missing.clone())
+                .fetch_missing_ids_with_omissions(client, relay, expected_missing.clone())
                 .await
             {
-                Ok(fetched) => fetched,
+                Ok(fetched) if fetched.omitted_ids.is_empty() => fetched.fetched,
+                Ok(direct) if self.config.max_relay_pages > 0 => {
+                    let (mut fetched, paging_complete) = self
+                        .fetch_full_history_by_paging_from_relay(
+                            client,
+                            relay,
+                            &pubkeys,
+                            query.kind,
+                            query.event_limit,
+                        )
+                        .await?;
+                    let fetched_ids = fetched
+                        .events
+                        .iter()
+                        .map(|event| event.id.clone())
+                        .collect::<BTreeSet<_>>();
+                    let paging_omitted = expected_missing
+                        .iter()
+                        .map(EventId::to_hex)
+                        .filter(|event_id| !fetched_ids.contains(event_id))
+                        .collect::<BTreeSet<_>>();
+                    if paging_complete && paging_omitted == direct.omitted_ids {
+                        eprintln!(
+                            "Warning: relay {relay} advertised {} reconciled event IDs but omitted the same {} IDs from direct fetch and complete paging; accepting the validated paging result",
+                            direct.expected_count,
+                            paging_omitted.len()
+                        );
+                    } else if !paging_omitted.is_empty() {
+                        return Err(CrawlError::Nostr(format!(
+                            "relay {relay} paging fallback omitted {} of {} reconciled event IDs after direct fetch omitted {}{}",
+                            paging_omitted.len(),
+                            expected_missing.len(),
+                            direct.omitted_ids.len(),
+                            if paging_complete {
+                                ""
+                            } else {
+                                "; paging did not reach a complete boundary"
+                            }
+                        )));
+                    }
+                    fetched.supports_negentropy = true;
+                    fetched
+                }
+                Ok(direct) => {
+                    return Err(CrawlError::Nostr(format!(
+                        "relay {relay} omitted {} of {} reconciled event IDs",
+                        direct.omitted_ids.len(),
+                        direct.expected_count
+                    )))
+                }
                 Err(err) if !self.config.require_negentropy && self.config.max_relay_pages > 0 => {
-                    let mut fetched = self
+                    let (mut fetched, _) = self
                         .fetch_full_history_by_paging_from_relay(
                             client,
                             relay,
@@ -2210,9 +2288,10 @@ impl<S: Store> NostrBridge<S> {
         pubkeys: &[PublicKey],
         kind: Option<u16>,
         per_author_event_limit: usize,
-    ) -> Result<RelayFetchResult> {
+    ) -> Result<(RelayFetchResult, bool)> {
         let mut out = BTreeMap::<String, StoredNostrEvent>::new();
         let mut events_seen = 0usize;
+        let mut paging_complete = true;
         let concurrency = FULL_HISTORY_PAGING_CONCURRENCY_PER_RELAY
             .min(pubkeys.len().max(1))
             .max(1);
@@ -2229,7 +2308,8 @@ impl<S: Store> NostrBridge<S> {
         let mut fetches = stream::iter(fetches).buffer_unordered(concurrency);
 
         while let Some(result) = fetches.next().await {
-            let fetched = result?;
+            let (fetched, author_complete) = result?;
+            paging_complete &= author_complete;
             events_seen = events_seen.saturating_add(fetched.events_seen);
             for event in fetched.events {
                 out.insert(event.id.clone(), event);
@@ -2239,12 +2319,15 @@ impl<S: Store> NostrBridge<S> {
             }
         }
 
-        Ok(RelayFetchResult {
-            events_seen,
-            events: out.into_values().collect(),
-            supports_negentropy: false,
-            remote_cardinality: None,
-        })
+        Ok((
+            RelayFetchResult {
+                events_seen,
+                events: out.into_values().collect(),
+                supports_negentropy: false,
+                remote_cardinality: None,
+            },
+            paging_complete,
+        ))
     }
 
     async fn fetch_full_author_history_by_paging_from_relay(
@@ -2254,14 +2337,16 @@ impl<S: Store> NostrBridge<S> {
         pubkey: PublicKey,
         kind: Option<u16>,
         per_author_event_limit: usize,
-    ) -> Result<RelayFetchResult> {
+    ) -> Result<(RelayFetchResult, bool)> {
         let mut out = BTreeMap::<String, StoredNostrEvent>::new();
         let mut events_seen = 0usize;
         let mut cursor = InclusiveTimestampCursor::default();
+        let mut paging_complete = false;
 
         for _ in 0..self.config.max_relay_pages {
             let remaining = per_author_event_limit.saturating_sub(out.len());
             if remaining == 0 {
+                paging_complete = true;
                 break;
             }
             let mut filter = Filter::new()
@@ -2284,6 +2369,7 @@ impl<S: Store> NostrBridge<S> {
             let fetched_count = events.len();
             events_seen = events_seen.saturating_add(fetched_count);
             if fetched_count == 0 {
+                paging_complete = true;
                 break;
             }
             let cursor_advanced = cursor.advance(events.iter());
@@ -2300,9 +2386,11 @@ impl<S: Store> NostrBridge<S> {
             }
 
             if out.len() >= per_author_event_limit {
+                paging_complete = true;
                 break;
             }
             if !cursor_advanced {
+                paging_complete = true;
                 break;
             }
             if self.reached_events_seen_limit(events_seen) {
@@ -2310,12 +2398,15 @@ impl<S: Store> NostrBridge<S> {
             }
         }
 
-        Ok(RelayFetchResult {
-            events_seen,
-            events: out.into_values().collect(),
-            supports_negentropy: false,
-            remote_cardinality: None,
-        })
+        Ok((
+            RelayFetchResult {
+                events_seen,
+                events: out.into_values().collect(),
+                supports_negentropy: false,
+                remote_cardinality: None,
+            },
+            paging_complete,
+        ))
     }
 
     fn select_author_events(&self, events: Vec<StoredNostrEvent>) -> Result<Vec<StoredNostrEvent>> {

@@ -42,7 +42,7 @@ require_line "${RUST_DIR}/crates/hashtree-nostr/Cargo.toml" 'version = "0.2.83"'
     "hashtree-nostr must release optional negentropy timeout fallback"
 require_line "${RUST_DIR}/crates/hashtree-nostr-pubsub/Cargo.toml" 'version = "0.2.83"' \
     "hashtree-nostr-pubsub must release transport-neutral route metadata"
-require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.103"' \
+require_line "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" 'version = "0.2.104"' \
     "hashtree-cli must release the transport-neutral Nostr router"
 require_line "${RUST_DIR}/crates/hashtree-embedded/Cargo.toml" 'version = "0.2.87"' \
     "hashtree-embedded must release the transport-neutral Nostr router"

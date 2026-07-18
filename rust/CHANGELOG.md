@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.104 - 2026-07-19
+
+### Fixed
+
+- Full-history Nostr crawls now tolerate relay records that are advertised by
+  negentropy but omitted identically by both direct retrieval and a complete
+  paging pass. Incomplete paging or disagreeing omission sets still fail the
+  all-relay checkpoint, so transient relay gaps cannot silently advance the
+  durable author cursor.
+
 ## 0.2.103 - 2026-07-19
 
 ### Fixed
