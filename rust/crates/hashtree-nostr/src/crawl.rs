@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{ListEventsOptions, NostrEventStore, NostrEventStoreError, StoredNostrEvent};
 use futures::{stream, StreamExt};
@@ -86,6 +86,10 @@ pub struct CrawlReport {
     pub events_selected: usize,
     pub live_bytes_selected: u64,
     pub applied_events: Vec<StoredNostrEvent>,
+    /// Wall-clock time spent fetching relay data and selecting retained events.
+    pub relay_fetch_select_ms: u128,
+    /// Wall-clock time spent applying selected events to the Hashtree index.
+    pub index_build_ms: u128,
 }
 
 pub trait EventSelectionPolicy: Send + Sync {
@@ -303,6 +307,7 @@ pub struct NostrBridge<S: Store> {
     event_store: NostrEventStore<S>,
     config: CrawlConfig,
     policy: Arc<dyn EventSelectionPolicy>,
+    require_all_relays: bool,
 }
 
 impl<S: Store> NostrBridge<S> {
@@ -311,11 +316,20 @@ impl<S: Store> NostrBridge<S> {
             event_store: NostrEventStore::new(store),
             config,
             policy: Arc::new(KindPriorityPolicy::default()),
+            require_all_relays: false,
         }
     }
 
     pub fn with_policy(mut self, policy: Arc<dyn EventSelectionPolicy>) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Fail an author batch unless every configured relay contributed a
+    /// successful result. This is useful when a durable author cursor would
+    /// otherwise make a transient relay omission permanent.
+    pub fn requiring_all_relays(mut self) -> Self {
+        self.require_all_relays = true;
         self
     }
 
@@ -397,8 +411,11 @@ impl<S: Store> NostrBridge<S> {
         let mut live_bytes_selected = 0u64;
         let mut authors_processed = 0usize;
         let mut applied_events = Vec::new();
+        let mut relay_fetch_select_ms = 0u128;
+        let mut index_build_ms = 0u128;
 
         for author_batch in authors.chunks(self.config.author_batch_size) {
+            let fetch_select_started = Instant::now();
             let batch = self
                 .crawl_author_batch(
                     client,
@@ -408,16 +425,21 @@ impl<S: Store> NostrBridge<S> {
                     live_bytes_selected,
                 )
                 .await?;
+            relay_fetch_select_ms =
+                relay_fetch_select_ms.saturating_add(fetch_select_started.elapsed().as_millis());
             events_seen = events_seen.saturating_add(batch.events_seen);
             events_selected = events_selected.saturating_add(batch.events_selected);
             live_bytes_selected = batch.live_bytes_selected;
             authors_processed = authors_processed.saturating_add(author_batch.len());
             if !batch.events.is_empty() {
                 applied_events.extend(batch.events.clone());
+                let index_build_started = Instant::now();
                 current_root = self
                     .event_store
                     .build(current_root.as_ref(), batch.events)
                     .await?;
+                index_build_ms =
+                    index_build_ms.saturating_add(index_build_started.elapsed().as_millis());
             }
             on_progress(&CrawlReport {
                 root: current_root.clone(),
@@ -427,6 +449,8 @@ impl<S: Store> NostrBridge<S> {
                 events_selected,
                 live_bytes_selected,
                 applied_events: Vec::new(),
+                relay_fetch_select_ms,
+                index_build_ms,
             });
             if self.reached_events_seen_limit(events_seen) {
                 break;
@@ -441,6 +465,8 @@ impl<S: Store> NostrBridge<S> {
             events_selected,
             live_bytes_selected,
             applied_events,
+            relay_fetch_select_ms,
+            index_build_ms,
         })
     }
 
@@ -669,6 +695,23 @@ impl<S: Store> NostrBridge<S> {
         Ok(client)
     }
 
+    async fn require_connected_relay(&self, client: &Client, relay: &str) -> Result<()> {
+        if !self.require_all_relays {
+            return Ok(());
+        }
+        let connected = client
+            .relay(relay)
+            .await
+            .map(|relay| relay.is_connected())
+            .unwrap_or(false);
+        if !connected {
+            return Err(CrawlError::Nostr(format!(
+                "required relay {relay} is not connected"
+            )));
+        }
+        Ok(())
+    }
+
     async fn crawl_author_batch(
         &self,
         client: &Client,
@@ -731,6 +774,11 @@ impl<S: Store> NostrBridge<S> {
         let mut last_relay_error = None;
 
         for relay in &self.config.relays {
+            if let Err(err) = self.require_connected_relay(client, relay).await {
+                eprintln!("Skipping relay {relay} for this author batch: {err}");
+                last_relay_error = Some(err);
+                continue;
+            }
             let relay_support = relay_negentropy_support.get(relay).copied();
             let relay_fetch = async {
                 if let Some(queries) = &per_author_kind_queries {
@@ -787,6 +835,14 @@ impl<S: Store> NostrBridge<S> {
         if successful_relays == 0 {
             return Err(last_relay_error.unwrap_or_else(|| {
                 CrawlError::Nostr("all relays were unavailable for the author batch".to_string())
+            }));
+        }
+        if self.require_all_relays && successful_relays != self.config.relays.len() {
+            return Err(last_relay_error.unwrap_or_else(|| {
+                CrawlError::Nostr(format!(
+                    "only {successful_relays}/{} relays completed the author batch",
+                    self.config.relays.len()
+                ))
             }));
         }
 
@@ -878,6 +934,9 @@ impl<S: Store> NostrBridge<S> {
             let passes = full_history_passes.clone();
             let batch_timeout = self.relay_batch_timeout();
             async move {
+                if let Err(err) = self.require_connected_relay(client, &relay).await {
+                    return (relay, Err(err));
+                }
                 let result = match tokio::time::timeout(
                     batch_timeout,
                     self.fetch_full_history_passes_from_relay(
@@ -905,6 +964,15 @@ impl<S: Store> NostrBridge<S> {
         while let Some((relay, result)) = relay_fetches.next().await {
             match result {
                 Ok(fetched_from_relay) => {
+                    if self.require_all_relays
+                        && self.config.max_relay_pages == 0
+                        && !fetched_from_relay.supports_negentropy
+                    {
+                        let err = CrawlError::NegentropyUnsupported(relay.clone());
+                        eprintln!("Skipping relay {relay} for this full-history batch: {err}");
+                        last_relay_error = Some(err);
+                        continue;
+                    }
                     successful_relays = successful_relays.saturating_add(1);
                     relay_negentropy_support
                         .insert(relay.clone(), fetched_from_relay.supports_negentropy);
@@ -933,6 +1001,14 @@ impl<S: Store> NostrBridge<S> {
         if successful_relays == 0 {
             return Err(last_relay_error.unwrap_or_else(|| {
                 CrawlError::Nostr("all full-history relays were unavailable".to_string())
+            }));
+        }
+        if self.require_all_relays && successful_relays != self.config.relays.len() {
+            return Err(last_relay_error.unwrap_or_else(|| {
+                CrawlError::Nostr(format!(
+                    "only {successful_relays}/{} relays completed the full-history author batch",
+                    self.config.relays.len()
+                ))
             }));
         }
 
@@ -1016,6 +1092,8 @@ impl<S: Store> NostrBridge<S> {
                 events_selected: state.events_selected,
                 live_bytes_selected: state.live_bytes_selected,
                 applied_events,
+                relay_fetch_select_ms: 0,
+                index_build_ms: 0,
             });
         }
 
@@ -1092,6 +1170,8 @@ impl<S: Store> NostrBridge<S> {
                     events_selected: state.events_selected,
                     live_bytes_selected: state.live_bytes_selected,
                     applied_events: Vec::new(),
+                    relay_fetch_select_ms: 0,
+                    index_build_ms: 0,
                 });
 
                 if !cursor_advanced {
@@ -1114,6 +1194,8 @@ impl<S: Store> NostrBridge<S> {
             events_selected: state.events_selected,
             live_bytes_selected: state.live_bytes_selected,
             applied_events,
+            relay_fetch_select_ms: 0,
+            index_build_ms: 0,
         })
     }
 
@@ -1531,6 +1613,8 @@ impl<S: Store> NostrBridge<S> {
                 events_selected: state.events_selected,
                 live_bytes_selected: state.live_bytes_selected,
                 applied_events: Vec::new(),
+                relay_fetch_select_ms: 0,
+                index_build_ms: 0,
             });
 
             if self.reached_events_seen_limit(*events_seen) {

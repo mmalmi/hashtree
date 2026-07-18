@@ -925,6 +925,9 @@ pub(crate) enum SocialGraphCommands {
         /// Relay query author batch size
         #[arg(long, default_value_t = 64)]
         author_batch_size: usize,
+        /// Authors committed to the resumable index root per durable checkpoint
+        #[arg(long, default_value_t = 8)]
+        checkpoint_authors: usize,
         /// Number of graph-crawl author batches to fetch concurrently during warmup
         #[arg(long, default_value_t = 4)]
         concurrent_batches: usize,

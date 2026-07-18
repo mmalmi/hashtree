@@ -1571,6 +1571,8 @@ async fn history_sync_checkpoints_root_before_later_chunk_failure() -> Result<()
                                 events_selected: 1,
                                 live_bytes_selected: 0,
                                 applied_events: vec![alice_stored],
+                                relay_fetch_select_ms: 0,
+                                index_build_ms: 0,
                             }),
                             _ => Err(anyhow::anyhow!("boom")),
                         },
@@ -1687,6 +1689,8 @@ async fn history_sync_coalesces_root_publications_and_flushes_final_root() -> Re
                             events_selected: 1,
                             live_bytes_selected: 0,
                             applied_events: Vec::new(),
+                            relay_fetch_select_ms: 0,
+                            index_build_ms: 0,
                         })
                     }
                 }
@@ -1841,6 +1845,8 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
                             events_selected: 1,
                             live_bytes_selected: 0,
                             applied_events: vec![history_stored.clone()],
+                            relay_fetch_select_ms: 0,
+                            index_build_ms: 0,
                         })
                     }
                 }
@@ -1922,6 +1928,8 @@ async fn event_only_history_sync_skips_profile_rebuild() -> Result<()> {
                         events_selected: 1,
                         live_bytes_selected: 0,
                         applied_events: Vec::new(),
+                        relay_fetch_select_ms: 0,
+                        index_build_ms: 0,
                     }))
                 }
             },

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Added bounded, resumable full-history Nostr indexing for explicit author
+  allowlists. One ordinary event-index root now advances behind an atomic local
+  cursor, exact crawl-policy validation, an exclusive writer lock, required
+  all-relay coverage, incremental profile indexing, and per-checkpoint
+  fetch-versus-build timings without a whole-index completion scan.
+
 ### Fixed
 
 - Prepared `hashtree-nostr-pubsub` 0.2.83, `hashtree-cli` 0.2.101, and

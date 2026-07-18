@@ -883,6 +883,87 @@ async fn full_author_history_retains_per_author_limit() -> io::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn required_relays_reject_partial_full_history_batch_before_build() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let relay_url = relay.url();
+    let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable port");
+    let unavailable_url = format!(
+        "ws://127.0.0.1:{}",
+        unavailable.local_addr().expect("unavailable addr").port()
+    );
+    drop(unavailable);
+
+    let author = Keys::generate();
+    let note = event_builder!(Kind::TextNote, "required relay note")
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&author)
+        .expect("note");
+    let publisher = Client::new(Keys::generate());
+    publisher.add_relay(&relay_url).await.expect("add relay");
+    publisher.connect().await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    publisher.send_event(&note).await.expect("publish note");
+
+    let root_keys = Keys::generate();
+    let graph = SocialGraph::new(&root_keys.public_key().to_hex());
+    let store = Arc::new(MemoryStore::new());
+    let bridge = NostrBridge::new(
+        store,
+        CrawlConfig {
+            relays: vec![relay_url, unavailable_url],
+            author_allowlist: Some(vec![author.public_key().to_hex()]),
+            author_batch_size: 1,
+            per_author_event_limit: 8,
+            full_author_history: true,
+            relay_page_size: 32,
+            max_relay_pages: 1,
+            fetch_timeout: Duration::from_millis(100),
+            kinds: Some(vec![1]),
+            ..CrawlConfig::default()
+        },
+    )
+    .requiring_all_relays();
+
+    let error = bridge
+        .crawl(&graph, None)
+        .await
+        .expect_err("partial relay coverage must fail");
+    assert!(error.to_string().contains("relay"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn required_relay_without_negentropy_or_paging_cannot_commit() -> io::Result<()> {
+    let relay = TestRelay::new();
+    let author = Keys::generate();
+    let graph = SocialGraph::new(&Keys::generate().public_key().to_hex());
+    let bridge = NostrBridge::new(
+        Arc::new(MemoryStore::new()),
+        CrawlConfig {
+            relays: vec![relay.url()],
+            author_allowlist: Some(vec![author.public_key().to_hex()]),
+            author_batch_size: 1,
+            per_author_event_limit: 8,
+            full_author_history: true,
+            max_relay_pages: 0,
+            fetch_timeout: Duration::from_millis(100),
+            kinds: Some(vec![1]),
+            ..CrawlConfig::default()
+        },
+    )
+    .requiring_all_relays();
+
+    let error = bridge
+        .crawl(&graph, None)
+        .await
+        .expect_err("required relay needs negentropy or paging coverage");
+    assert!(error.to_string().contains("negentropy"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_author_history_retains_more_than_256_events_across_pages() -> io::Result<()> {
     let relay = TestRelay::new();
     let relay_url = relay.url();
