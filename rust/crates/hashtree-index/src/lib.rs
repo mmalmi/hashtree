@@ -3,6 +3,7 @@
 mod search;
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -155,6 +156,27 @@ impl<S: Store> BTree<S> {
             return Ok(None);
         };
         self.get_link_recursive(root.clone(), key.to_string()).await
+    }
+
+    /// Resolve many link keys in one tree walk, skipping subtrees that cannot
+    /// contain any requested key.
+    pub async fn get_links<I>(
+        &self,
+        root: Option<&Cid>,
+        keys: I,
+    ) -> Result<BTreeMap<String, Cid>, BTreeError>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let keys = keys.into_iter().collect::<BTreeSet<_>>();
+        let Some(root) = root else {
+            return Ok(BTreeMap::new());
+        };
+        if keys.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        self.get_links_recursive(root.clone(), &keys.into_iter().collect::<Vec<_>>())
+            .await
     }
 
     pub async fn entries(&self, root: Option<&Cid>) -> Result<Vec<(String, String)>, BTreeError> {
@@ -428,6 +450,142 @@ impl<S: Store> BTree<S> {
         Ok(level.pop().map(|node| node.cid))
     }
 
+    /// Apply a sorted batch of link insertions and deletions, reusing untouched
+    /// subtrees. Repeated changes for one key use the last value; `None` deletes
+    /// a key.
+    pub async fn update_links<I>(
+        &self,
+        root: Option<&Cid>,
+        changes: I,
+    ) -> Result<Option<Cid>, BTreeError>
+    where
+        I: IntoIterator<Item = (String, Option<Cid>)>,
+    {
+        let changes = changes.into_iter().collect::<BTreeMap<_, _>>();
+        if changes.is_empty() {
+            return Ok(root.cloned());
+        }
+
+        let changes = changes.into_iter().collect::<Vec<_>>();
+        let Some(root) = root else {
+            return self
+                .build_links(
+                    changes
+                        .into_iter()
+                        .filter_map(|(key, cid)| cid.map(|cid| (key, cid))),
+                )
+                .await;
+        };
+
+        let nodes = self.update_link_node(root.clone(), &changes).await?;
+        self.finish_link_node_updates(nodes).await
+    }
+
+    fn update_link_node<'a>(
+        &'a self,
+        node: Cid,
+        changes: &'a [(String, Option<Cid>)],
+    ) -> BTreeFuture<'a, Vec<BuiltNode>> {
+        Box::pin(async move {
+            let entries = sort_entries(self.tree.list_directory(&node).await?);
+            if is_leaf_node(&entries) {
+                return self.update_link_leaf(entries, changes).await;
+            }
+
+            let mut children = Vec::new();
+            let mut change_start = 0;
+            for (child_index, entry) in entries.iter().enumerate() {
+                let change_end = entries
+                    .get(child_index + 1)
+                    .map(|next| {
+                        let next_key = unescape_key(&next.name);
+                        change_start
+                            + changes[change_start..].partition_point(|(key, _)| key < &next_key)
+                    })
+                    .unwrap_or(changes.len());
+                if change_start == change_end {
+                    let cid = entry_cid(entry);
+                    let count = match stored_link_subtree_count(entry) {
+                        Some(count) => count,
+                        None => self.count_links_recursive(cid.clone()).await?,
+                    };
+                    children.push(BuiltNode {
+                        first_key: unescape_key(&entry.name),
+                        cid,
+                        count,
+                    });
+                } else {
+                    children.extend(
+                        self.update_link_node(entry_cid(entry), &changes[change_start..change_end])
+                            .await?,
+                    );
+                }
+                change_start = change_end;
+            }
+
+            self.create_link_node_level(children).await
+        })
+    }
+
+    async fn update_link_leaf(
+        &self,
+        entries: Vec<TreeEntry>,
+        changes: &[(String, Option<Cid>)],
+    ) -> Result<Vec<BuiltNode>, BTreeError> {
+        let mut final_entries = entries
+            .into_iter()
+            .map(|entry| (unescape_key(&entry.name), entry_cid(&entry)))
+            .collect::<BTreeMap<_, _>>();
+        for (key, cid) in changes {
+            match cid {
+                Some(cid) => {
+                    final_entries.insert(key.clone(), cid.clone());
+                }
+                None => {
+                    final_entries.remove(key);
+                }
+            }
+        }
+
+        let final_entries = final_entries.into_iter().collect::<Vec<_>>();
+        let mut nodes = Vec::with_capacity(final_entries.len().div_ceil(self.max_keys));
+        for chunk in final_entries.chunks(self.max_keys) {
+            let cid = self.create_leaf_with_links(chunk).await?;
+            nodes.push(BuiltNode {
+                first_key: chunk[0].0.clone(),
+                cid,
+                count: chunk.len() as u64,
+            });
+        }
+        Ok(nodes)
+    }
+
+    async fn create_link_node_level(
+        &self,
+        children: Vec<BuiltNode>,
+    ) -> Result<Vec<BuiltNode>, BTreeError> {
+        let mut nodes = Vec::with_capacity(children.len().div_ceil(self.max_keys));
+        for chunk in children.chunks(self.max_keys) {
+            let cid = self.create_internal_node(chunk).await?;
+            nodes.push(BuiltNode {
+                first_key: chunk[0].first_key.clone(),
+                cid,
+                count: chunk.iter().map(|child| child.count).sum(),
+            });
+        }
+        Ok(nodes)
+    }
+
+    async fn finish_link_node_updates(
+        &self,
+        mut nodes: Vec<BuiltNode>,
+    ) -> Result<Option<Cid>, BTreeError> {
+        while nodes.len() > 1 {
+            nodes = self.create_link_node_level(nodes).await?;
+        }
+        Ok(nodes.pop().map(|node| node.cid))
+    }
+
     async fn finish_insert(&self, result: InsertResult) -> Result<Cid, BTreeError> {
         if let Some(split) = result.split {
             return self
@@ -484,6 +642,46 @@ impl<S: Store> BTree<S> {
 
             let child = find_child(&entries, &key);
             self.get_link_recursive(entry_cid(&child), key).await
+        })
+    }
+
+    fn get_links_recursive<'a>(
+        &'a self,
+        root: Cid,
+        keys: &'a [String],
+    ) -> BTreeFuture<'a, BTreeMap<String, Cid>> {
+        Box::pin(async move {
+            let entries = sort_entries(self.tree.list_directory(&root).await?);
+            if is_leaf_node(&entries) {
+                let links = entries
+                    .into_iter()
+                    .map(|entry| (unescape_key(&entry.name), entry_cid(&entry)))
+                    .collect::<BTreeMap<_, _>>();
+                return Ok(keys
+                    .iter()
+                    .filter_map(|key| links.get(key).cloned().map(|cid| (key.clone(), cid)))
+                    .collect());
+            }
+
+            let mut found = BTreeMap::new();
+            let mut key_start = 0;
+            for (child_index, entry) in entries.iter().enumerate() {
+                let key_end = entries
+                    .get(child_index + 1)
+                    .map(|next| {
+                        let next_key = unescape_key(&next.name);
+                        key_start + keys[key_start..].partition_point(|key| key < &next_key)
+                    })
+                    .unwrap_or(keys.len());
+                if key_start < key_end {
+                    found.extend(
+                        self.get_links_recursive(entry_cid(entry), &keys[key_start..key_end])
+                            .await?,
+                    );
+                }
+                key_start = key_end;
+            }
+            Ok(found)
         })
     }
 

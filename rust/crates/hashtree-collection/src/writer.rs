@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, Store};
@@ -236,6 +236,111 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         let next_item = self.normalize(item)?;
         self.delete_normalized_with_context(&next_item, context)
             .await
+    }
+
+    /// Apply a batch to the id and derived key indexes in one pass per B-tree.
+    ///
+    /// Callers must provide the previous item for every replacement, just as
+    /// with [`CollectionWriter::put`]. Search-indexed definitions are rejected
+    /// because their compound term updates require separate handling.
+    pub async fn put_batch<I>(&mut self, entries: I) -> Result<CollectionState, CollectionError>
+    where
+        I: IntoIterator<Item = (T, Cid, Option<T>)>,
+    {
+        if !self.definition.search_indexes().is_empty() {
+            return Err(CollectionError::Validation(
+                "batch collection updates do not support search indexes".to_string(),
+            ));
+        }
+
+        let mut normalized_entries = Vec::new();
+        let mut ids_without_previous = BTreeSet::new();
+        let mut seen_ids = BTreeSet::new();
+        for (item, cid, previous) in entries {
+            let item = self.normalize(&item)?;
+            let id = self.definition.item_id(&item)?;
+            if !seen_ids.insert(id.clone()) {
+                return Err(CollectionError::Validation(format!(
+                    "batch collection update contains duplicate id `{id}`"
+                )));
+            }
+            let previous = previous
+                .map(|previous| {
+                    let previous = self.normalize(&previous)?;
+                    let previous_id = self.definition.item_id(&previous)?;
+                    Ok::<_, CollectionError>((previous_id, previous))
+                })
+                .transpose()?;
+            if previous.is_none() {
+                ids_without_previous.insert(id.clone());
+            }
+            normalized_entries.push((id, item, cid, previous));
+        }
+        normalized_entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let existing_without_previous = self
+            .index
+            .get_links(self.state.by_id_root.as_ref(), ids_without_previous)
+            .await?;
+        if let Some(id) = existing_without_previous.keys().next() {
+            return Err(CollectionError::MissingPreviousForOverwrite { id: id.clone() });
+        }
+
+        let mut by_id_changes = BTreeMap::<String, Option<Cid>>::new();
+        let mut key_changes = self
+            .definition
+            .key_indexes()
+            .iter()
+            .map(|index| {
+                (
+                    index.name().to_string(),
+                    BTreeMap::<String, Option<Cid>>::new(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for (_, _, _, previous) in &normalized_entries {
+            if let Some((previous_id, previous)) = previous {
+                by_id_changes.insert(previous_id.clone(), None);
+                for index in self.definition.key_indexes() {
+                    let changes = key_changes
+                        .get_mut(index.name())
+                        .expect("collection key changes must exist");
+                    for key in index.materialize_keys(previous) {
+                        changes.insert(key, None);
+                    }
+                }
+            }
+        }
+
+        for (id, item, cid, _) in normalized_entries {
+            by_id_changes.insert(id, Some(cid.clone()));
+            for index in self.definition.key_indexes() {
+                let changes = key_changes
+                    .get_mut(index.name())
+                    .expect("collection key changes must exist");
+                for key in index.materialize_keys(&item) {
+                    changes.insert(key, Some(cid.clone()));
+                }
+            }
+        }
+
+        self.state.by_id_root = self
+            .index
+            .update_links(self.state.by_id_root.as_ref(), by_id_changes)
+            .await?;
+        for index in self.definition.key_indexes() {
+            let root = self
+                .index
+                .update_links(
+                    self.state.key_root(index.name()),
+                    key_changes.remove(index.name()).unwrap_or_default(),
+                )
+                .await?;
+            self.state.key_roots.insert(index.name().to_string(), root);
+        }
+
+        Ok(self.snapshot())
     }
 
     pub async fn rebuild<I>(&mut self, entries: I) -> Result<CollectionState, CollectionError>

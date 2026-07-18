@@ -13,3 +13,6 @@ hashtree-core.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.103 - 2026-07-19
+
+### Fixed
+
+- Resumed Nostr event-index builds now resolve existing events in batched tree
+  walks and apply each collection projection with one subtree-preserving bulk
+  update. This removes the per-event B-tree mutation amplification that could
+  stall large crawl checkpoints while preserving replacement, duplicate,
+  missing-blob, and obsolete-blob semantics.
+
 ## 0.2.102 - 2026-07-18
 
 ### Fixed

@@ -1,12 +1,59 @@
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::executor::block_on;
-use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, MemoryStore};
+use hashtree_core::{
+    Cid, DirEntry, Hash, HashTree, HashTreeConfig, LinkType, MemoryStore, Store, StoreError,
+};
 use hashtree_index::{escape_key, BTree, BTreeOptions};
 
 fn cid_from_hex(hex: &str) -> Cid {
     let bytes = hex::decode(hex).unwrap();
     let hash: [u8; 32] = bytes.try_into().unwrap();
+    Cid { hash, key: None }
+}
+
+#[derive(Default)]
+struct CountingStore {
+    inner: MemoryStore,
+    gets: AtomicUsize,
+}
+
+impl CountingStore {
+    fn reset_gets(&self) {
+        self.gets.store(0, Ordering::Relaxed);
+    }
+
+    fn gets(&self) -> usize {
+        self.gets.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl Store for CountingStore {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.inner.put(hash, data).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.gets.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(hash).await
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.delete(hash).await
+    }
+}
+
+fn cid_from_seed(seed: usize) -> Cid {
+    let mut hash = [0_u8; 32];
+    hash[..8].copy_from_slice(&(seed as u64).to_be_bytes());
     Cid { hash, key: None }
 }
 
@@ -195,6 +242,276 @@ fn bulk_link_build_matches_incremental_entries() {
                 .into_iter()
                 .take(3)
                 .collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
+fn bulk_link_changes_are_deterministic_and_match_map_semantics() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
+        let initial = (0..40)
+            .map(|index| (format!("key:{index:03}"), cid_from_seed(index)))
+            .collect::<BTreeMap<_, _>>();
+        let root = btree
+            .build_links(initial.clone())
+            .await
+            .unwrap()
+            .expect("initial root");
+
+        let changes = vec![
+            ("key:000".to_string(), None),
+            ("key:007".to_string(), Some(cid_from_seed(700))),
+            ("key:007".to_string(), Some(cid_from_seed(701))),
+            ("key:020".to_string(), None),
+            ("key:041".to_string(), Some(cid_from_seed(41))),
+            ("key:099".to_string(), None),
+            ("key:100".to_string(), Some(cid_from_seed(100))),
+        ];
+        let updated = btree
+            .update_links(Some(&root), changes.clone())
+            .await
+            .unwrap()
+            .expect("updated root");
+
+        let mut expected = initial;
+        for (key, value) in &changes {
+            match value {
+                Some(cid) => {
+                    expected.insert(key.clone(), cid.clone());
+                }
+                None => {
+                    expected.remove(key);
+                }
+            }
+        }
+        let repeated = btree
+            .update_links(Some(&root), changes)
+            .await
+            .unwrap()
+            .expect("repeated root");
+
+        assert_eq!(updated, repeated);
+        assert_eq!(
+            btree.links_entries(Some(&updated)).await.unwrap(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
+fn bulk_link_changes_handle_noop_delete_all_and_delete_to_one() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
+        let initial = (0..10)
+            .map(|index| (format!("key:{index:02}"), cid_from_seed(index)))
+            .collect::<Vec<_>>();
+        let root = btree
+            .build_links(initial.clone())
+            .await
+            .unwrap()
+            .expect("initial root");
+
+        let noop = btree
+            .update_links(
+                Some(&root),
+                [
+                    ("key:05".to_string(), Some(cid_from_seed(5))),
+                    ("missing".to_string(), None),
+                ],
+            )
+            .await
+            .unwrap()
+            .expect("noop root");
+        assert_eq!(noop, root);
+
+        let one = btree
+            .update_links(
+                Some(&root),
+                initial
+                    .iter()
+                    .filter(|(key, _)| key != "key:05")
+                    .map(|(key, _)| (key.clone(), None)),
+            )
+            .await
+            .unwrap()
+            .expect("single-entry root");
+        assert_eq!(
+            btree.links_entries(Some(&one)).await.unwrap(),
+            vec![("key:05".to_string(), cid_from_seed(5))]
+        );
+        assert_eq!(btree.count_stored_links(Some(&one)).await.unwrap(), Some(1));
+
+        assert_eq!(
+            btree
+                .update_links(Some(&root), initial.into_iter().map(|(key, _)| (key, None)),)
+                .await
+                .unwrap(),
+            None
+        );
+    });
+}
+
+#[test]
+fn sparse_link_changes_only_read_touched_paths() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions::default());
+        let initial = (0..31_000)
+            .map(|index| (format!("key:{index:05}"), cid_from_seed(index)))
+            .collect::<Vec<_>>();
+        let root = btree
+            .build_links(initial)
+            .await
+            .unwrap()
+            .expect("initial root");
+        let changes = vec![
+            ("key:00001".to_string(), Some(cid_from_seed(40_001))),
+            ("key:15500".to_string(), None),
+            ("key:30998".to_string(), Some(cid_from_seed(40_002))),
+        ];
+
+        store.reset_gets();
+        let updated = btree
+            .update_links(Some(&root), changes)
+            .await
+            .unwrap()
+            .expect("updated root");
+        let update_gets = store.gets();
+
+        assert_eq!(
+            btree.get_link(Some(&updated), "key:00001").await.unwrap(),
+            Some(cid_from_seed(40_001))
+        );
+        assert_eq!(
+            btree.get_link(Some(&updated), "key:15500").await.unwrap(),
+            None
+        );
+        assert!(
+            update_gets < 64,
+            "three sparse changes read {update_gets} blobs from a 31,000-entry tree"
+        );
+    });
+}
+
+#[test]
+fn dense_link_lookup_reads_each_existing_node_at_most_once() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions::default());
+        let entry_count = 3_100;
+        let initial = (0..entry_count)
+            .map(|index| (format!("key:{index:05}"), cid_from_seed(index)))
+            .collect::<Vec<_>>();
+        let root = btree
+            .build_links(initial.clone())
+            .await
+            .unwrap()
+            .expect("initial root");
+
+        store.reset_gets();
+        let found = btree
+            .get_links(Some(&root), initial.into_iter().map(|(key, _)| key))
+            .await
+            .unwrap();
+        let lookup_gets = store.gets();
+
+        assert_eq!(found.len(), entry_count);
+        assert!(
+            lookup_gets < entry_count / 4,
+            "bulk lookup made {lookup_gets} store reads for {entry_count} keys"
+        );
+    });
+}
+
+#[test]
+fn dense_link_changes_read_each_existing_node_at_most_once() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions::default());
+        let entry_count = 3_100;
+        let initial = (0..entry_count)
+            .map(|index| (format!("key:{index:05}"), cid_from_seed(index)))
+            .collect::<Vec<_>>();
+        let root = btree
+            .build_links(initial)
+            .await
+            .unwrap()
+            .expect("initial root");
+        let changes = (0..entry_count)
+            .map(|index| {
+                (
+                    format!("key:{index:05}"),
+                    Some(cid_from_seed(index + 10_000)),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        store.reset_gets();
+        let updated = btree
+            .update_links(Some(&root), changes.clone())
+            .await
+            .unwrap()
+            .expect("updated root");
+
+        let update_gets = store.gets();
+        assert_eq!(
+            btree.count_stored_links(Some(&updated)).await.unwrap(),
+            Some(entry_count as u64)
+        );
+        assert!(
+            update_gets < changes.len() / 4,
+            "bulk update made {} store reads for {} changes",
+            update_gets,
+            changes.len()
+        );
+    });
+}
+
+#[test]
+fn bulk_link_changes_restore_counts_when_reusing_legacy_children() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)));
+        let root = btree
+            .build_links((0..20).map(|index| (format!("key:{index:03}"), cid_from_seed(index))))
+            .await
+            .unwrap()
+            .expect("initial root");
+        let legacy_entries = tree
+            .list_directory(&root)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                let cid = Cid {
+                    hash: entry.hash,
+                    key: entry.key,
+                };
+                DirEntry::from_cid(entry.name, &cid).with_link_type(LinkType::Dir)
+            })
+            .collect();
+        let legacy_root = tree.put_directory(legacy_entries).await.unwrap();
+        assert_eq!(
+            btree.count_stored_links(Some(&legacy_root)).await.unwrap(),
+            None
+        );
+
+        let updated = btree
+            .update_links(
+                Some(&legacy_root),
+                [("key:001".to_string(), Some(cid_from_seed(101)))],
+            )
+            .await
+            .unwrap()
+            .expect("updated root");
+
+        assert_eq!(
+            btree.count_stored_links(Some(&updated)).await.unwrap(),
+            Some(20)
         );
     });
 }

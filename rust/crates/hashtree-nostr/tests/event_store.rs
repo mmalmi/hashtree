@@ -10,8 +10,9 @@ use hashtree_nostr::{
     encode_signed_event_json, encode_stored_event_msgpack, parse_hashtree_root_event,
     parse_verified_hashtree_root_event, read_signed_event_snapshot,
     resolve_self_encrypted_root_cid, store_signed_event_snapshot,
-    stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventStore, StoredNostrEvent,
-    VerifiedEvent, VerifiedStoredNostrEvent, HASHTREE_LEGACY_ROOT_KIND, HASHTREE_ROOT_KIND,
+    stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventStore, NostrEventStoreOptions,
+    StoredNostrEvent, VerifiedEvent, VerifiedStoredNostrEvent, HASHTREE_LEGACY_ROOT_KIND,
+    HASHTREE_ROOT_KIND,
 };
 use nostr_sdk::{
     Alphabet, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, SingleLetterTag, Tag, Timestamp,
@@ -158,6 +159,34 @@ async fn manifest_index_root(store: Arc<MemoryStore>, root: &Cid, name: &str) ->
             hash: entry.hash,
             key: entry.key,
         })
+}
+
+async fn manifest_index_entries(
+    store: Arc<MemoryStore>,
+    root: &Cid,
+) -> std::collections::BTreeMap<String, Vec<(String, Cid)>> {
+    let mut indexes = std::collections::BTreeMap::new();
+    for name in [
+        "by-id",
+        "by-author-time",
+        "by-author-kind-time",
+        "by-kind-time",
+        "by-kind-time-author",
+        "by-time",
+        "by-tag",
+        "replaceable",
+        "parameterized-replaceable",
+    ] {
+        let entries = match manifest_index_root(Arc::clone(&store), root, name).await {
+            Some(index_root) => BTree::new(Arc::clone(&store), BTreeOptions::default())
+                .links_entries(Some(&index_root))
+                .await
+                .unwrap(),
+            None => Vec::new(),
+        };
+        indexes.insert(name.to_string(), entries);
+    }
+    indexes
 }
 
 fn reverse_timestamp(created_at: u64) -> String {
@@ -1035,6 +1064,304 @@ fn build_deduplicates_non_replaceable_events_within_batch() {
             .expect("deduplicated event root");
 
         assert_eq!(cid_to_pair(&duplicated), cid_to_pair(&single));
+    });
+}
+
+#[test]
+fn resumed_build_with_only_existing_and_stale_events_keeps_exact_root() {
+    block_on(async {
+        let store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let author = "e".repeat(64);
+        let plain = canonical_store_event(&author, 10, 1, Vec::new(), "plain");
+        let profile = canonical_store_event(&author, 20, 0, Vec::new(), "profile");
+        let stale_profile = canonical_store_event(&author, 19, 0, Vec::new(), "stale profile");
+        let root = store
+            .build(None, [plain.clone(), profile])
+            .await
+            .unwrap()
+            .expect("initial root");
+
+        let unchanged = store
+            .build(Some(&root), [plain, stale_profile])
+            .await
+            .unwrap()
+            .expect("unchanged root");
+
+        assert_eq!(unchanged, root);
+    });
+}
+
+#[test]
+fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
+    block_on(async {
+        let options = NostrEventStoreOptions {
+            btree_order: Some(4),
+        };
+        let profile_author = "a".repeat(64);
+        let article_author = "b".repeat(64);
+        let article_tags = vec![vec!["d".to_string(), "article".to_string()]];
+        let old_profile = canonical_store_event(
+            &profile_author,
+            10,
+            0,
+            vec![vec!["t".to_string(), "profile".to_string()]],
+            r#"{"name":"old"}"#,
+        );
+        let new_profile = canonical_store_event(
+            &profile_author,
+            1_000,
+            0,
+            vec![vec!["t".to_string(), "profile".to_string()]],
+            r#"{"name":"new"}"#,
+        );
+        let stale_profile = canonical_store_event(
+            &profile_author,
+            9,
+            0,
+            vec![vec!["t".to_string(), "profile".to_string()]],
+            r#"{"name":"stale"}"#,
+        );
+        let old_article = canonical_store_event(
+            &article_author,
+            20,
+            30_023,
+            article_tags.clone(),
+            "old article",
+        );
+        let article_candidate_a = canonical_store_event(
+            &article_author,
+            1_001,
+            30_023,
+            article_tags.clone(),
+            "new article a",
+        );
+        let article_candidate_b = canonical_store_event(
+            &article_author,
+            1_001,
+            30_023,
+            article_tags,
+            "new article b",
+        );
+        let (new_article, losing_article) = if article_candidate_a.id < article_candidate_b.id {
+            (article_candidate_a, article_candidate_b)
+        } else {
+            (article_candidate_b, article_candidate_a)
+        };
+        let mut initial = (0..60)
+            .map(|index| {
+                let author = format!("{:064x}", index % 8 + 1);
+                canonical_store_event(
+                    &author,
+                    100 + index,
+                    1 + (index % 3) as u32,
+                    vec![
+                        vec!["t".to_string(), format!("topic-{}", index % 7)],
+                        vec!["p".to_string(), format!("{:064x}", index % 5 + 20)],
+                    ],
+                    &format!("initial-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        initial.extend([old_profile.clone(), old_article.clone()]);
+
+        let mut appended = (0..80)
+            .map(|index| {
+                let author = format!("{:064x}", index % 9 + 30);
+                canonical_store_event(
+                    &author,
+                    2_000 + index,
+                    1 + (index % 5) as u32,
+                    vec![
+                        vec!["t".to_string(), format!("topic-{}", index % 11)],
+                        vec!["e".to_string(), format!("{:064x}", index + 100)],
+                    ],
+                    &format!("appended-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        appended.extend([
+            stale_profile.clone(),
+            new_profile.clone(),
+            losing_article,
+            new_article.clone(),
+            canonical_store_event(
+                &format!("{:064x}", 99),
+                3_000,
+                5,
+                vec![vec!["e".to_string(), initial[0].id.clone()]],
+                "deletion tombstone",
+            ),
+        ]);
+
+        let bulk_backing = Arc::new(MemoryStore::new());
+        let bulk_store = NostrEventStore::with_options(Arc::clone(&bulk_backing), options.clone());
+        let initial_root = bulk_store
+            .build(None, initial.clone())
+            .await
+            .unwrap()
+            .expect("bulk initial root");
+        let old_profile_cid =
+            by_id_event_cid(Arc::clone(&bulk_backing), &initial_root, &old_profile.id)
+                .await
+                .expect("old profile cid");
+        let bulk_root = bulk_store
+            .build(Some(&initial_root), appended.clone())
+            .await
+            .unwrap()
+            .expect("bulk appended root");
+
+        let repeated_backing = Arc::new(MemoryStore::new());
+        let repeated_store =
+            NostrEventStore::with_options(Arc::clone(&repeated_backing), options.clone());
+        let repeated_initial = repeated_store
+            .build(None, initial.clone())
+            .await
+            .unwrap()
+            .expect("repeated initial root");
+        let mut shuffled_appended = appended.clone();
+        shuffled_appended.reverse();
+        let repeated_root = repeated_store
+            .build(Some(&repeated_initial), shuffled_appended)
+            .await
+            .unwrap()
+            .expect("repeated appended root");
+        assert_eq!(cid_to_pair(&bulk_root), cid_to_pair(&repeated_root));
+
+        let sequential_backing = Arc::new(MemoryStore::new());
+        let sequential_store =
+            NostrEventStore::with_options(Arc::clone(&sequential_backing), options);
+        let mut sequential_root = sequential_store
+            .build(None, initial)
+            .await
+            .unwrap()
+            .expect("sequential initial root");
+        appended.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for event in appended {
+            sequential_root = sequential_store
+                .add(Some(&sequential_root), event)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            manifest_index_entries(Arc::clone(&bulk_backing), &bulk_root).await,
+            manifest_index_entries(Arc::clone(&sequential_backing), &sequential_root).await
+        );
+        assert_eq!(
+            bulk_store
+                .get_replaceable(Some(&bulk_root), &profile_author, 0)
+                .await
+                .unwrap(),
+            Some(new_profile)
+        );
+        assert_eq!(
+            bulk_store
+                .get_parameterized_replaceable(
+                    Some(&bulk_root),
+                    &article_author,
+                    30_023,
+                    "article",
+                )
+                .await
+                .unwrap(),
+            Some(new_article)
+        );
+        assert_eq!(bulk_backing.get(&old_profile_cid.hash).await.unwrap(), None);
+        assert_eq!(
+            bulk_store
+                .get_by_id(Some(&bulk_root), &stale_profile.id)
+                .await
+                .unwrap(),
+            None
+        );
+    });
+}
+
+#[test]
+fn resumed_bulk_build_matches_sequential_recovery_from_missing_event_blobs() {
+    block_on(async {
+        let author = "c".repeat(64);
+        let plain = canonical_store_event(
+            &author,
+            100,
+            1,
+            vec![vec!["t".to_string(), "missing".to_string()]],
+            "plain",
+        );
+        let old_profile = canonical_store_event(&author, 101, 0, Vec::new(), r#"{"name":"old"}"#);
+        let new_profile = canonical_store_event(&author, 200, 0, Vec::new(), r#"{"name":"new"}"#);
+        let extra = canonical_store_event(
+            &"d".repeat(64),
+            201,
+            5,
+            vec![vec!["e".to_string(), plain.id.clone()]],
+            "tombstone",
+        );
+        let initial = vec![plain.clone(), old_profile.clone()];
+        let appended = vec![plain.clone(), new_profile.clone(), extra];
+
+        let bulk_backing = Arc::new(MemoryStore::new());
+        let bulk_store = NostrEventStore::new(Arc::clone(&bulk_backing));
+        let bulk_initial = bulk_store
+            .build(None, initial.clone())
+            .await
+            .unwrap()
+            .expect("bulk initial root");
+        for event in [&plain, &old_profile] {
+            let cid = by_id_event_cid(Arc::clone(&bulk_backing), &bulk_initial, &event.id)
+                .await
+                .expect("bulk event cid");
+            assert!(bulk_backing.delete(&cid.hash).await.unwrap());
+        }
+        let bulk_root = bulk_store
+            .build(Some(&bulk_initial), appended.clone())
+            .await
+            .unwrap()
+            .expect("bulk recovered root");
+
+        let sequential_backing = Arc::new(MemoryStore::new());
+        let sequential_store = NostrEventStore::new(Arc::clone(&sequential_backing));
+        let mut sequential_root = sequential_store
+            .build(None, initial)
+            .await
+            .unwrap()
+            .expect("sequential initial root");
+        for event in [&plain, &old_profile] {
+            let cid = by_id_event_cid(Arc::clone(&sequential_backing), &sequential_root, &event.id)
+                .await
+                .expect("sequential event cid");
+            assert!(sequential_backing.delete(&cid.hash).await.unwrap());
+        }
+        for event in appended {
+            sequential_root = sequential_store
+                .build(Some(&sequential_root), [event])
+                .await
+                .unwrap()
+                .expect("sequential recovered root");
+        }
+
+        assert_eq!(
+            manifest_index_entries(Arc::clone(&bulk_backing), &bulk_root).await,
+            manifest_index_entries(Arc::clone(&sequential_backing), &sequential_root).await
+        );
+        assert_eq!(
+            bulk_store
+                .get_by_id(Some(&bulk_root), &plain.id)
+                .await
+                .unwrap(),
+            Some(plain)
+        );
+        assert_eq!(
+            bulk_store
+                .get_replaceable(Some(&bulk_root), &author, 0)
+                .await
+                .unwrap(),
+            Some(new_profile)
+        );
     });
 }
 

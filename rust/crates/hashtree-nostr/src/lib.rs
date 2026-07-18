@@ -891,46 +891,104 @@ impl<S: Store> NostrEventStore<S> {
             buffered_writer.build_manifest_from_events(events).await?
         } else {
             let mut manifest = buffered_writer.get_manifest(root).await?;
-            let mut prepared_non_replaceable = Vec::new();
+            let mut normalized_events = Vec::with_capacity(events.len());
             for (sequence, event) in events.into_iter().enumerate() {
                 let normalized = buffered_writer.validate_event(event).await?;
-                if is_replaceable_kind(normalized.kind)
-                    || is_parameterized_replaceable_kind(normalized.kind)
-                {
-                    buffered_writer
-                        .insert_into_manifest(&mut manifest, normalized, &mut obsolete_event_cids)
-                        .await?;
+                normalized_events.push((sequence, normalized));
+            }
+
+            let existing_by_id = buffered_writer
+                .index
+                .get_links(
+                    manifest.by_id.as_ref(),
+                    normalized_events
+                        .iter()
+                        .filter(|(_, event)| {
+                            !is_replaceable_kind(event.kind)
+                                && !is_parameterized_replaceable_kind(event.kind)
+                        })
+                        .map(|(_, event)| event.id.clone()),
+                )
+                .await?;
+            let existing_replaceable = buffered_writer
+                .index
+                .get_links(
+                    manifest.replaceable.as_ref(),
+                    normalized_events
+                        .iter()
+                        .filter(|(_, event)| is_replaceable_kind(event.kind))
+                        .map(|(_, event)| replaceable_key(&event.pubkey, event.kind)),
+                )
+                .await?;
+            let existing_parameterized = buffered_writer
+                .index
+                .get_links(
+                    manifest.parameterized_replaceable.as_ref(),
+                    normalized_events
+                        .iter()
+                        .filter(|(_, event)| is_parameterized_replaceable_kind(event.kind))
+                        .map(|(_, event)| {
+                            parameterized_replaceable_key(
+                                &event.pubkey,
+                                event.kind,
+                                &parameterized_replaceable_d_tag(event),
+                            )
+                        }),
+                )
+                .await?;
+
+            let mut prepared_events = Vec::with_capacity(normalized_events.len());
+            for (sequence, normalized) in normalized_events {
+                let existing_cid = if is_replaceable_kind(normalized.kind) {
+                    existing_replaceable.get(&replaceable_key(&normalized.pubkey, normalized.kind))
+                } else if is_parameterized_replaceable_kind(normalized.kind) {
+                    existing_parameterized.get(&parameterized_replaceable_key(
+                        &normalized.pubkey,
+                        normalized.kind,
+                        &parameterized_replaceable_d_tag(&normalized),
+                    ))
                 } else {
-                    let previous = match buffered_writer
-                        .manifest_event_cid(&manifest, &normalized.id)
-                        .await?
-                    {
-                        Some(existing_cid) => {
-                            match buffered_writer.read_stored_event(&existing_cid).await {
-                                Ok(_) => continue,
-                                Err(err) if is_missing_stored_event_error(&err) => {
-                                    Some(normalized.clone())
+                    existing_by_id.get(&normalized.id)
+                };
+
+                let previous = match existing_cid {
+                    Some(existing_cid) => {
+                        match buffered_writer.read_stored_event(existing_cid).await {
+                            Ok(existing)
+                                if is_replaceable_kind(normalized.kind)
+                                    || is_parameterized_replaceable_kind(normalized.kind) =>
+                            {
+                                if compare_replaceable_events(&normalized, &existing) <= 0 {
+                                    continue;
                                 }
-                                Err(err) => return Err(err),
+                                obsolete_event_cids.push(existing_cid.clone());
+                                Some(existing)
                             }
+                            Ok(_) => continue,
+                            Err(err) if is_missing_stored_event_error(&err) => {
+                                (!is_replaceable_kind(normalized.kind)
+                                    && !is_parameterized_replaceable_kind(normalized.kind))
+                                .then(|| normalized.clone())
+                            }
+                            Err(err) => return Err(err),
                         }
-                        None => None,
-                    };
-                    prepared_non_replaceable
-                        .push(buffered_writer.prepare_event_blob(sequence, normalized, previous)?);
-                }
+                    }
+                    None => None,
+                };
+                prepared_events
+                    .push(buffered_writer.prepare_event_blob(sequence, normalized, previous)?);
             }
 
             let indexed_events = buffered_writer
-                .put_prepared_event_blobs_parallel(prepared_non_replaceable)
+                .put_prepared_event_blobs_parallel(prepared_events)
                 .await?;
             if !indexed_events.is_empty() {
                 let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
-                for (_sequence, event, event_cid, previous) in indexed_events {
-                    collection
-                        .put(&event, &event_cid, previous.as_ref())
-                        .await?;
-                }
+                collection
+                    .put_batch(indexed_events.into_iter().map(
+                        |(_sequence, event, event_cid, previous)| (event, event_cid, previous),
+                    ))
+                    .await?;
                 manifest = nostr_manifest_from_collection_state(collection.state());
             }
             buffered_writer.write_manifest(&manifest).await?
@@ -1366,17 +1424,6 @@ impl<S: Store> NostrEventStore<S> {
             ));
         };
         self.decode_event(&data)
-    }
-
-    async fn manifest_event_cid(
-        &self,
-        manifest: &NostrEventManifest,
-        id: &str,
-    ) -> Result<Option<Cid>, NostrEventStoreError> {
-        self.collection_source_from_manifest(manifest)
-            .get(id)
-            .await
-            .map_err(Into::into)
     }
 
     fn prepare_event_blob(
