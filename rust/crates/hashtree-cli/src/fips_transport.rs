@@ -18,13 +18,13 @@ use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig, MeshForward
 use hashtree_nostr_pubsub::HashtreeNostrBoundedEventCache;
 use nostr::nips::nip19::ToBech32;
 use nostr::PublicKey;
-use nostr_pubsub::{
-    EventBus, EventPolicyContext, EventRetentionPolicy, EventSource, NostrPubsubRouter,
-    PolicyDecision, PubsubPolicy, RouterLiveSource, RouterPublishSource, RouterQuerySource,
-    SourcePolicyContext, SourceRoute,
-};
 #[cfg(feature = "experimental-decentralized-pubsub")]
-use nostr_pubsub::{Filter, VerifiedEvent};
+use nostr_pubsub::{EventBus, Filter, VerifiedEvent};
+use nostr_pubsub::{
+    EventPolicyContext, EventRetentionPolicy, EventSource, NostrPubsubRouter, PolicyDecision,
+    PubsubPolicy, RouterLiveSource, RouterPublishSource, RouterQuerySource, SourcePolicyContext,
+    SourceRoute,
+};
 use nostr_pubsub_fips::{FipsPubsubClient, FipsPubsubClientOptions};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

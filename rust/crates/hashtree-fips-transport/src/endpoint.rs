@@ -2,6 +2,7 @@
 
 use fips_core::config::{
     EthernetConfig, NostrDiscoveryPolicy, PeerAddress, RoutingMode, TransportInstances,
+    WebSocketConfig,
 };
 use hashtree_core::StoreError;
 use std::collections::HashMap;
@@ -46,6 +47,8 @@ pub struct FipsEndpointOptions {
     pub relays: Vec<String>,
     pub enable_udp: bool,
     pub enable_webrtc: bool,
+    /// Optional native WebSocket listener and/or first-adjacency seed URLs.
+    pub websocket: Option<WebSocketConfig>,
     /// Join the ordinary fixed-loopback FIPS rendezvous transport.
     pub enable_local_rendezvous: bool,
     /// Host-local Ethernet interfaces used as the only underlay when ordinary
@@ -70,6 +73,7 @@ impl FipsEndpointOptions {
             relays: Vec::new(),
             enable_udp: true,
             enable_webrtc: true,
+            websocket: None,
             enable_local_rendezvous: false,
             ethernet_interfaces: Vec::new(),
             enable_lan_discovery: true,
@@ -113,6 +117,7 @@ async fn bind_fips_endpoint_inner(
 ) -> Result<BoundFipsEndpoint, FipsTransportError> {
     if !options.enable_udp
         && !options.enable_webrtc
+        && options.websocket.is_none()
         && !options.enable_local_rendezvous
         && options.ethernet_interfaces.is_empty()
     {
@@ -233,6 +238,9 @@ fn fips_endpoint_config_with_local_rendezvous(
     config.node.discovery.nostr.share_local_candidates = options.share_local_candidates;
     config.node.discovery.nostr.app = discovery_scope.to_string();
     config.node.discovery.nostr.advert_relays = options.relays;
+    if let Some(websocket) = options.websocket {
+        config.transports.websocket = TransportInstances::Single(websocket);
+    }
     if let Some(rendezvous_addr) = rendezvous_addr {
         config.node.discovery.local.rendezvous_addr = rendezvous_addr;
     }
@@ -372,5 +380,31 @@ mod tests {
             config.node.discovery.nostr.advert_relays,
             vec!["ws://127.0.0.1:12345"]
         );
+    }
+
+    #[test]
+    fn websocket_seed_is_an_ordinary_fips_transport() {
+        let mut options = FipsEndpointOptions::new(
+            "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqd3c4k5",
+        );
+        options.enable_udp = false;
+        options.enable_webrtc = false;
+        options.enable_lan_discovery = false;
+        options.websocket = Some(WebSocketConfig {
+            seed_urls: vec!["wss://seed.example/fips".to_string()],
+            ..Default::default()
+        });
+
+        let config =
+            fips_endpoint_config_with_local_rendezvous(options, DEFAULT_FIPS_DISCOVERY_SCOPE, None);
+
+        let websocket = config
+            .transports
+            .websocket
+            .iter()
+            .next()
+            .expect("configured WebSocket transport")
+            .1;
+        assert_eq!(websocket.seed_urls, vec!["wss://seed.example/fips"]);
     }
 }

@@ -12,7 +12,8 @@
 - Prepared `hashtree-fips-transport` 0.4.9 for FIPS 0.4.11: configured
   Nostr relays remain ordinary discovery/signaling relays, while the removed
   `nostr_relay` packet transport and kind-21060 adapter are no longer exposed
-  or accepted as peer addresses.
+  or accepted as peer addresses. Native WebSocket listeners and URL-only
+  first-adjacency seeds are available through the endpoint options.
 - Released `hashtree-fips-transport` 0.4.8 with adaptive TCP blob polling:
   active transfers retain the 10 ms service cadence while transports without
   application work back off to 250 ms, eliminating needless mobile idle CPU.
