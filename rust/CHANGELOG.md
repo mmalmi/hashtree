@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.110 - 2026-07-19
+
+### Changed
+
+- Each bounded profile checkpoint now buffers mirrored kind-0 events and both
+  profile index updates into one `put_many` flush. This replaces thousands of
+  tiny LMDB write transactions with one checkpoint-sized commit while keeping
+  the overlay bounded by the caller's author checkpoint cadence.
+
 ## 0.2.109 - 2026-07-19
 
 ### Added

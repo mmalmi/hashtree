@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-cli"
-version = "0.2.109"
+version = "0.2.110"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

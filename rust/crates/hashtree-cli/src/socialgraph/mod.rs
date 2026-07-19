@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::executor::block_on;
-use hashtree_core::{nhash_encode_full, Cid, HashTree, HashTreeConfig, NHashData};
+use hashtree_core::{nhash_encode_full, BufferedStore, Cid, HashTree, HashTreeConfig, NHashData};
 use hashtree_index::BTree;
 use hashtree_nostr::{
     is_parameterized_replaceable_kind, is_replaceable_kind, stored_event_from_nostr_sdk_event,
@@ -395,6 +395,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
             root_path: db_dir.join(AMBIENT_EVENTS_ROOT_FILE),
         },
         profile_index: ProfileIndexBucket {
+            store: Arc::clone(&public_store),
             tree: HashTree::new(HashTreeConfig::new(Arc::clone(&public_store))),
             index: BTree::new(
                 public_store,

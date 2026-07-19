@@ -6,6 +6,7 @@ pub(super) struct EventIndexBucket {
 }
 
 pub(super) struct ProfileIndexBucket {
+    pub(super) store: Arc<StorageRouter>,
     pub(super) tree: HashTree<StorageRouter>,
     pub(super) index: BTree<StorageRouter>,
     pub(super) by_pubkey_root_path: PathBuf,
@@ -576,6 +577,14 @@ impl ProfileIndexBucket {
             .collect::<Vec<_>>();
         let existing_cids = block_on(self.index.get_links(by_pubkey_root, pubkeys))
             .context("lookup existing mirrored profile events")?;
+        let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
+        let buffered_tree = HashTree::new(HashTreeConfig::new(Arc::clone(&buffered_store)));
+        let buffered_index = BTree::new(
+            Arc::clone(&buffered_store),
+            hashtree_index::BTreeOptions {
+                order: Some(PROFILE_SEARCH_INDEX_ORDER),
+            },
+        );
         let mut by_pubkey_changes = BTreeMap::<String, Option<Cid>>::new();
         let mut search_changes = BTreeMap::<String, Option<String>>::new();
 
@@ -606,7 +615,10 @@ impl ProfileIndexBucket {
                 continue;
             }
 
-            let mirrored_cid = self.mirror_profile_event(event)?;
+            let bytes = event.as_json().into_bytes();
+            let mirrored_cid = block_on(buffered_tree.put_file(&bytes))
+                .map(|(cid, _size)| cid)
+                .context("buffer mirrored profile event")?;
             by_pubkey_changes.insert(pubkey.clone(), Some(mirrored_cid.clone()));
             if let Some(current) = existing_event.as_ref() {
                 for term in profile_search_terms_for_event(current) {
@@ -632,10 +644,11 @@ impl ProfileIndexBucket {
         }
 
         let next_by_pubkey_root =
-            block_on(self.index.update_links(by_pubkey_root, by_pubkey_changes))
+            block_on(buffered_index.update_links(by_pubkey_root, by_pubkey_changes))
                 .context("batch update mirrored profile event index")?;
-        let next_search_root = block_on(self.index.update(search_root, search_changes))
+        let next_search_root = block_on(buffered_index.update(search_root, search_changes))
             .context("batch update profile search terms")?;
+        block_on(buffered_store.flush()).context("flush batched profile index update")?;
         Ok((next_by_pubkey_root, next_search_root, true))
     }
 }
