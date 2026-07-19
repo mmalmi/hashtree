@@ -1121,6 +1121,8 @@ fn test_cli_parses_socialgraph_index_command() {
         "128",
         "--per-author-event-limit",
         "64",
+        "--per-author-kind-event-limit",
+        "1",
         "--per-author-live-bytes",
         "65536",
         "--author-batch-size",
@@ -1164,6 +1166,7 @@ fn test_cli_parses_socialgraph_index_command() {
                     max_authors,
                     max_live_mb,
                     per_author_event_limit,
+                    per_author_kind_event_limit,
                     per_author_live_bytes,
                     author_batch_size,
                     checkpoint_authors,
@@ -1188,6 +1191,7 @@ fn test_cli_parses_socialgraph_index_command() {
             assert_eq!(max_authors, 48);
             assert_eq!(max_live_mb, 128);
             assert_eq!(per_author_event_limit, 64);
+            assert_eq!(per_author_kind_event_limit, Some(1));
             assert_eq!(per_author_live_bytes, Some(65_536));
             assert_eq!(author_batch_size, 32);
             assert_eq!(checkpoint_authors, 12);

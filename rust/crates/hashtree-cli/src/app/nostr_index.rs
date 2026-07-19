@@ -59,6 +59,7 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) checkpoint_authors: usize,
     pub(crate) concurrent_batches: usize,
     pub(crate) per_author_event_limit: usize,
+    pub(crate) per_author_kind_event_limit: Option<usize>,
     pub(crate) per_author_live_bytes: Option<u64>,
     pub(crate) fetch_timeout: Duration,
     pub(crate) relay_event_max_bytes: Option<u32>,
@@ -129,6 +130,8 @@ struct IndexedNostrCrawlPolicy {
     author_batch_size: usize,
     checkpoint_authors: usize,
     per_author_event_limit: usize,
+    #[serde(default)]
+    per_author_kind_event_limit: Option<usize>,
     per_author_live_bytes: Option<u64>,
     fetch_timeout_millis: u64,
     relay_event_max_bytes: Option<u32>,
@@ -383,6 +386,9 @@ pub(crate) async fn run_socialgraph_index(
     if checkpointed_allowlist && options.max_events_seen == Some(0) {
         anyhow::bail!("--max-events-seen must be greater than zero");
     }
+    if options.per_author_kind_event_limit == Some(0) {
+        anyhow::bail!("--per-author-kind-event-limit must be greater than zero");
+    }
     let _crawl_lock = checkpointed_allowlist
         .then(|| CrawlStateLock::acquire(&data_dir))
         .transpose()?;
@@ -522,7 +528,7 @@ pub(crate) async fn run_socialgraph_index(
             max_follow_distance: options.max_follow_distance,
             author_batch_size: options.author_batch_size,
             per_author_event_limit: options.per_author_event_limit,
-            per_author_kind_event_limit: None,
+            per_author_kind_event_limit: options.per_author_kind_event_limit,
             per_author_live_bytes: options.per_author_live_bytes,
             fetch_timeout: options.fetch_timeout,
             relay_event_max_size: options.relay_event_max_bytes,
@@ -583,7 +589,7 @@ fn build_crawl_config(
         max_follow_distance: options.max_follow_distance,
         author_batch_size,
         per_author_event_limit: options.per_author_event_limit,
-        per_author_kind_event_limit: None,
+        per_author_kind_event_limit: options.per_author_kind_event_limit,
         per_author_live_bytes: options.per_author_live_bytes,
         fetch_timeout: options.fetch_timeout,
         relay_event_max_size: options.relay_event_max_bytes,
@@ -1181,6 +1187,7 @@ fn build_crawl_policy(
         author_batch_size: options.author_batch_size,
         checkpoint_authors: options.checkpoint_authors,
         per_author_event_limit: options.per_author_event_limit,
+        per_author_kind_event_limit: options.per_author_kind_event_limit,
         per_author_live_bytes: options.per_author_live_bytes,
         fetch_timeout_millis: options
             .fetch_timeout
@@ -1506,6 +1513,7 @@ mod tests {
             checkpoint_authors: 1,
             concurrent_batches: 1,
             per_author_event_limit: 16,
+            per_author_kind_event_limit: None,
             per_author_live_bytes: Some(1024 * 1024),
             fetch_timeout: Duration::from_millis(100),
             relay_event_max_bytes: None,
@@ -2100,6 +2108,7 @@ mod tests {
                 checkpoint_authors: 8,
                 concurrent_batches: 4,
                 per_author_event_limit: 8,
+                per_author_kind_event_limit: None,
                 per_author_live_bytes: None,
                 fetch_timeout: Duration::from_secs(5),
                 relay_event_max_bytes: None,
@@ -2219,6 +2228,7 @@ mod tests {
                 checkpoint_authors: 8,
                 concurrent_batches: 1,
                 per_author_event_limit: 8,
+                per_author_kind_event_limit: None,
                 per_author_live_bytes: None,
                 fetch_timeout: Duration::from_secs(5),
                 relay_event_max_bytes: None,

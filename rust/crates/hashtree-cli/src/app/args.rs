@@ -921,6 +921,9 @@ pub(crate) enum SocialGraphCommands {
         /// Maximum number of kept events per author
         #[arg(long, default_value_t = 256)]
         per_author_event_limit: usize,
+        /// Maximum kept events per author and kind (overrides the aggregate author limit)
+        #[arg(long)]
+        per_author_kind_event_limit: Option<usize>,
         /// Maximum kept bytes per author before the global live cap is applied
         #[arg(long)]
         per_author_live_bytes: Option<u64>,

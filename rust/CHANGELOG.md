@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.111 - 2026-07-19
+
+### Added
+
+- `htree socialgraph index --per-author-kind-event-limit` independently bounds
+  retained events for every requested author/kind pair. Compact identity crawls
+  can now keep exactly the newest profile, follow list, and mute list without
+  one replaceable kind displacing another.
+
 ## 0.2.110 - 2026-07-19
 
 ### Changed
