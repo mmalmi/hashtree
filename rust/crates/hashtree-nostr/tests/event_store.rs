@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use futures::executor::block_on;
 use hashtree_core::{
-    sha256, Cid, DirEntry, HashTree, HashTreeConfig, MemoryStore, Store, TreeVisibility,
+    sha256, Cid, DirEntry, Hash, HashTree, HashTreeConfig, MemoryStore, Store, StoreError,
+    TreeVisibility,
 };
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
@@ -64,6 +66,39 @@ fn canonical_store_event(
         tags,
         content: content.to_string(),
         sig: "2".repeat(128),
+    }
+}
+
+#[derive(Default)]
+struct OptimisticBatchRecordingStore {
+    inner: MemoryStore,
+    optimistic_batch_sizes: Mutex<Vec<usize>>,
+}
+
+#[async_trait]
+impl Store for OptimisticBatchRecordingStore {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.inner.put(hash, data).await
+    }
+
+    async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.optimistic_batch_sizes
+            .lock()
+            .expect("optimistic batch sizes lock")
+            .push(items.len());
+        self.inner.put_many(items).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.get(hash).await
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.delete(hash).await
     }
 }
 
@@ -1092,10 +1127,58 @@ fn resumed_build_with_only_existing_and_stale_events_keeps_exact_root() {
 }
 
 #[test]
+fn bulk_build_flushes_configured_event_commit_batches() {
+    block_on(async {
+        let backing = Arc::new(OptimisticBatchRecordingStore::default());
+        let store = NostrEventStore::with_options(
+            Arc::clone(&backing),
+            NostrEventStoreOptions {
+                btree_order: Some(4),
+                index_commit_batch_size: Some(2),
+            },
+        );
+        let events = (0..5)
+            .map(|index| {
+                canonical_store_event(
+                    &format!("{:064x}", index + 1),
+                    100 + index,
+                    1,
+                    Vec::new(),
+                    &format!("bounded commit {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let root = store
+            .build(None, events)
+            .await
+            .expect("bounded build")
+            .expect("bounded root");
+        assert_eq!(
+            store
+                .list_recent(Some(&root), ListEventsOptions::default())
+                .await
+                .expect("list bounded build")
+                .len(),
+            5
+        );
+        assert_eq!(
+            backing
+                .optimistic_batch_sizes
+                .lock()
+                .expect("optimistic batch sizes lock")
+                .len(),
+            3
+        );
+    });
+}
+
+#[test]
 fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
     block_on(async {
         let options = NostrEventStoreOptions {
             btree_order: Some(4),
+            index_commit_batch_size: Some(16),
         };
         let profile_author = "a".repeat(64);
         let article_author = "b".repeat(64);

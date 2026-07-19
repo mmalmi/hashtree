@@ -21,6 +21,8 @@ const RELAY_QUERY_ATTEMPTS: usize = 3;
 const RELAY_QUERY_RETRY_DELAY: Duration = Duration::from_millis(100);
 const RELAY_BATCH_TIMEOUT_MULTIPLIER: u32 = 16;
 const RELAY_BATCH_TIMEOUT_MAX: Duration = Duration::from_secs(300);
+const OPTIONAL_RELAY_BATCH_TIMEOUT_MULTIPLIER: u32 = 4;
+const OPTIONAL_RELAY_BATCH_TIMEOUT_MAX: Duration = Duration::from_secs(120);
 const OPTIONAL_RELAY_CONNECTION_WAIT: Duration = Duration::from_millis(250);
 const METADATA_KIND: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,11 +584,19 @@ impl<S: Store> NostrBridge<S> {
     }
 
     fn relay_batch_timeout(&self) -> Duration {
+        let (multiplier, maximum) = if self.require_all_relays {
+            (RELAY_BATCH_TIMEOUT_MULTIPLIER, RELAY_BATCH_TIMEOUT_MAX)
+        } else {
+            (
+                OPTIONAL_RELAY_BATCH_TIMEOUT_MULTIPLIER,
+                OPTIONAL_RELAY_BATCH_TIMEOUT_MAX,
+            )
+        };
         self.config
             .fetch_timeout
-            .checked_mul(RELAY_BATCH_TIMEOUT_MULTIPLIER)
-            .unwrap_or(RELAY_BATCH_TIMEOUT_MAX)
-            .min(RELAY_BATCH_TIMEOUT_MAX)
+            .checked_mul(multiplier)
+            .unwrap_or(maximum)
+            .min(maximum)
     }
 
     fn validate_config(&self) -> Result<()> {
@@ -2696,24 +2706,39 @@ mod tests {
     }
 
     #[test]
-    fn relay_batch_timeout_scales_and_caps() {
-        let scaled = NostrBridge::new(
+    fn relay_batch_timeout_scales_and_caps_without_optional_relays_blocking() {
+        let optional_scaled = NostrBridge::new(
             Arc::new(MemoryStore::new()),
             CrawlConfig {
                 fetch_timeout: Duration::from_secs(10),
                 ..CrawlConfig::default()
             },
         );
-        let capped = NostrBridge::new(
+        let optional_capped = NostrBridge::new(
             Arc::new(MemoryStore::new()),
             CrawlConfig {
                 fetch_timeout: Duration::from_secs(60),
                 ..CrawlConfig::default()
             },
         );
+        let required = NostrBridge::new(
+            Arc::new(MemoryStore::new()),
+            CrawlConfig {
+                fetch_timeout: Duration::from_secs(10),
+                ..CrawlConfig::default()
+            },
+        )
+        .requiring_all_relays();
 
-        assert_eq!(scaled.relay_batch_timeout(), Duration::from_secs(160));
-        assert_eq!(capped.relay_batch_timeout(), Duration::from_secs(300));
+        assert_eq!(
+            optional_scaled.relay_batch_timeout(),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            optional_capped.relay_batch_timeout(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(required.relay_batch_timeout(), Duration::from_secs(160));
     }
 
     impl NostrSocialGraphBackend for FakeGraphBackend {

@@ -287,42 +287,13 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         }
 
         let mut by_id_changes = BTreeMap::<String, Option<Cid>>::new();
-        let mut key_changes = self
-            .definition
-            .key_indexes()
-            .iter()
-            .map(|index| {
-                (
-                    index.name().to_string(),
-                    BTreeMap::<String, Option<Cid>>::new(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-
         for (_, _, _, previous) in &normalized_entries {
-            if let Some((previous_id, previous)) = previous {
+            if let Some((previous_id, _)) = previous {
                 by_id_changes.insert(previous_id.clone(), None);
-                for index in self.definition.key_indexes() {
-                    let changes = key_changes
-                        .get_mut(index.name())
-                        .expect("collection key changes must exist");
-                    for key in index.materialize_keys(previous) {
-                        changes.insert(key, None);
-                    }
-                }
             }
         }
-
-        for (id, item, cid, _) in normalized_entries {
-            by_id_changes.insert(id, Some(cid.clone()));
-            for index in self.definition.key_indexes() {
-                let changes = key_changes
-                    .get_mut(index.name())
-                    .expect("collection key changes must exist");
-                for key in index.materialize_keys(&item) {
-                    changes.insert(key, Some(cid.clone()));
-                }
-            }
+        for (id, _, cid, _) in &normalized_entries {
+            by_id_changes.insert(id.clone(), Some(cid.clone()));
         }
 
         self.state.by_id_root = self
@@ -330,12 +301,22 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
             .update_links(self.state.by_id_root.as_ref(), by_id_changes)
             .await?;
         for index in self.definition.key_indexes() {
+            let mut changes = BTreeMap::<String, Option<Cid>>::new();
+            for (_, _, _, previous) in &normalized_entries {
+                if let Some((_, previous)) = previous {
+                    for key in index.materialize_keys(previous) {
+                        changes.insert(key, None);
+                    }
+                }
+            }
+            for (_, item, cid, _) in &normalized_entries {
+                for key in index.materialize_keys(item) {
+                    changes.insert(key, Some(cid.clone()));
+                }
+            }
             let root = self
                 .index
-                .update_links(
-                    self.state.key_root(index.name()),
-                    key_changes.remove(index.name()).unwrap_or_default(),
-                )
+                .update_links(self.state.key_root(index.name()), changes)
                 .await?;
             self.state.key_roots.insert(index.name().to_string(), root);
         }

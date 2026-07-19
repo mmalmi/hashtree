@@ -1802,6 +1802,7 @@ fn benchmark_warm_query_case<S: Store + 'static>(
         Arc::clone(&trace_store),
         NostrEventStoreOptions {
             btree_order: Some(order),
+            ..NostrEventStoreOptions::default()
         },
     );
     let mut durations = Vec::with_capacity(iterations);
@@ -1843,6 +1844,7 @@ fn benchmark_cold_query_case<S: Store + 'static>(
             Arc::clone(&trace_store),
             NostrEventStoreOptions {
                 btree_order: Some(order),
+                ..NostrEventStoreOptions::default()
             },
         );
         let started = Instant::now();
@@ -2084,6 +2086,7 @@ fn benchmark_nostr_btree_query_tradeoffs() {
             Arc::clone(&local_store),
             NostrEventStoreOptions {
                 btree_order: Some(order),
+                ..NostrEventStoreOptions::default()
             },
         );
         let root = block_on(event_store.build(None, stored_events.clone()))

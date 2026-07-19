@@ -660,8 +660,7 @@ async fn crawl_allowlist_in_checkpoints(
                 remaining_events_seen,
                 end - state.next_author,
             ),
-        )
-        .requiring_all_relays();
+        );
         let report = bridge
             .crawl(graph_store, current_root.as_ref())
             .await
@@ -1174,7 +1173,7 @@ fn build_crawl_policy(
         author_allowlist_sha256: hex::encode(allowlist_hash.finalize()),
         author_count: authors.len(),
         relays: relays.to_vec(),
-        require_all_relays: true,
+        require_all_relays: false,
         max_events_seen: options.max_events_seen,
         max_authors: options.max_authors,
         max_follow_distance: options.max_follow_distance,
@@ -1224,6 +1223,9 @@ fn validate_crawl_state(
     let mut resumed_identity = state.policy.clone();
     resumed_identity.author_batch_size = expected_policy.author_batch_size;
     resumed_identity.checkpoint_authors = expected_policy.checkpoint_authors;
+    if resumed_identity.require_all_relays && !expected_policy.require_all_relays {
+        resumed_identity.require_all_relays = false;
+    }
     if &resumed_identity != expected_policy {
         anyhow::bail!(
             "Nostr crawl policy or ordered author allowlist changed; refusing to reuse the durable cursor"
@@ -1703,10 +1705,6 @@ mod tests {
     impl TestRelay {
         fn new() -> Self {
             Self::bind("127.0.0.1:0")
-        }
-
-        fn on_port(port: u16) -> Self {
-            Self::bind(&format!("127.0.0.1:{port}"))
         }
 
         fn bind(address: &str) -> Self {
@@ -2260,7 +2258,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn checkpointed_allowlist_requires_every_relay_and_resumes_without_refetch(
+    async fn checkpointed_allowlist_advances_with_one_healthy_relay_and_resumes_without_refetch(
     ) -> io::Result<()> {
         let primary = TestRelay::new();
         let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve relay port");
@@ -2307,23 +2305,6 @@ mod tests {
         config.storage.max_size_gb = 1;
         config.nostr.db_max_size_gb = 1;
 
-        let error = run_socialgraph_index(
-            tmp.path().to_path_buf(),
-            &config,
-            Keys::generate(),
-            options.clone(),
-        )
-        .await
-        .expect_err("missing required relay must stop the crawl");
-        assert!(error.to_string().contains("crawl allowlisted authors"));
-        let failed_state = load_crawl_state(tmp.path())
-            .expect("load failed state")
-            .expect("initial state persisted");
-        assert_eq!(failed_state.next_author, 0);
-        assert!(failed_state.root.is_none());
-
-        let secondary = TestRelay::on_port(secondary_port);
-        publish_test_events(&secondary.url(), &events).await;
         let report = run_socialgraph_index(
             tmp.path().to_path_buf(),
             &config,
@@ -2331,7 +2312,7 @@ mod tests {
             options.clone(),
         )
         .await
-        .expect("retry checkpointed crawl");
+        .expect("unavailable optional relay must not stop the crawl");
         assert_eq!(report.authors_processed, 2);
         assert_eq!(report.events_selected, 3);
         assert!(report.profile_search_root.is_some());
@@ -2344,7 +2325,7 @@ mod tests {
         assert_eq!(completed_state.next_author, 2);
         assert_eq!(completed_state.root, report.root);
         assert_eq!(completed_state.policy.author_count, 2);
-        assert!(completed_state.policy.require_all_relays);
+        assert!(!completed_state.policy.require_all_relays);
 
         let requests_before_resume = primary.requested_authors().len();
         let resumed = run_socialgraph_index(
@@ -2357,18 +2338,6 @@ mod tests {
         .expect("resume completed crawl");
         assert_eq!(resumed.root, report.root);
         assert_eq!(primary.requested_authors().len(), requests_before_resume);
-
-        let uninterrupted_dir = TempDir::new().expect("uninterrupted tempdir");
-        let uninterrupted = run_socialgraph_index(
-            uninterrupted_dir.path().to_path_buf(),
-            &config,
-            Keys::generate(),
-            options,
-        )
-        .await
-        .expect("uninterrupted checkpointed crawl");
-        assert_eq!(uninterrupted.root, report.root);
-        assert_eq!(uninterrupted.events_selected, report.events_selected);
 
         Ok(())
     }
@@ -2433,6 +2402,12 @@ mod tests {
         .expect("build policy with new cadence");
         validate_crawl_state(&loaded, &same_content_policy, authors.len())
             .expect("execution cadence must not invalidate durable content progress");
+
+        assert!(!same_content_policy.require_all_relays);
+        let mut legacy_required_state = loaded.clone();
+        legacy_required_state.policy.require_all_relays = true;
+        validate_crawl_state(&legacy_required_state, &same_content_policy, authors.len())
+            .expect("one-way relaxation from required to optional relays must preserve progress");
 
         let reordered = vec![authors[1].clone(), authors[0].clone()];
         let changed_policy = build_crawl_policy(

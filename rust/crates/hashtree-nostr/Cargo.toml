@@ -23,6 +23,7 @@ nostr-social-graph.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+async-trait.workspace = true
 nostr.workspace = true
 negentropy = "0.5"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

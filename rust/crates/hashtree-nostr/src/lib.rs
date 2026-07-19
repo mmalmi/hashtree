@@ -636,9 +636,24 @@ fn unix_now_millis() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-#[derive(Debug, Clone, Default)]
+const DEFAULT_INDEX_COMMIT_BATCH_SIZE: usize = 8_192;
+
+#[derive(Debug, Clone)]
 pub struct NostrEventStoreOptions {
     pub btree_order: Option<usize>,
+    /// Maximum number of events applied to all collection indexes before the
+    /// resulting content-addressed nodes are flushed to the backing store.
+    /// None preserves the legacy single-commit behavior.
+    pub index_commit_batch_size: Option<usize>,
+}
+
+impl Default for NostrEventStoreOptions {
+    fn default() -> Self {
+        Self {
+            btree_order: None,
+            index_commit_batch_size: Some(DEFAULT_INDEX_COMMIT_BATCH_SIZE),
+        }
+    }
 }
 
 fn nostr_collection_definition() -> CollectionDefinition<StoredNostrEvent> {
@@ -883,6 +898,30 @@ impl<S: Store> NostrEventStore<S> {
             _ => std::cmp::Ordering::Equal,
         });
 
+        let batch_size = self
+            .options
+            .index_commit_batch_size
+            .unwrap_or(events.len())
+            .max(1);
+        let mut current_root = root.cloned();
+        let mut pending = events.into_iter();
+        loop {
+            let batch = pending.by_ref().take(batch_size).collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
+            }
+            current_root = self
+                .build_index_commit(current_root.as_ref(), batch)
+                .await?;
+        }
+        Ok(current_root)
+    }
+
+    async fn build_index_commit(
+        &self,
+        root: Option<&Cid>,
+        events: Vec<StoredNostrEvent>,
+    ) -> Result<Option<Cid>, NostrEventStoreError> {
         let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
         let buffered_writer =
             NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());

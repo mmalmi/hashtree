@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.2.107 - 2026-07-19
+
+### Changed
+
+- Full-history Nostr crawls now prefer Negentropy per relay while allowing a
+  healthy source to advance the durable author cursor when another relay is
+  unavailable or lacks reconciliation support. Optional relay work has a
+  bounded deadline, while relays without Negentropy retain the paged REQ
+  fallback.
+- Large Nostr event updates now apply and flush every 8,192 events instead of
+  retaining a whole author checkpoint in one in-memory store overlay. Derived
+  collection projections materialize one change map at a time, bounding peak
+  memory and LMDB transaction size without changing the final index schema.
+
 ## 0.2.106 - 2026-07-19
 
 ### Changed
