@@ -78,6 +78,16 @@ pub trait Store: Send + Sync {
         Ok(inserted)
     }
 
+    /// Store a locally generated content-addressed batch without requiring an
+    /// implementation to reread bytes for hashes it already tracks.
+    ///
+    /// Callers must provide bytes matching every hash. The default keeps the
+    /// ordinary verified batch behavior; stores with an authenticated local
+    /// location catalog may override this to skip known hashes cheaply.
+    async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.put_many(items).await
+    }
+
     /// Retrieve data by hash
     /// Returns data or None if not found
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError>;
@@ -237,7 +247,11 @@ impl<S: Store> BufferedStore<S> {
             items
         };
 
-        self.base.put_many(items).await
+        if self.options.check_base_on_put {
+            self.base.put_many(items).await
+        } else {
+            self.base.put_many_optimistic(items).await
+        }
     }
 }
 
@@ -648,6 +662,46 @@ impl Store for MemoryStore {
 mod tests {
     use super::*;
     use crate::hash::sha256;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct OptimisticBatchStore {
+        inner: MemoryStore,
+        regular_batches: AtomicUsize,
+        optimistic_batches: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Store for OptimisticBatchStore {
+        async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+            self.inner.put(hash, data).await
+        }
+
+        async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+            self.regular_batches.fetch_add(1, Ordering::Relaxed);
+            self.inner.put_many(items).await
+        }
+
+        async fn put_many_optimistic(
+            &self,
+            items: Vec<(Hash, Vec<u8>)>,
+        ) -> Result<usize, StoreError> {
+            self.optimistic_batches.fetch_add(1, Ordering::Relaxed);
+            self.inner.put_many(items).await
+        }
+
+        async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+            self.inner.get(hash).await
+        }
+
+        async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+            self.inner.has(hash).await
+        }
+
+        async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+            self.inner.delete(hash).await
+        }
+    }
 
     #[tokio::test]
     async fn test_put_returns_true_for_new() {
@@ -721,6 +775,21 @@ mod tests {
 
         assert_eq!(flushed, 0);
         assert_eq!(base.get(&hash).await.unwrap(), Some(data));
+    }
+
+    #[tokio::test]
+    async fn test_optimistic_buffered_store_uses_idempotent_batch_flush() {
+        let base = std::sync::Arc::new(OptimisticBatchStore::default());
+        let buffered = BufferedStore::new_optimistic(std::sync::Arc::clone(&base));
+        let data = vec![7u8; 1024];
+        let hash = sha256(&data);
+
+        base.inner.put(hash, data.clone()).await.unwrap();
+        assert!(buffered.put(hash, data).await.unwrap());
+        assert_eq!(buffered.flush().await.unwrap(), 0);
+
+        assert_eq!(base.regular_batches.load(Ordering::Relaxed), 0);
+        assert_eq!(base.optimistic_batches.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

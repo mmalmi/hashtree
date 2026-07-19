@@ -443,6 +443,25 @@ impl LocalStore {
             .map(|report| report.inserted)
     }
 
+    /// Sync batch put for locally generated content-addressed candidates.
+    pub fn put_many_optimistic_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
+        match self {
+            LocalStore::Fs(_) => self.put_many_report_sync(items),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(_) => self.put_many_report_sync(items),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.put_many_optimistic_report_sync(items),
+        }
+    }
+
+    pub fn put_many_optimistic_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_optimistic_report_sync(items)
+            .map(|report| report.inserted)
+    }
+
     /// Sync get operation
     pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         match self {
@@ -660,6 +679,10 @@ impl Store for LocalStore {
 
     async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
         self.put_many_sync(&items)
+    }
+
+    async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.put_many_optimistic_sync(&items)
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
@@ -1032,6 +1055,40 @@ impl StorageRouter {
             .map(|report| report.inserted)
     }
 
+    /// Store a locally generated content-addressed batch without rereading
+    /// committed PoolStore candidates that are already catalogued.
+    pub fn put_many_optimistic_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
+        let report = self.local.put_many_optimistic_report_sync(items)?;
+
+        #[cfg(feature = "s3")]
+        if let Some(ref tx) = self.sync_tx {
+            if !report.inserted_hashes.is_empty() {
+                let inserted: HashSet<Hash> = report.inserted_hashes.iter().copied().collect();
+                let mut queued = HashSet::new();
+                for (hash, data) in items {
+                    if inserted.contains(hash) && queued.insert(*hash) {
+                        if let Err(e) = tx.send(S3SyncMessage::Upload {
+                            hash: *hash,
+                            data: data.clone(),
+                        }) {
+                            tracing::error!("Failed to queue S3 upload: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    pub fn put_many_optimistic_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_optimistic_report_sync(items)
+            .map(|report| report.inserted)
+    }
+
     /// Get data - tries LMDB first, falls back to S3
     pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         // Try local first
@@ -1282,6 +1339,10 @@ impl Store for StorageRouter {
 
     async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
         self.put_many_sync(&items)
+    }
+
+    async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.put_many_optimistic_sync(&items)
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {

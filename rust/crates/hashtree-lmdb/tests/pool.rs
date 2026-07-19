@@ -195,6 +195,40 @@ fn valid_put_repairs_a_corrupt_located_copy() -> Result<(), StoreError> {
 }
 
 #[test]
+fn optimistic_batch_skips_committed_payload_reads_while_normal_batch_repairs(
+) -> Result<(), StoreError> {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    pool.add_member(member(&member_path, 1024 * 1024))?;
+    let data = b"optimistic retry bytes".repeat(32);
+    let hash = sha256(&data);
+    assert!(pool.put_sync(hash, &data)?);
+    drop(pool);
+
+    let raw = LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+        &member_path,
+        16 * 1024 * 1024,
+        None,
+    )?;
+    assert!(raw.delete_sync(&hash)?);
+    assert!(raw.put_sync(hash, b"corrupt bytes")?);
+    drop(raw);
+
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default())?;
+    assert_eq!(
+        reopened.put_many_optimistic_sync(&[(hash, data.clone())])?,
+        0
+    );
+    assert!(reopened.get_sync(&hash).is_err());
+
+    assert_eq!(reopened.put_many_sync(&[(hash, data.clone())])?, 1);
+    assert_eq!(reopened.get_sync(&hash)?, Some(data));
+    Ok(())
+}
+
+#[test]
 fn batch_put_is_hash_verified_globally_idempotent_and_exact() -> Result<(), StoreError> {
     let temp = TempDir::new().expect("temp dir");
     let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())?;

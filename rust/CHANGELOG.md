@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.105 - 2026-07-19
+
+### Fixed
+
+- Resumed PoolStore-backed index builds now batch locally generated
+  content-addressed candidates without rereading payloads for hashes already
+  present in the committed location catalog. Ordinary writes retain full
+  payload verification and repair, while interrupted crawl retries avoid
+  multi-gigabyte read amplification before committing their next root.
+
 ## 0.2.104 - 2026-07-19
 
 ### Fixed

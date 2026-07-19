@@ -512,6 +512,24 @@ impl PoolStore {
         &self,
         items: &[(Hash, Vec<u8>)],
     ) -> Result<PutManyReport, StoreError> {
+        self.put_many_report_sync_with_existing_verification(items, true)
+    }
+
+    /// Insert a locally generated content-addressed batch while trusting
+    /// catalogued committed locations. Pending locations still take the
+    /// ordinary repair path; stored and moving locations need no payload read.
+    pub fn put_many_optimistic_report_sync(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+    ) -> Result<PutManyReport, StoreError> {
+        self.put_many_report_sync_with_existing_verification(items, false)
+    }
+
+    fn put_many_report_sync_with_existing_verification(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+        verify_existing: bool,
+    ) -> Result<PutManyReport, StoreError> {
         let mut seen = HashSet::new();
         let mut unique = Vec::with_capacity(items.len());
         let mut ordered = Vec::with_capacity(items.len());
@@ -530,9 +548,11 @@ impl PoolStore {
         let mut inserted = HashSet::new();
         let mut missing = Vec::new();
         for (hash, data) in unique {
-            if self.read_location(&hash)?.is_some() {
-                if self.put_sync(hash, data)? {
-                    inserted.insert(hash);
+            if let Some(location) = self.read_location(&hash)? {
+                if verify_existing || matches!(location, LocationRecord::Pending { .. }) {
+                    if self.put_sync(hash, data)? {
+                        inserted.insert(hash);
+                    }
                 }
             } else {
                 missing.push((hash, data));
@@ -649,6 +669,11 @@ impl PoolStore {
 
     pub fn put_many_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
         self.put_many_report_sync(items)
+            .map(|report| report.inserted)
+    }
+
+    pub fn put_many_optimistic_sync(&self, items: &[(Hash, Vec<u8>)]) -> Result<usize, StoreError> {
+        self.put_many_optimistic_report_sync(items)
             .map(|report| report.inserted)
     }
 
@@ -1352,6 +1377,10 @@ impl Store for PoolStore {
 
     async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
         self.put_many_sync(&items)
+    }
+
+    async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.put_many_optimistic_sync(&items)
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
