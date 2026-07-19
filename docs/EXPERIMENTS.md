@@ -2568,3 +2568,41 @@ Interpretation:
 - This sample is still far below origin-local write throughput observed in the
   same runbook period, so it should not be treated as storage-engine capacity.
   It is a public ingress/path measurement.
+### 2026-07-20: Nostr crawl checkpoint I/O amplification on Vader
+
+Question: why did a four-author content checkpoint stop advancing for hours
+after the index reached roughly 2.55 million retained events?
+
+Setup:
+- Content and compact-profile crawlers used separate LMDB directories on the
+  same mirrored HDD array, each in an independently capped systemd cgroup.
+- The content checkpoint started from durable author 264 with 2,549,398
+  selected events and applied at most 65,536 retained events per author.
+- Process wait state, cgroup pressure, `/proc` I/O counters, block-device
+  telemetry, and checkpoint phase timings were sampled without opening either
+  active LMDB.
+
+Results:
+
+| Observation | Result |
+| --- | ---: |
+| HDD array utilization during the content index phase | 100% |
+| Array workload | about 380 random 4 KiB reads/s, about 1.5 MiB/s |
+| Aggregate full I/O pressure during the sample | about 56% |
+| Content cgroup full I/O pressure during the sample | about 49% |
+| Content process state | blocked in `folio_wait_bit_common`, reads advancing |
+| Relay fetch time in completed large checkpoints | about 68 seconds |
+| Index-build time in the author-200 to author-264 checkpoint | about 3,211 seconds |
+
+Interpretation:
+- The crawler was active rather than deadlocked. The bottleneck was random
+  content-addressed B-tree reads on the HDD array, not relay throughput, CPU,
+  LMDB commit size, or a shared memory ceiling.
+- An 8,192-event index commit repeated the collection's by-id lookup: Nostr
+  event preparation proved new ordinary event IDs absent, then
+  `CollectionWriter::put_batch` walked the same by-id paths again. The crawl
+  now passes those proven-absent IDs into the collection update.
+- The crawler's configurable default is now a still-bounded 32,768-event
+  index commit with 256-way B-tree nodes. This reduces repeated walks and
+  gradually rewrites touched paths into shallower trees without loading the
+  complete event catalog into memory.

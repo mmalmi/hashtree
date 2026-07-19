@@ -975,6 +975,15 @@ impl<S: Store> NostrEventStore<S> {
                         }),
                 )
                 .await?;
+            let known_absent_by_id = normalized_events
+                .iter()
+                .filter(|(_, event)| {
+                    !is_replaceable_kind(event.kind)
+                        && !is_parameterized_replaceable_kind(event.kind)
+                        && !existing_by_id.contains_key(&event.id)
+                })
+                .map(|(_, event)| event.id.clone())
+                .collect::<BTreeSet<_>>();
 
             let mut prepared_events = Vec::with_capacity(normalized_events.len());
             for (sequence, normalized) in normalized_events {
@@ -1024,9 +1033,12 @@ impl<S: Store> NostrEventStore<S> {
             if !indexed_events.is_empty() {
                 let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
                 collection
-                    .put_batch(indexed_events.into_iter().map(
-                        |(_sequence, event, event_cid, previous)| (event, event_cid, previous),
-                    ))
+                    .put_batch_with_known_absent_ids(
+                        indexed_events.into_iter().map(
+                            |(_sequence, event, event_cid, previous)| (event, event_cid, previous),
+                        ),
+                        known_absent_by_id,
+                    )
                     .await?;
                 manifest = nostr_manifest_from_collection_state(collection.state());
             }

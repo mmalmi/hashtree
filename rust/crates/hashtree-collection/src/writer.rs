@@ -247,12 +247,31 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
     where
         I: IntoIterator<Item = (T, Cid, Option<T>)>,
     {
+        self.put_batch_with_known_absent_ids(entries, std::iter::empty())
+            .await
+    }
+
+    /// Apply a batch while skipping duplicate lookups for item ids the caller
+    /// already proved absent from the current by-id root.
+    ///
+    /// Ids not included in `known_absent_ids` retain the ordinary overwrite
+    /// validation performed by [`CollectionWriter::put_batch`].
+    pub async fn put_batch_with_known_absent_ids<I, K>(
+        &mut self,
+        entries: I,
+        known_absent_ids: K,
+    ) -> Result<CollectionState, CollectionError>
+    where
+        I: IntoIterator<Item = (T, Cid, Option<T>)>,
+        K: IntoIterator<Item = String>,
+    {
         if !self.definition.search_indexes().is_empty() {
             return Err(CollectionError::Validation(
                 "batch collection updates do not support search indexes".to_string(),
             ));
         }
 
+        let known_absent_ids = known_absent_ids.into_iter().collect::<BTreeSet<_>>();
         let mut normalized_entries = Vec::new();
         let mut ids_without_previous = BTreeSet::new();
         let mut seen_ids = BTreeSet::new();
@@ -271,7 +290,7 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
                     Ok::<_, CollectionError>((previous_id, previous))
                 })
                 .transpose()?;
-            if previous.is_none() {
+            if previous.is_none() && !known_absent_ids.contains(&id) {
                 ids_without_previous.insert(id.clone());
             }
             normalized_entries.push((id, item, cid, previous));

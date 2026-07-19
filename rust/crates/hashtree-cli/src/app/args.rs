@@ -933,6 +933,12 @@ pub(crate) enum SocialGraphCommands {
         /// Authors committed to the resumable index root per durable checkpoint
         #[arg(long, default_value_t = 8)]
         checkpoint_authors: usize,
+        /// Events applied per bounded Hashtree index commit
+        #[arg(long, default_value_t = 32_768)]
+        index_commit_batch_size: usize,
+        /// Maximum children per Hashtree B-tree node
+        #[arg(long, default_value_t = 256)]
+        btree_order: usize,
         /// Number of graph-crawl author batches to fetch concurrently during warmup
         #[arg(long, default_value_t = 4)]
         concurrent_batches: usize,

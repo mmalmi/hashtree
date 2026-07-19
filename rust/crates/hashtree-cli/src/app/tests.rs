@@ -1129,6 +1129,10 @@ fn test_cli_parses_socialgraph_index_command() {
         "32",
         "--checkpoint-authors",
         "12",
+        "--index-commit-batch-size",
+        "32768",
+        "--btree-order",
+        "256",
         "--concurrent-batches",
         "6",
         "--fetch-timeout-secs",
@@ -1170,6 +1174,8 @@ fn test_cli_parses_socialgraph_index_command() {
                     per_author_live_bytes,
                     author_batch_size,
                     checkpoint_authors,
+                    index_commit_batch_size,
+                    btree_order,
                     concurrent_batches,
                     fetch_timeout_secs,
                     relay_event_max_bytes,
@@ -1195,6 +1201,8 @@ fn test_cli_parses_socialgraph_index_command() {
             assert_eq!(per_author_live_bytes, Some(65_536));
             assert_eq!(author_batch_size, 32);
             assert_eq!(checkpoint_authors, 12);
+            assert_eq!(index_commit_batch_size, 32_768);
+            assert_eq!(btree_order, 256);
             assert_eq!(concurrent_batches, 6);
             assert_eq!(fetch_timeout_secs, 7);
             assert_eq!(relay_event_max_bytes, Some(262_144));

@@ -3,7 +3,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::{ListEventsOptions, NostrEventStore, NostrEventStoreError, StoredNostrEvent};
+use crate::{
+    ListEventsOptions, NostrEventStore, NostrEventStoreError, NostrEventStoreOptions,
+    StoredNostrEvent,
+};
 use futures::{stream, StreamExt};
 use hashtree_core::{Cid, Store};
 use nostr_sdk::{
@@ -322,8 +325,16 @@ pub struct NostrBridge<S: Store> {
 
 impl<S: Store> NostrBridge<S> {
     pub fn new(store: Arc<S>, config: CrawlConfig) -> Self {
+        Self::with_event_store_options(store, config, NostrEventStoreOptions::default())
+    }
+
+    pub fn with_event_store_options(
+        store: Arc<S>,
+        config: CrawlConfig,
+        event_store_options: NostrEventStoreOptions,
+    ) -> Self {
         Self {
-            event_store: NostrEventStore::new(store),
+            event_store: NostrEventStore::with_options(store, event_store_options),
             config,
             policy: Arc::new(KindPriorityPolicy::default()),
             require_all_relays: false,

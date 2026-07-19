@@ -1,4 +1,7 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use hashtree_collection::{
     federated_search, load_collection_manifest_metadata, normalize_collection_item,
@@ -7,7 +10,7 @@ use hashtree_collection::{
     FederatedCollectionSource, FederatedSearchOptions, NormalizeCollectionItemOptions,
     COLLECTION_MANIFEST_METADATA_FILE, MANIFEST_BY_ID,
 };
-use hashtree_core::{Cid, HashTree, HashTreeConfig, MemoryStore};
+use hashtree_core::{Cid, Hash, HashTree, HashTreeConfig, MemoryStore, Store, StoreError};
 use hashtree_index::{SearchIndexOptions, SearchOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +45,42 @@ struct LegacySong {
     title: String,
     creator: String,
     tags: Vec<String>,
+}
+
+#[derive(Default)]
+struct CountingStore {
+    inner: MemoryStore,
+    gets: AtomicUsize,
+}
+
+impl CountingStore {
+    fn reset_gets(&self) {
+        self.gets.store(0, Ordering::Relaxed);
+    }
+
+    fn gets(&self) -> usize {
+        self.gets.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl Store for CountingStore {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.inner.put(hash, data).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.gets.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(hash).await
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.delete(hash).await
+    }
 }
 
 fn song_definition() -> CollectionDefinition<Song> {
@@ -515,6 +554,70 @@ async fn batch_put_rejects_existing_overwrite_without_previous_item() {
         hashtree_collection::CollectionError::MissingPreviousForOverwrite { ref id }
             if id == "song-a"
     ));
+}
+
+#[tokio::test]
+async fn batch_put_reuses_known_absent_ids_without_a_second_tree_walk() {
+    let store = Arc::new(CountingStore::default());
+    let definition = by_id_only_song_definition();
+    let initial = (0..1_000_usize)
+        .map(|index| {
+            let key = index * 2;
+            (
+                Song {
+                    id: format!("song:{key:05}"),
+                    title: format!("Initial {key}"),
+                    artist: "Ada".to_string(),
+                    tags: Vec::new(),
+                },
+                cid_from_seed((index % 250) as u8),
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut seed = CollectionWriter::new(Arc::clone(&store), definition.clone());
+    seed.put_batch(initial).await.unwrap();
+    let seed_state = seed.snapshot();
+
+    let additions = (0..500_usize)
+        .map(|index| {
+            let key = index * 2 + 1;
+            (
+                Song {
+                    id: format!("song:{key:05}"),
+                    title: format!("Added {key}"),
+                    artist: "Bea".to_string(),
+                    tags: Vec::new(),
+                },
+                cid_from_seed(((index + 3) % 250) as u8),
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let known_absent_ids = additions
+        .iter()
+        .map(|(song, _, _)| song.id.clone())
+        .collect::<Vec<_>>();
+
+    let mut checked =
+        CollectionWriter::with_state(Arc::clone(&store), definition.clone(), seed_state.clone());
+    store.reset_gets();
+    checked.put_batch(additions.clone()).await.unwrap();
+    let checked_gets = store.gets();
+
+    let mut prechecked = CollectionWriter::with_state(store.clone(), definition, seed_state);
+    store.reset_gets();
+    prechecked
+        .put_batch_with_known_absent_ids(additions, known_absent_ids)
+        .await
+        .unwrap();
+    let prechecked_gets = store.gets();
+
+    assert_eq!(checked.snapshot(), prechecked.snapshot());
+    assert!(
+        prechecked_gets * 3 < checked_gets * 2,
+        "prechecked batch made {prechecked_gets} reads versus {checked_gets} with duplicate checking"
+    );
 }
 
 #[tokio::test]

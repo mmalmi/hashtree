@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.112 - 2026-07-20
+
+### Changed
+
+- Nostr crawl batches reuse their existing by-id absence check instead of
+  walking the same large B-tree a second time during collection updates.
+- `htree socialgraph index` now uses bounded 32,768-event index commits and
+  256-way B-tree nodes by default. Both values are configurable with
+  `--index-commit-batch-size` and `--btree-order` for storage-specific tuning.
+
 ## 0.2.111 - 2026-07-19
 
 ### Added

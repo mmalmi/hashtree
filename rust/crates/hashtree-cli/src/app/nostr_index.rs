@@ -11,8 +11,8 @@ use std::os::fd::AsRawFd;
 use anyhow::{Context, Result};
 use hashtree_core::{nhash_decode, nhash_encode_full, Cid, NHashData};
 use hashtree_nostr::{
-    CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore, RelayFetchMode,
-    StoredNostrEvent, VerifiedEvent,
+    CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore,
+    NostrEventStoreOptions, RelayFetchMode, StoredNostrEvent, VerifiedEvent,
 };
 use nostr::Keys;
 use nostr_sdk::{Event as NostrSdkEvent, Filter as NostrFilter};
@@ -57,6 +57,8 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) max_live_bytes: u64,
     pub(crate) author_batch_size: usize,
     pub(crate) checkpoint_authors: usize,
+    pub(crate) index_commit_batch_size: usize,
+    pub(crate) btree_order: usize,
     pub(crate) concurrent_batches: usize,
     pub(crate) per_author_event_limit: usize,
     pub(crate) per_author_kind_event_limit: Option<usize>,
@@ -383,6 +385,12 @@ pub(crate) async fn run_socialgraph_index(
     if checkpointed_allowlist && options.author_batch_size == 0 {
         anyhow::bail!("--author-batch-size must be greater than zero");
     }
+    if options.index_commit_batch_size == 0 {
+        anyhow::bail!("--index-commit-batch-size must be greater than zero");
+    }
+    if options.btree_order < 2 {
+        anyhow::bail!("--btree-order must be at least 2");
+    }
     if checkpointed_allowlist && options.max_events_seen == Some(0) {
         anyhow::bail!("--max-events-seen must be greater than zero");
     }
@@ -460,7 +468,8 @@ pub(crate) async fn run_socialgraph_index(
             .context("parse resumable crawl base root")?,
         None => load_existing_root(&data_dir)?,
     };
-    let event_store = NostrEventStore::new(store.store_arc());
+    let event_store_options = nostr_event_store_options(&options);
+    let event_store = NostrEventStore::with_options(store.store_arc(), event_store_options.clone());
 
     if checkpointed_allowlist {
         let authors = author_allowlist
@@ -517,7 +526,7 @@ pub(crate) async fn run_socialgraph_index(
         return Ok(index_report);
     }
 
-    let bridge = NostrBridge::new(
+    let bridge = NostrBridge::with_event_store_options(
         store.store_arc(),
         CrawlConfig {
             relays: relays.clone(),
@@ -545,6 +554,7 @@ pub(crate) async fn run_socialgraph_index(
             full_author_history: options.full_author_history,
             kinds: options.kinds.clone(),
         },
+        event_store_options,
     );
 
     let report = bridge
@@ -602,6 +612,13 @@ fn build_crawl_config(
     }
 }
 
+fn nostr_event_store_options(options: &SocialGraphIndexOptions) -> NostrEventStoreOptions {
+    NostrEventStoreOptions {
+        btree_order: Some(options.btree_order),
+        index_commit_batch_size: Some(options.index_commit_batch_size),
+    }
+}
+
 async fn crawl_allowlist_in_checkpoints(
     store: Arc<hashtree_cli::storage::StorageRouter>,
     graph_store: &socialgraph::SocialGraphStore,
@@ -615,7 +632,9 @@ async fn crawl_allowlist_in_checkpoints(
         .checkpoint_authors
         .min(options.author_batch_size)
         .max(1);
-    let event_store = NostrEventStore::new(Arc::clone(&store));
+    let event_store_options = nostr_event_store_options(options);
+    let event_store =
+        NostrEventStore::with_options(Arc::clone(&store), event_store_options.clone());
 
     while state.next_author < authors.len() {
         if state.live_bytes_selected >= options.max_live_bytes {
@@ -656,7 +675,7 @@ async fn crawl_allowlist_in_checkpoints(
         validate_reachable_root(&event_store, current_root.as_ref(), "checkpoint root").await?;
 
         let started = Instant::now();
-        let bridge = NostrBridge::new(
+        let bridge = NostrBridge::with_event_store_options(
             Arc::clone(&store),
             build_crawl_config(
                 options,
@@ -666,6 +685,7 @@ async fn crawl_allowlist_in_checkpoints(
                 remaining_events_seen,
                 end - state.next_author,
             ),
+            event_store_options.clone(),
         );
         let report = bridge
             .crawl(graph_store, current_root.as_ref())
@@ -1511,6 +1531,8 @@ mod tests {
             max_live_bytes: 32 * 1024 * 1024,
             author_batch_size: 1,
             checkpoint_authors: 1,
+            index_commit_batch_size: 8,
+            btree_order: 8,
             concurrent_batches: 1,
             per_author_event_limit: 16,
             per_author_kind_event_limit: None,
@@ -2106,6 +2128,8 @@ mod tests {
                 max_live_bytes: 8 * 1024 * 1024,
                 author_batch_size: 32,
                 checkpoint_authors: 8,
+                index_commit_batch_size: 32,
+                btree_order: 16,
                 concurrent_batches: 4,
                 per_author_event_limit: 8,
                 per_author_kind_event_limit: None,
@@ -2226,6 +2250,8 @@ mod tests {
                 max_live_bytes: 8 * 1024 * 1024,
                 author_batch_size: 32,
                 checkpoint_authors: 8,
+                index_commit_batch_size: 32,
+                btree_order: 16,
                 concurrent_batches: 1,
                 per_author_event_limit: 8,
                 per_author_kind_event_limit: None,
