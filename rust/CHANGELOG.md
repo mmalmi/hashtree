@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.109 - 2026-07-19
+
+### Added
+
+- `htree socialgraph publish-profile-indexes` publishes the existing
+  `profile-search` and `profiles-by-pubkey` roots without rebuilding either
+  Hashtree index, allowing bounded crawlers to expose durable checkpoints
+  progressively without loading the whole profile catalog into memory.
+
 ## 0.2.108 - 2026-07-19
 
 ### Changed

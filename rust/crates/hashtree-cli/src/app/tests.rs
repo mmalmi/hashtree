@@ -1263,6 +1263,18 @@ fn test_cli_parses_socialgraph_rebuild_profile_index_command() {
 }
 
 #[test]
+fn test_cli_parses_socialgraph_publish_profile_indexes_command() {
+    let cli = Cli::parse_from(["htree", "socialgraph", "publish-profile-indexes"]);
+
+    match cli.command {
+        Commands::Socialgraph {
+            command: SocialGraphCommands::PublishProfileIndexes,
+        } => {}
+        _ => panic!("expected socialgraph publish-profile-indexes command"),
+    }
+}
+
+#[test]
 fn test_cli_parses_socialgraph_warm_command() {
     let cli = Cli::parse_from([
         "htree",

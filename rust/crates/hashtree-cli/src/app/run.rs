@@ -47,9 +47,9 @@ use super::resolve::{
     ResolvedCid,
 };
 use super::socialgraph::{
-    run_socialgraph_filter, run_socialgraph_rebuild_event_index,
-    run_socialgraph_rebuild_profile_index, run_socialgraph_snapshot, run_socialgraph_stats,
-    run_socialgraph_warm,
+    run_socialgraph_filter, run_socialgraph_publish_profile_indexes,
+    run_socialgraph_rebuild_event_index, run_socialgraph_rebuild_profile_index,
+    run_socialgraph_snapshot, run_socialgraph_stats, run_socialgraph_warm,
 };
 use super::storage_stats::print_storage_inventory;
 use super::user::show_user_identity;
@@ -1353,6 +1353,9 @@ pub(crate) async fn run() -> Result<()> {
             }
             SocialGraphCommands::RebuildProfileIndex => {
                 run_socialgraph_rebuild_profile_index(data_dir).await?;
+            }
+            SocialGraphCommands::PublishProfileIndexes => {
+                run_socialgraph_publish_profile_indexes(data_dir).await?;
             }
             SocialGraphCommands::RebuildEventIndex => {
                 run_socialgraph_rebuild_event_index(data_dir).await?;

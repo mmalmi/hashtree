@@ -457,6 +457,44 @@ pub(crate) async fn run_socialgraph_rebuild_profile_index(data_dir: PathBuf) -> 
     Ok(())
 }
 
+pub(crate) async fn run_socialgraph_publish_profile_indexes(data_dir: PathBuf) -> Result<()> {
+    let config = Config::load()?;
+    let (graph_store, _social_graph_root_bytes) =
+        init_socialgraph_with_shared_storage(&data_dir, &config)?;
+    let profile_search_root = graph_store.profile_search_root()?;
+    let profiles_by_pubkey_root = graph_store.profiles_by_pubkey_root()?;
+    publish_socialgraph_roots(
+        &data_dir,
+        &config,
+        &[
+            (
+                PUBLISHED_PROFILE_SEARCH_TREE_NAME,
+                profile_search_root.clone(),
+            ),
+            (
+                PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME,
+                profiles_by_pubkey_root.clone(),
+            ),
+        ],
+    )
+    .await?;
+
+    println!("Published existing profile index roots");
+    for (label, root) in [
+        (PUBLISHED_PROFILE_SEARCH_TREE_NAME, profile_search_root),
+        (
+            PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME,
+            profiles_by_pubkey_root,
+        ),
+    ] {
+        match root {
+            Some(root) => println!("  {label}: {}", hex::encode(root.hash)),
+            None => println!("  {label}: none"),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_socialgraph_rebuild_event_index(data_dir: PathBuf) -> Result<()> {
     let config = Config::load()?;
     let (graph_store, _social_graph_root_bytes) =
