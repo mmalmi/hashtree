@@ -906,33 +906,24 @@ impl SocialGraphStore {
             return Ok(());
         }
 
-        let mut by_pubkey_root = self.profile_index.by_pubkey_root()?;
-        let mut search_root = self.profile_index.search_root()?;
-        let mut changed = false;
-
+        let mut updates = Vec::with_capacity(latest_by_pubkey.len());
         for event in latest_by_pubkey.into_values() {
             let overmuted = self.is_overmuted_user(&event.pubkey.to_bytes(), threshold)?;
-            let (next_by_pubkey_root, next_search_root, updated) = if overmuted {
-                self.profile_index.remove_profile_event(
-                    by_pubkey_root.as_ref(),
-                    search_root.as_ref(),
-                    &event.pubkey.to_hex(),
-                )?
+            let follow_distance = if overmuted {
+                None
             } else {
-                self.profile_index.update_profile_event(
-                    by_pubkey_root.as_ref(),
-                    search_root.as_ref(),
-                    event,
-                    self.follow_distance(&event.pubkey.to_bytes())?,
-                )?
+                self.follow_distance(&event.pubkey.to_bytes())?
             };
-            if updated {
-                by_pubkey_root = next_by_pubkey_root;
-                search_root = next_search_root;
-                changed = true;
-            }
+            updates.push((event, follow_distance, overmuted));
         }
 
+        let by_pubkey_root = self.profile_index.by_pubkey_root()?;
+        let search_root = self.profile_index.search_root()?;
+        let (by_pubkey_root, search_root, changed) = self.profile_index.update_profile_events(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            &updates,
+        )?;
         if changed {
             self.profile_index
                 .write_by_pubkey_root(by_pubkey_root.as_ref())?;

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.2.108 - 2026-07-19
+
+### Changed
+
+- Profile metadata checkpoints now update the profile-by-pubkey tree and all
+  profile-search terms in two subtree-reusing Hashtree batches instead of one
+  tree rewrite per profile and term. This removes profile-crawl write
+  amplification while keeping the checkpoint transaction and memory bounded.
+- String-valued B-tree indexes now support deterministic batched insertions and
+  deletions with stored subtree counts, matching the existing CID-link batch
+  update path.
+
 ## 0.2.107 - 2026-07-19
 
 ### Changed

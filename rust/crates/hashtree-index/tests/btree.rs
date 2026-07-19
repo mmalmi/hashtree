@@ -84,6 +84,48 @@ fn string_values_support_get_and_range() {
 }
 
 #[test]
+fn bulk_string_changes_match_map_semantics() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(store, BTreeOptions { order: Some(4) });
+        let initial = (0..40)
+            .map(|index| (format!("key:{index:03}"), format!("value:{index:03}")))
+            .collect::<BTreeMap<_, _>>();
+        let root = btree
+            .build(initial.clone())
+            .await
+            .unwrap()
+            .expect("initial root");
+        let changes = vec![
+            ("key:003".to_string(), None),
+            ("key:019".to_string(), Some("replacement".to_string())),
+            ("key:041".to_string(), Some("added".to_string())),
+        ];
+
+        let updated = btree
+            .update(Some(&root), changes.clone())
+            .await
+            .unwrap()
+            .expect("updated root");
+        let mut expected = initial;
+        for (key, value) in changes {
+            match value {
+                Some(value) => {
+                    expected.insert(key, value);
+                }
+                None => {
+                    expected.remove(&key);
+                }
+            }
+        }
+        assert_eq!(
+            btree.entries(Some(&updated)).await.unwrap(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
 fn link_btree_matches_typescript_fixture_root() {
     block_on(async {
         let store = Arc::new(MemoryStore::new());

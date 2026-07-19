@@ -525,6 +525,65 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
 }
 
 #[test]
+fn test_metadata_batch_updates_profile_search_terms_together() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
+
+    let alice_old = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "name": "aliceold" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .sign_with_keys(&alice_keys)
+    .unwrap();
+    let alice_new = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "name": "alicenew" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(6))
+    .sign_with_keys(&alice_keys)
+    .unwrap();
+    let bob = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "name": "bobnew" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(6))
+    .sign_with_keys(&bob_keys)
+    .unwrap();
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&alice_old))
+        .unwrap();
+    graph_store
+        .sync_profile_index_for_events(&[alice_new.clone(), bob.clone()])
+        .unwrap();
+
+    assert!(graph_store
+        .profile_search_entries_for_prefix("p:aliceold")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        graph_store
+            .profile_search_entries_for_prefix("p:alicenew")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        graph_store
+            .profile_search_entries_for_prefix("p:bobnew")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn test_profile_search_entries_include_follow_distance() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();

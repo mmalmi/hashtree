@@ -560,104 +560,82 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
-    pub(super) fn update_profile_event(
+    pub(super) fn update_profile_events(
         &self,
         by_pubkey_root: Option<&Cid>,
         search_root: Option<&Cid>,
-        event: &Event,
-        follow_distance: Option<u32>,
+        updates: &[(&Event, Option<u32>, bool)],
     ) -> Result<(Option<Cid>, Option<Cid>, bool)> {
-        let pubkey = event.pubkey.to_hex();
-        let existing_cid = block_on(self.index.get_link(by_pubkey_root, &pubkey))
-            .context("lookup existing mirrored profile event")?;
-
-        let existing_event = match existing_cid.as_ref() {
-            Some(cid) => self.load_profile_event(cid)?,
-            None => None,
-        };
-
-        if existing_event
-            .as_ref()
-            .is_some_and(|current| compare_nostr_events(event, current).is_le())
-        {
+        if updates.is_empty() {
             return Ok((by_pubkey_root.cloned(), search_root.cloned(), false));
         }
 
-        let mirrored_cid = self.mirror_profile_event(event)?;
-        let next_by_pubkey_root = Some(
-            block_on(
-                self.index
-                    .insert_link(by_pubkey_root, &pubkey, &mirrored_cid),
-            )
-            .context("write mirrored profile event index")?,
-        );
+        let pubkeys = updates
+            .iter()
+            .map(|(event, _, _)| event.pubkey.to_hex())
+            .collect::<Vec<_>>();
+        let existing_cids = block_on(self.index.get_links(by_pubkey_root, pubkeys))
+            .context("lookup existing mirrored profile events")?;
+        let mut by_pubkey_changes = BTreeMap::<String, Option<Cid>>::new();
+        let mut search_changes = BTreeMap::<String, Option<String>>::new();
 
-        let mut next_search_root = search_root.cloned();
-        if let Some(current) = existing_event.as_ref() {
-            for term in profile_search_terms_for_event(current) {
-                let Some(root) = next_search_root.as_ref() else {
-                    break;
-                };
-                next_search_root = block_on(
-                    self.index
-                        .delete(root, &format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}")),
-                )
-                .context("remove stale profile search term")?;
+        for (event, follow_distance, remove) in updates {
+            let pubkey = event.pubkey.to_hex();
+            let existing_event = match existing_cids.get(&pubkey) {
+                Some(cid) => self.load_profile_event(cid)?,
+                None => None,
+            };
+
+            if *remove {
+                if existing_cids.contains_key(&pubkey) {
+                    by_pubkey_changes.insert(pubkey.clone(), None);
+                }
+                if let Some(current) = existing_event.as_ref() {
+                    for term in profile_search_terms_for_event(current) {
+                        search_changes
+                            .insert(format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"), None);
+                    }
+                }
+                continue;
+            }
+
+            if existing_event
+                .as_ref()
+                .is_some_and(|current| compare_nostr_events(event, current).is_le())
+            {
+                continue;
+            }
+
+            let mirrored_cid = self.mirror_profile_event(event)?;
+            by_pubkey_changes.insert(pubkey.clone(), Some(mirrored_cid.clone()));
+            if let Some(current) = existing_event.as_ref() {
+                for term in profile_search_terms_for_event(current) {
+                    search_changes.insert(format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"), None);
+                }
+            }
+
+            let search_value = serialize_profile_search_entry(&build_profile_search_entry(
+                event,
+                &mirrored_cid,
+                *follow_distance,
+            )?)?;
+            for term in profile_search_terms_for_event(event) {
+                search_changes.insert(
+                    format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"),
+                    Some(search_value.clone()),
+                );
             }
         }
 
-        let search_value = serialize_profile_search_entry(&build_profile_search_entry(
-            event,
-            &mirrored_cid,
-            follow_distance,
-        )?)?;
-        for term in profile_search_terms_for_event(event) {
-            next_search_root = Some(
-                block_on(self.index.insert(
-                    next_search_root.as_ref(),
-                    &format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"),
-                    &search_value,
-                ))
-                .context("write profile search term")?,
-            );
-        }
-
-        Ok((next_by_pubkey_root, next_search_root, true))
-    }
-
-    pub(super) fn remove_profile_event(
-        &self,
-        by_pubkey_root: Option<&Cid>,
-        search_root: Option<&Cid>,
-        pubkey: &str,
-    ) -> Result<(Option<Cid>, Option<Cid>, bool)> {
-        let existing_cid = block_on(self.index.get_link(by_pubkey_root, pubkey))
-            .context("lookup mirrored profile event for removal")?;
-        let Some(existing_cid) = existing_cid else {
+        if by_pubkey_changes.is_empty() && search_changes.is_empty() {
             return Ok((by_pubkey_root.cloned(), search_root.cloned(), false));
-        };
-
-        let existing_event = self.load_profile_event(&existing_cid)?;
-        let next_by_pubkey_root = match by_pubkey_root {
-            Some(root) => block_on(self.index.delete(root, pubkey))
-                .context("remove mirrored profile-by-pubkey entry")?,
-            None => None,
-        };
-
-        let mut next_search_root = search_root.cloned();
-        if let Some(current) = existing_event.as_ref() {
-            for term in profile_search_terms_for_event(current) {
-                let Some(root) = next_search_root.as_ref() else {
-                    break;
-                };
-                next_search_root = block_on(
-                    self.index
-                        .delete(root, &format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}")),
-                )
-                .context("remove overmuted profile search term")?;
-            }
         }
 
+        let next_by_pubkey_root =
+            block_on(self.index.update_links(by_pubkey_root, by_pubkey_changes))
+                .context("batch update mirrored profile event index")?;
+        let next_search_root = block_on(self.index.update(search_root, search_changes))
+            .context("batch update profile search terms")?;
         Ok((next_by_pubkey_root, next_search_root, true))
     }
 }

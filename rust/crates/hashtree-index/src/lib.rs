@@ -382,7 +382,7 @@ impl<S: Store> BTree<S> {
             level.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
-                count: 0,
+                count: chunk.len() as u64,
             });
         }
 
@@ -393,13 +393,128 @@ impl<S: Store> BTree<S> {
                 next_level.push(BuiltNode {
                     first_key: chunk[0].first_key.clone(),
                     cid,
-                    count: 0,
+                    count: chunk.iter().map(|child| child.count).sum(),
                 });
             }
             level = next_level;
         }
 
         Ok(level.pop().map(|node| node.cid))
+    }
+
+    /// Apply a sorted batch of string insertions and deletions, reusing
+    /// untouched subtrees. Repeated changes for one key use the last value;
+    /// `None` deletes a key.
+    pub async fn update<I>(&self, root: Option<&Cid>, changes: I) -> Result<Option<Cid>, BTreeError>
+    where
+        I: IntoIterator<Item = (String, Option<String>)>,
+    {
+        let changes = changes.into_iter().collect::<BTreeMap<_, _>>();
+        if changes.is_empty() {
+            return Ok(root.cloned());
+        }
+
+        let changes = changes.into_iter().collect::<Vec<_>>();
+        let Some(root) = root else {
+            return self
+                .build(
+                    changes
+                        .into_iter()
+                        .filter_map(|(key, value)| value.map(|value| (key, value))),
+                )
+                .await;
+        };
+
+        let nodes = self.update_string_node(root.clone(), &changes).await?;
+        self.finish_link_node_updates(nodes).await
+    }
+
+    fn update_string_node<'a>(
+        &'a self,
+        node: Cid,
+        changes: &'a [(String, Option<String>)],
+    ) -> BTreeFuture<'a, Vec<BuiltNode>> {
+        Box::pin(async move {
+            let entries = sort_entries(self.tree.list_directory(&node).await?);
+            if is_leaf_node(&entries) {
+                return self.update_string_leaf(entries, changes).await;
+            }
+
+            let mut children = Vec::new();
+            let mut change_start = 0;
+            for (child_index, entry) in entries.iter().enumerate() {
+                let change_end = entries
+                    .get(child_index + 1)
+                    .map(|next| {
+                        let next_key = unescape_key(&next.name);
+                        change_start
+                            + changes[change_start..].partition_point(|(key, _)| key < &next_key)
+                    })
+                    .unwrap_or(changes.len());
+                if change_start == change_end {
+                    let cid = entry_cid(entry);
+                    let count = match stored_link_subtree_count(entry) {
+                        Some(count) => count,
+                        None => self.count_entries_recursive(cid.clone()).await?,
+                    };
+                    children.push(BuiltNode {
+                        first_key: unescape_key(&entry.name),
+                        cid,
+                        count,
+                    });
+                } else {
+                    children.extend(
+                        self.update_string_node(
+                            entry_cid(entry),
+                            &changes[change_start..change_end],
+                        )
+                        .await?,
+                    );
+                }
+                change_start = change_end;
+            }
+
+            self.create_link_node_level(children).await
+        })
+    }
+
+    async fn update_string_leaf(
+        &self,
+        entries: Vec<TreeEntry>,
+        changes: &[(String, Option<String>)],
+    ) -> Result<Vec<BuiltNode>, BTreeError> {
+        let mut final_entries = BTreeMap::new();
+        for entry in entries {
+            if entry.link_type != LinkType::Blob {
+                continue;
+            }
+            let Some(data) = self.tree.get(&entry_cid(&entry), None).await? else {
+                continue;
+            };
+            final_entries.insert(unescape_key(&entry.name), String::from_utf8(data)?);
+        }
+        for (key, value) in changes {
+            match value {
+                Some(value) => {
+                    final_entries.insert(key.clone(), value.clone());
+                }
+                None => {
+                    final_entries.remove(key);
+                }
+            }
+        }
+
+        let final_entries = final_entries.into_iter().collect::<Vec<_>>();
+        let mut nodes = Vec::with_capacity(final_entries.len().div_ceil(self.max_keys));
+        for chunk in final_entries.chunks(self.max_keys) {
+            let cid = self.create_leaf(chunk).await?;
+            nodes.push(BuiltNode {
+                first_key: chunk[0].0.clone(),
+                cid,
+                count: chunk.len() as u64,
+            });
+        }
+        Ok(nodes)
     }
 
     pub async fn build_links<I>(&self, items: I) -> Result<Option<Cid>, BTreeError>
@@ -1196,6 +1311,27 @@ impl<S: Store> BTree<S> {
         Box::pin(async move {
             let entries = self.tree.list_directory(&node).await?;
             count_link_entries_or_subtrees(self, &entries).await
+        })
+    }
+
+    fn count_entries_recursive<'a>(&'a self, node: Cid) -> BTreeFuture<'a, u64> {
+        Box::pin(async move {
+            let entries = self.tree.list_directory(&node).await?;
+            if is_leaf_node(&entries) {
+                return Ok(entries
+                    .iter()
+                    .filter(|entry| entry.link_type == LinkType::Blob)
+                    .count() as u64);
+            }
+
+            let mut count = 0;
+            for entry in entries {
+                count += match stored_link_subtree_count(&entry) {
+                    Some(child_count) => child_count,
+                    None => self.count_entries_recursive(entry_cid(&entry)).await?,
+                };
+            }
+            Ok(count)
         })
     }
 }
