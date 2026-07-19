@@ -478,7 +478,7 @@ pub(crate) async fn run_socialgraph_index(
             None => IndexedNostrCrawlState {
                 version: CRAWL_STATE_VERSION,
                 author_allowlist_source: options.author_allowlist_url.clone(),
-                policy,
+                policy: policy.clone(),
                 next_author: 0,
                 root: existing_root.as_ref().map(cid_to_nhash).transpose()?,
                 events_seen: 0,
@@ -486,6 +486,8 @@ pub(crate) async fn run_socialgraph_index(
                 live_bytes_selected: 0,
             },
         };
+        state.author_allowlist_source = options.author_allowlist_url.clone();
+        state.policy = policy;
         persist_crawl_state(&data_dir, &state)?;
         let report = crawl_allowlist_in_checkpoints(
             store.store_arc(),
@@ -1219,7 +1221,10 @@ fn validate_crawl_state(
             CRAWL_STATE_VERSION
         );
     }
-    if &state.policy != expected_policy {
+    let mut resumed_identity = state.policy.clone();
+    resumed_identity.author_batch_size = expected_policy.author_batch_size;
+    resumed_identity.checkpoint_authors = expected_policy.checkpoint_authors;
+    if &resumed_identity != expected_policy {
         anyhow::bail!(
             "Nostr crawl policy or ordered author allowlist changed; refusing to reuse the durable cursor"
         );
@@ -2415,6 +2420,19 @@ mod tests {
         .expect("build same policy");
         validate_crawl_state(&loaded, &same_policy, authors.len())
             .expect("source URL is diagnostic only");
+
+        let mut changed_cadence = changed_source.clone();
+        changed_cadence.author_batch_size = 64;
+        changed_cadence.checkpoint_authors = 64;
+        let same_content_policy = build_crawl_policy(
+            &changed_cadence,
+            &["wss://relay.example".to_string()],
+            &authors,
+            None,
+        )
+        .expect("build policy with new cadence");
+        validate_crawl_state(&loaded, &same_content_policy, authors.len())
+            .expect("execution cadence must not invalidate durable content progress");
 
         let reordered = vec![authors[1].clone(), authors[0].clone()];
         let changed_policy = build_crawl_policy(

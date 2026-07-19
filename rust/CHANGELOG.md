@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.106 - 2026-07-19
+
+### Changed
+
+- Resumable Nostr crawls now treat author batch size and checkpoint cadence as
+  operational tuning rather than content identity. Operators can increase the
+  batch after a durable checkpoint to amortize cumulative tree-update costs;
+  relay coverage, author ordering, selection limits, and every other content
+  policy field remain exact resume invariants.
+
 ## 0.2.105 - 2026-07-19
 
 ### Fixed
