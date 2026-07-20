@@ -671,6 +671,55 @@ fn deleting_a_moving_blob_clears_its_resumption_record() {
 }
 
 #[test]
+fn batch_delete_removes_member_blobs_and_catalog_locations() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool =
+        PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default()).expect("pool");
+    let member = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("member"),
+            1024 * 1024,
+        ))
+        .expect("member");
+    let first = sha256(b"pool-batch-delete-first");
+    let second = sha256(b"pool-batch-delete-second");
+    let retained = sha256(b"pool-batch-delete-retained");
+    pool.put_sync(first, b"pool-batch-delete-first")
+        .expect("put first");
+    pool.put_sync(second, b"pool-batch-delete-second")
+        .expect("put second");
+    pool.put_sync(retained, b"pool-batch-delete-retained")
+        .expect("put retained");
+
+    assert_eq!(
+        pool.delete_many_sync(&[first, second, first])
+            .expect("batch delete"),
+        2
+    );
+    assert!(pool
+        .read_location(&first)
+        .expect("first location")
+        .is_none());
+    assert!(pool
+        .read_location(&second)
+        .expect("second location")
+        .is_none());
+    assert_eq!(
+        pool.read_location(&retained).expect("retained location"),
+        Some(LocationRecord::Stored {
+            member,
+            size: b"pool-batch-delete-retained".len() as u64,
+        })
+    );
+    let member_store = pool.get_member(member).expect("member store");
+    assert!(!member_store.exists(&first).expect("first member lookup"));
+    assert!(!member_store.exists(&second).expect("second member lookup"));
+    assert!(member_store
+        .exists(&retained)
+        .expect("retained member lookup"));
+}
+
+#[test]
 fn streamed_move_rejects_corrupt_source_before_target_commit() {
     let temp = TempDir::new().expect("temp dir");
     let mut config = PoolStoreConfig::default();

@@ -133,6 +133,20 @@ pub trait Store: Send + Sync {
     /// Returns true if deleted, false if didn't exist
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError>;
 
+    /// Delete multiple hashes and return the number that existed.
+    ///
+    /// Persistent stores should override this to use one bounded transaction
+    /// rather than forcing one durability barrier per hash.
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        let mut deleted = 0usize;
+        for hash in hashes {
+            if self.delete(&hash).await? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
     // ========================================================================
     // Optional: Storage limits and eviction (default no-op implementations)
     // ========================================================================

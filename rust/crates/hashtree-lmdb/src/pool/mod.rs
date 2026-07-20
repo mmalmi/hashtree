@@ -760,6 +760,49 @@ impl PoolStore {
         Ok(deleted)
     }
 
+    /// Delete a batch with one transaction per affected member and one pool
+    /// catalog transaction.
+    pub fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let mut seen = HashSet::with_capacity(hashes.len());
+        let mut located = Vec::new();
+        let mut by_member = HashMap::<PoolMemberId, Vec<Hash>>::new();
+        for hash in hashes {
+            if !seen.insert(*hash) {
+                continue;
+            }
+            let Some(encoded) = self.locations.get(&rtxn, hash).map_err(map_heed)? else {
+                continue;
+            };
+            let location = LocationRecord::decode(encoded)?;
+            let (members, len) = location.members();
+            for member in members.into_iter().take(len) {
+                by_member.entry(member).or_default().push(*hash);
+            }
+            located.push(*hash);
+        }
+        drop(rtxn);
+
+        for (member, member_hashes) in by_member {
+            if let Ok(store) = self.get_member(member) {
+                let gate = self.member_gate(member, true)?;
+                let _permit = gate.acquire()?;
+                store.delete_many_sync(&member_hashes)?;
+            }
+        }
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        for hash in &located {
+            self.set_location_txn(&mut wtxn, *hash, None)?;
+            self.pins.delete(&mut wtxn, hash).map_err(map_heed)?;
+        }
+        wtxn.commit().map_err(map_heed)?;
+        Ok(located.len())
+    }
+
     pub fn pin_sync(&self, hash: &Hash) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let previous = self
@@ -1406,6 +1449,10 @@ impl Store for PoolStore {
 
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.delete_sync(hash)
+    }
+
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        self.delete_many_sync(&hashes)
     }
 
     async fn stats(&self) -> StoreStats {

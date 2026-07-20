@@ -609,6 +609,15 @@ pub(crate) enum StorageCommands {
         #[arg(long)]
         keep_backup: bool,
     },
+    /// Remove blobs unreachable from the root in a closed, dedicated Nostr index store
+    RetainNostrRoot {
+        /// Durable crawl-state JSON whose root is authoritative
+        #[arg(long)]
+        state_file: PathBuf,
+        /// Delete unreachable blobs; without this flag the command is a dry run
+        #[arg(long)]
+        apply: bool,
+    },
     /// Trim a specific LMDB blob environment down to a logical size limit
     TrimLmdb {
         /// LMDB environment directory to trim

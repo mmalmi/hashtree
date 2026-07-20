@@ -640,6 +640,54 @@ fn dense_link_changes_read_each_existing_node_at_most_once() {
 }
 
 #[test]
+fn link_update_reports_only_nodes_superseded_by_the_new_root() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) });
+        let entry_count = 2_000;
+        let root = btree
+            .build_links(
+                (0..entry_count).map(|index| (format!("key:{index:05}"), cid_from_seed(index))),
+            )
+            .await
+            .unwrap()
+            .expect("initial root");
+
+        let report = btree
+            .update_links_with_superseded(
+                Some(&root),
+                (800..1_200).map(|index| {
+                    (
+                        format!("key:{index:05}"),
+                        Some(cid_from_seed(index + 10_000)),
+                    )
+                }),
+            )
+            .await
+            .expect("update links");
+        let updated = report.root.expect("updated root");
+
+        assert!(!report.superseded_nodes.is_empty());
+        assert!(!report.superseded_nodes.contains(&updated));
+        for cid in &report.superseded_nodes {
+            store
+                .delete(&cid.hash)
+                .await
+                .expect("delete superseded node");
+        }
+
+        assert_eq!(
+            btree.count_stored_links(Some(&updated)).await.unwrap(),
+            Some(entry_count as u64)
+        );
+        assert_eq!(
+            btree.get_link(Some(&updated), "key:00900").await.unwrap(),
+            Some(cid_from_seed(10_900))
+        );
+    });
+}
+
+#[test]
 fn dense_link_changes_read_independent_subtrees_concurrently() {
     block_on(async {
         let store = Arc::new(ConcurrentReadStore::default());

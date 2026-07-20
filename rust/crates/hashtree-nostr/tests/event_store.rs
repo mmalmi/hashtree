@@ -1501,6 +1501,72 @@ fn resumed_bulk_build_matches_sequential_recovery_from_missing_event_blobs() {
 }
 
 #[test]
+fn incremental_build_reports_nodes_safe_to_delete_after_root_publication() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::with_options(
+            Arc::clone(&backing),
+            NostrEventStoreOptions {
+                btree_order: Some(8),
+                index_commit_batch_size: Some(64),
+            },
+        );
+        let author = "d".repeat(64);
+        let initial = (0..128)
+            .map(|index| {
+                canonical_store_event(
+                    &author,
+                    1_000 + index,
+                    1,
+                    vec![vec!["t".to_string(), format!("initial-{}", index % 7)]],
+                    &format!("initial-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root = store
+            .build(None, initial)
+            .await
+            .unwrap()
+            .expect("initial root");
+        let appended = (0..96)
+            .map(|index| {
+                canonical_store_event(
+                    &author,
+                    2_000 + index,
+                    1,
+                    vec![vec!["t".to_string(), format!("appended-{}", index % 5)]],
+                    &format!("appended-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let report = store
+            .build_with_superseded_nodes(Some(&root), appended)
+            .await
+            .expect("incremental build");
+        let updated = report.root.expect("updated root");
+        assert!(!report.superseded_nodes.is_empty());
+        assert!(report.superseded_nodes.contains(&root));
+        assert_eq!(
+            store
+                .delete_superseded_nodes(&report.superseded_nodes)
+                .await
+                .expect("delete superseded nodes"),
+            report.superseded_nodes.len()
+        );
+
+        assert_eq!(
+            store
+                .list_by_author(Some(&updated), &author, ListEventsOptions::default())
+                .await
+                .expect("list after reclamation")
+                .len(),
+            224
+        );
+    });
+}
+
+#[test]
 fn stale_replaceable_events_do_not_remain_in_general_indexes() {
     block_on(async {
         let backing = Arc::new(MemoryStore::new());

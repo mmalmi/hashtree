@@ -24,6 +24,17 @@ pub struct BTreeOptions {
     pub order: Option<usize>,
 }
 
+/// Result of a copy-on-write link-index update.
+///
+/// `superseded_nodes` contains only B-tree directory nodes replaced by `root`.
+/// Their referenced values and untouched descendant nodes are deliberately not
+/// included. Callers may delete these nodes after the new root is durable.
+#[derive(Debug, Clone, Default)]
+pub struct BTreeLinkUpdate {
+    pub root: Option<Cid>,
+    pub superseded_nodes: Vec<Cid>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BTreeError {
     #[error("hash tree error: {0}")]
@@ -60,6 +71,12 @@ struct BuiltNode {
     first_key: String,
     cid: Cid,
     count: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct LinkNodeUpdate {
+    nodes: Vec<BuiltNode>,
+    superseded_nodes: Vec<Cid>,
 }
 
 impl<S: Store> BTree<S> {
@@ -644,24 +661,48 @@ impl<S: Store> BTree<S> {
     where
         I: IntoIterator<Item = (String, Option<Cid>)>,
     {
+        Ok(self.update_links_with_superseded(root, changes).await?.root)
+    }
+
+    /// Apply a sorted batch of link changes and report the old copy-on-write
+    /// B-tree nodes made unreachable by the resulting root.
+    pub async fn update_links_with_superseded<I>(
+        &self,
+        root: Option<&Cid>,
+        changes: I,
+    ) -> Result<BTreeLinkUpdate, BTreeError>
+    where
+        I: IntoIterator<Item = (String, Option<Cid>)>,
+    {
         let changes = changes.into_iter().collect::<BTreeMap<_, _>>();
         if changes.is_empty() {
-            return Ok(root.cloned());
+            return Ok(BTreeLinkUpdate {
+                root: root.cloned(),
+                superseded_nodes: Vec::new(),
+            });
         }
 
         let changes = changes.into_iter().collect::<Vec<_>>();
         let Some(root) = root else {
-            return self
+            let root = self
                 .build_links(
                     changes
                         .into_iter()
                         .filter_map(|(key, cid)| cid.map(|cid| (key, cid))),
                 )
-                .await;
+                .await?;
+            return Ok(BTreeLinkUpdate {
+                root,
+                superseded_nodes: Vec::new(),
+            });
         };
 
-        let nodes = self.update_link_node(root.clone(), &changes, true).await?;
-        self.finish_link_node_updates(nodes).await
+        let update = self.update_link_node(root.clone(), &changes, true).await?;
+        let new_root = self.finish_link_node_updates(update.nodes).await?;
+        Ok(BTreeLinkUpdate {
+            root: new_root,
+            superseded_nodes: update.superseded_nodes,
+        })
     }
 
     fn update_link_node<'a>(
@@ -669,65 +710,80 @@ impl<S: Store> BTree<S> {
         node: Cid,
         changes: &'a [(String, Option<Cid>)],
         parallel_children: bool,
-    ) -> BTreeFuture<'a, Vec<BuiltNode>> {
+    ) -> BTreeFuture<'a, LinkNodeUpdate> {
         Box::pin(async move {
             let entries = sort_entries(self.tree.list_directory(&node).await?);
-            if is_leaf_node(&entries) {
-                return self.update_link_leaf(entries, changes).await;
-            }
-
-            let mut work = Vec::with_capacity(entries.len());
-            let mut change_start = 0;
-            for (child_index, entry) in entries.iter().enumerate() {
-                let change_end = entries
-                    .get(child_index + 1)
-                    .map(|next| {
-                        let next_key = unescape_key(&next.name);
-                        change_start
-                            + changes[change_start..].partition_point(|(key, _)| key < &next_key)
-                    })
-                    .unwrap_or(changes.len());
-                work.push((
-                    BuiltNode {
-                        first_key: unescape_key(&entry.name),
-                        cid: entry_cid(entry),
-                        count: stored_link_subtree_count(entry),
-                    },
-                    change_start,
-                    change_end,
-                ));
-                change_start = change_end;
-            }
-
-            let touched_children = work
-                .iter()
-                .filter(|(_, change_start, change_end)| change_start != change_end)
-                .count();
-            let children = if parallel_children
-                && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
-                && touched_children > 1
-            {
-                self.update_link_children_parallel(work, changes)?
-            } else {
-                let mut children = Vec::new();
-                for (child, change_start, change_end) in work {
-                    if change_start == change_end {
-                        children.push(child);
-                    } else {
-                        children.extend(
-                            self.update_link_node(
-                                child.cid,
-                                &changes[change_start..change_end],
-                                parallel_children,
-                            )
-                            .await?,
-                        );
-                    }
+            let mut update = if is_leaf_node(&entries) {
+                LinkNodeUpdate {
+                    nodes: self.update_link_leaf(entries, changes).await?,
+                    superseded_nodes: Vec::new(),
                 }
-                children
+            } else {
+                let mut work = Vec::with_capacity(entries.len());
+                let mut change_start = 0;
+                for (child_index, entry) in entries.iter().enumerate() {
+                    let change_end = entries
+                        .get(child_index + 1)
+                        .map(|next| {
+                            let next_key = unescape_key(&next.name);
+                            change_start
+                                + changes[change_start..]
+                                    .partition_point(|(key, _)| key < &next_key)
+                        })
+                        .unwrap_or(changes.len());
+                    work.push((
+                        BuiltNode {
+                            first_key: unescape_key(&entry.name),
+                            cid: entry_cid(entry),
+                            count: stored_link_subtree_count(entry),
+                        },
+                        change_start,
+                        change_end,
+                    ));
+                    change_start = change_end;
+                }
+
+                let touched_children = work
+                    .iter()
+                    .filter(|(_, change_start, change_end)| change_start != change_end)
+                    .count();
+                let children_update = if parallel_children
+                    && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
+                    && touched_children > 1
+                {
+                    self.update_link_children_parallel(work, changes)?
+                } else {
+                    let mut update = LinkNodeUpdate::default();
+                    for (child, change_start, change_end) in work {
+                        if change_start == change_end {
+                            update.nodes.push(child);
+                        } else {
+                            let child_update = self
+                                .update_link_node(
+                                    child.cid,
+                                    &changes[change_start..change_end],
+                                    parallel_children,
+                                )
+                                .await?;
+                            update.nodes.extend(child_update.nodes);
+                            update
+                                .superseded_nodes
+                                .extend(child_update.superseded_nodes);
+                        }
+                    }
+                    update
+                };
+
+                LinkNodeUpdate {
+                    nodes: self.create_link_node_level(children_update.nodes).await?,
+                    superseded_nodes: children_update.superseded_nodes,
+                }
             };
 
-            self.create_link_node_level(children).await
+            if update.nodes.len() != 1 || update.nodes[0].cid != node {
+                update.superseded_nodes.push(node);
+            }
+            Ok(update)
         })
     }
 
@@ -735,7 +791,7 @@ impl<S: Store> BTree<S> {
         &self,
         work: Vec<(BuiltNode, usize, usize)>,
         changes: &[(String, Option<Cid>)],
-    ) -> Result<Vec<BuiltNode>, BTreeError> {
+    ) -> Result<LinkNodeUpdate, BTreeError> {
         let worker_count = UPDATE_CHILD_CONCURRENCY.min(work.len()).max(1);
         let work_per_worker = work.len().div_ceil(worker_count);
         std::thread::scope(|scope| {
@@ -743,33 +799,38 @@ impl<S: Store> BTree<S> {
                 .chunks(work_per_worker)
                 .map(|work_chunk| {
                     scope.spawn(move || {
-                        let mut children = Vec::new();
+                        let mut update = LinkNodeUpdate::default();
                         for (child, change_start, change_end) in work_chunk {
                             if change_start == change_end {
-                                children.push(child.clone());
+                                update.nodes.push(child.clone());
                             } else {
-                                children.extend(futures::executor::block_on(
-                                    self.update_link_node(
+                                let child_update =
+                                    futures::executor::block_on(self.update_link_node(
                                         child.cid.clone(),
                                         &changes[*change_start..*change_end],
                                         false,
-                                    ),
-                                )?);
+                                    ))?;
+                                update.nodes.extend(child_update.nodes);
+                                update
+                                    .superseded_nodes
+                                    .extend(child_update.superseded_nodes);
                             }
                         }
-                        Ok::<_, BTreeError>(children)
+                        Ok::<_, BTreeError>(update)
                     })
                 })
                 .collect::<Vec<_>>();
-            let mut children = Vec::new();
+            let mut update = LinkNodeUpdate::default();
             for handle in handles {
-                children.extend(
-                    handle
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
-                );
+                let child_update = handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                update.nodes.extend(child_update.nodes);
+                update
+                    .superseded_nodes
+                    .extend(child_update.superseded_nodes);
             }
-            Ok(children)
+            Ok(update)
         })
     }
 

@@ -8,7 +8,9 @@ use hashtree_cli::{
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, NostrToBech32, RootResolver,
     BACKGROUND_EVICTION_INTERVAL, PRIORITY_OTHER,
 };
-use hashtree_core::{from_hex, Cid, HashTree, HashTreeConfig, HashTreeError, NHashData};
+use hashtree_core::{
+    from_hex, nhash_decode, Cid, HashTree, HashTreeConfig, HashTreeError, NHashData,
+};
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
@@ -1629,6 +1631,52 @@ pub(crate) async fn run() -> Result<()> {
                             );
                         }
                     }
+                }
+                StorageCommands::RetainNostrRoot { state_file, apply } => {
+                    let state_bytes = std::fs::read(&state_file).with_context(|| {
+                        format!("read durable crawl state {}", state_file.display())
+                    })?;
+                    let state: serde_json::Value = serde_json::from_slice(&state_bytes)
+                        .with_context(|| {
+                            format!("parse durable crawl state {}", state_file.display())
+                        })?;
+                    let root_text = state
+                        .get("root")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|root| !root.is_empty())
+                        .with_context(|| {
+                            format!("durable crawl state {} has no root", state_file.display())
+                        })?;
+                    let root = if root_text.starts_with("nhash1") {
+                        let decoded =
+                            nhash_decode(root_text).context("decode durable root nhash")?;
+                        Cid {
+                            hash: decoded.hash,
+                            key: decoded.decrypt_key,
+                        }
+                    } else {
+                        Cid::parse(root_text).context("parse durable root CID")?
+                    };
+                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+                    let store = HashtreeStore::with_options(
+                        &data_dir,
+                        config.storage.s3.as_ref(),
+                        max_size_bytes,
+                    )?;
+                    if !apply {
+                        println!("Dry run; pass --apply to delete unreachable blobs.");
+                    }
+                    let report = store.retain_nostr_root(&root, apply)?;
+                    println!("Retained Nostr root from {}", state_file.display());
+                    println!("  Stored hashes: {}", report.total_hashes);
+                    println!("  Reachable hashes: {}", report.reachable_hashes);
+                    println!("  Explicitly pinned hashes: {}", report.pinned_hashes);
+                    println!("  Unreachable hashes: {}", report.candidate_hashes);
+                    println!("  Deleted hashes: {}", report.deleted_hashes);
+                    println!(
+                        "  Logical bytes: {} -> {}",
+                        report.logical_bytes_before, report.logical_bytes_after
+                    );
                 }
                 StorageCommands::Verify { delete, r2 } => {
                     let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;

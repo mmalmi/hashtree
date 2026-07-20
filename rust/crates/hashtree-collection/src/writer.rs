@@ -20,6 +20,7 @@ pub struct CollectionWriter<S: Store, T> {
     search_indexes: BTreeMap<String, SearchIndex<S>>,
     definition: CollectionDefinition<T>,
     state: CollectionState,
+    superseded_index_nodes: Vec<Cid>,
 }
 
 impl<S: Store, T> CollectionWriter<S, T> {
@@ -76,6 +77,7 @@ impl<S: Store, T> CollectionWriter<S, T> {
             search_indexes,
             definition,
             state,
+            superseded_index_nodes: Vec::new(),
         }
     }
 
@@ -97,6 +99,14 @@ impl<S: Store, T> CollectionWriter<S, T> {
 
     pub fn state(&self) -> &CollectionState {
         &self.state
+    }
+
+    /// Drain the copy-on-write B-tree nodes superseded by batch updates.
+    ///
+    /// Callers must not delete these nodes until a root containing the current
+    /// collection state has been made durable.
+    pub fn take_superseded_index_nodes(&mut self) -> Vec<Cid> {
+        std::mem::take(&mut self.superseded_index_nodes)
     }
 
     pub async fn write_root(&self) -> Result<Option<Cid>, CollectionError> {
@@ -317,10 +327,13 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
             by_id_changes.insert(id.clone(), Some(cid.clone()));
         }
 
-        self.state.by_id_root = self
+        let by_id_update = self
             .index
-            .update_links(self.state.by_id_root.as_ref(), by_id_changes)
+            .update_links_with_superseded(self.state.by_id_root.as_ref(), by_id_changes)
             .await?;
+        self.state.by_id_root = by_id_update.root;
+        self.superseded_index_nodes
+            .extend(by_id_update.superseded_nodes);
         self.flush_index_writes().await?;
         for index in self.definition.key_indexes() {
             let mut changes = BTreeMap::<String, Option<Cid>>::new();
@@ -336,11 +349,14 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
                     changes.insert(key, Some(cid.clone()));
                 }
             }
-            let root = self
+            let update = self
                 .index
-                .update_links(self.state.key_root(index.name()), changes)
+                .update_links_with_superseded(self.state.key_root(index.name()), changes)
                 .await?;
-            self.state.key_roots.insert(index.name().to_string(), root);
+            self.state
+                .key_roots
+                .insert(index.name().to_string(), update.root);
+            self.superseded_index_nodes.extend(update.superseded_nodes);
             self.flush_index_writes().await?;
         }
 

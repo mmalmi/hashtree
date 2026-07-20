@@ -889,13 +889,19 @@ async fn crawl_allowlist_in_checkpoints(
             .context("force-sync Nostr index checkpoint storage")?;
         let checkpoint_sync_ms = checkpoint_sync_started.elapsed().as_millis();
         persist_crawl_state(data_dir, state)?;
+        let gc_started = Instant::now();
+        let superseded_nodes_deleted = event_store
+            .delete_superseded_nodes(&report.superseded_nodes)
+            .await
+            .context("delete superseded Nostr checkpoint nodes")?;
+        let gc_ms = gc_started.elapsed().as_millis();
         // Large B-tree change maps are intentionally short-lived, but glibc
         // can retain their freed arenas across durable author checkpoints.
         // Return those pages before starting the next checkpoint so a bounded
         // crawler does not accumulate heap until its cgroup limit is reached.
         hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
-            "Nostr index checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} relay_fetch_select_ms={} index_build_ms={} checkpoint_sync_ms={} batch_elapsed_ms={}",
+            "Nostr index checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} relay_fetch_select_ms={} index_build_ms={} checkpoint_sync_ms={} superseded_nodes_deleted={} gc_ms={} batch_elapsed_ms={}",
             state.next_author,
             authors.len(),
             state.events_seen,
@@ -904,6 +910,8 @@ async fn crawl_allowlist_in_checkpoints(
             report.relay_fetch_select_ms,
             report.index_build_ms,
             checkpoint_sync_ms,
+            superseded_nodes_deleted,
+            gc_ms,
             started.elapsed().as_millis()
         );
     }
@@ -918,6 +926,7 @@ async fn crawl_allowlist_in_checkpoints(
         applied_events: Vec::new(),
         relay_fetch_select_ms: 0,
         index_build_ms: 0,
+        superseded_nodes: Vec::new(),
     })
 }
 
@@ -1202,8 +1211,8 @@ async fn project_staged_allowlist(
             .context("parse projection root")?;
         validate_reachable_root(&event_store, current_root.as_ref(), "projection root").await?;
         let index_started = Instant::now();
-        let next_root = event_store
-            .build(current_root.as_ref(), events)
+        let build_report = event_store
+            .build_with_superseded_nodes(current_root.as_ref(), events)
             .await
             .with_context(|| {
                 format!(
@@ -1211,6 +1220,7 @@ async fn project_staged_allowlist(
                     segment.end_author
                 )
             })?;
+        let next_root = build_report.root;
         let index_build_ms = index_started.elapsed().as_millis();
         total_index_build_ms = total_index_build_ms.saturating_add(index_build_ms);
         validate_reachable_root(&event_store, next_root.as_ref(), "new projection root").await?;
@@ -1243,9 +1253,15 @@ async fn project_staged_allowlist(
             .context("force-sync projected Nostr indexes")?;
         let checkpoint_sync_ms = checkpoint_sync_started.elapsed().as_millis();
         persist_crawl_state(data_dir, state)?;
+        let gc_started = Instant::now();
+        let superseded_nodes_deleted = event_store
+            .delete_superseded_nodes(&build_report.superseded_nodes)
+            .await
+            .context("delete superseded projection index nodes")?;
+        let gc_ms = gc_started.elapsed().as_millis();
         hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
-            "Nostr projection checkpoint: authors={}/{} staged_authors={} events_seen={} events_selected={} live_bytes={} segment_authors={} segment_event_offset={}/{} projected_events={} completed_segment={} index_build_ms={} checkpoint_sync_ms={} batch_elapsed_ms={}",
+            "Nostr projection checkpoint: authors={}/{} staged_authors={} events_seen={} events_selected={} live_bytes={} segment_authors={} segment_event_offset={}/{} projected_events={} completed_segment={} index_build_ms={} checkpoint_sync_ms={} superseded_nodes_deleted={} gc_ms={} batch_elapsed_ms={}",
             state.next_author,
             authors.len(),
             stage.next_author,
@@ -1259,6 +1275,8 @@ async fn project_staged_allowlist(
             completed_segment,
             index_build_ms,
             checkpoint_sync_ms,
+            superseded_nodes_deleted,
+            gc_ms,
             projection_started.elapsed().as_millis()
         );
     }

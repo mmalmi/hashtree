@@ -1484,6 +1484,39 @@ impl LmdbBlobStore {
         Ok(existed)
     }
 
+    /// Delete a batch in one LMDB transaction.
+    pub fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let mut wtxn = self
+            .env
+            .write_txn()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        let mut seen = HashSet::with_capacity(hashes.len());
+        let mut external_paths = Vec::new();
+        let mut deleted = 0usize;
+        for hash in hashes {
+            if !seen.insert(*hash) {
+                continue;
+            }
+            let external_path = self.external_blob_path_in_txn(&wtxn, hash)?;
+            let (existed, _) = self.delete_blob_in_txn(&mut wtxn, hash)?;
+            if existed {
+                deleted += 1;
+                if let Some(path) = external_path {
+                    external_paths.push(path);
+                }
+            }
+        }
+        wtxn.commit()
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        for path in external_paths {
+            self.remove_external_blob_file(Some(path));
+        }
+        Ok(deleted)
+    }
+
     fn pin_sync(&self, hash: &Hash) -> Result<(), StoreError> {
         let mut wtxn = self
             .env
@@ -2312,6 +2345,10 @@ impl Store for LmdbBlobStore {
         self.delete_sync(hash)
     }
 
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        self.delete_many_sync(&hashes)
+    }
+
     fn set_max_bytes(&self, max: u64) {
         self.max_bytes.store(max, Ordering::Relaxed);
     }
@@ -2648,6 +2685,25 @@ mod tests {
         assert!(!store.has(&hash).await?);
         assert!(!store.delete(&hash).await?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn batch_delete_removes_unique_hashes_in_one_operation() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+        let first = sha256(b"batch-delete-first");
+        let second = sha256(b"batch-delete-second");
+        let retained = sha256(b"batch-delete-retained");
+        store.put_sync(first, b"batch-delete-first")?;
+        store.put_sync(second, b"batch-delete-second")?;
+        store.put_sync(retained, b"batch-delete-retained")?;
+
+        assert_eq!(store.delete_many_sync(&[first, second, first])?, 2);
+        assert!(!store.exists(&first)?);
+        assert!(!store.exists(&second)?);
+        assert!(store.exists(&retained)?);
+        assert_eq!(store.stats()?.count, 1);
         Ok(())
     }
 

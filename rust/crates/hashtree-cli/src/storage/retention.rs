@@ -28,6 +28,17 @@ pub struct PinTreeResult {
     pub already_pinned: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootRetentionReport {
+    pub total_hashes: usize,
+    pub reachable_hashes: usize,
+    pub pinned_hashes: usize,
+    pub candidate_hashes: usize,
+    pub deleted_hashes: usize,
+    pub logical_bytes_before: u64,
+    pub logical_bytes_after: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PinTreeError {
     #[error("root blob {hash} is missing")]
@@ -219,6 +230,94 @@ fn unix_timestamp_now() -> u64 {
 }
 
 impl HashtreeStore {
+    /// Retain only one Nostr event-index DAG plus explicit pins in the writable
+    /// blob store. This is intended for a dedicated, closed-writer index store.
+    ///
+    /// Nostr B-tree links mark event values as files even though the values are
+    /// direct blobs. Traversing directory/fanout links only therefore visits
+    /// every index node while avoiding millions of unnecessary event reads.
+    pub fn retain_nostr_root(&self, root: &Cid, apply: bool) -> Result<RootRetentionReport> {
+        let tree = HashTree::new(HashTreeConfig::new(self.store_arc()));
+        let reachable = sync_block_on(async {
+            let mut reachable = HashSet::new();
+            let mut stack = vec![root.clone()];
+            while let Some(cid) = stack.pop() {
+                if !reachable.insert(cid.hash) {
+                    continue;
+                }
+                let node = tree
+                    .get_tree_node_by_cid(&cid)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("read retained root DAG: {error}"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("retained directory node {} is missing", to_hex(&cid.hash))
+                    })?;
+                for link in node.links {
+                    reachable.insert(link.hash);
+                    if link.link_type.is_directory_like() {
+                        stack.push(link.to_cid());
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(reachable)
+        })?;
+
+        let rtxn = self.env.read_txn()?;
+        let pinned = self
+            .pins
+            .iter(&rtxn)?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|(hash, _)| hash.try_into().ok())
+            .collect::<HashSet<Hash>>();
+        drop(rtxn);
+
+        let stats_before = self
+            .router
+            .writable_stats()
+            .map_err(|error| anyhow::anyhow!("read writable storage stats: {error}"))?;
+        let all_hashes = self
+            .router
+            .list_writable()
+            .map_err(|error| anyhow::anyhow!("list writable hashes: {error}"))?;
+        let candidates = all_hashes
+            .iter()
+            .filter(|hash| !reachable.contains(*hash) && !pinned.contains(*hash))
+            .copied()
+            .collect::<Vec<_>>();
+
+        let mut deleted = 0usize;
+        if apply {
+            const DELETE_BATCH_SIZE: usize = 16_384;
+            for (batch_index, batch) in candidates.chunks(DELETE_BATCH_SIZE).enumerate() {
+                deleted = deleted.saturating_add(
+                    self.router
+                        .delete_many_local_only(batch)
+                        .map_err(|error| anyhow::anyhow!("delete unreachable batch: {error}"))?,
+                );
+                if (batch_index + 1).is_multiple_of(32) {
+                    eprintln!(
+                        "Retained-root cleanup: deleted {deleted}/{} unreachable hashes",
+                        candidates.len()
+                    );
+                }
+            }
+        }
+        let stats_after = self
+            .router
+            .writable_stats()
+            .map_err(|error| anyhow::anyhow!("read writable storage stats: {error}"))?;
+
+        Ok(RootRetentionReport {
+            total_hashes: all_hashes.len(),
+            reachable_hashes: reachable.len(),
+            pinned_hashes: pinned.len(),
+            candidate_hashes: candidates.len(),
+            deleted_hashes: deleted,
+            logical_bytes_before: stats_before.total_bytes,
+            logical_bytes_after: stats_after.total_bytes,
+        })
+    }
+
     fn socialgraph_root_files(&self) -> [PathBuf; 4] {
         let socialgraph = self.base_path().join("socialgraph");
         [
@@ -1431,5 +1530,33 @@ mod tests {
 
         assert!(freed < 1024);
         assert!(store.blob_exists(&cid.hash).expect("root exists"));
+    }
+
+    #[test]
+    fn retained_nostr_root_cleanup_is_dry_run_first_and_keeps_the_dag() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024 * 1024).expect("store");
+        let root = build_test_tree(&store);
+        let orphan_bytes = b"unreachable historical index node";
+        let orphan = hashtree_core::sha256(orphan_bytes);
+        store.put_blob(orphan_bytes).expect("put orphan");
+
+        let dry_run = store
+            .retain_nostr_root(&root, false)
+            .expect("retention dry run");
+        assert_eq!(dry_run.deleted_hashes, 0);
+        assert!(dry_run.candidate_hashes >= 1);
+        assert!(store.blob_exists(&orphan).expect("orphan exists"));
+
+        let applied = store
+            .retain_nostr_root(&root, true)
+            .expect("apply retention");
+        assert_eq!(applied.deleted_hashes, applied.candidate_hashes);
+        assert!(!store.blob_exists(&orphan).expect("orphan deleted"));
+        let index = BTree::new(store.store_arc(), BTreeOptions { order: Some(8) });
+        assert_eq!(
+            sync_block_on(index.get(Some(&root), "beta")).expect("read retained index"),
+            Some("two".to_string())
+        );
     }
 }

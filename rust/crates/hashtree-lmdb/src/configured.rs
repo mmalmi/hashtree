@@ -69,6 +69,13 @@ impl ConfiguredLmdbBlobStore {
             Self::Pool(store) => store.delete_sync(hash),
         }
     }
+
+    pub fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        match self {
+            Self::Single(store) => store.delete_many_sync(hashes),
+            Self::Pool(store) => store.delete_many_sync(hashes),
+        }
+    }
 }
 
 #[async_trait]
@@ -104,6 +111,10 @@ impl Store for ConfiguredLmdbBlobStore {
 
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.delete_sync(hash)
+    }
+
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        self.delete_many_sync(&hashes)
     }
 
     async fn stats(&self) -> hashtree_core::store::StoreStats {

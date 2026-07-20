@@ -180,6 +180,17 @@ pub struct NostrEventManifest {
     pub parameterized_replaceable: Option<Cid>,
 }
 
+/// Result of an incremental event-index build.
+///
+/// Superseded nodes remain readable until the caller deletes them. The caller
+/// must first durably publish `root`; deleting them earlier would make crash
+/// recovery unsafe.
+#[derive(Debug, Clone, Default)]
+pub struct NostrEventBuildReport {
+    pub root: Option<Cid>,
+    pub superseded_nodes: Vec<Cid>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsOptions {
     pub limit: Option<usize>,
@@ -943,9 +954,46 @@ impl<S: Store> NostrEventStore<S> {
     where
         I: IntoIterator<Item = StoredNostrEvent>,
     {
+        Ok(self.build_with_superseded_nodes(root, events).await?.root)
+    }
+
+    /// Reclaim nodes returned by [`NostrEventStore::build_with_superseded_nodes`].
+    /// The new root must already be durably published before calling this.
+    pub async fn delete_superseded_nodes(
+        &self,
+        nodes: &[Cid],
+    ) -> Result<usize, NostrEventStoreError> {
+        const DELETE_BATCH_SIZE: usize = 16_384;
+        let mut deleted = 0usize;
+        for batch in nodes.chunks(DELETE_BATCH_SIZE) {
+            deleted = deleted.saturating_add(
+                self.store
+                    .delete_many(batch.iter().map(|cid| cid.hash).collect())
+                    .await
+                    .map_err(|err| {
+                        NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string()))
+                    })?,
+            );
+        }
+        Ok(deleted)
+    }
+
+    /// Build event indexes while retaining the exact old copy-on-write nodes
+    /// that the new root supersedes.
+    pub async fn build_with_superseded_nodes<I>(
+        &self,
+        root: Option<&Cid>,
+        events: I,
+    ) -> Result<NostrEventBuildReport, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = StoredNostrEvent>,
+    {
         let mut events: Vec<StoredNostrEvent> = events.into_iter().collect();
         if events.is_empty() {
-            return Ok(root.cloned());
+            return Ok(NostrEventBuildReport {
+                root: root.cloned(),
+                superseded_nodes: Vec::new(),
+            });
         }
         events = retain_unique_latest_events(events);
         events.sort_by(|left, right| match compare_events(left, right) {
@@ -960,33 +1008,45 @@ impl<S: Store> NostrEventStore<S> {
             .unwrap_or(events.len())
             .max(1);
         let mut current_root = root.cloned();
+        let mut superseded_nodes = Vec::new();
         let mut pending = events.into_iter();
         loop {
             let batch = pending.by_ref().take(batch_size).collect::<Vec<_>>();
             if batch.is_empty() {
                 break;
             }
-            current_root = self
+            let report = self
                 .build_index_commit(current_root.as_ref(), batch)
                 .await?;
+            current_root = report.root;
+            superseded_nodes.extend(report.superseded_nodes);
             // Each commit drops its large per-index change maps before
             // returning. glibc can otherwise retain those freed arenas across
             // the remaining commits in a large author, defeating the bounded
             // commit size and eventually exhausting a crawler cgroup.
             trim_index_commit_allocations();
         }
-        Ok(current_root)
+        let mut seen_superseded = HashSet::new();
+        superseded_nodes.retain(|candidate| seen_superseded.insert(candidate.hash));
+        if let Some(root) = current_root.as_ref() {
+            superseded_nodes.retain(|candidate| candidate != root);
+        }
+        Ok(NostrEventBuildReport {
+            root: current_root,
+            superseded_nodes,
+        })
     }
 
     async fn build_index_commit(
         &self,
         root: Option<&Cid>,
         events: Vec<StoredNostrEvent>,
-    ) -> Result<Option<Cid>, NostrEventStoreError> {
+    ) -> Result<NostrEventBuildReport, NostrEventStoreError> {
         let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
         let buffered_writer =
             NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
         let mut obsolete_event_cids = Vec::new();
+        let mut superseded_nodes = Vec::new();
         let next_root = if root.is_none() {
             buffered_writer.build_manifest_from_events(events).await?
         } else {
@@ -1104,6 +1164,7 @@ impl<S: Store> NostrEventStore<S> {
                         known_absent_by_id,
                     )
                     .await?;
+                superseded_nodes.extend(collection.take_superseded_index_nodes());
                 manifest = nostr_manifest_from_collection_state(collection.state());
             }
             buffered_writer.write_manifest(&manifest).await?
@@ -1112,9 +1173,21 @@ impl<S: Store> NostrEventStore<S> {
             .flush()
             .await
             .map_err(|err| NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string())))?;
-        self.delete_obsolete_event_blobs(&obsolete_event_cids)
-            .await?;
-        Ok(next_root)
+        superseded_nodes.extend(obsolete_event_cids);
+        if let (Some(old_root), Some(new_root)) = (root, next_root.as_ref()) {
+            if old_root != new_root {
+                superseded_nodes.push(old_root.clone());
+            }
+        }
+        let mut seen_superseded = HashSet::new();
+        superseded_nodes.retain(|candidate| seen_superseded.insert(candidate.hash));
+        if let Some(root) = next_root.as_ref() {
+            superseded_nodes.retain(|candidate| candidate != root);
+        }
+        Ok(NostrEventBuildReport {
+            root: next_root,
+            superseded_nodes,
+        })
     }
 
     pub async fn upgrade_manifest_indexes(

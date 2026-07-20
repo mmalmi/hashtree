@@ -41,8 +41,8 @@ pub use maintenance::{
     compact_lmdb_environments_under, CompactResult, R2ImportOptions, R2ImportResult, VerifyResult,
 };
 pub use retention::{
-    OwnedBlobStats, PinTreeError, PinTreeResult, PinnedItem, StorageByPriority, StorageStats,
-    TreeIndexLimits, TreeMeta,
+    OwnedBlobStats, PinTreeError, PinTreeResult, PinnedItem, RootRetentionReport,
+    StorageByPriority, StorageStats, TreeIndexLimits, TreeMeta,
 };
 
 /// Priority levels for tree eviction
@@ -580,6 +580,24 @@ impl LocalStore {
         }
     }
 
+    pub fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        match self {
+            LocalStore::Fs(store) => {
+                let mut deleted = 0usize;
+                for hash in hashes {
+                    if store.delete_sync(hash)? {
+                        deleted += 1;
+                    }
+                }
+                Ok(deleted)
+            }
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.delete_many_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.delete_many_sync(hashes),
+        }
+    }
+
     pub fn delete_writable_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
         match self {
             LocalStore::Fs(store) => store.delete_sync(hash),
@@ -708,6 +726,10 @@ impl Store for LocalStore {
 
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.delete_sync(hash)
+    }
+
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        self.delete_many_sync(&hashes)
     }
 }
 
@@ -1215,10 +1237,27 @@ impl StorageRouter {
         Ok(deleted)
     }
 
+    pub fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        let deleted = self.local.delete_many_sync(hashes)?;
+
+        #[cfg(feature = "s3")]
+        if let Some(ref tx) = self.sync_tx {
+            for hash in hashes {
+                let _ = tx.send(S3SyncMessage::Delete { hash: *hash });
+            }
+        }
+
+        Ok(deleted)
+    }
+
     /// Delete data from local store only (don't propagate to S3)
     /// Used for eviction where we want to keep archives and cold tiers intact.
     pub fn delete_local_only(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.local.delete_writable_sync(hash)
+    }
+
+    pub fn delete_many_local_only(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        self.local.delete_many_sync(hashes)
     }
 
     /// Get stats from local store
@@ -1327,6 +1366,10 @@ impl Store for AccessRecordingStore {
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.inner.delete(hash).await
     }
+
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        self.inner.delete_many(hashes).await
+    }
 }
 
 // Implement async Store trait for StorageRouter so it can be used directly with HashTree
@@ -1377,6 +1420,10 @@ impl Store for StorageRouter {
 
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.delete_sync(hash)
+    }
+
+    async fn delete_many(&self, hashes: Vec<Hash>) -> Result<usize, StoreError> {
+        self.delete_many_sync(&hashes)
     }
 }
 

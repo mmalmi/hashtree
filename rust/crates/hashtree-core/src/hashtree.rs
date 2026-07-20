@@ -801,6 +801,17 @@ impl<S: Store> HashTree<S> {
         Ok(Some(node))
     }
 
+    /// Get and decode a tree node through its CID, decrypting it when needed.
+    pub async fn get_tree_node_by_cid(&self, cid: &Cid) -> Result<Option<TreeNode>, HashTreeError> {
+        let Some(data) = self.get_cid_root_bytes(cid).await? else {
+            return Ok(None);
+        };
+        if !is_tree_node(&data) {
+            return Ok(None);
+        }
+        Ok(Some(decode_tree_node(&data)?))
+    }
+
     async fn get_cid_root_bytes(&self, cid: &Cid) -> Result<Option<Vec<u8>>, HashTreeError> {
         let data = match self
             .store

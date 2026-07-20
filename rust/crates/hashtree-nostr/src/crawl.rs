@@ -96,6 +96,9 @@ pub struct CrawlReport {
     pub relay_fetch_select_ms: u128,
     /// Wall-clock time spent applying selected events to the Hashtree index.
     pub index_build_ms: u128,
+    /// Copy-on-write nodes made unreachable by `root`. Callers may delete them
+    /// only after durably publishing the returned root.
+    pub superseded_nodes: Vec<Cid>,
 }
 
 pub trait EventSelectionPolicy: Send + Sync {
@@ -508,6 +511,7 @@ impl<S: Store> NostrBridge<S> {
         let mut applied_events = Vec::new();
         let mut relay_fetch_select_ms = 0u128;
         let mut index_build_ms = 0u128;
+        let mut superseded_nodes = Vec::new();
 
         for author_batch in authors.chunks(self.config.author_batch_size) {
             let fetch_select_started = Instant::now();
@@ -529,10 +533,12 @@ impl<S: Store> NostrBridge<S> {
             if !batch.events.is_empty() {
                 self.retain_applied_events(&mut applied_events, &batch.events);
                 let index_build_started = Instant::now();
-                current_root = self
+                let build_report = self
                     .event_store
-                    .build(current_root.as_ref(), batch.events)
+                    .build_with_superseded_nodes(current_root.as_ref(), batch.events)
                     .await?;
+                current_root = build_report.root;
+                superseded_nodes.extend(build_report.superseded_nodes);
                 index_build_ms =
                     index_build_ms.saturating_add(index_build_started.elapsed().as_millis());
             }
@@ -546,6 +552,7 @@ impl<S: Store> NostrBridge<S> {
                 applied_events: Vec::new(),
                 relay_fetch_select_ms,
                 index_build_ms,
+                superseded_nodes: superseded_nodes.clone(),
             });
             if self.reached_events_seen_limit(events_seen) {
                 break;
@@ -562,6 +569,7 @@ impl<S: Store> NostrBridge<S> {
             applied_events,
             relay_fetch_select_ms,
             index_build_ms,
+            superseded_nodes,
         })
     }
 
@@ -1207,6 +1215,7 @@ impl<S: Store> NostrBridge<S> {
                 applied_events,
                 relay_fetch_select_ms: 0,
                 index_build_ms: 0,
+                superseded_nodes: Vec::new(),
             });
         }
 
@@ -1285,6 +1294,7 @@ impl<S: Store> NostrBridge<S> {
                     applied_events: Vec::new(),
                     relay_fetch_select_ms: 0,
                     index_build_ms: 0,
+                    superseded_nodes: Vec::new(),
                 });
 
                 if !cursor_advanced {
@@ -1309,6 +1319,7 @@ impl<S: Store> NostrBridge<S> {
             applied_events,
             relay_fetch_select_ms: 0,
             index_build_ms: 0,
+            superseded_nodes: Vec::new(),
         })
     }
 
@@ -1728,6 +1739,7 @@ impl<S: Store> NostrBridge<S> {
                 applied_events: Vec::new(),
                 relay_fetch_select_ms: 0,
                 index_build_ms: 0,
+                superseded_nodes: Vec::new(),
             });
 
             if self.reached_events_seen_limit(*events_seen) {
