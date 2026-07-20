@@ -818,13 +818,11 @@ impl<S: Store> HashTree<S> {
 
         let raw_is_tree = is_tree_node(&data);
         match decrypt_chk(&data, key) {
-            Ok(decrypted) => {
-                if is_tree_node(&decrypted) || !raw_is_tree {
-                    Ok(Some(decrypted))
-                } else {
-                    Ok(Some(data))
-                }
-            }
+            // AES-GCM authentication makes a successful decryption
+            // authoritative. Ciphertext can coincidentally deserialize into
+            // the loose tree shape; preferring that shape here makes valid
+            // encrypted blobs fail with a bogus node type.
+            Ok(decrypted) => Ok(Some(decrypted)),
             Err(err) => {
                 if raw_is_tree {
                     Ok(Some(data))
