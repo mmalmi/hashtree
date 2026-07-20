@@ -1631,11 +1631,13 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 StorageCommands::Compact {
                     env_dirs,
+                    scratch_dir,
                     keep_backup,
                 } => {
                     let results = hashtree_cli::storage::compact_lmdb_environments_under(
                         &data_dir,
                         &env_dirs,
+                        scratch_dir.as_deref(),
                         keep_backup,
                     )?;
                     if results.is_empty() {
@@ -1652,6 +1654,9 @@ pub(crate) async fn run() -> Result<()> {
                                 saved_bytes,
                                 saved_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
                             );
+                            if let Some(backup_path) = &result.backup_path {
+                                println!("  recovery backup: {}", backup_path.display());
+                            }
                         }
                     }
                 }

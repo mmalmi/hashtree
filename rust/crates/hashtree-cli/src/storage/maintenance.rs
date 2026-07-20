@@ -1,6 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use heed::{CompactionOption, EnvOpenOptions};
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::managed_env::ManagedEnv;
@@ -32,6 +34,7 @@ pub struct CompactResult {
     pub env_dir: PathBuf,
     pub before_bytes: u64,
     pub after_bytes: u64,
+    pub backup_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -899,15 +902,17 @@ impl HashtreeStore {
     pub fn compact_lmdb_environments(
         &self,
         env_dirs: &[PathBuf],
+        scratch_dir: Option<&Path>,
         keep_backup: bool,
     ) -> Result<Vec<CompactResult>> {
-        compact_lmdb_environments_under(self.base_path(), env_dirs, keep_backup)
+        compact_lmdb_environments_under(self.base_path(), env_dirs, scratch_dir, keep_backup)
     }
 }
 
 pub fn compact_lmdb_environments_under(
     base_path: &Path,
     env_dirs: &[PathBuf],
+    scratch_dir: Option<&Path>,
     keep_backup: bool,
 ) -> Result<Vec<CompactResult>> {
     let targets = if env_dirs.is_empty() {
@@ -927,7 +932,11 @@ pub fn compact_lmdb_environments_under(
 
     let mut results = Vec::new();
     for env_dir in targets {
-        results.push(compact_lmdb_environment_dir(&env_dir, keep_backup)?);
+        results.push(compact_lmdb_environment_dir(
+            &env_dir,
+            scratch_dir,
+            keep_backup,
+        )?);
     }
     Ok(results)
 }
@@ -955,7 +964,15 @@ fn collect_lmdb_environment_dirs(root: &Path, dirs: &mut Vec<PathBuf>) -> Result
     Ok(())
 }
 
-fn compact_lmdb_environment_dir(env_dir: &Path, keep_backup: bool) -> Result<CompactResult> {
+fn compact_lmdb_environment_dir(
+    env_dir: &Path,
+    scratch_dir: Option<&Path>,
+    keep_backup: bool,
+) -> Result<CompactResult> {
+    if let Some(scratch_dir) = scratch_dir {
+        return compact_lmdb_environment_dir_with_scratch(env_dir, scratch_dir, keep_backup);
+    }
+
     let data_path = env_dir.join("data.mdb");
     if !data_path.exists() {
         anyhow::bail!("No data.mdb found in {}", env_dir.display());
@@ -1005,7 +1022,156 @@ fn compact_lmdb_environment_dir(env_dir: &Path, keep_backup: bool) -> Result<Com
         env_dir: env_dir.to_path_buf(),
         before_bytes,
         after_bytes,
+        backup_path: keep_backup.then_some(backup_path),
     })
+}
+
+fn compact_lmdb_environment_dir_with_scratch(
+    env_dir: &Path,
+    scratch_root: &Path,
+    keep_backup: bool,
+) -> Result<CompactResult> {
+    let data_path = env_dir.join("data.mdb");
+    if !data_path.exists() {
+        anyhow::bail!("No data.mdb found in {}", env_dir.display());
+    }
+
+    std::fs::create_dir_all(scratch_root)?;
+    let scratch_dir = unique_compaction_scratch_dir(scratch_root, env_dir)?;
+    std::fs::create_dir(&scratch_dir)?;
+    sync_directory(scratch_root)?;
+
+    let compact_path = scratch_dir.join("data.mdb.compact");
+    let backup_path = scratch_dir.join("data.mdb.bak");
+    let recovery_path = env_dir.join("data.mdb.compact-recovery");
+    let replacement_path = env_dir.join("data.mdb.replacement");
+    let restore_path = env_dir.join("data.mdb.restore");
+    for path in [&recovery_path, &replacement_path, &restore_path] {
+        if path.exists() {
+            anyhow::bail!(
+                "refusing to compact {} while recovery artifact {} exists",
+                env_dir.display(),
+                path.display()
+            );
+        }
+    }
+
+    let before_bytes = std::fs::metadata(&data_path)?.len();
+    let open_map_size = existing_lmdb_map_size_bytes(&data_path)?;
+    {
+        let mut options = EnvOpenOptions::new();
+        options
+            .map_size(open_map_size)
+            .max_dbs(COMPACT_MAX_DBS)
+            .max_readers(COMPACT_MAX_READERS);
+        let env = unsafe { ManagedEnv::open(&options, env_dir) }?;
+        env.force_sync()?;
+        env.copy_to_file(&compact_path, CompactionOption::Enabled)?;
+    }
+    sync_file(&compact_path)?;
+    let after_bytes = std::fs::metadata(&compact_path)?.len();
+
+    let copied = std::fs::copy(&data_path, &backup_path)
+        .with_context(|| format!("copying recovery backup to {}", backup_path.display()))?;
+    if copied != before_bytes {
+        anyhow::bail!(
+            "incomplete recovery backup at {}: copied {} of {} bytes",
+            backup_path.display(),
+            copied,
+            before_bytes
+        );
+    }
+    sync_file(&backup_path)?;
+    sync_directory(&scratch_dir)?;
+
+    write_recovery_marker(&recovery_path, &backup_path, &compact_path)?;
+    std::fs::remove_file(&data_path)?;
+    sync_directory(env_dir)?;
+
+    let replacement_result = (|| -> Result<()> {
+        let copied = std::fs::copy(&compact_path, &replacement_path)
+            .with_context(|| format!("copying compact LMDB to {}", replacement_path.display()))?;
+        if copied != after_bytes {
+            anyhow::bail!(
+                "incomplete compact replacement at {}: copied {} of {} bytes",
+                replacement_path.display(),
+                copied,
+                after_bytes
+            );
+        }
+        sync_file(&replacement_path)?;
+        std::fs::rename(&replacement_path, &data_path)?;
+        sync_directory(env_dir)?;
+        Ok(())
+    })();
+
+    if let Err(replacement_error) = replacement_result {
+        let _ = std::fs::remove_file(&replacement_path);
+        let restore_result = (|| -> Result<()> {
+            let copied = std::fs::copy(&backup_path, &restore_path)?;
+            if copied != before_bytes {
+                anyhow::bail!("incomplete restoration: copied {copied} of {before_bytes} bytes");
+            }
+            sync_file(&restore_path)?;
+            std::fs::rename(&restore_path, &data_path)?;
+            sync_directory(env_dir)?;
+            Ok(())
+        })();
+        return match restore_result {
+            Ok(()) => Err(replacement_error.context("compact replacement failed; original restored")),
+            Err(restore_error) => Err(replacement_error.context(format!(
+                "compact replacement failed and automatic restoration failed: {restore_error:#}; recovery backup is {}",
+                backup_path.display()
+            ))),
+        };
+    }
+
+    std::fs::remove_file(&recovery_path)?;
+    std::fs::remove_file(&compact_path)?;
+    if !keep_backup {
+        std::fs::remove_file(&backup_path)?;
+        std::fs::remove_dir(&scratch_dir)?;
+    }
+    sync_directory(env_dir)?;
+    sync_directory(scratch_root)?;
+
+    Ok(CompactResult {
+        env_dir: env_dir.to_path_buf(),
+        before_bytes,
+        after_bytes,
+        backup_path: keep_backup.then_some(backup_path),
+    })
+}
+
+fn unique_compaction_scratch_dir(scratch_root: &Path, env_dir: &Path) -> Result<PathBuf> {
+    let leaf = env_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("lmdb")
+        .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(scratch_root.join(format!("htree-compact-{leaf}-{}-{now}", std::process::id())))
+}
+
+fn write_recovery_marker(path: &Path, backup_path: &Path, compact_path: &Path) -> Result<()> {
+    let mut marker = OpenOptions::new().write(true).create_new(true).open(path)?;
+    writeln!(marker, "backup={}", backup_path.display())?;
+    writeln!(marker, "compact={}", compact_path.display())?;
+    marker.sync_all()?;
+    sync_directory(path.parent().context("recovery marker has no parent")?)
+}
+
+fn sync_file(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
 }
 
 fn existing_lmdb_map_size_bytes(data_path: &Path) -> Result<usize> {

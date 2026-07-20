@@ -605,6 +605,9 @@ pub(crate) enum StorageCommands {
         /// Specific LMDB environment directory to compact (repeatable)
         #[arg(long = "env-dir")]
         env_dirs: Vec<PathBuf>,
+        /// Build and retain the recovery copy under this directory before replacing data.mdb
+        #[arg(long)]
+        scratch_dir: Option<PathBuf>,
         /// Keep the original data.mdb as a .bak file after swapping
         #[arg(long)]
         keep_backup: bool,
