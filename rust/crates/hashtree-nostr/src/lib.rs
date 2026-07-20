@@ -1079,8 +1079,8 @@ impl<S: Store> NostrEventStore<S> {
         let mut manifest = buffered_writer.get_manifest(Some(root)).await?;
         let mut prepared_events = Vec::new();
         for (sequence, event) in events.into_iter().enumerate() {
-            let normalized = buffered_writer.validate_event(event).await?;
-            prepared_events.push(buffered_writer.prepare_event_blob(
+            let normalized = self.validate_event(event).await?;
+            prepared_events.push(self.prepare_event_blob(
                 sequence,
                 normalized.clone(),
                 Some(normalized),
@@ -1093,12 +1093,12 @@ impl<S: Store> NostrEventStore<S> {
             });
         }
 
-        let indexed_events = buffered_writer
+        // Use the verified underlying pool path, not optimistic buffered
+        // writes: the catalog entry exists precisely when this repair is
+        // needed, but its physical member blob does not.
+        let indexed_events = self
             .put_prepared_event_blobs_parallel(prepared_events)
             .await?;
-        buffered_store.flush().await.map_err(|error| {
-            NostrEventStoreError::HashTree(HashTreeError::Store(error.to_string()))
-        })?;
         let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
         collection
             .put_batch(
