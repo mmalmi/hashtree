@@ -321,6 +321,7 @@ pub struct NostrBridge<S: Store> {
     config: CrawlConfig,
     policy: Arc<dyn EventSelectionPolicy>,
     require_all_relays: bool,
+    applied_event_kinds: Option<BTreeSet<u32>>,
 }
 
 impl<S: Store> NostrBridge<S> {
@@ -338,6 +339,7 @@ impl<S: Store> NostrBridge<S> {
             config,
             policy: Arc::new(KindPriorityPolicy::default()),
             require_all_relays: false,
+            applied_event_kinds: None,
         }
     }
 
@@ -352,6 +354,32 @@ impl<S: Store> NostrBridge<S> {
     pub fn requiring_all_relays(mut self) -> Self {
         self.require_all_relays = true;
         self
+    }
+
+    /// Retain only the selected kinds in [`CrawlReport::applied_events`].
+    ///
+    /// All selected events are still written to the event store. This only
+    /// bounds the duplicate report payload kept in memory while indexes are
+    /// built.
+    pub fn retaining_applied_event_kinds(mut self, kinds: impl IntoIterator<Item = u32>) -> Self {
+        self.applied_event_kinds = Some(kinds.into_iter().collect());
+        self
+    }
+
+    fn retain_applied_events(
+        &self,
+        target: &mut Vec<StoredNostrEvent>,
+        events: &[StoredNostrEvent],
+    ) {
+        match &self.applied_event_kinds {
+            Some(kinds) => target.extend(
+                events
+                    .iter()
+                    .filter(|event| kinds.contains(&event.kind))
+                    .cloned(),
+            ),
+            None => target.extend(events.iter().cloned()),
+        }
     }
 
     pub async fn crawl<G: SocialGraphBackend>(
@@ -453,7 +481,7 @@ impl<S: Store> NostrBridge<S> {
             live_bytes_selected = batch.live_bytes_selected;
             authors_processed = authors_processed.saturating_add(author_batch.len());
             if !batch.events.is_empty() {
-                applied_events.extend(batch.events.clone());
+                self.retain_applied_events(&mut applied_events, &batch.events);
                 let index_build_started = Instant::now();
                 current_root = self
                     .event_store
@@ -1194,7 +1222,7 @@ impl<S: Store> NostrBridge<S> {
                     &mut authors_processed,
                 )?;
                 if !pending_apply.is_empty() {
-                    applied_events.extend(pending_apply.clone());
+                    self.retain_applied_events(&mut applied_events, &pending_apply);
                     state.current_root = self
                         .event_store
                         .build(state.current_root.as_ref(), pending_apply)
@@ -1637,7 +1665,7 @@ impl<S: Store> NostrBridge<S> {
                 authors_processed,
             )?;
             if !pending_apply.is_empty() {
-                applied_events.extend(pending_apply.clone());
+                self.retain_applied_events(applied_events, &pending_apply);
                 state.current_root = self
                     .event_store
                     .build(state.current_root.as_ref(), pending_apply)

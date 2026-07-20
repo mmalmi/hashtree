@@ -686,7 +686,11 @@ async fn crawl_allowlist_in_checkpoints(
                 end - state.next_author,
             ),
             event_store_options.clone(),
-        );
+        )
+        // The social-graph projection consumes metadata only. Avoid retaining
+        // a duplicate copy of every content event while Hashtree indexes are
+        // being committed.
+        .retaining_applied_event_kinds([0]);
         let report = bridge
             .crawl(graph_store, current_root.as_ref())
             .await

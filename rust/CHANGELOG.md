@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.113 - 2026-07-20
+
+### Changed
+
+- Bounded social-graph Nostr checkpoints retain only kind-0 metadata in their
+  in-memory report projection while still committing every selected event to
+  Hashtree. This removes a redundant full-content copy that could exhaust a
+  1 GiB crawler cgroup during large author batches.
+
 ## 0.2.112 - 2026-07-20
 
 ### Changed

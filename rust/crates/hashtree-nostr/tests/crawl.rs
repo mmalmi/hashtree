@@ -1183,8 +1183,9 @@ async fn per_kind_quota_isolated_by_author_at_the_relay() -> io::Result<()> {
         .events
         .extend(events);
 
+    let store = Arc::new(MemoryStore::new());
     let bridge = NostrBridge::new(
-        Arc::new(MemoryStore::new()),
+        Arc::clone(&store),
         CrawlConfig {
             relays: vec![relay_url],
             author_batch_size: 3,
@@ -1193,10 +1194,24 @@ async fn per_kind_quota_isolated_by_author_at_the_relay() -> io::Result<()> {
             kinds: Some(vec![1, 5]),
             ..CrawlConfig::default()
         },
-    );
+    )
+    .retaining_applied_event_kinds([5]);
 
     let report = bridge.crawl(&graph, None).await.expect("crawl report");
     assert_eq!(report.events_selected, 6);
+    assert!(report.applied_events.iter().all(|event| event.kind == 5));
+    let indexed_notes = NostrEventStore::new(store)
+        .list_by_kind(
+            report.root.as_ref(),
+            1,
+            ListEventsOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query indexed notes");
+    assert_eq!(indexed_notes.len(), 4);
     for pubkey in [
         alice_keys.public_key().to_hex(),
         bob_keys.public_key().to_hex(),
