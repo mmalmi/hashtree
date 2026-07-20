@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -313,6 +313,8 @@ pub(crate) struct NostrIndexQueryOutput {
 #[derive(Debug, Clone)]
 pub(crate) struct NostrReplaceableRepairOptions {
     pub(crate) state_file: PathBuf,
+    pub(crate) staging_data_dir: PathBuf,
+    pub(crate) eligible_authors: PathBuf,
     pub(crate) page_size: usize,
     pub(crate) btree_order: usize,
     pub(crate) apply: bool,
@@ -325,6 +327,7 @@ pub(crate) struct NostrReplaceableRepairOutput {
     pub(crate) entries_scanned: u64,
     pub(crate) replaceable_entries: usize,
     pub(crate) parameterized_replaceable_entries: usize,
+    pub(crate) recovered_event_blobs: usize,
     pub(crate) applied: bool,
 }
 
@@ -468,11 +471,13 @@ pub(crate) async fn run_nostr_replaceable_repair(
             entries_scanned: 0,
             replaceable_entries: 0,
             parameterized_replaceable_entries: 0,
+            recovered_event_blobs: 0,
             applied: false,
         });
     }
 
     let _lock = CrawlStateLock::acquire(&data_dir)?;
+    let _stage_lock = CrawlStateLock::acquire_stage(&options.staging_data_dir)?;
     let config = Config::load()?;
     // Closed-writer repair must never invoke quota eviction while opening an
     // intentionally large dedicated index.
@@ -485,19 +490,158 @@ pub(crate) async fn run_nostr_replaceable_repair(
         store.store_arc(),
         NostrEventStoreOptions {
             btree_order: Some(options.btree_order),
-            ..NostrEventStoreOptions::default()
+            index_commit_batch_size: Some(2048),
         },
     );
-    let report = event_store
-        .rebuild_replaceable_index(&root, options.page_size)
+    let missing = event_store
+        .missing_parameterized_event_links(&root, options.page_size)
         .await
-        .context("rebuild regular replaceable-event index")?;
+        .context("scan missing parameterized event blobs")?;
+    let mut working_root = root;
+    let mut superseded_nodes = Vec::new();
+    let recovered_event_blobs = if missing.is_empty() {
+        0
+    } else {
+        let allowlist_text =
+            std::fs::read_to_string(&options.eligible_authors).with_context(|| {
+                format!(
+                    "read ordered author allowlist {}",
+                    options.eligible_authors.display()
+                )
+            })?;
+        let authors = parse_author_allowlist(&allowlist_text, usize::MAX);
+        let mut allowlist_hash = Sha256::new();
+        for author in &authors {
+            allowlist_hash.update(author.as_bytes());
+            allowlist_hash.update(b"\n");
+        }
+        let allowlist_hash = hex::encode(allowlist_hash.finalize());
+        if authors.len() != state.policy.author_count
+            || allowlist_hash != state.policy.author_allowlist_sha256
+        {
+            anyhow::bail!("repair author allowlist does not match the durable crawl identity");
+        }
+        let author_positions = authors
+            .iter()
+            .enumerate()
+            .map(|(index, author)| (author.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let mut targets_by_author = BTreeMap::<usize, HashSet<String>>::new();
+        for missing_link in &missing {
+            let parts = missing_link.key.split(':').collect::<Vec<_>>();
+            if parts.len() != 4 || parts[0].len() != 64 || parts[3].len() != 64 {
+                anyhow::bail!("invalid missing author-kind-time key {}", missing_link.key);
+            }
+            let author_index = author_positions.get(parts[0]).copied().with_context(|| {
+                format!(
+                    "missing event author {} is absent from the crawl allowlist",
+                    parts[0]
+                )
+            })?;
+            if author_index > state.next_author
+                || (author_index == state.next_author && state.staged_segment_event_offset == 0)
+            {
+                anyhow::bail!(
+                    "missing event belongs to unprojected author {author_index}; refusing repair"
+                );
+            }
+            targets_by_author
+                .entry(author_index)
+                .or_default()
+                .insert(parts[3].to_string());
+        }
+
+        let staging_store = Arc::new(HashtreeStore::with_options(
+            &options.staging_data_dir,
+            config.storage.s3.as_ref(),
+            0,
+        )?);
+        let staging_event_store = NostrEventStore::new(staging_store.store_arc());
+        let mut recovered = Vec::with_capacity(missing.len());
+        for (author_index, mut target_ids) in targets_by_author {
+            let path =
+                stage_segment_path(&options.staging_data_dir, author_index, author_index + 1);
+            let segment: StagedAuthorSegment = serde_json::from_slice(
+                &std::fs::read(&path)
+                    .with_context(|| format!("read staged repair segment {}", path.display()))?,
+            )
+            .with_context(|| format!("parse staged repair segment {}", path.display()))?;
+            if segment.start_author != author_index || segment.end_author != author_index + 1 {
+                anyhow::bail!(
+                    "staged repair segment {} has the wrong author range",
+                    path.display()
+                );
+            }
+            let projected_len = if author_index < state.next_author {
+                segment.event_cids.len()
+            } else {
+                state
+                    .staged_segment_event_offset
+                    .min(segment.event_cids.len())
+            };
+            for cid_texts in segment.event_cids[..projected_len].chunks(2048) {
+                let cids = cid_texts
+                    .iter()
+                    .map(|cid| parse_root_text(cid))
+                    .collect::<Result<Vec<_>>>()?;
+                for event in staging_event_store
+                    .load_event_blobs(cids)
+                    .await
+                    .with_context(|| {
+                        format!("load staged repair events for author {author_index}")
+                    })?
+                {
+                    if target_ids.remove(&event.id) {
+                        recovered.push(event);
+                    }
+                }
+                if target_ids.is_empty() {
+                    break;
+                }
+            }
+            if !target_ids.is_empty() {
+                anyhow::bail!(
+                    "{} missing indexed events were not present in projected staging data for author {author_index}",
+                    target_ids.len()
+                );
+            }
+        }
+        if recovered.len() != missing.len() {
+            anyhow::bail!(
+                "recovered {} of {} missing indexed events",
+                recovered.len(),
+                missing.len()
+            );
+        }
+
+        let repair_base = event_store
+            .clear_replaceable_indexes(&working_root)
+            .await
+            .context("write temporary repair manifest")?;
+        let event_repair = event_store
+            .build_with_superseded_nodes(Some(&repair_base), recovered)
+            .await
+            .context("reindex recovered staged events")?;
+        working_root = event_repair
+            .root
+            .context("recovered events did not produce an index root")?;
+        superseded_nodes.extend(event_repair.superseded_nodes);
+        missing.len()
+    };
+    let report = event_store
+        .rebuild_replaceable_index(&working_root, options.page_size)
+        .await
+        .context("rebuild replaceable-event indexes")?;
     store
         .force_sync()
         .context("force-sync repaired Nostr index")?;
     let repaired_root = cid_to_nhash(&report.root)?;
     state.root = Some(repaired_root.clone());
     persist_crawl_state(&data_dir, &state)?;
+    event_store
+        .delete_superseded_nodes(&superseded_nodes)
+        .await
+        .context("delete superseded nodes after publishing repaired root")?;
 
     Ok(NostrReplaceableRepairOutput {
         previous_root,
@@ -505,6 +649,7 @@ pub(crate) async fn run_nostr_replaceable_repair(
         entries_scanned: report.entries_scanned,
         replaceable_entries: report.replaceable_entries,
         parameterized_replaceable_entries: report.parameterized_replaceable_entries,
+        recovered_event_blobs,
         applied: true,
     })
 }

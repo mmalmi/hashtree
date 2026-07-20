@@ -1648,6 +1648,28 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .get_manifest(Some(&root))
             .await
             .expect("read manifest");
+        let article_cid = by_id_event_cid(Arc::clone(&backing), &root, &article.id)
+            .await
+            .expect("article event cid");
+        let article_bytes = backing
+            .get(&article_cid.hash)
+            .await
+            .expect("read article blob")
+            .expect("article blob exists");
+        assert!(backing
+            .delete(&article_cid.hash)
+            .await
+            .expect("delete article event blob"));
+        let missing = store
+            .missing_parameterized_event_links(&root, 2)
+            .await
+            .expect("scan missing parameterized event links");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].cid, article_cid);
+        assert!(backing
+            .put(article_cid.hash, article_bytes)
+            .await
+            .expect("restore article event blob"));
         let damaged = manifest.replaceable.expect("replaceable root");
         let damaged_parameterized = manifest
             .parameterized_replaceable

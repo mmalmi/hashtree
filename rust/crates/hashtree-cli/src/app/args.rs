@@ -1056,6 +1056,12 @@ pub(crate) enum NostrIndexCommands {
         /// Durable crawl state whose root will be replaced atomically
         #[arg(long = "state-file")]
         state_file: PathBuf,
+        /// Durable staging store used to recover any missing indexed events
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Ordered author allowlist used by the durable crawl state
+        #[arg(long = "eligible-authors")]
+        eligible_authors: PathBuf,
         /// Maximum author/kind/time entries held per scan page
         #[arg(long, default_value_t = 8192)]
         page_size: usize,

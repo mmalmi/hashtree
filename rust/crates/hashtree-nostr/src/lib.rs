@@ -199,6 +199,19 @@ pub struct NostrReplaceableRepairReport {
     pub parameterized_replaceable_entries: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MissingNostrEventLink {
+    pub key: String,
+    pub cid: Cid,
+}
+
+struct ReplaceableSourceScan {
+    entries_scanned: u64,
+    replaceable: Vec<(String, Cid)>,
+    parameterized_replaceable: BTreeMap<String, Cid>,
+    missing_parameterized: Vec<MissingNostrEventLink>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsOptions {
     pub limit: Option<usize>,
@@ -1226,25 +1239,17 @@ impl<S: Store> NostrEventStore<S> {
         Ok(next_root)
     }
 
-    /// Rebuild the regular and parameterized replaceable-event indexes from
-    /// the authoritative author/kind/time index while leaving every other
-    /// manifest index intact.
-    ///
-    /// This is a bounded-memory closed-writer repair path for a damaged
-    /// derived replaceable indexes. The caller must force-sync the returned root
-    /// and publish it durably before deleting anything reachable only from the
-    /// previous root.
-    pub async fn rebuild_replaceable_index(
+    async fn scan_replaceable_sources(
         &self,
         root: &Cid,
         page_size: usize,
-    ) -> Result<NostrReplaceableRepairReport, NostrEventStoreError> {
+    ) -> Result<ReplaceableSourceScan, NostrEventStoreError> {
         if page_size == 0 {
             return Err(NostrEventStoreError::Validation(
                 "replaceable repair page size must be non-zero".to_string(),
             ));
         }
-        let mut manifest = self.get_manifest(Some(root)).await?;
+        let manifest = self.get_manifest(Some(root)).await?;
         let author_kind_time = manifest.by_author_kind_time.as_ref().ok_or_else(|| {
             NostrEventStoreError::Validation(
                 "Nostr manifest has no by-author-kind-time index".to_string(),
@@ -1289,7 +1294,10 @@ impl<S: Store> NostrEventStore<S> {
                     let event = match self.read_stored_event(cid).await {
                         Ok(event) => event,
                         Err(error) if is_missing_stored_event_error(&error) => {
-                            missing_parameterized.push((key.clone(), cid.clone()));
+                            missing_parameterized.push(MissingNostrEventLink {
+                                key: key.clone(),
+                                cid: cid.clone(),
+                            });
                             continue;
                         }
                         Err(error) => return Err(error),
@@ -1312,26 +1320,77 @@ impl<S: Store> NostrEventStore<S> {
             }
         }
 
-        if let Some((key, cid)) = missing_parameterized.first() {
+        Ok(ReplaceableSourceScan {
+            entries_scanned,
+            replaceable,
+            parameterized_replaceable,
+            missing_parameterized,
+        })
+    }
+
+    /// Find parameterized replaceable events whose current index value blob is
+    /// missing. The returned author/kind/time key includes the event id.
+    pub async fn missing_parameterized_event_links(
+        &self,
+        root: &Cid,
+        page_size: usize,
+    ) -> Result<Vec<MissingNostrEventLink>, NostrEventStoreError> {
+        Ok(self
+            .scan_replaceable_sources(root, page_size)
+            .await?
+            .missing_parameterized)
+    }
+
+    /// Write a temporary manifest that omits both derived replaceable indexes.
+    /// Other authoritative indexes remain unchanged. This lets a closed-writer
+    /// repair reinsert missing event blobs before rebuilding both catalogs.
+    pub async fn clear_replaceable_indexes(&self, root: &Cid) -> Result<Cid, NostrEventStoreError> {
+        let mut manifest = self.get_manifest(Some(root)).await?;
+        manifest.replaceable = None;
+        manifest.parameterized_replaceable = None;
+        self.write_manifest(&manifest).await?.ok_or_else(|| {
+            NostrEventStoreError::Validation("temporary Nostr repair manifest was empty".into())
+        })
+    }
+
+    /// Rebuild the regular and parameterized replaceable-event indexes from
+    /// the authoritative author/kind/time index while leaving every other
+    /// manifest index intact.
+    ///
+    /// This is a bounded-memory closed-writer repair path for damaged derived
+    /// replaceable indexes. The caller must force-sync the returned root and
+    /// publish it durably before deleting anything reachable only from the
+    /// previous root.
+    pub async fn rebuild_replaceable_index(
+        &self,
+        root: &Cid,
+        page_size: usize,
+    ) -> Result<NostrReplaceableRepairReport, NostrEventStoreError> {
+        let mut manifest = self.get_manifest(Some(root)).await?;
+        let scan = self.scan_replaceable_sources(root, page_size).await?;
+
+        if let Some(missing) = scan.missing_parameterized.first() {
             return Err(NostrEventStoreError::Validation(format!(
                 "{} parameterized event blobs are missing; first key={key} cid={cid}",
-                missing_parameterized.len()
+                scan.missing_parameterized.len(),
+                key = missing.key,
+                cid = missing.cid,
             )));
         }
 
-        manifest.replaceable = self.index.build_links(replaceable.clone()).await?;
+        manifest.replaceable = self.index.build_links(scan.replaceable.clone()).await?;
         manifest.parameterized_replaceable = self
             .index
-            .build_links(parameterized_replaceable.clone())
+            .build_links(scan.parameterized_replaceable.clone())
             .await?;
         let repaired_root = self.write_manifest(&manifest).await?.ok_or_else(|| {
             NostrEventStoreError::Validation("repaired Nostr manifest was empty".to_string())
         })?;
         Ok(NostrReplaceableRepairReport {
             root: repaired_root,
-            entries_scanned,
-            replaceable_entries: replaceable.len(),
-            parameterized_replaceable_entries: parameterized_replaceable.len(),
+            entries_scanned: scan.entries_scanned,
+            replaceable_entries: scan.replaceable.len(),
+            parameterized_replaceable_entries: scan.parameterized_replaceable.len(),
         })
     }
 

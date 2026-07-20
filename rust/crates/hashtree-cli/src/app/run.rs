@@ -1038,6 +1038,8 @@ pub(crate) async fn run() -> Result<()> {
             }
             NostrIndexCommands::RepairReplaceable {
                 state_file,
+                staging_data_dir,
+                eligible_authors,
                 page_size,
                 btree_order,
                 apply,
@@ -1046,6 +1048,8 @@ pub(crate) async fn run() -> Result<()> {
                     data_dir,
                     NostrReplaceableRepairOptions {
                         state_file,
+                        staging_data_dir,
+                        eligible_authors,
                         page_size,
                         btree_order,
                         apply,
