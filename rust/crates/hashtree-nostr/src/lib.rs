@@ -200,6 +200,12 @@ pub struct NostrReplaceableRepairReport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct NostrProjectionRepairReport {
+    pub root: Cid,
+    pub entries_scanned: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MissingNostrEventLink {
     pub key: String,
     pub cid: Cid,
@@ -1460,6 +1466,73 @@ impl<S: Store> NostrEventStore<S> {
             entries_scanned: scan.entries_scanned,
             replaceable_entries: scan.replaceable.len(),
             parameterized_replaceable_entries: scan.parameterized_replaceable.len(),
+        })
+    }
+
+    /// Rebuild the global chronological projection from the authoritative
+    /// author/kind/time index in bounded pages. Superseded nodes from each
+    /// unpublished intermediate root are reclaimed immediately; the prior
+    /// durable index remains untouched until the caller publishes the returned
+    /// manifest root.
+    pub async fn rebuild_time_index(
+        &self,
+        root: &Cid,
+        page_size: usize,
+    ) -> Result<NostrProjectionRepairReport, NostrEventStoreError> {
+        if page_size == 0 {
+            return Err(NostrEventStoreError::Validation(
+                "time-index repair page size must be non-zero".to_string(),
+            ));
+        }
+        let mut manifest = self.get_manifest(Some(root)).await?;
+        let author_kind_time = manifest.by_author_kind_time.as_ref().ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "Nostr manifest has no by-author-kind-time index".to_string(),
+            )
+        })?;
+        let mut start = None;
+        let mut entries_scanned = 0u64;
+        let mut rebuilt_root = None;
+        loop {
+            let page = self
+                .index
+                .range_links_limited(author_kind_time, start.as_deref(), None, page_size)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            entries_scanned = entries_scanned.saturating_add(page.len() as u64);
+            let mut changes = BTreeMap::new();
+            for (key, cid) in &page {
+                let parts = key.split(':').collect::<Vec<_>>();
+                if parts.len() != 4 || parts[2].len() != 16 || parts[3].len() != 64 {
+                    return Err(NostrEventStoreError::Validation(format!(
+                        "invalid author-kind-time key: {key}"
+                    )));
+                }
+                changes.insert(format!("{}:{}", parts[2], parts[3]), Some(cid.clone()));
+            }
+            let update = self
+                .index
+                .update_links_with_superseded(rebuilt_root.as_ref(), changes)
+                .await?;
+            rebuilt_root = update.root;
+            self.delete_superseded_nodes(&update.superseded_nodes)
+                .await?;
+
+            let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
+            start = Some(format!("{last_key}\0"));
+            if page.len() < page_size {
+                break;
+            }
+        }
+        manifest.by_time = rebuilt_root;
+        let repaired_root = self.write_manifest(&manifest).await?.ok_or_else(|| {
+            NostrEventStoreError::Validation("repaired Nostr manifest was empty".to_string())
+        })?;
+        Ok(NostrProjectionRepairReport {
+            root: repaired_root,
+            entries_scanned,
         })
     }
 

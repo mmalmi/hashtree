@@ -751,10 +751,17 @@ pub(crate) async fn run_nostr_replaceable_repair(
         .rebuild_replaceable_index(&working_root, options.page_size)
         .await
         .context("rebuild replaceable-event indexes")?;
+    let time_report = event_store
+        .rebuild_time_index(&report.root, options.page_size)
+        .await
+        .context("rebuild chronological event index")?;
+    if time_report.entries_scanned != report.entries_scanned {
+        anyhow::bail!("author/kind/time source changed during closed-writer repair");
+    }
     store
         .force_sync()
         .context("force-sync repaired Nostr index")?;
-    let repaired_root = cid_to_nhash(&report.root)?;
+    let repaired_root = cid_to_nhash(&time_report.root)?;
     state.root = Some(repaired_root.clone());
     persist_crawl_state(&data_dir, &state)?;
     event_store

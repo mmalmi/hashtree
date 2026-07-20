@@ -1699,16 +1699,31 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
         assert_eq!(repaired.entries_scanned, 4);
         assert_eq!(repaired.replaceable_entries, 2);
         assert_eq!(repaired.parameterized_replaceable_entries, 1);
+        let repaired_manifest = store
+            .get_manifest(Some(&repaired.root))
+            .await
+            .expect("read replaceable-repaired manifest");
+        let damaged_time = repaired_manifest.by_time.expect("time root");
+        assert!(backing
+            .delete(&damaged_time.hash)
+            .await
+            .expect("delete time root"));
+        let time_repaired = store
+            .rebuild_time_index(&repaired.root, 2)
+            .await
+            .expect("repair time index");
+        assert_eq!(time_repaired.entries_scanned, 4);
+        let final_root = &time_repaired.root;
         assert_eq!(
             store
-                .get_replaceable(Some(&repaired.root), &author_a, 0)
+                .get_replaceable(Some(final_root), &author_a, 0)
                 .await
                 .expect("read repaired profile a"),
             Some(profile_a)
         );
         assert_eq!(
             store
-                .get_replaceable(Some(&repaired.root), &author_b, 0)
+                .get_replaceable(Some(final_root), &author_b, 0)
                 .await
                 .expect("read repaired profile b"),
             Some(profile_b)
@@ -1716,7 +1731,7 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
         assert_eq!(
             store
                 .get_parameterized_replaceable(
-                    Some(&repaired.root),
+                    Some(final_root),
                     &author_a,
                     30_023,
                     "repair-article",
@@ -1727,10 +1742,18 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
         );
         assert_eq!(
             store
-                .get_by_id(Some(&repaired.root), &note.id)
+                .get_by_id(Some(final_root), &note.id)
                 .await
                 .expect("read unchanged by-id index"),
-            Some(note)
+            Some(note.clone())
+        );
+        assert_eq!(
+            store
+                .list_recent(Some(final_root), ListEventsOptions::default())
+                .await
+                .expect("read rebuilt time index")
+                .len(),
+            4
         );
     });
 }
