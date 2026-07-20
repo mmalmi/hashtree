@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
@@ -43,6 +44,53 @@ impl Store for CountingStore {
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.gets.fetch_add(1, Ordering::Relaxed);
         self.inner.get(hash).await
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.has(hash).await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.inner.delete(hash).await
+    }
+}
+
+#[derive(Default)]
+struct ConcurrentReadStore {
+    inner: MemoryStore,
+    active_gets: AtomicUsize,
+    max_active_gets: AtomicUsize,
+}
+
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+#[async_trait]
+impl Store for ConcurrentReadStore {
+    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.inner.put(hash, data).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        let active = self.active_gets.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active_gets.fetch_max(active, Ordering::SeqCst);
+        YieldOnce(false).await;
+        let result = self.inner.get(hash).await;
+        self.active_gets.fetch_sub(1, Ordering::SeqCst);
+        result
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
@@ -582,6 +630,46 @@ fn dense_link_changes_read_each_existing_node_at_most_once() {
             "bulk update made {} store reads for {} changes",
             update_gets,
             changes.len()
+        );
+    });
+}
+
+#[test]
+fn dense_link_changes_read_independent_subtrees_concurrently() {
+    block_on(async {
+        let store = Arc::new(ConcurrentReadStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) });
+        let entry_count = 3_500;
+        let root = btree
+            .build_links(
+                (0..entry_count).map(|index| (format!("key:{index:05}"), cid_from_seed(index))),
+            )
+            .await
+            .unwrap()
+            .expect("initial root");
+        store.max_active_gets.store(0, Ordering::SeqCst);
+
+        btree
+            .update_links(
+                Some(&root),
+                (0..entry_count).map(|index| {
+                    (
+                        format!("key:{index:05}"),
+                        Some(cid_from_seed(index + 10_000)),
+                    )
+                }),
+            )
+            .await
+            .expect("update links");
+
+        let max_active_gets = store.max_active_gets.load(Ordering::SeqCst);
+        assert!(
+            max_active_gets > 1,
+            "independent changed subtrees were read serially"
+        );
+        assert!(
+            max_active_gets <= 4,
+            "bounded subtree traversal issued {max_active_gets} concurrent reads"
         );
     });
 }

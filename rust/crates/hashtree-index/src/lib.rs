@@ -16,6 +16,8 @@ pub use search::{
 };
 
 const DEFAULT_ORDER: usize = 32;
+const UPDATE_CHILD_CONCURRENCY: usize = 4;
+const PARALLEL_UPDATE_MIN_CHANGES: usize = 256;
 
 #[derive(Debug, Clone, Default)]
 pub struct BTreeOptions {
@@ -425,7 +427,9 @@ impl<S: Store> BTree<S> {
                 .await;
         };
 
-        let nodes = self.update_string_node(root.clone(), &changes).await?;
+        let nodes = self
+            .update_string_node(root.clone(), &changes, true)
+            .await?;
         self.finish_link_node_updates(nodes).await
     }
 
@@ -433,6 +437,7 @@ impl<S: Store> BTree<S> {
         &'a self,
         node: Cid,
         changes: &'a [(String, Option<String>)],
+        parallel_children: bool,
     ) -> BTreeFuture<'a, Vec<BuiltNode>> {
         Box::pin(async move {
             let entries = sort_entries(self.tree.list_directory(&node).await?);
@@ -440,7 +445,7 @@ impl<S: Store> BTree<S> {
                 return self.update_string_leaf(entries, changes).await;
             }
 
-            let mut children = Vec::new();
+            let mut work = Vec::with_capacity(entries.len());
             let mut change_start = 0;
             for (child_index, entry) in entries.iter().enumerate() {
                 let change_end = entries
@@ -451,26 +456,93 @@ impl<S: Store> BTree<S> {
                             + changes[change_start..].partition_point(|(key, _)| key < &next_key)
                     })
                     .unwrap_or(changes.len());
-                if change_start == change_end {
-                    let cid = entry_cid(entry);
-                    children.push(BuiltNode {
+                work.push((
+                    BuiltNode {
                         first_key: unescape_key(&entry.name),
-                        cid,
+                        cid: entry_cid(entry),
                         count: stored_link_subtree_count(entry),
-                    });
-                } else {
-                    children.extend(
-                        self.update_string_node(
-                            entry_cid(entry),
-                            &changes[change_start..change_end],
-                        )
-                        .await?,
-                    );
-                }
+                    },
+                    change_start,
+                    change_end,
+                ));
                 change_start = change_end;
             }
 
+            let touched_children = work
+                .iter()
+                .filter(|(_, change_start, change_end)| change_start != change_end)
+                .count();
+            let children = if parallel_children
+                && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
+                && touched_children > 1
+            {
+                self.update_string_children_parallel(work, changes)?
+            } else {
+                let mut children = Vec::new();
+                for (child, change_start, change_end) in work {
+                    if change_start == change_end {
+                        children.push(child);
+                    } else {
+                        children.extend(
+                            self.update_string_node(
+                                child.cid,
+                                &changes[change_start..change_end],
+                                false,
+                            )
+                            .await?,
+                        );
+                    }
+                }
+                children
+            };
+
             self.create_link_node_level(children).await
+        })
+    }
+
+    fn update_string_children_parallel(
+        &self,
+        work: Vec<(BuiltNode, usize, usize)>,
+        changes: &[(String, Option<String>)],
+    ) -> Result<Vec<BuiltNode>, BTreeError> {
+        // Store reads are intentionally synchronous behind the async trait on
+        // local LMDB. Run independent immutable root branches on a small,
+        // fixed number of scoped workers so the backend can issue real
+        // parallel reads without multiplying memory at every tree depth.
+        let worker_count = UPDATE_CHILD_CONCURRENCY.min(work.len()).max(1);
+        let work_per_worker = work.len().div_ceil(worker_count);
+        std::thread::scope(|scope| {
+            let handles = work
+                .chunks(work_per_worker)
+                .map(|work_chunk| {
+                    scope.spawn(move || {
+                        let mut children = Vec::new();
+                        for (child, change_start, change_end) in work_chunk {
+                            if change_start == change_end {
+                                children.push(child.clone());
+                            } else {
+                                children.extend(futures::executor::block_on(
+                                    self.update_string_node(
+                                        child.cid.clone(),
+                                        &changes[*change_start..*change_end],
+                                        false,
+                                    ),
+                                )?);
+                            }
+                        }
+                        Ok::<_, BTreeError>(children)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut children = Vec::new();
+            for handle in handles {
+                children.extend(
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+                );
+            }
+            Ok(children)
         })
     }
 
@@ -588,7 +660,7 @@ impl<S: Store> BTree<S> {
                 .await;
         };
 
-        let nodes = self.update_link_node(root.clone(), &changes).await?;
+        let nodes = self.update_link_node(root.clone(), &changes, true).await?;
         self.finish_link_node_updates(nodes).await
     }
 
@@ -596,6 +668,7 @@ impl<S: Store> BTree<S> {
         &'a self,
         node: Cid,
         changes: &'a [(String, Option<Cid>)],
+        parallel_children: bool,
     ) -> BTreeFuture<'a, Vec<BuiltNode>> {
         Box::pin(async move {
             let entries = sort_entries(self.tree.list_directory(&node).await?);
@@ -603,7 +676,7 @@ impl<S: Store> BTree<S> {
                 return self.update_link_leaf(entries, changes).await;
             }
 
-            let mut children = Vec::new();
+            let mut work = Vec::with_capacity(entries.len());
             let mut change_start = 0;
             for (child_index, entry) in entries.iter().enumerate() {
                 let change_end = entries
@@ -614,23 +687,89 @@ impl<S: Store> BTree<S> {
                             + changes[change_start..].partition_point(|(key, _)| key < &next_key)
                     })
                     .unwrap_or(changes.len());
-                if change_start == change_end {
-                    let cid = entry_cid(entry);
-                    children.push(BuiltNode {
+                work.push((
+                    BuiltNode {
                         first_key: unescape_key(&entry.name),
-                        cid,
+                        cid: entry_cid(entry),
                         count: stored_link_subtree_count(entry),
-                    });
-                } else {
-                    children.extend(
-                        self.update_link_node(entry_cid(entry), &changes[change_start..change_end])
-                            .await?,
-                    );
-                }
+                    },
+                    change_start,
+                    change_end,
+                ));
                 change_start = change_end;
             }
 
+            let touched_children = work
+                .iter()
+                .filter(|(_, change_start, change_end)| change_start != change_end)
+                .count();
+            let children = if parallel_children
+                && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
+                && touched_children > 1
+            {
+                self.update_link_children_parallel(work, changes)?
+            } else {
+                let mut children = Vec::new();
+                for (child, change_start, change_end) in work {
+                    if change_start == change_end {
+                        children.push(child);
+                    } else {
+                        children.extend(
+                            self.update_link_node(
+                                child.cid,
+                                &changes[change_start..change_end],
+                                false,
+                            )
+                            .await?,
+                        );
+                    }
+                }
+                children
+            };
+
             self.create_link_node_level(children).await
+        })
+    }
+
+    fn update_link_children_parallel(
+        &self,
+        work: Vec<(BuiltNode, usize, usize)>,
+        changes: &[(String, Option<Cid>)],
+    ) -> Result<Vec<BuiltNode>, BTreeError> {
+        let worker_count = UPDATE_CHILD_CONCURRENCY.min(work.len()).max(1);
+        let work_per_worker = work.len().div_ceil(worker_count);
+        std::thread::scope(|scope| {
+            let handles = work
+                .chunks(work_per_worker)
+                .map(|work_chunk| {
+                    scope.spawn(move || {
+                        let mut children = Vec::new();
+                        for (child, change_start, change_end) in work_chunk {
+                            if change_start == change_end {
+                                children.push(child.clone());
+                            } else {
+                                children.extend(futures::executor::block_on(
+                                    self.update_link_node(
+                                        child.cid.clone(),
+                                        &changes[*change_start..*change_end],
+                                        false,
+                                    ),
+                                )?);
+                            }
+                        }
+                        Ok::<_, BTreeError>(children)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut children = Vec::new();
+            for handle in handles {
+                children.extend(
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+                );
+            }
+            Ok(children)
         })
     }
 

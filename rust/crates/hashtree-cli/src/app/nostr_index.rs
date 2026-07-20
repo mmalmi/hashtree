@@ -165,6 +165,11 @@ struct IndexedNostrCrawlState {
     author_allowlist_source: Option<String>,
     policy: IndexedNostrCrawlPolicy,
     next_author: usize,
+    /// Number of event blobs already durably projected from the staged
+    /// segment beginning at `next_author`. Older state files predate partial
+    /// segment checkpoints and therefore resume at offset zero.
+    #[serde(default)]
+    staged_segment_event_offset: usize,
     root: Option<String>,
     events_seen: usize,
     events_selected: usize,
@@ -612,6 +617,7 @@ pub(crate) async fn run_socialgraph_index(
                 author_allowlist_source: options.author_allowlist_url.clone(),
                 policy: policy.clone(),
                 next_author: 0,
+                staged_segment_event_offset: 0,
                 root: existing_root.as_ref().map(cid_to_nhash).transpose()?,
                 events_seen: 0,
                 events_selected: 0,
@@ -620,6 +626,13 @@ pub(crate) async fn run_socialgraph_index(
         };
         state.author_allowlist_source = options.author_allowlist_url.clone();
         state.policy = policy;
+        if !options.project_staged && state.staged_segment_event_offset != 0 {
+            anyhow::bail!(
+                "Nostr crawl has a partial staged projection at author {} offset {}; resume with --project-staged",
+                state.next_author,
+                state.staged_segment_event_offset
+            );
+        }
         persist_crawl_state(&data_dir, &state)?;
         let report = if options.project_staged {
             let projection_policy = state.policy.clone();
@@ -1034,6 +1047,25 @@ async fn stage_allowlist_in_checkpoints(
         durable_store
             .force_sync()
             .context("force-sync staged Nostr event blobs")?;
+        // The staging cursor is a promise that every referenced event can be
+        // consumed without contacting a relay again. Verify that promise only
+        // after the blob store's durability boundary and before publishing the
+        // segment or advancing crawl-state.json.
+        for (chunk_index, event_cid_chunk) in event_cids
+            .chunks(options.index_commit_batch_size.max(1))
+            .enumerate()
+        {
+            event_store
+                .load_event_blobs(event_cid_chunk.iter().cloned())
+                .await
+                .with_context(|| {
+                    let chunk_start = chunk_index * options.index_commit_batch_size.max(1);
+                    let chunk_end = chunk_start + event_cid_chunk.len();
+                    format!(
+                        "verify durable staged event blobs for authors {start}..{end} at offsets {chunk_start}..{chunk_end}; staging cursor was not advanced"
+                    )
+                })?;
+        }
         let segment = StagedAuthorSegment {
             version: STAGE_FORMAT_VERSION,
             start_author: start,
@@ -1119,39 +1151,44 @@ async fn project_staged_allowlist(
 
         let projection_started = Instant::now();
         let start = state.next_author;
-        let mut end = start;
-        let mut projected_event_count = 0usize;
-        let mut segments = Vec::new();
-        while end < stage.next_author && end.saturating_sub(start) < options.projection_authors {
-            let segment = load_stage_segment(staging_data_dir, end)?;
-            let would_exceed_event_limit = projected_event_count
-                .saturating_add(segment.event_cids.len())
-                > options.projection_event_limit;
-            if segment.end_author > stage.next_author
-                || segment.end_author > authors.len()
-                || segment.end_author.saturating_sub(start) > options.projection_authors
-                    && !segments.is_empty()
-                || would_exceed_event_limit && !segments.is_empty()
-            {
-                break;
-            }
-            end = segment.end_author;
-            projected_event_count = projected_event_count.saturating_add(segment.event_cids.len());
-            segments.push(segment);
+        let segment = load_stage_segment(staging_data_dir, start)?;
+        if segment.end_author > stage.next_author || segment.end_author > authors.len() {
+            anyhow::bail!(
+                "staged segment at author {start} extends beyond the durable staging cursor"
+            );
         }
-        if segments.is_empty() {
-            anyhow::bail!("no complete staged segment is projectable at author {start}");
+        if state.staged_segment_event_offset > segment.event_cids.len() {
+            anyhow::bail!(
+                "durable projection offset {} exceeds the {} events in staged segment at author {start}",
+                state.staged_segment_event_offset,
+                segment.event_cids.len()
+            );
         }
 
-        let cids = segments
+        // Match the outer durability unit to the event store's bounded index
+        // commit. This prevents a complete 65k-event author from remaining in
+        // memory (and uncheckpointed) while all nine indexes are constructed.
+        let chunk_size = options
+            .index_commit_batch_size
+            .min(options.projection_event_limit)
+            .max(1);
+        let event_offset = state.staged_segment_event_offset;
+        let event_end = event_offset
+            .saturating_add(chunk_size)
+            .min(segment.event_cids.len());
+        let cids = segment.event_cids[event_offset..event_end]
             .iter()
-            .flat_map(|segment| segment.event_cids.iter())
             .map(|root| parse_root_text(root))
             .collect::<Result<Vec<_>>>()?;
         let events = staging_event_store
             .load_event_blobs(cids)
             .await
-            .with_context(|| format!("load staged event blobs for authors {start}..{end}"))?;
+            .with_context(|| {
+                format!(
+                    "load staged event blobs for authors {start}..{} at offsets {event_offset}..{event_end}",
+                    segment.end_author
+                )
+            })?;
         let profile_events = events
             .iter()
             .filter(|event| event.kind == 0)
@@ -1168,7 +1205,12 @@ async fn project_staged_allowlist(
         let next_root = event_store
             .build(current_root.as_ref(), events)
             .await
-            .with_context(|| format!("project staged authors {start}..{end}"))?;
+            .with_context(|| {
+                format!(
+                    "project staged authors {start}..{} at offsets {event_offset}..{event_end}",
+                    segment.end_author
+                )
+            })?;
         let index_build_ms = index_started.elapsed().as_millis();
         total_index_build_ms = total_index_build_ms.saturating_add(index_build_ms);
         validate_reachable_root(&event_store, next_root.as_ref(), "new projection root").await?;
@@ -1184,17 +1226,12 @@ async fn project_staged_allowlist(
                 .context("sync projected profile search batch")?;
         }
 
-        state.next_author = end;
-        state.root = next_root.as_ref().map(cid_to_nhash).transpose()?;
-        for segment in &segments {
-            state.events_seen = state.events_seen.saturating_add(segment.events_seen);
-            state.events_selected = state
-                .events_selected
-                .saturating_add(segment.events_selected);
-            state.live_bytes_selected = state
-                .live_bytes_selected
-                .saturating_add(segment.live_bytes_selected);
-        }
+        let completed_segment = apply_projected_segment_checkpoint(
+            state,
+            &segment,
+            event_end,
+            next_root.as_ref().map(cid_to_nhash).transpose()?,
+        )?;
         let checkpoint_sync_started = Instant::now();
         stores
             .graph
@@ -1208,15 +1245,18 @@ async fn project_staged_allowlist(
         persist_crawl_state(data_dir, state)?;
         hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
-            "Nostr projection checkpoint: authors={}/{} staged_authors={} events_seen={} events_selected={} live_bytes={} segments={} projected_events={} index_build_ms={} checkpoint_sync_ms={} batch_elapsed_ms={}",
+            "Nostr projection checkpoint: authors={}/{} staged_authors={} events_seen={} events_selected={} live_bytes={} segment_authors={} segment_event_offset={}/{} projected_events={} completed_segment={} index_build_ms={} checkpoint_sync_ms={} batch_elapsed_ms={}",
             state.next_author,
             authors.len(),
             stage.next_author,
             state.events_seen,
             state.events_selected,
             state.live_bytes_selected,
-            segments.len(),
-            projected_event_count,
+            segment.end_author.saturating_sub(segment.start_author),
+            state.staged_segment_event_offset,
+            segment.event_cids.len(),
+            event_end.saturating_sub(event_offset),
+            completed_segment,
             index_build_ms,
             checkpoint_sync_ms,
             projection_started.elapsed().as_millis()
@@ -1233,6 +1273,47 @@ async fn project_staged_allowlist(
         index_build_ms: total_index_build_ms,
         ..CrawlReport::default()
     })
+}
+
+fn apply_projected_segment_checkpoint(
+    state: &mut IndexedNostrCrawlState,
+    segment: &StagedAuthorSegment,
+    event_end: usize,
+    root: Option<String>,
+) -> Result<bool> {
+    if segment.start_author != state.next_author {
+        anyhow::bail!(
+            "staged segment starts at author {}, but projection cursor is {}",
+            segment.start_author,
+            state.next_author
+        );
+    }
+    if event_end < state.staged_segment_event_offset || event_end > segment.event_cids.len() {
+        anyhow::bail!(
+            "invalid projected event range {}..{} for {}-event segment at author {}",
+            state.staged_segment_event_offset,
+            event_end,
+            segment.event_cids.len(),
+            segment.start_author
+        );
+    }
+
+    state.root = root;
+    let completed_segment = event_end == segment.event_cids.len();
+    if completed_segment {
+        state.next_author = segment.end_author;
+        state.staged_segment_event_offset = 0;
+        state.events_seen = state.events_seen.saturating_add(segment.events_seen);
+        state.events_selected = state
+            .events_selected
+            .saturating_add(segment.events_selected);
+        state.live_bytes_selected = state
+            .live_bytes_selected
+            .saturating_add(segment.live_bytes_selected);
+    } else {
+        state.staged_segment_event_offset = event_end;
+    }
+    Ok(completed_segment)
 }
 
 async fn validate_reachable_root(
@@ -1880,6 +1961,12 @@ fn validate_crawl_state(
             "Nostr crawl cursor {} exceeds the validated author count {}",
             state.next_author,
             author_count
+        );
+    }
+    if state.next_author == author_count && state.staged_segment_event_offset != 0 {
+        anyhow::bail!(
+            "completed Nostr crawl has a non-zero staged projection offset {}",
+            state.staged_segment_event_offset
         );
     }
     Ok(())
@@ -2995,11 +3082,15 @@ mod tests {
     async fn two_phase_crawl_stages_blobs_then_projects_without_refetching() -> io::Result<()> {
         let relay = TestRelay::new();
         let author = Keys::generate();
-        let note = event_builder!(Kind::TextNote, "staged note")
+        let first_note = event_builder!(Kind::TextNote, "first staged note")
             .custom_created_at(Timestamp::from_secs(42))
             .sign_with_keys(&author)
             .expect("signed note");
-        publish_test_events(&relay.url(), &[note]).await;
+        let second_note = event_builder!(Kind::TextNote, "second staged note")
+            .custom_created_at(Timestamp::from_secs(43))
+            .sign_with_keys(&author)
+            .expect("signed note");
+        publish_test_events(&relay.url(), &[first_note, second_note]).await;
         let allowlist = TestTextServer::new(format!("{}\n", author.public_key().to_hex()));
         let mut options =
             checkpoint_test_options(format!("{}/authors", allowlist.url()), vec![relay.url()]);
@@ -3020,31 +3111,126 @@ mod tests {
         .await
         .expect("stage relay events");
         assert_eq!(staged.authors_processed, 1);
-        assert_eq!(staged.events_selected, 1);
+        assert_eq!(staged.events_selected, 2);
         assert!(staged.root.is_none());
         assert!(load_crawl_state(tmp.path()).unwrap().is_none());
         let stage_state = load_stage_state(&staging_data_dir).unwrap().unwrap();
         assert_eq!(stage_state.next_author, 1);
         let segment = load_stage_segment(&staging_data_dir, 0).expect("staged segment");
-        assert_eq!(segment.event_cids.len(), 1);
+        assert_eq!(segment.event_cids.len(), 2);
 
         let relay_requests_after_stage = relay.requested_authors().len();
         options.stage_only = false;
         options.project_staged = true;
         options.projection_authors = 16;
+        options.index_commit_batch_size = 1;
         let projected =
             run_socialgraph_index(tmp.path().to_path_buf(), &config, Keys::generate(), options)
                 .await
                 .expect("project staged events");
 
         assert_eq!(projected.authors_processed, 1);
-        assert_eq!(projected.events_selected, 1);
+        assert_eq!(projected.events_selected, 2);
         assert!(projected.root.is_some());
         assert_eq!(relay.requested_authors().len(), relay_requests_after_stage);
         let projected_state = load_crawl_state(tmp.path()).unwrap().unwrap();
         assert_eq!(projected_state.next_author, 1);
+        assert_eq!(projected_state.staged_segment_event_offset, 0);
         assert_eq!(projected_state.root, projected.root);
         Ok(())
+    }
+
+    #[test]
+    fn partial_staged_projection_checkpoint_resumes_inside_segment() {
+        let authors = vec!["a".repeat(64), "b".repeat(64)];
+        let options = checkpoint_test_options(
+            "http://127.0.0.1:10001/authors".to_string(),
+            vec!["wss://relay.example".to_string()],
+        );
+        let policy = build_crawl_policy(
+            &options,
+            &["wss://relay.example".to_string()],
+            &authors,
+            None,
+        )
+        .expect("build policy");
+        let mut state = IndexedNostrCrawlState {
+            version: CRAWL_STATE_VERSION,
+            author_allowlist_source: options.author_allowlist_url.clone(),
+            policy,
+            next_author: 0,
+            staged_segment_event_offset: 0,
+            root: None,
+            events_seen: 0,
+            events_selected: 0,
+            live_bytes_selected: 0,
+        };
+        let segment = StagedAuthorSegment {
+            version: STAGE_FORMAT_VERSION,
+            start_author: 0,
+            end_author: 2,
+            events_seen: 5,
+            events_selected: 3,
+            live_bytes_selected: 123,
+            event_cids: vec!["one".into(), "two".into(), "three".into()],
+        };
+
+        assert!(!apply_projected_segment_checkpoint(
+            &mut state,
+            &segment,
+            1,
+            Some("partial-root".into())
+        )
+        .expect("partial checkpoint"));
+        assert_eq!(state.next_author, 0);
+        assert_eq!(state.staged_segment_event_offset, 1);
+        assert_eq!(state.events_selected, 0);
+
+        let resumed: IndexedNostrCrawlState =
+            serde_json::from_slice(&serde_json::to_vec(&state).expect("serialize state"))
+                .expect("resume state");
+        state = resumed;
+        assert!(apply_projected_segment_checkpoint(
+            &mut state,
+            &segment,
+            3,
+            Some("complete-root".into())
+        )
+        .expect("complete checkpoint"));
+        assert_eq!(state.next_author, 2);
+        assert_eq!(state.staged_segment_event_offset, 0);
+        assert_eq!(state.events_seen, 5);
+        assert_eq!(state.events_selected, 3);
+        assert_eq!(state.live_bytes_selected, 123);
+    }
+
+    #[test]
+    fn legacy_projection_state_defaults_partial_offset_to_zero() {
+        let authors = vec!["a".repeat(64)];
+        let options = checkpoint_test_options(
+            "http://127.0.0.1:10001/authors".to_string(),
+            vec!["wss://relay.example".to_string()],
+        );
+        let policy = build_crawl_policy(
+            &options,
+            &["wss://relay.example".to_string()],
+            &authors,
+            None,
+        )
+        .expect("build policy");
+        let legacy = serde_json::json!({
+            "version": CRAWL_STATE_VERSION,
+            "author_allowlist_source": options.author_allowlist_url,
+            "policy": policy,
+            "next_author": 0,
+            "root": null,
+            "events_seen": 0,
+            "events_selected": 0,
+            "live_bytes_selected": 0
+        });
+        let state: IndexedNostrCrawlState =
+            serde_json::from_value(legacy).expect("load legacy state");
+        assert_eq!(state.staged_segment_event_offset, 0);
     }
 
     #[test]
@@ -3067,6 +3253,7 @@ mod tests {
             author_allowlist_source: options.author_allowlist_url.clone(),
             policy: policy.clone(),
             next_author: 0,
+            staged_segment_event_offset: 0,
             root: None,
             events_seen: 0,
             events_selected: 0,
