@@ -641,8 +641,9 @@ const DEFAULT_INDEX_COMMIT_BATCH_SIZE: usize = 8_192;
 #[derive(Debug, Clone)]
 pub struct NostrEventStoreOptions {
     pub btree_order: Option<usize>,
-    /// Maximum number of events applied to all collection indexes before the
-    /// resulting content-addressed nodes are flushed to the backing store.
+    /// Maximum number of events applied in one collection update. Event blobs
+    /// and each independent index projection are flushed within the update so
+    /// memory is bounded without repeatedly walking every index.
     /// None preserves the legacy single-commit behavior.
     pub index_commit_batch_size: Option<usize>,
 }
@@ -1035,6 +1036,9 @@ impl<S: Store> NostrEventStore<S> {
             let indexed_events = buffered_writer
                 .put_prepared_event_blobs_parallel(prepared_events)
                 .await?;
+            buffered_store.flush().await.map_err(|err| {
+                NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string()))
+            })?;
             if !indexed_events.is_empty() {
                 let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
                 collection

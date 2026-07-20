@@ -88,6 +88,15 @@ pub trait Store: Send + Sync {
         self.put_many(items).await
     }
 
+    /// Flush writes retained by an overlay store.
+    ///
+    /// Ordinary stores write through and keep the default no-op. Buffered
+    /// stores override this so callers that build several independent index
+    /// projections can bound memory without exposing an incomplete root.
+    async fn flush_pending(&self) -> Result<usize, StoreError> {
+        Ok(0)
+    }
+
     /// Retrieve data by hash
     /// Returns data or None if not found
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError>;
@@ -286,6 +295,10 @@ impl<S: Store> Store for BufferedStore<S> {
             }
         }
         Ok(inserted)
+    }
+
+    async fn flush_pending(&self) -> Result<usize, StoreError> {
+        BufferedStore::flush(self).await
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {

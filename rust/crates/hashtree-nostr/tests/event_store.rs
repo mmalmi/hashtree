@@ -1127,7 +1127,7 @@ fn resumed_build_with_only_existing_and_stale_events_keeps_exact_root() {
 }
 
 #[test]
-fn bulk_build_flushes_configured_event_commit_batches() {
+fn bulk_build_flushes_each_projection_within_configured_event_commits() {
     block_on(async {
         let backing = Arc::new(OptimisticBatchRecordingStore::default());
         let store = NostrEventStore::with_options(
@@ -1162,13 +1162,14 @@ fn bulk_build_flushes_configured_event_commit_batches() {
                 .len(),
             5
         );
-        assert_eq!(
-            backing
-                .optimistic_batch_sizes
-                .lock()
-                .expect("optimistic batch sizes lock")
-                .len(),
-            3
+        let flush_sizes = backing
+            .optimistic_batch_sizes
+            .lock()
+            .expect("optimistic batch sizes lock")
+            .clone();
+        assert!(
+            flush_sizes.len() > 3,
+            "three event commits should flush intermediate index projections: {flush_sizes:?}"
         );
     });
 }

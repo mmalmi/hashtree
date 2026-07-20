@@ -549,10 +549,10 @@ impl PoolStore {
         let mut missing = Vec::new();
         for (hash, data) in unique {
             if let Some(location) = self.read_location(&hash)? {
-                if verify_existing || matches!(location, LocationRecord::Pending { .. }) {
-                    if self.put_sync(hash, data)? {
-                        inserted.insert(hash);
-                    }
+                if (verify_existing || matches!(location, LocationRecord::Pending { .. }))
+                    && self.put_sync(hash, data)?
+                {
+                    inserted.insert(hash);
                 }
             } else {
                 missing.push((hash, data));

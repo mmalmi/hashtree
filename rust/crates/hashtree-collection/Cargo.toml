@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-collection"
-version = "0.2.83"
+version = "0.2.84"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

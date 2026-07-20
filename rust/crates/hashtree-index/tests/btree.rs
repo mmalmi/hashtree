@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::executor::block_on;
 use hashtree_core::{
-    Cid, DirEntry, Hash, HashTree, HashTreeConfig, LinkType, MemoryStore, Store, StoreError,
+    Cid, DirEntry, Hash, HashTree, HashTreeConfig, HashTreeError, LinkType, MemoryStore, Store,
+    StoreError,
 };
 use hashtree_index::{escape_key, BTree, BTreeOptions};
 
@@ -55,6 +58,33 @@ fn cid_from_seed(seed: usize) -> Cid {
     let mut hash = [0_u8; 32];
     hash[..8].copy_from_slice(&(seed as u64).to_be_bytes());
     Cid { hash, key: None }
+}
+
+fn strip_internal_counts<'a, S: Store + 'a>(
+    tree: &'a HashTree<S>,
+    node: Cid,
+) -> Pin<Box<dyn Future<Output = Result<Cid, HashTreeError>> + 'a>> {
+    Box::pin(async move {
+        let entries = tree.list_directory(&node).await?;
+        if entries.iter().any(|entry| entry.link_type != LinkType::Dir) {
+            return Ok(node);
+        }
+
+        let mut legacy_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let child = strip_internal_counts(
+                tree,
+                Cid {
+                    hash: entry.hash,
+                    key: entry.key,
+                },
+            )
+            .await?;
+            legacy_entries
+                .push(DirEntry::from_cid(entry.name, &child).with_link_type(LinkType::Dir));
+        }
+        tree.put_directory(legacy_entries).await
+    })
 }
 
 #[test]
@@ -439,6 +469,50 @@ fn sparse_link_changes_only_read_touched_paths() {
 }
 
 #[test]
+fn sparse_link_changes_do_not_scan_every_legacy_subtree_for_counts() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions::default());
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)));
+        let root = btree
+            .build_links((0..31_000).map(|index| (format!("key:{index:05}"), cid_from_seed(index))))
+            .await
+            .unwrap()
+            .expect("initial root");
+        let legacy_root = strip_internal_counts(&tree, root).await.unwrap();
+        assert_eq!(
+            btree.count_stored_links(Some(&legacy_root)).await.unwrap(),
+            None
+        );
+
+        store.reset_gets();
+        let updated = btree
+            .update_links(
+                Some(&legacy_root),
+                [("key:00001".to_string(), Some(cid_from_seed(40_001)))],
+            )
+            .await
+            .unwrap()
+            .expect("updated root");
+        let update_gets = store.gets();
+
+        assert_eq!(
+            btree.get_link(Some(&updated), "key:00001").await.unwrap(),
+            Some(cid_from_seed(40_001))
+        );
+        assert_eq!(
+            btree.count_stored_links(Some(&updated)).await.unwrap(),
+            None
+        );
+        assert!(
+            update_gets < 64,
+            "one sparse legacy update read {update_gets} blobs from a 31,000-entry tree"
+        );
+        assert_eq!(btree.scan_links(Some(&updated)).await.unwrap(), 31_000);
+    });
+}
+
+#[test]
 fn dense_link_lookup_reads_each_existing_node_at_most_once() {
     block_on(async {
         let store = Arc::new(CountingStore::default());
@@ -513,7 +587,7 @@ fn dense_link_changes_read_each_existing_node_at_most_once() {
 }
 
 #[test]
-fn bulk_link_changes_restore_counts_when_reusing_legacy_children() {
+fn bulk_link_changes_preserve_unknown_counts_without_scanning_legacy_children() {
     block_on(async {
         let store = Arc::new(MemoryStore::new());
         let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
@@ -553,8 +627,9 @@ fn bulk_link_changes_restore_counts_when_reusing_legacy_children() {
 
         assert_eq!(
             btree.count_stored_links(Some(&updated)).await.unwrap(),
-            Some(20)
+            None
         );
+        assert_eq!(btree.scan_links(Some(&updated)).await.unwrap(), 20);
     });
 }
 

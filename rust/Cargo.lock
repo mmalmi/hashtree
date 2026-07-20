@@ -3611,7 +3611,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.115"
+version = "0.2.116"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-collection"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "futures",
@@ -3705,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.2.87"
+version = "0.2.88"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "futures",
@@ -3853,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.85"
+version = "0.2.86"
 dependencies = [
  "async-trait",
  "futures",

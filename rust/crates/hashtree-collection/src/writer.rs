@@ -14,6 +14,7 @@ use crate::{
 };
 
 pub struct CollectionWriter<S: Store, T> {
+    store: Arc<S>,
     tree: HashTree<S>,
     index: BTree<S>,
     search_indexes: BTreeMap<String, SearchIndex<S>>,
@@ -64,6 +65,7 @@ impl<S: Store, T> CollectionWriter<S, T> {
             .collect();
 
         Self {
+            store: Arc::clone(&store),
             tree: HashTree::new(HashTreeConfig::new(Arc::clone(&store))),
             index: BTree::new(
                 store,
@@ -319,6 +321,7 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
             .index
             .update_links(self.state.by_id_root.as_ref(), by_id_changes)
             .await?;
+        self.flush_index_writes().await?;
         for index in self.definition.key_indexes() {
             let mut changes = BTreeMap::<String, Option<Cid>>::new();
             for (_, _, _, previous) in &normalized_entries {
@@ -338,9 +341,17 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
                 .update_links(self.state.key_root(index.name()), changes)
                 .await?;
             self.state.key_roots.insert(index.name().to_string(), root);
+            self.flush_index_writes().await?;
         }
 
         Ok(self.snapshot())
+    }
+
+    async fn flush_index_writes(&self) -> Result<(), CollectionError> {
+        self.store.flush_pending().await.map_err(|err| {
+            CollectionError::HashTree(hashtree_core::HashTreeError::Store(err.to_string()))
+        })?;
+        Ok(())
     }
 
     pub async fn rebuild<I>(&mut self, entries: I) -> Result<CollectionState, CollectionError>

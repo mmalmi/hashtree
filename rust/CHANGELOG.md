@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.2.116 - 2026-07-20
+
+### Changed
+
+- Resumed Nostr event ingestion now flushes event blobs and each independent
+  B-tree projection separately. This bounds the buffered node set without
+  forcing tiny event commits that repeatedly walk all nine indexes.
+- Sparse updates of legacy B-tree roots preserve unknown subtree counts instead
+  of recursively scanning untouched descendants during ingestion. Exact counts
+  remain available through explicit scans, while newly built and fully counted
+  subtrees continue to expose constant-time stored counts.
+- Release `hashtree-core` 0.2.88, `hashtree-index` 0.2.84,
+  `hashtree-collection` 0.2.84, and `hashtree-nostr` 0.2.86 with the bounded
+  projection-flush path used by the CLI.
+
 ## 0.2.115 - 2026-07-20
 
 ### Changed

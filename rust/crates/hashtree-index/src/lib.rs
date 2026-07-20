@@ -57,7 +57,7 @@ pub struct BTree<S: Store> {
 struct BuiltNode {
     first_key: String,
     cid: Cid,
-    count: u64,
+    count: Option<u64>,
 }
 
 impl<S: Store> BTree<S> {
@@ -382,7 +382,7 @@ impl<S: Store> BTree<S> {
             level.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
-                count: chunk.len() as u64,
+                count: Some(chunk.len() as u64),
             });
         }
 
@@ -453,14 +453,10 @@ impl<S: Store> BTree<S> {
                     .unwrap_or(changes.len());
                 if change_start == change_end {
                     let cid = entry_cid(entry);
-                    let count = match stored_link_subtree_count(entry) {
-                        Some(count) => count,
-                        None => self.count_entries_recursive(cid.clone()).await?,
-                    };
                     children.push(BuiltNode {
                         first_key: unescape_key(&entry.name),
                         cid,
-                        count,
+                        count: stored_link_subtree_count(entry),
                     });
                 } else {
                     children.extend(
@@ -511,7 +507,7 @@ impl<S: Store> BTree<S> {
             nodes.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
-                count: chunk.len() as u64,
+                count: Some(chunk.len() as u64),
             });
         }
         Ok(nodes)
@@ -545,7 +541,7 @@ impl<S: Store> BTree<S> {
             level.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
-                count: chunk.len() as u64,
+                count: Some(chunk.len() as u64),
             });
         }
 
@@ -620,14 +616,10 @@ impl<S: Store> BTree<S> {
                     .unwrap_or(changes.len());
                 if change_start == change_end {
                     let cid = entry_cid(entry);
-                    let count = match stored_link_subtree_count(entry) {
-                        Some(count) => count,
-                        None => self.count_links_recursive(cid.clone()).await?,
-                    };
                     children.push(BuiltNode {
                         first_key: unescape_key(&entry.name),
                         cid,
-                        count,
+                        count: stored_link_subtree_count(entry),
                     });
                 } else {
                     children.extend(
@@ -669,7 +661,7 @@ impl<S: Store> BTree<S> {
             nodes.push(BuiltNode {
                 first_key: chunk[0].0.clone(),
                 cid,
-                count: chunk.len() as u64,
+                count: Some(chunk.len() as u64),
             });
         }
         Ok(nodes)
@@ -988,7 +980,7 @@ impl<S: Store> BTree<S> {
             .iter()
             .map(|child| {
                 DirEntry::from_cid(escape_key(&child.first_key), &child.cid)
-                    .with_size(child.count)
+                    .with_size(child.count.unwrap_or(0))
                     .with_link_type(LinkType::Dir)
             })
             .collect();
@@ -1311,27 +1303,6 @@ impl<S: Store> BTree<S> {
         Box::pin(async move {
             let entries = self.tree.list_directory(&node).await?;
             count_link_entries_or_subtrees(self, &entries).await
-        })
-    }
-
-    fn count_entries_recursive<'a>(&'a self, node: Cid) -> BTreeFuture<'a, u64> {
-        Box::pin(async move {
-            let entries = self.tree.list_directory(&node).await?;
-            if is_leaf_node(&entries) {
-                return Ok(entries
-                    .iter()
-                    .filter(|entry| entry.link_type == LinkType::Blob)
-                    .count() as u64);
-            }
-
-            let mut count = 0;
-            for entry in entries {
-                count += match stored_link_subtree_count(&entry) {
-                    Some(child_count) => child_count,
-                    None => self.count_entries_recursive(entry_cid(&entry)).await?,
-                };
-            }
-            Ok(count)
         })
     }
 }
