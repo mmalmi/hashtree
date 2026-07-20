@@ -1615,6 +1615,65 @@ fn stale_replaceable_events_do_not_remain_in_general_indexes() {
 }
 
 #[test]
+fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let author_a = "a".repeat(64);
+        let author_b = "b".repeat(64);
+        let profile_a = canonical_store_event(&author_a, 7, 0, Vec::new(), "profile a");
+        let profile_b = canonical_store_event(&author_b, 9, 0, Vec::new(), "profile b");
+        let note = canonical_store_event(&author_a, 11, 1, Vec::new(), "ordinary note");
+        let root = store
+            .build(
+                None,
+                vec![note.clone(), profile_b.clone(), profile_a.clone()],
+            )
+            .await
+            .expect("build event index")
+            .expect("event index root");
+        let manifest = store
+            .get_manifest(Some(&root))
+            .await
+            .expect("read manifest");
+        let damaged = manifest.replaceable.expect("replaceable root");
+        assert!(backing
+            .delete(&damaged.hash)
+            .await
+            .expect("delete replaceable root"));
+
+        let repaired = store
+            .rebuild_replaceable_index(&root, 2)
+            .await
+            .expect("repair replaceable index");
+
+        assert_eq!(repaired.entries_scanned, 3);
+        assert_eq!(repaired.replaceable_entries, 2);
+        assert_eq!(
+            store
+                .get_replaceable(Some(&repaired.root), &author_a, 0)
+                .await
+                .expect("read repaired profile a"),
+            Some(profile_a)
+        );
+        assert_eq!(
+            store
+                .get_replaceable(Some(&repaired.root), &author_b, 0)
+                .await
+                .expect("read repaired profile b"),
+            Some(profile_b)
+        );
+        assert_eq!(
+            store
+                .get_by_id(Some(&repaired.root), &note.id)
+                .await
+                .expect("read unchanged by-id index"),
+            Some(note)
+        );
+    });
+}
+
+#[test]
 fn same_second_replaceable_events_prefer_the_lowest_id_in_every_build_order() {
     block_on(async {
         let author = "a".repeat(64);

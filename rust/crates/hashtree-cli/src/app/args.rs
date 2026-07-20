@@ -1051,6 +1051,21 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Rebuild a damaged regular replaceable-event index from durable indexes
+    RepairReplaceable {
+        /// Durable crawl state whose root will be replaced atomically
+        #[arg(long = "state-file")]
+        state_file: PathBuf,
+        /// Maximum author/kind/time entries held per scan page
+        #[arg(long, default_value_t = 8192)]
+        page_size: usize,
+        /// B-tree order used for the rebuilt index
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Apply the repair; without this flag the command only validates inputs
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]

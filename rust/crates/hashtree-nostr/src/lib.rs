@@ -191,6 +191,13 @@ pub struct NostrEventBuildReport {
     pub superseded_nodes: Vec<Cid>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NostrReplaceableRepairReport {
+    pub root: Cid,
+    pub entries_scanned: u64,
+    pub replaceable_entries: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsOptions {
     pub limit: Option<usize>,
@@ -1216,6 +1223,81 @@ impl<S: Store> NostrEventStore<S> {
             .await
             .map_err(|err| NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string())))?;
         Ok(next_root)
+    }
+
+    /// Rebuild the regular replaceable-event index from the authoritative
+    /// author/kind/time index while leaving every other manifest index intact.
+    ///
+    /// This is a bounded-memory closed-writer repair path for a damaged
+    /// derived replaceable index. The caller must force-sync the returned root
+    /// and publish it durably before deleting anything reachable only from the
+    /// previous root.
+    pub async fn rebuild_replaceable_index(
+        &self,
+        root: &Cid,
+        page_size: usize,
+    ) -> Result<NostrReplaceableRepairReport, NostrEventStoreError> {
+        if page_size == 0 {
+            return Err(NostrEventStoreError::Validation(
+                "replaceable repair page size must be non-zero".to_string(),
+            ));
+        }
+        let mut manifest = self.get_manifest(Some(root)).await?;
+        let author_kind_time = manifest.by_author_kind_time.as_ref().ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "Nostr manifest has no by-author-kind-time index".to_string(),
+            )
+        })?;
+
+        let mut start = None;
+        let mut entries_scanned = 0u64;
+        let mut last_slot = None;
+        let mut replaceable = Vec::new();
+        loop {
+            let page = self
+                .index
+                .range_links_limited(author_kind_time, start.as_deref(), None, page_size)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            entries_scanned = entries_scanned.saturating_add(page.len() as u64);
+            for (key, cid) in &page {
+                let mut parts = key.split(':');
+                let pubkey = parts.next().unwrap_or_default();
+                let kind_hex = parts.next().unwrap_or_default();
+                let kind = u32::from_str_radix(kind_hex, 16).map_err(|error| {
+                    NostrEventStoreError::Validation(format!(
+                        "invalid kind in author-kind-time key {key}: {error}"
+                    ))
+                })?;
+                if pubkey.len() != 64 || !is_replaceable_kind(kind) {
+                    continue;
+                }
+                let slot = replaceable_key(pubkey, kind);
+                if last_slot.as_ref() == Some(&slot) {
+                    continue;
+                }
+                last_slot = Some(slot.clone());
+                replaceable.push((slot, cid.clone()));
+            }
+
+            let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
+            start = Some(format!("{last_key}\0"));
+            if page.len() < page_size {
+                break;
+            }
+        }
+
+        manifest.replaceable = self.index.build_links(replaceable.clone()).await?;
+        let repaired_root = self.write_manifest(&manifest).await?.ok_or_else(|| {
+            NostrEventStoreError::Validation("repaired Nostr manifest was empty".to_string())
+        })?;
+        Ok(NostrReplaceableRepairReport {
+            root: repaired_root,
+            entries_scanned,
+            replaceable_entries: replaceable.len(),
+        })
     }
 
     pub async fn get_by_id(

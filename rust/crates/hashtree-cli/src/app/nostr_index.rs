@@ -310,6 +310,23 @@ pub(crate) struct NostrIndexQueryOutput {
     pub(crate) events: Vec<StoredNostrEvent>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct NostrReplaceableRepairOptions {
+    pub(crate) state_file: PathBuf,
+    pub(crate) page_size: usize,
+    pub(crate) btree_order: usize,
+    pub(crate) apply: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct NostrReplaceableRepairOutput {
+    pub(crate) previous_root: String,
+    pub(crate) root: String,
+    pub(crate) entries_scanned: u64,
+    pub(crate) replaceable_entries: usize,
+    pub(crate) applied: bool,
+}
+
 pub(crate) async fn run_nostr_index_import(
     data_dir: PathBuf,
     options: NostrIndexImportOptions,
@@ -416,6 +433,77 @@ pub(crate) async fn run_nostr_index_query(
     };
     write_nostr_index_query_output(&output, options.out.as_deref())?;
     Ok(output)
+}
+
+pub(crate) async fn run_nostr_replaceable_repair(
+    data_dir: PathBuf,
+    options: NostrReplaceableRepairOptions,
+) -> Result<NostrReplaceableRepairOutput> {
+    let expected_state_file = data_dir.join(INDEX_DIR).join(CRAWL_STATE_FILE);
+    if options.state_file != expected_state_file {
+        anyhow::bail!(
+            "repair state file {} does not match data directory state {}",
+            options.state_file.display(),
+            expected_state_file.display()
+        );
+    }
+    if options.page_size == 0 || options.btree_order < 2 {
+        anyhow::bail!("repair page size must be non-zero and B-tree order must be at least 2");
+    }
+    let state_bytes = std::fs::read(&options.state_file)
+        .with_context(|| format!("read durable crawl state {}", options.state_file.display()))?;
+    let mut state: IndexedNostrCrawlState = serde_json::from_slice(&state_bytes)
+        .with_context(|| format!("parse durable crawl state {}", options.state_file.display()))?;
+    let previous_root = state
+        .root
+        .clone()
+        .context("durable crawl state has no root")?;
+    let root = parse_root_text(&previous_root).context("parse durable crawl root")?;
+
+    if !options.apply {
+        return Ok(NostrReplaceableRepairOutput {
+            previous_root: previous_root.clone(),
+            root: previous_root,
+            entries_scanned: 0,
+            replaceable_entries: 0,
+            applied: false,
+        });
+    }
+
+    let _lock = CrawlStateLock::acquire(&data_dir)?;
+    let config = Config::load()?;
+    // Closed-writer repair must never invoke quota eviction while opening an
+    // intentionally large dedicated index.
+    let store = Arc::new(HashtreeStore::with_options(
+        &data_dir,
+        config.storage.s3.as_ref(),
+        0,
+    )?);
+    let event_store = NostrEventStore::with_options(
+        store.store_arc(),
+        NostrEventStoreOptions {
+            btree_order: Some(options.btree_order),
+            ..NostrEventStoreOptions::default()
+        },
+    );
+    let report = event_store
+        .rebuild_replaceable_index(&root, options.page_size)
+        .await
+        .context("rebuild regular replaceable-event index")?;
+    store
+        .force_sync()
+        .context("force-sync repaired Nostr index")?;
+    let repaired_root = cid_to_nhash(&report.root)?;
+    state.root = Some(repaired_root.clone());
+    persist_crawl_state(&data_dir, &state)?;
+
+    Ok(NostrReplaceableRepairOutput {
+        previous_root,
+        root: repaired_root,
+        entries_scanned: report.entries_scanned,
+        replaceable_entries: report.replaceable_entries,
+        applied: true,
+    })
 }
 
 pub(crate) async fn run_socialgraph_index_from_cli(

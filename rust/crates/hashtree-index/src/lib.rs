@@ -317,6 +317,29 @@ impl<S: Store> BTree<S> {
             .await
     }
 
+    /// Read a bounded page of CID-link entries in key order.
+    ///
+    /// `start` is inclusive and `end` is exclusive. Callers paging forward can
+    /// append `\0` to the final key from the previous page to exclude it.
+    pub async fn range_links_limited(
+        &self,
+        root: &Cid,
+        start: Option<&str>,
+        end: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Cid)>, BTreeError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.range_link_traverse_limited(
+            root.clone(),
+            start.map(ToOwned::to_owned),
+            end.map(ToOwned::to_owned),
+            limit,
+        )
+        .await
+    }
+
     pub async fn delete(&self, root: &Cid, key: &str) -> Result<Option<Cid>, BTreeError> {
         self.delete_recursive(root.clone(), key.to_string()).await
     }
