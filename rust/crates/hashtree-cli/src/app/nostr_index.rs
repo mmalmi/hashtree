@@ -9,13 +9,17 @@ use std::time::{Duration, Instant};
 use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
+use futures::{stream, StreamExt};
 use hashtree_core::{nhash_decode, nhash_encode_full, Cid, NHashData};
 use hashtree_nostr::{
-    CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge, NostrEventStore,
-    NostrEventStoreOptions, RelayFetchMode, StoredNostrEvent, VerifiedEvent,
+    stored_event_from_nostr_sdk_event, CrawlConfig, CrawlReport, ListEventsOptions, NostrBridge,
+    NostrEventStore, NostrEventStoreOptions, RelayFetchMode, StoredNostrEvent, VerifiedEvent,
 };
-use nostr::Keys;
-use nostr_sdk::{Event as NostrSdkEvent, Filter as NostrFilter};
+use nostr::{EventId, Keys};
+use nostr_sdk::{
+    pool::RelayLimits, Client as NostrClient, ClientOptions, Event as NostrSdkEvent,
+    Filter as NostrFilter,
+};
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -331,6 +335,90 @@ pub(crate) struct NostrReplaceableRepairOutput {
     pub(crate) applied: bool,
 }
 
+async fn fetch_missing_events_from_relays(
+    event_ids: &[String],
+    relays: &[String],
+    timeout: Duration,
+    relay_event_max_bytes: Option<u32>,
+) -> Result<Vec<StoredNostrEvent>> {
+    if event_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if relays.is_empty() {
+        anyhow::bail!("durable crawl policy has no relays for missing-event recovery");
+    }
+
+    let client = if let Some(max_size) = relay_event_max_bytes {
+        let mut limits = RelayLimits::default();
+        limits.events.max_size = Some(max_size);
+        NostrClient::builder()
+            .signer(Keys::generate())
+            .opts(ClientOptions::new().relay_limits(limits))
+            .build()
+    } else {
+        NostrClient::new(Keys::generate())
+    };
+    for relay in relays {
+        if let Err(error) = client.add_relay(relay).await {
+            eprintln!("Skipping repair relay {relay}: {error}");
+        }
+    }
+    client.connect().await;
+    client
+        .wait_for_connection(timeout.min(Duration::from_secs(2)))
+        .await;
+
+    let parsed_ids = event_ids
+        .iter()
+        .map(|event_id| {
+            EventId::from_hex(event_id)
+                .with_context(|| format!("parse missing Nostr event id {event_id}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let requests = parsed_ids
+        .chunks(64)
+        .flat_map(|ids| {
+            relays
+                .iter()
+                .map(move |relay| (relay.clone(), ids.to_vec()))
+        })
+        .collect::<Vec<_>>();
+    let concurrency = relays.len().saturating_mul(2).max(1);
+    let batches = stream::iter(requests)
+        .map(|(relay, ids)| {
+            let client = client.clone();
+            async move {
+                let filter = NostrFilter::new().ids(ids);
+                match client
+                    .fetch_events_from([relay.as_str()], filter, timeout)
+                    .await
+                {
+                    Ok(events) => events.to_vec(),
+                    Err(error) => {
+                        eprintln!("Skipping failed repair request to {relay}: {error}");
+                        Vec::new()
+                    }
+                }
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    client.disconnect().await;
+
+    let wanted = event_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut recovered = BTreeMap::<String, StoredNostrEvent>::new();
+    for event in batches.into_iter().flatten() {
+        let id = event.id.to_hex();
+        if wanted.contains(id.as_str()) {
+            recovered
+                .entry(id)
+                .or_insert_with(|| stored_event_from_nostr_sdk_event(&event));
+        }
+    }
+    Ok(recovered.into_values().collect())
+}
+
 pub(crate) async fn run_nostr_index_import(
     data_dir: PathBuf,
     options: NostrIndexImportOptions,
@@ -557,15 +645,20 @@ pub(crate) async fn run_nostr_replaceable_repair(
             0,
         )?);
         let staging_event_store = NostrEventStore::new(staging_store.store_arc());
-        let mut recovered = Vec::with_capacity(missing.len());
+        let mut recovered = BTreeMap::<String, StoredNostrEvent>::new();
         for (author_index, mut target_ids) in targets_by_author {
             let path =
                 stage_segment_path(&options.staging_data_dir, author_index, author_index + 1);
-            let segment: StagedAuthorSegment = serde_json::from_slice(
-                &std::fs::read(&path)
-                    .with_context(|| format!("read staged repair segment {}", path.display()))?,
-            )
-            .with_context(|| format!("parse staged repair segment {}", path.display()))?;
+            let segment_bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("read staged repair segment {}", path.display()));
+                }
+            };
+            let segment: StagedAuthorSegment = serde_json::from_slice(&segment_bytes)
+                .with_context(|| format!("parse staged repair segment {}", path.display()))?;
             if segment.start_author != author_index || segment.end_author != author_index + 1 {
                 anyhow::bail!(
                     "staged repair segment {} has the wrong author range",
@@ -592,25 +685,51 @@ pub(crate) async fn run_nostr_replaceable_repair(
                     })?
                 {
                     if target_ids.remove(&event.id) {
-                        recovered.push(event);
+                        recovered.insert(event.id.clone(), event);
                     }
                 }
                 if target_ids.is_empty() {
                     break;
                 }
             }
-            if !target_ids.is_empty() {
-                anyhow::bail!(
-                    "{} missing indexed events were not present in projected staging data for author {author_index}",
-                    target_ids.len()
-                );
-            }
         }
-        if recovered.len() != missing.len() {
+
+        let missing_event_ids = missing
+            .iter()
+            .map(|missing_link| {
+                missing_link
+                    .key
+                    .rsplit_once(':')
+                    .map(|(_, event_id)| event_id.to_string())
+                    .context("missing author-kind-time key has no event id")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let unresolved = missing_event_ids
+            .iter()
+            .filter(|event_id| !recovered.contains_key(event_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for event in fetch_missing_events_from_relays(
+            &unresolved,
+            &state.policy.relays,
+            Duration::from_millis(state.policy.fetch_timeout_millis),
+            state.policy.relay_event_max_bytes,
+        )
+        .await
+        .context("fetch missing indexed events from crawl relays")?
+        {
+            recovered.insert(event.id.clone(), event);
+        }
+        if recovered.len() != missing_event_ids.len() {
+            let first_unresolved = missing_event_ids
+                .iter()
+                .find(|event_id| !recovered.contains_key(event_id.as_str()))
+                .map(String::as_str)
+                .unwrap_or("unknown");
             anyhow::bail!(
-                "recovered {} of {} missing indexed events",
+                "recovered {} of {} missing indexed events; first unresolved id={first_unresolved}",
                 recovered.len(),
-                missing.len()
+                missing_event_ids.len()
             );
         }
 
@@ -619,7 +738,7 @@ pub(crate) async fn run_nostr_replaceable_repair(
             .await
             .context("write temporary repair manifest")?;
         let event_repair = event_store
-            .build_with_superseded_nodes(Some(&repair_base), recovered)
+            .build_with_superseded_nodes(Some(&repair_base), recovered.into_values())
             .await
             .context("reindex recovered staged events")?;
         working_root = event_repair
