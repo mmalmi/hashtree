@@ -2805,9 +2805,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.4.19"
+version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59f25c710228b85f5389709670e7affe0d6d4561325b261d4daee6658da4ca0b"
+checksum = "ea03ec2992538be19336dcdb2a054baa58567e0613a2e71509589aebe2264a2f"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -3766,7 +3766,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "async-trait",
  "fips-core",

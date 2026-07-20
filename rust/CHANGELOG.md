@@ -10,6 +10,11 @@
   arenas to glibc before processing the next author batch. This prevents
   bounded multi-checkpoint crawls from accumulating inactive heap until their
   cgroup memory limit is exhausted.
+- Native FIPS WebRTC endpoints now bootstrap over the same authenticated
+  WebSocket seeds as browser consumers. `server.fips_websocket_seed_urls` can
+  override the defaults, and an explicit empty list disables seed bootstrap.
+- Release `hashtree-fips-transport` 0.4.11 with FIPS core 0.4.20 so configured
+  WebSocket adjacencies remain admitted under configured-only discovery.
 
 ## 0.2.113 - 2026-07-20
 

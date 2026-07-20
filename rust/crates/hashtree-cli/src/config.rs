@@ -113,6 +113,10 @@ pub struct ServerConfig {
     /// list disables relay discovery.
     #[serde(default)]
     pub fips_relays: Option<Vec<String>>,
+    /// First-adjacency FIPS WebSocket seeds. Unset uses the public Iris FIPS
+    /// seeds when WebRTC is enabled; an explicit empty list disables them.
+    #[serde(default)]
+    pub fips_websocket_seed_urls: Option<Vec<String>>,
     /// Always-configured Hashtree FIPS peers. These are useful for origin/cache
     /// pairs that should connect immediately without waiting for discovery.
     #[serde(
@@ -187,9 +191,22 @@ impl ServerConfig {
             None => merge_fips_signal_relays(active_nostr_relays),
         }
     }
+
+    pub fn resolved_fips_websocket_seed_urls(&self) -> Vec<String> {
+        match &self.fips_websocket_seed_urls {
+            Some(seed_urls) => normalize_fips_signal_relays(seed_urls),
+            None if self.enable_fips_webrtc => DEFAULT_FIPS_WEBSOCKET_SEED_URLS
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
 }
 
 const DEFAULT_FIPS_SIGNAL_RELAYS: [&str; 2] = ["wss://temp.iris.to", "wss://relay.primal.net"];
+const DEFAULT_FIPS_WEBSOCKET_SEED_URLS: [&str; 2] =
+    ["wss://fips1.iris.to/fips", "wss://fips2.iris.to/fips"];
 
 fn merge_fips_signal_relays(configured: &[String]) -> Vec<String> {
     normalize_fips_signal_relays(
@@ -708,6 +725,7 @@ impl Default for ServerConfig {
             fips_local_rendezvous_addr: None,
             enable_fips_lan_discovery: default_enable_fips_lan_discovery(),
             fips_relays: None,
+            fips_websocket_seed_urls: None,
             fips_peers: Vec::new(),
             enable_fips_udp: default_enable_fips_udp(),
             fips_udp_bind_addr: None,
@@ -1474,6 +1492,18 @@ decentralized_pubsub_max_event_bytes = 4096
         assert!(server.fips_ethernet_interfaces.is_empty());
         assert!(server.fetch_from_fips_peers);
         assert!(server.fips_relays.is_none());
+        assert!(server.fips_websocket_seed_urls.is_none());
+        assert_eq!(
+            server.resolved_fips_websocket_seed_urls(),
+            if cfg!(feature = "fips-webrtc") {
+                vec![
+                    "wss://fips1.iris.to/fips".to_string(),
+                    "wss://fips2.iris.to/fips".to_string(),
+                ]
+            } else {
+                Vec::new()
+            }
+        );
         assert!(server.fips_peers.is_empty());
         assert_eq!(server.fips_discovery_scope, "fips-overlay-v1");
         assert_eq!(server.fips_open_discovery_max_pending, 0);
@@ -1493,6 +1523,7 @@ fips_open_discovery_max_pending = 32
 fips_local_rendezvous_addr = "127.0.0.1:32111"
 enable_fips_lan_discovery = false
 fips_relays = ["wss://fips.example"]
+fips_websocket_seed_urls = ["wss://seed.example/fips", "wss://seed.example/fips/"]
 fips_peers = [
   { npub = "npub1origin", udp_addresses = ["udp:192.0.2.10:2121"] },
   { npub = "npub1cache" },
@@ -1520,6 +1551,10 @@ fips_request_timeout_ms = 42
         assert_eq!(
             config.server.fips_relays,
             Some(vec!["wss://fips.example".to_string()])
+        );
+        assert_eq!(
+            config.server.resolved_fips_websocket_seed_urls(),
+            ["wss://seed.example/fips"]
         );
         assert_eq!(
             config.server.fips_peers,

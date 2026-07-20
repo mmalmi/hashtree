@@ -12,7 +12,8 @@ use hashtree_core::{BlobRoute, StoreBlobRoute};
 use hashtree_fips_transport::{
     bind_fips_endpoint, bind_fips_endpoint_at_local_rendezvous, set_fips_peer_configs,
     BoundFipsEndpoint, FipsBlobRoute, FipsEndpoint, FipsEndpointOptions, FipsPeerConfig,
-    PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig, DEFAULT_FIPS_DISCOVERY_SCOPE,
+    PeerIdentity, TcpBlobTransport, TcpBlobTransportConfig, WebSocketConfig,
+    DEFAULT_FIPS_DISCOVERY_SCOPE,
 };
 use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig, MeshForwardingRoute};
 use hashtree_nostr_pubsub::HashtreeNostrBoundedEventCache;
@@ -102,6 +103,13 @@ pub async fn start_daemon_fips_transport(
     options.relays = relays;
     options.enable_udp = config.server.enable_fips_udp;
     options.enable_webrtc = config.server.enable_fips_webrtc;
+    let websocket_seed_urls = config.server.resolved_fips_websocket_seed_urls();
+    if !websocket_seed_urls.is_empty() {
+        options.websocket = Some(WebSocketConfig {
+            seed_urls: websocket_seed_urls,
+            ..Default::default()
+        });
+    }
     options.enable_local_rendezvous = true;
     options.enable_lan_discovery = config.server.enable_fips_lan_discovery;
     options.ethernet_interfaces = config.server.fips_ethernet_interfaces.clone();
