@@ -1256,6 +1256,7 @@ impl<S: Store> NostrEventStore<S> {
         let mut last_slot = None;
         let mut replaceable = Vec::new();
         let mut parameterized_replaceable = BTreeMap::new();
+        let mut missing_parameterized = Vec::new();
         loop {
             let page = self
                 .index
@@ -1285,7 +1286,14 @@ impl<S: Store> NostrEventStore<S> {
                     last_slot = Some(slot.clone());
                     replaceable.push((slot, cid.clone()));
                 } else if is_parameterized_replaceable_kind(kind) {
-                    let event = self.read_stored_event(cid).await?;
+                    let event = match self.read_stored_event(cid).await {
+                        Ok(event) => event,
+                        Err(error) if is_missing_stored_event_error(&error) => {
+                            missing_parameterized.push((key.clone(), cid.clone()));
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let slot = parameterized_replaceable_key(
                         pubkey,
                         kind,
@@ -1302,6 +1310,13 @@ impl<S: Store> NostrEventStore<S> {
             if page.len() < page_size {
                 break;
             }
+        }
+
+        if let Some((key, cid)) = missing_parameterized.first() {
+            return Err(NostrEventStoreError::Validation(format!(
+                "{} parameterized event blobs are missing; first key={key} cid={cid}",
+                missing_parameterized.len()
+            )));
         }
 
         manifest.replaceable = self.index.build_links(replaceable.clone()).await?;
