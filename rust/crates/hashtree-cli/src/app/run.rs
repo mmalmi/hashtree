@@ -1657,12 +1657,10 @@ pub(crate) async fn run() -> Result<()> {
                     } else {
                         Cid::parse(root_text).context("parse durable root CID")?
                     };
-                    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
-                    let store = HashtreeStore::with_options(
-                        &data_dir,
-                        config.storage.s3.as_ref(),
-                        max_size_bytes,
-                    )?;
+                    // This closed-writer reachability operation must not invoke
+                    // quota eviction while opening an intentionally large index.
+                    let store =
+                        HashtreeStore::with_options(&data_dir, config.storage.s3.as_ref(), 0)?;
                     if !apply {
                         println!("Dry run; pass --apply to delete unreachable blobs.");
                     }
