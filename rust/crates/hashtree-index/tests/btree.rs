@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
@@ -58,23 +57,16 @@ impl Store for CountingStore {
 #[derive(Default)]
 struct ConcurrentReadStore {
     inner: MemoryStore,
+    probe_enabled: AtomicBool,
     active_gets: AtomicUsize,
     max_active_gets: AtomicUsize,
 }
 
-struct YieldOnce(bool);
-
-impl Future for YieldOnce {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.0 {
-            Poll::Ready(())
-        } else {
-            self.0 = true;
-            context.waker().wake_by_ref();
-            Poll::Pending
-        }
+impl ConcurrentReadStore {
+    fn start_probe(&self) {
+        self.active_gets.store(0, Ordering::SeqCst);
+        self.max_active_gets.store(0, Ordering::SeqCst);
+        self.probe_enabled.store(true, Ordering::SeqCst);
     }
 }
 
@@ -85,9 +77,22 @@ impl Store for ConcurrentReadStore {
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        if !self.probe_enabled.load(Ordering::SeqCst) {
+            return self.inner.get(hash).await;
+        }
         let active = self.active_gets.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active_gets.fetch_max(active, Ordering::SeqCst);
-        YieldOnce(false).await;
+        // Hold the first probed synchronous read briefly. Real worker threads
+        // can enter another read concurrently; future-only fan-out on one
+        // executor thread cannot, which is exactly what this test distinguishes.
+        if self.max_active_gets.load(Ordering::SeqCst) < 2 {
+            for _ in 0..1_000 {
+                if self.active_gets.load(Ordering::SeqCst) > 1 {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+        }
         let result = self.inner.get(hash).await;
         self.active_gets.fetch_sub(1, Ordering::SeqCst);
         result
@@ -647,7 +652,7 @@ fn dense_link_changes_read_independent_subtrees_concurrently() {
             .await
             .unwrap()
             .expect("initial root");
-        store.max_active_gets.store(0, Ordering::SeqCst);
+        store.start_probe();
 
         btree
             .update_links(
@@ -670,6 +675,46 @@ fn dense_link_changes_read_independent_subtrees_concurrently() {
         assert!(
             max_active_gets <= 4,
             "bounded subtree traversal issued {max_active_gets} concurrent reads"
+        );
+    });
+}
+
+#[test]
+fn clustered_link_changes_find_deeper_parallel_subtrees() {
+    block_on(async {
+        let store = Arc::new(ConcurrentReadStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) });
+        let entry_count = 20_000;
+        let root = btree
+            .build_links(
+                (0..entry_count).map(|index| (format!("key:{index:05}"), cid_from_seed(index))),
+            )
+            .await
+            .unwrap()
+            .expect("initial root");
+        store.start_probe();
+
+        btree
+            .update_links(
+                Some(&root),
+                (8_000..9_000).map(|index| {
+                    (
+                        format!("key:{index:05}"),
+                        Some(cid_from_seed(index + 30_000)),
+                    )
+                }),
+            )
+            .await
+            .expect("update clustered links");
+
+        let max_active_gets = store.max_active_gets.load(Ordering::SeqCst);
+        assert!(
+            max_active_gets > 1,
+            "clustered changes did not parallelize below their shared root branch"
+        );
+        assert!(
+            max_active_gets <= 4,
+            "bounded clustered traversal issued {max_active_gets} concurrent reads"
         );
     });
 }

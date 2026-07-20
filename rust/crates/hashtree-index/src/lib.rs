@@ -487,7 +487,7 @@ impl<S: Store> BTree<S> {
                             self.update_string_node(
                                 child.cid,
                                 &changes[change_start..change_end],
-                                false,
+                                parallel_children,
                             )
                             .await?,
                         );
@@ -718,7 +718,7 @@ impl<S: Store> BTree<S> {
                             self.update_link_node(
                                 child.cid,
                                 &changes[change_start..change_end],
-                                false,
+                                parallel_children,
                             )
                             .await?,
                         );
