@@ -6,7 +6,11 @@ import {
   type Logger,
 } from '@fips/core';
 import { WebRtcTransport } from '@fips/transport-webrtc';
-import { DEFAULT_FIPS_DISCOVERY_APP } from './constants.js';
+import { WebSocketTransport } from '@fips/transport-websocket';
+import {
+  DEFAULT_FIPS_DISCOVERY_APP,
+  DEFAULT_FIPS_WEBSOCKET_SEED_URLS,
+} from './constants.js';
 import {
   createFipsWorkerP2PProvider,
   type FipsBlobRouteSource,
@@ -23,6 +27,8 @@ interface BrowserHashtreeFipsProviderBaseOptions {
   localStore: Store;
   discoveryApp?: string;
   stunServers?: readonly string[];
+  /** Explicit authenticated first-adjacency seeds used to bootstrap WebRTC negotiation. */
+  websocketSeedUrls?: readonly string[];
   maxConnections?: number;
   connectTimeoutMs?: number;
   relayConnectTimeoutMs?: number;
@@ -42,6 +48,7 @@ export type BrowserHashtreeFipsProviderOptions = BrowserHashtreeFipsProviderBase
 export interface BrowserHashtreeFipsProvider extends HashtreeWorkerP2PProvider {
   readonly node: FipsNode;
   readonly webRtcTransport: WebRtcTransport;
+  readonly webSocketTransport: WebSocketTransport;
   stop(): Promise<void>;
 }
 
@@ -64,6 +71,16 @@ export async function createBrowserHashtreeFipsProvider(
     throw new Error('browser FIPS requires at least one Nostr relay');
   }
   const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
+  const websocketSeedUrls = normalizeWebSocketSeedUrls(
+    options.websocketSeedUrls ?? DEFAULT_FIPS_WEBSOCKET_SEED_URLS,
+  );
+  if (websocketSeedUrls.length === 0) {
+    throw new Error('browser FIPS requires at least one WebSocket bootstrap seed');
+  }
+  const webSocketTransport = new WebSocketTransport({
+    seedUrls: websocketSeedUrls,
+    logger: options.logger,
+  });
   const webRtcTransport = new WebRtcTransport({
     relays,
     stunServers: [...(options.stunServers ?? DEFAULT_STUN_SERVERS)],
@@ -79,7 +96,7 @@ export async function createBrowserHashtreeFipsProvider(
   });
   const node = new FipsNode({
     identity,
-    transports: [webRtcTransport],
+    transports: [webSocketTransport, webRtcTransport],
     forwarding: options.forwarding ?? true,
     routingMode: 'reply_learned',
     logger: options.logger,
@@ -109,6 +126,7 @@ export async function createBrowserHashtreeFipsProvider(
     listPeerIds: () => provider.listPeerIds(),
     node,
     webRtcTransport,
+    webSocketTransport,
     stop,
   };
 }
@@ -125,6 +143,15 @@ function normalizeRelayUrls(relays: readonly string[]): string[] {
   const normalized = new Set<string>();
   for (const relay of relays) {
     const value = relay.trim().replace(/\/+$/, '');
+    if (value) normalized.add(value);
+  }
+  return [...normalized];
+}
+
+function normalizeWebSocketSeedUrls(seedUrls: readonly string[]): string[] {
+  const normalized = new Set<string>();
+  for (const seedUrl of seedUrls) {
+    const value = seedUrl.trim().replace(/\/+$/, '');
     if (value) normalized.add(value);
   }
   return [...normalized];

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.5 - 2026-07-20
+
+### Fixed
+
+- Release `@hashtree/fips-transport@0.4.6` with the authenticated WebSocket
+  first adjacency required by FIPS TypeScript 0.0.29. Browser WebRTC offers now
+  travel over FSP port 257 after a real FIPS route exists instead of failing
+  with `no route` immediately after Nostr peer discovery.
+
 ## TypeScript runtime 0.5.4 - 2026-07-20
 
 ### Changed

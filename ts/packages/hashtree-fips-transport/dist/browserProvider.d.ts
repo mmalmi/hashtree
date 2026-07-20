@@ -1,12 +1,15 @@
 import { type Store } from '@hashtree/core';
 import { FipsNode, type FipsIdentity, type Logger } from '@fips/core';
 import { WebRtcTransport } from '@fips/transport-webrtc';
+import { WebSocketTransport } from '@fips/transport-websocket';
 import { type FipsBlobRouteSource, type HashtreeWorkerP2PProvider } from './workerProvider.js';
 interface BrowserHashtreeFipsProviderBaseOptions {
     relays: readonly string[];
     localStore: Store;
     discoveryApp?: string;
     stunServers?: readonly string[];
+    /** Explicit authenticated first-adjacency seeds used to bootstrap WebRTC negotiation. */
+    websocketSeedUrls?: readonly string[];
     maxConnections?: number;
     connectTimeoutMs?: number;
     relayConnectTimeoutMs?: number;
@@ -27,6 +30,7 @@ export type BrowserHashtreeFipsProviderOptions = BrowserHashtreeFipsProviderBase
 export interface BrowserHashtreeFipsProvider extends HashtreeWorkerP2PProvider {
     readonly node: FipsNode;
     readonly webRtcTransport: WebRtcTransport;
+    readonly webSocketTransport: WebSocketTransport;
     stop(): Promise<void>;
 }
 export declare function supportsBrowserHashtreeFips(): boolean;
