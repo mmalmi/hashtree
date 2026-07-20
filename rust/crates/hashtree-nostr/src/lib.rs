@@ -913,6 +913,11 @@ impl<S: Store> NostrEventStore<S> {
             current_root = self
                 .build_index_commit(current_root.as_ref(), batch)
                 .await?;
+            // Each commit drops its large per-index change maps before
+            // returning. glibc can otherwise retain those freed arenas across
+            // the remaining commits in a large author, defeating the bounded
+            // commit size and eventually exhausting a crawler cgroup.
+            trim_index_commit_allocations();
         }
         Ok(current_root)
     }
@@ -2118,6 +2123,18 @@ fn compare_replaceable_events(left: &StoredNostrEvent, right: &StoredNostrEvent)
         },
     }
 }
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_index_commit_allocations() {
+    // SAFETY: malloc_trim asks glibc to return free heap pages to the OS after
+    // the commit-local values that owned them have been dropped.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_index_commit_allocations() {}
 
 fn retain_unique_latest_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostrEvent> {
     let mut winners = BTreeMap::<(ReplaceableSlot, String), StoredNostrEvent>::new();

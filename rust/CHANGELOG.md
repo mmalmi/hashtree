@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.115 - 2026-07-20
+
+### Changed
+
+- Bounded Nostr event-store builds now return freed per-index change-map arenas
+  to glibc after every configured index commit. Large single-author crawls no
+  longer need to reach the outer author checkpoint before reclaiming memory.
+
 ## 0.2.114 - 2026-07-20
 
 ### Changed

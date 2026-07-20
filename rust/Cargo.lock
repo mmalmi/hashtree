@@ -3611,7 +3611,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.114"
+version = "0.2.115"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3853,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.84"
+version = "0.2.85"
 dependencies = [
  "async-trait",
  "futures",
@@ -3861,6 +3861,7 @@ dependencies = [
  "hashtree-core",
  "hashtree-index",
  "hex",
+ "libc",
  "negentropy",
  "nostr",
  "nostr-sdk",
