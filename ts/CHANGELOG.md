@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.4 - 2026-07-20
+
+### Changed
+
+- Release `@hashtree/fips-transport@0.4.5` against FIPS TypeScript runtime
+  0.0.29. Direct FSP records are now used only after both peers negotiate the
+  Rust FIPS 0.4.19 session capability; upstream 0.4.1 and older peers retain
+  established FSP-inside-FMP routing.
+- Release Rust `hashtree-fips-transport` 0.4.10 with FIPS 0.4.19 as its
+  minimum compatible core.
+
 ## TypeScript runtime 0.5.3 - 2026-07-18
 
 ### Changed
