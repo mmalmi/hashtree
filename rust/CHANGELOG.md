@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.120 - 2026-07-20
+
+### Changed
+
+- Two-phase Nostr fetch backpressure is now based on the 8 GiB staged-live-byte
+  budget instead of an arbitrary 256-author lag. Authors with empty or small
+  segments no longer make relay fetching wait for slow global-index projection.
+
 ## 0.2.119 - 2026-07-20
 
 ### Changed

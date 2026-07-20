@@ -38,7 +38,6 @@ const STAGE_SEGMENTS_DIR: &str = "segments";
 const STAGE_STATE_FILE: &str = "crawl-state.json";
 const STAGE_LOCK_FILE: &str = "crawl.lock";
 const STAGE_FORMAT_VERSION: u32 = 1;
-const MAX_STAGED_AUTHORS_AHEAD: usize = 256;
 const MAX_STAGED_LIVE_BYTES_AHEAD: u64 = 8 * 1024 * 1024 * 1024;
 const MIRROR_STATE_DIR: &str = "nostr-mirror";
 const MIRROR_UPLOADED_EVENT_ROOT_FILE: &str = "nostr-event-index.uploaded-root";
@@ -956,9 +955,11 @@ async fn stage_allowlist_in_checkpoints(
             let live_bytes_ahead = state
                 .live_bytes_selected
                 .saturating_sub(projected_live_bytes);
-            if authors_ahead < MAX_STAGED_AUTHORS_AHEAD
-                && live_bytes_ahead < MAX_STAGED_LIVE_BYTES_AHEAD
-            {
+            // Authors vary by orders of magnitude and empty-author segments are
+            // tiny, so an author-count limit can re-couple fast relay fetching
+            // to slow projection while barely using the staging disk. Bound the
+            // queue by selected live bytes instead.
+            if live_bytes_ahead < MAX_STAGED_LIVE_BYTES_AHEAD {
                 break;
             }
             if !announced_backpressure {
