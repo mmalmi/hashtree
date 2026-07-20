@@ -240,8 +240,8 @@ impl HashtreeStore {
         let tree = HashTree::new(HashTreeConfig::new(self.store_arc()));
         let reachable = sync_block_on(async {
             let mut reachable = HashSet::new();
-            let mut stack = vec![root.clone()];
-            while let Some(cid) = stack.pop() {
+            let mut stack = vec![(root.clone(), "root".to_string())];
+            while let Some((cid, path)) = stack.pop() {
                 if !reachable.insert(cid.hash) {
                     continue;
                 }
@@ -250,11 +250,15 @@ impl HashtreeStore {
                     .await
                     .map_err(|error| anyhow::anyhow!("read retained root DAG: {error}"))?
                     .ok_or_else(|| {
-                        anyhow::anyhow!("retained directory node {} is missing", to_hex(&cid.hash))
+                        anyhow::anyhow!(
+                            "retained directory node {} is missing at {path}",
+                            to_hex(&cid.hash)
+                        )
                     })?;
                 for link in node.links {
                     if link.link_type.is_directory_like() {
-                        stack.push(link.to_cid());
+                        let name = link.name.as_deref().unwrap_or("<unnamed>");
+                        stack.push((link.to_cid(), format!("{path}/{name}")));
                     } else {
                         reachable.insert(link.hash);
                     }
