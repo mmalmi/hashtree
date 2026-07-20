@@ -13,6 +13,9 @@ use crate::{
     CollectionState, CollectionWriteContext, COLLECTION_MANIFEST_METADATA_FILE, MANIFEST_BY_ID,
 };
 
+const PARALLEL_KEY_INDEX_MIN_ENTRIES: usize = 256;
+const KEY_INDEX_CONCURRENCY: usize = 2;
+
 pub struct CollectionWriter<S: Store, T> {
     store: Arc<S>,
     tree: HashTree<S>,
@@ -322,26 +325,82 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
             .update_links(self.state.by_id_root.as_ref(), by_id_changes)
             .await?;
         self.flush_index_writes().await?;
-        for index in self.definition.key_indexes() {
-            let mut changes = BTreeMap::<String, Option<Cid>>::new();
-            for (_, _, _, previous) in &normalized_entries {
-                if let Some((_, previous)) = previous {
-                    for key in index.materialize_keys(previous) {
-                        changes.insert(key, None);
+        let parallel_key_indexes = normalized_entries.len() >= PARALLEL_KEY_INDEX_MIN_ENTRIES
+            && self.definition.key_indexes().len() > 1;
+        if parallel_key_indexes {
+            for index_group in self.definition.key_indexes().chunks(KEY_INDEX_CONCURRENCY) {
+                let mut jobs = Vec::with_capacity(index_group.len());
+                for index in index_group {
+                    let mut changes = BTreeMap::<String, Option<Cid>>::new();
+                    for (_, _, _, previous) in &normalized_entries {
+                        if let Some((_, previous)) = previous {
+                            for key in index.materialize_keys(previous) {
+                                changes.insert(key, None);
+                            }
+                        }
+                    }
+                    for (_, item, cid, _) in &normalized_entries {
+                        for key in index.materialize_keys(item) {
+                            changes.insert(key, Some(cid.clone()));
+                        }
+                    }
+                    jobs.push((
+                        index.name().to_string(),
+                        self.state.key_root(index.name()).cloned(),
+                        changes,
+                    ));
+                }
+
+                let index_writer = &self.index;
+                let roots = std::thread::scope(|scope| {
+                    let handles = jobs
+                        .into_iter()
+                        .map(|(name, root, changes)| {
+                            scope.spawn(move || {
+                                let root = futures::executor::block_on(
+                                    index_writer.update_links_serial(root.as_ref(), changes),
+                                )?;
+                                Ok::<_, CollectionError>((name, root))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let mut roots = Vec::with_capacity(handles.len());
+                    for handle in handles {
+                        roots.push(
+                            handle
+                                .join()
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+                        );
+                    }
+                    Ok::<_, CollectionError>(roots)
+                })?;
+                for (name, root) in roots {
+                    self.state.key_roots.insert(name, root);
+                }
+                self.flush_index_writes().await?;
+            }
+        } else {
+            for index in self.definition.key_indexes() {
+                let mut changes = BTreeMap::<String, Option<Cid>>::new();
+                for (_, _, _, previous) in &normalized_entries {
+                    if let Some((_, previous)) = previous {
+                        for key in index.materialize_keys(previous) {
+                            changes.insert(key, None);
+                        }
                     }
                 }
-            }
-            for (_, item, cid, _) in &normalized_entries {
-                for key in index.materialize_keys(item) {
-                    changes.insert(key, Some(cid.clone()));
+                for (_, item, cid, _) in &normalized_entries {
+                    for key in index.materialize_keys(item) {
+                        changes.insert(key, Some(cid.clone()));
+                    }
                 }
+                let root = self
+                    .index
+                    .update_links(self.state.key_root(index.name()), changes)
+                    .await?;
+                self.state.key_roots.insert(index.name().to_string(), root);
+                self.flush_index_writes().await?;
             }
-            let root = self
-                .index
-                .update_links(self.state.key_root(index.name()), changes)
-                .await?;
-            self.state.key_roots.insert(index.name().to_string(), root);
-            self.flush_index_writes().await?;
         }
 
         Ok(self.snapshot())
