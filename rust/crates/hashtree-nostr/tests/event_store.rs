@@ -1651,11 +1651,6 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
         let article_cid = by_id_event_cid(Arc::clone(&backing), &root, &article.id)
             .await
             .expect("article event cid");
-        let article_bytes = backing
-            .get(&article_cid.hash)
-            .await
-            .expect("read article blob")
-            .expect("article blob exists");
         assert!(backing
             .delete(&article_cid.hash)
             .await
@@ -1666,10 +1661,6 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .expect("scan missing parameterized event links");
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].cid, article_cid);
-        assert!(backing
-            .put(article_cid.hash, article_bytes)
-            .await
-            .expect("restore article event blob"));
         let damaged = manifest.replaceable.expect("replaceable root");
         let damaged_parameterized = manifest
             .parameterized_replaceable
@@ -1683,8 +1674,25 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .await
             .expect("delete parameterized replaceable root"));
 
+        let repair_base = store
+            .clear_replaceable_indexes(&root)
+            .await
+            .expect("clear damaged replaceable indexes");
+        let event_repair = store
+            .repair_missing_event_blobs_with_superseded_nodes(&repair_base, [article.clone()])
+            .await
+            .expect("repair missing event blob");
+        let repaired_event_root = event_repair.root.expect("repaired event root");
+        assert_eq!(
+            store
+                .get_by_id(Some(&repaired_event_root), &article.id)
+                .await
+                .expect("read restored article by id"),
+            Some(article.clone())
+        );
+
         let repaired = store
-            .rebuild_replaceable_index(&root, 2)
+            .rebuild_replaceable_index(&repaired_event_root, 2)
             .await
             .expect("repair replaceable index");
 

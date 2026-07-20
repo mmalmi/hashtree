@@ -1058,6 +1058,75 @@ impl<S: Store> NostrEventStore<S> {
         })
     }
 
+    /// Restore event blobs that are referenced by an existing collection but
+    /// missing from physical storage. The recovered logical event is supplied
+    /// as both the previous and replacement item so every derived index is
+    /// updated through the collection's explicit replace path.
+    ///
+    /// This is a closed-writer repair operation. The returned root must be
+    /// force-synced and published durably before deleting superseded nodes.
+    pub async fn repair_missing_event_blobs_with_superseded_nodes<I>(
+        &self,
+        root: &Cid,
+        events: I,
+    ) -> Result<NostrEventBuildReport, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = StoredNostrEvent>,
+    {
+        let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
+        let buffered_writer =
+            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
+        let mut manifest = buffered_writer.get_manifest(Some(root)).await?;
+        let mut prepared_events = Vec::new();
+        for (sequence, event) in events.into_iter().enumerate() {
+            let normalized = buffered_writer.validate_event(event).await?;
+            prepared_events.push(buffered_writer.prepare_event_blob(
+                sequence,
+                normalized.clone(),
+                Some(normalized),
+            )?);
+        }
+        if prepared_events.is_empty() {
+            return Ok(NostrEventBuildReport {
+                root: Some(root.clone()),
+                superseded_nodes: Vec::new(),
+            });
+        }
+
+        let indexed_events = buffered_writer
+            .put_prepared_event_blobs_parallel(prepared_events)
+            .await?;
+        buffered_store.flush().await.map_err(|error| {
+            NostrEventStoreError::HashTree(HashTreeError::Store(error.to_string()))
+        })?;
+        let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
+        collection
+            .put_batch(
+                indexed_events
+                    .into_iter()
+                    .map(|(_sequence, event, event_cid, previous)| (event, event_cid, previous)),
+            )
+            .await?;
+        let mut superseded_nodes = collection.take_superseded_index_nodes();
+        manifest = nostr_manifest_from_collection_state(collection.state());
+        let next_root = buffered_writer.write_manifest(&manifest).await?;
+        buffered_store.flush().await.map_err(|error| {
+            NostrEventStoreError::HashTree(HashTreeError::Store(error.to_string()))
+        })?;
+        if next_root.as_ref().is_some_and(|next| next != root) {
+            superseded_nodes.push(root.clone());
+        }
+        let mut seen_superseded = HashSet::new();
+        superseded_nodes.retain(|candidate| seen_superseded.insert(candidate.hash));
+        if let Some(next_root) = next_root.as_ref() {
+            superseded_nodes.retain(|candidate| candidate != next_root);
+        }
+        Ok(NostrEventBuildReport {
+            root: next_root,
+            superseded_nodes,
+        })
+    }
+
     async fn build_index_commit(
         &self,
         root: Option<&Cid>,

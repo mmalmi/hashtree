@@ -738,9 +738,9 @@ pub(crate) async fn run_nostr_replaceable_repair(
             .await
             .context("write temporary repair manifest")?;
         let event_repair = event_store
-            .build_with_superseded_nodes(Some(&repair_base), recovered.into_values())
+            .repair_missing_event_blobs_with_superseded_nodes(&repair_base, recovered.into_values())
             .await
-            .context("reindex recovered staged events")?;
+            .context("reindex recovered missing events")?;
         working_root = event_repair
             .root
             .context("recovered events did not produce an index root")?;
