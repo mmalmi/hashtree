@@ -126,6 +126,7 @@ pub struct SocialGraphStore {
     // `HeedSocialGraph` owns a raw Heed handle. Declaring it before this
     // managed clone makes Rust drop the graph first, then close Heed's cache.
     _graph_env_lifecycle: ManagedEnv,
+    ambient_store: Arc<StorageRouter>,
     distance_cache: StdMutex<Option<DistanceCache>>,
     public_events: EventIndexBucket,
     ambient_events: EventIndexBucket,
@@ -385,6 +386,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
     Ok(Arc::new(SocialGraphStore {
         graph: StdMutex::new(graph),
         _graph_env_lifecycle: graph_env_lifecycle,
+        ambient_store: Arc::clone(&ambient_store),
         distance_cache: StdMutex::new(None),
         public_events: EventIndexBucket {
             event_store: NostrEventStore::new(Arc::clone(&public_store)),
@@ -501,6 +503,19 @@ pub fn query_events(
 }
 
 impl SocialGraphStore {
+    /// Forces graph-owned LMDB state to durable storage.
+    ///
+    /// The public event/profile blobs are owned by the caller's
+    /// `HashtreeStore` and must be synced by that store separately.
+    pub fn force_sync(&self) -> Result<()> {
+        self._graph_env_lifecycle
+            .force_sync()
+            .context("force-sync social graph database")?;
+        self.ambient_store
+            .force_sync()
+            .map_err(|err| anyhow::anyhow!("force-sync ambient event storage: {err}"))
+    }
+
     pub fn set_profile_index_overmute_threshold(&self, threshold: f64) {
         *self
             .profile_index_overmute_threshold

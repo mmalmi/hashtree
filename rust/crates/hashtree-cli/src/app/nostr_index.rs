@@ -505,7 +505,7 @@ pub(crate) async fn run_socialgraph_index(
         state.policy = policy;
         persist_crawl_state(&data_dir, &state)?;
         let report = crawl_allowlist_in_checkpoints(
-            store.store_arc(),
+            store.as_ref(),
             graph_store.as_ref(),
             &data_dir,
             &options,
@@ -620,7 +620,7 @@ fn nostr_event_store_options(options: &SocialGraphIndexOptions) -> NostrEventSto
 }
 
 async fn crawl_allowlist_in_checkpoints(
-    store: Arc<hashtree_cli::storage::StorageRouter>,
+    durable_store: &HashtreeStore,
     graph_store: &socialgraph::SocialGraphStore,
     data_dir: &Path,
     options: &SocialGraphIndexOptions,
@@ -628,6 +628,7 @@ async fn crawl_allowlist_in_checkpoints(
     authors: &[String],
     state: &mut IndexedNostrCrawlState,
 ) -> Result<CrawlReport> {
+    let store = durable_store.store_arc();
     let checkpoint_authors = options
         .checkpoint_authors
         .min(options.author_batch_size)
@@ -722,6 +723,14 @@ async fn crawl_allowlist_in_checkpoints(
         state.live_bytes_selected = state
             .live_bytes_selected
             .saturating_add(report.live_bytes_selected);
+        let checkpoint_sync_started = Instant::now();
+        graph_store
+            .force_sync()
+            .context("force-sync social graph checkpoint storage")?;
+        durable_store
+            .force_sync()
+            .context("force-sync Nostr index checkpoint storage")?;
+        let checkpoint_sync_ms = checkpoint_sync_started.elapsed().as_millis();
         persist_crawl_state(data_dir, state)?;
         // Large B-tree change maps are intentionally short-lived, but glibc
         // can retain their freed arenas across durable author checkpoints.
@@ -729,7 +738,7 @@ async fn crawl_allowlist_in_checkpoints(
         // crawler does not accumulate heap until its cgroup limit is reached.
         hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
-            "Nostr index checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} relay_fetch_select_ms={} index_build_ms={} batch_elapsed_ms={}",
+            "Nostr index checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} relay_fetch_select_ms={} index_build_ms={} checkpoint_sync_ms={} batch_elapsed_ms={}",
             state.next_author,
             authors.len(),
             state.events_seen,
@@ -737,6 +746,7 @@ async fn crawl_allowlist_in_checkpoints(
             state.live_bytes_selected,
             report.relay_fetch_select_ms,
             report.index_build_ms,
+            checkpoint_sync_ms,
             started.elapsed().as_millis()
         );
     }

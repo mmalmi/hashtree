@@ -825,6 +825,32 @@ fn test_profile_search_index_with_shared_hashtree_storage() {
 }
 
 #[test]
+fn test_social_graph_force_sync_flushes_managed_storage() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let store =
+        crate::storage::HashtreeStore::with_embedded_options(tmp.path(), None, 1024 * 1024 * 1024)
+            .unwrap();
+    let graph_store =
+        open_test_social_graph_store_with_storage(tmp.path(), store.store_arc(), None).unwrap();
+    let keys = Keys::generate();
+    let profile = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "durable profile" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&profile))
+        .unwrap();
+    graph_store.force_sync().unwrap();
+    store.force_sync().unwrap();
+}
+
+#[test]
 fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadata() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();

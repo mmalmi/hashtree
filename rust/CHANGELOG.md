@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.2.117 - 2026-07-20
+
+### Changed
+
+- Durable Nostr author checkpoints can use LMDB `NO_SYNC`/`NO_META_SYNC` for
+  bounded internal event-index commits, then force-sync the graph, ambient,
+  metadata, pool catalog, and pool members once before advancing the author
+  cursor. This removes hundreds of redundant disk barriers from large authors
+  without weakening checkpoint durability.
+- Nostr checkpoint logs now report `checkpoint_sync_ms` separately from relay
+  fetching and index construction.
+
 ## 0.2.116 - 2026-07-20
 
 ### Changed
