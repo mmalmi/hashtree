@@ -38,6 +38,8 @@ const STAGE_SEGMENTS_DIR: &str = "segments";
 const STAGE_STATE_FILE: &str = "crawl-state.json";
 const STAGE_LOCK_FILE: &str = "crawl.lock";
 const STAGE_FORMAT_VERSION: u32 = 1;
+const MAX_STAGED_AUTHORS_AHEAD: usize = 256;
+const MAX_STAGED_LIVE_BYTES_AHEAD: u64 = 8 * 1024 * 1024 * 1024;
 const MIRROR_STATE_DIR: &str = "nostr-mirror";
 const MIRROR_UPLOADED_EVENT_ROOT_FILE: &str = "nostr-event-index.uploaded-root";
 const TOP_ITEMS_LIMIT: usize = 20;
@@ -65,6 +67,7 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) index_commit_batch_size: usize,
     pub(crate) stage_only: bool,
     pub(crate) project_staged: bool,
+    pub(crate) staging_data_dir: Option<PathBuf>,
     pub(crate) projection_authors: usize,
     pub(crate) projection_event_limit: usize,
     pub(crate) projection_follow: bool,
@@ -191,6 +194,17 @@ struct StagedAuthorSegment {
     events_selected: usize,
     live_bytes_selected: u64,
     event_cids: Vec<String>,
+}
+
+struct StagePaths<'a> {
+    staging: &'a Path,
+    projection: &'a Path,
+}
+
+struct ProjectionStores<'a> {
+    durable: &'a HashtreeStore,
+    staging: &'a HashtreeStore,
+    graph: &'a socialgraph::SocialGraphStore,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -421,6 +435,10 @@ pub(crate) async fn run_socialgraph_index(
     options: SocialGraphIndexOptions,
 ) -> Result<IndexedNostrReport> {
     let checkpointed_allowlist = uses_durable_author_checkpoints(&options);
+    let staging_data_dir = options
+        .staging_data_dir
+        .clone()
+        .unwrap_or_else(|| data_dir.clone());
     if options.stage_only && options.project_staged {
         anyhow::bail!("--stage-only and --project-staged are mutually exclusive");
     }
@@ -455,7 +473,7 @@ pub(crate) async fn run_socialgraph_index(
         anyhow::bail!("--per-author-kind-event-limit must be greater than zero");
     }
     let _crawl_lock = if options.stage_only {
-        Some(CrawlStateLock::acquire_stage(&data_dir)?)
+        Some(CrawlStateLock::acquire_stage(&staging_data_dir)?)
     } else if checkpointed_allowlist {
         Some(CrawlStateLock::acquire(&data_dir)?)
     } else {
@@ -542,9 +560,21 @@ pub(crate) async fn run_socialgraph_index(
             if let Some(state) = saved_crawl_state.as_ref() {
                 validate_crawl_state(state, &policy, authors.len())?;
             }
+            let staging_store = if staging_data_dir == data_dir {
+                Arc::clone(&store)
+            } else {
+                Arc::new(HashtreeStore::with_options(
+                    &staging_data_dir,
+                    config.storage.s3.as_ref(),
+                    max_size_bytes,
+                )?)
+            };
             let report = stage_allowlist_in_checkpoints(
-                store.as_ref(),
-                &data_dir,
+                staging_store.as_ref(),
+                StagePaths {
+                    staging: &staging_data_dir,
+                    projection: &data_dir,
+                },
                 &options,
                 &relays,
                 authors,
@@ -594,10 +624,23 @@ pub(crate) async fn run_socialgraph_index(
         persist_crawl_state(&data_dir, &state)?;
         let report = if options.project_staged {
             let projection_policy = state.policy.clone();
+            let staging_store = if staging_data_dir == data_dir {
+                Arc::clone(&store)
+            } else {
+                Arc::new(HashtreeStore::with_options(
+                    &staging_data_dir,
+                    config.storage.s3.as_ref(),
+                    max_size_bytes,
+                )?)
+            };
             project_staged_allowlist(
-                store.as_ref(),
-                graph_store.as_ref(),
+                ProjectionStores {
+                    durable: store.as_ref(),
+                    staging: staging_store.as_ref(),
+                    graph: graph_store.as_ref(),
+                },
                 &data_dir,
+                &staging_data_dir,
                 &options,
                 authors,
                 &projection_policy,
@@ -868,7 +911,7 @@ async fn crawl_allowlist_in_checkpoints(
 
 async fn stage_allowlist_in_checkpoints(
     durable_store: &HashtreeStore,
-    data_dir: &Path,
+    paths: StagePaths<'_>,
     options: &SocialGraphIndexOptions,
     relays: &[String],
     authors: &[String],
@@ -878,7 +921,7 @@ async fn stage_allowlist_in_checkpoints(
     let store = durable_store.store_arc();
     let event_store =
         NostrEventStore::with_options(Arc::clone(&store), nostr_event_store_options(options));
-    let mut state = match load_stage_state(data_dir)? {
+    let mut state = match load_stage_state(paths.staging)? {
         Some(state) => {
             validate_stage_state(&state, &policy, authors.len())?;
             state
@@ -895,13 +938,41 @@ async fn stage_allowlist_in_checkpoints(
     };
     state.author_allowlist_source = options.author_allowlist_url.clone();
     state.policy = policy;
-    persist_stage_state(data_dir, &state)?;
+    persist_stage_state(paths.staging, &state)?;
 
     let checkpoint_authors = options
         .checkpoint_authors
         .min(options.author_batch_size)
         .max(1);
     while state.next_author < authors.len() {
+        let mut announced_backpressure = false;
+        loop {
+            let projected = load_crawl_state(paths.projection)?;
+            let projected_author = projected.as_ref().map_or(0, |state| state.next_author);
+            let projected_live_bytes = projected
+                .as_ref()
+                .map_or(0, |state| state.live_bytes_selected);
+            let authors_ahead = state.next_author.saturating_sub(projected_author);
+            let live_bytes_ahead = state
+                .live_bytes_selected
+                .saturating_sub(projected_live_bytes);
+            if authors_ahead < MAX_STAGED_AUTHORS_AHEAD
+                && live_bytes_ahead < MAX_STAGED_LIVE_BYTES_AHEAD
+            {
+                break;
+            }
+            if !announced_backpressure {
+                eprintln!(
+                    "Nostr staging backpressure: fetched_authors={} projected_authors={} authors_ahead={} live_bytes_ahead={}",
+                    state.next_author,
+                    projected_author,
+                    authors_ahead,
+                    live_bytes_ahead
+                );
+                announced_backpressure = true;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
         if state.live_bytes_selected >= options.max_live_bytes {
             anyhow::bail!(
                 "Nostr staging live-byte budget exhausted after {}/{} authors; the durable fetch cursor was preserved",
@@ -974,7 +1045,7 @@ async fn stage_allowlist_in_checkpoints(
                 .map(cid_to_nhash)
                 .collect::<Result<Vec<_>>>()?,
         };
-        persist_stage_segment(data_dir, &segment)?;
+        persist_stage_segment(paths.staging, &segment)?;
 
         state.next_author = end;
         state.events_seen = state.events_seen.saturating_add(segment.events_seen);
@@ -984,7 +1055,7 @@ async fn stage_allowlist_in_checkpoints(
         state.live_bytes_selected = state
             .live_bytes_selected
             .saturating_add(segment.live_bytes_selected);
-        persist_stage_state(data_dir, &state)?;
+        persist_stage_state(paths.staging, &state)?;
         hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
             "Nostr staging checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} event_blobs={} relay_fetch_select_ms={} batch_elapsed_ms={}",
@@ -1014,22 +1085,26 @@ async fn stage_allowlist_in_checkpoints(
 }
 
 async fn project_staged_allowlist(
-    durable_store: &HashtreeStore,
-    graph_store: &socialgraph::SocialGraphStore,
+    stores: ProjectionStores<'_>,
     data_dir: &Path,
+    staging_data_dir: &Path,
     options: &SocialGraphIndexOptions,
     authors: &[String],
     policy: &IndexedNostrCrawlPolicy,
     state: &mut IndexedNostrCrawlState,
 ) -> Result<CrawlReport> {
     let event_store = NostrEventStore::with_options(
-        durable_store.store_arc(),
+        stores.durable.store_arc(),
+        nostr_event_store_options(options),
+    );
+    let staging_event_store = NostrEventStore::with_options(
+        stores.staging.store_arc(),
         nostr_event_store_options(options),
     );
     let mut total_index_build_ms = 0u128;
 
     loop {
-        let stage = load_stage_state(data_dir)?.context(
+        let stage = load_stage_state(staging_data_dir)?.context(
             "no durable Nostr staging state exists; start --stage-only before projection",
         )?;
         validate_stage_state(&stage, policy, authors.len())?;
@@ -1047,7 +1122,7 @@ async fn project_staged_allowlist(
         let mut projected_event_count = 0usize;
         let mut segments = Vec::new();
         while end < stage.next_author && end.saturating_sub(start) < options.projection_authors {
-            let segment = load_stage_segment(data_dir, end)?;
+            let segment = load_stage_segment(staging_data_dir, end)?;
             let would_exceed_event_limit = projected_event_count
                 .saturating_add(segment.event_cids.len())
                 > options.projection_event_limit;
@@ -1072,7 +1147,7 @@ async fn project_staged_allowlist(
             .flat_map(|segment| segment.event_cids.iter())
             .map(|root| parse_root_text(root))
             .collect::<Result<Vec<_>>>()?;
-        let events = event_store
+        let events = staging_event_store
             .load_event_blobs(cids)
             .await
             .with_context(|| format!("load staged event blobs for authors {start}..{end}"))?;
@@ -1102,7 +1177,8 @@ async fn project_staged_allowlist(
                 .iter()
                 .map(|event| event.to_nostr_sdk_event().map_err(anyhow::Error::from))
                 .collect::<Result<Vec<_>>>()?;
-            graph_store
+            stores
+                .graph
                 .sync_profile_index_for_events(&parsed)
                 .context("sync projected profile search batch")?;
         }
@@ -1119,10 +1195,12 @@ async fn project_staged_allowlist(
                 .saturating_add(segment.live_bytes_selected);
         }
         let checkpoint_sync_started = Instant::now();
-        graph_store
+        stores
+            .graph
             .force_sync()
             .context("force-sync projected social graph storage")?;
-        durable_store
+        stores
+            .durable
             .force_sync()
             .context("force-sync projected Nostr indexes")?;
         let checkpoint_sync_ms = checkpoint_sync_started.elapsed().as_millis();
@@ -2050,6 +2128,7 @@ mod tests {
             index_commit_batch_size: 8,
             stage_only: false,
             project_staged: false,
+            staging_data_dir: None,
             projection_authors: 8,
             projection_event_limit: 65_536,
             projection_follow: false,
@@ -2652,6 +2731,7 @@ mod tests {
                 index_commit_batch_size: 32,
                 stage_only: false,
                 project_staged: false,
+                staging_data_dir: None,
                 projection_authors: 8,
                 projection_event_limit: 65_536,
                 projection_follow: false,
@@ -2779,6 +2859,7 @@ mod tests {
                 index_commit_batch_size: 32,
                 stage_only: false,
                 project_staged: false,
+                staging_data_dir: None,
                 projection_authors: 8,
                 projection_event_limit: 65_536,
                 projection_follow: false,
@@ -2923,6 +3004,8 @@ mod tests {
             checkpoint_test_options(format!("{}/authors", allowlist.url()), vec![relay.url()]);
         options.stage_only = true;
         let tmp = TempDir::new().expect("tempdir");
+        let staging_data_dir = tmp.path().join("staging-data");
+        options.staging_data_dir = Some(staging_data_dir.clone());
         let mut config = Config::default();
         config.storage.max_size_gb = 1;
         config.nostr.db_max_size_gb = 1;
@@ -2939,9 +3022,9 @@ mod tests {
         assert_eq!(staged.events_selected, 1);
         assert!(staged.root.is_none());
         assert!(load_crawl_state(tmp.path()).unwrap().is_none());
-        let stage_state = load_stage_state(tmp.path()).unwrap().unwrap();
+        let stage_state = load_stage_state(&staging_data_dir).unwrap().unwrap();
         assert_eq!(stage_state.next_author, 1);
-        let segment = load_stage_segment(tmp.path(), 0).expect("staged segment");
+        let segment = load_stage_segment(&staging_data_dir, 0).expect("staged segment");
         assert_eq!(segment.event_cids.len(), 1);
 
         let relay_requests_after_stage = relay.requested_authors().len();

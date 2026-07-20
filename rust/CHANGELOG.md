@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.119 - 2026-07-20
+
+### Changed
+
+- Two-phase Nostr crawls accept `--staging-data-dir`, allowing fetch state and
+  individual event blobs to live in a separate Hashtree store. Relay ingestion
+  and index projection no longer contend for the same LMDB writer lock.
+- Fetching applies durable backpressure at 256 projected authors or 8 GiB of
+  selected live data ahead, bounding staging-disk growth without re-coupling
+  either LMDB writer.
+
 ## 0.2.118 - 2026-07-20
 
 ### Changed

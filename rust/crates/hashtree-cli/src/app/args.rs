@@ -900,97 +900,106 @@ pub(crate) enum SocialGraphCommands {
     RebuildEventIndex,
     /// Crawl and index Nostr events for authors in the social graph
     Index {
-        /// Warm the social graph for this many seconds before indexing
-        #[arg(long, default_value_t = 0)]
-        warm_secs: u64,
-        /// Graph crawl depth to use while warming (default: config nostr.social_graph_crawl_depth)
-        #[arg(long)]
-        crawl_depth: Option<u32>,
-        /// Ignore existing graph frontier state and refetch from the root
-        #[arg(long, default_value_t = false)]
-        full_graph_recrawl: bool,
-        /// Maximum follow distance to include in the post index (default: config nostr.social_graph_crawl_depth)
-        #[arg(long)]
-        max_follow_distance: Option<u32>,
-        /// Maximum number of authors to crawl from the graph
-        #[arg(long, default_value_t = 64)]
-        max_authors: usize,
-        /// Maximum live index size in MiB
-        #[arg(long, default_value_t = 256)]
-        max_live_mb: u64,
-        /// Maximum number of kept events per author
-        #[arg(long, default_value_t = 256)]
-        per_author_event_limit: usize,
-        /// Maximum kept events per author and kind (overrides the aggregate author limit)
-        #[arg(long)]
-        per_author_kind_event_limit: Option<usize>,
-        /// Maximum kept bytes per author before the global live cap is applied
-        #[arg(long)]
-        per_author_live_bytes: Option<u64>,
-        /// Relay query author batch size
-        #[arg(long, default_value_t = 64)]
-        author_batch_size: usize,
-        /// Authors committed to the resumable index root per durable checkpoint
-        #[arg(long, default_value_t = 8)]
-        checkpoint_authors: usize,
-        /// Events applied per bounded Hashtree index commit
-        #[arg(long, default_value_t = 32_768)]
-        index_commit_batch_size: usize,
-        /// Fetch and durably stage individual events without building query indexes
-        #[arg(long, default_value_t = false)]
-        stage_only: bool,
-        /// Build query indexes from durably staged events without contacting relays
-        #[arg(long, default_value_t = false)]
-        project_staged: bool,
-        /// Maximum staged authors combined into one projection batch
-        #[arg(long, default_value_t = 64)]
-        projection_authors: usize,
-        /// Soft maximum staged events combined into one projection batch
-        #[arg(long, default_value_t = 65_536)]
-        projection_event_limit: usize,
-        /// Wait for the staging watermark when projection catches up
-        #[arg(long, default_value_t = false)]
-        projection_follow: bool,
-        /// Maximum children per Hashtree B-tree node
-        #[arg(long, default_value_t = 256)]
-        btree_order: usize,
-        /// Number of graph-crawl author batches to fetch concurrently during warmup
-        #[arg(long, default_value_t = 4)]
-        concurrent_batches: usize,
-        /// Relay fetch timeout in seconds
-        #[arg(long, default_value_t = 10)]
-        fetch_timeout_secs: u64,
-        /// Maximum event size accepted from relays, in bytes
-        #[arg(long)]
-        relay_event_max_bytes: Option<u32>,
-        /// Fetch recent relay pages without author filters and filter locally by social graph
-        #[arg(long, default_value_t = false)]
-        global_relay_scan: bool,
-        /// Page each author's relay history until exhausted instead of keeping only the newest per-author window
-        #[arg(long, default_value_t = false)]
-        full_author_history: bool,
-        /// HTTP URL returning newline-delimited author pubkeys to index
-        #[arg(long)]
-        author_allowlist_url: Option<String>,
-        /// Only use relays that advertise NIP-77 negentropy support via NIP-11
-        #[arg(long, default_value_t = false)]
-        negentropy_only: bool,
-        /// Number of events to request per relay page in global relay scan mode
-        #[arg(long, default_value_t = 1_000)]
-        relay_page_size: usize,
-        /// Maximum pages to fetch per relay in global relay scan mode
-        #[arg(long, default_value_t = 10)]
-        max_relay_pages: usize,
-        /// Stop after seeing at least this many raw relay events
-        #[arg(long)]
-        max_events_seen: Option<usize>,
-        /// Restrict indexing to these kinds (repeatable)
-        #[arg(long = "kind")]
-        kinds: Vec<u16>,
-        /// Relay URLs to use for this index run (repeatable, overrides config relays)
-        #[arg(long = "relay")]
-        relays: Vec<String>,
+        #[command(flatten)]
+        options: Box<SocialGraphIndexArgs>,
     },
+}
+
+#[derive(clap::Args)]
+pub(crate) struct SocialGraphIndexArgs {
+    /// Warm the social graph for this many seconds before indexing
+    #[arg(long, default_value_t = 0)]
+    pub(crate) warm_secs: u64,
+    /// Graph crawl depth to use while warming (default: config nostr.social_graph_crawl_depth)
+    #[arg(long)]
+    pub(crate) crawl_depth: Option<u32>,
+    /// Ignore existing graph frontier state and refetch from the root
+    #[arg(long, default_value_t = false)]
+    pub(crate) full_graph_recrawl: bool,
+    /// Maximum follow distance to include in the post index (default: config nostr.social_graph_crawl_depth)
+    #[arg(long)]
+    pub(crate) max_follow_distance: Option<u32>,
+    /// Maximum number of authors to crawl from the graph
+    #[arg(long, default_value_t = 64)]
+    pub(crate) max_authors: usize,
+    /// Maximum live index size in MiB
+    #[arg(long, default_value_t = 256)]
+    pub(crate) max_live_mb: u64,
+    /// Maximum number of kept events per author
+    #[arg(long, default_value_t = 256)]
+    pub(crate) per_author_event_limit: usize,
+    /// Maximum kept events per author and kind (overrides the aggregate author limit)
+    #[arg(long)]
+    pub(crate) per_author_kind_event_limit: Option<usize>,
+    /// Maximum kept bytes per author before the global live cap is applied
+    #[arg(long)]
+    pub(crate) per_author_live_bytes: Option<u64>,
+    /// Relay query author batch size
+    #[arg(long, default_value_t = 64)]
+    pub(crate) author_batch_size: usize,
+    /// Authors committed to the resumable index root per durable checkpoint
+    #[arg(long, default_value_t = 8)]
+    pub(crate) checkpoint_authors: usize,
+    /// Events applied per bounded Hashtree index commit
+    #[arg(long, default_value_t = 32_768)]
+    pub(crate) index_commit_batch_size: usize,
+    /// Fetch and durably stage individual events without building query indexes
+    #[arg(long, default_value_t = false)]
+    pub(crate) stage_only: bool,
+    /// Build query indexes from durably staged events without contacting relays
+    #[arg(long, default_value_t = false)]
+    pub(crate) project_staged: bool,
+    /// Separate Hashtree data directory for staged event blobs and fetch state
+    #[arg(long)]
+    pub(crate) staging_data_dir: Option<PathBuf>,
+    /// Maximum staged authors combined into one projection batch
+    #[arg(long, default_value_t = 64)]
+    pub(crate) projection_authors: usize,
+    /// Soft maximum staged events combined into one projection batch
+    #[arg(long, default_value_t = 65_536)]
+    pub(crate) projection_event_limit: usize,
+    /// Wait for the staging watermark when projection catches up
+    #[arg(long, default_value_t = false)]
+    pub(crate) projection_follow: bool,
+    /// Maximum children per Hashtree B-tree node
+    #[arg(long, default_value_t = 256)]
+    pub(crate) btree_order: usize,
+    /// Number of graph-crawl author batches to fetch concurrently during warmup
+    #[arg(long, default_value_t = 4)]
+    pub(crate) concurrent_batches: usize,
+    /// Relay fetch timeout in seconds
+    #[arg(long, default_value_t = 10)]
+    pub(crate) fetch_timeout_secs: u64,
+    /// Maximum event size accepted from relays, in bytes
+    #[arg(long)]
+    pub(crate) relay_event_max_bytes: Option<u32>,
+    /// Fetch recent relay pages without author filters and filter locally by social graph
+    #[arg(long, default_value_t = false)]
+    pub(crate) global_relay_scan: bool,
+    /// Page each author's relay history until exhausted instead of keeping only the newest per-author window
+    #[arg(long, default_value_t = false)]
+    pub(crate) full_author_history: bool,
+    /// HTTP URL returning newline-delimited author pubkeys to index
+    #[arg(long)]
+    pub(crate) author_allowlist_url: Option<String>,
+    /// Only use relays that advertise NIP-77 negentropy support via NIP-11
+    #[arg(long, default_value_t = false)]
+    pub(crate) negentropy_only: bool,
+    /// Number of events to request per relay page in global relay scan mode
+    #[arg(long, default_value_t = 1_000)]
+    pub(crate) relay_page_size: usize,
+    /// Maximum pages to fetch per relay in global relay scan mode
+    #[arg(long, default_value_t = 10)]
+    pub(crate) max_relay_pages: usize,
+    /// Stop after seeing at least this many raw relay events
+    #[arg(long)]
+    pub(crate) max_events_seen: Option<usize>,
+    /// Restrict indexing to these kinds (repeatable)
+    #[arg(long = "kind")]
+    pub(crate) kinds: Vec<u16>,
+    /// Relay URLs to use for this index run (repeatable, overrides config relays)
+    #[arg(long = "relay")]
+    pub(crate) relays: Vec<String>,
 }
 
 #[derive(Subcommand)]

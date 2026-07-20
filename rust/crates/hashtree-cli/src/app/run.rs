@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::add::{run_add, AddOptions};
 use super::args::{
     Cli, Commands, MirrorCommands, NostrIndexCommands, PoolCommands, PrCommands, PwaCommands,
-    ReleaseCommands, SocialGraphCommands, StorageCommands,
+    ReleaseCommands, SocialGraphCommands, SocialGraphIndexArgs, StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -1360,38 +1360,40 @@ pub(crate) async fn run() -> Result<()> {
             SocialGraphCommands::RebuildEventIndex => {
                 run_socialgraph_rebuild_event_index(data_dir).await?;
             }
-            SocialGraphCommands::Index {
-                warm_secs,
-                crawl_depth,
-                full_graph_recrawl,
-                max_follow_distance,
-                max_authors,
-                max_live_mb,
-                per_author_event_limit,
-                per_author_kind_event_limit,
-                per_author_live_bytes,
-                author_batch_size,
-                checkpoint_authors,
-                index_commit_batch_size,
-                stage_only,
-                project_staged,
-                projection_authors,
-                projection_event_limit,
-                projection_follow,
-                btree_order,
-                concurrent_batches,
-                fetch_timeout_secs,
-                relay_event_max_bytes,
-                global_relay_scan,
-                full_author_history,
-                author_allowlist_url,
-                negentropy_only,
-                relay_page_size,
-                max_relay_pages,
-                max_events_seen,
-                kinds,
-                relays,
-            } => {
+            SocialGraphCommands::Index { options } => {
+                let SocialGraphIndexArgs {
+                    warm_secs,
+                    crawl_depth,
+                    full_graph_recrawl,
+                    max_follow_distance,
+                    max_authors,
+                    max_live_mb,
+                    per_author_event_limit,
+                    per_author_kind_event_limit,
+                    per_author_live_bytes,
+                    author_batch_size,
+                    checkpoint_authors,
+                    index_commit_batch_size,
+                    stage_only,
+                    project_staged,
+                    staging_data_dir,
+                    projection_authors,
+                    projection_event_limit,
+                    projection_follow,
+                    btree_order,
+                    concurrent_batches,
+                    fetch_timeout_secs,
+                    relay_event_max_bytes,
+                    global_relay_scan,
+                    full_author_history,
+                    author_allowlist_url,
+                    negentropy_only,
+                    relay_page_size,
+                    max_relay_pages,
+                    max_events_seen,
+                    kinds,
+                    relays,
+                } = *options;
                 let config = Config::load()?;
                 let effective_crawl_depth =
                     crawl_depth.unwrap_or(config.nostr.social_graph_crawl_depth);
@@ -1412,6 +1414,7 @@ pub(crate) async fn run() -> Result<()> {
                         index_commit_batch_size,
                         stage_only,
                         project_staged,
+                        staging_data_dir,
                         projection_authors,
                         projection_event_limit,
                         projection_follow,

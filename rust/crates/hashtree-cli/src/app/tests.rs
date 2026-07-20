@@ -34,7 +34,7 @@ use super::storage_stats::{
 use super::util::format_bytes;
 use crate::app::args::{
     CashuCommands, CashuMintCommands, MirrorCommands, NostrIndexCommands, ReleaseCommands,
-    SocialGraphCommands, StorageCommands,
+    SocialGraphCommands, SocialGraphIndexArgs, StorageCommands,
 };
 use crate::app::args::{Cli, Commands, PoolCommands};
 #[cfg(feature = "fuse")]
@@ -1132,6 +1132,8 @@ fn test_cli_parses_socialgraph_index_command() {
         "--index-commit-batch-size",
         "32768",
         "--stage-only",
+        "--staging-data-dir",
+        "/srv/staging",
         "--projection-authors",
         "96",
         "--projection-event-limit",
@@ -1167,40 +1169,41 @@ fn test_cli_parses_socialgraph_index_command() {
 
     match cli.command {
         Commands::Socialgraph {
-            command:
-                SocialGraphCommands::Index {
-                    warm_secs,
-                    crawl_depth,
-                    full_graph_recrawl,
-                    max_follow_distance,
-                    max_authors,
-                    max_live_mb,
-                    per_author_event_limit,
-                    per_author_kind_event_limit,
-                    per_author_live_bytes,
-                    author_batch_size,
-                    checkpoint_authors,
-                    index_commit_batch_size,
-                    stage_only,
-                    project_staged,
-                    projection_authors,
-                    projection_event_limit,
-                    projection_follow,
-                    btree_order,
-                    concurrent_batches,
-                    fetch_timeout_secs,
-                    relay_event_max_bytes,
-                    global_relay_scan,
-                    author_allowlist_url,
-                    negentropy_only,
-                    full_author_history,
-                    relay_page_size,
-                    max_relay_pages,
-                    max_events_seen,
-                    kinds,
-                    relays,
-                },
+            command: SocialGraphCommands::Index { options },
         } => {
+            let SocialGraphIndexArgs {
+                warm_secs,
+                crawl_depth,
+                full_graph_recrawl,
+                max_follow_distance,
+                max_authors,
+                max_live_mb,
+                per_author_event_limit,
+                per_author_kind_event_limit,
+                per_author_live_bytes,
+                author_batch_size,
+                checkpoint_authors,
+                index_commit_batch_size,
+                stage_only,
+                project_staged,
+                staging_data_dir,
+                projection_authors,
+                projection_event_limit,
+                projection_follow,
+                btree_order,
+                concurrent_batches,
+                fetch_timeout_secs,
+                relay_event_max_bytes,
+                global_relay_scan,
+                author_allowlist_url,
+                negentropy_only,
+                full_author_history,
+                relay_page_size,
+                max_relay_pages,
+                max_events_seen,
+                kinds,
+                relays,
+            } = *options;
             assert_eq!(warm_secs, 15);
             assert_eq!(crawl_depth, Some(2));
             assert!(full_graph_recrawl);
@@ -1215,6 +1218,7 @@ fn test_cli_parses_socialgraph_index_command() {
             assert_eq!(index_commit_batch_size, 32_768);
             assert!(stage_only);
             assert!(!project_staged);
+            assert_eq!(staging_data_dir, Some(PathBuf::from("/srv/staging")));
             assert_eq!(projection_authors, 96);
             assert_eq!(projection_event_limit, 131_072);
             assert!(projection_follow);
