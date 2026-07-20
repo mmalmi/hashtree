@@ -822,9 +822,15 @@ impl<S: Store> NostrEventStore<S> {
     {
         let mut events = stream::iter(cids.into_iter().enumerate().map(
             |(sequence, cid)| async move {
+                let cid_text = cid.to_string();
                 self.read_stored_event(&cid)
                     .await
                     .map(|event| (sequence, event))
+                    .map_err(|err| {
+                        NostrEventStoreError::Validation(format!(
+                            "load event blob {cid_text} at sequence {sequence}: {err}"
+                        ))
+                    })
             },
         ))
         .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)

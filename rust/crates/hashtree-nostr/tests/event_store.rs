@@ -1203,6 +1203,29 @@ fn individual_event_blobs_round_trip_without_creating_an_index_root() {
 }
 
 #[test]
+fn bulk_event_blob_load_identifies_the_failing_cid_and_sequence() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let first = canonical_store_event(&"1".repeat(64), 10, 1, Vec::new(), "first");
+        let second = canonical_store_event(&"2".repeat(64), 20, 7, Vec::new(), "second");
+        let cids = store
+            .store_event_blobs([first, second])
+            .await
+            .expect("store individual event blobs");
+        assert!(backing.delete(&cids[1].hash).await.unwrap());
+
+        let error = store
+            .load_event_blobs(cids.clone())
+            .await
+            .expect_err("missing event blob should fail");
+        let message = error.to_string();
+        assert!(message.contains(&cids[1].to_string()), "{message}");
+        assert!(message.contains("sequence 1"), "{message}");
+    });
+}
+
+#[test]
 fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
     block_on(async {
         let options = NostrEventStoreOptions {
