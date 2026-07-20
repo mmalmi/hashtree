@@ -253,9 +253,10 @@ impl HashtreeStore {
                         anyhow::anyhow!("retained directory node {} is missing", to_hex(&cid.hash))
                     })?;
                 for link in node.links {
-                    reachable.insert(link.hash);
                     if link.link_type.is_directory_like() {
                         stack.push(link.to_cid());
+                    } else {
+                        reachable.insert(link.hash);
                     }
                 }
             }
@@ -1318,6 +1319,16 @@ mod tests {
         .expect("non-empty root")
     }
 
+    fn build_deep_test_tree(store: &HashtreeStore) -> Cid {
+        let index = BTree::new(store.store_arc(), BTreeOptions { order: Some(4) });
+        let entries: Vec<_> = (0..256)
+            .map(|index| (format!("key-{index:04}"), format!("value-{index:04}")))
+            .collect();
+        sync_block_on(index.build(entries))
+            .expect("build deep btree")
+            .expect("non-empty deep root")
+    }
+
     #[test]
     fn orphan_cleanup_keeps_indexed_tree_hashes() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -1536,7 +1547,7 @@ mod tests {
     fn retained_nostr_root_cleanup_is_dry_run_first_and_keeps_the_dag() {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = HashtreeStore::with_options(temp_dir.path(), None, 1024 * 1024).expect("store");
-        let root = build_test_tree(&store);
+        let root = build_deep_test_tree(&store);
         let orphan_bytes = b"unreachable historical index node";
         let orphan = hashtree_core::sha256(orphan_bytes);
         store.put_blob(orphan_bytes).expect("put orphan");
@@ -1545,7 +1556,9 @@ mod tests {
             .retain_nostr_root(&root, false)
             .expect("retention dry run");
         assert_eq!(dry_run.deleted_hashes, 0);
-        assert!(dry_run.candidate_hashes >= 1);
+        assert_eq!(dry_run.candidate_hashes, 1);
+        assert_eq!(dry_run.total_hashes, dry_run.reachable_hashes + 1);
+        assert!(dry_run.reachable_hashes > 256);
         assert!(store.blob_exists(&orphan).expect("orphan exists"));
 
         let applied = store
@@ -1555,8 +1568,8 @@ mod tests {
         assert!(!store.blob_exists(&orphan).expect("orphan deleted"));
         let index = BTree::new(store.store_arc(), BTreeOptions { order: Some(8) });
         assert_eq!(
-            sync_block_on(index.get(Some(&root), "beta")).expect("read retained index"),
-            Some("two".to_string())
+            sync_block_on(index.get(Some(&root), "key-0255")).expect("read retained index"),
+            Some("value-0255".to_string())
         );
     }
 }
