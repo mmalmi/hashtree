@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-core"
-version = "0.2.86"
+version = "0.2.87"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

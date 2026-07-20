@@ -15,6 +15,8 @@
   override the defaults, and an explicit empty list disables seed bootstrap.
 - Release `hashtree-fips-transport` 0.4.11 with FIPS core 0.4.20 so configured
   WebSocket adjacencies remain admitted under configured-only discovery.
+- Release `hashtree-core` 0.2.87 with the optimistic batch-store API already
+  used by the CLI, keeping registry builds self-contained.
 
 ## 0.2.113 - 2026-07-20
 
