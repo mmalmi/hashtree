@@ -1131,6 +1131,12 @@ fn test_cli_parses_socialgraph_index_command() {
         "12",
         "--index-commit-batch-size",
         "32768",
+        "--stage-only",
+        "--projection-authors",
+        "96",
+        "--projection-event-limit",
+        "131072",
+        "--projection-follow",
         "--btree-order",
         "256",
         "--concurrent-batches",
@@ -1175,6 +1181,11 @@ fn test_cli_parses_socialgraph_index_command() {
                     author_batch_size,
                     checkpoint_authors,
                     index_commit_batch_size,
+                    stage_only,
+                    project_staged,
+                    projection_authors,
+                    projection_event_limit,
+                    projection_follow,
                     btree_order,
                     concurrent_batches,
                     fetch_timeout_secs,
@@ -1202,6 +1213,11 @@ fn test_cli_parses_socialgraph_index_command() {
             assert_eq!(author_batch_size, 32);
             assert_eq!(checkpoint_authors, 12);
             assert_eq!(index_commit_batch_size, 32_768);
+            assert!(stage_only);
+            assert!(!project_staged);
+            assert_eq!(projection_authors, 96);
+            assert_eq!(projection_event_limit, 131_072);
+            assert!(projection_follow);
             assert_eq!(btree_order, 256);
             assert_eq!(concurrent_batches, 6);
             assert_eq!(fetch_timeout_secs, 7);

@@ -33,6 +33,11 @@ const CHECKPOINT_REPORT_FILE: &str = "checkpoint-report.json";
 const CRAWL_STATE_FILE: &str = "crawl-state.json";
 const CRAWL_LOCK_FILE: &str = "crawl.lock";
 const CRAWL_STATE_VERSION: u32 = 1;
+const STAGE_DIR: &str = "nostr-stage";
+const STAGE_SEGMENTS_DIR: &str = "segments";
+const STAGE_STATE_FILE: &str = "crawl-state.json";
+const STAGE_LOCK_FILE: &str = "crawl.lock";
+const STAGE_FORMAT_VERSION: u32 = 1;
 const MIRROR_STATE_DIR: &str = "nostr-mirror";
 const MIRROR_UPLOADED_EVENT_ROOT_FILE: &str = "nostr-event-index.uploaded-root";
 const TOP_ITEMS_LIMIT: usize = 20;
@@ -58,6 +63,11 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) author_batch_size: usize,
     pub(crate) checkpoint_authors: usize,
     pub(crate) index_commit_batch_size: usize,
+    pub(crate) stage_only: bool,
+    pub(crate) project_staged: bool,
+    pub(crate) projection_authors: usize,
+    pub(crate) projection_event_limit: usize,
+    pub(crate) projection_follow: bool,
     pub(crate) btree_order: usize,
     pub(crate) concurrent_batches: usize,
     pub(crate) per_author_event_limit: usize,
@@ -160,6 +170,30 @@ struct IndexedNostrCrawlState {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct StagedNostrCrawlState {
+    version: u32,
+    /// Diagnostic only; the ordered allowlist digest in `policy` is the
+    /// durable crawl identity.
+    author_allowlist_source: Option<String>,
+    policy: IndexedNostrCrawlPolicy,
+    next_author: usize,
+    events_seen: usize,
+    events_selected: usize,
+    live_bytes_selected: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct StagedAuthorSegment {
+    version: u32,
+    start_author: usize,
+    end_author: usize,
+    events_seen: usize,
+    events_selected: usize,
+    live_bytes_selected: u64,
+    event_cids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct IndexedNostrCheckpointReport {
     root: Option<String>,
     authors_considered: usize,
@@ -178,10 +212,18 @@ struct CrawlStateLock {
 
 impl CrawlStateLock {
     fn acquire(data_dir: &Path) -> Result<Self> {
-        let output_dir = data_dir.join(INDEX_DIR);
+        Self::acquire_in(data_dir, INDEX_DIR, CRAWL_LOCK_FILE)
+    }
+
+    fn acquire_stage(data_dir: &Path) -> Result<Self> {
+        Self::acquire_in(data_dir, STAGE_DIR, STAGE_LOCK_FILE)
+    }
+
+    fn acquire_in(data_dir: &Path, state_dir: &str, lock_file: &str) -> Result<Self> {
+        let output_dir = data_dir.join(state_dir);
         std::fs::create_dir_all(&output_dir)
             .with_context(|| format!("create {}", output_dir.display()))?;
-        let path = output_dir.join(CRAWL_LOCK_FILE);
+        let path = output_dir.join(lock_file);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -379,6 +421,21 @@ pub(crate) async fn run_socialgraph_index(
     options: SocialGraphIndexOptions,
 ) -> Result<IndexedNostrReport> {
     let checkpointed_allowlist = uses_durable_author_checkpoints(&options);
+    if options.stage_only && options.project_staged {
+        anyhow::bail!("--stage-only and --project-staged are mutually exclusive");
+    }
+    if (options.stage_only || options.project_staged) && !checkpointed_allowlist {
+        anyhow::bail!(
+            "two-phase Nostr indexing requires --author-allowlist-url and either --full-author-history or --negentropy-only"
+        );
+    }
+    if options.project_staged
+        && (options.projection_authors == 0 || options.projection_event_limit == 0)
+    {
+        anyhow::bail!(
+            "--projection-authors and --projection-event-limit must be greater than zero"
+        );
+    }
     if checkpointed_allowlist && options.checkpoint_authors == 0 {
         anyhow::bail!("--checkpoint-authors must be greater than zero");
     }
@@ -397,9 +454,13 @@ pub(crate) async fn run_socialgraph_index(
     if options.per_author_kind_event_limit == Some(0) {
         anyhow::bail!("--per-author-kind-event-limit must be greater than zero");
     }
-    let _crawl_lock = checkpointed_allowlist
-        .then(|| CrawlStateLock::acquire(&data_dir))
-        .transpose()?;
+    let _crawl_lock = if options.stage_only {
+        Some(CrawlStateLock::acquire_stage(&data_dir)?)
+    } else if checkpointed_allowlist {
+        Some(CrawlStateLock::acquire(&data_dir)?)
+    } else {
+        None
+    };
 
     let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
     let store = Arc::new(HashtreeStore::with_options(
@@ -477,6 +538,33 @@ pub(crate) async fn run_socialgraph_index(
             .context("checkpointed crawl requires an explicit author allowlist")?;
         validate_reachable_root(&event_store, existing_root.as_ref(), "crawl base root").await?;
         let policy = build_crawl_policy(&options, &relays, authors, existing_root.as_ref())?;
+        if options.stage_only {
+            if let Some(state) = saved_crawl_state.as_ref() {
+                validate_crawl_state(state, &policy, authors.len())?;
+            }
+            let report = stage_allowlist_in_checkpoints(
+                store.as_ref(),
+                &data_dir,
+                &options,
+                &relays,
+                authors,
+                policy,
+                saved_crawl_state.as_ref(),
+            )
+            .await?;
+            let index_report = build_bounded_report(
+                &relays,
+                &options,
+                report,
+                graph_store
+                    .profile_search_root()?
+                    .as_ref()
+                    .map(cid_to_nhash)
+                    .transpose()?,
+            )?;
+            print_report(&index_report, &data_dir);
+            return Ok(index_report);
+        }
         let mut state = match saved_crawl_state {
             Some(state) => {
                 validate_crawl_state(&state, &policy, authors.len())?;
@@ -504,16 +592,30 @@ pub(crate) async fn run_socialgraph_index(
         state.author_allowlist_source = options.author_allowlist_url.clone();
         state.policy = policy;
         persist_crawl_state(&data_dir, &state)?;
-        let report = crawl_allowlist_in_checkpoints(
-            store.as_ref(),
-            graph_store.as_ref(),
-            &data_dir,
-            &options,
-            &relays,
-            authors,
-            &mut state,
-        )
-        .await?;
+        let report = if options.project_staged {
+            let projection_policy = state.policy.clone();
+            project_staged_allowlist(
+                store.as_ref(),
+                graph_store.as_ref(),
+                &data_dir,
+                &options,
+                authors,
+                &projection_policy,
+                &mut state,
+            )
+            .await?
+        } else {
+            crawl_allowlist_in_checkpoints(
+                store.as_ref(),
+                graph_store.as_ref(),
+                &data_dir,
+                &options,
+                &relays,
+                authors,
+                &mut state,
+            )
+            .await?
+        };
         let profile_search_root = graph_store
             .profile_search_root()?
             .as_ref()
@@ -761,6 +863,296 @@ async fn crawl_allowlist_in_checkpoints(
         applied_events: Vec::new(),
         relay_fetch_select_ms: 0,
         index_build_ms: 0,
+    })
+}
+
+async fn stage_allowlist_in_checkpoints(
+    durable_store: &HashtreeStore,
+    data_dir: &Path,
+    options: &SocialGraphIndexOptions,
+    relays: &[String],
+    authors: &[String],
+    policy: IndexedNostrCrawlPolicy,
+    indexed_state: Option<&IndexedNostrCrawlState>,
+) -> Result<CrawlReport> {
+    let store = durable_store.store_arc();
+    let event_store =
+        NostrEventStore::with_options(Arc::clone(&store), nostr_event_store_options(options));
+    let mut state = match load_stage_state(data_dir)? {
+        Some(state) => {
+            validate_stage_state(&state, &policy, authors.len())?;
+            state
+        }
+        None => StagedNostrCrawlState {
+            version: STAGE_FORMAT_VERSION,
+            author_allowlist_source: options.author_allowlist_url.clone(),
+            policy: policy.clone(),
+            next_author: indexed_state.map_or(0, |state| state.next_author),
+            events_seen: indexed_state.map_or(0, |state| state.events_seen),
+            events_selected: indexed_state.map_or(0, |state| state.events_selected),
+            live_bytes_selected: indexed_state.map_or(0, |state| state.live_bytes_selected),
+        },
+    };
+    state.author_allowlist_source = options.author_allowlist_url.clone();
+    state.policy = policy;
+    persist_stage_state(data_dir, &state)?;
+
+    let checkpoint_authors = options
+        .checkpoint_authors
+        .min(options.author_batch_size)
+        .max(1);
+    while state.next_author < authors.len() {
+        if state.live_bytes_selected >= options.max_live_bytes {
+            anyhow::bail!(
+                "Nostr staging live-byte budget exhausted after {}/{} authors; the durable fetch cursor was preserved",
+                state.next_author,
+                authors.len()
+            );
+        }
+        if options
+            .max_events_seen
+            .is_some_and(|limit| state.events_seen >= limit)
+        {
+            anyhow::bail!(
+                "Nostr staging relay-event budget exhausted after {}/{} authors; the durable fetch cursor was preserved",
+                state.next_author,
+                authors.len()
+            );
+        }
+
+        let start = state.next_author;
+        let end = start.saturating_add(checkpoint_authors).min(authors.len());
+        let remaining_live_bytes = options
+            .max_live_bytes
+            .saturating_sub(state.live_bytes_selected);
+        let remaining_events_seen = options
+            .max_events_seen
+            .map(|limit| limit.saturating_sub(state.events_seen));
+        let started = Instant::now();
+        let bridge = NostrBridge::with_event_store_options(
+            Arc::clone(&store),
+            build_crawl_config(
+                options,
+                relays,
+                Some(authors[start..end].to_vec()),
+                remaining_live_bytes,
+                remaining_events_seen,
+                end - start,
+            ),
+            nostr_event_store_options(options),
+        );
+        let report = bridge
+            .fetch_authors(&authors[start..end])
+            .await
+            .with_context(|| format!("fetch allowlisted authors {start}..{end}"))?;
+        if report.authors_processed != end - start {
+            anyhow::bail!(
+                "author fetch stopped after {} of {} authors; staging cursor was not advanced",
+                report.authors_processed,
+                end - start
+            );
+        }
+
+        let event_cids = event_store
+            .store_event_blobs(report.applied_events)
+            .await
+            .with_context(|| {
+                format!("persist individual event blobs for authors {start}..{end}")
+            })?;
+        durable_store
+            .force_sync()
+            .context("force-sync staged Nostr event blobs")?;
+        let segment = StagedAuthorSegment {
+            version: STAGE_FORMAT_VERSION,
+            start_author: start,
+            end_author: end,
+            events_seen: report.events_seen,
+            events_selected: report.events_selected,
+            live_bytes_selected: report.live_bytes_selected,
+            event_cids: event_cids
+                .iter()
+                .map(cid_to_nhash)
+                .collect::<Result<Vec<_>>>()?,
+        };
+        persist_stage_segment(data_dir, &segment)?;
+
+        state.next_author = end;
+        state.events_seen = state.events_seen.saturating_add(segment.events_seen);
+        state.events_selected = state
+            .events_selected
+            .saturating_add(segment.events_selected);
+        state.live_bytes_selected = state
+            .live_bytes_selected
+            .saturating_add(segment.live_bytes_selected);
+        persist_stage_state(data_dir, &state)?;
+        hashtree_cli::diagnostics::trim_process_allocations();
+        eprintln!(
+            "Nostr staging checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} event_blobs={} relay_fetch_select_ms={} batch_elapsed_ms={}",
+            state.next_author,
+            authors.len(),
+            state.events_seen,
+            state.events_selected,
+            state.live_bytes_selected,
+            segment.event_cids.len(),
+            report.relay_fetch_select_ms,
+            started.elapsed().as_millis()
+        );
+    }
+
+    Ok(CrawlReport {
+        root: indexed_state
+            .and_then(|state| state.root.as_deref())
+            .map(parse_root_text)
+            .transpose()?,
+        authors_considered: authors.len(),
+        authors_processed: state.next_author,
+        events_seen: state.events_seen,
+        events_selected: state.events_selected,
+        live_bytes_selected: state.live_bytes_selected,
+        ..CrawlReport::default()
+    })
+}
+
+async fn project_staged_allowlist(
+    durable_store: &HashtreeStore,
+    graph_store: &socialgraph::SocialGraphStore,
+    data_dir: &Path,
+    options: &SocialGraphIndexOptions,
+    authors: &[String],
+    policy: &IndexedNostrCrawlPolicy,
+    state: &mut IndexedNostrCrawlState,
+) -> Result<CrawlReport> {
+    let event_store = NostrEventStore::with_options(
+        durable_store.store_arc(),
+        nostr_event_store_options(options),
+    );
+    let mut total_index_build_ms = 0u128;
+
+    loop {
+        let stage = load_stage_state(data_dir)?.context(
+            "no durable Nostr staging state exists; start --stage-only before projection",
+        )?;
+        validate_stage_state(&stage, policy, authors.len())?;
+        if state.next_author >= stage.next_author {
+            if state.next_author >= authors.len() || !options.projection_follow {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        let projection_started = Instant::now();
+        let start = state.next_author;
+        let mut end = start;
+        let mut projected_event_count = 0usize;
+        let mut segments = Vec::new();
+        while end < stage.next_author && end.saturating_sub(start) < options.projection_authors {
+            let segment = load_stage_segment(data_dir, end)?;
+            let would_exceed_event_limit = projected_event_count
+                .saturating_add(segment.event_cids.len())
+                > options.projection_event_limit;
+            if segment.end_author > stage.next_author
+                || segment.end_author > authors.len()
+                || segment.end_author.saturating_sub(start) > options.projection_authors
+                    && !segments.is_empty()
+                || would_exceed_event_limit && !segments.is_empty()
+            {
+                break;
+            }
+            end = segment.end_author;
+            projected_event_count = projected_event_count.saturating_add(segment.event_cids.len());
+            segments.push(segment);
+        }
+        if segments.is_empty() {
+            anyhow::bail!("no complete staged segment is projectable at author {start}");
+        }
+
+        let cids = segments
+            .iter()
+            .flat_map(|segment| segment.event_cids.iter())
+            .map(|root| parse_root_text(root))
+            .collect::<Result<Vec<_>>>()?;
+        let events = event_store
+            .load_event_blobs(cids)
+            .await
+            .with_context(|| format!("load staged event blobs for authors {start}..{end}"))?;
+        let profile_events = events
+            .iter()
+            .filter(|event| event.kind == 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_root = state
+            .root
+            .as_deref()
+            .map(parse_root_text)
+            .transpose()
+            .context("parse projection root")?;
+        validate_reachable_root(&event_store, current_root.as_ref(), "projection root").await?;
+        let index_started = Instant::now();
+        let next_root = event_store
+            .build(current_root.as_ref(), events)
+            .await
+            .with_context(|| format!("project staged authors {start}..{end}"))?;
+        let index_build_ms = index_started.elapsed().as_millis();
+        total_index_build_ms = total_index_build_ms.saturating_add(index_build_ms);
+        validate_reachable_root(&event_store, next_root.as_ref(), "new projection root").await?;
+
+        if !profile_events.is_empty() {
+            let parsed = profile_events
+                .iter()
+                .map(|event| event.to_nostr_sdk_event().map_err(anyhow::Error::from))
+                .collect::<Result<Vec<_>>>()?;
+            graph_store
+                .sync_profile_index_for_events(&parsed)
+                .context("sync projected profile search batch")?;
+        }
+
+        state.next_author = end;
+        state.root = next_root.as_ref().map(cid_to_nhash).transpose()?;
+        for segment in &segments {
+            state.events_seen = state.events_seen.saturating_add(segment.events_seen);
+            state.events_selected = state
+                .events_selected
+                .saturating_add(segment.events_selected);
+            state.live_bytes_selected = state
+                .live_bytes_selected
+                .saturating_add(segment.live_bytes_selected);
+        }
+        let checkpoint_sync_started = Instant::now();
+        graph_store
+            .force_sync()
+            .context("force-sync projected social graph storage")?;
+        durable_store
+            .force_sync()
+            .context("force-sync projected Nostr indexes")?;
+        let checkpoint_sync_ms = checkpoint_sync_started.elapsed().as_millis();
+        persist_crawl_state(data_dir, state)?;
+        hashtree_cli::diagnostics::trim_process_allocations();
+        eprintln!(
+            "Nostr projection checkpoint: authors={}/{} staged_authors={} events_seen={} events_selected={} live_bytes={} segments={} projected_events={} index_build_ms={} checkpoint_sync_ms={} batch_elapsed_ms={}",
+            state.next_author,
+            authors.len(),
+            stage.next_author,
+            state.events_seen,
+            state.events_selected,
+            state.live_bytes_selected,
+            segments.len(),
+            projected_event_count,
+            index_build_ms,
+            checkpoint_sync_ms,
+            projection_started.elapsed().as_millis()
+        );
+    }
+
+    Ok(CrawlReport {
+        root: state.root.as_deref().map(parse_root_text).transpose()?,
+        authors_considered: authors.len(),
+        authors_processed: state.next_author,
+        events_seen: state.events_seen,
+        events_selected: state.events_selected,
+        live_bytes_selected: state.live_bytes_selected,
+        index_build_ms: total_index_build_ms,
+        ..CrawlReport::default()
     })
 }
 
@@ -1254,6 +1646,133 @@ fn load_crawl_state(data_dir: &Path) -> Result<Option<IndexedNostrCrawlState>> {
         .map(Some)
 }
 
+fn load_stage_state(data_dir: &Path) -> Result<Option<StagedNostrCrawlState>> {
+    let path = data_dir.join(STAGE_DIR).join(STAGE_STATE_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
+}
+
+fn validate_stage_state(
+    state: &StagedNostrCrawlState,
+    expected_policy: &IndexedNostrCrawlPolicy,
+    author_count: usize,
+) -> Result<()> {
+    if state.version != STAGE_FORMAT_VERSION {
+        anyhow::bail!(
+            "unsupported Nostr staging state version {} (expected {})",
+            state.version,
+            STAGE_FORMAT_VERSION
+        );
+    }
+    let mut resumed_identity = state.policy.clone();
+    resumed_identity.author_batch_size = expected_policy.author_batch_size;
+    resumed_identity.checkpoint_authors = expected_policy.checkpoint_authors;
+    if resumed_identity.require_all_relays && !expected_policy.require_all_relays {
+        resumed_identity.require_all_relays = false;
+    }
+    if &resumed_identity != expected_policy {
+        anyhow::bail!(
+            "Nostr staging policy or ordered author allowlist changed; refusing to reuse the durable fetch cursor"
+        );
+    }
+    if state.next_author > author_count {
+        anyhow::bail!(
+            "Nostr staging cursor {} exceeds the validated author count {}",
+            state.next_author,
+            author_count
+        );
+    }
+    Ok(())
+}
+
+fn stage_segment_path(data_dir: &Path, start_author: usize, end_author: usize) -> PathBuf {
+    data_dir
+        .join(STAGE_DIR)
+        .join(STAGE_SEGMENTS_DIR)
+        .join(format!("{start_author:012}-{end_author:012}.json"))
+}
+
+fn persist_json_atomic<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Result<()> {
+    let output_dir = path
+        .parent()
+        .context("atomic JSON path has no parent directory")?;
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create {}", output_dir.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("atomic JSON path has no UTF-8 file name")?;
+    let temp_path = output_dir.join(format!(".{file_name}.tmp"));
+    let mut bytes = serde_json::to_vec(value).with_context(|| format!("encode {label}"))?;
+    bytes.push(b'\n');
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temp_path)
+        .with_context(|| format!("open {}", temp_path.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("write {}", temp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync {}", temp_path.display()))?;
+    drop(file);
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("rename {} to {}", temp_path.display(), path.display()))?;
+    #[cfg(unix)]
+    File::open(output_dir)
+        .with_context(|| format!("open {} for fsync", output_dir.display()))?
+        .sync_all()
+        .with_context(|| format!("fsync {}", output_dir.display()))?;
+    Ok(())
+}
+
+fn persist_stage_state(data_dir: &Path, state: &StagedNostrCrawlState) -> Result<()> {
+    persist_json_atomic(
+        &data_dir.join(STAGE_DIR).join(STAGE_STATE_FILE),
+        state,
+        "Nostr staging state",
+    )
+}
+
+fn persist_stage_segment(data_dir: &Path, segment: &StagedAuthorSegment) -> Result<()> {
+    persist_json_atomic(
+        &stage_segment_path(data_dir, segment.start_author, segment.end_author),
+        segment,
+        "Nostr staging segment",
+    )
+}
+
+fn load_stage_segment(data_dir: &Path, start_author: usize) -> Result<StagedAuthorSegment> {
+    let segments_dir = data_dir.join(STAGE_DIR).join(STAGE_SEGMENTS_DIR);
+    let prefix = format!("{start_author:012}-");
+    let path = std::fs::read_dir(&segments_dir)
+        .with_context(|| format!("read {}", segments_dir.display()))?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".json"))
+        })
+        .with_context(|| format!("missing staged author segment beginning at {start_author}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let segment: StagedAuthorSegment =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    if segment.version != STAGE_FORMAT_VERSION
+        || segment.start_author != start_author
+        || segment.end_author <= segment.start_author
+    {
+        anyhow::bail!("invalid staged author segment {}", path.display());
+    }
+    Ok(segment)
+}
+
 fn validate_crawl_state(
     state: &IndexedNostrCrawlState,
     expected_policy: &IndexedNostrCrawlPolicy,
@@ -1288,33 +1807,11 @@ fn validate_crawl_state(
 }
 
 fn persist_crawl_state(data_dir: &Path, state: &IndexedNostrCrawlState) -> Result<()> {
-    let output_dir = data_dir.join(INDEX_DIR);
-    std::fs::create_dir_all(&output_dir)
-        .with_context(|| format!("create {}", output_dir.display()))?;
-    let path = output_dir.join(CRAWL_STATE_FILE);
-    let temp_path = output_dir.join(format!(".{CRAWL_STATE_FILE}.tmp"));
-    let mut bytes = serde_json::to_vec_pretty(state).context("encode Nostr crawl state")?;
-    bytes.push(b'\n');
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp_path)
-        .with_context(|| format!("open {}", temp_path.display()))?;
-    file.write_all(&bytes)
-        .with_context(|| format!("write {}", temp_path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("fsync {}", temp_path.display()))?;
-    drop(file);
-    std::fs::rename(&temp_path, &path)
-        .with_context(|| format!("rename {} to {}", temp_path.display(), path.display()))?;
-    #[cfg(unix)]
-    File::open(&output_dir)
-        .with_context(|| format!("open {} for fsync", output_dir.display()))?
-        .sync_all()
-        .with_context(|| format!("fsync {}", output_dir.display()))?;
-    Ok(())
+    persist_json_atomic(
+        &data_dir.join(INDEX_DIR).join(CRAWL_STATE_FILE),
+        state,
+        "Nostr crawl state",
+    )
 }
 
 fn persist_checkpoint(
@@ -1551,6 +2048,11 @@ mod tests {
             author_batch_size: 1,
             checkpoint_authors: 1,
             index_commit_batch_size: 8,
+            stage_only: false,
+            project_staged: false,
+            projection_authors: 8,
+            projection_event_limit: 65_536,
+            projection_follow: false,
             btree_order: 8,
             concurrent_batches: 1,
             per_author_event_limit: 16,
@@ -2148,6 +2650,11 @@ mod tests {
                 author_batch_size: 32,
                 checkpoint_authors: 8,
                 index_commit_batch_size: 32,
+                stage_only: false,
+                project_staged: false,
+                projection_authors: 8,
+                projection_event_limit: 65_536,
+                projection_follow: false,
                 btree_order: 16,
                 concurrent_batches: 4,
                 per_author_event_limit: 8,
@@ -2270,6 +2777,11 @@ mod tests {
                 author_batch_size: 32,
                 checkpoint_authors: 8,
                 index_commit_batch_size: 32,
+                stage_only: false,
+                project_staged: false,
+                projection_authors: 8,
+                projection_event_limit: 65_536,
+                projection_follow: false,
                 btree_order: 16,
                 concurrent_batches: 1,
                 per_author_event_limit: 8,
@@ -2397,6 +2909,60 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_phase_crawl_stages_blobs_then_projects_without_refetching() -> io::Result<()> {
+        let relay = TestRelay::new();
+        let author = Keys::generate();
+        let note = event_builder!(Kind::TextNote, "staged note")
+            .custom_created_at(Timestamp::from_secs(42))
+            .sign_with_keys(&author)
+            .expect("signed note");
+        publish_test_events(&relay.url(), &[note]).await;
+        let allowlist = TestTextServer::new(format!("{}\n", author.public_key().to_hex()));
+        let mut options =
+            checkpoint_test_options(format!("{}/authors", allowlist.url()), vec![relay.url()]);
+        options.stage_only = true;
+        let tmp = TempDir::new().expect("tempdir");
+        let mut config = Config::default();
+        config.storage.max_size_gb = 1;
+        config.nostr.db_max_size_gb = 1;
+
+        let staged = run_socialgraph_index(
+            tmp.path().to_path_buf(),
+            &config,
+            Keys::generate(),
+            options.clone(),
+        )
+        .await
+        .expect("stage relay events");
+        assert_eq!(staged.authors_processed, 1);
+        assert_eq!(staged.events_selected, 1);
+        assert!(staged.root.is_none());
+        assert!(load_crawl_state(tmp.path()).unwrap().is_none());
+        let stage_state = load_stage_state(tmp.path()).unwrap().unwrap();
+        assert_eq!(stage_state.next_author, 1);
+        let segment = load_stage_segment(tmp.path(), 0).expect("staged segment");
+        assert_eq!(segment.event_cids.len(), 1);
+
+        let relay_requests_after_stage = relay.requested_authors().len();
+        options.stage_only = false;
+        options.project_staged = true;
+        options.projection_authors = 16;
+        let projected =
+            run_socialgraph_index(tmp.path().to_path_buf(), &config, Keys::generate(), options)
+                .await
+                .expect("project staged events");
+
+        assert_eq!(projected.authors_processed, 1);
+        assert_eq!(projected.events_selected, 1);
+        assert!(projected.root.is_some());
+        assert_eq!(relay.requested_authors().len(), relay_requests_after_stage);
+        let projected_state = load_crawl_state(tmp.path()).unwrap().unwrap();
+        assert_eq!(projected_state.next_author, 1);
+        assert_eq!(projected_state.root, projected.root);
+        Ok(())
+    }
+
     #[test]
     fn crawl_state_policy_uses_ordered_content_not_ephemeral_source_url() {
         let tmp = TempDir::new().expect("tempdir");
@@ -2473,6 +3039,56 @@ mod tests {
         )
         .expect("build changed policy");
         assert!(validate_crawl_state(&loaded, &changed_policy, authors.len()).is_err());
+    }
+
+    #[test]
+    fn staged_segments_and_fetch_watermark_are_durable_and_independent() {
+        let tmp = TempDir::new().expect("tempdir");
+        let authors = vec!["a".repeat(64), "b".repeat(64)];
+        let options = checkpoint_test_options(
+            "http://127.0.0.1:10001/authors".to_string(),
+            vec!["wss://relay.example".to_string()],
+        );
+        let policy = build_crawl_policy(
+            &options,
+            &["wss://relay.example".to_string()],
+            &authors,
+            None,
+        )
+        .expect("build policy");
+        let state = StagedNostrCrawlState {
+            version: STAGE_FORMAT_VERSION,
+            author_allowlist_source: options.author_allowlist_url.clone(),
+            policy: policy.clone(),
+            next_author: 1,
+            events_seen: 4,
+            events_selected: 2,
+            live_bytes_selected: 512,
+        };
+        let segment = StagedAuthorSegment {
+            version: STAGE_FORMAT_VERSION,
+            start_author: 0,
+            end_author: 1,
+            events_seen: 4,
+            events_selected: 2,
+            live_bytes_selected: 512,
+            event_cids: vec![
+                "nhash1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqd6y6y".to_string(),
+            ],
+        };
+
+        persist_stage_segment(tmp.path(), &segment).expect("persist segment");
+        persist_stage_state(tmp.path(), &state).expect("persist stage state");
+
+        assert_eq!(load_stage_state(tmp.path()).unwrap(), Some(state));
+        assert_eq!(load_stage_segment(tmp.path(), 0).unwrap(), segment);
+        validate_stage_state(
+            &load_stage_state(tmp.path()).unwrap().unwrap(),
+            &policy,
+            authors.len(),
+        )
+        .expect("validate stage state");
+        assert!(!tmp.path().join(INDEX_DIR).join(CRAWL_STATE_FILE).exists());
     }
 
     #[tokio::test]

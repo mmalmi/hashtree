@@ -390,6 +390,52 @@ impl<S: Store> NostrBridge<S> {
         self.crawl_with_progress(graph, existing_root, |_| {}).await
     }
 
+    /// Fetch and retain events for an explicit, ordered author slice without
+    /// updating any query index. This is the durable-ingest half of a
+    /// two-phase crawl: callers can persist the returned events individually,
+    /// advance a fetch watermark, and let an independent projector build the
+    /// expensive global indexes later.
+    pub async fn fetch_authors(&self, authors: &[String]) -> Result<CrawlReport> {
+        self.validate_config()?;
+        if authors.is_empty() {
+            return Ok(CrawlReport::default());
+        }
+
+        let client = self.connect_client().await?;
+        let mut relay_negentropy_support = BTreeMap::<String, bool>::new();
+        let mut report = CrawlReport {
+            authors_considered: authors.len(),
+            ..CrawlReport::default()
+        };
+
+        for author_batch in authors.chunks(self.config.author_batch_size) {
+            let started = Instant::now();
+            let batch = self
+                .crawl_author_batch(
+                    &client,
+                    author_batch,
+                    None,
+                    &mut relay_negentropy_support,
+                    report.live_bytes_selected,
+                )
+                .await?;
+            report.relay_fetch_select_ms = report
+                .relay_fetch_select_ms
+                .saturating_add(started.elapsed().as_millis());
+            report.events_seen = report.events_seen.saturating_add(batch.events_seen);
+            report.events_selected = report.events_selected.saturating_add(batch.events_selected);
+            report.live_bytes_selected = batch.live_bytes_selected;
+            report.authors_processed = report.authors_processed.saturating_add(author_batch.len());
+            report.applied_events.extend(batch.events);
+            if self.reached_events_seen_limit(report.events_seen) {
+                break;
+            }
+        }
+
+        let _ = client.disconnect().await;
+        Ok(report)
+    }
+
     pub async fn crawl_with_progress<G, F>(
         &self,
         graph: &G,

@@ -785,6 +785,55 @@ impl<S: Store> NostrEventStore<S> {
         VerifiedStoredNostrEvent::try_from(self.decode_event(data)?)
     }
 
+    /// Persist signed events as independent content-addressed Hashtree blobs
+    /// without mutating any query index.
+    pub async fn store_event_blobs<I>(&self, events: I) -> Result<Vec<Cid>, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = StoredNostrEvent>,
+    {
+        let mut prepared = Vec::new();
+        for (sequence, event) in events.into_iter().enumerate() {
+            let normalized = self.validate_event(event).await?;
+            prepared.push(self.prepare_event_blob(sequence, normalized, None)?);
+        }
+        Ok(self
+            .put_prepared_event_blobs_parallel(prepared)
+            .await?
+            .into_iter()
+            .map(|(_sequence, _event, cid, _previous)| cid)
+            .collect())
+    }
+
+    /// Read one independently persisted event blob.
+    pub async fn load_event_blob(
+        &self,
+        cid: &Cid,
+    ) -> Result<StoredNostrEvent, NostrEventStoreError> {
+        self.read_stored_event(cid).await
+    }
+
+    /// Read independent event blobs concurrently while preserving input order.
+    pub async fn load_event_blobs<I>(
+        &self,
+        cids: I,
+    ) -> Result<Vec<StoredNostrEvent>, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = Cid>,
+    {
+        let mut events = stream::iter(cids.into_iter().enumerate().map(
+            |(sequence, cid)| async move {
+                self.read_stored_event(&cid)
+                    .await
+                    .map(|event| (sequence, event))
+            },
+        ))
+        .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        events.sort_by_key(|(sequence, _)| *sequence);
+        Ok(events.into_iter().map(|(_, event)| event).collect())
+    }
+
     pub async fn validate_index_root(
         &self,
         root: Option<&Cid>,

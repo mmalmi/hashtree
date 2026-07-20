@@ -1175,6 +1175,34 @@ fn bulk_build_flushes_each_projection_within_configured_event_commits() {
 }
 
 #[test]
+fn individual_event_blobs_round_trip_without_creating_an_index_root() {
+    block_on(async {
+        let store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let first = canonical_store_event(&"1".repeat(64), 10, 1, Vec::new(), "first");
+        let second = canonical_store_event(&"2".repeat(64), 20, 7, Vec::new(), "second");
+
+        let cids = store
+            .store_event_blobs([first.clone(), second.clone()])
+            .await
+            .expect("store individual event blobs");
+
+        assert_eq!(cids.len(), 2);
+        assert_eq!(
+            store
+                .load_event_blobs(cids)
+                .await
+                .expect("load individual event blobs"),
+            vec![first, second]
+        );
+        assert!(store
+            .list_recent(None, ListEventsOptions::default())
+            .await
+            .expect("list empty index")
+            .is_empty());
+    });
+}
+
+#[test]
 fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
     block_on(async {
         let options = NostrEventStoreOptions {

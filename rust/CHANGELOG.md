@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.2.118 - 2026-07-20
+
+### Changed
+
+- Social-graph archive crawls can run as two independent durable phases:
+  `--stage-only` fetches each author and stores every selected event as an
+  individual content-addressed Hashtree blob, while `--project-staged` consumes
+  those blobs without contacting relays and advances the published index
+  watermark separately.
+- Staging segments and fetch state are atomically persisted and fsynced before
+  their cursor advances. Projection batches are bounded by both author and
+  event counts, can follow a live staging pass, and retain the existing
+  resumable index cursor as their publication watermark.
+- Release `hashtree-nostr` 0.2.87 with explicit fetch-only and independent
+  event-blob storage APIs used by the two-phase CLI.
+
 ## 0.2.117 - 2026-07-20
 
 ### Changed

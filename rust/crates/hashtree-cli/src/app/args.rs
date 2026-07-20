@@ -936,6 +936,21 @@ pub(crate) enum SocialGraphCommands {
         /// Events applied per bounded Hashtree index commit
         #[arg(long, default_value_t = 32_768)]
         index_commit_batch_size: usize,
+        /// Fetch and durably stage individual events without building query indexes
+        #[arg(long, default_value_t = false)]
+        stage_only: bool,
+        /// Build query indexes from durably staged events without contacting relays
+        #[arg(long, default_value_t = false)]
+        project_staged: bool,
+        /// Maximum staged authors combined into one projection batch
+        #[arg(long, default_value_t = 64)]
+        projection_authors: usize,
+        /// Soft maximum staged events combined into one projection batch
+        #[arg(long, default_value_t = 65_536)]
+        projection_event_limit: usize,
+        /// Wait for the staging watermark when projection catches up
+        #[arg(long, default_value_t = false)]
+        projection_follow: bool,
         /// Maximum children per Hashtree B-tree node
         #[arg(long, default_value_t = 256)]
         btree_order: usize,
