@@ -723,6 +723,11 @@ async fn crawl_allowlist_in_checkpoints(
             .live_bytes_selected
             .saturating_add(report.live_bytes_selected);
         persist_crawl_state(data_dir, state)?;
+        // Large B-tree change maps are intentionally short-lived, but glibc
+        // can retain their freed arenas across durable author checkpoints.
+        // Return those pages before starting the next checkpoint so a bounded
+        // crawler does not accumulate heap until its cgroup limit is reached.
+        hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
             "Nostr index checkpoint: authors={}/{} events_seen={} events_selected={} live_bytes={} relay_fetch_select_ms={} index_build_ms={} batch_elapsed_ms={}",
             state.next_author,

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.114 - 2026-07-20
+
+### Changed
+
+- Durable social-graph Nostr checkpoints now return freed B-tree working
+  arenas to glibc before processing the next author batch. This prevents
+  bounded multi-checkpoint crawls from accumulating inactive heap until their
+  cgroup memory limit is exhausted.
+
 ## 0.2.113 - 2026-07-20
 
 ### Changed
