@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-collection"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "futures",
@@ -3853,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "futures",

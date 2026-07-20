@@ -19,6 +19,10 @@
   used by the CLI, keeping registry builds self-contained.
 - Release `hashtree-index` 0.2.83 and `hashtree-lmdb` 0.2.86 with their batch
   APIs already consumed by the CLI, completing registry package verification.
+- Release `hashtree-nostr` 0.2.84 with the bounded event-store options and
+  crawl timing fields already consumed by the CLI.
+- Release `hashtree-collection` 0.2.83 with the known-absent batch writer used
+  by the Nostr event store.
 
 ## 0.2.113 - 2026-07-20
 
