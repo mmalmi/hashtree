@@ -17,6 +17,8 @@
   WebSocket adjacencies remain admitted under configured-only discovery.
 - Release `hashtree-core` 0.2.87 with the optimistic batch-store API already
   used by the CLI, keeping registry builds self-contained.
+- Release `hashtree-index` 0.2.83 and `hashtree-lmdb` 0.2.86 with their batch
+  APIs already consumed by the CLI, completing registry package verification.
 
 ## 0.2.113 - 2026-07-20
 
