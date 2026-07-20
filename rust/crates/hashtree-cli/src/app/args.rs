@@ -1051,7 +1051,7 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
-    /// Rebuild a damaged regular replaceable-event index from durable indexes
+    /// Rebuild damaged replaceable-event indexes from durable indexes
     RepairReplaceable {
         /// Durable crawl state whose root will be replaced atomically
         #[arg(long = "state-file")]

@@ -1624,10 +1624,22 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
         let profile_a = canonical_store_event(&author_a, 7, 0, Vec::new(), "profile a");
         let profile_b = canonical_store_event(&author_b, 9, 0, Vec::new(), "profile b");
         let note = canonical_store_event(&author_a, 11, 1, Vec::new(), "ordinary note");
+        let article = canonical_store_event(
+            &author_a,
+            13,
+            30_023,
+            vec![vec!["d".to_string(), "repair-article".to_string()]],
+            "article",
+        );
         let root = store
             .build(
                 None,
-                vec![note.clone(), profile_b.clone(), profile_a.clone()],
+                vec![
+                    note.clone(),
+                    profile_b.clone(),
+                    profile_a.clone(),
+                    article.clone(),
+                ],
             )
             .await
             .expect("build event index")
@@ -1637,18 +1649,26 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .await
             .expect("read manifest");
         let damaged = manifest.replaceable.expect("replaceable root");
+        let damaged_parameterized = manifest
+            .parameterized_replaceable
+            .expect("parameterized replaceable root");
         assert!(backing
             .delete(&damaged.hash)
             .await
             .expect("delete replaceable root"));
+        assert!(backing
+            .delete(&damaged_parameterized.hash)
+            .await
+            .expect("delete parameterized replaceable root"));
 
         let repaired = store
             .rebuild_replaceable_index(&root, 2)
             .await
             .expect("repair replaceable index");
 
-        assert_eq!(repaired.entries_scanned, 3);
+        assert_eq!(repaired.entries_scanned, 4);
         assert_eq!(repaired.replaceable_entries, 2);
+        assert_eq!(repaired.parameterized_replaceable_entries, 1);
         assert_eq!(
             store
                 .get_replaceable(Some(&repaired.root), &author_a, 0)
@@ -1662,6 +1682,18 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
                 .await
                 .expect("read repaired profile b"),
             Some(profile_b)
+        );
+        assert_eq!(
+            store
+                .get_parameterized_replaceable(
+                    Some(&repaired.root),
+                    &author_a,
+                    30_023,
+                    "repair-article",
+                )
+                .await
+                .expect("read repaired article"),
+            Some(article)
         );
         assert_eq!(
             store

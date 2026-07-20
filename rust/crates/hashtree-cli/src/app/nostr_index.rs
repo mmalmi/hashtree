@@ -324,6 +324,7 @@ pub(crate) struct NostrReplaceableRepairOutput {
     pub(crate) root: String,
     pub(crate) entries_scanned: u64,
     pub(crate) replaceable_entries: usize,
+    pub(crate) parameterized_replaceable_entries: usize,
     pub(crate) applied: bool,
 }
 
@@ -466,6 +467,7 @@ pub(crate) async fn run_nostr_replaceable_repair(
             root: previous_root,
             entries_scanned: 0,
             replaceable_entries: 0,
+            parameterized_replaceable_entries: 0,
             applied: false,
         });
     }
@@ -502,6 +504,7 @@ pub(crate) async fn run_nostr_replaceable_repair(
         root: repaired_root,
         entries_scanned: report.entries_scanned,
         replaceable_entries: report.replaceable_entries,
+        parameterized_replaceable_entries: report.parameterized_replaceable_entries,
         applied: true,
     })
 }

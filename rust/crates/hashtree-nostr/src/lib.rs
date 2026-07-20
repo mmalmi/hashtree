@@ -196,6 +196,7 @@ pub struct NostrReplaceableRepairReport {
     pub root: Cid,
     pub entries_scanned: u64,
     pub replaceable_entries: usize,
+    pub parameterized_replaceable_entries: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1225,11 +1226,12 @@ impl<S: Store> NostrEventStore<S> {
         Ok(next_root)
     }
 
-    /// Rebuild the regular replaceable-event index from the authoritative
-    /// author/kind/time index while leaving every other manifest index intact.
+    /// Rebuild the regular and parameterized replaceable-event indexes from
+    /// the authoritative author/kind/time index while leaving every other
+    /// manifest index intact.
     ///
     /// This is a bounded-memory closed-writer repair path for a damaged
-    /// derived replaceable index. The caller must force-sync the returned root
+    /// derived replaceable indexes. The caller must force-sync the returned root
     /// and publish it durably before deleting anything reachable only from the
     /// previous root.
     pub async fn rebuild_replaceable_index(
@@ -1253,6 +1255,7 @@ impl<S: Store> NostrEventStore<S> {
         let mut entries_scanned = 0u64;
         let mut last_slot = None;
         let mut replaceable = Vec::new();
+        let mut parameterized_replaceable = BTreeMap::new();
         loop {
             let page = self
                 .index
@@ -1271,15 +1274,27 @@ impl<S: Store> NostrEventStore<S> {
                         "invalid kind in author-kind-time key {key}: {error}"
                     ))
                 })?;
-                if pubkey.len() != 64 || !is_replaceable_kind(kind) {
+                if pubkey.len() != 64 {
                     continue;
                 }
-                let slot = replaceable_key(pubkey, kind);
-                if last_slot.as_ref() == Some(&slot) {
-                    continue;
+                if is_replaceable_kind(kind) {
+                    let slot = replaceable_key(pubkey, kind);
+                    if last_slot.as_ref() == Some(&slot) {
+                        continue;
+                    }
+                    last_slot = Some(slot.clone());
+                    replaceable.push((slot, cid.clone()));
+                } else if is_parameterized_replaceable_kind(kind) {
+                    let event = self.read_stored_event(cid).await?;
+                    let slot = parameterized_replaceable_key(
+                        pubkey,
+                        kind,
+                        &parameterized_replaceable_d_tag(&event),
+                    );
+                    parameterized_replaceable
+                        .entry(slot)
+                        .or_insert_with(|| cid.clone());
                 }
-                last_slot = Some(slot.clone());
-                replaceable.push((slot, cid.clone()));
             }
 
             let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
@@ -1290,6 +1305,10 @@ impl<S: Store> NostrEventStore<S> {
         }
 
         manifest.replaceable = self.index.build_links(replaceable.clone()).await?;
+        manifest.parameterized_replaceable = self
+            .index
+            .build_links(parameterized_replaceable.clone())
+            .await?;
         let repaired_root = self.write_manifest(&manifest).await?.ok_or_else(|| {
             NostrEventStoreError::Validation("repaired Nostr manifest was empty".to_string())
         })?;
@@ -1297,6 +1316,7 @@ impl<S: Store> NostrEventStore<S> {
             root: repaired_root,
             entries_scanned,
             replaceable_entries: replaceable.len(),
+            parameterized_replaceable_entries: parameterized_replaceable.len(),
         })
     }
 
