@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -71,56 +71,6 @@ impl Store for CountingStore {
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.gets.fetch_add(1, Ordering::Relaxed);
-        self.inner.get(hash).await
-    }
-
-    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
-        self.inner.has(hash).await
-    }
-
-    async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
-        self.inner.delete(hash).await
-    }
-}
-
-#[derive(Default)]
-struct ConcurrentWriteStore {
-    inner: MemoryStore,
-    probe_enabled: AtomicBool,
-    active_puts: AtomicUsize,
-    max_active_puts: AtomicUsize,
-}
-
-impl ConcurrentWriteStore {
-    fn start_probe(&self) {
-        self.active_puts.store(0, Ordering::SeqCst);
-        self.max_active_puts.store(0, Ordering::SeqCst);
-        self.probe_enabled.store(true, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl Store for ConcurrentWriteStore {
-    async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
-        if !self.probe_enabled.load(Ordering::SeqCst) {
-            return self.inner.put(hash, data).await;
-        }
-        let active = self.active_puts.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_active_puts.fetch_max(active, Ordering::SeqCst);
-        if self.max_active_puts.load(Ordering::SeqCst) < 2 {
-            for _ in 0..1_000 {
-                if self.active_puts.load(Ordering::SeqCst) > 1 {
-                    break;
-                }
-                std::thread::yield_now();
-            }
-        }
-        let result = self.inner.put(hash, data).await;
-        self.active_puts.fetch_sub(1, Ordering::SeqCst);
-        result
-    }
-
-    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.inner.get(hash).await
     }
 
@@ -571,57 +521,6 @@ async fn batch_put_is_order_independent_and_deletes_previous_keys_before_puts() 
             .collect::<Vec<_>>(),
         vec![cid_from_seed(51)]
     );
-}
-
-#[tokio::test]
-async fn dense_batch_builds_independent_key_indexes_with_bounded_concurrency() {
-    let store = Arc::new(ConcurrentWriteStore::default());
-    let definition = CollectionDefinition::new(|song: &Song| song.id.clone())
-        .with_key_index("artist", |song| {
-            vec![format!("artist:{}:{}", song.artist, song.id)]
-        })
-        .with_key_index("title", |song| {
-            vec![format!("title:{}:{}", song.title, song.id)]
-        })
-        .with_key_index("first-tag", |song| {
-            vec![format!(
-                "tag:{}:{}",
-                song.tags.first().cloned().unwrap_or_default(),
-                song.id
-            )]
-        })
-        .with_key_index("reverse-id", |song| {
-            vec![song.id.chars().rev().collect::<String>()]
-        });
-    let entries = (0..300_usize)
-        .map(|index| {
-            (
-                Song {
-                    id: format!("song:{index:04}"),
-                    title: format!("Title {index}"),
-                    artist: format!("Artist {}", index % 17),
-                    tags: vec![format!("tag-{}", index % 23)],
-                },
-                cid_from_seed((index % 250) as u8),
-                None,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut writer = CollectionWriter::new(Arc::clone(&store), definition);
-    store.start_probe();
-
-    writer.put_batch(entries).await.expect("put dense batch");
-
-    let max_active_puts = store.max_active_puts.load(Ordering::SeqCst);
-    assert!(
-        max_active_puts > 1,
-        "independent key indexes were written serially"
-    );
-    assert!(
-        max_active_puts <= 2,
-        "bounded key-index construction issued {max_active_puts} concurrent writes"
-    );
-    assert!(writer.snapshot().key_roots.values().all(Option::is_some));
 }
 
 #[tokio::test]

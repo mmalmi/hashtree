@@ -644,36 +644,6 @@ impl<S: Store> BTree<S> {
     where
         I: IntoIterator<Item = (String, Option<Cid>)>,
     {
-        self.update_links_with_parallelism(root, changes, true)
-            .await
-    }
-
-    /// Apply a link batch without spawning branch workers.
-    ///
-    /// Collection writers use this when they already parallelize independent
-    /// indexes, keeping one explicit concurrency budget instead of nesting
-    /// index-level and branch-level workers.
-    pub async fn update_links_serial<I>(
-        &self,
-        root: Option<&Cid>,
-        changes: I,
-    ) -> Result<Option<Cid>, BTreeError>
-    where
-        I: IntoIterator<Item = (String, Option<Cid>)>,
-    {
-        self.update_links_with_parallelism(root, changes, false)
-            .await
-    }
-
-    async fn update_links_with_parallelism<I>(
-        &self,
-        root: Option<&Cid>,
-        changes: I,
-        parallel_children: bool,
-    ) -> Result<Option<Cid>, BTreeError>
-    where
-        I: IntoIterator<Item = (String, Option<Cid>)>,
-    {
         let changes = changes.into_iter().collect::<BTreeMap<_, _>>();
         if changes.is_empty() {
             return Ok(root.cloned());
@@ -690,9 +660,7 @@ impl<S: Store> BTree<S> {
                 .await;
         };
 
-        let nodes = self
-            .update_link_node(root.clone(), &changes, parallel_children)
-            .await?;
+        let nodes = self.update_link_node(root.clone(), &changes, true).await?;
         self.finish_link_node_updates(nodes).await
     }
 
