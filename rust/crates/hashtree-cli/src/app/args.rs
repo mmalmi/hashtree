@@ -976,6 +976,9 @@ pub(crate) struct SocialGraphIndexArgs {
     /// Maximum children per Hashtree B-tree node
     #[arg(long, default_value_t = 256)]
     pub(crate) btree_order: usize,
+    /// Maximum independent B-tree subtrees updated concurrently
+    #[arg(long, default_value_t = 4)]
+    pub(crate) btree_update_concurrency: usize,
     /// Number of graph-crawl author batches to fetch concurrently during warmup
     #[arg(long, default_value_t = 4)]
     pub(crate) concurrent_batches: usize,

@@ -1141,6 +1141,8 @@ fn test_cli_parses_socialgraph_index_command() {
         "--projection-follow",
         "--btree-order",
         "256",
+        "--btree-update-concurrency",
+        "1",
         "--concurrent-batches",
         "6",
         "--fetch-timeout-secs",
@@ -1191,6 +1193,7 @@ fn test_cli_parses_socialgraph_index_command() {
                 projection_event_limit,
                 projection_follow,
                 btree_order,
+                btree_update_concurrency,
                 concurrent_batches,
                 fetch_timeout_secs,
                 relay_event_max_bytes,
@@ -1223,6 +1226,7 @@ fn test_cli_parses_socialgraph_index_command() {
             assert_eq!(projection_event_limit, 131_072);
             assert!(projection_follow);
             assert_eq!(btree_order, 256);
+            assert_eq!(btree_update_concurrency, 1);
             assert_eq!(concurrent_batches, 6);
             assert_eq!(fetch_timeout_secs, 7);
             assert_eq!(relay_event_max_bytes, Some(262_144));

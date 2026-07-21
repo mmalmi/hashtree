@@ -728,6 +728,43 @@ fn dense_link_changes_read_independent_subtrees_concurrently() {
 }
 
 #[test]
+fn dense_link_changes_honor_single_worker_limit() {
+    block_on(async {
+        let store = Arc::new(ConcurrentReadStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) })
+            .with_update_concurrency(1);
+        let entry_count = 3_500;
+        let root = btree
+            .build_links(
+                (0..entry_count).map(|index| (format!("key:{index:05}"), cid_from_seed(index))),
+            )
+            .await
+            .unwrap()
+            .expect("initial root");
+        store.start_probe();
+
+        btree
+            .update_links(
+                Some(&root),
+                (0..entry_count).map(|index| {
+                    (
+                        format!("key:{index:05}"),
+                        Some(cid_from_seed(index + 10_000)),
+                    )
+                }),
+            )
+            .await
+            .expect("update links");
+
+        assert_eq!(
+            store.max_active_gets.load(Ordering::SeqCst),
+            1,
+            "single-worker B-tree update issued concurrent reads"
+        );
+    });
+}
+
+#[test]
 fn clustered_link_changes_find_deeper_parallel_subtrees() {
     block_on(async {
         let store = Arc::new(ConcurrentReadStore::default());

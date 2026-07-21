@@ -64,16 +64,20 @@ impl<S: Store, T> CollectionWriter<S, T> {
                 )
             })
             .collect();
+        let mut index = BTree::new(
+            Arc::clone(&store),
+            BTreeOptions {
+                order: options.btree_order,
+            },
+        );
+        if let Some(concurrency) = options.btree_update_concurrency {
+            index = index.with_update_concurrency(concurrency);
+        }
 
         Self {
             store: Arc::clone(&store),
             tree: HashTree::new(HashTreeConfig::new(Arc::clone(&store))),
-            index: BTree::new(
-                store,
-                BTreeOptions {
-                    order: options.btree_order,
-                },
-            ),
+            index,
             search_indexes,
             definition,
             state,

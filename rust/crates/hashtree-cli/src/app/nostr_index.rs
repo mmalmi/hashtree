@@ -75,6 +75,7 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) projection_event_limit: usize,
     pub(crate) projection_follow: bool,
     pub(crate) btree_order: usize,
+    pub(crate) btree_update_concurrency: usize,
     pub(crate) concurrent_batches: usize,
     pub(crate) per_author_event_limit: usize,
     pub(crate) per_author_kind_event_limit: Option<usize>,
@@ -647,6 +648,7 @@ pub(crate) async fn run_nostr_replaceable_repair(
         store.store_arc(),
         NostrEventStoreOptions {
             btree_order: Some(options.btree_order),
+            btree_update_concurrency: None,
             index_commit_batch_size: Some(2048),
         },
     );
@@ -1200,6 +1202,7 @@ fn build_crawl_config(
 fn nostr_event_store_options(options: &SocialGraphIndexOptions) -> NostrEventStoreOptions {
     NostrEventStoreOptions {
         btree_order: Some(options.btree_order),
+        btree_update_concurrency: Some(options.btree_update_concurrency),
         index_commit_batch_size: Some(options.index_commit_batch_size),
     }
 }
@@ -2667,6 +2670,7 @@ mod tests {
             projection_event_limit: 65_536,
             projection_follow: false,
             btree_order: 8,
+            btree_update_concurrency: 4,
             concurrent_batches: 1,
             per_author_event_limit: 16,
             per_author_kind_event_limit: None,
@@ -3270,6 +3274,7 @@ mod tests {
                 projection_event_limit: 65_536,
                 projection_follow: false,
                 btree_order: 16,
+                btree_update_concurrency: 4,
                 concurrent_batches: 4,
                 per_author_event_limit: 8,
                 per_author_kind_event_limit: None,
@@ -3398,6 +3403,7 @@ mod tests {
                 projection_event_limit: 65_536,
                 projection_follow: false,
                 btree_order: 16,
+                btree_update_concurrency: 4,
                 concurrent_batches: 1,
                 per_author_event_limit: 8,
                 per_author_kind_event_limit: None,

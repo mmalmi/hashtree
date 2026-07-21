@@ -681,6 +681,9 @@ const DEFAULT_INDEX_COMMIT_BATCH_SIZE: usize = 8_192;
 #[derive(Debug, Clone)]
 pub struct NostrEventStoreOptions {
     pub btree_order: Option<usize>,
+    /// Maximum number of independent B-tree subtrees updated in parallel.
+    /// Lower values reduce peak memory for dense derived-index commits.
+    pub btree_update_concurrency: Option<usize>,
     /// Maximum number of events applied in one collection update. Event blobs
     /// and each independent index projection are flushed within the update so
     /// memory is bounded without repeatedly walking every index.
@@ -692,6 +695,7 @@ impl Default for NostrEventStoreOptions {
     fn default() -> Self {
         Self {
             btree_order: None,
+            btree_update_concurrency: None,
             index_commit_batch_size: Some(DEFAULT_INDEX_COMMIT_BATCH_SIZE),
         }
     }
@@ -739,6 +743,7 @@ fn nostr_collection_definition() -> CollectionDefinition<StoredNostrEvent> {
 fn nostr_collection_options(options: &NostrEventStoreOptions) -> CollectionOptions {
     CollectionOptions {
         btree_order: options.btree_order,
+        btree_update_concurrency: options.btree_update_concurrency,
     }
 }
 
@@ -797,15 +802,19 @@ impl<S: Store> NostrEventStore<S> {
     }
 
     pub fn with_options(store: Arc<S>, options: NostrEventStoreOptions) -> Self {
+        let mut index = BTree::new(
+            Arc::clone(&store),
+            BTreeOptions {
+                order: options.btree_order,
+            },
+        );
+        if let Some(concurrency) = options.btree_update_concurrency {
+            index = index.with_update_concurrency(concurrency);
+        }
         Self {
             store: Arc::clone(&store),
             tree: HashTree::new(HashTreeConfig::new(Arc::clone(&store))),
-            index: BTree::new(
-                store,
-                BTreeOptions {
-                    order: options.btree_order,
-                },
-            ),
+            index,
             options,
         }
     }

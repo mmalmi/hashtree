@@ -64,6 +64,7 @@ type BTreeFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BTreeError>> + '
 pub struct BTree<S: Store> {
     tree: HashTree<S>,
     max_keys: usize,
+    update_child_concurrency: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +86,18 @@ impl<S: Store> BTree<S> {
         Self {
             tree: HashTree::new(HashTreeConfig::new(store)),
             max_keys: order - 1,
+            update_child_concurrency: UPDATE_CHILD_CONCURRENCY,
         }
+    }
+
+    /// Bound parallel copy-on-write subtree updates.
+    ///
+    /// Large derived-index projections can touch many independent root
+    /// children at once. Restricting that fanout lets callers operating under
+    /// a tight memory cgroup trade throughput for a lower peak working set.
+    pub fn with_update_concurrency(mut self, concurrency: usize) -> Self {
+        self.update_child_concurrency = concurrency.max(1);
+        self
     }
 
     pub async fn insert(
@@ -771,6 +783,7 @@ impl<S: Store> BTree<S> {
                     .filter(|(_, change_start, change_end)| change_start != change_end)
                     .count();
                 let children_update = if parallel_children
+                    && self.update_child_concurrency > 1
                     && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
                     && touched_children > 1
                 {
@@ -824,7 +837,7 @@ impl<S: Store> BTree<S> {
         work: Vec<(BuiltNode, usize, usize)>,
         changes: &[(String, Option<Cid>)],
     ) -> Result<LinkNodeUpdate, BTreeError> {
-        let worker_count = UPDATE_CHILD_CONCURRENCY.min(work.len()).max(1);
+        let worker_count = self.update_child_concurrency.min(work.len()).max(1);
         let work_per_worker = work.len().div_ceil(worker_count);
         std::thread::scope(|scope| {
             let handles = work

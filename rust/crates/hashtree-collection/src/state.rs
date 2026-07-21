@@ -26,6 +26,7 @@ impl CollectionState {
 #[derive(Debug, Clone, Default)]
 pub struct CollectionOptions {
     pub btree_order: Option<usize>,
+    pub btree_update_concurrency: Option<usize>,
 }
 
 pub fn create_empty_collection_state<T>(definition: &CollectionDefinition<T>) -> CollectionState {

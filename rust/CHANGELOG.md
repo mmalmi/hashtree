@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.132 - 2026-07-21
+
+### Added
+
+- Social-graph indexing accepts `--btree-update-concurrency` to bound the
+  number of independent copy-on-write B-tree subtrees updated in parallel.
+  Tight-memory projectors can use one worker to avoid fanout-driven anonymous
+  memory spikes while preserving the same durable roots and resume offsets.
+
 ## 0.2.131 - 2026-07-21
 
 ### Changed

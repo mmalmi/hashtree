@@ -1134,6 +1134,7 @@ fn bulk_build_flushes_each_projection_within_configured_event_commits() {
             Arc::clone(&backing),
             NostrEventStoreOptions {
                 btree_order: Some(4),
+                btree_update_concurrency: None,
                 index_commit_batch_size: Some(2),
             },
         );
@@ -1230,6 +1231,7 @@ fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
     block_on(async {
         let options = NostrEventStoreOptions {
             btree_order: Some(4),
+            btree_update_concurrency: None,
             index_commit_batch_size: Some(16),
         };
         let profile_author = "a".repeat(64);
@@ -1521,6 +1523,7 @@ fn incremental_build_reports_nodes_safe_to_delete_after_root_publication() {
             Arc::clone(&backing),
             NostrEventStoreOptions {
                 btree_order: Some(8),
+                btree_update_concurrency: None,
                 index_commit_batch_size: Some(64),
             },
         );
@@ -1635,6 +1638,7 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             Arc::clone(&backing),
             NostrEventStoreOptions {
                 btree_order: Some(4),
+                btree_update_concurrency: None,
                 index_commit_batch_size: Some(8),
             },
         );
