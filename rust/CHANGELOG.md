@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.130 - 2026-07-21
+
+### Added
+
+- `nostr-index prepare-time-repair` atomically publishes a closed-store repair
+  manifest that preserves every authoritative index and event link while
+  detaching a damaged derived chronological index. Retained-root cleanup can
+  then reclaim the broken generation before rebuilding it without requiring
+  extra filesystem headroom.
+
 ## 0.2.129 - 2026-07-21
 
 ### Fixed

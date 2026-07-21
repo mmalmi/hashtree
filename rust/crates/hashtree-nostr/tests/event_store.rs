@@ -1731,8 +1731,24 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .delete(&damaged_time.hash)
             .await
             .expect("delete time root"));
+        let prepared = store
+            .clear_time_index(&repaired.root)
+            .await
+            .expect("publish time-repair manifest");
+        let prepared_manifest = store
+            .get_manifest(Some(&prepared))
+            .await
+            .expect("read time-repair manifest");
+        assert_eq!(prepared_manifest.by_time, None);
+        assert_eq!(
+            store
+                .get_by_id(Some(&prepared), &note.id)
+                .await
+                .expect("read authoritative index through repair manifest"),
+            Some(note.clone())
+        );
         let time_repaired = store
-            .rebuild_time_index(&repaired.root, 2)
+            .rebuild_time_index(&prepared, 2)
             .await
             .expect("repair time index");
         assert_eq!(time_repaired.entries_scanned, expected_events);

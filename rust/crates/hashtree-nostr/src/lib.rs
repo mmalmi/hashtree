@@ -1536,6 +1536,21 @@ impl<S: Store> NostrEventStore<S> {
         })
     }
 
+    /// Publish a temporary manifest without the derived chronological index.
+    ///
+    /// Closed-store repair can retain this root to reclaim a damaged `by-time`
+    /// generation before rebuilding it from the authoritative
+    /// author/kind/time index. All other indexes and event links are preserved.
+    pub async fn clear_time_index(&self, root: &Cid) -> Result<Cid, NostrEventStoreError> {
+        let mut manifest = self.get_manifest(Some(root)).await?;
+        manifest.by_time = None;
+        self.write_manifest(&manifest).await?.ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "temporary chronological-index repair manifest was empty".to_string(),
+            )
+        })
+    }
+
     pub async fn get_by_id(
         &self,
         root: Option<&Cid>,

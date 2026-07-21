@@ -39,8 +39,9 @@ use super::mount_target::{
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
     run_nostr_index_import, run_nostr_index_query, run_nostr_replaceable_repair,
-    run_socialgraph_index_from_cli, NostrIndexImportOptions, NostrIndexQueryOptions,
-    NostrReplaceableRepairOptions, SocialGraphIndexOptions,
+    run_nostr_time_repair_preparation, run_socialgraph_index_from_cli, NostrIndexImportOptions,
+    NostrIndexQueryOptions, NostrReplaceableRepairOptions, NostrTimeRepairPreparationOptions,
+    SocialGraphIndexOptions,
 };
 use super::peers::list_peers;
 use super::pwa::run_export;
@@ -1035,6 +1036,14 @@ pub(crate) async fn run() -> Result<()> {
                     },
                 )
                 .await?;
+            }
+            NostrIndexCommands::PrepareTimeRepair { state_file, apply } => {
+                let output = run_nostr_time_repair_preparation(
+                    data_dir,
+                    NostrTimeRepairPreparationOptions { state_file, apply },
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&output)?);
             }
             NostrIndexCommands::RepairReplaceable {
                 state_file,

@@ -324,6 +324,12 @@ pub(crate) struct NostrReplaceableRepairOptions {
     pub(crate) apply: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct NostrTimeRepairPreparationOptions {
+    pub(crate) state_file: PathBuf,
+    pub(crate) apply: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct NostrReplaceableRepairOutput {
     pub(crate) previous_root: String,
@@ -332,6 +338,13 @@ pub(crate) struct NostrReplaceableRepairOutput {
     pub(crate) replaceable_entries: usize,
     pub(crate) parameterized_replaceable_entries: usize,
     pub(crate) recovered_event_blobs: usize,
+    pub(crate) applied: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct NostrTimeRepairPreparationOutput {
+    pub(crate) previous_root: String,
+    pub(crate) root: String,
     pub(crate) applied: bool,
 }
 
@@ -525,6 +538,62 @@ pub(crate) async fn run_nostr_index_query(
     };
     write_nostr_index_query_output(&output, options.out.as_deref())?;
     Ok(output)
+}
+
+pub(crate) async fn run_nostr_time_repair_preparation(
+    data_dir: PathBuf,
+    options: NostrTimeRepairPreparationOptions,
+) -> Result<NostrTimeRepairPreparationOutput> {
+    let expected_state_file = data_dir.join(INDEX_DIR).join(CRAWL_STATE_FILE);
+    if options.state_file != expected_state_file {
+        anyhow::bail!(
+            "repair state file {} does not match data directory state {}",
+            options.state_file.display(),
+            expected_state_file.display()
+        );
+    }
+    let state_bytes = std::fs::read(&options.state_file)
+        .with_context(|| format!("read durable crawl state {}", options.state_file.display()))?;
+    let mut state: IndexedNostrCrawlState = serde_json::from_slice(&state_bytes)
+        .with_context(|| format!("parse durable crawl state {}", options.state_file.display()))?;
+    let previous_root = state
+        .root
+        .clone()
+        .context("durable crawl state has no root")?;
+    let root = parse_root_text(&previous_root).context("parse durable crawl root")?;
+
+    if !options.apply {
+        return Ok(NostrTimeRepairPreparationOutput {
+            previous_root: previous_root.clone(),
+            root: previous_root,
+            applied: false,
+        });
+    }
+
+    let _lock = CrawlStateLock::acquire(&data_dir)?;
+    let config = Config::load()?;
+    let store = Arc::new(HashtreeStore::with_options(
+        &data_dir,
+        config.storage.s3.as_ref(),
+        0,
+    )?);
+    let event_store = NostrEventStore::new(store.store_arc());
+    let prepared_root = event_store
+        .clear_time_index(&root)
+        .await
+        .context("write temporary chronological-index repair manifest")?;
+    store
+        .force_sync()
+        .context("force-sync chronological-index repair manifest")?;
+    let prepared_root = cid_to_nhash(&prepared_root)?;
+    state.root = Some(prepared_root.clone());
+    persist_crawl_state(&data_dir, &state)?;
+
+    Ok(NostrTimeRepairPreparationOutput {
+        previous_root,
+        root: prepared_root,
+        applied: true,
+    })
 }
 
 pub(crate) async fn run_nostr_replaceable_repair(

@@ -1054,6 +1054,15 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Detach a damaged chronological index before closed-store retention and rebuild
+    PrepareTimeRepair {
+        /// Durable crawl state whose root will be replaced atomically
+        #[arg(long = "state-file")]
+        state_file: PathBuf,
+        /// Publish the prepared root; without this flag the command only validates inputs
+        #[arg(long)]
+        apply: bool,
+    },
     /// Rebuild damaged replaceable-event indexes from durable indexes
     RepairReplaceable {
         /// Durable crawl state whose root will be replaced atomically
