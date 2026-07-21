@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.129 - 2026-07-21
+
+### Fixed
+
+- Copy-on-write B-tree updates no longer report an original node as
+  superseded when a split retains that content-addressed node as one of its
+  replacement chunks. Offline chronological-index repair can now reclaim
+  intermediate generations without deleting nodes still reachable from the
+  repaired root.
+
 ## 0.2.120 - 2026-07-20
 
 ### Changed

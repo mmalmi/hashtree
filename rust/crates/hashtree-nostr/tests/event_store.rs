@@ -1618,7 +1618,13 @@ fn stale_replaceable_events_do_not_remain_in_general_indexes() {
 fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
     block_on(async {
         let backing = Arc::new(MemoryStore::new());
-        let store = NostrEventStore::new(Arc::clone(&backing));
+        let store = NostrEventStore::with_options(
+            Arc::clone(&backing),
+            NostrEventStoreOptions {
+                btree_order: Some(4),
+                index_commit_batch_size: Some(8),
+            },
+        );
         let author_a = "a".repeat(64);
         let author_b = "b".repeat(64);
         let profile_a = canonical_store_event(&author_a, 7, 0, Vec::new(), "profile a");
@@ -1631,16 +1637,29 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             vec![vec!["d".to_string(), "repair-article".to_string()]],
             "article",
         );
+        let mut events = vec![
+            note.clone(),
+            profile_b.clone(),
+            profile_a.clone(),
+            article.clone(),
+        ];
+        for index in 0u64..96 {
+            let author = if index.is_multiple_of(2) {
+                &author_a
+            } else {
+                &author_b
+            };
+            events.push(canonical_store_event(
+                author,
+                100 + index,
+                1,
+                Vec::new(),
+                &format!("repair note {index}"),
+            ));
+        }
+        let expected_events = events.len() as u64;
         let root = store
-            .build(
-                None,
-                vec![
-                    note.clone(),
-                    profile_b.clone(),
-                    profile_a.clone(),
-                    article.clone(),
-                ],
-            )
+            .build(None, events)
             .await
             .expect("build event index")
             .expect("event index root");
@@ -1682,6 +1701,10 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .repair_missing_event_blobs_with_superseded_nodes(&repair_base, [article.clone()])
             .await
             .expect("repair missing event blob");
+        assert!(
+            !event_repair.superseded_nodes.is_empty(),
+            "event repair should report the replaced copy-on-write path"
+        );
         let repaired_event_root = event_repair.root.expect("repaired event root");
         assert_eq!(
             store
@@ -1696,7 +1719,7 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .await
             .expect("repair replaceable index");
 
-        assert_eq!(repaired.entries_scanned, 4);
+        assert_eq!(repaired.entries_scanned, expected_events);
         assert_eq!(repaired.replaceable_entries, 2);
         assert_eq!(repaired.parameterized_replaceable_entries, 1);
         let repaired_manifest = store
@@ -1712,8 +1735,25 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .rebuild_time_index(&repaired.root, 2)
             .await
             .expect("repair time index");
-        assert_eq!(time_repaired.entries_scanned, 4);
+        assert_eq!(time_repaired.entries_scanned, expected_events);
         let final_root = &time_repaired.root;
+        let final_manifest = store
+            .get_manifest(Some(final_root))
+            .await
+            .expect("read final manifest");
+        let by_time = final_manifest.by_time.expect("rebuilt time root");
+        let rebuilt_time_index = BTree::new(Arc::clone(&backing), BTreeOptions { order: Some(4) });
+        assert_eq!(
+            rebuilt_time_index
+                .count_stored_links(Some(&by_time))
+                .await
+                .expect("traverse complete rebuilt time index before cleanup"),
+            Some(expected_events)
+        );
+        store
+            .delete_superseded_nodes(&event_repair.superseded_nodes)
+            .await
+            .expect("delete nodes superseded by event repair");
         assert_eq!(
             store
                 .get_replaceable(Some(final_root), &author_a, 0)
@@ -1748,12 +1788,11 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             Some(note.clone())
         );
         assert_eq!(
-            store
-                .list_recent(Some(final_root), ListEventsOptions::default())
+            rebuilt_time_index
+                .count_stored_links(Some(&by_time))
                 .await
-                .expect("read rebuilt time index")
-                .len(),
-            4
+                .expect("traverse complete rebuilt time index"),
+            Some(expected_events)
         );
     });
 }

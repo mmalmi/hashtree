@@ -803,7 +803,16 @@ impl<S: Store> BTree<S> {
                 }
             };
 
-            if update.nodes.len() != 1 || update.nodes[0].cid != node {
+            // A split can retain the original node verbatim as one output
+            // chunk while adding siblings around it. Content addressing then
+            // gives that retained chunk the same CID as `node`; deleting it as
+            // superseded would corrupt the new root. Reclaim the old hash only
+            // when none of the replacement nodes still references it.
+            if !update
+                .nodes
+                .iter()
+                .any(|replacement| replacement.cid == node)
+            {
                 update.superseded_nodes.push(node);
             }
             Ok(update)
