@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.131 - 2026-07-21
+
+### Changed
+
+- Closed-store Nostr repair now detaches every derived projection while
+  retaining the authoritative author/kind/time index, then rebuilds all eight
+  derived indexes in bounded pages. This recovers from damage in more than one
+  projection, reclaims broken generations before rebuilding, and emits a
+  measured checkpoint after every page.
+
 ## 0.2.130 - 2026-07-21
 
 ### Added

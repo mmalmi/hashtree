@@ -1339,11 +1339,11 @@ fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
             by_id_event_cid(Arc::clone(&bulk_backing), &initial_root, &old_profile.id)
                 .await
                 .expect("old profile cid");
-        let bulk_root = bulk_store
-            .build(Some(&initial_root), appended.clone())
+        let bulk_report = bulk_store
+            .build_with_superseded_nodes(Some(&initial_root), appended.clone())
             .await
-            .unwrap()
-            .expect("bulk appended root");
+            .unwrap();
+        let bulk_root = bulk_report.root.expect("bulk appended root");
 
         let repeated_backing = Arc::new(MemoryStore::new());
         let repeated_store =
@@ -1405,6 +1405,19 @@ fn resumed_bulk_build_matches_sequential_semantics_across_every_projection() {
                 .unwrap(),
             Some(new_article)
         );
+        assert!(bulk_backing
+            .get(&old_profile_cid.hash)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(bulk_report
+            .superseded_nodes
+            .iter()
+            .any(|cid| cid == &old_profile_cid));
+        bulk_store
+            .delete_superseded_nodes(&bulk_report.superseded_nodes)
+            .await
+            .unwrap();
         assert_eq!(bulk_backing.get(&old_profile_cid.hash).await.unwrap(), None);
         assert_eq!(
             bulk_store
@@ -1757,7 +1770,7 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
             .get_manifest(Some(final_root))
             .await
             .expect("read final manifest");
-        let by_time = final_manifest.by_time.expect("rebuilt time root");
+        let by_time = final_manifest.by_time.clone().expect("rebuilt time root");
         let rebuilt_time_index = BTree::new(Arc::clone(&backing), BTreeOptions { order: Some(4) });
         assert_eq!(
             rebuilt_time_index
@@ -1794,7 +1807,7 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
                 )
                 .await
                 .expect("read repaired article"),
-            Some(article)
+            Some(article.clone())
         );
         assert_eq!(
             store
@@ -1809,6 +1822,60 @@ fn damaged_replaceable_index_can_be_rebuilt_from_author_kind_time() {
                 .await
                 .expect("traverse complete rebuilt time index"),
             Some(expected_events)
+        );
+
+        let damaged_by_tag = final_manifest.by_tag.expect("tag root");
+        assert!(backing
+            .delete(&damaged_by_tag.hash)
+            .await
+            .expect("delete tag root"));
+        let prepared_all = store
+            .clear_derived_indexes(final_root)
+            .await
+            .expect("publish all-derived repair manifest");
+        let prepared_all_manifest = store
+            .get_manifest(Some(&prepared_all))
+            .await
+            .expect("read all-derived repair manifest");
+        assert!(prepared_all_manifest.by_author_kind_time.is_some());
+        assert_eq!(prepared_all_manifest.by_id, None);
+        assert_eq!(prepared_all_manifest.by_author_time, None);
+        assert_eq!(prepared_all_manifest.by_kind_time, None);
+        assert_eq!(prepared_all_manifest.by_kind_time_author, None);
+        assert_eq!(prepared_all_manifest.by_time, None);
+        assert_eq!(prepared_all_manifest.by_tag, None);
+        assert_eq!(prepared_all_manifest.replaceable, None);
+        assert_eq!(prepared_all_manifest.parameterized_replaceable, None);
+
+        let all_repaired = store
+            .rebuild_derived_indexes(&prepared_all, 2)
+            .await
+            .expect("rebuild all derived indexes");
+        assert_eq!(all_repaired.entries_scanned, expected_events);
+        assert_eq!(all_repaired.replaceable_entries, 2);
+        assert_eq!(all_repaired.parameterized_replaceable_entries, 1);
+        store
+            .validate_index_root(Some(&all_repaired.root))
+            .await
+            .expect("validate fully rebuilt root");
+        assert_eq!(
+            store
+                .get_by_id(Some(&all_repaired.root), &note.id)
+                .await
+                .expect("read rebuilt by-id index"),
+            Some(note)
+        );
+        assert_eq!(
+            store
+                .list_by_tag(
+                    Some(&all_repaired.root),
+                    "d",
+                    "repair-article",
+                    ListEventsOptions::default(),
+                )
+                .await
+                .expect("read rebuilt tag index"),
+            vec![article]
         );
     });
 }

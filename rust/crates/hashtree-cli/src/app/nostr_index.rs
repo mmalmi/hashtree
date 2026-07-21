@@ -579,12 +579,12 @@ pub(crate) async fn run_nostr_time_repair_preparation(
     )?);
     let event_store = NostrEventStore::new(store.store_arc());
     let prepared_root = event_store
-        .clear_time_index(&root)
+        .clear_derived_indexes(&root)
         .await
-        .context("write temporary chronological-index repair manifest")?;
+        .context("write temporary derived-index repair manifest")?;
     store
         .force_sync()
-        .context("force-sync chronological-index repair manifest")?;
+        .context("force-sync derived-index repair manifest")?;
     let prepared_root = cid_to_nhash(&prepared_root)?;
     state.root = Some(prepared_root.clone());
     persist_crawl_state(&data_dir, &state)?;
@@ -816,21 +816,18 @@ pub(crate) async fn run_nostr_replaceable_repair(
         superseded_nodes.extend(event_repair.superseded_nodes);
         missing.len()
     };
+    let rebuild_base = event_store
+        .clear_derived_indexes(&working_root)
+        .await
+        .context("write derived-index rebuild manifest")?;
     let report = event_store
-        .rebuild_replaceable_index(&working_root, options.page_size)
+        .rebuild_derived_indexes(&rebuild_base, options.page_size)
         .await
-        .context("rebuild replaceable-event indexes")?;
-    let time_report = event_store
-        .rebuild_time_index(&report.root, options.page_size)
-        .await
-        .context("rebuild chronological event index")?;
-    if time_report.entries_scanned != report.entries_scanned {
-        anyhow::bail!("author/kind/time source changed during closed-writer repair");
-    }
+        .context("rebuild derived event indexes")?;
     store
         .force_sync()
         .context("force-sync repaired Nostr index")?;
-    let repaired_root = cid_to_nhash(&time_report.root)?;
+    let repaired_root = cid_to_nhash(&report.root)?;
     state.root = Some(repaired_root.clone());
     persist_crawl_state(&data_dir, &state)?;
     event_store

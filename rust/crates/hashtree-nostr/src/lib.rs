@@ -203,6 +203,8 @@ pub struct NostrReplaceableRepairReport {
 pub struct NostrProjectionRepairReport {
     pub root: Cid,
     pub entries_scanned: u64,
+    pub replaceable_entries: usize,
+    pub parameterized_replaceable_entries: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1533,6 +1535,143 @@ impl<S: Store> NostrEventStore<S> {
         Ok(NostrProjectionRepairReport {
             root: repaired_root,
             entries_scanned,
+            replaceable_entries: 0,
+            parameterized_replaceable_entries: 0,
+        })
+    }
+
+    /// Rebuild every projection except the authoritative author/kind/time
+    /// index in bounded pages.
+    ///
+    /// The input root may contain only `by-author-kind-time`. Each page reads
+    /// the event blobs referenced by that index, updates the eight derived
+    /// indexes independently, and immediately reclaims nodes superseded only
+    /// inside the unpublished rebuild. The caller must force-sync and publish
+    /// the returned manifest before retaining the store.
+    pub async fn rebuild_derived_indexes(
+        &self,
+        root: &Cid,
+        page_size: usize,
+    ) -> Result<NostrProjectionRepairReport, NostrEventStoreError> {
+        if page_size == 0 {
+            return Err(NostrEventStoreError::Validation(
+                "derived-index repair page size must be non-zero".to_string(),
+            ));
+        }
+        let source_manifest = self.get_manifest(Some(root)).await?;
+        let author_kind_time = source_manifest
+            .by_author_kind_time
+            .as_ref()
+            .ok_or_else(|| {
+                NostrEventStoreError::Validation(
+                    "Nostr manifest has no by-author-kind-time index".to_string(),
+                )
+            })?
+            .clone();
+        let mut rebuilt = NostrEventManifest {
+            by_author_kind_time: Some(author_kind_time.clone()),
+            ..NostrEventManifest::default()
+        };
+        let started = Instant::now();
+        let mut start = None;
+        let mut entries_scanned = 0u64;
+        let mut replaceable_entries = 0usize;
+        let mut parameterized_replaceable_entries = 0usize;
+
+        loop {
+            let page = self
+                .index
+                .range_links_limited(&author_kind_time, start.as_deref(), None, page_size)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            let events = self
+                .load_event_blobs(page.iter().map(|(_, cid)| cid.clone()))
+                .await?;
+
+            let mut by_id = BTreeMap::new();
+            let mut by_author_time = BTreeMap::new();
+            let mut by_kind_time = BTreeMap::new();
+            let mut by_kind_time_author = BTreeMap::new();
+            let mut by_time = BTreeMap::new();
+            let mut by_tag = BTreeMap::new();
+            let mut replaceable = BTreeMap::new();
+            let mut parameterized_replaceable = BTreeMap::new();
+            for ((_, cid), event) in page.iter().zip(events.iter()) {
+                by_id.insert(event.id.clone(), Some(cid.clone()));
+                by_author_time.insert(author_time_key(event), Some(cid.clone()));
+                by_kind_time.insert(kind_time_key(event), Some(cid.clone()));
+                by_kind_time_author.insert(kind_time_author_key(event), Some(cid.clone()));
+                by_time.insert(time_key(event), Some(cid.clone()));
+                for key in tag_keys(event) {
+                    by_tag.insert(key, Some(cid.clone()));
+                }
+                if is_replaceable_kind(event.kind) {
+                    replaceable_entries = replaceable_entries.saturating_add(1);
+                    replaceable.insert(
+                        replaceable_key(&event.pubkey, event.kind),
+                        Some(cid.clone()),
+                    );
+                } else if is_parameterized_replaceable_kind(event.kind) {
+                    parameterized_replaceable_entries =
+                        parameterized_replaceable_entries.saturating_add(1);
+                    parameterized_replaceable.insert(
+                        parameterized_replaceable_key(
+                            &event.pubkey,
+                            event.kind,
+                            &parameterized_replaceable_d_tag(event),
+                        ),
+                        Some(cid.clone()),
+                    );
+                }
+            }
+
+            macro_rules! update_projection {
+                ($field:ident, $changes:expr) => {{
+                    let update = self
+                        .index
+                        .update_links_with_superseded(rebuilt.$field.as_ref(), $changes)
+                        .await?;
+                    rebuilt.$field = update.root;
+                    self.delete_superseded_nodes(&update.superseded_nodes)
+                        .await?;
+                }};
+            }
+            update_projection!(by_id, by_id);
+            update_projection!(by_author_time, by_author_time);
+            update_projection!(by_kind_time, by_kind_time);
+            update_projection!(by_kind_time_author, by_kind_time_author);
+            update_projection!(by_time, by_time);
+            update_projection!(by_tag, by_tag);
+            update_projection!(replaceable, replaceable);
+            update_projection!(parameterized_replaceable, parameterized_replaceable);
+
+            entries_scanned = entries_scanned.saturating_add(page.len() as u64);
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            eprintln!(
+                "derived-index repair checkpoint entries_scanned={} page_entries={} elapsed_ms={} entries_per_second={:.1}",
+                entries_scanned,
+                page.len(),
+                started.elapsed().as_millis(),
+                entries_scanned as f64 / elapsed,
+            );
+            let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
+            start = Some(format!("{last_key}\0"));
+            if page.len() < page_size {
+                break;
+            }
+            trim_index_commit_allocations();
+        }
+
+        let repaired_root = self.write_manifest(&rebuilt).await?.ok_or_else(|| {
+            NostrEventStoreError::Validation("repaired Nostr manifest was empty".to_string())
+        })?;
+        Ok(NostrProjectionRepairReport {
+            root: repaired_root,
+            entries_scanned,
+            replaceable_entries,
+            parameterized_replaceable_entries,
         })
     }
 
@@ -1547,6 +1686,28 @@ impl<S: Store> NostrEventStore<S> {
         self.write_manifest(&manifest).await?.ok_or_else(|| {
             NostrEventStoreError::Validation(
                 "temporary chronological-index repair manifest was empty".to_string(),
+            )
+        })
+    }
+
+    /// Publish a repair manifest that retains only the authoritative
+    /// author/kind/time projection. Every other index is derivable from its
+    /// event links and can therefore be reclaimed and rebuilt safely.
+    pub async fn clear_derived_indexes(&self, root: &Cid) -> Result<Cid, NostrEventStoreError> {
+        let manifest = self.get_manifest(Some(root)).await?;
+        let by_author_kind_time = manifest.by_author_kind_time.ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "Nostr manifest has no by-author-kind-time index".to_string(),
+            )
+        })?;
+        self.write_manifest(&NostrEventManifest {
+            by_author_kind_time: Some(by_author_kind_time),
+            ..NostrEventManifest::default()
+        })
+        .await?
+        .ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "temporary derived-index repair manifest was empty".to_string(),
             )
         })
     }
