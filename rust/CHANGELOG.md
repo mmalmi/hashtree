@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.133 - 2026-07-22
+
+### Added
+
+- `socialgraph index --project-staged --bulk-project-staged` now performs a
+  resumable rebuild through a durable ordered LMDB spool and can follow a live
+  staging pass without publishing intermediate trees. It resolves
+  replaceable-event winners on disk, streams each of the nine final indexes
+  once with bounded memory and no reads of prior B-tree generations, then
+  atomically installs the validated manifest root. This avoids the severe
+  copy-on-write read/write amplification of checkpointing every small staged
+  batch while preserving encrypted event links and the ordinary query format.
+
 ## 0.2.132 - 2026-07-21
 
 ### Added

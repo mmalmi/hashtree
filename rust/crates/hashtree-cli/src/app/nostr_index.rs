@@ -29,6 +29,8 @@ use hashtree_cli::config::{ensure_keys, parse_npub};
 use hashtree_cli::socialgraph::{self, SocialGraphBackend, SocialGraphCrawler};
 use hashtree_cli::{Config, HashtreeStore};
 
+mod bulk_projection;
+
 const INDEX_DIR: &str = "nostr-index";
 const LATEST_ROOT_FILE: &str = "latest-root.txt";
 const LATEST_REPORT_FILE: &str = "latest-report.json";
@@ -70,6 +72,7 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) index_commit_batch_size: usize,
     pub(crate) stage_only: bool,
     pub(crate) project_staged: bool,
+    pub(crate) bulk_project_staged: bool,
     pub(crate) staging_data_dir: Option<PathBuf>,
     pub(crate) projection_authors: usize,
     pub(crate) projection_event_limit: usize,
@@ -876,6 +879,9 @@ pub(crate) async fn run_socialgraph_index(
     if options.stage_only && options.project_staged {
         anyhow::bail!("--stage-only and --project-staged are mutually exclusive");
     }
+    if options.bulk_project_staged && !options.project_staged {
+        anyhow::bail!("--bulk-project-staged requires --project-staged");
+    }
     if (options.stage_only || options.project_staged) && !checkpointed_allowlist {
         anyhow::bail!(
             "two-phase Nostr indexing requires --author-allowlist-url and either --full-author-history or --negentropy-only"
@@ -1075,20 +1081,34 @@ pub(crate) async fn run_socialgraph_index(
                     max_size_bytes,
                 )?)
             };
-            project_staged_allowlist(
-                ProjectionStores {
-                    durable: store.as_ref(),
-                    staging: staging_store.as_ref(),
-                    graph: graph_store.as_ref(),
-                },
-                &data_dir,
-                &staging_data_dir,
-                &options,
-                authors,
-                &projection_policy,
-                &mut state,
-            )
-            .await?
+            let stores = ProjectionStores {
+                durable: store.as_ref(),
+                staging: staging_store.as_ref(),
+                graph: graph_store.as_ref(),
+            };
+            if options.bulk_project_staged {
+                bulk_projection::project_staged_allowlist_bulk(
+                    stores,
+                    &data_dir,
+                    &staging_data_dir,
+                    &options,
+                    authors,
+                    &projection_policy,
+                    &mut state,
+                )
+                .await?
+            } else {
+                project_staged_allowlist(
+                    stores,
+                    &data_dir,
+                    &staging_data_dir,
+                    &options,
+                    authors,
+                    &projection_policy,
+                    &mut state,
+                )
+                .await?
+            }
         } else {
             crawl_allowlist_in_checkpoints(
                 store.as_ref(),
@@ -2665,6 +2685,7 @@ mod tests {
             index_commit_batch_size: 8,
             stage_only: false,
             project_staged: false,
+            bulk_project_staged: false,
             staging_data_dir: None,
             projection_authors: 8,
             projection_event_limit: 65_536,
@@ -3269,6 +3290,7 @@ mod tests {
                 index_commit_batch_size: 32,
                 stage_only: false,
                 project_staged: false,
+                bulk_project_staged: false,
                 staging_data_dir: None,
                 projection_authors: 8,
                 projection_event_limit: 65_536,
@@ -3398,6 +3420,7 @@ mod tests {
                 index_commit_batch_size: 32,
                 stage_only: false,
                 project_staged: false,
+                bulk_project_staged: false,
                 staging_data_dir: None,
                 projection_authors: 8,
                 projection_event_limit: 65_536,
@@ -3531,7 +3554,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn two_phase_crawl_stages_blobs_then_projects_without_refetching() -> io::Result<()> {
+    async fn two_phase_crawl_bulk_projects_staged_blobs_without_refetching() -> io::Result<()> {
         let relay = TestRelay::new();
         let author = Keys::generate();
         let first_note = event_builder!(Kind::TextNote, "first staged note")
@@ -3574,6 +3597,8 @@ mod tests {
         let relay_requests_after_stage = relay.requested_authors().len();
         options.stage_only = false;
         options.project_staged = true;
+        options.bulk_project_staged = true;
+        options.projection_follow = true;
         options.projection_authors = 16;
         options.index_commit_batch_size = 1;
         let projected =

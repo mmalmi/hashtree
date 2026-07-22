@@ -24,7 +24,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use hashtree_collection::{
     load_collection_manifest_metadata, load_collection_state, CollectionDefinition,
     CollectionOptions, CollectionPublishedSchema, CollectionSource, CollectionState,
-    CollectionWriter,
+    CollectionWriter, MANIFEST_BY_ID,
 };
 use hashtree_core::{
     sha256, BufferedStore, Cid, HashTree, HashTreeConfig, HashTreeError, Store, TreeVisibility,
@@ -178,6 +178,63 @@ pub struct NostrEventManifest {
     pub by_tag: Option<Cid>,
     pub replaceable: Option<Cid>,
     pub parameterized_replaceable: Option<Cid>,
+}
+
+/// One independently buildable projection in a Nostr event collection.
+///
+/// The stable numeric ids are used by disk-backed bulk projectors. They are
+/// deliberately separate from the published manifest field names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum NostrEventIndex {
+    ById = 0,
+    ByAuthorTime = 1,
+    ByAuthorKindTime = 2,
+    ByKindTime = 3,
+    ByKindTimeAuthor = 4,
+    ByTime = 5,
+    ByTag = 6,
+    Replaceable = 7,
+    ParameterizedReplaceable = 8,
+}
+
+impl NostrEventIndex {
+    pub const ALL: [Self; 9] = [
+        Self::ById,
+        Self::ByAuthorTime,
+        Self::ByAuthorKindTime,
+        Self::ByKindTime,
+        Self::ByKindTimeAuthor,
+        Self::ByTime,
+        Self::ByTag,
+        Self::Replaceable,
+        Self::ParameterizedReplaceable,
+    ];
+
+    pub fn stable_id(self) -> u8 {
+        self as u8
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ById => MANIFEST_BY_ID,
+            Self::ByAuthorTime => MANIFEST_BY_AUTHOR_TIME,
+            Self::ByAuthorKindTime => MANIFEST_BY_AUTHOR_KIND_TIME,
+            Self::ByKindTime => MANIFEST_BY_KIND_TIME,
+            Self::ByKindTimeAuthor => MANIFEST_BY_KIND_TIME_AUTHOR,
+            Self::ByTime => MANIFEST_BY_TIME,
+            Self::ByTag => MANIFEST_BY_TAG,
+            Self::Replaceable => MANIFEST_REPLACEABLE,
+            Self::ParameterizedReplaceable => MANIFEST_PARAMETERIZED_REPLACEABLE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NostrEventIndexEntry {
+    pub index: NostrEventIndex,
+    pub key: String,
+    pub cid: Cid,
 }
 
 /// Result of an incremental event-index build.
@@ -942,6 +999,37 @@ impl<S: Store> NostrEventStore<S> {
         }
 
         Ok(())
+    }
+
+    /// Publish independently bulk-built index roots as one ordinary Nostr
+    /// collection manifest. The resulting root is query-compatible with the
+    /// online incremental writer.
+    pub async fn write_bulk_index_manifest(
+        &self,
+        roots: &BTreeMap<NostrEventIndex, Option<Cid>>,
+    ) -> Result<Option<Cid>, NostrEventStoreError> {
+        if let Some(missing) = NostrEventIndex::ALL
+            .into_iter()
+            .find(|index| !roots.contains_key(index))
+        {
+            return Err(NostrEventStoreError::Validation(format!(
+                "bulk Nostr manifest omitted the {} index",
+                missing.name()
+            )));
+        }
+        let root = |index| roots.get(&index).cloned().flatten();
+        self.write_manifest(&NostrEventManifest {
+            by_id: root(NostrEventIndex::ById),
+            by_author_time: root(NostrEventIndex::ByAuthorTime),
+            by_author_kind_time: root(NostrEventIndex::ByAuthorKindTime),
+            by_kind_time: root(NostrEventIndex::ByKindTime),
+            by_kind_time_author: root(NostrEventIndex::ByKindTimeAuthor),
+            by_time: root(NostrEventIndex::ByTime),
+            by_tag: root(NostrEventIndex::ByTag),
+            replaceable: root(NostrEventIndex::Replaceable),
+            parameterized_replaceable: root(NostrEventIndex::ParameterizedReplaceable),
+        })
+        .await
     }
 
     pub async fn add(
@@ -2584,6 +2672,93 @@ fn tag_keys(event: &StoredNostrEvent) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Materialize every query-index entry for one retained event.
+///
+/// Bulk projectors use this to stage final key/CID mappings in an ordinary
+/// disk-backed ordered database before constructing immutable Hashtree B-trees
+/// once. Keeping this function beside the online collection definition ensures
+/// both paths publish exactly the same keys.
+pub fn nostr_event_index_entries(event: &StoredNostrEvent, cid: &Cid) -> Vec<NostrEventIndexEntry> {
+    let mut entries = vec![
+        NostrEventIndexEntry {
+            index: NostrEventIndex::ById,
+            key: event.id.clone(),
+            cid: cid.clone(),
+        },
+        NostrEventIndexEntry {
+            index: NostrEventIndex::ByAuthorTime,
+            key: author_time_key(event),
+            cid: cid.clone(),
+        },
+        NostrEventIndexEntry {
+            index: NostrEventIndex::ByAuthorKindTime,
+            key: author_kind_time_key(event),
+            cid: cid.clone(),
+        },
+        NostrEventIndexEntry {
+            index: NostrEventIndex::ByKindTime,
+            key: kind_time_key(event),
+            cid: cid.clone(),
+        },
+        NostrEventIndexEntry {
+            index: NostrEventIndex::ByKindTimeAuthor,
+            key: kind_time_author_key(event),
+            cid: cid.clone(),
+        },
+        NostrEventIndexEntry {
+            index: NostrEventIndex::ByTime,
+            key: time_key(event),
+            cid: cid.clone(),
+        },
+    ];
+    entries.extend(tag_keys(event).into_iter().map(|key| NostrEventIndexEntry {
+        index: NostrEventIndex::ByTag,
+        key,
+        cid: cid.clone(),
+    }));
+    if let Some((index, key)) = nostr_replaceable_slot(event) {
+        entries.push(NostrEventIndexEntry {
+            index,
+            key,
+            cid: cid.clone(),
+        });
+    }
+    entries
+}
+
+/// Return the unique slot used by a regular or parameterized replaceable event.
+pub fn nostr_replaceable_slot(event: &StoredNostrEvent) -> Option<(NostrEventIndex, String)> {
+    if is_replaceable_kind(event.kind) {
+        Some((
+            NostrEventIndex::Replaceable,
+            replaceable_key(&event.pubkey, event.kind),
+        ))
+    } else if is_parameterized_replaceable_kind(event.kind) {
+        Some((
+            NostrEventIndex::ParameterizedReplaceable,
+            parameterized_replaceable_key(
+                &event.pubkey,
+                event.kind,
+                &parameterized_replaceable_d_tag(event),
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Compare two events competing for the same replaceable slot.
+pub fn compare_nostr_replaceable_events(
+    left: &StoredNostrEvent,
+    right: &StoredNostrEvent,
+) -> std::cmp::Ordering {
+    match compare_replaceable_events(left, right) {
+        value if value < 0 => std::cmp::Ordering::Less,
+        value if value > 0 => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 fn tag_prefix(tag_name: &str, tag_value: &str) -> Result<String, NostrEventStoreError> {

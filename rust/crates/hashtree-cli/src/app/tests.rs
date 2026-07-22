@@ -1188,6 +1188,7 @@ fn test_cli_parses_socialgraph_index_command() {
                 index_commit_batch_size,
                 stage_only,
                 project_staged,
+                bulk_project_staged,
                 staging_data_dir,
                 projection_authors,
                 projection_event_limit,
@@ -1221,6 +1222,7 @@ fn test_cli_parses_socialgraph_index_command() {
             assert_eq!(index_commit_batch_size, 32_768);
             assert!(stage_only);
             assert!(!project_staged);
+            assert!(!bulk_project_staged);
             assert_eq!(staging_data_dir, Some(PathBuf::from("/srv/staging")));
             assert_eq!(projection_authors, 96);
             assert_eq!(projection_event_limit, 131_072);
@@ -1248,6 +1250,50 @@ fn test_cli_parses_socialgraph_index_command() {
                     "wss://relay.two".to_string()
                 ]
             );
+        }
+        _ => panic!("expected socialgraph index command"),
+    }
+}
+
+#[test]
+fn test_cli_parses_bulk_staged_projection() {
+    let cli = Cli::parse_from([
+        "htree",
+        "socialgraph",
+        "index",
+        "--project-staged",
+        "--bulk-project-staged",
+    ]);
+
+    match cli.command {
+        Commands::Socialgraph {
+            command: SocialGraphCommands::Index { options },
+        } => {
+            assert!(options.project_staged);
+            assert!(options.bulk_project_staged);
+            assert!(!options.projection_follow);
+        }
+        _ => panic!("expected socialgraph index command"),
+    }
+
+    assert!(
+        Cli::try_parse_from(["htree", "socialgraph", "index", "--bulk-project-staged",]).is_err()
+    );
+
+    let following = Cli::parse_from([
+        "htree",
+        "socialgraph",
+        "index",
+        "--project-staged",
+        "--bulk-project-staged",
+        "--projection-follow",
+    ]);
+    match following.command {
+        Commands::Socialgraph {
+            command: SocialGraphCommands::Index { options },
+        } => {
+            assert!(options.bulk_project_staged);
+            assert!(options.projection_follow);
         }
         _ => panic!("expected socialgraph index command"),
     }

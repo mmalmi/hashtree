@@ -961,6 +961,10 @@ pub(crate) struct SocialGraphIndexArgs {
     /// Build query indexes from durably staged events without contacting relays
     #[arg(long, default_value_t = false)]
     pub(crate) project_staged: bool,
+    /// Build a staged corpus through a disk-backed ordered spool, then
+    /// stream each final index once instead of incrementally rewriting it
+    #[arg(long, default_value_t = false, requires = "project_staged")]
+    pub(crate) bulk_project_staged: bool,
     /// Separate Hashtree data directory for staged event blobs and fetch state
     #[arg(long)]
     pub(crate) staging_data_dir: Option<PathBuf>,

@@ -41,6 +41,8 @@ pub enum BTreeError {
     HashTree(#[from] HashTreeError),
     #[error("value was not valid utf-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("sorted B-tree input moved backwards from `{previous}` to `{next}`")]
+    UnsortedInput { previous: String, next: String },
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,14 @@ pub struct BTree<S: Store> {
     tree: HashTree<S>,
     max_keys: usize,
     update_child_concurrency: usize,
+}
+
+/// Incremental builder for an already sorted CID-link stream.
+pub struct BTreeLinkBulkBuilder<'a, S: Store> {
+    index: &'a BTree<S>,
+    levels: Vec<Vec<BuiltNode>>,
+    leaf: Vec<(String, Cid)>,
+    pending: Option<(String, Cid)>,
 }
 
 #[derive(Debug, Clone)]
@@ -685,6 +695,132 @@ impl<S: Store> BTree<S> {
         Ok(level.pop().map(|node| node.cid))
     }
 
+    /// Build a CID-link tree from entries already sorted by key.
+    ///
+    /// Unlike [`BTree::build_links`], this keeps only one leaf plus at most one
+    /// node-sized frontier at each tree level in memory. Adjacent duplicate
+    /// keys use the last value, matching the ordinary bulk builder. This is
+    /// intended for disk-backed sorters whose output must not be collected into
+    /// RAM again.
+    pub async fn build_sorted_links<I>(&self, items: I) -> Result<Option<Cid>, BTreeError>
+    where
+        I: IntoIterator<Item = (String, Cid)>,
+    {
+        let mut builder = self.sorted_link_builder();
+        for (key, cid) in items {
+            builder.push(key, cid).await?;
+        }
+        builder.finish().await
+    }
+
+    pub fn sorted_link_builder(&self) -> BTreeLinkBulkBuilder<'_, S> {
+        BTreeLinkBulkBuilder {
+            index: self,
+            levels: Vec::new(),
+            leaf: Vec::with_capacity(self.max_keys),
+            pending: None,
+        }
+    }
+}
+
+impl<S: Store> BTreeLinkBulkBuilder<'_, S> {
+    pub async fn push(&mut self, key: String, cid: Cid) -> Result<(), BTreeError> {
+        if let Some((previous_key, previous_cid)) = self.pending.as_mut() {
+            match key.cmp(previous_key) {
+                Ordering::Less => {
+                    return Err(BTreeError::UnsortedInput {
+                        previous: previous_key.clone(),
+                        next: key,
+                    });
+                }
+                Ordering::Equal => {
+                    *previous_cid = cid;
+                    return Ok(());
+                }
+                Ordering::Greater => self
+                    .leaf
+                    .push(self.pending.take().expect("pending sorted link")),
+            }
+        }
+        self.pending = Some((key, cid));
+        self.flush_full_leaf().await
+    }
+
+    pub async fn finish(mut self) -> Result<Option<Cid>, BTreeError> {
+        if let Some(entry) = self.pending.take() {
+            self.leaf.push(entry);
+        }
+        self.flush_leaf().await?;
+        loop {
+            let Some(lowest) = self.levels.iter().position(|level| !level.is_empty()) else {
+                return Ok(None);
+            };
+            let highest = self
+                .levels
+                .iter()
+                .rposition(|level| !level.is_empty())
+                .expect("a lowest non-empty bulk-builder level exists");
+            if lowest == highest && self.levels[lowest].len() == 1 {
+                return Ok(self.levels[lowest].pop().map(|node| node.cid));
+            }
+            let children = std::mem::take(&mut self.levels[lowest]);
+            let parent = self.build_parent(&children).await?;
+            self.push_node(lowest + 1, parent).await?;
+        }
+    }
+
+    async fn flush_full_leaf(&mut self) -> Result<(), BTreeError> {
+        if self.leaf.len() == self.index.max_keys {
+            self.flush_leaf().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_leaf(&mut self) -> Result<(), BTreeError> {
+        if self.leaf.is_empty() {
+            return Ok(());
+        }
+        let cid = self.index.create_leaf_with_links(&self.leaf).await?;
+        let node = BuiltNode {
+            first_key: self.leaf[0].0.clone(),
+            cid,
+            count: Some(self.leaf.len() as u64),
+        };
+        self.leaf.clear();
+        self.push_node(0, node).await?;
+        Ok(())
+    }
+
+    async fn push_node(
+        &mut self,
+        mut level_index: usize,
+        mut node: BuiltNode,
+    ) -> Result<(), BTreeError> {
+        loop {
+            if self.levels.len() <= level_index {
+                self.levels.push(Vec::with_capacity(self.index.max_keys));
+            }
+            self.levels[level_index].push(node);
+            if self.levels[level_index].len() < self.index.max_keys {
+                return Ok(());
+            }
+            let children = std::mem::take(&mut self.levels[level_index]);
+            node = self.build_parent(&children).await?;
+            level_index += 1;
+        }
+    }
+
+    async fn build_parent(&self, children: &[BuiltNode]) -> Result<BuiltNode, BTreeError> {
+        let cid = self.index.create_internal_node(children).await?;
+        Ok(BuiltNode {
+            first_key: children[0].first_key.clone(),
+            cid,
+            count: children.iter().map(|child| child.count).sum(),
+        })
+    }
+}
+
+impl<S: Store> BTree<S> {
     /// Apply a sorted batch of link insertions and deletions, reusing untouched
     /// subtrees. Repeated changes for one key use the last value; `None` deletes
     /// a key.

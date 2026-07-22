@@ -209,6 +209,50 @@ fn bulk_string_changes_match_map_semantics() {
 }
 
 #[test]
+fn sorted_link_build_streams_without_reading_existing_nodes() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) });
+        let entries = (0..10_000).flat_map(|index| {
+            let key = format!("key:{index:05}");
+            [
+                (key.clone(), cid_from_seed(index)),
+                (key, cid_from_seed(index + 20_000)),
+            ]
+        });
+
+        let root = btree
+            .build_sorted_links(entries)
+            .await
+            .expect("stream sorted links")
+            .expect("sorted root");
+        let expected = btree
+            .build_links((0..10_000).flat_map(|index| {
+                let key = format!("key:{index:05}");
+                [
+                    (key.clone(), cid_from_seed(index)),
+                    (key, cid_from_seed(index + 20_000)),
+                ]
+            }))
+            .await
+            .expect("ordinary bulk links")
+            .expect("ordinary root");
+
+        assert_eq!(store.gets(), 0, "bulk construction must not read old nodes");
+        assert_eq!(root, expected, "streaming and collected roots must match");
+        assert_eq!(
+            btree.count_stored_links(Some(&root)).await.unwrap(),
+            Some(10_000)
+        );
+        assert_eq!(
+            btree.get_link(Some(&root), "key:04200").await.unwrap(),
+            Some(cid_from_seed(24_200)),
+            "the last value for an adjacent duplicate key must win"
+        );
+    });
+}
+
+#[test]
 fn link_btree_matches_typescript_fixture_root() {
     block_on(async {
         let store = Arc::new(MemoryStore::new());
