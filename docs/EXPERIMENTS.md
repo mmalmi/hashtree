@@ -2606,3 +2606,44 @@ Interpretation:
   index commit with 256-way B-tree nodes. This reduces repeated walks and
   gradually rewrites touched paths into shallower trees without loading the
   complete event catalog into memory.
+
+### 2026-07-22: Disk-backed bulk Nostr projection
+
+Question: can a multi-million-event archive rebuild avoid rewriting and
+garbage-collecting nine immutable B-trees after every small durable batch?
+
+Setup:
+- The original production projector checkpointed every 1,024 retained events,
+  incrementally updating all nine query indexes with B-tree order 64 and one
+  update worker.
+- The replacement stores event blobs normally but resolves replaceable winners
+  and all ordered index entries in a durable LMDB spool. It constructs each
+  final immutable B-tree once after the staged prefix has been consumed.
+- Version 0.2.134 stores arbitrary-length logical index keys as 400-byte trie
+  edges, avoiding LMDB's physical key-size ceiling while retaining exact
+  bytewise output order.
+
+Results:
+
+| Observation | Incremental projector | Bulk-v2 projector |
+| --- | ---: | ---: |
+| Typical 1,024-event checkpoint wall time | 30–50 s | 0.4–0.6 s initially |
+| Selected-event rate in representative live intervals | about 27 events/s | about 1,800 events/s |
+| Reads before the incremental run stopped | about 2.53 TB | 13.35 GB in an early roughly 190-checkpoint sample |
+| Writes before the incremental run stopped | about 2.35 TB | 53.63 GB in the same early sample |
+| Durable logical spool size in that bulk sample | not applicable | about 1.2 GB |
+| Long tag and parameterized-replaceable regression coverage | failed above LMDB key limit | passed at 1,024 bytes |
+
+Interpretation:
+- Repeated immutable-tree traversal, copy-on-write construction, and
+  superseded-generation garbage collection caused the pathological reads and
+  most of the wall time. The bulk path removes that work from each checkpoint;
+  ordinary checkpoints now append to the spool and the final trees are streamed
+  once in sorted order.
+- The early bulk write count is still substantially above logical spool growth
+  because the crash-resumable path commits and synchronizes every 1,024 events.
+  Larger durable batches may reduce that residual amplification, but must be
+  measured separately rather than inferred from the initial recovery run.
+- The bulk run must retain strict single-writer ownership of its target and a
+  frozen or independently verified staged prefix. Final-tree construction and
+  publication remain closed-store validation steps.
