@@ -2,9 +2,16 @@
  * Tree reading operations
  */
 
-import { Store, Hash, TreeNode, Link, LinkType, toHex, CID, cid } from '../types.js';
+import { Store, Hash, TreeNode, LinkType, toHex, CID, cid } from '../types.js';
 import { decodeTreeNode, tryDecodeTreeNode, getNodeType } from '../codec.js';
 import { loadBlock } from './loadBlock.js';
+import {
+  ensureWithinLimit,
+  isDirectoryLikeNode,
+  isInternalDirectoryLink,
+  normalizeMaxBytes,
+  type ReadState,
+} from './readSupport.js';
 
 export interface TreeEntry {
   name: string;
@@ -17,25 +24,6 @@ export interface TreeEntry {
 export interface ReadOptions {
   /** Maximum plaintext bytes to return before throwing */
   maxBytes?: number;
-}
-
-interface ReadState {
-  maxBytes?: number;
-  bytesRead: number;
-}
-
-function normalizeMaxBytes(maxBytes?: number): number | undefined {
-  if (maxBytes === undefined) return undefined;
-  if (!Number.isFinite(maxBytes) || maxBytes < 0) {
-    throw new Error(`Invalid maxBytes: ${maxBytes}`);
-  }
-  return Math.floor(maxBytes);
-}
-
-function ensureWithinLimit(maxBytes: number | undefined, actualBytes: number): void {
-  if (maxBytes !== undefined && actualBytes > maxBytes) {
-    throw new Error(`Content size ${actualBytes} exceeds maxBytes ${maxBytes}`);
-  }
 }
 
 /**
@@ -73,10 +61,6 @@ export async function isDirectory(store: Store, hash: Hash): Promise<boolean> {
   if (!data) return false;
   const node = tryDecodeTreeNode(data);
   return isDirectoryLikeNode(node);
-}
-
-function isDirectoryLikeNode(node: TreeNode | null): node is TreeNode {
-  return node?.type === LinkType.Dir || node?.type === LinkType.Fanout;
 }
 
 /**
@@ -543,36 +527,4 @@ export async function* walk(
   // Chunked file - sum link sizes
   const fileSize = node.links.reduce((sum, l) => sum + l.size, 0);
   yield { path, hash, type: LinkType.File, size: fileSize };
-}
-
-function internalChunkStart(name: string): number | null {
-  const prefix = '_chunk_';
-  if (!name.startsWith(prefix)) return null;
-
-  const suffix = name.slice(prefix.length);
-  if (suffix.length === 0 || !/^[0-9]+$/.test(suffix)) return null;
-
-  const start = Number(suffix);
-  return Number.isSafeInteger(start) ? start : null;
-}
-
-function nodeUsesLegacyDirectoryFanout(node: TreeNode): boolean {
-  return node.type === LinkType.Dir
-    && node.links.length > 0
-    && node.links.every((link) => (
-      link.type === LinkType.Dir
-      && link.name !== undefined
-      && internalChunkStart(link.name) !== null
-    ));
-}
-
-function isInternalDirectoryLink(node: TreeNode, link: Link): boolean {
-  if (node.type === LinkType.Fanout) {
-    return link.type === LinkType.Dir || link.type === LinkType.Fanout;
-  }
-
-  return nodeUsesLegacyDirectoryFanout(node)
-    && link.type === LinkType.Dir
-    && link.name !== undefined
-    && internalChunkStart(link.name) !== null;
 }

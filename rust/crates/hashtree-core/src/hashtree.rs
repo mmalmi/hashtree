@@ -577,44 +577,7 @@ impl<S: Store> HashTree<S> {
     /// Store a file, chunking if necessary
     /// Returns (Cid, size) where Cid is hash + optional key
     pub async fn put_file(&self, data: &[u8]) -> Result<(Cid, u64), HashTreeError> {
-        let size = data.len() as u64;
-
-        // Small file - store as single chunk
-        if data.len() <= self.chunk_size {
-            let (hash, key) = self.put_chunk_internal(data).await?;
-            return Ok((Cid { hash, key }, size));
-        }
-
-        // Large file - chunk it
-        let mut links: Vec<Link> = Vec::new();
-        let mut offset = 0;
-
-        while offset < data.len() {
-            let end = (offset + self.chunk_size).min(data.len());
-            let chunk = &data[offset..end];
-            let chunk_size = (end - offset) as u64;
-
-            let (hash, key) = self.put_chunk_internal(chunk).await?;
-            links.push(Link {
-                hash,
-                name: None,
-                size: chunk_size,
-                key,
-                link_type: LinkType::Blob, // Leaf chunk
-                meta: None,
-            });
-            offset = end;
-        }
-
-        // Build tree from chunks (uses encryption if enabled)
-        let (root_hash, root_key, _) = self.build_tree_internal(links, Some(size)).await?;
-        Ok((
-            Cid {
-                hash: root_hash,
-                key: root_key,
-            },
-            size,
-        ))
+        self.put(data).await
     }
 
     /// Build a directory from entries

@@ -15,6 +15,13 @@ import { encodeAndHash, decodeTreeNode, tryDecodeTreeNode } from './codec.js';
 import { encryptChk, decryptChk, type EncryptionKey } from './crypto.js';
 import { compareNames } from './compare.js';
 import { loadBlock } from './tree/loadBlock.js';
+import {
+  ensureWithinLimit,
+  isDirectoryLikeNode,
+  isInternalDirectoryLink,
+  normalizeMaxBytes,
+  type ReadState,
+} from './tree/readSupport.js';
 
 const DEFAULT_MAX_LINKS = 174;
 
@@ -27,11 +34,6 @@ export interface EncryptedTreeConfig {
 export interface ReadEncryptedOptions {
   /** Maximum plaintext bytes to return before throwing */
   maxBytes?: number;
-}
-
-interface ReadState {
-  maxBytes?: number;
-  bytesRead: number;
 }
 
 async function getRootNodeOrBlob(
@@ -72,20 +74,6 @@ async function decryptRootNodeOrBlob(
       return encryptedData;
     }
     throw error;
-  }
-}
-
-function normalizeMaxBytes(maxBytes?: number): number | undefined {
-  if (maxBytes === undefined) return undefined;
-  if (!Number.isFinite(maxBytes) || maxBytes < 0) {
-    throw new Error(`Invalid maxBytes: ${maxBytes}`);
-  }
-  return Math.floor(maxBytes);
-}
-
-function ensureWithinLimit(maxBytes: number | undefined, actualBytes: number): void {
-  if (maxBytes !== undefined && actualBytes > maxBytes) {
-    throw new Error(`Content size ${actualBytes} exceeds maxBytes ${maxBytes}`);
   }
 }
 
@@ -745,40 +733,4 @@ function getMaxLinks(config: EncryptedTreeConfig): number {
     throw new Error(`Invalid maxLinks: ${config.maxLinks}`);
   }
   return maxLinks;
-}
-
-function isDirectoryLikeNode(node: TreeNode | null): node is TreeNode {
-  return node?.type === LinkType.Dir || node?.type === LinkType.Fanout;
-}
-
-function internalChunkStart(name: string): number | null {
-  const prefix = '_chunk_';
-  if (!name.startsWith(prefix)) return null;
-
-  const suffix = name.slice(prefix.length);
-  if (suffix.length === 0 || !/^[0-9]+$/.test(suffix)) return null;
-
-  const start = Number(suffix);
-  return Number.isSafeInteger(start) ? start : null;
-}
-
-function nodeUsesLegacyDirectoryFanout(node: TreeNode): boolean {
-  return node.type === LinkType.Dir
-    && node.links.length > 0
-    && node.links.every((link) => (
-      link.type === LinkType.Dir
-      && link.name !== undefined
-      && internalChunkStart(link.name) !== null
-    ));
-}
-
-function isInternalDirectoryLink(node: TreeNode, link: Link): boolean {
-  if (node.type === LinkType.Fanout) {
-    return link.type === LinkType.Dir || link.type === LinkType.Fanout;
-  }
-
-  return nodeUsesLegacyDirectoryFanout(node)
-    && link.type === LinkType.Dir
-    && link.name !== undefined
-    && internalChunkStart(link.name) !== null;
 }

@@ -215,6 +215,25 @@ async fn test_unified_put_get_encrypted_chunked() {
     assert_eq!(retrieved, data);
 }
 
+#[tokio::test]
+async fn test_put_file_matches_put_at_chunk_boundaries_and_fanout() {
+    for encrypted in [false, true] {
+        let config = HashTreeConfig::new(Arc::new(MemoryStore::new()))
+            .with_chunk_size(4)
+            .with_max_links(2);
+        let tree = HashTree::new(if encrypted { config } else { config.public() });
+
+        for size in [0, 1, 4, 5, 20] {
+            let data = vec![42; size];
+            assert_eq!(
+                tree.put_file(&data).await.unwrap(),
+                tree.put(&data).await.unwrap(),
+                "encrypted={encrypted}, size={size}"
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct CountingStore {
     inner: MemoryStore,
