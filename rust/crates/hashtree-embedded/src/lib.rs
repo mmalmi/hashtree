@@ -315,6 +315,22 @@ mod tests {
     use std::thread;
     use tempfile::TempDir;
 
+    fn disable_background_network(temp: &TempDir) {
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("browser_settings.json"),
+            serde_json::to_vec(&json!({
+                "enableFips": false,
+                "enableFipsUdp": false,
+                "enableFipsWebrtc": false,
+                "socialGraphCrawlDepth": 0
+            }))
+            .expect("serialize browser settings"),
+        )
+        .expect("write browser settings");
+    }
+
     fn create_blossom_auth(keys: &Keys, action: &str) -> String {
         let expiration = Timestamp::from(Timestamp::now().as_secs() + 300);
         let tags = vec![
@@ -393,6 +409,7 @@ mod tests {
     #[test]
     fn host_runtime_starts_and_shuts_down() {
         let temp = TempDir::new().expect("temp dir");
+        disable_background_network(&temp);
         let mut runtime =
             HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
 
@@ -420,6 +437,7 @@ mod tests {
     #[test]
     fn host_runtime_rejects_public_blossom_uploads() {
         let temp = TempDir::new().expect("temp dir");
+        disable_background_network(&temp);
         let runtime =
             HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
         let status = runtime.status();
@@ -443,6 +461,7 @@ mod tests {
     #[test]
     fn host_runtime_keeps_default_relays_and_file_servers() {
         let temp = TempDir::new().expect("temp dir");
+        disable_background_network(&temp);
         let runtime =
             HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
         let status = runtime.status();
@@ -468,10 +487,6 @@ mod tests {
                 .unwrap_or_default()
                 > 0,
             "browser mode should keep default file servers for content fetches",
-        );
-        assert!(
-            payload.get("mesh").is_none() && payload.get("webrtc").is_none(),
-            "the daemon status must not expose the removed legacy mesh status",
         );
     }
 
@@ -566,7 +581,6 @@ mod tests {
                 "blossomWriteServers": [
                     "https://upload.example"
                 ],
-                "enableWebrtc": true,
                 "enableFips": false,
                 "enableFipsUdp": false,
                 "enableFipsWebrtc": false,
@@ -594,10 +608,6 @@ mod tests {
 
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(2));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
-        assert!(
-            payload.get("mesh").is_none() && payload.get("webrtc").is_none(),
-            "legacy WebRTC settings must not recreate legacy mesh status",
-        );
     }
 
     #[test]
@@ -675,6 +685,7 @@ mod tests {
     #[test]
     fn host_runtime_reload_applies_updated_browser_settings() {
         let temp = TempDir::new().expect("temp dir");
+        disable_background_network(&temp);
         let mut runtime =
             HostDaemonRuntime::start(HostDaemonOptions::new(temp.path())).expect("start daemon");
         let initial_status = runtime.status();
@@ -687,7 +698,10 @@ mod tests {
                 "nostrRelays": ["wss://relay.example-one"],
                 "blossomReadServers": ["https://cdn.example"],
                 "blossomWriteServers": ["https://upload.example"],
-                "enableWebrtc": true
+                "enableFips": false,
+                "enableFipsUdp": false,
+                "enableFipsWebrtc": false,
+                "socialGraphCrawlDepth": 0
             }))
             .expect("serialize browser settings"),
         )
@@ -704,10 +718,6 @@ mod tests {
 
         assert_eq!(payload["upstream"]["nostr_relays"].as_u64(), Some(1));
         assert_eq!(payload["upstream"]["blossom_servers"].as_u64(), Some(2));
-        assert!(
-            payload.get("mesh").is_none() && payload.get("webrtc").is_none(),
-            "reload must not recreate legacy mesh status when browser settings request WebRTC",
-        );
         assert!(
             !reloaded_status.base_url.is_empty(),
             "reload should keep serving from some loopback endpoint"

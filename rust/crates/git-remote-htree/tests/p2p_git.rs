@@ -531,7 +531,7 @@ fn test_p2p_git_roundtrip() {
     println!("=== P2P Git Roundtrip Test ===\n");
 
     // Start local relay
-    let relay = TestRelay::new(19090);
+    let relay = TestRelay::new();
     let relay_url = relay.url();
     println!("Relay: {}", relay_url);
 

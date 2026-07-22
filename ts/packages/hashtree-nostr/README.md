@@ -40,8 +40,8 @@ for await (const event of events.streamQuery(rootCid, {
 ## P2P Transport
 
 P2P blob fetching is provided by `@hashtree/fips-transport`. FIPS owns peer
-discovery, signaling, and WebRTC/UDP links; Hashtree carries verified mesh blob
-frames over the FIPS node endpoint.
+discovery, signaling, and FIPS WebRTC/UDP links; Hashtree carries verified mesh
+blob frames over the FIPS node endpoint.
 
 ## Nostr Ref Resolver
 

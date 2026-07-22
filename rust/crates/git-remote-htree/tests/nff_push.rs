@@ -16,8 +16,8 @@ fn test_non_fast_forward_rejected() {
     }
 
     // Start local servers
-    let relay = TestRelay::new(19220);
-    let server = match TestServer::new(19221) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

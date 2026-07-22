@@ -109,8 +109,8 @@ htree status                 # Check daemon and FIPS route status
 
 The daemon acts as a local Blossom server. Remote blob reads use the canonical
 `BlobRequest`/`BlobReply` service over FIPS; FIPS owns transport addresses and
-may use UDP, WebRTC, or another underlay. Git operations automatically use the
-daemon when running.
+may use UDP, FIPS WebRTC, or another underlay. Git operations automatically use
+the daemon when running.
 
 ## Git Remote Helper
 
@@ -293,10 +293,15 @@ If you also want the same command to publish the crates.io release, opt into the
 ```bash
 ../scripts/release-gate.sh     # Full pre-publish Rust, TypeScript, and wiring gate
 ../scripts/release-gate.sh --fast # Compile Rust tests; run the faster checks
-cargo test --workspace         # Run Rust tests directly
+cargo nextest run --workspace  # Run Rust tests with bounded parallelism
 cargo test -p hashtree-core    # Run core crate tests
 cargo bench -p hashtree-core   # Run core benchmarks
 ```
+
+The release gate requires `cargo-nextest`. CI runs its `static`, `typescript`,
+`rust`, `rust-peripheral`, and `fips` lanes on separate runners; the default
+local invocation overlaps independent work and keeps FIPS out of the ordinary
+workspace feature set.
 
 ## License
 

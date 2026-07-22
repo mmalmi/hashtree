@@ -129,11 +129,11 @@ fn test_git_push_and_clone_local() {
     }
 
     // Start local nostr relay
-    let relay = TestRelay::new(19300);
+    let relay = TestRelay::new();
     println!("Started local nostr relay at: {}", relay.url());
 
     // Start local blossom server
-    let server = match TestServer::new(19301) {
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -249,8 +249,8 @@ fn test_public_push_publishes_nip34_repo_announcement() {
         return;
     }
 
-    let relay = TestRelay::new(19640);
-    let server = match TestServer::new(19641) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -314,8 +314,8 @@ fn test_public_push_from_cloned_htree_repo_announces_personal_fork() {
         return;
     }
 
-    let relay = TestRelay::new(19642);
-    let server = match TestServer::new(19643) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -443,8 +443,8 @@ fn test_git_push_clone_and_pull_across_two_clients_local() {
         return;
     }
 
-    let relay = TestRelay::new(19310);
-    let server = match TestServer::new(19311) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

@@ -14,10 +14,8 @@ Promote formal verification checks from advisory to hard gate after proving stab
 2. In repository settings, add required checks for:
    - `Resolver Formal`
    - `Core Property Suite`
-   - `Core Integrity`
-3. If/when available, also require:
-   - `git-formal`
-   - `Blob Router`
+3. Keep `Rust Tests` required for integrity, git state-machine, and blob-router
+   regressions; those suites are not rebuilt in the advisory workflow.
 4. Announce promotion in release notes/changelog.
 
 ## Rollback Procedure

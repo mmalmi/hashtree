@@ -56,7 +56,8 @@ For P2P sharing between peers, run the hashtree daemon:
 htree start
 ```
 
-Git operations automatically use the local daemon when running, enabling direct peer-to-peer transfers via WebRTC.
+Git operations automatically use the local daemon when running, enabling direct
+peer-to-peer transfers over configured FIPS transports such as WebRTC.
 
 ## Configuration
 

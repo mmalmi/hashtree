@@ -28,8 +28,8 @@ fn test_fetch_does_not_update_checked_out_branch() {
         return;
     }
 
-    let relay = TestRelay::new(19310);
-    let server = match TestServer::new(19311) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

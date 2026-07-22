@@ -13,8 +13,8 @@ fn test_git_push_fails_when_only_local_relay_confirms_publish() {
         return;
     }
 
-    let relay = TestRelay::new(19640);
-    let server = match TestServer::new(19641) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(server) => server,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

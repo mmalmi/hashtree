@@ -47,7 +47,7 @@ Out of scope in first wave:
 ## Step 1: Create verification documentation scaffold
 - Add `docs/formal-verification-plan.md` with this exact plan.
 - Add `docs/formal-invariants.md` with invariant IDs and status.
-- Add invariant ID format: `HT-RES-*`, `HT-CORE-*`, `HT-GIT-*`, `HT-WEBRTC-*`.
+- Add invariant ID format: `HT-RES-*`, `HT-CORE-*`, `HT-GIT-*`, `HT-NET-*`.
 - Add columns: `Invariant`, `Spec Source`, `Code Location`, `Proof Artifact`, `CI Job`, `Status`.
 - Done when every step below maps to invariant IDs before any code changes.
 
@@ -112,10 +112,11 @@ Out of scope in first wave:
 - Jobs:
   `resolver-formal` for resolver determinism tests.
   `core-props` for codec/tree/diff property suites.
-  `core-integrity` for strong integrity verifier tests.
+- The ordinary `rust-tests` gate owns integrity, git state-machine, and blob
+  router regressions so the same binaries are not rebuilt in advisory jobs.
 - Run on `pull_request` and `push` to `master`.
 - Set jobs advisory initially with `continue-on-error: true`.
-- Upload failing seeds/artifacts for reproducibility.
+- Upload failing property seeds/artifacts for reproducibility.
 - Done when workflow runs on all PRs with visible status but non-blocking.
 
 ## Step 8: Promote verification to hard gate

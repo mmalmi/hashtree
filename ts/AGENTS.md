@@ -29,7 +29,7 @@ pnpm run build
 
 - Simple: SHA256 + MessagePack; no multicodec/CID versioning
 - Focused: Merkle trees over key-value stores only
-- Composable: WebRTC/Nostr/Blossom are separate layers
+- Composable: FIPS transports, Nostr, and Blossom are separate layers
 
 ## Code Style
 

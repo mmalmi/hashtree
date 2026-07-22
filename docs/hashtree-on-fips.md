@@ -15,8 +15,8 @@ fips-overlay-v1
 ```
 
 Private deployments can select another discovery app. Browser providers should
-normally share the generic FIPS fabric instead of creating a parallel
-Hashtree-only WebRTC island.
+normally share the generic FIPS fabric rather than creating an
+application-specific discovery fabric.
 
 ## Blob Service
 

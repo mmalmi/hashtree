@@ -233,7 +233,7 @@ fn test_push_repairs_missing_old_chunks_after_sample_check() {
         return;
     }
 
-    let relay = TestRelay::new(19320);
+    let relay = TestRelay::new();
     let fake_blossom = FakeBlossomServer::new(19321);
     println!(
         "Started local nostr relay at {}, fake blossom at {}",

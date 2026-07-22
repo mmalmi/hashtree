@@ -28,8 +28,8 @@ fn test_link_visible_push_and_clone_with_secret() {
         return;
     }
 
-    let relay = TestRelay::new(19400);
-    let server = match TestServer::new(19401) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found.");
@@ -110,8 +110,8 @@ fn test_link_visible_cannot_clone_without_secret() {
         return;
     }
 
-    let relay = TestRelay::new(19402);
-    let server = match TestServer::new(19403) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found.");
@@ -194,8 +194,8 @@ fn test_link_visible_cannot_clone_with_wrong_secret() {
         return;
     }
 
-    let relay = TestRelay::new(19404);
-    let server = match TestServer::new(19405) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found.");
@@ -283,8 +283,8 @@ fn test_private_push_and_clone_as_author() {
         return;
     }
 
-    let relay = TestRelay::new(19406);
-    let server = match TestServer::new(19407) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found.");
@@ -359,8 +359,8 @@ fn test_private_cannot_clone_without_private_flag() {
         return;
     }
 
-    let relay = TestRelay::new(19408);
-    let server = match TestServer::new(19409) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found.");

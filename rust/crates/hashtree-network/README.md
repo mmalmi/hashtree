@@ -23,6 +23,5 @@ wallet commands remain, but this crate deliberately configures no paid
 `BlobRoute`. A future paid provider must own negotiation and replay protection
 inside one opaque route without changing the published blob wire.
 
-The retired WebRTC/raw-frame mesh, duplicate blob request/response codec, and
-private pubsub carrier are intentionally not part of this crate. FIPS owns
-transport addressing and `nostr-pubsub` owns Nostr event distribution.
+FIPS owns transport addressing and `nostr-pubsub` owns Nostr event
+distribution.

@@ -26,9 +26,9 @@ Status values:
 | HT-CORE-010: diff completeness/minimality w.r.t. reachable sets | `docs/HTS-01.md` §2 | `rust/crates/hashtree-core/src/diff.rs` | `formal_diff_props.rs` | `core-props` | Verified |
 | HT-CORE-011: diff first push returns all new reachable hashes | `docs/HTS-01.md` §2 | `rust/crates/hashtree-core/src/diff.rs` | `formal_diff_props.rs` | `core-props` | Verified |
 | HT-CORE-012: keyed decryption failure in diff returns explicit error | `docs/HTS-01.md` §5 | `rust/crates/hashtree-core/src/diff.rs` | `formal_diff_props.rs` | `core-props` | Verified |
-| HT-CORE-013: strong integrity verifier detects missing and corrupted children | `docs/HTS-01.md` §2 | `rust/crates/hashtree-core/src/reader.rs` | `test_verify_tree_integrity_*` | `core-integrity` | Verified |
-| HT-GIT-001: non-fast-forward rejected unless force | `docs/HTS-01.md` §10 | `rust/crates/git-remote-htree/src/helper.rs` | `formal_git_props.rs` | `git-formal` | In Progress |
-| HT-GIT-002: deleting one ref does not mutate others | `docs/HTS-01.md` §10 | `rust/crates/git-remote-htree/src/git/storage.rs` | `formal_git_props.rs` | `git-formal` | Verified |
-| HT-GIT-003: all written refs satisfy ref-name constraints | git ref rules + project policy | `rust/crates/git-remote-htree/src/git/refs.rs` | `formal_git_props.rs` | `git-formal` | Verified |
-| HT-GIT-004: untouched remote refs are preserved during push | `docs/HTS-01.md` §10 | `rust/crates/git-remote-htree/src/helper.rs` | `formal_git_props.rs` | `git-formal` | In Progress |
-| HT-ROUTE-001: explicit route preference, route-local NoResult, bounded cooldown, recovery, and central hash verification preserve correctness | `docs/HTS-01.md` §11 | `rust/crates/hashtree-network/src/blob_router.rs` | `blob_router.rs` | `blob-router` | Verified |
+| HT-CORE-013: strong integrity verifier detects missing and corrupted children | `docs/HTS-01.md` §2 | `rust/crates/hashtree-core/src/reader.rs` | `test_verify_tree_integrity_*` | `rust-tests` | Verified |
+| HT-GIT-001: non-fast-forward rejected unless force | `docs/HTS-01.md` §10 | `rust/crates/git-remote-htree/src/helper.rs` | `formal_git_props.rs` | `rust-tests` | In Progress |
+| HT-GIT-002: deleting one ref does not mutate others | `docs/HTS-01.md` §10 | `rust/crates/git-remote-htree/src/git/storage.rs` | `formal_git_props.rs` | `rust-tests` | Verified |
+| HT-GIT-003: all written refs satisfy ref-name constraints | git ref rules + project policy | `rust/crates/git-remote-htree/src/git/refs.rs` | `formal_git_props.rs` | `rust-tests` | Verified |
+| HT-GIT-004: untouched remote refs are preserved during push | `docs/HTS-01.md` §10 | `rust/crates/git-remote-htree/src/helper.rs` | `formal_git_props.rs` | `rust-tests` | In Progress |
+| HT-ROUTE-001: explicit route preference, route-local NoResult, bounded cooldown, recovery, and central hash verification preserve correctness | `docs/HTS-01.md` §11 | `rust/crates/hashtree-network/src/blob_router.rs` | `blob_router.rs` | `rust-tests` | Verified |

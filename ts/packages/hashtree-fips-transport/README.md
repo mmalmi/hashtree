@@ -58,4 +58,4 @@ await provider.stop();
 
 The discovery scope is configurable for isolated deployments, but applications
 should normally stay on `fips-overlay-v1` so they share the generic FIPS transit
-fabric instead of creating a parallel Hashtree-only WebRTC island.
+fabric rather than creating an application-specific discovery fabric.

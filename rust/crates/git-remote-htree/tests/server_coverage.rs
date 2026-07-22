@@ -16,11 +16,11 @@ fn test_server_coverage_full_upload() {
     }
 
     // Start local relay
-    let relay = TestRelay::new(19210);
+    let relay = TestRelay::new();
     println!("Started local nostr relay at: {}", relay.url());
 
     // Start TWO blossom servers
-    let server_a = match TestServer::new(19211) {
+    let server_a = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -29,7 +29,7 @@ fn test_server_coverage_full_upload() {
     };
     println!("Started blossom server A at: {}", server_a.base_url());
 
-    let server_b = match TestServer::new(19212) {
+    let server_b = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

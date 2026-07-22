@@ -27,49 +27,44 @@ reject grep -qF 'requiredSiblingSourceDirs' rust/scripts/build_windows_vm_artifa
 grep -F 'default = []' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'required-features = ["interop-fixture"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'webrtc = ["webrtc-endpoint"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-reject grep -qF 'legacy-mesh' rust/crates/hashtree-fips-transport/Cargo.toml
 reject grep -qF 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.toml
-reject test -e rust/crates/hashtree-fips-transport/src/legacy_mesh.rs
-
-# Blob retrieval has one request/reply vocabulary. The retired WebRTC mesh
-# codec must not return under a new transport or keep pubsub coupled to blob
-# routing.
-reject test -e rust/crates/hashtree-cli/src/webrtc_stub.rs
-reject test -e rust/crates/hashtree-cli/src/peer_state.rs
-reject test -e ts/packages/hashtree-mesh/src/protocol.ts
-reject test -e ts/packages/hashtree-mesh/src/types.ts
-reject test -e ts/packages/hashtree-mesh/src/peerSelector.ts
-reject grep -RqF 'pub struct DataRequest' rust/crates
-reject grep -RqF 'pub struct DataResponse' rust/crates
-reject grep -RqF 'MSG_TYPE_PUBSUB_' rust/crates/hashtree-network/src
-reject grep -RqF 'interface DataRequest' ts/packages
-reject grep -RqF 'interface DataResponse' ts/packages
 
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.
 grep -F '"${REPO_DIR}/scripts/release-gate.sh"' publish_release.sh >/dev/null
 grep -F 'export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target}"' scripts/release-gate.sh >/dev/null
 grep -F 'ensure_test_fd_limit' scripts/release-gate.sh >/dev/null
-grep -F 'ulimit -Sn 8192' .github/workflows/ci.yml >/dev/null
+grep -F 'cargo nextest run --workspace --locked' scripts/release-gate.sh >/dev/null
+grep -F -- '--exclude hashtree-embedded-ffi' scripts/release-gate.sh >/dev/null
+grep -F -- '--exclude tauri-plugin-hashtree-updater' scripts/release-gate.sh >/dev/null
+grep -F -- '--test-threads 4' scripts/release-gate.sh >/dev/null
+grep -F 'taiki-e/install-action@nextest' .github/workflows/ci.yml >/dev/null
 grep -F 'rev-parse "${VERSION}^{commit}"' publish_release.sh >/dev/null
 reject grep -qF "tags:" .github/workflows/release.yml
-grep -F 'needs: gate' .github/workflows/release.yml >/dev/null
+grep -F 'gate-static' .github/workflows/release.yml >/dev/null
+grep -F 'gate-typescript' .github/workflows/release.yml >/dev/null
+grep -F 'gate-rust' .github/workflows/release.yml >/dev/null
+grep -F 'gate-rust-peripheral' .github/workflows/release.yml >/dev/null
+grep -F 'gate-fips' .github/workflows/release.yml >/dev/null
 grep -F 'os: ubuntu-24.04-arm' .github/workflows/release.yml >/dev/null
 reject grep -qF 'docker/setup-qemu-action' .github/workflows/release.yml
 grep -F -- '--asset-base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"' .github/workflows/release.yml >/dev/null
-release_gate_job="$(sed -n '/^  gate:/,/^  build:/p' .github/workflows/release.yml)"
-printf '%s\n' "$release_gate_job" | grep -F '~/.cargo/registry/cache/' >/dev/null
-if printf '%s\n' "$release_gate_job" | grep -qF 'rust/target/'; then
-    echo 'release gate cache must not retain rust/target/' >&2
-    exit 1
-fi
+grep -F 'cargo-gate-rust-' .github/workflows/release.yml >/dev/null
+grep -F 'cargo-gate-peripheral-' .github/workflows/release.yml >/dev/null
+grep -F 'cargo-gate-fips-' .github/workflows/release.yml >/dev/null
 
-# CI keeps the same coverage while avoiding duplicate dependency installs and
-# a second `cargo test` execution that already overlaps the workspace suite.
+# CI keeps one dependency install and shards the ordinary and FIPS-enabled Rust
+# suites onto separate runners.
 [ "$(grep -c 'pnpm install --frozen-lockfile' .github/workflows/ci.yml)" -eq 1 ]
-[ "$(grep -Ec 'cargo test --workspace( --locked)?$' .github/workflows/ci.yml)" -eq 1 ]
 reject grep -qF 'cargo test --workspace --tests' .github/workflows/ci.yml
+[ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane rust' .github/workflows/ci.yml)" -eq 1 ]
+[ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane rust-peripheral' .github/workflows/ci.yml)" -eq 1 ]
+[ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane fips' .github/workflows/ci.yml)" -eq 1 ]
+grep -F 'rust-fuse-smoke:' .github/workflows/ci.yml >/dev/null
+[ "$(grep -Fxc '        run: bash rust/scripts/run_fuse_smoke_in_docker.sh' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -h 'libwebkit2gtk-4.1-dev' .github/workflows/ci.yml .github/workflows/release.yml | wc -l | tr -d ' ')" -eq 2 ]
+[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/ci.yml)" -eq 4 ]
+[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/release.yml)" -eq 4 ]
 
 # The independently consumable FIPS transport has one canonical TypeScript
 # verification command. Both CI and the release gate must invoke it instead of

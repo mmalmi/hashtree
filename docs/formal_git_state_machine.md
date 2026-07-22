@@ -34,5 +34,5 @@ Code scope:
 - Use temporary git repos and storage roots for reproducibility.
 
 ## CI
-- Planned CI job name: `git-formal`.
-- Initially advisory, promoted to hard gate after stability criteria are met.
+- Runs in the ordinary `rust-tests` gate so the integration binary is built
+  once and remains a required regression suite.

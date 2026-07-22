@@ -78,8 +78,8 @@ fn test_diff_based_push() {
     }
 
     // Start local servers
-    let relay = TestRelay::new(19202);
-    let server = match TestServer::new(19203) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -283,8 +283,8 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
         return;
     }
 
-    let relay = TestRelay::new(19212);
-    let server = match TestServer::new(19213) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

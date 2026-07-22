@@ -14,7 +14,7 @@ pnpm run build    # Build
 ## Design
 - **Simple**: SHA256 + MessagePack, no multicodec/CID versioning
 - **Focused**: Merkle trees over key-value stores, nothing else
-- **Composable**: WebRTC/Nostr/Blossom are separate layers
+- **Composable**: FIPS transports, Nostr, and Blossom are separate layers
 
 ## Code Style
 - UnoCSS: use `b-` prefix for borders

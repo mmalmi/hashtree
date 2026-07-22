@@ -24,10 +24,10 @@ fn test_pr_auto_merge_detection() {
     }
 
     // Start local nostr relay and blossom server
-    let relay = TestRelay::new(19500);
+    let relay = TestRelay::new();
     println!("Started local nostr relay at: {}", relay.url());
 
-    let server = match TestServer::new(19501) {
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -226,8 +226,8 @@ fn test_pr_auto_merge_ignores_untrusted_spoofed_status() {
         return;
     }
 
-    let relay = TestRelay::new(19502);
-    let server = match TestServer::new(19503) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -281,14 +281,11 @@ fn test_pr_auto_merge_does_not_report_success_when_status_publish_rejected() {
         return;
     }
 
-    let relay = TestRelay::with_options(
-        19504,
-        TestRelayOptions {
-            reject_event_kinds: vec![1631],
-            ..Default::default()
-        },
-    );
-    let server = match TestServer::new(19505) {
+    let relay = TestRelay::with_options(TestRelayOptions {
+        reject_event_kinds: vec![1631],
+        ..Default::default()
+    });
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -325,14 +322,11 @@ fn test_pr_auto_merge_skips_when_pr_status_lookup_times_out() {
         return;
     }
 
-    let relay = TestRelay::with_options(
-        19506,
-        TestRelayOptions {
-            ignore_req_kinds: vec![1630, 1631, 1632, 1633],
-            ..Default::default()
-        },
-    );
-    let server = match TestServer::new(19507) {
+    let relay = TestRelay::with_options(TestRelayOptions {
+        ignore_req_kinds: vec![1630, 1631, 1632, 1633],
+        ..Default::default()
+    });
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -396,8 +390,8 @@ fn test_pr_auto_merge_marks_multiple_prs_in_single_push() {
         return;
     }
 
-    let relay = TestRelay::new(19508);
-    let server = match TestServer::new(19509) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
@@ -452,8 +446,8 @@ fn test_pr_auto_merge_only_marks_matching_pr_when_multiple_open_prs_exist() {
         return;
     }
 
-    let relay = TestRelay::new(19510);
-    let server = match TestServer::new(19511) {
+    let relay = TestRelay::new();
+    let server = match TestServer::new() {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");

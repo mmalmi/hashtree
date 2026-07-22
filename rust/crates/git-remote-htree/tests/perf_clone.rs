@@ -15,19 +15,10 @@ mod common;
 
 use common::{skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
 use serde::Serialize;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 use tempfile::TempDir;
-
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("read local addr")
-        .port()
-}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -180,10 +171,8 @@ fn benchmark_large_repo_clone_local() {
     let label = benchmark_label();
     let remote_repo = benchmark_repo_name();
 
-    let relay_port = reserve_port();
-    let blossom_port = reserve_port();
-    let relay = TestRelay::new(relay_port);
-    let server = TestServer::new(blossom_port).expect("start local blossom server");
+    let relay = TestRelay::new();
+    let server = TestServer::new().expect("start local blossom server");
     let relay_url = relay.url();
     let blossom_url = server.base_url();
 

@@ -8,6 +8,7 @@
 //! - Helper functions for creating test repos
 
 use nostr::ToBech32;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -67,9 +68,8 @@ pub fn command_output_with_timeout(
 pub mod test_relay {
     use futures::{SinkExt, StreamExt};
     use std::collections::{HashMap, HashSet};
-    use std::net::{TcpListener, TcpStream as StdTcpStream};
+    use std::net::TcpListener;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
     use tokio::net::TcpStream;
     use tokio::sync::{broadcast, RwLock};
     use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -226,6 +226,7 @@ pub mod test_relay {
         port: u16,
         shutdown: broadcast::Sender<()>,
         events: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+        thread: Option<std::thread::JoinHandle<()>>,
     }
 
     #[derive(Clone, Default)]
@@ -236,11 +237,19 @@ pub mod test_relay {
     }
 
     impl TestRelay {
-        pub fn new(port: u16) -> Self {
-            Self::with_options(port, TestRelayOptions::default())
+        pub fn new() -> Self {
+            Self::with_options(TestRelayOptions::default())
         }
 
-        pub fn with_options(port: u16, options: TestRelayOptions) -> Self {
+        pub fn with_options(options: TestRelayOptions) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test relay");
+            let port = listener
+                .local_addr()
+                .expect("read test relay address")
+                .port();
+            listener
+                .set_nonblocking(true)
+                .expect("set test relay nonblocking");
             let events: Arc<RwLock<HashMap<String, serde_json::Value>>> =
                 Arc::new(RwLock::new(HashMap::new()));
             let (shutdown, _) = broadcast::channel(1);
@@ -259,20 +268,13 @@ pub mod test_relay {
                         .collect(),
                 ));
 
-            let relay = TestRelay {
-                port,
-                shutdown: shutdown.clone(),
-                events: events.clone(),
-            };
-
-            // Start relay in background
             let events_clone = events.clone();
             let mut shutdown_rx = shutdown.subscribe();
             let event_tx_clone = event_tx.clone();
             let ignore_req_kinds_clone = ignore_req_kinds.clone();
             let respond_empty_req_kinds_once_clone = respond_empty_req_kinds_once.clone();
 
-            std::thread::spawn(move || {
+            let thread = std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
@@ -280,8 +282,6 @@ pub mod test_relay {
                     .unwrap();
 
                 rt.block_on(async move {
-                    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).unwrap();
-                    listener.set_nonblocking(true).unwrap();
                     let listener = tokio::net::TcpListener::from_std(listener).unwrap();
 
                     loop {
@@ -312,16 +312,12 @@ pub mod test_relay {
                 });
             });
 
-            // Wait until the listener is actually bound before returning.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let addr = format!("127.0.0.1:{}", port);
-            while Instant::now() < deadline {
-                if StdTcpStream::connect(&addr).is_ok() {
-                    return relay;
-                }
-                std::thread::sleep(Duration::from_millis(20));
+            TestRelay {
+                port,
+                shutdown,
+                events,
+                thread: Some(thread),
             }
-            panic!("Test relay did not start on {}", addr);
         }
 
         pub fn url(&self) -> String {
@@ -341,8 +337,9 @@ pub mod test_relay {
     impl Drop for TestRelay {
         fn drop(&mut self) {
             let _ = self.shutdown.send(());
-            // Give time for cleanup
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("join test relay");
+            }
         }
     }
 
@@ -607,7 +604,7 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    pub fn new(port: u16) -> Option<Self> {
+    pub fn new() -> Option<Self> {
         let htree_bin = find_htree_binary()?;
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let home_dir = TempDir::new().expect("Failed to create home dir");
@@ -637,21 +634,23 @@ relays = []
             .expect("Failed to encode nsec");
         std::fs::write(config_dir.join("keys"), &nsec).expect("Failed to write keys");
 
-        let process = Command::new(&htree_bin)
-            .arg("--data-dir")
-            .arg(data_dir.path())
-            .arg("start")
-            .arg("--addr")
-            .arg(format!("127.0.0.1:{}", port))
-            .env("HOME", home_dir.path())
-            .env("RUST_LOG", "warn")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("Failed to start htree server");
-
-        // Wait for server to start
-        std::thread::sleep(Duration::from_secs(2));
+        let (mut process, port) = start_test_server(&htree_bin, data_dir.path(), home_dir.path());
+        let addr = format!("127.0.0.1:{port}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if TcpStream::connect(&addr).is_ok() {
+                break;
+            }
+            if let Some(status) = process.try_wait().expect("poll htree test server") {
+                panic!("htree test server exited before startup: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = process.kill();
+                let _ = process.wait();
+                panic!("htree test server did not start on {addr}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
 
         Some(TestServer {
             _data_dir: data_dir,
@@ -664,6 +663,44 @@ relays = []
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
+}
+
+fn start_test_server(
+    htree_bin: &std::path::Path,
+    data_dir: &std::path::Path,
+    home_dir: &std::path::Path,
+) -> (Child, u16) {
+    for _ in 0..10 {
+        let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve htree test port");
+        let port = reservation
+            .local_addr()
+            .expect("read htree test port")
+            .port();
+        drop(reservation);
+
+        let mut process = Command::new(htree_bin)
+            .arg("--data-dir")
+            .arg(data_dir)
+            .arg("start")
+            .arg("--addr")
+            .arg(format!("127.0.0.1:{port}"))
+            .env("HOME", home_dir)
+            .env("RUST_LOG", "warn")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to start htree server");
+
+        std::thread::sleep(Duration::from_millis(20));
+        if process
+            .try_wait()
+            .expect("poll htree test server startup")
+            .is_none()
+        {
+            return (process, port);
+        }
+    }
+    panic!("failed to reserve a port for htree test server");
 }
 
 impl Drop for TestServer {

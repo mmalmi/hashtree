@@ -13,15 +13,12 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
-    let good_relay = TestRelay::new(19630);
-    let hanging_relay = TestRelay::with_options(
-        19631,
-        TestRelayOptions {
-            // Simulate a relay that never answers hashtree-root REQ.
-            ignore_req_kinds: vec![KIND_HASHTREE_ROOT as u64],
-            ..Default::default()
-        },
-    );
+    let good_relay = TestRelay::new();
+    let hanging_relay = TestRelay::with_options(TestRelayOptions {
+        // Simulate a relay that never answers hashtree-root REQ.
+        ignore_req_kinds: vec![KIND_HASHTREE_ROOT as u64],
+        ..Default::default()
+    });
 
     let keys = Keys::generate();
     let pubkey_hex = hex::encode(keys.public_key().to_bytes());
@@ -65,15 +62,12 @@ fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
 
 #[test]
 fn test_fetch_refs_retries_after_empty_repo_lookup_before_reporting_not_found() {
-    let flaky_relay = TestRelay::with_options(
-        19632,
-        TestRelayOptions {
-            // First repo lookup returns EOSE without the historical event, so the
-            // client needs to retry discovery instead of surfacing a false "not found".
-            respond_empty_req_kinds_once: vec![KIND_HASHTREE_ROOT as u64],
-            ..Default::default()
-        },
-    );
+    let flaky_relay = TestRelay::with_options(TestRelayOptions {
+        // First repo lookup returns EOSE without the historical event, so the
+        // client needs to retry discovery instead of surfacing a false "not found".
+        respond_empty_req_kinds_once: vec![KIND_HASHTREE_ROOT as u64],
+        ..Default::default()
+    });
 
     let keys = Keys::generate();
     let pubkey_hex = hex::encode(keys.public_key().to_bytes());
@@ -115,7 +109,7 @@ fn test_fetch_refs_retries_after_empty_repo_lookup_before_reporting_not_found() 
 
 #[test]
 fn test_fetch_refs_discards_bad_local_daemon_root_and_retries_relays() {
-    let relay = TestRelay::new(19633);
+    let relay = TestRelay::new();
     let daemon_root = "aa".repeat(32);
     let relay_root = "bb".repeat(32);
     let fake_daemon = FakeResolveDaemon::start(daemon_root.clone());
