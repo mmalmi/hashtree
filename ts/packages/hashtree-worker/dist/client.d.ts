@@ -18,6 +18,8 @@ export declare class HashtreeWorkerClient {
     private uploadProgressListeners;
     private blossomBandwidthListeners;
     private diagnosticListeners;
+    private extensionListeners;
+    private extensionErrorListeners;
     private rootWatchListeners;
     private pendingRootWatchUpdates;
     private p2pFetchHandler;
@@ -25,6 +27,8 @@ export declare class HashtreeWorkerClient {
     constructor(workerFactory: WorkerFactory, config?: WorkerConfig);
     init(): Promise<void>;
     private spawnWorker;
+    private handleWorkerFailure;
+    private notifyExtensionError;
     private rejectAllPending;
     private resolvePending;
     private rejectPending;
@@ -83,6 +87,9 @@ export declare class HashtreeWorkerClient {
     onUploadProgress(listener: (progress: UploadProgressState) => void): () => void;
     onBlossomBandwidth(listener: (stats: BlossomBandwidthState) => void): () => void;
     onDiagnostic(listener: (event: WorkerDiagnosticEvent) => void): () => void;
+    onExtensionMessage(listener: (message: unknown) => void): () => void;
+    onExtensionError(listener: (error: Error) => void): () => void;
+    postExtensionMessage(message: unknown, transfer?: Transferable[]): Promise<void>;
     setP2PFetchHandler(handler: P2PFetchHandler | null): void;
     setP2PPeerListHandler(handler: P2PPeerListHandler | null): void;
     setP2PProvider(provider: WorkerP2PProvider | null): void;

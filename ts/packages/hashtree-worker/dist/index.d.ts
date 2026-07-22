@@ -1,5 +1,6 @@
 export { HashtreeWorkerClient } from './client.js';
 export type { WorkerFactory, P2PFetchHandler, P2PPeerListHandler, WorkerP2PProvider, } from './client.js';
+export type { AttachHashtreeWorkerOptions, HashtreeWorkerMessageEndpoint, HashtreeWorkerRuntime, } from './worker.js';
 export { RelayWorkerClient } from './relay-client.js';
 export type { RelayWorkerClientConfig, RelayPeerStats, RelayStats, BlossomBandwidthStats as RelayBlossomBandwidthStats, TreeRootInfo as RelayTreeRootInfo, TreeRootUpdate as RelayTreeRootUpdate, RelayWorkerConfig, RelayWorkerRequest, RelayWorkerResponse, } from './relay-client.js';
 export { canUseInjectedHtreeServerUrl, canUseLocalHtreeRoutes, canUseSameOriginHtreeProtocolStreaming, getInjectedHtreeServerUrl, resolveRuntimeHtreeBaseUrl, shouldEagerLoadMediaInNativeChildRuntime, shouldPreferSameOriginHtreeRoutes, } from './runtime.js';

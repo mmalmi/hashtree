@@ -52,6 +52,8 @@ export class HashtreeWorkerClient {
   private uploadProgressListeners = new Set<(progress: UploadProgressState) => void>();
   private blossomBandwidthListeners = new Set<(stats: BlossomBandwidthState) => void>();
   private diagnosticListeners = new Set<(event: WorkerDiagnosticEvent) => void>();
+  private extensionListeners = new Set<(message: unknown) => void>();
+  private extensionErrorListeners = new Set<(error: Error) => void>();
   private rootWatchListeners = new Map<string, (cid: CID | null) => void>();
   private pendingRootWatchUpdates = new Map<string, CID | null>();
   private p2pFetchHandler: P2PFetchHandler | null = null;
@@ -119,9 +121,14 @@ export class HashtreeWorkerClient {
     } else {
       this.worker = new this.workerFactory();
     }
+    const spawnedWorker = this.worker;
 
-    this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-      const message = event.data;
+    spawnedWorker.onmessage = (event: MessageEvent<unknown>) => {
+      if (!event.data || typeof event.data !== 'object') {
+        this.extensionListeners.forEach(listener => listener(event.data));
+        return;
+      }
+      const message = event.data as WorkerResponse;
 
       if (message.type === 'connectivityUpdate') {
         this.connectivityListeners.forEach(listener => listener(message.state));
@@ -169,15 +176,47 @@ export class HashtreeWorkerClient {
       }
 
       if ('id' in message && typeof message.id === 'string') {
-        this.resolvePending(message.id, message);
+        if (this.pending.has(message.id)) {
+          this.resolvePending(message.id, message);
+          return;
+        }
       }
+
+      this.extensionListeners.forEach(listener => listener(event.data));
     };
 
-    this.worker.onerror = (event) => {
-      this.workerReady = false;
-      const errorMessage = event instanceof ErrorEvent ? event.message : 'Worker error';
-      this.rejectAllPending(new Error(errorMessage));
+    spawnedWorker.onerror = (event) => {
+      const message = 'message' in event && typeof event.message === 'string' && event.message
+        ? event.message
+        : 'Worker error';
+      this.handleWorkerFailure(spawnedWorker, new Error(message));
     };
+    spawnedWorker.onmessageerror = () => {
+      this.handleWorkerFailure(spawnedWorker, new Error('Worker message deserialization failed'));
+    };
+  }
+
+  private handleWorkerFailure(worker: Worker, error: Error): void {
+    if (this.worker !== worker) return;
+    this.worker = null;
+    this.workerReady = false;
+    this.initPromise = null;
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    worker.terminate();
+    this.rejectAllPending(error);
+    this.notifyExtensionError(error);
+  }
+
+  private notifyExtensionError(error: Error): void {
+    for (const listener of this.extensionErrorListeners) {
+      try {
+        listener(error);
+      } catch {
+        // A lifecycle listener must not prevent other callers from settling.
+      }
+    }
   }
 
   private rejectAllPending(error: Error): void {
@@ -607,6 +646,28 @@ export class HashtreeWorkerClient {
     };
   }
 
+  onExtensionMessage(listener: (message: unknown) => void): () => void {
+    this.extensionListeners.add(listener);
+    return () => {
+      this.extensionListeners.delete(listener);
+    };
+  }
+
+  onExtensionError(listener: (error: Error) => void): () => void {
+    this.extensionErrorListeners.add(listener);
+    return () => {
+      this.extensionErrorListeners.delete(listener);
+    };
+  }
+
+  async postExtensionMessage(message: unknown, transfer: Transferable[] = []): Promise<void> {
+    await this.initIfNeeded();
+    if (!this.worker) {
+      throw new Error('Worker not initialized');
+    }
+    this.worker.postMessage(message, transfer);
+  }
+
   setP2PFetchHandler(handler: P2PFetchHandler | null): void {
     this.p2pFetchHandler = handler;
     this.notifyP2PProviderState();
@@ -636,6 +697,10 @@ export class HashtreeWorkerClient {
   }
 
   async close(): Promise<void> {
+    const closeError = new Error('Worker closed');
+    this.notifyExtensionError(closeError);
+    this.extensionListeners.clear();
+    this.extensionErrorListeners.clear();
     try {
       await this.request({ type: 'close' });
     } catch {
@@ -647,6 +712,6 @@ export class HashtreeWorkerClient {
     this.worker = null;
     this.workerReady = false;
     this.initPromise = null;
-    this.rejectAllPending(new Error('Worker closed'));
+    this.rejectAllPending(closeError);
   }
 }

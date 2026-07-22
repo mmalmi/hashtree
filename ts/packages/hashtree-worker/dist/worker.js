@@ -24,6 +24,7 @@ let endpointListener = null;
 let storage = null;
 let blossom = null;
 let blobRouter = null;
+let routedStore = null;
 let tree = null;
 let mediaTree = null;
 let nostrRelays = [];
@@ -275,6 +276,7 @@ function resetState() {
     storage = null;
     blossom = null;
     blobRouter = null;
+    routedStore = null;
     tree = null;
     mediaTree = null;
     p2pPeerRoutes.setEnabled(false);
@@ -924,7 +926,8 @@ async function init(config, hasP2PProvider = false) {
         publishBlossomBandwidth(stats);
     });
     blobRouter = createBlobRouter(primaryStore);
-    tree = new HashTree({ store: createRoutedStore(primaryStore, blobRouter) });
+    routedStore = createRoutedStore(primaryStore, blobRouter);
+    tree = new HashTree({ store: routedStore });
     mediaTree = tree;
     publishBlossomBandwidth(blossom.getBandwidthStats());
     emitDiagnostic('info', 'worker', 'initialized', 'Hashtree worker initialized', {
@@ -1407,13 +1410,27 @@ function isWorkerRequestMessage(value) {
         && typeof value === 'object'
         && typeof value.type === 'string');
 }
-export function attachHashtreeWorker(target = self) {
+export function attachHashtreeWorker(target = self, options = {}) {
     if (endpoint && endpointListener) {
         endpoint.removeEventListener('message', endpointListener);
     }
     endpoint = target;
     endpointListener = ((event) => {
         const req = event.data;
+        const runtime = {
+            get tree() {
+                return tree;
+            },
+            get store() {
+                return routedStore;
+            },
+            postMessage(message, transfer = []) {
+                target.postMessage(message, transfer);
+            },
+        };
+        if (options.handleExtensionRequest?.(req, runtime)) {
+            return;
+        }
         if (!isWorkerRequestMessage(req)) {
             return;
         }

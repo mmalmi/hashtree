@@ -49,10 +49,23 @@ const RAW_BLOCK_UPLOAD_CONCURRENCY = 6;
 const ROUTE_HEDGE_DELAY_MS = 250;
 
 export interface HashtreeWorkerMessageEndpoint {
-  postMessage(message: WorkerResponse): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
   addEventListener(type: 'message', listener: EventListenerOrEventListenerObject): void;
   removeEventListener(type: 'message', listener: EventListenerOrEventListenerObject): void;
   start?: () => void;
+}
+
+export interface HashtreeWorkerRuntime {
+  readonly tree: HashTree | null;
+  readonly store: Store | null;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+}
+
+export interface AttachHashtreeWorkerOptions {
+  handleExtensionRequest?: (
+    request: unknown,
+    runtime: HashtreeWorkerRuntime,
+  ) => boolean;
 }
 
 let endpoint: HashtreeWorkerMessageEndpoint | null = null;
@@ -61,6 +74,7 @@ let endpointListener: EventListener | null = null;
 let storage: IdbBlobStorage | null = null;
 let blossom: BlossomTransport | null = null;
 let blobRouter: BlobRouter | null = null;
+let routedStore: Store | null = null;
 let tree: HashTree | null = null;
 let mediaTree: HashTree | null = null;
 let nostrRelays: string[] = [];
@@ -416,6 +430,7 @@ function resetState(): void {
   storage = null;
   blossom = null;
   blobRouter = null;
+  routedStore = null;
   tree = null;
   mediaTree = null;
   p2pPeerRoutes.setEnabled(false);
@@ -1136,7 +1151,8 @@ async function init(config: WorkerConfig, hasP2PProvider = false): Promise<void>
     }
   );
   blobRouter = createBlobRouter(primaryStore);
-  tree = new HashTree({ store: createRoutedStore(primaryStore, blobRouter) });
+  routedStore = createRoutedStore(primaryStore, blobRouter);
+  tree = new HashTree({ store: routedStore });
   mediaTree = tree;
   publishBlossomBandwidth(blossom.getBandwidthStats());
   emitDiagnostic('info', 'worker', 'initialized', 'Hashtree worker initialized', {
@@ -1705,6 +1721,7 @@ function isWorkerRequestMessage(value: unknown): value is WorkerRequest {
 
 export function attachHashtreeWorker(
   target: HashtreeWorkerMessageEndpoint = self as unknown as DedicatedWorkerGlobalScope,
+  options: AttachHashtreeWorkerOptions = {},
 ): () => void {
   if (endpoint && endpointListener) {
     endpoint.removeEventListener('message', endpointListener);
@@ -1713,6 +1730,20 @@ export function attachHashtreeWorker(
   endpoint = target;
   endpointListener = ((event: Event) => {
     const req = (event as MessageEvent<unknown>).data;
+    const runtime: HashtreeWorkerRuntime = {
+      get tree() {
+        return tree;
+      },
+      get store() {
+        return routedStore;
+      },
+      postMessage(message, transfer = []) {
+        target.postMessage(message, transfer);
+      },
+    };
+    if (options.handleExtensionRequest?.(req, runtime)) {
+      return;
+    }
     if (!isWorkerRequestMessage(req)) {
       return;
     }

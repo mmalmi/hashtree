@@ -5,6 +5,11 @@ export type {
   P2PPeerListHandler,
   WorkerP2PProvider,
 } from './client.js';
+export type {
+  AttachHashtreeWorkerOptions,
+  HashtreeWorkerMessageEndpoint,
+  HashtreeWorkerRuntime,
+} from './worker.js';
 export { RelayWorkerClient } from './relay-client.js';
 export type {
   RelayWorkerClientConfig,
