@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use hashtree_core::{Cid, Store};
+use hashtree_core::{sha256, Cid, Store};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
     compare_nostr_replaceable_events, nostr_event_index_entries, nostr_replaceable_slot,
@@ -22,11 +23,16 @@ use super::{
     INDEX_DIR,
 };
 
-const BULK_PROJECTION_VERSION: u32 = 1;
-const BULK_PROJECTION_DIR: &str = "bulk-projection-v1";
+const BULK_PROJECTION_VERSION: u32 = 2;
+const BULK_PROJECTION_DIR: &str = "bulk-projection-v2";
 const BULK_PROJECTION_STATE_FILE: &str = "state.json";
 const BULK_PROJECTION_SPOOL_DIR: &str = "spool";
 const BULK_PROJECTION_MAP_SIZE: usize = 256 * 1024 * 1024 * 1024;
+const ENTRY_CHUNK_SIZE: usize = 400;
+const ENTRY_PREFIX_SIZE: usize = 33;
+const ENTRY_PAGE_SIZE: usize = 4_096;
+const EDGE_HAS_CID: u8 = 1;
+const EDGE_HAS_CHILDREN: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct BulkProjectionState {
@@ -65,6 +71,28 @@ struct BulkProjectionSpool {
     entries: Database<Bytes, Bytes>,
     events: Database<Bytes, Bytes>,
     slots: Database<Bytes, Bytes>,
+}
+
+#[derive(Debug)]
+struct EntryEdge {
+    chunk: Vec<u8>,
+    value: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct EntryTrieFrame {
+    parent: [u8; 32],
+    logical_prefix_len: usize,
+    after: Option<Vec<u8>>,
+    edges: VecDeque<EntryEdge>,
+    exhausted: bool,
+}
+
+struct EntryTrieCursor<'a> {
+    spool: &'a BulkProjectionSpool,
+    index: NostrEventIndex,
+    logical_key: Vec<u8>,
+    stack: Vec<EntryTrieFrame>,
 }
 
 impl BulkProjectionSpool {
@@ -112,7 +140,7 @@ impl BulkProjectionSpool {
             let mut replaced = false;
             let slot = nostr_replaceable_slot(&event);
             if let Some((index, slot_key)) = slot.as_ref() {
-                let encoded_slot = prefixed_key(*index, slot_key);
+                let encoded_slot = hashed_key(*index, slot_key);
                 if let Some(previous_id) = self.slots.get(&wtxn, &encoded_slot)? {
                     let previous = self
                         .events
@@ -139,17 +167,13 @@ impl BulkProjectionSpool {
             let encoded = rmp_serde::to_vec_named(&record).context("encode spool event")?;
             self.events.put(&mut wtxn, event.id.as_bytes(), &encoded)?;
             for entry in nostr_event_index_entries(&event, &cid) {
-                self.entries.put(
-                    &mut wtxn,
-                    &prefixed_key(entry.index, &entry.key),
-                    &encode_cid(&entry.cid),
-                )?;
+                self.put_entry(&mut wtxn, entry.index, &entry.key, &entry.cid)?;
                 report.index_entries = report.index_entries.saturating_add(1);
             }
             if let Some((index, slot_key)) = slot {
                 self.slots.put(
                     &mut wtxn,
-                    &prefixed_key(index, &slot_key),
+                    &hashed_key(index, &slot_key),
                     event.id.as_bytes(),
                 )?;
             }
@@ -171,11 +195,114 @@ impl BulkProjectionSpool {
             key: record.cid_key,
         };
         for entry in nostr_event_index_entries(&record.event, &cid) {
-            self.entries
-                .delete(wtxn, &prefixed_key(entry.index, &entry.key))?;
+            self.remove_entry(wtxn, entry.index, &entry.key)?;
         }
         self.events.delete(wtxn, record.event.id.as_bytes())?;
         Ok(())
+    }
+
+    fn put_entry(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        index: NostrEventIndex,
+        logical_key: &str,
+        cid: &Cid,
+    ) -> Result<()> {
+        let bytes = logical_key.as_bytes();
+        let mut parent = [0; 32];
+        let mut offset: usize = 0;
+        loop {
+            let end = offset.saturating_add(ENTRY_CHUNK_SIZE).min(bytes.len());
+            let chunk = &bytes[offset..end];
+            let final_chunk = end == bytes.len();
+            let physical_key = entry_edge_key(index, &parent, chunk);
+            let mut edge = self
+                .entries
+                .get(wtxn, &physical_key)?
+                .map(decode_edge_value)
+                .transpose()?
+                .unwrap_or_default();
+            if final_chunk {
+                edge.cid = Some(cid.clone());
+            } else {
+                edge.has_children = true;
+            }
+            self.entries
+                .put(wtxn, &physical_key, &encode_edge_value(&edge))?;
+            if final_chunk {
+                return Ok(());
+            }
+            parent = sha256(&physical_key);
+            offset = end;
+        }
+    }
+
+    fn remove_entry(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        index: NostrEventIndex,
+        logical_key: &str,
+    ) -> Result<()> {
+        let bytes = logical_key.as_bytes();
+        let mut parent = [0; 32];
+        let mut offset: usize = 0;
+        loop {
+            let end = offset.saturating_add(ENTRY_CHUNK_SIZE).min(bytes.len());
+            let chunk = &bytes[offset..end];
+            let final_chunk = end == bytes.len();
+            let physical_key = entry_edge_key(index, &parent, chunk);
+            if final_chunk {
+                let Some(encoded) = self.entries.get(wtxn, &physical_key)? else {
+                    return Ok(());
+                };
+                let mut edge = decode_edge_value(encoded)?;
+                if edge.has_children {
+                    edge.cid = None;
+                    self.entries
+                        .put(wtxn, &physical_key, &encode_edge_value(&edge))?;
+                } else {
+                    self.entries.delete(wtxn, &physical_key)?;
+                }
+                return Ok(());
+            }
+            parent = sha256(&physical_key);
+            offset = end;
+        }
+    }
+
+    fn load_edge_page(
+        &self,
+        index: NostrEventIndex,
+        parent: &[u8; 32],
+        after: Option<&[u8]>,
+    ) -> Result<(VecDeque<EntryEdge>, bool)> {
+        let prefix = entry_edge_prefix(index, parent);
+        let start = match after {
+            Some(key) => Bound::Excluded(key),
+            None => Bound::Included(prefix.as_slice()),
+        };
+        let bounds = (start, Bound::Unbounded);
+        let rtxn = self.env.read_txn()?;
+        let mut edges = VecDeque::new();
+        let mut exhausted = false;
+        for item in self.entries.range(&rtxn, &bounds)? {
+            let (key, value) = item?;
+            if !key.starts_with(&prefix) {
+                exhausted = true;
+                break;
+            }
+            edges.push_back(EntryEdge {
+                chunk: key[ENTRY_PREFIX_SIZE..].to_vec(),
+                value: value.to_vec(),
+            });
+            if edges.len() == ENTRY_PAGE_SIZE {
+                break;
+            }
+        }
+        if edges.len() < ENTRY_PAGE_SIZE {
+            exhausted = true;
+        }
+        Ok((edges, exhausted))
     }
 
     async fn build_index_root<S: Store>(
@@ -186,24 +313,134 @@ impl BulkProjectionSpool {
     ) -> Result<Option<Cid>> {
         let btree = BTree::new(store, BTreeOptions { order: Some(order) });
         let mut builder = btree.sorted_link_builder();
-        let rtxn = self.env.read_txn()?;
-        let prefix = [index.stable_id()];
-        for item in self.entries.prefix_iter(&rtxn, &prefix)? {
-            let (key, value) = item?;
-            let key = std::str::from_utf8(&key[1..])
-                .context("bulk projection index key is not UTF-8")?
-                .to_owned();
-            builder.push(key, decode_cid(value)?).await?;
+        let mut cursor = EntryTrieCursor::new(self, index);
+        while let Some((key, cid)) = cursor.next_entry()? {
+            builder.push(key, cid).await?;
         }
         Ok(builder.finish().await?)
     }
 }
 
-fn prefixed_key(index: NostrEventIndex, key: &str) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(key.len() + 1);
+impl EntryTrieCursor<'_> {
+    fn new(spool: &BulkProjectionSpool, index: NostrEventIndex) -> EntryTrieCursor<'_> {
+        EntryTrieCursor {
+            spool,
+            index,
+            logical_key: Vec::new(),
+            stack: vec![EntryTrieFrame {
+                parent: [0; 32],
+                logical_prefix_len: 0,
+                after: None,
+                edges: VecDeque::new(),
+                exhausted: false,
+            }],
+        }
+    }
+
+    fn next_entry(&mut self) -> Result<Option<(String, Cid)>> {
+        loop {
+            let Some(frame) = self.stack.last_mut() else {
+                return Ok(None);
+            };
+            if frame.edges.is_empty() && !frame.exhausted {
+                let (edges, exhausted) =
+                    self.spool
+                        .load_edge_page(self.index, &frame.parent, frame.after.as_deref())?;
+                frame.edges = edges;
+                frame.exhausted = exhausted;
+            }
+            let Some(edge) = frame.edges.pop_front() else {
+                let prefix_len = frame.logical_prefix_len;
+                self.stack.pop();
+                self.logical_key.truncate(prefix_len);
+                continue;
+            };
+            self.logical_key.truncate(frame.logical_prefix_len);
+            self.logical_key.extend_from_slice(&edge.chunk);
+            let physical_key = entry_edge_key(self.index, &frame.parent, &edge.chunk);
+            frame.after = Some(physical_key.clone());
+            let value = decode_edge_value(&edge.value)?;
+            if value.has_children {
+                self.stack.push(EntryTrieFrame {
+                    parent: sha256(&physical_key),
+                    logical_prefix_len: self.logical_key.len(),
+                    after: None,
+                    edges: VecDeque::new(),
+                    exhausted: false,
+                });
+            }
+            if let Some(cid) = value.cid {
+                let key = String::from_utf8(self.logical_key.clone())
+                    .context("bulk projection index key is not UTF-8")?;
+                return Ok(Some((key, cid)));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct EdgeValue {
+    cid: Option<Cid>,
+    has_children: bool,
+}
+
+fn entry_edge_prefix(index: NostrEventIndex, parent: &[u8; 32]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(ENTRY_PREFIX_SIZE);
     encoded.push(index.stable_id());
-    encoded.extend_from_slice(key.as_bytes());
+    encoded.extend_from_slice(parent);
     encoded
+}
+
+fn entry_edge_key(index: NostrEventIndex, parent: &[u8; 32], chunk: &[u8]) -> Vec<u8> {
+    let mut encoded = entry_edge_prefix(index, parent);
+    encoded.extend_from_slice(chunk);
+    encoded
+}
+
+fn hashed_key(index: NostrEventIndex, key: &str) -> Vec<u8> {
+    let mut logical = Vec::with_capacity(key.len() + 1);
+    logical.push(index.stable_id());
+    logical.extend_from_slice(key.as_bytes());
+    let mut encoded = Vec::with_capacity(33);
+    encoded.push(index.stable_id());
+    encoded.extend_from_slice(&sha256(&logical));
+    encoded
+}
+
+fn encode_edge_value(value: &EdgeValue) -> Vec<u8> {
+    let mut flags = 0;
+    if value.cid.is_some() {
+        flags |= EDGE_HAS_CID;
+    }
+    if value.has_children {
+        flags |= EDGE_HAS_CHILDREN;
+    }
+    let mut encoded = vec![flags];
+    if let Some(cid) = value.cid.as_ref() {
+        encoded.extend_from_slice(&encode_cid(cid));
+    }
+    encoded
+}
+
+fn decode_edge_value(encoded: &[u8]) -> Result<EdgeValue> {
+    let (&flags, cid) = encoded
+        .split_first()
+        .context("bulk projection edge value is empty")?;
+    if flags & !(EDGE_HAS_CID | EDGE_HAS_CHILDREN) != 0 {
+        anyhow::bail!("invalid bulk projection edge flags {flags}");
+    }
+    let cid = if flags & EDGE_HAS_CID != 0 {
+        Some(decode_cid(cid)?)
+    } else {
+        if !cid.is_empty() {
+            anyhow::bail!("bulk projection edge without CID has trailing bytes");
+        }
+        None
+    };
+    Ok(EdgeValue {
+        cid,
+        has_children: flags & EDGE_HAS_CHILDREN != 0,
+    })
 }
 
 fn encode_cid(cid: &Cid) -> Vec<u8> {

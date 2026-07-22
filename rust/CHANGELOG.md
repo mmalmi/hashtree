@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.134 - 2026-07-22
+
+### Fixed
+
+- Bulk staged Nostr projection now stores ordered index entries in a
+  bounded-key disk trie and hashes exact-match replaceable slots. Large tag or
+  parameter values no longer exceed LMDB's physical key limit, while streaming
+  the final indexes retains their original logical byte ordering.
+
 ## 0.2.133 - 2026-07-22
 
 ### Added

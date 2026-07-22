@@ -19,8 +19,12 @@ fn event(id: &str, created_at: u64, kind: u32) -> StoredNostrEvent {
 async fn spool_replaces_old_events_and_bulk_builds_final_indexes_once() {
     let temp = tempfile::tempdir().unwrap();
     let spool = BulkProjectionSpool::open(temp.path()).unwrap();
-    let old = event(&"01".repeat(32), 10, 0);
-    let new = event(&"02".repeat(32), 20, 0);
+    let mut old = event(&"01".repeat(32), 10, 30_000);
+    let mut new = event(&"02".repeat(32), 20, 30_000);
+    let long_identifier = "d".repeat(1_024);
+    old.tags
+        .push(vec!["d".to_string(), long_identifier.clone()]);
+    new.tags.push(vec!["d".to_string(), long_identifier]);
     let note = event(&"03".repeat(32), 15, 1);
     let old_cid = Cid::public([1; 32]);
     let new_cid = Cid::public([2; 32]);
@@ -42,7 +46,11 @@ async fn spool_replaces_old_events_and_bulk_builds_final_indexes_once() {
         .unwrap()
         .unwrap();
     let replaceable = spool
-        .build_index_root(NostrEventIndex::Replaceable, Arc::clone(&store), 8)
+        .build_index_root(
+            NostrEventIndex::ParameterizedReplaceable,
+            Arc::clone(&store),
+            8,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -67,15 +75,54 @@ async fn spool_replaces_old_events_and_bulk_builds_final_indexes_once() {
     );
 }
 
+#[test]
+fn entry_trie_streams_long_keys_in_logical_order_across_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let spool = BulkProjectionSpool::open(temp.path()).unwrap();
+    let mut expected = BTreeMap::new();
+    for key in [
+        String::new(),
+        "a".repeat(399),
+        "a".repeat(400),
+        format!("{}a", "a".repeat(400)),
+        format!("{}b", "a".repeat(400)),
+        format!("{}é", "a".repeat(399)),
+        "z".repeat(1_024),
+    ]
+    .into_iter()
+    .chain((0..4_100).map(|number| format!("page-{number:04}")))
+    {
+        expected.insert(key.clone(), Cid::public(sha256(key.as_bytes())));
+    }
+    let mut wtxn = spool.env.write_txn().unwrap();
+    for (key, cid) in &expected {
+        spool
+            .put_entry(&mut wtxn, NostrEventIndex::ByTag, key, cid)
+            .unwrap();
+    }
+    wtxn.commit().unwrap();
+
+    let mut cursor = EntryTrieCursor::new(&spool, NostrEventIndex::ByTag);
+    let mut actual = Vec::new();
+    while let Some(entry) = cursor.next_entry().unwrap() {
+        actual.push(entry);
+    }
+    assert_eq!(actual, expected.into_iter().collect::<Vec<_>>());
+}
+
 #[tokio::test]
 async fn bulk_projection_root_matches_the_incremental_collection_writer() {
     let keys = Keys::generate();
+    let long_tag = "x".repeat(1_024);
     let old = EventBuilder::new(Kind::Metadata, "old profile")
         .custom_created_at(Timestamp::from_secs(10))
         .sign_with_keys(&keys)
         .unwrap();
     let note = EventBuilder::new(Kind::TextNote, "hello")
-        .tags([Tag::parse(["t", "Hashtree"]).unwrap()])
+        .tags([
+            Tag::parse(["t", "Hashtree"]).unwrap(),
+            Tag::parse(["r", long_tag.as_str()]).unwrap(),
+        ])
         .custom_created_at(Timestamp::from_secs(15))
         .sign_with_keys(&keys)
         .unwrap();
