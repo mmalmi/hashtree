@@ -2088,6 +2088,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 state_file,
                 batch_size,
                 max_buffer_mib,
+                reopen_batches,
                 max_items,
                 resume,
             } => {
@@ -2095,23 +2096,22 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     migrate_lmdb_batch_with_max_buffer_bytes, ExternalBlobOptions, LmdbBlobReader,
                 };
 
-                if batch_size == 0 || max_buffer_mib == 0 || max_items == Some(0) {
-                    bail!("migration batch size, max buffer MiB, and max items must be non-zero");
+                if batch_size == 0
+                    || max_buffer_mib == 0
+                    || reopen_batches == 0
+                    || max_items == Some(0)
+                {
+                    bail!(
+                        "migration batch size, max buffer MiB, reopen batches, and max items must be non-zero"
+                    );
                 }
                 let max_buffer_bytes = max_buffer_mib
                     .checked_mul(1024 * 1024)
                     .and_then(|bytes| usize::try_from(bytes).ok())
                     .context("migration max buffer MiB is too large for this platform")?;
-                let pool = open_existing()?;
                 let source = resolve_path(source);
                 let state_file = resolve_path(state_file);
-                let external = source_external_dir.map(|path| ExternalBlobOptions {
-                    base_path: resolve_path(path),
-                    min_bytes: 1,
-                    sync: true,
-                    pack_target_bytes: None,
-                });
-                let reader = LmdbBlobReader::open(&source, external)?;
+                let source_external_dir = source_external_dir.map(resolve_path);
                 let mut cursor = if resume && state_file.exists() {
                     let value = std::fs::read_to_string(&state_file)?;
                     let value = value.trim();
@@ -2129,42 +2129,73 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 let mut inserted = 0usize;
                 let mut inserted_bytes = 0u64;
                 let mut completed = false;
-                loop {
-                    let remaining = max_items
-                        .map(|maximum| maximum.saturating_sub(scanned))
-                        .unwrap_or(batch_size);
-                    if remaining == 0 {
+                'mapping_epochs: loop {
+                    if max_items.is_some_and(|maximum| scanned >= maximum) {
                         break;
                     }
-                    let limit = batch_size.min(remaining);
-                    let batch = migrate_lmdb_batch_with_max_buffer_bytes(
-                        &reader,
-                        &pool,
-                        cursor,
-                        limit,
-                        max_buffer_bytes,
-                    )?;
-                    if batch.source_exhausted {
-                        write_pool_migration_cursor(&state_file, "complete")?;
-                        completed = true;
-                        break;
+
+                    let mut pool_config = PoolStoreConfig::default();
+                    pool_config.temperature.enabled = false;
+                    let pool = PoolStore::open(&pool_path, pool_config)?;
+                    let external = source_external_dir
+                        .as_ref()
+                        .map(|path| ExternalBlobOptions {
+                            base_path: path.clone(),
+                            min_bytes: 1,
+                            sync: true,
+                            pack_target_bytes: None,
+                        });
+                    let reader = LmdbBlobReader::open(&source, external)?;
+                    let mut epoch_batches = 0usize;
+
+                    loop {
+                        let remaining = max_items
+                            .map(|maximum| maximum.saturating_sub(scanned))
+                            .unwrap_or(batch_size);
+                        if remaining == 0 {
+                            break 'mapping_epochs;
+                        }
+                        let limit = batch_size.min(remaining);
+                        let batch = migrate_lmdb_batch_with_max_buffer_bytes(
+                            &reader,
+                            &pool,
+                            cursor,
+                            limit,
+                            max_buffer_bytes,
+                        )?;
+                        if batch.source_exhausted {
+                            write_pool_migration_cursor(&state_file, "complete")?;
+                            completed = true;
+                            break 'mapping_epochs;
+                        }
+                        scanned = scanned.saturating_add(batch.scanned);
+                        already_present = already_present.saturating_add(batch.already_present);
+                        verified = verified.saturating_add(batch.verified);
+                        inserted = inserted.saturating_add(batch.inserted);
+                        inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
+                        cursor = batch.last_hash;
+                        let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
+                        write_pool_migration_cursor(
+                            &state_file,
+                            &hashtree_core::to_hex(&cursor_hash),
+                        )?;
+                        println!(
+                            "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes",
+                            batch.scanned,
+                            batch.already_present,
+                            batch.verified,
+                            batch.write_batches,
+                            batch.peak_buffered_bytes
+                        );
+                        epoch_batches = epoch_batches.saturating_add(1);
+                        if epoch_batches >= reopen_batches {
+                            println!(
+                                "Migration mappings reopened after {epoch_batches} batches at cursor {}",
+                                hashtree_core::to_hex(&cursor_hash)
+                            );
+                            break;
+                        }
                     }
-                    scanned = scanned.saturating_add(batch.scanned);
-                    already_present = already_present.saturating_add(batch.already_present);
-                    verified = verified.saturating_add(batch.verified);
-                    inserted = inserted.saturating_add(batch.inserted);
-                    inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
-                    cursor = batch.last_hash;
-                    let cursor = cursor.expect("non-empty migration batch has a cursor");
-                    write_pool_migration_cursor(&state_file, &hashtree_core::to_hex(&cursor))?;
-                    println!(
-                        "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes",
-                        batch.scanned,
-                        batch.already_present,
-                        batch.verified,
-                        batch.write_batches,
-                        batch.peak_buffered_bytes
-                    );
                 }
                 println!(
                     "Migration pass: scanned {scanned}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, completed: {completed}"

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.136 - 2026-07-23
+
+### Fixed
+
+- Long-running `storage pool migrate-lmdb` passes now close and reopen their
+  source and target LMDB mappings every 256 batches by default. This releases
+  accumulated page tables before bounded-memory systemd services can stall in
+  memory-high reclaim; migration-only pool sessions also disable background
+  temperature balancing. `--reopen-batches` can tune the remap interval.
+
 ## 0.2.135 - 2026-07-23
 
 ### Fixed

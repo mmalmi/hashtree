@@ -783,6 +783,9 @@ pub(crate) enum PoolCommands {
         /// Maximum MiB of complete blob payloads retained per pool write
         #[arg(long, default_value_t = 64)]
         max_buffer_mib: u64,
+        /// Close and reopen source/target LMDB mappings after this many batches
+        #[arg(long, default_value_t = 256)]
+        reopen_batches: usize,
         /// Stop after this many blobs in this invocation
         #[arg(long)]
         max_items: Option<usize>,
