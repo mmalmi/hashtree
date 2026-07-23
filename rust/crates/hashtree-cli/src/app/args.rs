@@ -940,6 +940,9 @@ pub(crate) struct SocialGraphIndexArgs {
     /// Maximum number of authors to crawl from the graph
     #[arg(long, default_value_t = 64)]
     pub(crate) max_authors: usize,
+    /// Maximum authors processed by this process before a durable resumable exit
+    #[arg(long)]
+    pub(crate) max_authors_per_run: Option<usize>,
     /// Maximum live index size in MiB
     #[arg(long, default_value_t = 256)]
     pub(crate) max_live_mb: u64,

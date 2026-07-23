@@ -65,6 +65,7 @@ pub(crate) struct SocialGraphIndexOptions {
     pub(crate) author_allowlist_url: Option<String>,
     pub(crate) max_events_seen: Option<usize>,
     pub(crate) max_authors: usize,
+    pub(crate) max_authors_per_run: Option<usize>,
     pub(crate) max_follow_distance: Option<u32>,
     pub(crate) max_live_bytes: u64,
     pub(crate) author_batch_size: usize,
@@ -900,6 +901,14 @@ pub(crate) async fn run_socialgraph_index(
     if checkpointed_allowlist && options.author_batch_size == 0 {
         anyhow::bail!("--author-batch-size must be greater than zero");
     }
+    if options.max_authors_per_run == Some(0) {
+        anyhow::bail!("--max-authors-per-run must be greater than zero");
+    }
+    if options.max_authors_per_run.is_some()
+        && (!checkpointed_allowlist || options.stage_only || options.project_staged)
+    {
+        anyhow::bail!("--max-authors-per-run requires one-phase durable allowlist indexing");
+    }
     if options.index_commit_batch_size == 0 {
         anyhow::bail!("--index-commit-batch-size must be greater than zero");
     }
@@ -1121,12 +1130,21 @@ pub(crate) async fn run_socialgraph_index(
             )
             .await?
         };
+        let completed_allowlist = report.authors_processed >= authors.len();
         let profile_search_root = graph_store
             .profile_search_root()?
             .as_ref()
             .map(cid_to_nhash)
             .transpose()?;
         let index_report = build_bounded_report(&relays, &options, report, profile_search_root)?;
+        if !completed_allowlist {
+            eprintln!(
+                "Nostr index process tranche complete: authors={}/{}; restart to resume from the durable checkpoint",
+                index_report.authors_processed,
+                index_report.authors_considered
+            );
+            return Ok(index_report);
+        }
         persist_report(&data_dir, &index_report)?;
         clear_checkpoint(&data_dir)?;
         print_report(&index_report, &data_dir);
@@ -1244,8 +1262,12 @@ async fn crawl_allowlist_in_checkpoints(
     let event_store_options = nostr_event_store_options(options);
     let event_store =
         NostrEventStore::with_options(Arc::clone(&store), event_store_options.clone());
+    let process_author_limit = options
+        .max_authors_per_run
+        .map(|limit| state.next_author.saturating_add(limit).min(authors.len()))
+        .unwrap_or(authors.len());
 
-    while state.next_author < authors.len() {
+    while state.next_author < process_author_limit {
         if state.live_bytes_selected >= options.max_live_bytes {
             anyhow::bail!(
                 "Nostr index live-byte budget exhausted after {}/{} authors; the durable checkpoint was preserved",
@@ -1267,6 +1289,7 @@ async fn crawl_allowlist_in_checkpoints(
         let end = state
             .next_author
             .saturating_add(checkpoint_authors)
+            .min(process_author_limit)
             .min(authors.len());
         let author_batch = authors[state.next_author..end].to_vec();
         let remaining_live_bytes = options
@@ -2678,6 +2701,7 @@ mod tests {
             author_allowlist_url: Some(allowlist_url),
             max_events_seen: None,
             max_authors: 16,
+            max_authors_per_run: None,
             max_follow_distance: Some(0),
             max_live_bytes: 32 * 1024 * 1024,
             author_batch_size: 1,
@@ -3283,6 +3307,7 @@ mod tests {
                 author_allowlist_url: None,
                 max_events_seen: None,
                 max_authors: 8,
+                max_authors_per_run: None,
                 max_follow_distance: Some(1),
                 max_live_bytes: 8 * 1024 * 1024,
                 author_batch_size: 32,
@@ -3413,6 +3438,7 @@ mod tests {
                 author_allowlist_url: Some(format!("{}/allowlist", allowlist.url())),
                 max_events_seen: None,
                 max_authors: 8,
+                max_authors_per_run: None,
                 max_follow_distance: Some(0),
                 max_live_bytes: 8 * 1024 * 1024,
                 author_batch_size: 32,
@@ -3464,6 +3490,67 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, format!("p:alice:{alice_pubkey}"));
         assert_eq!(results[0].1.name, "Alice Allowlist");
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpointed_allowlist_recycles_after_a_durable_process_tranche() -> io::Result<()> {
+        let relay = TestRelay::new();
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let events = vec![
+            event_builder!(Kind::TextNote, "alice tranche")
+                .custom_created_at(Timestamp::from_secs(30))
+                .sign_with_keys(&alice)
+                .expect("alice note"),
+            event_builder!(Kind::TextNote, "bob tranche")
+                .custom_created_at(Timestamp::from_secs(31))
+                .sign_with_keys(&bob)
+                .expect("bob note"),
+        ];
+        publish_test_events(&relay.url(), &events).await;
+
+        let allowlist = TestTextServer::new(format!(
+            "{}\n{}\n",
+            alice.public_key().to_hex(),
+            bob.public_key().to_hex()
+        ));
+        let mut options =
+            checkpoint_test_options(format!("{}/authors", allowlist.url()), vec![relay.url()]);
+        options.max_authors_per_run = Some(1);
+        let tmp = TempDir::new().expect("tempdir");
+        let mut config = Config::default();
+        config.storage.max_size_gb = 1;
+        config.nostr.db_max_size_gb = 1;
+
+        let first = run_socialgraph_index(
+            tmp.path().to_path_buf(),
+            &config,
+            Keys::generate(),
+            options.clone(),
+        )
+        .await
+        .expect("first bounded process tranche");
+        assert_eq!(first.authors_considered, 2);
+        assert_eq!(first.authors_processed, 1);
+        assert_eq!(
+            load_crawl_state(tmp.path())
+                .expect("load first tranche state")
+                .expect("first tranche state")
+                .next_author,
+            1
+        );
+        assert!(!tmp.path().join(INDEX_DIR).join(LATEST_REPORT_FILE).exists());
+
+        let second =
+            run_socialgraph_index(tmp.path().to_path_buf(), &config, Keys::generate(), options)
+                .await
+                .expect("resumed bounded process tranche");
+        assert_eq!(second.authors_considered, 2);
+        assert_eq!(second.authors_processed, 2);
+        assert_eq!(second.events_selected, 2);
+        assert!(tmp.path().join(INDEX_DIR).join(LATEST_REPORT_FILE).exists());
 
         Ok(())
     }

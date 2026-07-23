@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.137 - 2026-07-23
+
+### Fixed
+
+- Durable allowlist indexers can now use `--max-authors-per-run` to stop a
+  native process after an exact number of checkpointed authors without
+  publishing an incomplete final report. Supervising software can reopen all
+  LMDB mappings and resume from the preserved cursor, bounding lifetime memory
+  and page-table accumulation in long profile crawls.
+
 ## 0.2.136 - 2026-07-23
 
 ### Fixed

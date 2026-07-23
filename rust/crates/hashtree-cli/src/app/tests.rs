@@ -1124,6 +1124,8 @@ fn test_cli_parses_socialgraph_index_command() {
         "2",
         "--max-authors",
         "48",
+        "--max-authors-per-run",
+        "1024",
         "--max-live-mb",
         "128",
         "--per-author-event-limit",
@@ -1186,6 +1188,7 @@ fn test_cli_parses_socialgraph_index_command() {
                 full_graph_recrawl,
                 max_follow_distance,
                 max_authors,
+                max_authors_per_run,
                 max_live_mb,
                 per_author_event_limit,
                 per_author_kind_event_limit,
@@ -1220,6 +1223,7 @@ fn test_cli_parses_socialgraph_index_command() {
             assert!(full_graph_recrawl);
             assert_eq!(max_follow_distance, Some(2));
             assert_eq!(max_authors, 48);
+            assert_eq!(max_authors_per_run, Some(1_024));
             assert_eq!(max_live_mb, 128);
             assert_eq!(per_author_event_limit, 64);
             assert_eq!(per_author_kind_event_limit, Some(1));
