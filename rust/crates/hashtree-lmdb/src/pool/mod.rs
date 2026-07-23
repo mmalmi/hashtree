@@ -723,6 +723,34 @@ impl PoolStore {
             .map_err(map_heed)
     }
 
+    /// Mark hashes whose pool catalog entries represent committed data.
+    ///
+    /// Pending records deliberately return false so an interrupted migration
+    /// supplies the source bytes again and lets the ordinary repair/finalize
+    /// path complete them. Stored and moving records are already durable and
+    /// can be skipped by an incremental migration without rereading payloads.
+    pub fn committed_hashes_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        sorted_hashes
+            .iter()
+            .map(|hash| {
+                self.locations
+                    .get(&rtxn, hash)
+                    .map_err(map_heed)?
+                    .map(LocationRecord::decode)
+                    .transpose()
+                    .map(|location| {
+                        location.is_some_and(|location| {
+                            !matches!(location, LocationRecord::Pending { .. })
+                        })
+                    })
+            })
+            .collect()
+    }
+
     /// Largest map size among members that are available in this process.
     ///
     /// The pool catalog is a separate LMDB environment and is intentionally

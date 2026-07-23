@@ -266,7 +266,13 @@ fn test_storage_pool_add_and_migration_args() {
     };
     assert!(matches!(
         command,
-        PoolCommands::MigrateLmdb { resume: true, .. }
+        PoolCommands::MigrateLmdb {
+            batch_size: 256,
+            max_buffer_mib: 64,
+            max_items: None,
+            resume: true,
+            ..
+        }
     ));
 }
 

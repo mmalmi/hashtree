@@ -2087,14 +2087,21 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 source_external_dir,
                 state_file,
                 batch_size,
+                max_buffer_mib,
                 max_items,
                 resume,
             } => {
-                use hashtree_lmdb::{migrate_lmdb_batch, ExternalBlobOptions, LmdbBlobReader};
+                use hashtree_lmdb::{
+                    migrate_lmdb_batch_with_max_buffer_bytes, ExternalBlobOptions, LmdbBlobReader,
+                };
 
-                if batch_size == 0 || max_items == Some(0) {
-                    bail!("migration batch size and max items must be non-zero");
+                if batch_size == 0 || max_buffer_mib == 0 || max_items == Some(0) {
+                    bail!("migration batch size, max buffer MiB, and max items must be non-zero");
                 }
+                let max_buffer_bytes = max_buffer_mib
+                    .checked_mul(1024 * 1024)
+                    .and_then(|bytes| usize::try_from(bytes).ok())
+                    .context("migration max buffer MiB is too large for this platform")?;
                 let pool = open_existing()?;
                 let source = resolve_path(source);
                 let state_file = resolve_path(state_file);
@@ -2117,32 +2124,50 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     None
                 };
                 let mut verified = 0usize;
+                let mut scanned = 0usize;
+                let mut already_present = 0usize;
                 let mut inserted = 0usize;
                 let mut inserted_bytes = 0u64;
                 let mut completed = false;
                 loop {
                     let remaining = max_items
-                        .map(|maximum| maximum.saturating_sub(verified))
+                        .map(|maximum| maximum.saturating_sub(scanned))
                         .unwrap_or(batch_size);
                     if remaining == 0 {
                         break;
                     }
                     let limit = batch_size.min(remaining);
-                    let batch = migrate_lmdb_batch(&reader, &pool, cursor, limit)?;
+                    let batch = migrate_lmdb_batch_with_max_buffer_bytes(
+                        &reader,
+                        &pool,
+                        cursor,
+                        limit,
+                        max_buffer_bytes,
+                    )?;
                     if batch.source_exhausted {
                         write_pool_migration_cursor(&state_file, "complete")?;
                         completed = true;
                         break;
                     }
+                    scanned = scanned.saturating_add(batch.scanned);
+                    already_present = already_present.saturating_add(batch.already_present);
                     verified = verified.saturating_add(batch.verified);
                     inserted = inserted.saturating_add(batch.inserted);
                     inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
                     cursor = batch.last_hash;
                     let cursor = cursor.expect("non-empty migration batch has a cursor");
                     write_pool_migration_cursor(&state_file, &hashtree_core::to_hex(&cursor))?;
+                    println!(
+                        "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes",
+                        batch.scanned,
+                        batch.already_present,
+                        batch.verified,
+                        batch.write_batches,
+                        batch.peak_buffered_bytes
+                    );
                 }
                 println!(
-                    "Migration pass: verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, completed: {completed}"
+                    "Migration pass: scanned {scanned}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, completed: {completed}"
                 );
                 println!("Cursor: {}", state_file.display());
             }

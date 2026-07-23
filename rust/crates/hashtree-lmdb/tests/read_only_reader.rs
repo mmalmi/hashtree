@@ -1,7 +1,7 @@
 use hashtree_core::sha256;
 use hashtree_lmdb::{
-    migrate_lmdb_batch, ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolMemberConfig,
-    PoolStore, PoolStoreConfig,
+    migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes, ExternalBlobOptions,
+    LmdbBlobReader, LmdbBlobStore, PoolMemberConfig, PoolStore, PoolStoreConfig,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -110,16 +110,24 @@ fn read_only_reader_adopts_existing_map_and_reads_inline_and_external_blobs() {
         64 * 1024 * 1024,
     ))
     .expect("add target");
-    let first = migrate_lmdb_batch(&reader, &pool, None, 1).expect("first migration batch");
-    assert_eq!(first.verified, 1);
-    assert_eq!(first.inserted, 1);
-    let replay = migrate_lmdb_batch(&reader, &pool, None, 1).expect("replay migration batch");
-    assert_eq!(replay.verified, 1);
+    let first = migrate_lmdb_batch_with_max_buffer_bytes(&reader, &pool, None, 2, 1024)
+        .expect("byte-bounded migration batch");
+    assert_eq!(first.verified, 2);
+    assert_eq!(first.inserted, 2);
+    assert_eq!(first.write_batches, 2);
+    assert_eq!(
+        first.peak_buffered_bytes,
+        external_data().len() as u64,
+        "migration should retain at most one oversized blob"
+    );
+    let replay = migrate_lmdb_batch(&reader, &pool, None, 2).expect("replay migration batch");
+    assert_eq!(replay.scanned, 2);
+    assert_eq!(replay.already_present, 2);
+    assert_eq!(replay.verified, 0);
     assert_eq!(replay.inserted, 0);
-    let second = migrate_lmdb_batch(&reader, &pool, first.last_hash, 1).expect("second batch");
-    assert_eq!(second.verified, 1);
-    assert_eq!(second.inserted, 1);
-    let complete = migrate_lmdb_batch(&reader, &pool, second.last_hash, 1).expect("complete scan");
+    assert_eq!(replay.write_batches, 0);
+    assert_eq!(replay.peak_buffered_bytes, 0);
+    let complete = migrate_lmdb_batch(&reader, &pool, first.last_hash, 1).expect("complete scan");
     assert!(complete.source_exhausted);
     assert_eq!(pool.stats().expect("pool stats").count, 2);
     std::fs::write(control.join("stop"), b"stop").expect("stop writer");

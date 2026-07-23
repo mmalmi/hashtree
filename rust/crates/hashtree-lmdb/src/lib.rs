@@ -9,7 +9,10 @@ pub use configured::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
     LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
-pub use migration::{migrate_lmdb_batch, PoolMigrationBatch};
+pub use migration::{
+    migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes, PoolMigrationBatch,
+    DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
+};
 pub use pool::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStore, PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
@@ -198,7 +201,11 @@ impl LmdbBlobReader {
             .max_dbs(DATABASE_COUNT)
             .max_readers(DEFAULT_MAX_READERS);
         unsafe {
-            options.flags(env_flags_from_env() | EnvFlags::READ_ONLY);
+            // Migration and verification perform sparse hash lookups across a
+            // potentially very large source. Disable kernel read-ahead for
+            // this dedicated reader so unrelated LMDB pages do not inflate
+            // the process cgroup's reclaimable file cache.
+            options.flags(env_flags_from_env() | EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD);
         }
         let env = unsafe { ManagedEnv::open(&options, path) }.map_err(map_heed_error)?;
         let rtxn = env.read_txn().map_err(map_heed_error)?;
@@ -235,6 +242,10 @@ impl LmdbBlobReader {
 
     pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.store.get_sync(hash)
+    }
+
+    pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        self.store.blob_size_sync(hash)
     }
 
     pub fn scan_hashes_after(

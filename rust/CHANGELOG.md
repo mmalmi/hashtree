@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.135 - 2026-07-23
+
+### Fixed
+
+- `storage pool migrate-lmdb` now splits each durable cursor page into
+  byte-bounded writes, defaults to a 64 MiB payload buffer, and disables LMDB
+  read-ahead for its sparse source reader. Migration memory no longer scales
+  with 256 arbitrarily large blobs.
+- Catch-up migration passes consult the pool catalog before loading payloads,
+  skipping committed hashes while retrying interrupted pending locations.
+  Re-running a completed migration now scans compact hash metadata and copies
+  only blobs added since earlier passes.
+
 ## 0.2.134 - 2026-07-22
 
 ### Fixed

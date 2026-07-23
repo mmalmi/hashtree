@@ -780,6 +780,9 @@ pub(crate) enum PoolCommands {
         /// Blobs per committed migration batch
         #[arg(long, default_value_t = 256)]
         batch_size: usize,
+        /// Maximum MiB of complete blob payloads retained per pool write
+        #[arg(long, default_value_t = 64)]
+        max_buffer_mib: u64,
         /// Stop after this many blobs in this invocation
         #[arg(long)]
         max_items: Option<usize>,

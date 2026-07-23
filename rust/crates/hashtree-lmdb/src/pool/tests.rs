@@ -166,6 +166,50 @@ fn process_death_before_or_after_member_write_recovers_pending_location() {
 }
 
 #[test]
+fn committed_candidate_lookup_skips_stored_but_retries_pending_locations() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("member"),
+        1024 * 1024,
+    ))
+    .expect("add member");
+
+    let stored_data = b"committed migration target";
+    let stored = sha256(stored_data);
+    pool.put_sync(stored, stored_data)
+        .expect("store committed blob");
+
+    let pending = sha256(PENDING_DATA);
+    let target = pool
+        .choose_write_member(PENDING_DATA.len() as u64, None)
+        .expect("choose pending member");
+    pool.reserve_if_absent(
+        pending,
+        LocationRecord::Pending {
+            member: target,
+            size: PENDING_DATA.len() as u64,
+        },
+    )
+    .expect("reserve pending location");
+
+    let missing = sha256(b"missing migration target");
+    let mut hashes = vec![stored, pending, missing];
+    hashes.sort_unstable();
+    let committed = pool
+        .committed_hashes_in_sorted_candidates(&hashes)
+        .expect("lookup committed candidates");
+    let status = hashes
+        .into_iter()
+        .zip(committed)
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(status.get(&stored), Some(&true));
+    assert_eq!(status.get(&pending), Some(&false));
+    assert_eq!(status.get(&missing), Some(&false));
+}
+
+#[test]
 fn sampled_reads_stay_in_memory_until_one_bounded_flush() {
     let temp = TempDir::new().expect("temp dir");
     let mut config = PoolStoreConfig::default();
