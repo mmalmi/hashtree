@@ -2468,7 +2468,21 @@ pub async fn delete_blob(
                 .body(Body::empty())
                 .unwrap()
         }
-        Ok(Err(_)) | Err(_) => Response::builder()
+        Ok(Err(error)) => Response::builder()
+            .status(
+                if error
+                    .to_string()
+                    .contains(crate::storage::POOL_MIGRATION_DELETE_DISABLED)
+                {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+            )
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(Body::empty())
+            .unwrap(),
+        Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(Body::empty())

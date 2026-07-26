@@ -297,12 +297,21 @@ pub async fn iris_store_delete(
                 .body(Body::empty())
                 .unwrap()
         }
-        Ok(Err(error)) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(header::CONTENT_TYPE, "text/plain")
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from(error.to_string()))
-            .unwrap(),
+        Ok(Err(error)) => {
+            let message = error.to_string();
+            Response::builder()
+                .status(
+                    if message.contains(crate::storage::POOL_MIGRATION_DELETE_DISABLED) {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                )
+                .header(header::CONTENT_TYPE, "text/plain")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from(message))
+                .unwrap()
+        }
         Err(error) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::CONTENT_TYPE, "text/plain")

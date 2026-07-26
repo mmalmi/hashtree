@@ -10,7 +10,7 @@ use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
-    ExternalBlobOptions, LmdbBlobStore, PoolStore,
+    ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolStore,
 };
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
@@ -68,6 +68,16 @@ const FILE_METADATA_CACHE_ENTRIES_ENV: &str = "HTREE_FILE_METADATA_CACHE_ENTRIES
 const SLOW_OWNED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_OWNED_BLOB_BATCH_LOG_MS";
 const SLOW_CACHED_BLOB_BATCH_LOG_MS_ENV: &str = "HTREE_SLOW_CACHED_BLOB_BATCH_LOG_MS";
 pub const LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME: &str = "blob-files-v1";
+pub(crate) const POOL_MIGRATION_DELETE_DISABLED: &str =
+    "explicit deletes are temporarily disabled during legacy PoolStore migration";
+#[cfg(feature = "lmdb")]
+const LMDB_HOT_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_DIR";
+#[cfg(feature = "lmdb")]
+const LMDB_HOT_BLOB_LEGACY_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_LEGACY_DIR";
+#[cfg(feature = "lmdb")]
+const LMDB_HOT_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR";
+#[cfg(feature = "lmdb")]
+const LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
 const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
@@ -205,7 +215,166 @@ pub enum LocalStore {
     #[cfg(feature = "lmdb")]
     Lmdb(LmdbBlobStore),
     #[cfg(feature = "lmdb")]
-    Pool(Box<PoolStore>),
+    Pool(Box<PoolStoreWithFallbacks>),
+}
+
+/// A PoolStore with temporary exact-hash lookup fallbacks used during an
+/// online migration from the former hot and legacy LMDB tiers.
+///
+/// PoolStore remains the sole writable and enumerable store. Fallbacks are
+/// consulted only after a pool miss, so new writes stop extending the legacy
+/// migration tail immediately. Explicit deletes fail closed until the
+/// fallbacks are removed after migration.
+#[cfg(feature = "lmdb")]
+pub struct PoolStoreWithFallbacks {
+    primary: PoolStore,
+    fallbacks: Vec<LmdbBlobReader>,
+    promotion_gates: Vec<Mutex<()>>,
+}
+
+#[cfg(feature = "lmdb")]
+impl std::ops::Deref for PoolStoreWithFallbacks {
+    type Target = PoolStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.primary
+    }
+}
+
+#[cfg(feature = "lmdb")]
+impl PoolStoreWithFallbacks {
+    fn new(primary: PoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
+        Self {
+            primary,
+            fallbacks,
+            promotion_gates: (0..64).map(|_| Mutex::new(())).collect(),
+        }
+    }
+
+    fn during_migration(primary: PoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
+        if !fallbacks.is_empty() {
+            tracing::warn!(
+                "Blocking explicit full-store deletes until legacy PoolStore migration finishes"
+            );
+        }
+        Self::new(primary, fallbacks)
+    }
+
+    fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        let mut first_error = None;
+        match self.primary.get_sync(hash) {
+            Ok(Some(data)) => return Ok(Some(data)),
+            Ok(None) => {}
+            Err(error) => first_error = Some(error),
+        }
+
+        let stripe = usize::from(hash[0]) % self.promotion_gates.len();
+        let _promotion_guard = self.promotion_gates[stripe]
+            .lock()
+            .map_err(|_| StoreError::Other("PoolStore promotion lock poisoned".into()))?;
+
+        // A concurrent request may have completed the same promotion while
+        // this request waited for the stripe.
+        match self.primary.get_sync(hash) {
+            Ok(Some(data)) => return Ok(Some(data)),
+            Ok(None) => {}
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+        for fallback in &self.fallbacks {
+            match fallback.get_sync(hash) {
+                Ok(Some(data)) if sha256(&data) == *hash => {
+                    if let Err(error) = self.primary.put_sync(*hash, &data) {
+                        tracing::warn!(
+                            hash = %to_hex(hash),
+                            %error,
+                            "Serving verified legacy blob after PoolStore promotion failed"
+                        );
+                    }
+                    return Ok(Some(data));
+                }
+                Ok(Some(_)) if first_error.is_none() => {
+                    first_error = Some(StoreError::Other(format!(
+                        "legacy fallback returned corrupt blob {}",
+                        to_hex(hash)
+                    )))
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Ok(Some(data)) = self.primary.get_range_sync(hash, start, end_inclusive) {
+            return Ok(Some(data));
+        }
+        self.get_sync(hash)?
+            .map(|data| slice_blob_range(&data, start, end_inclusive))
+            .transpose()
+    }
+
+    fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let mut first_error = None;
+        match self.primary.blob_size_sync(hash) {
+            Ok(Some(size)) => return Ok(Some(size)),
+            Ok(None) => {}
+            Err(error) => first_error = Some(error),
+        }
+        for fallback in &self.fallbacks {
+            match fallback.blob_size_sync(hash) {
+                Ok(Some(size)) => return Ok(Some(size)),
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    fn exists(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.get_sync(hash).map(|data| data.is_some())
+    }
+
+    fn delete_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
+        if !self.fallbacks.is_empty() {
+            return Err(StoreError::Other(POOL_MIGRATION_DELETE_DISABLED.into()));
+        }
+        self.primary.delete_sync(hash)
+    }
+
+    fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        if !self.fallbacks.is_empty() {
+            return Err(StoreError::Other(POOL_MIGRATION_DELETE_DISABLED.into()));
+        }
+        self.primary.delete_many_sync(hashes)
+    }
+
+    fn delete_writable_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.primary.delete_sync(hash)
+    }
+
+    fn delete_many_writable_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        self.primary.delete_many_sync(hashes)
+    }
+
+    fn full_deletes_blocked(&self) -> bool {
+        !self.fallbacks.is_empty()
+    }
 }
 
 #[cfg(feature = "lmdb")]
@@ -294,6 +463,84 @@ fn external_blob_options_for(store_path: &Path) -> ExternalBlobOptions {
 }
 
 #[cfg(feature = "lmdb")]
+fn external_blob_options_for_fallback(
+    store_path: &Path,
+    external_dir_env: &str,
+) -> ExternalBlobOptions {
+    let options = external_blob_options_for(store_path);
+    std::env::var(external_dir_env)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| options.clone().with_base_path(path))
+        .unwrap_or(options)
+}
+
+#[cfg(feature = "lmdb")]
+fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(feature = "lmdb")]
+fn open_pool_fallbacks(data_dir: &Path) -> Result<Vec<LmdbBlobReader>, StoreError> {
+    let canonical_legacy = data_dir.join("blobs");
+    let configured_legacy = std::env::var(LMDB_HOT_BLOB_LEGACY_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let Some(configured_legacy) = configured_legacy else {
+        return Ok(Vec::new());
+    };
+    if !paths_refer_to_same_location(&canonical_legacy, &configured_legacy) {
+        tracing::warn!(
+            expected = %canonical_legacy.display(),
+            configured = %configured_legacy.display(),
+            "Ignoring PoolStore fallbacks because the legacy tier guard does not match"
+        );
+        return Ok(Vec::new());
+    }
+
+    let hot = std::env::var(LMDB_HOT_BLOB_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let candidates = [
+        hot.map(|path| (path, LMDB_HOT_EXTERNAL_BLOB_DIR_ENV)),
+        Some((configured_legacy, LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV)),
+    ];
+    let mut fallbacks = Vec::new();
+    let mut opened = HashSet::new();
+    for candidate in candidates.into_iter().flatten() {
+        let (path, external_dir_env) = candidate;
+        if !path.join("data.mdb").exists() {
+            continue;
+        }
+        let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !opened.insert(identity) {
+            continue;
+        }
+        let external = external_blob_options_for_fallback(&path, external_dir_env);
+        let store = LmdbBlobReader::open(&path, Some(external))?;
+        tracing::info!(
+            path = %path.display(),
+            external_dir_env,
+            "Enabled read-only exact-hash LMDB fallback behind writable PoolStore"
+        );
+        fallbacks.push(store);
+    }
+    Ok(fallbacks)
+}
+
+#[cfg(feature = "lmdb")]
 fn open_lmdb_blob_store<P: AsRef<Path>>(
     path: P,
     map_size_bytes: Option<u64>,
@@ -370,7 +617,9 @@ impl LocalStore {
             StorageBackend::Lmdb => Ok(
                 match open_configured_lmdb_blob_store(path, _map_size_bytes)? {
                     ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
-                    ConfiguredLmdbBlobStore::Pool(store) => LocalStore::Pool(store),
+                    ConfiguredLmdbBlobStore::Pool(store) => {
+                        LocalStore::Pool(Box::new(PoolStoreWithFallbacks::new(*store, Vec::new())))
+                    }
                 },
             ),
             #[cfg(not(feature = "lmdb"))]
@@ -607,7 +856,35 @@ impl LocalStore {
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
-            LocalStore::Pool(store) => store.delete_sync(hash),
+            LocalStore::Pool(store) => store.delete_writable_sync(hash),
+        }
+    }
+
+    pub fn delete_many_writable_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
+        match self {
+            LocalStore::Fs(store) => {
+                let mut deleted = 0usize;
+                for hash in hashes {
+                    if store.delete_sync(hash)? {
+                        deleted += 1;
+                    }
+                }
+                Ok(deleted)
+            }
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.delete_many_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.delete_many_writable_sync(hashes),
+        }
+    }
+
+    pub fn full_deletes_blocked(&self) -> bool {
+        match self {
+            LocalStore::Fs(_) => false,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(_) => false,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => store.full_deletes_blocked(),
         }
     }
 
@@ -779,11 +1056,18 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
 ) -> Result<Arc<LocalStore>, StoreError> {
     #[cfg(feature = "lmdb")]
     if *backend == StorageBackend::Lmdb {
-        return open_shared_lmdb_blob_store(data_dir, max_size_bytes).map(|store| {
-            Arc::new(match store {
+        let data_dir = data_dir.as_ref();
+        return open_shared_lmdb_blob_store(data_dir, max_size_bytes).and_then(|store| {
+            let local = match store {
                 ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
-                ConfiguredLmdbBlobStore::Pool(store) => LocalStore::Pool(store),
-            })
+                ConfiguredLmdbBlobStore::Pool(store) => {
+                    let fallbacks = open_pool_fallbacks(data_dir)?;
+                    LocalStore::Pool(Box::new(PoolStoreWithFallbacks::during_migration(
+                        *store, fallbacks,
+                    )))
+                }
+            };
+            Ok(Arc::new(local))
         });
     }
 
@@ -1296,7 +1580,11 @@ impl StorageRouter {
     }
 
     pub fn delete_many_local_only(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
-        self.local.delete_many_sync(hashes)
+        self.local.delete_many_writable_sync(hashes)
+    }
+
+    pub fn full_deletes_blocked(&self) -> bool {
+        self.local.full_deletes_blocked()
     }
 
     /// Get stats from local store
@@ -2379,8 +2667,12 @@ impl HashtreeStore {
             &sha256_hex[..8]
         );
 
+        if self.router.full_deletes_blocked() {
+            return Err(anyhow::anyhow!(POOL_MIGRATION_DELETE_DISABLED));
+        }
+
         // Delete raw blob (by content hash) - this deletes from S3 too
-        let _ = self.router.delete_sync(sha256);
+        self.router.delete_sync(sha256)?;
 
         wtxn.commit()?;
         Ok(true)
@@ -3156,6 +3448,8 @@ pub struct BlobMetadata {
 mod tests {
     use super::*;
     #[cfg(feature = "lmdb")]
+    use hashtree_lmdb::{PoolMemberConfig, PoolStoreConfig};
+    #[cfg(feature = "lmdb")]
     use tempfile::TempDir;
 
     #[cfg(feature = "lmdb")]
@@ -3200,6 +3494,115 @@ mod tests {
             gate.due_hashes([second, first], 10 + ACCESS_UPDATE_INTERVAL_SECS),
             vec![second, first]
         );
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn pool_migration_fallback_reads_old_tiers_and_writes_only_pool() -> Result<()> {
+        let temp = TempDir::new()?;
+        let pool = PoolStore::open(temp.path().join("pool"), PoolStoreConfig::default())?;
+        let member_map_size = 64 * 1024 * 1024;
+        pool.add_member(
+            PoolMemberConfig::new(temp.path().join("member"), member_map_size)
+                .with_map_size_bytes(member_map_size),
+        )?;
+        let hot_path = temp.path().join("hot");
+        let legacy_path = temp.path().join("legacy");
+
+        let hot_data = b"existing hot-tier blob".to_vec();
+        let hot_hash = sha256(&hot_data);
+        let legacy_data = b"existing legacy-tier blob".to_vec();
+        let legacy_hash = sha256(&legacy_data);
+        {
+            let hot = LmdbBlobStore::new(&hot_path)?;
+            hot.put_sync(hot_hash, &hot_data)?;
+            let legacy = LmdbBlobStore::new(&legacy_path)?;
+            legacy.put_sync(legacy_hash, &legacy_data)?;
+        }
+        let hot_data_mdb = hot_path.join("data.mdb");
+        let legacy_data_mdb = legacy_path.join("data.mdb");
+        let hot_before = std::fs::metadata(&hot_data_mdb)?;
+        let legacy_before = std::fs::metadata(&legacy_data_mdb)?;
+        let hot = LmdbBlobReader::open(&hot_path, None)?;
+        let legacy = LmdbBlobReader::open(&legacy_path, None)?;
+        let store = PoolStoreWithFallbacks::new(pool.clone(), vec![hot, legacy]);
+
+        let new_data = b"new writes belong only in PoolStore".to_vec();
+        let new_hash = sha256(&new_data);
+        assert!(store.put_sync(new_hash, &new_data)?);
+        assert_eq!(pool.get_sync(&new_hash)?, Some(new_data));
+        assert!(
+            store
+                .fallbacks
+                .iter()
+                .all(|fallback| fallback.get_sync(&new_hash).unwrap().is_none()),
+            "migration fallbacks must never receive new writes"
+        );
+
+        let mut candidates = vec![hot_hash, new_hash, legacy_hash];
+        candidates.sort_unstable();
+        let canonical_before_reads = store.existing_hashes_in_sorted_candidates(&candidates)?;
+        for (hash, exists) in candidates.iter().zip(canonical_before_reads) {
+            assert_eq!(
+                exists,
+                *hash == new_hash,
+                "legacy fallback entries must not suppress migration writes"
+            );
+        }
+
+        assert_eq!(store.get_sync(&hot_hash)?, Some(hot_data.clone()));
+        assert_eq!(
+            store.blob_size_sync(&legacy_hash)?,
+            Some(legacy_data.len() as u64)
+        );
+        assert_eq!(
+            pool.get_sync(&legacy_hash)?,
+            None,
+            "metadata-only size checks must not read or promote the body"
+        );
+        assert_eq!(
+            store.get_range_sync(&legacy_hash, 9, 14)?,
+            Some(legacy_data[9..=14].to_vec())
+        );
+        assert_eq!(pool.get_sync(&hot_hash)?, Some(hot_data));
+        assert_eq!(pool.get_sync(&legacy_hash)?, Some(legacy_data));
+        let canonical_after_reads = store.existing_hashes_in_sorted_candidates(&candidates)?;
+        assert_eq!(canonical_after_reads, vec![true; candidates.len()]);
+        let hot_after = std::fs::metadata(hot_data_mdb)?;
+        let legacy_after = std::fs::metadata(legacy_data_mdb)?;
+        assert_eq!(hot_after.len(), hot_before.len());
+        assert_eq!(hot_after.modified()?, hot_before.modified()?);
+        assert_eq!(legacy_after.len(), legacy_before.len());
+        assert_eq!(legacy_after.modified()?, legacy_before.modified()?);
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn pool_migration_fallback_blocks_racy_full_deletes() -> Result<()> {
+        let temp = TempDir::new()?;
+        let pool = PoolStore::open(temp.path().join("pool"), PoolStoreConfig::default())?;
+        let member_map_size = 64 * 1024 * 1024;
+        pool.add_member(
+            PoolMemberConfig::new(temp.path().join("member"), member_map_size)
+                .with_map_size_bytes(member_map_size),
+        )?;
+        let fallback_path = temp.path().join("legacy");
+        let data = b"source blob under active migration".to_vec();
+        let hash = sha256(&data);
+        {
+            let fallback = LmdbBlobStore::new(&fallback_path)?;
+            fallback.put_sync(hash, &data)?;
+        }
+        let fallback = LmdbBlobReader::open(fallback_path, None)?;
+        let store = PoolStoreWithFallbacks::during_migration(pool, vec![fallback]);
+
+        let error = store
+            .delete_sync(&hash)
+            .expect_err("full delete must fail closed while source replay can race it");
+        assert!(error.to_string().contains("temporarily disabled"));
+        assert_eq!(store.get_sync(&hash)?, Some(data));
+        Ok(())
     }
 
     #[cfg(feature = "lmdb")]
