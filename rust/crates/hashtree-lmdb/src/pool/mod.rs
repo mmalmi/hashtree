@@ -2,8 +2,13 @@ mod adaptive;
 mod catalog;
 mod gate;
 mod maintenance;
+mod maintenance_batch;
+mod maintenance_move;
+#[cfg(test)]
+mod maintenance_tests;
 mod member;
 mod model;
+mod move_catalog;
 mod temperature;
 mod temperature_balancer;
 mod temperature_catalog;
@@ -388,6 +393,12 @@ impl PoolStore {
         if located != 0 {
             return Err(StoreError::Other(format!(
                 "pool member {id} still owns {located} blob(s)"
+            )));
+        }
+        let pending_cleanup = self.count_move_cleanups_for_source_txn(&wtxn, id)?;
+        if pending_cleanup != 0 {
+            return Err(StoreError::Other(format!(
+                "pool member {id} still has {pending_cleanup} pending source cleanup(s)"
             )));
         }
         manifest.members.remove(index);

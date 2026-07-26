@@ -1,5 +1,5 @@
+use super::move_catalog::{move_cleanup_state_key, move_state_key};
 use super::temperature::AccessRecord;
-use super::temperature_catalog::move_state_key;
 use super::{
     decode_manifest, encode_manifest, map_heed, member_hash_key, unix_timestamp_now,
     LocationRecord, PoolManifest, PoolMemberId, PoolStore, MANIFEST_KEY,
@@ -105,11 +105,12 @@ impl PoolStore {
                     .map_err(map_heed)?;
             }
         }
-        if previous.is_some_and(|previous| matches!(previous, LocationRecord::Moving { .. }))
-            && previous != location
-        {
+        if previous != location {
             self.temperature_state
                 .delete(txn, &move_state_key(hash))
+                .map_err(map_heed)?;
+            self.temperature_state
+                .delete(txn, &move_cleanup_state_key(hash))
                 .map_err(map_heed)?;
         }
         match location {

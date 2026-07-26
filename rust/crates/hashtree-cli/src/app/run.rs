@@ -2031,9 +2031,12 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 pool.begin_drain(id)?;
                 println!("Pool member {id} is draining");
             }
-            PoolCommands::Maintain { max_items } => {
+            PoolCommands::Maintain {
+                max_items,
+                batch_items,
+            } => {
                 let pool = open_existing()?;
-                let report = pool.maintain(max_items)?;
+                let report = pool.maintain_with_batch_items(max_items, batch_items)?;
                 println!(
                     "Examined {}, moved {} blobs / {} bytes, {} failures",
                     report.examined,

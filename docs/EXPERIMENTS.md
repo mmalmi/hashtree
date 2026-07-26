@@ -2647,3 +2647,34 @@ Interpretation:
 - The bulk run must retain strict single-writer ownership of its target and a
   frozen or independently verified staged prefix. Final-tree construction and
   publication remain closed-store validation steps.
+
+### 2026-07-26: Pack-aware PoolStore drain commit batching
+
+Question: how much of PoolStore evacuation time comes from committing one
+external file and several LMDB transactions per blob rather than from reading,
+hashing, and verifying the payloads?
+
+Setup:
+- Two fresh real PoolStore members were created on local storage.
+- The source held 256 unique 32 KiB blobs (8 MiB total).
+- The target used synchronized external blobs with a 64 MiB pack target.
+- The serial production relocation path and the bounded packed production path
+  each read, hash-verified, copied, target-verified, and deleted the same data.
+- The packed path used one 256-item batch. This was a single local debug-build
+  comparison, not a production-array benchmark.
+
+Results:
+
+| Path | Wall time |
+| --- | ---: |
+| Serial loose-file relocation | 8.190 s |
+| Bounded packed relocation | 0.659 s |
+| Observed ratio | 12.4x |
+
+Interpretation:
+- Payload I/O and verification were held constant. The measured improvement
+  came from replacing per-blob external-file synchronization and catalog/member
+  transactions with one durable pack write and bounded batch transactions.
+- Production performance will depend on blob-size distribution and storage
+  latency. The local ratio should not be treated as a promised server speedup;
+  the structural bound is up to 256 blobs and at most 64 MiB per batch.

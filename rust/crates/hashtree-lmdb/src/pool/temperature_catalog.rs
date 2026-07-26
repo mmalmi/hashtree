@@ -6,117 +6,8 @@ use std::ops::Bound;
 
 const CURSOR_KEY: &[u8] = b"temperature-cursor-v1";
 const LEASE_KEY: &[u8] = b"temperature-lease-v1";
-const MOVE_KEY_PREFIX: u8 = b'm';
 
 impl PoolStore {
-    pub(super) fn begin_move_record(
-        &self,
-        hash: Hash,
-        expected: LocationRecord,
-        moving: LocationRecord,
-    ) -> Result<bool, StoreError> {
-        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
-        let current = self
-            .locations
-            .get(&wtxn, &hash)
-            .map_err(map_heed)?
-            .map(LocationRecord::decode)
-            .transpose()?;
-        if current != Some(expected) && current != Some(moving) {
-            return Ok(false);
-        }
-        if current != Some(moving) {
-            self.set_location_txn(&mut wtxn, hash, Some(moving))?;
-        }
-        self.temperature_state
-            .put(&mut wtxn, &move_state_key(hash), &moving.encode())
-            .map_err(map_heed)?;
-        wtxn.commit().map_err(map_heed)?;
-        Ok(true)
-    }
-
-    pub(super) fn finish_move_record(
-        &self,
-        hash: Hash,
-        source: PoolMemberId,
-        target: PoolMemberId,
-        size: u64,
-    ) -> Result<(), StoreError> {
-        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
-        let current = self
-            .locations
-            .get(&wtxn, &hash)
-            .map_err(map_heed)?
-            .map(LocationRecord::decode)
-            .transpose()?;
-        match current {
-            Some(LocationRecord::Moving {
-                source: actual_source,
-                target: actual_target,
-                ..
-            }) if actual_source == source && actual_target == target => {
-                self.set_location_txn(
-                    &mut wtxn,
-                    hash,
-                    Some(LocationRecord::Stored {
-                        member: target,
-                        size,
-                    }),
-                )?;
-                if let Some(mut access) = self
-                    .last_accessed
-                    .get(&wtxn, &hash)
-                    .map_err(map_heed)?
-                    .and_then(AccessRecord::decode)
-                {
-                    access.mark_moved(super::unix_timestamp_now());
-                    self.last_accessed
-                        .put(&mut wtxn, &hash, &access.encode())
-                        .map_err(map_heed)?;
-                }
-            }
-            Some(LocationRecord::Stored { member, .. }) if member == target => {}
-            other => {
-                return Err(StoreError::Other(format!(
-                    "pool location changed while moving {hash:?}: {other:?}"
-                )))
-            }
-        }
-        self.temperature_state
-            .delete(&mut wtxn, &move_state_key(hash))
-            .map_err(map_heed)?;
-        wtxn.commit().map_err(map_heed)
-    }
-
-    pub(super) fn active_moves(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(Hash, LocationRecord)>, StoreError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let rtxn = self.env.read_txn().map_err(map_heed)?;
-        let mut moves = Vec::with_capacity(limit);
-        for item in self
-            .temperature_state
-            .prefix_iter(&rtxn, &[MOVE_KEY_PREFIX])
-            .map_err(map_heed)?
-        {
-            let (key, value) = item.map_err(map_heed)?;
-            if key.len() != 33 {
-                return Err(StoreError::Other("invalid pool move-state key".into()));
-            }
-            let hash: Hash = key[1..]
-                .try_into()
-                .map_err(|_| StoreError::Other("invalid pool move-state hash".into()))?;
-            moves.push((hash, LocationRecord::decode(value)?));
-            if moves.len() >= limit {
-                break;
-            }
-        }
-        Ok(moves)
-    }
-
     pub(super) fn flush_sampled_accesses(
         &self,
         now: u64,
@@ -335,13 +226,6 @@ impl PoolStore {
         }
         wtxn.commit().map_err(map_heed)
     }
-}
-
-pub(super) fn move_state_key(hash: Hash) -> [u8; 33] {
-    let mut key = [0u8; 33];
-    key[0] = MOVE_KEY_PREFIX;
-    key[1..].copy_from_slice(&hash);
-    key
 }
 
 fn temperature_lease_expiry(pool: &PoolStore, now: u64) -> u64 {

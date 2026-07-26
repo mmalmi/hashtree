@@ -753,6 +753,9 @@ pub(crate) enum PoolCommands {
     Maintain {
         #[arg(long, default_value_t = 1_000)]
         max_items: usize,
+        /// Maximum blobs committed together; memory is also capped internally
+        #[arg(long, default_value_t = 256)]
+        batch_items: usize,
     },
     /// Run one bounded automatic temperature-balancing cycle now
     BalanceTemperature {
