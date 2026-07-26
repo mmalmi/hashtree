@@ -292,7 +292,13 @@ impl LmdbBlobReader {
         self.store.scan_hashes_after(after, limit)
     }
 
-    pub(crate) fn read_hashes_bounded(
+    /// Read a present set of hashes with one LMDB transaction and physically
+    /// coalesced external-file reads, stopping before `byte_limit` after at
+    /// least one result.
+    ///
+    /// Callers must supply only hashes that are present in this reader. The
+    /// returned prefix length tells the caller where to resume.
+    pub fn read_hashes_bounded(
         &self,
         hashes: &[Hash],
         byte_limit: u64,
@@ -442,6 +448,15 @@ impl LmdbBlobReader {
                 })
             })
             .collect()
+    }
+
+    /// Mark candidate hashes present using one read transaction.
+    pub fn existing_hashes_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        self.store
+            .existing_hashes_in_sorted_candidates(sorted_hashes)
     }
 
     pub fn map_size_bytes(&self) -> usize {

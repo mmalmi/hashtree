@@ -70,6 +70,35 @@ impl PoolStoreReader {
             .map(LocationRecord::preferred_member))
     }
 
+    /// Resolve candidate member order for many hashes with one catalog
+    /// transaction. Moving records prefer the target and retain the source as
+    /// a read fallback; pending and stored records contain one candidate.
+    pub fn blob_member_candidates(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<Vec<PoolMemberId>>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        hashes
+            .iter()
+            .map(|hash| {
+                let location = self
+                    .locations
+                    .get(&rtxn, hash)
+                    .map_err(map_heed)?
+                    .map(LocationRecord::decode)
+                    .transpose()?;
+                Ok(match location {
+                    None => Vec::new(),
+                    Some(LocationRecord::Pending { member, .. })
+                    | Some(LocationRecord::Stored { member, .. }) => vec![member],
+                    Some(LocationRecord::Moving { source, target, .. }) => {
+                        vec![target, source]
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
         Ok(self.read_location(hash)?.map(LocationRecord::size))
     }
