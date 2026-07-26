@@ -1,5 +1,5 @@
 use hashtree_core::{from_hex, sha256, to_hex, Hash};
-use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobReader, PoolStore, PoolStoreConfig};
+use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobReader, PoolStoreConfig, PoolStoreReader};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -335,7 +335,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pack_target_bytes: None,
     };
     let source = LmdbBlobReader::open(&source_path, Some(external))?;
-    let pool = PoolStore::open(&pool_path, PoolStoreConfig::default())?;
+    let mut pool_config = PoolStoreConfig::default();
+    pool_config.temperature.enabled = false;
+    let pool = PoolStoreReader::open(&pool_path, pool_config)?;
     let run_started = Instant::now();
     let base_elapsed_ms = state.active_elapsed_ms;
     let invocation_start_count = state.source_keys;

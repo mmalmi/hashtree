@@ -15,7 +15,7 @@ pub use migration::{
 };
 pub use pool::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
-    PoolStore, PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
+    PoolStore, PoolStoreConfig, PoolStoreReader, PoolTemperatureConfig, PoolTemperatureReport,
 };
 
 use async_trait::async_trait;
