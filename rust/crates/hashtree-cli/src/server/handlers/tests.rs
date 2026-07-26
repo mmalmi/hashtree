@@ -2828,7 +2828,14 @@ async fn hot_blob_cache_serves_repeated_raw_blob_reads() {
 async fn raw_blob_miss_allows_short_edge_negative_cache() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
-    let state = test_app_state(store, Vec::new());
+    let corrupt_remote = Arc::new(MemoryStore::new());
+    corrupt_remote
+        .put([0; 32], b"must not be fetched for a sentinel hash".to_vec())
+        .await
+        .unwrap();
+    let resolver = blob_resolver_with_source(store.store_arc(), corrupt_remote).await;
+    let mut state = test_app_state(store, Vec::new());
+    state.fips_blob_resolver = Some(resolver);
     let missing_hash = "0000000000000000000000000000000000000000000000000000000000000000";
 
     let response = serve_content_or_blob(

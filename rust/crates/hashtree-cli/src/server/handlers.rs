@@ -1146,6 +1146,18 @@ async fn serve_raw_blob_with_range(
     head_only: bool,
     allow_fetch: bool,
 ) -> Response<Body> {
+    // The all-zero digest has no known content preimage and is commonly used
+    // as a health-check/sentinel value. Never fan that request out across FIPS
+    // peers: repeated probes otherwise occupy the bounded resolver until its
+    // deadline and can starve real blob reads.
+    if hash == [0; 32] {
+        return if is_immutable {
+            immutable_not_found_response("Not found")
+        } else {
+            not_found_response("Not found")
+        };
+    }
+
     let mut source = BlobSource::Local;
     let mut total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
         Ok(size) => size,
