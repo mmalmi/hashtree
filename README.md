@@ -125,6 +125,7 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
 ## Protocol spec
 
 - [`docs/HTS-01.md`](docs/HTS-01.md) - hashtree core protocol (draft)
+- [`docs/NETWORKING.md`](docs/NETWORKING.md) - implemented networking, peer discovery, routing, and P2P blob protocol
 - [`docs/hashtree-on-fips.md`](docs/hashtree-on-fips.md) - FIPS discovery, signaling, and transport plan for Hashtree blobs
 - [`docs/URL-ENCODING.md`](docs/URL-ENCODING.md) - concise routing rules for slash-containing tree names
 - [`docs/architecture.html`](docs/architecture.html) - visual overview of the current content, routing, and transport layers
