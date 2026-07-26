@@ -459,6 +459,19 @@ impl LmdbBlobReader {
             .existing_hashes_in_sorted_candidates(sorted_hashes)
     }
 
+    /// Read the aggregate counters without opening the environment writable.
+    pub fn stats(&self) -> Result<LmdbStats, StoreError> {
+        self.store.stats()
+    }
+
+    /// Read exact LMDB entry counts from the blob and metadata database roots.
+    pub fn database_entry_counts(&self) -> Result<(u64, u64), StoreError> {
+        let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
+        let blob_entries = self.store.blobs.len(&rtxn).map_err(map_heed_error)?;
+        let metadata_entries = self.store.metadata.len(&rtxn).map_err(map_heed_error)?;
+        Ok((blob_entries, metadata_entries))
+    }
+
     pub fn map_size_bytes(&self) -> usize {
         self.store.map_size_bytes()
     }
