@@ -786,6 +786,9 @@ pub(crate) enum PoolCommands {
         /// Maximum MiB of complete blob payloads retained per pool write
         #[arg(long, default_value_t = 64)]
         max_buffer_mib: u64,
+        /// Concurrent reads for distinct unpacked source external-blob files
+        #[arg(long, default_value_t = 4)]
+        source_read_concurrency: usize,
         /// Close and reopen source/target LMDB mappings after this many batches
         #[arg(long, default_value_t = 256)]
         reopen_batches: usize,

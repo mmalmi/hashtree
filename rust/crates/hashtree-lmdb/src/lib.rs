@@ -30,7 +30,9 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Re-export sha256 for convenience
@@ -225,6 +227,7 @@ pub struct LmdbBlobStore {
 /// a resize, and intentionally exposes no mutation methods.
 pub struct LmdbBlobReader {
     store: LmdbBlobStore,
+    external_read_concurrency: usize,
 }
 
 impl LmdbBlobReader {
@@ -232,6 +235,24 @@ impl LmdbBlobReader {
         path: P,
         external_blobs: Option<ExternalBlobOptions>,
     ) -> Result<Self, StoreError> {
+        Self::open_with_external_read_concurrency(path, external_blobs, 1)
+    }
+
+    /// Open a read-only source with bounded concurrency for distinct unpacked
+    /// external blob files.
+    ///
+    /// External pack ranges remain physically ordered and are read
+    /// sequentially through one open pack at a time.
+    pub fn open_with_external_read_concurrency<P: AsRef<Path>>(
+        path: P,
+        external_blobs: Option<ExternalBlobOptions>,
+        external_read_concurrency: usize,
+    ) -> Result<Self, StoreError> {
+        if external_read_concurrency == 0 {
+            return Err(StoreError::Other(
+                "external read concurrency must be non-zero".into(),
+            ));
+        }
         let path = path.as_ref();
         let mut options = EnvOpenOptions::new();
         options
@@ -274,6 +295,7 @@ impl LmdbBlobReader {
                 next_order: AtomicU64::new(0),
                 external_blobs: external_blobs.map(Into::into),
             },
+            external_read_concurrency,
         })
     }
 
@@ -378,10 +400,30 @@ impl LmdbBlobReader {
         }
         drop(rtxn);
 
+        let (mut external_reads, mut pack_reads): (Vec<_>, Vec<_>) = reads
+            .into_iter()
+            .partition(|plan| matches!(plan.read, SourceBlobRead::ExternalBlob { .. }));
+
+        // Distinct legacy files can otherwise turn a migration into one
+        // blocking disk seek per hash. Keep only a bounded number in flight so
+        // RAID/device scheduling can reorder them without opening the whole
+        // page at once.
+        external_reads.sort_unstable_by(|left, right| {
+            left.read
+                .physical_path()
+                .cmp(right.read.physical_path())
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        for (index, data) in
+            read_external_blob_files(&external_reads, self.external_read_concurrency)?
+        {
+            values[index].1 = Some(data);
+        }
+
         // Hash order is the durable cursor order, but external pack layout is
-        // physical. Read external payloads by path and offset, then restore the
-        // original hash order before verification and insertion.
-        reads.sort_unstable_by(|left, right| {
+        // physical. Read pack payloads by path and offset through one open pack,
+        // then restore the original hash order before verification/insertion.
+        pack_reads.sort_unstable_by(|left, right| {
             left.read
                 .physical_path()
                 .cmp(right.read.physical_path())
@@ -393,23 +435,8 @@ impl LmdbBlobReader {
                 .then_with(|| left.index.cmp(&right.index))
         });
         let mut open_pack: Option<(PathBuf, File)> = None;
-        for plan in reads {
+        for plan in pack_reads {
             let data = match plan.read {
-                SourceBlobRead::ExternalBlob {
-                    path,
-                    expected_size,
-                } => {
-                    open_pack = None;
-                    let data = fs::read(path)?;
-                    if data.len() as u64 != expected_size {
-                        return Err(StoreError::Other(format!(
-                            "source size changed for {:?}: metadata says {expected_size}, file has {}",
-                            plan.hash,
-                            data.len()
-                        )));
-                    }
-                    data
-                }
                 SourceBlobRead::ExternalPack {
                     path,
                     offset,
@@ -436,6 +463,11 @@ impl LmdbBlobReader {
                     let mut data = vec![0; read_len];
                     file.read_exact(&mut data)?;
                     data
+                }
+                SourceBlobRead::ExternalBlob { .. } => {
+                    return Err(StoreError::Other(
+                        "external blob read entered the pack read lane".to_string(),
+                    ));
                 }
             };
             values[plan.index].1 = Some(data);
@@ -476,6 +508,77 @@ impl LmdbBlobReader {
     pub fn map_size_bytes(&self) -> usize {
         self.store.map_size_bytes()
     }
+}
+
+fn read_external_blob_files(
+    plans: &[SourceBlobReadPlan],
+    concurrency: usize,
+) -> Result<Vec<(usize, Vec<u8>)>, StoreError> {
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let worker_count = concurrency.min(plans.len());
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel();
+    let mut results = (0..plans.len())
+        .map(|_| None)
+        .collect::<Vec<Option<Result<Vec<u8>, StoreError>>>>();
+
+    thread::scope(|scope| -> Result<(), StoreError> {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next = &next;
+            scope.spawn(move || loop {
+                let plan_index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(plan) = plans.get(plan_index) else {
+                    break;
+                };
+                let result = read_external_blob_file(plan);
+                if sender.send((plan_index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+        for _ in 0..plans.len() {
+            let (plan_index, result) = receiver.recv().map_err(|_| {
+                StoreError::Other("external source read worker stopped early".into())
+            })?;
+            results[plan_index] = Some(result);
+        }
+        Ok(())
+    })?;
+
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(plan_index, result)| {
+            let data = result
+                .ok_or_else(|| StoreError::Other("external source read omitted a file".into()))??;
+            Ok((plans[plan_index].index, data))
+        })
+        .collect()
+}
+
+fn read_external_blob_file(plan: &SourceBlobReadPlan) -> Result<Vec<u8>, StoreError> {
+    let SourceBlobRead::ExternalBlob {
+        path,
+        expected_size,
+    } = &plan.read
+    else {
+        return Err(StoreError::Other(
+            "pack range entered the external-file read lane".into(),
+        ));
+    };
+    let data = fs::read(path)?;
+    if data.len() as u64 != *expected_size {
+        return Err(StoreError::Other(format!(
+            "source size changed for {:?}: metadata says {expected_size}, file has {}",
+            plan.hash,
+            data.len()
+        )));
+    }
+    Ok(data)
 }
 
 impl LmdbBlobStore {

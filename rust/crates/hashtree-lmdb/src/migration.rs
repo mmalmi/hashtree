@@ -1,6 +1,7 @@
 use crate::{LmdbBlobReader, PoolStore};
 use hashtree_core::store::StoreError;
 use hashtree_core::{sha256, types::Hash};
+use std::time::{Duration, Instant};
 
 /// Default upper bound for complete blob payloads retained by a migration.
 ///
@@ -22,6 +23,16 @@ pub struct PoolMigrationBatch {
     pub write_batches: usize,
     /// Maximum bytes of complete blob payloads owned at once.
     pub peak_buffered_bytes: u64,
+    /// Time spent scanning source hashes for this cursor page.
+    pub scan_micros: u64,
+    /// Time spent probing the Pool catalog for already committed hashes.
+    pub catalog_probe_micros: u64,
+    /// Time spent loading source payloads.
+    pub source_read_micros: u64,
+    /// Time spent hash-verifying source payloads.
+    pub source_verify_micros: u64,
+    /// Time spent committing payloads and locations to the Pool.
+    pub target_write_micros: u64,
     pub last_hash: Option<Hash>,
     pub source_exhausted: bool,
 }
@@ -68,20 +79,26 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
             "migration max buffer bytes must be non-zero".into(),
         ));
     }
+    let scan_started = Instant::now();
     let hashes = source.scan_hashes_after(after, limit)?;
+    let scan_micros = elapsed_micros(scan_started.elapsed());
     if hashes.is_empty() {
         return Ok(PoolMigrationBatch {
             source_exhausted: true,
+            scan_micros,
             ..PoolMigrationBatch::default()
         });
     }
 
     let mut batch = PoolMigrationBatch {
         scanned: hashes.len(),
+        scan_micros,
         last_hash: hashes.last().copied(),
         ..PoolMigrationBatch::default()
     };
+    let catalog_probe_started = Instant::now();
     let committed = target.committed_hashes_in_sorted_candidates(&hashes)?;
+    batch.catalog_probe_micros = elapsed_micros(catalog_probe_started.elapsed());
     let missing = hashes
         .iter()
         .zip(committed)
@@ -98,12 +115,17 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
     let max_buffer_bytes = max_buffer_bytes as u64;
     let mut next = 0usize;
     while next < missing.len() {
+        let source_read_started = Instant::now();
         let items = source.read_hashes_bounded(&missing[next..], max_buffer_bytes)?;
+        batch.source_read_micros = batch
+            .source_read_micros
+            .saturating_add(elapsed_micros(source_read_started.elapsed()));
         if items.is_empty() {
             return Err(StoreError::Other(
                 "bounded source read made no migration progress".into(),
             ));
         }
+        let source_verify_started = Instant::now();
         let mut buffered_bytes = 0u64;
         for (hash, data) in &items {
             if sha256(data) != *hash {
@@ -113,13 +135,24 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
             }
             buffered_bytes = buffered_bytes.saturating_add(data.len() as u64);
         }
+        batch.source_verify_micros = batch
+            .source_verify_micros
+            .saturating_add(elapsed_micros(source_verify_started.elapsed()));
         batch.verified = batch.verified.saturating_add(items.len());
         batch.peak_buffered_bytes = batch.peak_buffered_bytes.max(buffered_bytes);
+        let target_write_started = Instant::now();
         let report = target.put_many_report_sync(&items)?;
+        batch.target_write_micros = batch
+            .target_write_micros
+            .saturating_add(elapsed_micros(target_write_started.elapsed()));
         batch.inserted = batch.inserted.saturating_add(report.inserted);
         batch.inserted_bytes = batch.inserted_bytes.saturating_add(report.inserted_bytes);
         batch.write_batches = batch.write_batches.saturating_add(1);
         next = next.saturating_add(items.len());
     }
     Ok(batch)
+}
+
+fn elapsed_micros(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
 }
