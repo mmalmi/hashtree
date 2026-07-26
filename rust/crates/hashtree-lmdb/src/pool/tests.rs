@@ -1,4 +1,3 @@
-use super::move_catalog::move_cleanup_state_key;
 use super::*;
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -9,6 +8,8 @@ const HELPER_MODE: &str = "HASHTREE_POOL_HELPER_MODE";
 const HELPER_CATALOG: &str = "HASHTREE_POOL_HELPER_CATALOG";
 const HELPER_READY: &str = "HASHTREE_POOL_HELPER_READY";
 const HELPER_HASH: &str = "HASHTREE_POOL_HELPER_HASH";
+const HELPER_SOURCE: &str = "HASHTREE_POOL_HELPER_SOURCE";
+const HELPER_TARGET: &str = "HASHTREE_POOL_HELPER_TARGET";
 const PENDING_DATA: &[u8] = b"pool pending crash recovery bytes";
 
 #[derive(serde::Serialize)]
@@ -108,6 +109,37 @@ fn pool_pending_helper() {
     let hash = hashtree_core::from_hex(&std::env::var(HELPER_HASH).expect("hash hex"))
         .expect("32-byte hash");
     let pool = PoolStore::open(catalog, PoolStoreConfig::default()).expect("open pool");
+    if mode == "cleanup" {
+        let source = std::env::var(HELPER_SOURCE)
+            .expect("source id")
+            .parse()
+            .expect("valid source id");
+        let target = std::env::var(HELPER_TARGET)
+            .expect("target id")
+            .parse()
+            .expect("valid target id");
+        let expected = pool
+            .read_location(&hash)
+            .expect("source location")
+            .expect("present source location");
+        let moving = LocationRecord::Moving {
+            source,
+            target,
+            size: PENDING_DATA.len() as u64,
+        };
+        assert!(pool
+            .begin_move_record(hash, expected, moving)
+            .expect("begin cleanup test move"));
+        let target_store = pool.get_member(target).expect("open move target");
+        pool.write_verified_member(target, &target_store, hash, PENDING_DATA)
+            .expect("write move target");
+        pool.finish_move_record(hash, source, target, PENDING_DATA.len() as u64)
+            .expect("commit target and cleanup ownership");
+        fs::write(ready, b"ready").expect("write ready marker");
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
     let target = pool
         .choose_write_member(PENDING_DATA.len() as u64, None)
         .expect("choose member");
@@ -164,6 +196,54 @@ fn process_death_before_or_after_member_write_recovers_pending_location() {
             Some(LocationRecord::Stored { .. })
         ));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn process_death_after_target_commit_preserves_cleanup_ownership_index() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let mut config = PoolStoreConfig::default();
+    config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, config.clone()).expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    let hash = sha256(PENDING_DATA);
+    pool.put_sync(hash, PENDING_DATA).expect("seed source");
+    let target = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("target"),
+            1024 * 1024,
+        ))
+        .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+    drop(pool);
+
+    let ready = temp.path().join("cleanup-ready");
+    let mut child = spawn_cleanup_helper(&catalog, &ready, hash, source, target);
+    wait_for_file(&ready, &mut child);
+    child.kill().expect("kill cleanup helper");
+    let output = child.wait_with_output().expect("reap cleanup helper");
+    assert!(!output.status.success(), "helper must be killed");
+
+    let recovered = PoolStore::open(&catalog, config).expect("reopen pool");
+    assert!(
+        recovered.remove_member(source).is_err(),
+        "cross-process cleanup ownership must block removal"
+    );
+    let report = recovered.maintain(1).expect("resume source cleanup");
+    assert!(report.failed.is_empty(), "{report:?}");
+    recovered
+        .remove_member(source)
+        .expect("remove after resumed cleanup");
+    assert_eq!(
+        recovered.get_sync(&hash).expect("read moved blob"),
+        Some(PENDING_DATA.to_vec())
+    );
 }
 
 #[test]
@@ -323,10 +403,12 @@ fn member_location_probe_respects_full_uuid_prefix_boundaries() {
 }
 
 #[test]
-fn member_removal_rejects_pending_source_cleanup() {
+fn pending_cleanup_ownership_rebuilds_after_crash_and_clears_before_removal() {
     let temp = TempDir::new().expect("temp dir");
-    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
-        .expect("open pool");
+    let catalog = temp.path().join("catalog");
+    let mut config = PoolStoreConfig::default();
+    config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, config.clone()).expect("open pool");
     let source = pool
         .add_member(PoolMemberConfig::new(
             temp.path().join("source"),
@@ -347,15 +429,45 @@ fn member_removal_rejects_pending_source_cleanup() {
         size: 1,
     };
     let mut wtxn = pool.env.write_txn().expect("catalog write txn");
-    pool.temperature_state
-        .put(&mut wtxn, &move_cleanup_state_key(hash), &moving.encode())
-        .expect("install cleanup record");
-    wtxn.commit().expect("commit cleanup record");
+    pool.set_location_txn(&mut wtxn, hash, Some(moving))
+        .expect("install moving location");
+    wtxn.commit().expect("commit moving location");
+    pool.finish_move_records(&[(hash, source, target, 1)])
+        .expect("finish move and retain cleanup ownership");
+    assert!(matches!(
+        pool.read_location(&hash).expect("stored target location"),
+        Some(LocationRecord::Stored { member, size: 1 }) if member == target
+    ));
+    let rtxn = pool.env.read_txn().expect("catalog read txn");
+    assert!(pool
+        .member_has_locations_txn(&rtxn, source)
+        .expect("cleanup ownership prefix"));
+    drop(rtxn);
 
-    let error = pool
+    // Simulate a cleanup record committed by the pre-index format, then crash.
+    let mut wtxn = pool.env.write_txn().expect("legacy cleanup write txn");
+    pool.by_member
+        .delete(&mut wtxn, &member_hash_key(source, hash))
+        .expect("remove cleanup ownership index");
+    wtxn.commit().expect("commit legacy cleanup state");
+    drop(pool);
+
+    let reopened = PoolStore::open(&catalog, config).expect("reopen after cleanup crash");
+    let error = reopened
         .remove_member(source)
         .expect_err("cleanup source must remain configured");
-    assert!(error.to_string().contains("pending source cleanup"));
+    assert!(error.to_string().contains("still owns"));
+    reopened
+        .clear_move_cleanup_records(&[(hash, source, target, 1)])
+        .expect("clear source cleanup");
+    let rtxn = reopened.env.read_txn().expect("catalog read txn");
+    assert!(!reopened
+        .member_has_locations_txn(&rtxn, source)
+        .expect("cleared cleanup ownership prefix"));
+    drop(rtxn);
+    reopened
+        .remove_member(source)
+        .expect("remove after cleanup ownership clears");
 }
 
 #[test]
@@ -1072,6 +1184,28 @@ fn spawn_pending_helper(mode: &str, catalog: &Path, ready: &Path, hash: Hash) ->
         .env("RUST_TEST_THREADS", "1")
         .spawn()
         .expect("spawn pending helper")
+}
+
+fn spawn_cleanup_helper(
+    catalog: &Path,
+    ready: &Path,
+    hash: Hash,
+    source: PoolMemberId,
+    target: PoolMemberId,
+) -> Child {
+    Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("pool::tests::pool_pending_helper")
+        .env(HELPER_MODE, "cleanup")
+        .env(HELPER_CATALOG, catalog)
+        .env(HELPER_READY, ready)
+        .env(HELPER_HASH, hashtree_core::to_hex(&hash))
+        .env(HELPER_SOURCE, source.to_string())
+        .env(HELPER_TARGET, target.to_string())
+        .env("RUST_TEST_THREADS", "1")
+        .spawn()
+        .expect("spawn cleanup helper")
 }
 
 #[cfg(unix)]

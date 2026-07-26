@@ -25,6 +25,7 @@ pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
+use self::move_catalog::rebuild_move_cleanup_member_index_txn;
 pub use self::reader::{PoolReadBatchItem, PoolStoreReader};
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
@@ -178,7 +179,17 @@ impl PoolStore {
                 .put(&mut wtxn, MANIFEST_KEY, bytes.as_slice())
                 .map_err(map_heed)?;
         }
+        let cleanup_rebuild_started = Instant::now();
+        let cleanup_rebuild_count =
+            rebuild_move_cleanup_member_index_txn(&temperature_state, &by_member, &mut wtxn)?;
+        let cleanup_rebuild_elapsed = cleanup_rebuild_started.elapsed();
         wtxn.commit().map_err(map_heed)?;
+        if cleanup_rebuild_count > 0 || cleanup_rebuild_elapsed >= Duration::from_millis(10) {
+            eprintln!(
+                "Pool cleanup ownership index rebuild: entries {cleanup_rebuild_count}, elapsed {} us",
+                cleanup_rebuild_elapsed.as_micros()
+            );
+        }
 
         let temperature_config = config.temperature.clone();
         let store = Self {
@@ -394,11 +405,6 @@ impl PoolStore {
         if self.member_has_locations_txn(&wtxn, id)? {
             return Err(StoreError::Other(format!(
                 "pool member {id} still owns blob(s)"
-            )));
-        }
-        if self.has_move_cleanup_for_source_txn(&wtxn, id)? {
-            return Err(StoreError::Other(format!(
-                "pool member {id} still has pending source cleanup(s)"
             )));
         }
         manifest.members.remove(index);

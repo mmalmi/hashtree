@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -519,6 +519,7 @@ fn read_external_blob_files(
     }
     let worker_count = concurrency.min(plans.len());
     let next = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
     let (sender, receiver) = mpsc::channel();
     let mut results = (0..plans.len())
         .map(|_| None)
@@ -528,27 +529,46 @@ fn read_external_blob_files(
         for _ in 0..worker_count {
             let sender = sender.clone();
             let next = &next;
+            let cancelled = &cancelled;
             scope.spawn(move || loop {
+                if cancelled.load(Ordering::Acquire) {
+                    break;
+                }
                 let plan_index = next.fetch_add(1, Ordering::Relaxed);
                 let Some(plan) = plans.get(plan_index) else {
                     break;
                 };
+                if cancelled.load(Ordering::Acquire) {
+                    break;
+                }
                 let result = read_external_blob_file(plan);
+                let failed = result.is_err();
+                if failed {
+                    cancelled.store(true, Ordering::Release);
+                }
                 if sender.send((plan_index, result)).is_err() {
+                    break;
+                }
+                if failed {
                     break;
                 }
             });
         }
         drop(sender);
-        for _ in 0..plans.len() {
-            let (plan_index, result) = receiver.recv().map_err(|_| {
-                StoreError::Other("external source read worker stopped early".into())
-            })?;
+        for (plan_index, result) in receiver {
             results[plan_index] = Some(result);
         }
         Ok(())
     })?;
 
+    for result in &mut results {
+        if result.as_ref().is_some_and(Result::is_err) {
+            return Err(result
+                .take()
+                .expect("checked external source read result")
+                .expect_err("checked external source read error"));
+        }
+    }
     results
         .into_iter()
         .enumerate()
@@ -570,10 +590,27 @@ fn read_external_blob_file(plan: &SourceBlobReadPlan) -> Result<Vec<u8>, StoreEr
             "pack range entered the external-file read lane".into(),
         ));
     };
-    let data = fs::read(path)?;
-    if data.len() as u64 != *expected_size {
+    let mut file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    if file_size != *expected_size {
         return Err(StoreError::Other(format!(
             "source size changed for {:?}: metadata says {expected_size}, file has {}",
+            plan.hash, file_size
+        )));
+    }
+    let expected_len = usize::try_from(*expected_size)
+        .map_err(|_| StoreError::Other("external source blob is too large to read".into()))?;
+    let read_limit = expected_size
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Other("external source blob is too large to read".into()))?;
+    let mut data = Vec::with_capacity(expected_len.min(1024 * 1024));
+    Read::by_ref(&mut file)
+        .take(read_limit)
+        .read_to_end(&mut data)
+        .map_err(StoreError::Io)?;
+    if data.len() != expected_len {
+        return Err(StoreError::Other(format!(
+            "source size changed for {:?}: metadata says {expected_size}, read {}",
             plan.hash,
             data.len()
         )));

@@ -180,10 +180,7 @@ fn packed_drain_resumes_after_every_durable_move_boundary() {
                     let error = pool
                         .remove_member(source)
                         .expect_err("cleanup intent must block member removal");
-                    assert!(
-                        error.to_string().contains("pending source cleanup"),
-                        "{error}"
-                    );
+                    assert!(error.to_string().contains("still owns"), "{error}");
                 }
             }
         }

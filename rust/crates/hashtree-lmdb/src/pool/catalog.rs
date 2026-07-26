@@ -106,6 +106,17 @@ impl PoolStore {
             }
         }
         if previous != location {
+            if let Some(LocationRecord::Moving { source, .. }) = self
+                .temperature_state
+                .get(txn, &move_cleanup_state_key(hash))
+                .map_err(map_heed)?
+                .map(LocationRecord::decode)
+                .transpose()?
+            {
+                self.by_member
+                    .delete(txn, &member_hash_key(source, hash))
+                    .map_err(map_heed)?;
+            }
             self.temperature_state
                 .delete(txn, &move_state_key(hash))
                 .map_err(map_heed)?;

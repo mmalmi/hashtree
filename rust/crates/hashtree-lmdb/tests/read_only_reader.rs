@@ -14,6 +14,8 @@ const EXTERNAL_ENV: &str = "HASHTREE_READER_EXTERNAL";
 const CONTROL_ENV: &str = "HASHTREE_READER_CONTROL";
 const FD_SOURCE_ENV: &str = "HASHTREE_READER_FD_SOURCE";
 const FD_EXTERNAL_ENV: &str = "HASHTREE_READER_FD_EXTERNAL";
+const CANCEL_SOURCE_ENV: &str = "HASHTREE_READER_CANCEL_SOURCE";
+const CANCEL_EXTERNAL_ENV: &str = "HASHTREE_READER_CANCEL_EXTERNAL";
 
 fn inline_data() -> Vec<u8> {
     b"read-only inline migration data".repeat(32)
@@ -97,6 +99,26 @@ fn concurrent_external_reader_fd_helper() {
     assert_eq!(
         values.iter().map(|(hash, _)| *hash).collect::<Vec<_>>(),
         hashes
+    );
+}
+
+#[test]
+#[ignore = "subprocess entry point for read cancellation tests"]
+fn concurrent_external_reader_cancel_helper() {
+    let Some(source) = std::env::var_os(CANCEL_SOURCE_ENV) else {
+        return;
+    };
+    let external = PathBuf::from(std::env::var_os(CANCEL_EXTERNAL_ENV).expect("external path"));
+    let reader = LmdbBlobReader::open_with_external_read_concurrency(
+        source,
+        Some(unpacked_external_options(external)),
+        1,
+    )
+    .expect("open cancellation reader");
+    let hashes = reader.scan_hashes_after(None, 512).expect("scan source");
+    assert!(
+        reader.read_hashes_bounded(&hashes, u64::MAX).is_err(),
+        "missing first file must fail the page"
     );
 }
 
@@ -225,6 +247,24 @@ fn concurrent_external_reader_preserves_order_and_rejects_corrupt_bytes() {
         assert_eq!(sha256(data), *hash);
     }
 
+    let grown_hash = *hashes.last().expect("grown-file hash");
+    let grown_path = unpacked_external_path(&external, &grown_hash);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&grown_path)
+        .expect("open grown source")
+        .set_len(1024 * 1024 * 1024)
+        .expect("make sparse grown source");
+    let error = reader
+        .read_hashes_bounded(&[grown_hash], u64::MAX)
+        .expect_err("grown file must be rejected before body allocation");
+    assert!(error.to_string().contains("file has"));
+    let grown_original = blobs
+        .iter()
+        .find_map(|(hash, data)| (*hash == grown_hash).then_some(data))
+        .expect("original grown-file bytes");
+    std::fs::write(&grown_path, grown_original).expect("restore grown source");
+
     let corrupt_hash = hashes[hashes.len() / 2];
     let corrupt_path = unpacked_external_path(&external, &corrupt_hash);
     let corrupt_len = std::fs::metadata(&corrupt_path)
@@ -255,6 +295,68 @@ fn concurrent_external_reader_preserves_order_and_rejects_corrupt_bytes() {
         reader.read_hashes_bounded(&hashes, u64::MAX).is_err(),
         "one worker's file error must fail the batch without hanging"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn external_reader_cancels_before_unstarted_blocking_file() {
+    let temp = TempDir::new().expect("temp dir");
+    let source = temp.path().join("source");
+    let external = temp.path().join("external");
+    let store = LmdbBlobStore::with_map_size_and_external_blob_options(
+        &source,
+        64 * 1024 * 1024,
+        Some(unpacked_external_options(external.clone())),
+    )
+    .expect("open source writer");
+    let blobs = (0..16)
+        .map(|index| {
+            let data = format!("cancel external blob {index:04}")
+                .repeat(64)
+                .into_bytes();
+            (sha256(&data), data)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        store.put_many_sync(&blobs).expect("populate source"),
+        blobs.len()
+    );
+    drop(store);
+    let reader = LmdbBlobReader::open(&source, Some(unpacked_external_options(external.clone())))
+        .expect("open source reader");
+    let hashes = reader
+        .scan_hashes_after(None, blobs.len())
+        .expect("scan source");
+    drop(reader);
+    std::fs::remove_file(unpacked_external_path(&external, &hashes[0]))
+        .expect("remove first sorted source");
+    let blocking_path = unpacked_external_path(&external, &hashes[1]);
+    std::fs::remove_file(&blocking_path).expect("remove second sorted source");
+    assert!(Command::new("mkfifo")
+        .arg(&blocking_path)
+        .status()
+        .expect("create blocking fifo")
+        .success());
+
+    let mut child = Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("concurrent_external_reader_cancel_helper")
+        .env(CANCEL_SOURCE_ENV, &source)
+        .env(CANCEL_EXTERNAL_ENV, &external)
+        .env("RUST_TEST_THREADS", "1")
+        .spawn()
+        .expect("run cancellation helper");
+    for _ in 0..300 {
+        if let Some(status) = child.try_wait().expect("poll cancellation helper") {
+            assert!(status.success());
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().expect("kill stuck cancellation helper");
+    let _ = child.wait();
+    panic!("reader did not cancel before opening the next blocking file");
 }
 
 #[cfg(unix)]

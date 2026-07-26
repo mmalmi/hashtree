@@ -1,7 +1,9 @@
 use super::temperature::AccessRecord;
-use super::{map_heed, LocationRecord, PoolMemberId, PoolStore};
+use super::{map_heed, member_hash_key, LocationRecord, PoolMemberId, PoolStore};
 use hashtree_core::store::StoreError;
 use hashtree_core::types::Hash;
+use heed::types::{Bytes, Unit};
+use heed::Database;
 
 const MOVE_CLEANUP_KEY_PREFIX: u8 = b'c';
 const MOVE_KEY_PREFIX: u8 = b'm';
@@ -123,6 +125,9 @@ impl PoolStore {
             self.temperature_state
                 .put(&mut wtxn, &move_cleanup_state_key(*hash), &moving.encode())
                 .map_err(map_heed)?;
+            self.by_member
+                .put(&mut wtxn, &member_hash_key(*source, *hash), &())
+                .map_err(map_heed)?;
             self.temperature_state
                 .delete(&mut wtxn, &move_state_key(*hash))
                 .map_err(map_heed)?;
@@ -170,6 +175,9 @@ impl PoolStore {
                 self.temperature_state
                     .delete(&mut wtxn, &move_cleanup_state_key(*hash))
                     .map_err(map_heed)?;
+                self.by_member
+                    .delete(&mut wtxn, &member_hash_key(*source, *hash))
+                    .map_err(map_heed)?;
             }
         }
         wtxn.commit().map_err(map_heed)
@@ -187,30 +195,6 @@ impl PoolStore {
         limit: usize,
     ) -> Result<Vec<(Hash, LocationRecord)>, StoreError> {
         self.active_move_records(MOVE_CLEANUP_KEY_PREFIX, limit, "move-cleanup")
-    }
-
-    pub(super) fn has_move_cleanup_for_source_txn(
-        &self,
-        txn: &heed::RoTxn<'_>,
-        source: PoolMemberId,
-    ) -> Result<bool, StoreError> {
-        for item in self
-            .temperature_state
-            .prefix_iter(txn, &[MOVE_CLEANUP_KEY_PREFIX])
-            .map_err(map_heed)?
-        {
-            let (_, value) = item.map_err(map_heed)?;
-            if matches!(
-                LocationRecord::decode(value)?,
-                LocationRecord::Moving {
-                    source: actual_source,
-                    ..
-                } if actual_source == source
-            ) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn active_move_records(
@@ -243,6 +227,41 @@ impl PoolStore {
         }
         Ok(moves)
     }
+}
+
+pub(super) fn rebuild_move_cleanup_member_index_txn(
+    temperature_state: &Database<Bytes, Bytes>,
+    by_member: &Database<Bytes, Unit>,
+    txn: &mut heed::RwTxn<'_>,
+) -> Result<usize, StoreError> {
+    let cleanups = {
+        let mut cleanups = Vec::new();
+        for item in temperature_state
+            .prefix_iter(txn, &[MOVE_CLEANUP_KEY_PREFIX])
+            .map_err(map_heed)?
+        {
+            let (key, value) = item.map_err(map_heed)?;
+            if key.len() != 33 {
+                return Err(StoreError::Other("invalid pool move-cleanup key".into()));
+            }
+            let hash: Hash = key[1..]
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid pool move-cleanup hash".into()))?;
+            let LocationRecord::Moving { source, .. } = LocationRecord::decode(value)? else {
+                return Err(StoreError::Other(
+                    "pool move-cleanup contains a non-moving record".into(),
+                ));
+            };
+            cleanups.push((source, hash));
+        }
+        cleanups
+    };
+    for (source, hash) in &cleanups {
+        by_member
+            .put(txn, &member_hash_key(*source, *hash), &())
+            .map_err(map_heed)?;
+    }
+    Ok(cleanups.len())
 }
 
 pub(super) fn move_state_key(hash: Hash) -> [u8; 33] {
