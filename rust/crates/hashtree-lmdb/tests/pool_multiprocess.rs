@@ -122,6 +122,37 @@ fn concurrent_process_writes_are_pool_wide_idempotent() {
 }
 
 #[test]
+fn physical_stats_observe_another_process_write_without_reopening() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let control = temp.path().join("control");
+    fs::create_dir(&control).expect("control dir");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("member"),
+        1024 * 1024,
+    ))
+    .expect("add member");
+
+    let child = spawn_helper("put", &catalog, &control, "writer".to_string());
+    wait_for(&control.join("writer-ready"));
+    assert_eq!(
+        pool.writable_physical_stats()
+            .expect("stats before child write")
+            .count,
+        0
+    );
+    fs::write(control.join("go"), b"go").expect("release helper");
+    wait_success(child, "writer");
+
+    let stats = pool
+        .writable_physical_stats()
+        .expect("stats after child write");
+    assert_eq!(stats.count, 1);
+    assert_eq!(stats.bytes, SHARED_DATA.len() as u64);
+}
+
+#[test]
 fn process_open_before_member_add_refreshes_manifest_and_placement() {
     let temp = TempDir::new().expect("temp dir");
     let catalog = temp.path().join("catalog");

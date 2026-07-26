@@ -99,11 +99,8 @@ impl SpoolReplayPlan {
             .iter()
             .zip(staged_cids)
             .enumerate()
-            .filter_map(|(position, ((_, durable_cid), staged_cid))| {
-                durable_cid
-                    .is_none()
-                    .then(|| (position, staged_cid.clone()))
-            })
+            .filter(|(_, ((_, durable_cid), _))| durable_cid.is_none())
+            .map(|(position, ((_, _), staged_cid))| (position, staged_cid.clone()))
             .collect::<Vec<_>>();
         let loaded = target
             .try_load_event_blobs(candidates.iter().map(|(_, cid)| cid.clone()))

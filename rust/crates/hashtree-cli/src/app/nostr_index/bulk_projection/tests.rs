@@ -395,7 +395,8 @@ async fn mixed_replay_stores_only_missing_events_and_preserves_replaceable_order
         .store_event_blobs(
             plan.events
                 .iter()
-                .filter_map(|(event, cid)| cid.is_none().then(|| event.clone())),
+                .filter(|(_, cid)| cid.is_none())
+                .map(|(event, _)| event.clone()),
         )
         .await
         .unwrap();

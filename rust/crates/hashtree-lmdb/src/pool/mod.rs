@@ -1006,6 +1006,65 @@ impl PoolStore {
         Ok(stats)
     }
 
+    /// Return conservative physical usage for quota admission without scanning
+    /// the logical Pool catalog.
+    ///
+    /// Every member LMDB maintains its own totals transactionally, so summing
+    /// those counters is constant in the member count and remains accurate
+    /// across processes and mixed binary versions. Blobs temporarily duplicated
+    /// during a move are counted in both members, which is intentionally
+    /// conservative for writable-space admission. Missing member statistics
+    /// fail closed rather than undercounting storage.
+    pub fn writable_physical_stats(&self) -> Result<StoreStats, StoreError> {
+        self.refresh_members()?;
+        let manifest = self.read_manifest()?;
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+        let mut total = StoreStats::default();
+        for member in manifest.members {
+            let store = runtime.stores.get(&member.id).ok_or_else(|| {
+                let detail = runtime
+                    .errors
+                    .get(&member.id)
+                    .map(String::as_str)
+                    .unwrap_or("member store is not open");
+                StoreError::Other(format!(
+                    "pool member {} unavailable for physical quota accounting: {detail}",
+                    member.id
+                ))
+            })?;
+            let stats = store.stats().map_err(|error| {
+                StoreError::Other(format!(
+                    "pool member {} unavailable for physical quota accounting: {error}",
+                    member.id
+                ))
+            })?;
+            let count = u64::try_from(stats.count)
+                .map_err(|_| StoreError::Other("pool physical blob count exceeds u64".into()))?;
+            let pinned_count = u64::try_from(stats.pinned_count)
+                .map_err(|_| StoreError::Other("pool physical pin count exceeds u64".into()))?;
+            total.count = total
+                .count
+                .checked_add(count)
+                .ok_or_else(|| StoreError::Other("pool physical blob count overflow".into()))?;
+            total.bytes = total
+                .bytes
+                .checked_add(stats.total_bytes)
+                .ok_or_else(|| StoreError::Other("pool physical byte count overflow".into()))?;
+            total.pinned_count = total
+                .pinned_count
+                .checked_add(pinned_count)
+                .ok_or_else(|| StoreError::Other("pool physical pin count overflow".into()))?;
+            total.pinned_bytes = total
+                .pinned_bytes
+                .checked_add(stats.pinned_bytes)
+                .ok_or_else(|| StoreError::Other("pool physical pinned bytes overflow".into()))?;
+        }
+        Ok(total)
+    }
+
     pub fn force_sync(&self) -> Result<(), StoreError> {
         self.env.force_sync().map_err(map_heed)?;
         self.refresh_members()?;

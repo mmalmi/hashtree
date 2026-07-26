@@ -297,6 +297,69 @@ fn incremental_temperature_cursor_is_bounded_and_persists_across_reopen() {
 }
 
 #[test]
+fn writable_physical_stats_sum_real_member_totals_without_catalog_enumeration() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let first = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("first"),
+            1024 * 1024,
+        ))
+        .expect("add first member");
+    let second = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("second"),
+            1024 * 1024,
+        ))
+        .expect("add second member");
+
+    let data = b"physical pool accounting";
+    let hash = sha256(data);
+    pool.put_sync(hash, data).expect("write catalog-owned blob");
+    let duplicate_member = if pool.blob_location(&hash).expect("location") == Some(first) {
+        second
+    } else {
+        first
+    };
+    pool.get_member(duplicate_member)
+        .expect("open duplicate member")
+        .put_sync(hash, data)
+        .expect("write real duplicate");
+
+    let logical = pool.stats().expect("logical stats");
+    assert_eq!(logical.count, 1);
+    assert_eq!(logical.bytes, data.len() as u64);
+
+    let physical = pool
+        .writable_physical_stats()
+        .expect("physical member stats");
+    assert_eq!(physical.count, 2);
+    assert_eq!(physical.bytes, (data.len() * 2) as u64);
+}
+
+#[test]
+fn writable_physical_stats_fail_closed_when_a_member_is_unavailable() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member.clone(), 1024 * 1024))
+        .expect("add member");
+    drop(pool);
+
+    fs::rename(&member, temp.path().join("member-offline")).expect("take member offline");
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("reopen catalog");
+    let error = reopened
+        .writable_physical_stats()
+        .expect_err("quota accounting must fail closed");
+    assert!(
+        error.to_string().contains("unavailable"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn temperature_lease_has_exact_multiprocess_ownership_and_expiry() {
     let temp = TempDir::new().expect("temp dir");
     let catalog = temp.path().join("catalog");
