@@ -164,6 +164,42 @@ struct ExternalPackRef {
     len: u64,
 }
 
+#[derive(Debug)]
+enum SourceBlobRead {
+    ExternalBlob {
+        path: PathBuf,
+        expected_size: u64,
+    },
+    ExternalPack {
+        path: PathBuf,
+        offset: u64,
+        len: u64,
+        expected_size: u64,
+    },
+}
+
+impl SourceBlobRead {
+    fn physical_path(&self) -> &Path {
+        match self {
+            Self::ExternalBlob { path, .. } | Self::ExternalPack { path, .. } => path,
+        }
+    }
+
+    fn physical_offset(&self) -> u64 {
+        match self {
+            Self::ExternalBlob { .. } => 0,
+            Self::ExternalPack { offset, .. } => *offset,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SourceBlobReadPlan {
+    index: usize,
+    hash: Hash,
+    read: SourceBlobRead,
+}
+
 /// LMDB-backed blob store implementing hashtree's Store trait.
 pub struct LmdbBlobStore {
     env: ManagedEnv,
@@ -254,6 +290,158 @@ impl LmdbBlobReader {
         limit: usize,
     ) -> Result<Vec<Hash>, StoreError> {
         self.store.scan_hashes_after(after, limit)
+    }
+
+    pub(crate) fn read_hashes_bounded(
+        &self,
+        hashes: &[Hash],
+        byte_limit: u64,
+    ) -> Result<Vec<(Hash, Vec<u8>)>, StoreError> {
+        if hashes.is_empty() || byte_limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Resolve every LMDB value in one read transaction. The old migration
+        // path opened one transaction per hash, amplifying cursor and mmap
+        // overhead on multi-terabyte sources.
+        let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
+        let mut values = Vec::with_capacity(hashes.len());
+        let mut reads = Vec::new();
+        let mut selected_bytes = 0u64;
+
+        for hash in hashes {
+            let expected_size = self.store.blob_size_in_txn(&rtxn, hash)?.ok_or_else(|| {
+                StoreError::Other(format!("source lost blob {hash:?} during scan"))
+            })?;
+            if !values.is_empty() && selected_bytes.saturating_add(expected_size) > byte_limit {
+                break;
+            }
+            let value = self
+                .store
+                .blobs
+                .get(&rtxn, hash)
+                .map_err(map_heed_error)?
+                .ok_or_else(|| {
+                    StoreError::Other(format!("source lost blob {hash:?} during scan"))
+                })?;
+            let index = values.len();
+            if self.store.is_external_blob_ref(hash, value) {
+                let path = self.store.external_blob_path(hash).ok_or_else(|| {
+                    StoreError::Other(
+                        "external LMDB blob marker found but external blobs are disabled".into(),
+                    )
+                })?;
+                values.push((*hash, None));
+                reads.push(SourceBlobReadPlan {
+                    index,
+                    hash: *hash,
+                    read: SourceBlobRead::ExternalBlob {
+                        path,
+                        expected_size,
+                    },
+                });
+            } else if let Some(pack_ref) = LmdbBlobStore::decode_external_pack_ref(value)? {
+                let path = self.store.external_pack_path(&pack_ref).ok_or_else(|| {
+                    StoreError::Other(
+                        "external LMDB pack marker found but external blobs are disabled".into(),
+                    )
+                })?;
+                values.push((*hash, None));
+                reads.push(SourceBlobReadPlan {
+                    index,
+                    hash: *hash,
+                    read: SourceBlobRead::ExternalPack {
+                        path,
+                        offset: pack_ref.offset,
+                        len: pack_ref.len,
+                        expected_size,
+                    },
+                });
+            } else {
+                let data = value.to_vec();
+                if data.len() as u64 != expected_size {
+                    return Err(StoreError::Other(format!(
+                        "source size changed for {hash:?}: metadata says {expected_size}, value has {}",
+                        data.len()
+                    )));
+                }
+                values.push((*hash, Some(data)));
+            }
+            selected_bytes = selected_bytes.saturating_add(expected_size);
+        }
+        drop(rtxn);
+
+        // Hash order is the durable cursor order, but external pack layout is
+        // physical. Read external payloads by path and offset, then restore the
+        // original hash order before verification and insertion.
+        reads.sort_unstable_by(|left, right| {
+            left.read
+                .physical_path()
+                .cmp(right.read.physical_path())
+                .then_with(|| {
+                    left.read
+                        .physical_offset()
+                        .cmp(&right.read.physical_offset())
+                })
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        let mut open_pack: Option<(PathBuf, File)> = None;
+        for plan in reads {
+            let data = match plan.read {
+                SourceBlobRead::ExternalBlob {
+                    path,
+                    expected_size,
+                } => {
+                    open_pack = None;
+                    let data = fs::read(path)?;
+                    if data.len() as u64 != expected_size {
+                        return Err(StoreError::Other(format!(
+                            "source size changed for {:?}: metadata says {expected_size}, file has {}",
+                            plan.hash,
+                            data.len()
+                        )));
+                    }
+                    data
+                }
+                SourceBlobRead::ExternalPack {
+                    path,
+                    offset,
+                    len,
+                    expected_size,
+                } => {
+                    if len != expected_size {
+                        return Err(StoreError::Other(format!(
+                            "source size changed for {:?}: metadata says {expected_size}, pack marker says {len}",
+                            plan.hash
+                        )));
+                    }
+                    let must_open = open_pack
+                        .as_ref()
+                        .is_none_or(|(open_path, _)| open_path != &path);
+                    if must_open {
+                        open_pack = Some((path.clone(), File::open(&path)?));
+                    }
+                    let (_, file) = open_pack.as_mut().expect("pack was opened");
+                    file.seek(SeekFrom::Start(offset))?;
+                    let read_len = usize::try_from(len).map_err(|_| {
+                        StoreError::Other("external pack blob is too large to read".to_string())
+                    })?;
+                    let mut data = vec![0; read_len];
+                    file.read_exact(&mut data)?;
+                    data
+                }
+            };
+            values[plan.index].1 = Some(data);
+        }
+
+        values
+            .into_iter()
+            .map(|(hash, data)| {
+                data.map(|data| (hash, data)).ok_or_else(|| {
+                    StoreError::Other(format!("source read plan omitted blob {hash:?}"))
+                })
+            })
+            .collect()
     }
 
     pub fn map_size_bytes(&self) -> usize {
