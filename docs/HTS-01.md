@@ -221,8 +221,8 @@ Blob retrieval uses one vocabulary on every in-process and transported route:
 
 The published TCP/FIPS wire request is exactly 36 bytes and the reply starts
 with a seven-byte header. The exact bytes and shared vectors are specified in
-[`tcp-fips-blob-v1.md`](tcp-fips-blob-v1.md). In-process routes use the same
-types without serialization.
+the [networking protocol](NETWORKING.md#blob-protocol-v1). In-process routes
+use the same types without serialization.
 
 Every Data reply MUST be SHA-256 verified against the requested hash before it
 is returned or cached. `NoResult` means only that the active route did not

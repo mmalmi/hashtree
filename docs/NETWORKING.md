@@ -1,7 +1,7 @@
 # Hashtree Networking and P2P Protocol
 
 Hashtree resolves mutable Nostr roots, discovers authenticated FIPS peers, and
-exchanges content-addressed blobs with [TCP/FIPS blob v1](tcp-fips-blob-v1.md).
+exchanges content-addressed blobs.
 
 ## Mutable roots
 
@@ -35,6 +35,9 @@ The default FSP port is `39018`. A connected FIPS peer is not automatically a
 blob provider.
 
 ## Blob protocol v1
+
+Blob transfer uses FIPS service `39018`. TCP provides ordered delivery, flow
+control, and retransmission. Hashtree may retry a reset session once.
 
 One request and one reply are exchanged per authenticated TCP/FIPS session.
 
@@ -76,6 +79,7 @@ Reference data reply header for three bytes:
 
 HTL is `0..10`; clients normally start at `10`.
 
+- Direct same-host requests use HTL `0`.
 - At HTL `0`, the receiver may serve locally but must not forward.
 - Each Hashtree forwarding hop decrements HTL by one.
 - FIPS transport hops do not change HTL.

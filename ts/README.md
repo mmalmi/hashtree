@@ -163,8 +163,9 @@ await transport.close();
 The protocol uses FIPS service port `39018`. A provider explicitly reports
 found or missing. `null` therefore means every attempted provider reported a
 miss; timeouts, resets, malformed responses, and mixed miss/failure results stay
-errors rather than becoming false absence. See
-[`docs/tcp-fips-blob-v1.md`](../docs/tcp-fips-blob-v1.md) for the wire format.
+errors rather than becoming false absence. See the
+[networking protocol](../docs/NETWORKING.md#blob-protocol-v1) for the wire
+format.
 
 ## Iris App Repos
 

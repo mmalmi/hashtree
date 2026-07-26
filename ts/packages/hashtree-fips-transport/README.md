@@ -6,8 +6,8 @@ This package keeps FIPS below Hashtree: FIPS discovers peers, signals transports
 and moves authenticated datagrams between node identities. TCP/FIPS owns
 ordered byte delivery, flow control, and segment retransmission. Hashtree still
 owns hash verification, peer choice, one whole-session retry, and cache writes.
-The byte framing is documented in
-[`docs/tcp-fips-blob-v1.md`](../../../docs/tcp-fips-blob-v1.md).
+The byte framing is documented in the
+[networking protocol](../../../docs/NETWORKING.md#blob-protocol-v1).
 
 Browser providers join the shared FIPS discovery fabric by default:
 

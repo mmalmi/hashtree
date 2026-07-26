@@ -29,9 +29,9 @@ returns a seven-byte header for `BlobReply::Data(bytes)` or
 `BlobReply::NoResult`; a Data header is followed by the blob. NoResult says only
 that this route produced no data. It is neither proof of global absence nor a
 cacheable negative result. Implementations reject blobs above 16 MiB and verify
-the requested hash before returning or caching them. The exact wire format and
-shared vectors are in
-[`tcp-fips-blob-v1.md`](tcp-fips-blob-v1.md).
+the requested hash before returning or caching them. See the
+[networking protocol](NETWORKING.md#blob-protocol-v1) for the exact wire format
+and shared vectors.
 
 Direct same-host requests use HTL `0`. The existing HTL resolver is adapted as
 one composite `BlobRoute`. Only forwarding from one Hashtree mesh peer to
