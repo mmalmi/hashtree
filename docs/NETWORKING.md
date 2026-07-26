@@ -42,10 +42,10 @@ needed, and decodes it locally. It then follows child hashes for the required
 nodes and chunks. Each lookup fetches one immutable blob by SHA-256, never by
 filename or path:
 
-1. The client asks its `BlobRouter` for the hash. The caller does not choose a
-   peer.
-2. The router searches its configured sources, such as local storage, a P2P
-   provider group, and Blossom/HTTP stores. It may hedge several routes.
+1. The client submits the hash to `BlobRouter`.
+2. The router selects and searches its configured sources, such as local
+   storage, a P2P provider group, and Blossom/HTTP stores. It may hedge several
+   routes.
 3. The P2P route selects and hedges a bounded set of eligible providers. Each
    peer attempt opens an authenticated
    [fips-tcp](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips-tcp)
