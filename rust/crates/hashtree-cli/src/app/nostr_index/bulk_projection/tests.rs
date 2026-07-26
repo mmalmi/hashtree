@@ -16,6 +16,72 @@ fn event(id: &str, created_at: u64, kind: u32) -> StoredNostrEvent {
     }
 }
 
+fn terminal_test_policy() -> IndexedNostrCrawlPolicy {
+    IndexedNostrCrawlPolicy {
+        base_root: None,
+        author_allowlist_sha256: "aa".repeat(32),
+        author_count: 100,
+        relays: vec!["wss://relay.example".to_string()],
+        require_all_relays: false,
+        max_events_seen: None,
+        max_authors: 100,
+        max_follow_distance: Some(0),
+        max_live_bytes: 1_000_000,
+        author_batch_size: 1,
+        checkpoint_authors: 1,
+        per_author_event_limit: 256,
+        per_author_kind_event_limit: None,
+        per_author_live_bytes: Some(64 * 1024 * 1024),
+        fetch_timeout_millis: 30_000,
+        relay_event_max_bytes: Some(1024 * 1024),
+        global_relay_scan: false,
+        full_author_history: true,
+        negentropy_only: false,
+        relay_page_size: 1_000,
+        max_relay_pages: 67,
+        kinds: Some(vec![0, 1]),
+    }
+}
+
+#[test]
+fn terminal_gate_requires_the_exact_frozen_stage_boundary() {
+    let policy = terminal_test_policy();
+    let stage = StagedNostrCrawlState {
+        version: 1,
+        author_allowlist_source: Some("http://127.0.0.1/stage".to_string()),
+        policy: policy.clone(),
+        next_author: 42,
+        events_seen: 1_000,
+        events_selected: 900,
+        live_bytes_selected: 123_456,
+    };
+    let mut bulk = BulkProjectionState {
+        version: BULK_PROJECTION_VERSION,
+        author_allowlist_source: Some("http://127.0.0.1/project".to_string()),
+        policy,
+        next_author: stage.next_author,
+        segment_event_offset: 0,
+        events_seen: stage.events_seen,
+        events_selected: stage.events_selected,
+        live_bytes_selected: stage.live_bytes_selected,
+        built_roots: BTreeMap::new(),
+        complete_root: None,
+    };
+    validate_terminal_stage_state(&bulk, &stage).unwrap();
+
+    bulk.segment_event_offset = 1;
+    assert!(validate_terminal_stage_state(&bulk, &stage)
+        .unwrap_err()
+        .to_string()
+        .contains("inside a staged segment"));
+    bulk.segment_event_offset = 0;
+    bulk.events_selected += 1;
+    assert!(validate_terminal_stage_state(&bulk, &stage)
+        .unwrap_err()
+        .to_string()
+        .contains("counters differ"));
+}
+
 #[tokio::test]
 async fn spool_replaces_old_events_and_bulk_builds_final_indexes_once() {
     let temp = tempfile::tempdir().unwrap();
@@ -392,11 +458,13 @@ async fn mixed_replay_stores_only_missing_events_and_preserves_replaceable_order
     assert_eq!(plan.events[0].0, new_profile);
     assert_eq!(plan.events[3].0, losing_profile);
     let missing_cids = event_store
-        .store_event_blobs(
-            plan.events
-                .iter()
-                .filter_map(|(event, cid)| cid.is_none().then(|| event.clone())),
-        )
+        .store_event_blobs(plan.events.iter().filter_map(|(event, cid)| {
+            if cid.is_none() {
+                Some(event.clone())
+            } else {
+                None
+            }
+        }))
         .await
         .unwrap();
     let mut missing_cids = missing_cids.into_iter();
@@ -697,6 +765,22 @@ async fn bulk_projection_root_matches_the_incremental_collection_writer() {
                 .unwrap(),
         );
     }
+    let encoded_roots = roots
+        .iter()
+        .map(|(index, root)| {
+            (
+                index.stable_id(),
+                root.as_ref()
+                    .map(cid_to_nhash)
+                    .transpose()
+                    .unwrap()
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    validate_built_index_roots(&spool, &event_store, Arc::clone(&store), &encoded_roots, 8)
+        .await
+        .unwrap();
     let bulk = event_store
         .write_bulk_index_manifest(&roots)
         .await

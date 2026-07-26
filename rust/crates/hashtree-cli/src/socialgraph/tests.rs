@@ -495,6 +495,11 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
             .id,
         older.id
     );
+    let validated = graph_store
+        .validate_profile_indexes_for_event(&older)
+        .unwrap();
+    assert_eq!(validated.pubkey, pubkey);
+    assert_eq!(validated.created_at, 5);
 
     ingest_parsed_event(&graph_store, &newer).unwrap();
 
@@ -522,6 +527,11 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
             .id,
         newer.id
     );
+    let validated = graph_store
+        .validate_profile_indexes_for_event(&newer)
+        .unwrap();
+    assert_eq!(validated.pubkey, pubkey);
+    assert_eq!(validated.created_at, 6);
 }
 
 #[test]

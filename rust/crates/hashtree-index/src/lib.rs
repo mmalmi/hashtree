@@ -35,6 +35,20 @@ pub struct BTreeLinkUpdate {
     pub superseded_nodes: Vec<Cid>,
 }
 
+/// Exhaustive structural validation report for one CID-link B-tree.
+///
+/// Validation reads every B-tree node through the configured store while
+/// retaining only one root-to-leaf path at a time. Linked value blobs are
+/// deliberately reported as samples rather than traversed: callers that know
+/// the value format can validate those CIDs semantically.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BTreeLinkValidation {
+    pub nodes: u64,
+    pub links: u64,
+    pub first: Option<(String, Cid)>,
+    pub last: Option<(String, Cid)>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BTreeError {
     #[error("hash tree error: {0}")]
@@ -43,6 +57,8 @@ pub enum BTreeError {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("sorted B-tree input moved backwards from `{previous}` to `{next}`")]
     UnsortedInput { previous: String, next: String },
+    #[error("invalid CID-link B-tree: {0}")]
+    InvalidLinkTree(String),
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +282,22 @@ impl<S: Store> BTree<S> {
             return Ok(0);
         };
         self.count_links_recursive(root.clone()).await
+    }
+
+    /// Exhaustively validate every node in a CID-link B-tree.
+    ///
+    /// Unlike [`Self::scan_links`], this never trusts stored subtree counts.
+    /// It walks every descendant node, verifies routing separators, strict key
+    /// order, leaf link types, and exact subtree counts, and returns real leaf
+    /// samples for caller-specific value validation.
+    pub async fn validate_link_tree(
+        &self,
+        root: Option<&Cid>,
+    ) -> Result<BTreeLinkValidation, BTreeError> {
+        let Some(root) = root else {
+            return Ok(BTreeLinkValidation::default());
+        };
+        self.validate_link_tree_recursive(root.clone()).await
     }
 
     /// Read the stored CID-link count from the root node without scanning.
@@ -1684,6 +1716,100 @@ impl<S: Store> BTree<S> {
         Box::pin(async move {
             let entries = self.tree.list_directory(&node).await?;
             count_link_entries_or_subtrees(self, &entries).await
+        })
+    }
+
+    fn validate_link_tree_recursive<'a>(
+        &'a self,
+        node: Cid,
+    ) -> BTreeFuture<'a, BTreeLinkValidation> {
+        Box::pin(async move {
+            let entries = sort_entries(self.tree.list_directory(&node).await?);
+            if entries.is_empty() {
+                return Err(BTreeError::InvalidLinkTree(format!(
+                    "node {} is empty",
+                    hex::encode(node.hash)
+                )));
+            }
+
+            for pair in entries.windows(2) {
+                let left = unescape_key(&pair[0].name);
+                let right = unescape_key(&pair[1].name);
+                if left >= right {
+                    return Err(BTreeError::InvalidLinkTree(format!(
+                        "node {} keys are not strictly ordered: `{left}` then `{right}`",
+                        hex::encode(node.hash)
+                    )));
+                }
+            }
+
+            let all_directories = entries.iter().all(|entry| entry.link_type == LinkType::Dir);
+            let all_links = entries
+                .iter()
+                .all(|entry| entry.link_type == LinkType::File);
+            if !all_directories && !all_links {
+                return Err(BTreeError::InvalidLinkTree(format!(
+                    "node {} mixes internal and leaf link types",
+                    hex::encode(node.hash)
+                )));
+            }
+
+            if all_links {
+                let first = entries.first().expect("non-empty leaf");
+                let last = entries.last().expect("non-empty leaf");
+                return Ok(BTreeLinkValidation {
+                    nodes: 1,
+                    links: entries.len() as u64,
+                    first: Some((unescape_key(&first.name), entry_cid(first))),
+                    last: Some((unescape_key(&last.name), entry_cid(last))),
+                });
+            }
+
+            let mut report = BTreeLinkValidation {
+                nodes: 1,
+                ..BTreeLinkValidation::default()
+            };
+            for entry in entries {
+                let separator = unescape_key(&entry.name);
+                let child = self.validate_link_tree_recursive(entry_cid(&entry)).await?;
+                let child_first = child.first.as_ref().ok_or_else(|| {
+                    BTreeError::InvalidLinkTree(format!(
+                        "internal child `{separator}` has no first leaf"
+                    ))
+                })?;
+                if child_first.0 != separator {
+                    return Err(BTreeError::InvalidLinkTree(format!(
+                        "routing separator `{separator}` does not match child first key `{}`",
+                        child_first.0
+                    )));
+                }
+                if entry.size != child.links {
+                    return Err(BTreeError::InvalidLinkTree(format!(
+                        "routing separator `{separator}` stores {} links but child contains {}",
+                        entry.size, child.links
+                    )));
+                }
+                if let (Some((previous, _)), Some((next, _))) =
+                    (report.last.as_ref(), child.first.as_ref())
+                {
+                    if previous >= next {
+                        return Err(BTreeError::InvalidLinkTree(format!(
+                            "child ranges overlap or move backwards: `{previous}` then `{next}`"
+                        )));
+                    }
+                }
+                report.nodes = report.nodes.checked_add(child.nodes).ok_or_else(|| {
+                    BTreeError::InvalidLinkTree("node count overflow".to_string())
+                })?;
+                report.links = report.links.checked_add(child.links).ok_or_else(|| {
+                    BTreeError::InvalidLinkTree("link count overflow".to_string())
+                })?;
+                if report.first.is_none() {
+                    report.first = child.first.clone();
+                }
+                report.last = child.last;
+            }
+            Ok(report)
         })
     }
 }

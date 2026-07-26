@@ -689,6 +689,74 @@ impl SocialGraphStore {
         self.profile_index.search_entries_for_prefix(prefix)
     }
 
+    /// Validate profile-by-pubkey and profile-search semantics against one
+    /// real metadata event.
+    ///
+    /// This reads both persisted roots through the shared storage router,
+    /// proves that the pubkey points at the expected event blob, derives a
+    /// normal search term from that event, and proves the exact search entry
+    /// points at the same mirrored blob.
+    pub fn validate_profile_indexes_for_event(
+        &self,
+        event: &Event,
+    ) -> Result<StoredProfileSearchEntry> {
+        if event.kind != Kind::Metadata {
+            anyhow::bail!("profile index validation requires a kind-0 metadata event");
+        }
+
+        let pubkey = event.pubkey.to_hex();
+        let by_pubkey_root = self
+            .profile_index
+            .by_pubkey_root()?
+            .context("profile-by-pubkey root is missing")?;
+        let mirrored_cid = block_on(
+            self.profile_index
+                .index
+                .get_link(Some(&by_pubkey_root), &pubkey),
+        )
+        .context("query profile-by-pubkey root")?
+        .with_context(|| format!("profile-by-pubkey omitted {pubkey}"))?;
+        let mirrored = self
+            .profile_index
+            .load_profile_event(&mirrored_cid)?
+            .with_context(|| format!("mirrored profile blob for {pubkey} is missing"))?;
+        if mirrored.id != event.id {
+            anyhow::bail!(
+                "profile-by-pubkey returned event {} instead of {} for {pubkey}",
+                mirrored.id,
+                event.id
+            );
+        }
+
+        let term = profile_search_terms_for_event(event)
+            .into_iter()
+            .next()
+            .with_context(|| format!("profile {pubkey} did not produce a search term"))?;
+        let exact_key = format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}");
+        let matches = self
+            .profile_index
+            .search_entries_for_prefix(&exact_key)
+            .context("query profile-search root")?;
+        let entry = matches
+            .into_iter()
+            .find_map(|(key, entry)| (key == exact_key).then_some(entry))
+            .with_context(|| format!("profile-search omitted exact key {exact_key}"))?;
+        let expected_nhash = nhash_encode_full(&NHashData {
+            hash: mirrored_cid.hash,
+            decrypt_key: mirrored_cid.key,
+        })
+        .context("encode mirrored profile event nhash")?;
+        if entry.pubkey != pubkey
+            || entry.created_at != event.created_at.as_secs()
+            || entry.event_nhash != expected_nhash
+        {
+            anyhow::bail!(
+                "profile-search entry for {exact_key} does not match its profile-by-pubkey event"
+            );
+        }
+        Ok(entry)
+    }
+
     pub fn sync_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
         self.update_profile_index_for_events(events)
     }

@@ -990,6 +990,65 @@ fn link_counts_distinguish_stored_counts_from_scans() {
 }
 
 #[test]
+fn exhaustive_link_validation_reads_every_node_and_reports_leaf_samples() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) });
+        let entry_count = 2_000usize;
+        let root = btree
+            .build_links(
+                (0..entry_count).map(|index| (format!("key:{index:05}"), cid_from_seed(index))),
+            )
+            .await
+            .unwrap()
+            .expect("built root");
+
+        store.reset_gets();
+        let validation = btree.validate_link_tree(Some(&root)).await.unwrap();
+        assert_eq!(validation.links, entry_count as u64);
+        assert!(validation.nodes > 1);
+        assert_eq!(
+            validation.first,
+            Some(("key:00000".to_string(), cid_from_seed(0)))
+        );
+        assert_eq!(
+            validation.last,
+            Some((
+                format!("key:{:05}", entry_count - 1),
+                cid_from_seed(entry_count - 1)
+            ))
+        );
+        assert_eq!(store.gets(), validation.nodes as usize);
+    });
+}
+
+#[test]
+fn exhaustive_link_validation_rejects_a_missing_descendant() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
+        let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)));
+        let root = btree
+            .build_links((0..100).map(|index| (format!("key:{index:03}"), cid_from_seed(index))))
+            .await
+            .unwrap()
+            .expect("built root");
+        let root_entries = tree.list_directory(&root).await.unwrap();
+        let missing_child = root_entries
+            .first()
+            .filter(|entry| entry.link_type == LinkType::Dir)
+            .expect("multi-level root");
+        store.delete(&missing_child.hash).await.unwrap();
+
+        let error = btree.validate_link_tree(Some(&root)).await.unwrap_err();
+        assert!(
+            error.to_string().contains("is empty"),
+            "unexpected validation error: {error}"
+        );
+    });
+}
+
+#[test]
 fn bulk_string_build_matches_incremental_entries() {
     block_on(async {
         let store = Arc::new(MemoryStore::new());

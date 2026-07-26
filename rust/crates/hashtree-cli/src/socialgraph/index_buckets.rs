@@ -434,7 +434,7 @@ impl ProfileIndexBucket {
             .context("store mirrored profile event")
     }
 
-    fn load_profile_event(&self, cid: &Cid) -> Result<Option<Event>> {
+    pub(super) fn load_profile_event(&self, cid: &Cid) -> Result<Option<Event>> {
         let bytes = block_on(self.tree.get(cid, None)).context("read mirrored profile event")?;
         let Some(bytes) = bytes else {
             return Ok(None);

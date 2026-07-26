@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     cid_to_nhash, load_stage_segment, load_stage_state, parse_root_text, persist_crawl_state,
     persist_json_atomic, validate_reachable_root, validate_stage_state, IndexedNostrCrawlPolicy,
-    IndexedNostrCrawlState, ProjectionStores, SocialGraphIndexOptions, CRAWL_STATE_VERSION,
-    INDEX_DIR,
+    IndexedNostrCrawlState, ProjectionStores, SocialGraphIndexOptions, StagedNostrCrawlState,
+    CRAWL_STATE_VERSION, INDEX_DIR,
 };
 
 const BULK_PROJECTION_VERSION: u32 = 2;
@@ -100,9 +100,11 @@ impl SpoolReplayPlan {
             .zip(staged_cids)
             .enumerate()
             .filter_map(|(position, ((_, durable_cid), staged_cid))| {
-                durable_cid
-                    .is_none()
-                    .then(|| (position, staged_cid.clone()))
+                if durable_cid.is_none() {
+                    Some((position, staged_cid.clone()))
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>();
         let loaded = target
@@ -487,6 +489,19 @@ impl BulkProjectionSpool {
         }
         Ok(builder.finish().await?)
     }
+
+    fn profile_validation_candidate(&self) -> Result<Option<StoredNostrEvent>> {
+        let rtxn = self.env.read_txn()?;
+        for item in self.events.iter(&rtxn)? {
+            let (_event_id, encoded) = item?;
+            let record: SpoolEventRecord =
+                rmp_serde::from_slice(encoded).context("decode profile validation event")?;
+            if record.event.kind == 0 {
+                return Ok(Some(record.event));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl EntryTrieCursor<'_> {
@@ -690,6 +705,167 @@ fn persist_bulk_state(path: &Path, state: &BulkProjectionState) -> Result<()> {
     persist_json_atomic(path, state, "bulk projection state")
 }
 
+fn validate_terminal_stage_state(
+    state: &BulkProjectionState,
+    stage: &StagedNostrCrawlState,
+) -> Result<()> {
+    if state.policy != stage.policy {
+        anyhow::bail!("terminal bulk projection policy differs from frozen staging policy");
+    }
+    if state.next_author != stage.next_author {
+        anyhow::bail!(
+            "terminal bulk projection author watermark {} differs from frozen staging watermark {}",
+            state.next_author,
+            stage.next_author
+        );
+    }
+    if state.segment_event_offset != 0 {
+        anyhow::bail!(
+            "terminal bulk projection stopped inside a staged segment at event offset {}",
+            state.segment_event_offset
+        );
+    }
+    if state.events_seen != stage.events_seen
+        || state.events_selected != stage.events_selected
+        || state.live_bytes_selected != stage.live_bytes_selected
+    {
+        anyhow::bail!(
+            "terminal bulk projection counters differ from frozen staging counters: \
+             bulk=({},{},{}) stage=({},{},{})",
+            state.events_seen,
+            state.events_selected,
+            state.live_bytes_selected,
+            stage.events_seen,
+            stage.events_selected,
+            stage.live_bytes_selected
+        );
+    }
+    Ok(())
+}
+
+fn load_terminal_stage_state(
+    staging_data_dir: &Path,
+    state: &BulkProjectionState,
+) -> Result<StagedNostrCrawlState> {
+    let stage = load_stage_state(staging_data_dir)?
+        .context("terminal bulk projection requires frozen staging state")?;
+    validate_terminal_stage_state(state, &stage)?;
+    Ok(stage)
+}
+
+fn require_unchanged_terminal_stage(
+    staging_data_dir: &Path,
+    expected: &StagedNostrCrawlState,
+    state: &BulkProjectionState,
+) -> Result<()> {
+    let current = load_terminal_stage_state(staging_data_dir, state)?;
+    if current != *expected {
+        anyhow::bail!("frozen staging state changed during terminal bulk validation");
+    }
+    Ok(())
+}
+
+async fn validate_index_sample<S: Store>(
+    target: &NostrEventStore<S>,
+    index: NostrEventIndex,
+    key: &str,
+    cid: &Cid,
+) -> Result<()> {
+    let event = target
+        .load_event_blob(cid)
+        .await
+        .with_context(|| format!("load {} validation event {key}", index.name()))?;
+    let matches = nostr_event_index_entries(&event, cid)
+        .into_iter()
+        .any(|entry| entry.index == index && entry.key == key && entry.cid == *cid);
+    if !matches {
+        anyhow::bail!(
+            "{} validation sample `{key}` does not match event {}",
+            index.name(),
+            event.id
+        );
+    }
+    Ok(())
+}
+
+async fn validate_built_index_roots<S: Store>(
+    spool: &BulkProjectionSpool,
+    target: &NostrEventStore<S>,
+    store: Arc<S>,
+    built_roots: &BTreeMap<u8, String>,
+    order: usize,
+) -> Result<()> {
+    let btree = BTree::new(store, BTreeOptions { order: Some(order) });
+    for index in NostrEventIndex::ALL {
+        let encoded = built_roots
+            .get(&index.stable_id())
+            .with_context(|| format!("terminal state omitted built {} root", index.name()))?;
+        if encoded.is_empty() {
+            let mut cursor = EntryTrieCursor::new(spool, index);
+            if cursor.next_entry()?.is_some() {
+                anyhow::bail!(
+                    "terminal state records an empty {} root but the spool has entries",
+                    index.name()
+                );
+            }
+            eprintln!(
+                "Nostr bulk index validated: index={} nodes=0 links=0 elapsed_ms=0",
+                index.name()
+            );
+            continue;
+        }
+
+        let started = Instant::now();
+        let root = parse_root_text(encoded)
+            .with_context(|| format!("parse terminal {} root", index.name()))?;
+        let report = btree
+            .validate_link_tree(Some(&root))
+            .await
+            .with_context(|| format!("exhaustively validate {} root", index.name()))?;
+        let mut samples = Vec::new();
+        if let Some(first) = report.first.as_ref() {
+            samples.push(first);
+        }
+        if let Some(last) = report.last.as_ref() {
+            if report.first.as_ref() != Some(last) {
+                samples.push(last);
+            }
+        }
+        for (key, cid) in samples {
+            validate_index_sample(target, index, key, cid).await?;
+        }
+        eprintln!(
+            "Nostr bulk index validated: index={} nodes={} links={} elapsed_ms={}",
+            index.name(),
+            report.nodes,
+            report.links,
+            started.elapsed().as_millis()
+        );
+    }
+    Ok(())
+}
+
+fn validate_profile_indexes(
+    spool: &BulkProjectionSpool,
+    graph: &hashtree_cli::socialgraph::SocialGraphStore,
+) -> Result<()> {
+    let Some(profile) = spool.profile_validation_candidate()? else {
+        eprintln!("Nostr bulk profile indexes validated: no retained kind-0 event");
+        return Ok(());
+    };
+    let event = profile
+        .to_nostr_sdk_event()
+        .context("decode terminal profile validation event")?;
+    let entry = graph
+        .validate_profile_indexes_for_event(&event)
+        .context("validate terminal profile-by-pubkey and profile-search roots")?;
+    eprintln!(
+        "Nostr bulk profile indexes validated: pubkey={} event={} search_name={}",
+        entry.pubkey, profile.id, entry.name
+    );
+    Ok(())
+}
+
 pub(super) async fn project_staged_allowlist_bulk(
     stores: ProjectionStores<'_>,
     data_dir: &Path,
@@ -732,7 +908,18 @@ pub(super) async fn project_staged_allowlist_bulk(
 
     if let Some(root) = state.complete_root.as_deref() {
         let root = parse_root_text(root).context("parse completed bulk projection root")?;
+        let stage = load_terminal_stage_state(staging_data_dir, &state)?;
+        validate_built_index_roots(
+            &spool,
+            &target_event_store,
+            stores.durable.store_arc(),
+            &state.built_roots,
+            options.btree_order,
+        )
+        .await?;
+        validate_profile_indexes(&spool, stores.graph)?;
         validate_reachable_root(&target_event_store, Some(&root), "bulk projection root").await?;
+        require_unchanged_terminal_stage(staging_data_dir, &stage, &state)?;
         install_crawl_state(crawl_state, &state);
         persist_crawl_state(data_dir, crawl_state)?;
         return Ok(report_from_state(&state, authors.len(), Some(root)));
@@ -913,6 +1100,7 @@ pub(super) async fn project_staged_allowlist_bulk(
         );
     }
 
+    let terminal_stage = load_terminal_stage_state(staging_data_dir, &state)?;
     for index in NostrEventIndex::ALL {
         if state.built_roots.contains_key(&index.stable_id()) {
             continue;
@@ -941,6 +1129,17 @@ pub(super) async fn project_staged_allowlist_bulk(
         );
     }
 
+    require_unchanged_terminal_stage(staging_data_dir, &terminal_stage, &state)?;
+    validate_built_index_roots(
+        &spool,
+        &target_event_store,
+        stores.durable.store_arc(),
+        &state.built_roots,
+        options.btree_order,
+    )
+    .await?;
+    validate_profile_indexes(&spool, stores.graph)?;
+
     let roots = NostrEventIndex::ALL
         .into_iter()
         .map(|index| {
@@ -964,6 +1163,7 @@ pub(super) async fn project_staged_allowlist_bulk(
         .force_sync()
         .context("force-sync bulk Nostr index manifest")?;
     validate_reachable_root(&target_event_store, Some(&root), "bulk projection root").await?;
+    require_unchanged_terminal_stage(staging_data_dir, &terminal_stage, &state)?;
     state.complete_root = Some(cid_to_nhash(&root)?);
     persist_bulk_state(&state_path, &state)?;
     install_crawl_state(crawl_state, &state);
