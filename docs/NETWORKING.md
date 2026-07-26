@@ -36,8 +36,10 @@ blob provider.
 
 ## Blob protocol v1
 
-Blob transfer uses FIPS service `39018`. TCP provides ordered delivery, flow
-control, and retransmission. Hashtree may retry a reset session once.
+Blob transfer uses
+[fips-tcp](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips-tcp)
+service `39018`, which provides ordered delivery, flow control, and
+retransmission. Hashtree may retry a reset session once.
 
 One request and one reply are exchanged per authenticated TCP/FIPS session.
 
