@@ -418,6 +418,25 @@ export class BlossomStore implements StoreWithMeta {
     return null;
   }
 
+  private async getRawBlobResponse(
+    server: BlossomServer,
+    hashHex: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const url = `${server.url}/${hashHex}.bin`;
+    const response = await fetch(url, { signal });
+    if (response.status !== 404) {
+      return response;
+    }
+
+    // Immutable hash URLs can retain a stale browser/CDN negative cache entry.
+    // Retry once while bypassing it before treating the response as a real miss.
+    return await fetch(url, {
+      signal,
+      cache: 'reload',
+    });
+  }
+
   private createInFlightReadRequest(server: BlossomServer, hashHex: string): InFlightReadRequest {
     const startedAt = Date.now();
     this.recordReadRequest(server.url);
@@ -444,9 +463,7 @@ export class BlossomStore implements StoreWithMeta {
             return { serverUrl: server.url, data: preferredBatchData };
           }
 
-          return fetch(`${server.url}/${hashHex}.bin`, {
-            signal,
-          });
+          return this.getRawBlobResponse(server, hashHex, signal);
         })
         .then(async (responseOrResult) => {
           if ('serverUrl' in responseOrResult) {

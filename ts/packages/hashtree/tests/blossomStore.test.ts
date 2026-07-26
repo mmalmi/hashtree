@@ -93,6 +93,68 @@ describe('BlossomStore', () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain('https://fast.example/');
   });
 
+  it('recovers from a cached raw 404 with one cache-reload request', async () => {
+    const hash = await makeHash();
+    const rawUrl = `https://cdn.example/${toHex(hash)}.bin`;
+    const fetchMock = vi.fn((input: string | URL | RequestInfo, init?: RequestInit) => {
+      expect(String(input)).toBe(rawUrl);
+      if (init?.cache === 'reload') {
+        return Promise.resolve(makeResponse(200, DATA));
+      }
+      expect(init?.cache).toBeUndefined();
+      return Promise.resolve(makeResponse(404));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://cdn.example', read: true }],
+    });
+
+    await expect(store.get(hash)).resolves.toEqual(DATA);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([url, init]) => ({
+      url: String(url),
+      cache: init?.cache,
+    }))).toEqual([
+      { url: rawUrl, cache: undefined },
+      { url: rawUrl, cache: 'reload' },
+    ]);
+  });
+
+  it('does not cache-reload a successful raw response', async () => {
+    const hash = await makeHash();
+    const rawUrl = `https://cdn.example/${toHex(hash)}.bin`;
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(200, DATA)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://cdn.example', read: true }],
+    });
+
+    await expect(store.get(hash)).resolves.toEqual(DATA);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      rawUrl,
+      expect.not.objectContaining({ cache: 'reload' }),
+    );
+  });
+
+  it('cache-reloads a raw 404 only once when the blob is genuinely missing', async () => {
+    const hash = await makeHash();
+    const rawUrl = `https://cdn.example/${toHex(hash)}.bin`;
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(404)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const store = new BlossomStore({
+      servers: [{ url: 'https://cdn.example', read: true }],
+    });
+
+    await expect(store.get(hash)).resolves.toBeNull();
+    const rawCalls = fetchMock.mock.calls.filter(([url]) => String(url) === rawUrl);
+    expect(rawCalls).toHaveLength(2);
+    expect(rawCalls.map(([, init]) => init?.cache)).toEqual([undefined, 'reload']);
+  });
+
   it('falls through immediately when the preferred server returns 404', async () => {
     vi.useFakeTimers();
     const hash = await makeHash();
@@ -125,9 +187,12 @@ describe('BlossomStore', () => {
     await expect(readPromise).resolves.toEqual(DATA);
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       expect.stringContaining('https://aaa-missing.example/'),
+      expect.stringContaining('https://aaa-missing.example/'),
       'https://aaa-missing.example/blob/batch',
       expect.stringContaining('https://zzz-later.example/'),
     ]);
+    expect(fetchMock.mock.calls[0]?.[1]?.cache).toBeUndefined();
+    expect(fetchMock.mock.calls[1]?.[1]?.cache).toBe('reload');
   });
 
   it('falls back to blob batch download when hash URLs are blocked', async () => {
