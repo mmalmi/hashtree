@@ -1,5 +1,5 @@
 use super::{EXTERNAL_MARKER_NAME, MEMBER_MARKER_NAME};
-use crate::{ExternalBlobOptions, LmdbBlobStore};
+use crate::{ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore};
 use hashtree_core::store::StoreError;
 use std::fs;
 use std::path::Path;
@@ -99,14 +99,43 @@ pub(super) fn open_member_store(
     id: PoolMemberId,
     config: &PoolMemberConfig,
 ) -> Result<LmdbBlobStore, StoreError> {
+    let external = member_external_blob_options(id, config)?;
+    let map_size = usize::try_from(config.map_size_bytes)
+        .map_err(|_| StoreError::Other("pool member map size exceeds usize".into()))?;
+    LmdbBlobStore::with_exact_map_size_and_external_blob_options(&config.path, map_size, external)
+        .map_err(|error| {
+            StoreError::Other(format!(
+                "open pool member {id} at {}: {error}",
+                config.path.display()
+            ))
+        })
+}
+
+pub(super) fn open_member_reader(
+    id: PoolMemberId,
+    config: &PoolMemberConfig,
+) -> Result<LmdbBlobReader, StoreError> {
+    let external = member_external_blob_options(id, config)?;
+    LmdbBlobReader::open(&config.path, external).map_err(|error| {
+        StoreError::Other(format!(
+            "open read-only pool member {id} at {}: {error}",
+            config.path.display()
+        ))
+    })
+}
+
+fn member_external_blob_options(
+    id: PoolMemberId,
+    config: &PoolMemberConfig,
+) -> Result<Option<ExternalBlobOptions>, StoreError> {
     verify_member_path(&config.path, MEMBER_MARKER_NAME, id)?;
-    let external = match (
+    match (
         config.external_blob_dir.as_ref(),
         config.external_blob_min_bytes,
     ) {
         (Some(path), Some(min_bytes)) => {
             verify_member_path(path, EXTERNAL_MARKER_NAME, id)?;
-            Some(ExternalBlobOptions {
+            Ok(Some(ExternalBlobOptions {
                 base_path: path.clone(),
                 min_bytes: usize::try_from(min_bytes).map_err(|_| {
                     StoreError::Other("pool external blob threshold exceeds usize".into())
@@ -119,22 +148,11 @@ pub(super) fn open_member_store(
                     .map_err(|_| {
                         StoreError::Other("pool external pack target exceeds usize".into())
                     })?,
-            })
+            }))
         }
-        (None, None) => None,
-        _ => {
-            return Err(StoreError::Other(
-                "invalid pool external blob configuration".into(),
-            ))
-        }
-    };
-    let map_size = usize::try_from(config.map_size_bytes)
-        .map_err(|_| StoreError::Other("pool member map size exceeds usize".into()))?;
-    LmdbBlobStore::with_exact_map_size_and_external_blob_options(&config.path, map_size, external)
-        .map_err(|error| {
-            StoreError::Other(format!(
-                "open pool member {id} at {}: {error}",
-                config.path.display()
-            ))
-        })
+        (None, None) => Ok(None),
+        _ => Err(StoreError::Other(
+            "invalid pool external blob configuration".into(),
+        )),
+    }
 }
