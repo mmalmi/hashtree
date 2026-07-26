@@ -25,7 +25,7 @@ pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
-pub use self::reader::PoolStoreReader;
+pub use self::reader::{PoolReadBatchItem, PoolStoreReader};
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
 use crate::{managed_env::ManagedEnv, LmdbBlobStore};

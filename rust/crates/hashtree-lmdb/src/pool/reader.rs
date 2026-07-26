@@ -24,6 +24,15 @@ pub struct PoolStoreReader {
     members: HashMap<PoolMemberId, LmdbBlobReader>,
 }
 
+/// One result from a bounded, strictly read-only Pool batch.
+pub struct PoolReadBatchItem {
+    pub hash: Hash,
+    pub member_candidates: Vec<PoolMemberId>,
+    pub declared_size: Option<u64>,
+    pub data: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
 impl PoolStoreReader {
     pub fn open<P: AsRef<Path>>(path: P, config: PoolStoreConfig) -> Result<Self, StoreError> {
         if config.temperature.enabled {
@@ -143,6 +152,125 @@ impl PoolStoreReader {
         }
     }
 
+    /// Resolve a bounded prefix with one catalog transaction and coalesced
+    /// member reads. The returned prefix always contains at least one item
+    /// when `hashes` is non-empty and `byte_limit` is non-zero.
+    pub fn read_hashes_bounded(
+        &self,
+        hashes: &[Hash],
+        byte_limit: u64,
+    ) -> Result<Vec<PoolReadBatchItem>, StoreError> {
+        if hashes.is_empty() || byte_limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let mut items = Vec::with_capacity(hashes.len());
+        let mut selected_bytes = 0u64;
+        for hash in hashes {
+            let location = self
+                .locations
+                .get(&rtxn, hash)
+                .map_err(map_heed)?
+                .map(LocationRecord::decode)
+                .transpose()?;
+            let declared_size = location.as_ref().map(|location| (*location).size());
+            let expected_size = declared_size.unwrap_or(0);
+            if !items.is_empty() && selected_bytes.saturating_add(expected_size) > byte_limit {
+                break;
+            }
+            let member_candidates = match location {
+                None => Vec::new(),
+                Some(LocationRecord::Pending { member, .. })
+                | Some(LocationRecord::Stored { member, .. }) => vec![member],
+                Some(LocationRecord::Moving { source, target, .. }) => vec![target, source],
+            };
+            items.push(PoolReadBatchItem {
+                hash: *hash,
+                member_candidates,
+                declared_size,
+                data: None,
+                error: None,
+            });
+            selected_bytes = selected_bytes.saturating_add(expected_size);
+        }
+        drop(rtxn);
+
+        for candidate_index in 0..2 {
+            let mut reads_by_member = HashMap::<PoolMemberId, Vec<(usize, Hash)>>::new();
+            for (item_index, item) in items.iter().enumerate() {
+                if item.data.is_none() {
+                    if let Some(member) = item.member_candidates.get(candidate_index) {
+                        reads_by_member
+                            .entry(*member)
+                            .or_default()
+                            .push((item_index, item.hash));
+                    }
+                }
+            }
+            for (member_id, requested) in reads_by_member {
+                let Some(member) = self.members.get(&member_id) else {
+                    for (item_index, _) in requested {
+                        items[item_index].error.get_or_insert_with(|| {
+                            format!("pool member {member_id} is unavailable to reader")
+                        });
+                    }
+                    continue;
+                };
+                let hashes = requested.iter().map(|(_, hash)| *hash).collect::<Vec<_>>();
+                let present = member.existing_hashes_in_sorted_candidates(&hashes)?;
+                let present_requests = requested
+                    .into_iter()
+                    .zip(present)
+                    .filter_map(|(request, is_present)| is_present.then_some(request))
+                    .collect::<Vec<_>>();
+                if present_requests.is_empty() {
+                    continue;
+                }
+                let present_hashes = present_requests
+                    .iter()
+                    .map(|(_, hash)| *hash)
+                    .collect::<Vec<_>>();
+                let bodies = member.read_hashes_bounded(&present_hashes, u64::MAX)?;
+                if bodies.len() != present_requests.len() {
+                    return Err(StoreError::Other(format!(
+                        "pool member {member_id} bounded reader returned {} of {} requested blobs",
+                        bodies.len(),
+                        present_requests.len()
+                    )));
+                }
+                for ((item_index, expected_hash), (actual_hash, data)) in
+                    present_requests.into_iter().zip(bodies)
+                {
+                    if actual_hash != expected_hash {
+                        return Err(StoreError::Other(format!(
+                            "pool member {member_id} returned hashes out of order"
+                        )));
+                    }
+                    if sha256(&data) == expected_hash {
+                        items[item_index].data = Some(data);
+                    } else {
+                        items[item_index].error.get_or_insert_with(|| {
+                            format!("pool member {member_id} returned corrupt bytes")
+                        });
+                    }
+                }
+            }
+        }
+        for item in &mut items {
+            if item.member_candidates.is_empty() {
+                item.error
+                    .get_or_insert_with(|| "Pool catalog entry is missing".into());
+            } else if item.data.is_none() {
+                item.error
+                    .get_or_insert_with(|| "Pool payload is missing from candidate members".into());
+            } else {
+                item.error = None;
+            }
+        }
+        Ok(items)
+    }
+
     fn read_location(&self, hash: &Hash) -> Result<Option<LocationRecord>, StoreError> {
         let rtxn = self.env.read_txn().map_err(map_heed)?;
         self.locations
@@ -226,6 +354,17 @@ mod tests {
             reader.get_sync(&moving_hash)?.as_deref(),
             Some(moving_data.as_slice())
         );
+        let batch = reader.read_hashes_bounded(
+            &[pending_hash, moving_hash],
+            pending_data.len() as u64 + moving_data.len() as u64,
+        )?;
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].hash, pending_hash);
+        assert_eq!(batch[0].data.as_deref(), Some(pending_data.as_slice()));
+        assert!(batch[0].error.is_none());
+        assert_eq!(batch[1].hash, moving_hash);
+        assert_eq!(batch[1].data.as_deref(), Some(moving_data.as_slice()));
+        assert!(batch[1].error.is_none());
         drop(reader);
         let after = fs::read(&catalog_path).map_err(StoreError::Io)?;
         assert_eq!(after, before);
