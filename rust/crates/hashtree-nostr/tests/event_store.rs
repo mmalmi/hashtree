@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use hashtree_core::{
     sha256, Cid, DirEntry, Hash, HashTree, HashTreeConfig, MemoryStore, Store, StoreError,
-    TreeVisibility,
+    TreeVisibility, DEFAULT_CHUNK_SIZE,
 };
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
@@ -1204,6 +1204,54 @@ fn individual_event_blobs_round_trip_without_creating_an_index_root() {
 }
 
 #[test]
+fn validated_event_blobs_copy_exact_cids_between_stores() {
+    block_on(async {
+        let source = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let target = NostrEventStore::new(Arc::new(MemoryStore::new()));
+        let first = canonical_store_event(&"1".repeat(64), 10, 1, Vec::new(), "first");
+        let second = canonical_store_event(&"2".repeat(64), 20, 7, Vec::new(), "second");
+        let large_content = "z".repeat(DEFAULT_CHUNK_SIZE + 1);
+        let third = canonical_store_event(&"3".repeat(64), 30, 1, Vec::new(), &large_content);
+        let source_cids = source
+            .store_event_blobs([first.clone(), second.clone(), third.clone()])
+            .await
+            .expect("store source event blobs");
+
+        let blobs = source
+            .load_validated_event_blobs(source_cids.clone())
+            .await
+            .expect("load validated source blobs");
+        assert_eq!(
+            blobs
+                .iter()
+                .map(|blob| blob.event().clone())
+                .collect::<Vec<_>>(),
+            vec![first.clone(), second.clone(), third.clone()]
+        );
+        assert_eq!(
+            blobs
+                .iter()
+                .map(|blob| blob.cid().clone())
+                .collect::<Vec<_>>(),
+            source_cids
+        );
+
+        let copied_cids = target
+            .store_validated_event_blobs(&blobs)
+            .await
+            .expect("copy validated event blobs");
+        assert_eq!(copied_cids, source_cids);
+        assert_eq!(
+            target
+                .load_event_blobs(copied_cids)
+                .await
+                .expect("load copied event blobs"),
+            vec![first, second, third]
+        );
+    });
+}
+
+#[test]
 fn bulk_event_blob_load_identifies_the_failing_cid_and_sequence() {
     block_on(async {
         let backing = Arc::new(MemoryStore::new());
@@ -1223,6 +1271,29 @@ fn bulk_event_blob_load_identifies_the_failing_cid_and_sequence() {
         let message = error.to_string();
         assert!(message.contains(&cids[1].to_string()), "{message}");
         assert!(message.contains("sequence 1"), "{message}");
+    });
+}
+
+#[test]
+fn optional_bulk_event_blob_load_preserves_present_and_missing_positions() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let first = canonical_store_event(&"1".repeat(64), 10, 1, Vec::new(), "first");
+        let second = canonical_store_event(&"2".repeat(64), 20, 7, Vec::new(), "second");
+        let cids = store
+            .store_event_blobs([first.clone(), second.clone()])
+            .await
+            .expect("store individual event blobs");
+        assert!(backing.delete(&cids[1].hash).await.unwrap());
+
+        assert_eq!(
+            store
+                .try_load_event_blobs(cids)
+                .await
+                .expect("load optional event blobs"),
+            vec![Some(first), None]
+        );
     });
 }
 

@@ -27,6 +27,7 @@ const BULK_PROJECTION_VERSION: u32 = 2;
 const BULK_PROJECTION_DIR: &str = "bulk-projection-v2";
 const BULK_PROJECTION_STATE_FILE: &str = "state.json";
 const BULK_PROJECTION_SPOOL_DIR: &str = "spool";
+const REJECTED_SPOOL_EDGE_STATE_FILE: &str = "trusted-spool-edge-state-v1.json";
 const BULK_PROJECTION_MAP_SIZE: usize = 256 * 1024 * 1024 * 1024;
 const ENTRY_CHUNK_SIZE: usize = 400;
 const ENTRY_PREFIX_SIZE: usize = 33;
@@ -64,6 +65,81 @@ struct SpoolApplyReport {
     replaced: usize,
     skipped: usize,
     index_entries: usize,
+    reused_records: usize,
+    durable_reused_candidates: usize,
+    stored_candidates: usize,
+    reused_exact_batch: bool,
+    spool_write_ms: u128,
+    spool_sync_ms: u128,
+}
+
+#[derive(Debug)]
+struct SpoolReplayPlan {
+    events: Vec<(StoredNostrEvent, Option<Cid>)>,
+    missing_positions: Vec<usize>,
+    reused_records: usize,
+}
+
+impl SpoolReplayPlan {
+    async fn reuse_durable_candidates<S: Store>(
+        &mut self,
+        target: &NostrEventStore<S>,
+        staged_cids: &[Cid],
+    ) -> Result<usize> {
+        if self.events.len() != staged_cids.len() {
+            anyhow::bail!(
+                "bulk durable replay event/CID length mismatch: events={} cids={}",
+                self.events.len(),
+                staged_cids.len()
+            );
+        }
+
+        let candidates = self
+            .events
+            .iter()
+            .zip(staged_cids)
+            .enumerate()
+            .filter_map(|(position, ((_, durable_cid), staged_cid))| {
+                durable_cid
+                    .is_none()
+                    .then(|| (position, staged_cid.clone()))
+            })
+            .collect::<Vec<_>>();
+        let loaded = target
+            .try_load_event_blobs(candidates.iter().map(|(_, cid)| cid.clone()))
+            .await
+            .context("probe durable target event blobs for bulk replay")?;
+        if loaded.len() != candidates.len() {
+            anyhow::bail!(
+                "bulk durable replay probe length mismatch: candidates={} loaded={}",
+                candidates.len(),
+                loaded.len()
+            );
+        }
+
+        let mut reused = 0usize;
+        for ((position, cid), durable_event) in candidates.into_iter().zip(loaded) {
+            let Some(durable_event) = durable_event else {
+                continue;
+            };
+            let staged_event = &self.events[position].0;
+            if durable_event != *staged_event {
+                anyhow::bail!(
+                    "bulk replay payload differs from durable target blob for event {}",
+                    staged_event.id
+                );
+            }
+            self.events[position].1 = Some(cid);
+            reused = reused.saturating_add(1);
+        }
+        self.missing_positions = self
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(position, (_, cid))| cid.is_none().then_some(position))
+            .collect();
+        Ok(reused)
+    }
 }
 
 struct BulkProjectionSpool {
@@ -124,11 +200,24 @@ impl BulkProjectionSpool {
 
     fn apply(&self, events: Vec<(StoredNostrEvent, Cid)>) -> Result<SpoolApplyReport> {
         let mut report = SpoolApplyReport::default();
+        let write_started = Instant::now();
         let mut wtxn = self.env.write_txn()?;
         for (event, cid) in events {
             if let Some(existing) = self.events.get(&wtxn, event.id.as_bytes())? {
                 let existing: SpoolEventRecord =
                     rmp_serde::from_slice(existing).context("decode duplicate spool event")?;
+                if existing.event != event {
+                    anyhow::bail!(
+                        "bulk replay payload differs from duplicate spool record for event {}",
+                        event.id
+                    );
+                }
+                if existing.cid_hash != cid.hash || existing.cid_key != cid.key {
+                    anyhow::bail!(
+                        "bulk replay CID differs from duplicate spool record for event {}",
+                        event.id
+                    );
+                }
                 report.skipped = report.skipped.saturating_add(1);
                 // A crash can occur after the spool commit but before the
                 // profile index and JSON cursor are durable. Returning the
@@ -185,8 +274,87 @@ impl BulkProjectionSpool {
             report.retained_events.push(event);
         }
         wtxn.commit()?;
+        report.spool_write_ms = write_started.elapsed().as_millis();
+        let sync_started = Instant::now();
         self.env.force_sync()?;
+        report.spool_sync_ms = sync_started.elapsed().as_millis();
         Ok(report)
+    }
+
+    fn plan_replay_batch(
+        &self,
+        events: Vec<StoredNostrEvent>,
+        staged_cids: &[Cid],
+    ) -> Result<SpoolReplayPlan> {
+        // A spool record is committed only after the target event blob was
+        // force-synced. During crash replay, a complete matching batch can
+        // therefore reuse those durable target CIDs without revalidating and
+        // rewriting every blob. Missing events still pass through the original
+        // store/apply path, and apply receives the complete original sequence
+        // so replaceable-event ordering remains unchanged.
+        if events.len() != staged_cids.len() {
+            anyhow::bail!(
+                "bulk replay event/CID length mismatch: events={} cids={}",
+                events.len(),
+                staged_cids.len()
+            );
+        }
+
+        let event_count = events.len();
+        let mut lookup = events
+            .into_iter()
+            .zip(staged_cids.iter().cloned())
+            .enumerate()
+            .collect::<Vec<_>>();
+        // The event spool is keyed lexicographically by event id. Staged
+        // segments arrive in author/time order, which otherwise turns a large
+        // replay page into tens of thousands of random LMDB page faults.
+        // Sorting only the read schedule retains the original sequence below.
+        lookup.sort_unstable_by(|(_, (left, _)), (_, (right, _))| left.id.cmp(&right.id));
+
+        let rtxn = self.env.read_txn()?;
+        let mut planned = (0..event_count).map(|_| None).collect::<Vec<_>>();
+        let mut reused_records = 0usize;
+        for (position, (event, staged_cid)) in lookup {
+            let Some(encoded) = self.events.get(&rtxn, event.id.as_bytes())? else {
+                planned[position] = Some((event, None));
+                continue;
+            };
+            let existing: SpoolEventRecord =
+                rmp_serde::from_slice(encoded).context("decode replayed spool event")?;
+            if existing.event != event {
+                anyhow::bail!(
+                    "bulk replay payload differs from durable spool record for event {}",
+                    event.id
+                );
+            }
+            let existing_cid = Cid {
+                hash: existing.cid_hash,
+                key: existing.cid_key,
+            };
+            if existing_cid != staged_cid {
+                anyhow::bail!(
+                    "bulk replay CID differs from durable spool record for event {}",
+                    event.id
+                );
+            }
+            reused_records = reused_records.saturating_add(1);
+            planned[position] = Some((event, Some(existing_cid)));
+        }
+        let planned = planned
+            .into_iter()
+            .map(|event| event.context("bulk replay read schedule omitted an event"))
+            .collect::<Result<Vec<_>>>()?;
+        let missing_positions = planned
+            .iter()
+            .enumerate()
+            .filter_map(|(position, (_, cid))| cid.is_none().then_some(position))
+            .collect();
+        Ok(SpoolReplayPlan {
+            events: planned,
+            missing_positions,
+            reused_records,
+        })
     }
 
     fn remove_event(&self, wtxn: &mut heed::RwTxn<'_>, record: &SpoolEventRecord) -> Result<()> {
@@ -485,6 +653,27 @@ fn bulk_paths(data_dir: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
+fn rejected_spool_edge_state_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join(INDEX_DIR)
+        .join(BULK_PROJECTION_DIR)
+        .join(REJECTED_SPOOL_EDGE_STATE_FILE)
+}
+
+fn reject_spool_edge_state_marker(data_dir: &Path) -> Result<()> {
+    let path = rejected_spool_edge_state_path(data_dir);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => anyhow::bail!(
+            "rejected bulk projection fast-forward marker is present at {}; \
+             remove it and resume exact spool replay",
+            path.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("inspect rejected spool edge marker {}", path.display())),
+    }
+}
+
 fn load_bulk_state(path: &Path) -> Result<Option<BulkProjectionState>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
@@ -515,6 +704,7 @@ pub(super) async fn project_staged_allowlist_bulk(
     }
 
     let (state_path, spool_path) = bulk_paths(data_dir);
+    reject_spool_edge_state_marker(data_dir)?;
     let mut state = load_bulk_state(&state_path)?.unwrap_or_else(|| BulkProjectionState {
         version: BULK_PROJECTION_VERSION,
         author_allowlist_source: options.author_allowlist_url.clone(),
@@ -577,19 +767,90 @@ pub(super) async fn project_staged_allowlist_bulk(
             .iter()
             .map(|root| parse_root_text(root))
             .collect::<Result<Vec<_>>>()?;
-        let events = staging_event_store
-            .load_event_blobs(cids)
+        let stage_load_started = Instant::now();
+        let staged_blobs = staging_event_store
+            .load_validated_event_blobs(cids.clone())
             .await
             .context("load staged events for bulk projection")?;
-        let target_cids = target_event_store
-            .store_event_blobs(events.clone())
-            .await
-            .context("store bulk-projected event blobs")?;
-        stores
-            .durable
-            .force_sync()
-            .context("force-sync bulk-projected event blobs")?;
-        let apply = spool.apply(events.into_iter().zip(target_cids).collect())?;
+        let events = staged_blobs
+            .iter()
+            .map(|blob| blob.event().clone())
+            .collect::<Vec<_>>();
+        let stage_load_ms = stage_load_started.elapsed().as_millis();
+        let replay_plan_started = Instant::now();
+        let mut plan = spool.plan_replay_batch(events, &cids)?;
+        let replay_plan_ms = replay_plan_started.elapsed().as_millis();
+        let spool_missing_candidates = plan.missing_positions.len();
+
+        // During crash catch-up, a batch can contain a mostly committed spool
+        // page plus a few event blobs that were force-synced just before the
+        // old process stopped. Prove those exceptional CIDs through the
+        // durable target's full HashTree read path before reusing them. Do not
+        // probe wholly new pages: the staging and durable pools are distinct,
+        // and thousands of expected misses would only slow normal recovery.
+        let durable_probe_started = Instant::now();
+        let durable_reused_candidates =
+            if plan.reused_records > 0 && !plan.missing_positions.is_empty() {
+                plan.reuse_durable_candidates(&target_event_store, &cids)
+                    .await?
+            } else {
+                0
+            };
+        let durable_probe_ms = durable_probe_started.elapsed().as_millis();
+        let stored_candidates = plan.missing_positions.len();
+        let mut target_store_ms = 0u128;
+        let mut target_sync_ms = 0u128;
+        let mut apply = if spool_missing_candidates == 0 {
+            SpoolApplyReport {
+                retained_events: plan.events.into_iter().map(|(event, _)| event).collect(),
+                skipped: plan.reused_records,
+                reused_records: plan.reused_records,
+                reused_exact_batch: true,
+                ..SpoolApplyReport::default()
+            }
+        } else {
+            let target_cids = if stored_candidates == 0 {
+                Vec::new()
+            } else {
+                let target_store_started = Instant::now();
+                let target_cids = target_event_store
+                    .store_validated_event_blobs(
+                        plan.events
+                            .iter()
+                            .zip(&staged_blobs)
+                            .filter_map(|((_, cid), blob)| cid.is_none().then_some(blob)),
+                    )
+                    .await
+                    .context("copy bulk-projected event blobs")?;
+                target_store_ms = target_store_started.elapsed().as_millis();
+                let target_sync_started = Instant::now();
+                stores
+                    .durable
+                    .force_sync()
+                    .context("force-sync bulk-projected event blobs")?;
+                target_sync_ms = target_sync_started.elapsed().as_millis();
+                target_cids
+            };
+            let mut target_cids = target_cids.into_iter();
+            let events = plan
+                .events
+                .into_iter()
+                .map(|(event, existing_cid)| {
+                    let cid = existing_cid
+                        .or_else(|| target_cids.next())
+                        .context("bulk replay omitted a stored event CID")?;
+                    Ok((event, cid))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if target_cids.next().is_some() {
+                anyhow::bail!("bulk replay produced excess stored event CIDs");
+            }
+            spool.apply(events)?
+        };
+        apply.reused_records = plan.reused_records;
+        apply.durable_reused_candidates = durable_reused_candidates;
+        apply.stored_candidates = stored_candidates;
+        let profile_sync_started = Instant::now();
         let profile_events = apply
             .retained_events
             .iter()
@@ -603,6 +864,7 @@ pub(super) async fn project_staged_allowlist_bulk(
                 .context("sync bulk-projected profile events")?;
             stores.graph.force_sync()?;
         }
+        let profile_sync_ms = profile_sync_started.elapsed().as_millis();
 
         let completed_segment = event_end == segment.event_cids.len();
         if completed_segment {
@@ -618,9 +880,11 @@ pub(super) async fn project_staged_allowlist_bulk(
         } else {
             state.segment_event_offset = event_end;
         }
+        let state_persist_started = Instant::now();
         persist_bulk_state(&state_path, &state)?;
+        let state_persist_ms = state_persist_started.elapsed().as_millis();
         eprintln!(
-            "Nostr bulk spool checkpoint: authors={}/{} staged_authors={} segment_event_offset={}/{} retained={} replaced={} skipped={} index_entries={} completed_segment={} batch_elapsed_ms={}",
+            "Nostr bulk spool checkpoint: authors={}/{} staged_authors={} segment_event_offset={}/{} retained={} replaced={} skipped={} index_entries={} reused_records={} spool_missing_candidates={} durable_reused_candidates={} stored_candidates={} reused_exact_batch={} completed_segment={} stage_load_ms={} replay_plan_ms={} durable_probe_ms={} target_store_ms={} target_sync_ms={} spool_write_ms={} spool_sync_ms={} profile_sync_ms={} state_persist_ms={} batch_elapsed_ms={}",
             state.next_author,
             authors.len(),
             stage.next_author,
@@ -630,7 +894,21 @@ pub(super) async fn project_staged_allowlist_bulk(
             apply.replaced,
             apply.skipped,
             apply.index_entries,
+            apply.reused_records,
+            spool_missing_candidates,
+            apply.durable_reused_candidates,
+            apply.stored_candidates,
+            apply.reused_exact_batch,
             completed_segment,
+            stage_load_ms,
+            replay_plan_ms,
+            durable_probe_ms,
+            target_store_ms,
+            target_sync_ms,
+            apply.spool_write_ms,
+            apply.spool_sync_ms,
+            profile_sync_ms,
+            state_persist_ms,
             started.elapsed().as_millis()
         );
     }

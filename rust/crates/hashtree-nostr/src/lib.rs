@@ -27,7 +27,8 @@ use hashtree_collection::{
     CollectionWriter, MANIFEST_BY_ID,
 };
 use hashtree_core::{
-    sha256, BufferedStore, Cid, HashTree, HashTreeConfig, HashTreeError, Store, TreeVisibility,
+    collect_hashes, decrypt_chk, is_tree_node, sha256, BufferedStore, Cid, Hash, HashTree,
+    HashTreeConfig, HashTreeError, Store, TreeVisibility,
 };
 use hashtree_index::{BTree, BTreeError, BTreeOptions};
 use nostr_sdk::nips::nip44::{self, Version as Nip44Version};
@@ -56,6 +57,10 @@ const MANIFEST_BY_TAG: &str = "by-tag";
 const MANIFEST_REPLACEABLE: &str = "replaceable";
 const MANIFEST_PARAMETERIZED_REPLACEABLE: &str = "parameterized-replaceable";
 const EVENT_BLOB_WRITE_CONCURRENCY: usize = 64;
+// Match one production Nostr index commit and one external PoolStore pack while
+// keeping the temporary owned copy bounded independently of caller input.
+const VALIDATED_EVENT_BLOB_COPY_MAX_ITEMS: usize = 32_768;
+const VALIDATED_EVENT_BLOB_COPY_MAX_BYTES: usize = 64 * 1024 * 1024;
 const NOSTR_EVENT_ITEM_FORMAT: &str = "nostr/event@1";
 const NOSTR_EVENT_PROJECTION_FORMAT: &str = "hashtree/nostr-event-index@1";
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
@@ -73,6 +78,30 @@ pub struct StoredNostrEvent {
     pub tags: Vec<Vec<String>>,
     pub content: String,
     pub sig: String,
+}
+
+/// One canonical event blob loaded with its exact content-addressed bytes.
+///
+/// The stored bytes remain private so they can only be produced by
+/// [`NostrEventStore::load_validated_event_blobs`]. That loader authenticates
+/// the CID, decrypts and decodes the event, and checks its canonical event id.
+/// A second event store can then persist the exact bytes in one verified store
+/// batch instead of serializing and encrypting the same event again.
+#[derive(Debug)]
+pub struct ValidatedNostrEventBlob {
+    event: StoredNostrEvent,
+    cid: Cid,
+    stored_blocks: Vec<(Hash, Vec<u8>)>,
+}
+
+impl ValidatedNostrEventBlob {
+    pub fn event(&self) -> &StoredNostrEvent {
+        &self.event
+    }
+
+    pub fn cid(&self) -> &Cid {
+        &self.cid
+    }
 }
 
 impl StoredNostrEvent {
@@ -910,12 +939,162 @@ impl<S: Store> NostrEventStore<S> {
             .collect())
     }
 
+    /// Load canonical event blobs together with their exact content-addressed
+    /// stored blocks.
+    pub async fn load_validated_event_blobs<I>(
+        &self,
+        cids: I,
+    ) -> Result<Vec<ValidatedNostrEventBlob>, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = Cid>,
+    {
+        let mut blobs = stream::iter(cids.into_iter().enumerate().map(
+            |(sequence, cid)| async move {
+                let cid_text = cid.to_string();
+                let stored_bytes = self
+                    .store
+                    .get(&cid.hash)
+                    .await
+                    .map_err(|err| HashTreeError::Store(err.to_string()))?
+                    .ok_or_else(|| {
+                        NostrEventStoreError::Validation(format!(
+                            "load event blob {cid_text} at sequence {sequence}: \
+                             {MISSING_STORED_EVENT_BLOB_ERROR}"
+                        ))
+                    })?;
+                if sha256(&stored_bytes) != cid.hash {
+                    return Err(NostrEventStoreError::Validation(format!(
+                        "load event blob {cid_text} at sequence {sequence}: \
+                         stored bytes do not match the CID"
+                    )));
+                }
+                let plaintext = match cid.key {
+                    Some(key) => decrypt_chk(&stored_bytes, &key)
+                        .map_err(|err| HashTreeError::Decryption(err.to_string()))?,
+                    None => stored_bytes.clone(),
+                };
+                let (event, stored_blocks) = if is_tree_node(&plaintext) {
+                    let event = self
+                        .validate_event(self.read_stored_event(&cid).await?)
+                        .await?;
+                    let hashes =
+                        collect_hashes(&self.tree, &cid, EVENT_BLOB_WRITE_CONCURRENCY).await?;
+                    let stored_blocks = stream::iter(hashes.into_iter().map(|hash| {
+                        let cid_text = cid_text.clone();
+                        async move {
+                            let bytes = self
+                                .store
+                                .get(&hash)
+                                .await
+                                .map_err(|err| HashTreeError::Store(err.to_string()))?
+                                .ok_or_else(|| {
+                                    NostrEventStoreError::Validation(format!(
+                                        "load event blob {cid_text} at sequence {sequence}: \
+                                         linked block {} is missing",
+                                        hex::encode(hash)
+                                    ))
+                                })?;
+                            if sha256(&bytes) != hash {
+                                return Err(NostrEventStoreError::Validation(format!(
+                                    "load event blob {cid_text} at sequence {sequence}: \
+                                     linked block {} does not match its hash",
+                                    hex::encode(hash)
+                                )));
+                            }
+                            Ok::<_, NostrEventStoreError>((hash, bytes))
+                        }
+                    }))
+                    .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                    (event, stored_blocks)
+                } else {
+                    (
+                        self.validate_event(self.decode_event(&plaintext)?).await?,
+                        vec![(cid.hash, stored_bytes)],
+                    )
+                };
+                Ok::<_, NostrEventStoreError>((
+                    sequence,
+                    ValidatedNostrEventBlob {
+                        event,
+                        cid,
+                        stored_blocks,
+                    },
+                ))
+            },
+        ))
+        .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        blobs.sort_by_key(|(sequence, _)| *sequence);
+        Ok(blobs.into_iter().map(|(_, blob)| blob).collect())
+    }
+
+    /// Persist exact validated event-blob bytes in bounded store batches.
+    ///
+    /// Returned CIDs preserve input order and are byte-for-byte identical to
+    /// the source CIDs. A caller that needs a durability boundary must sync the
+    /// underlying store after this method succeeds.
+    pub async fn store_validated_event_blobs<'a, I>(
+        &self,
+        blobs: I,
+    ) -> Result<Vec<Cid>, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = &'a ValidatedNostrEventBlob>,
+    {
+        let mut cids = Vec::new();
+        let mut items = Vec::with_capacity(VALIDATED_EVENT_BLOB_COPY_MAX_ITEMS);
+        let mut item_bytes = 0usize;
+        for blob in blobs {
+            cids.push(blob.cid.clone());
+            for (hash, data) in &blob.stored_blocks {
+                let next_bytes = item_bytes.saturating_add(data.len());
+                if !items.is_empty()
+                    && (items.len() >= VALIDATED_EVENT_BLOB_COPY_MAX_ITEMS
+                        || next_bytes > VALIDATED_EVENT_BLOB_COPY_MAX_BYTES)
+                {
+                    self.store
+                        .put_many(std::mem::take(&mut items))
+                        .await
+                        .map_err(|err| HashTreeError::Store(err.to_string()))?;
+                    items = Vec::with_capacity(VALIDATED_EVENT_BLOB_COPY_MAX_ITEMS);
+                    item_bytes = 0;
+                }
+                item_bytes = item_bytes.saturating_add(data.len());
+                items.push((*hash, data.clone()));
+            }
+        }
+        if !items.is_empty() {
+            self.store
+                .put_many(items)
+                .await
+                .map_err(|err| HashTreeError::Store(err.to_string()))?;
+        }
+        Ok(cids)
+    }
+
     /// Read one independently persisted event blob.
     pub async fn load_event_blob(
         &self,
         cid: &Cid,
     ) -> Result<StoredNostrEvent, NostrEventStoreError> {
         self.read_stored_event(cid).await
+    }
+
+    /// Read one independently persisted event blob when present.
+    ///
+    /// Unlike [`Self::load_event_blob`], absence is not an error. Corrupt or
+    /// otherwise invalid stored data remains an error so recovery callers can
+    /// distinguish a safe missing-blob fallback from a damaged durable blob.
+    pub async fn try_load_event_blob(
+        &self,
+        cid: &Cid,
+    ) -> Result<Option<StoredNostrEvent>, NostrEventStoreError> {
+        let Some(data) = self.tree.get(cid, None).await? else {
+            return Ok(None);
+        };
+        self.decode_event(&data).map(Some)
     }
 
     /// Read independent event blobs concurrently while preserving input order.
@@ -937,6 +1116,29 @@ impl<S: Store> NostrEventStore<S> {
                             "load event blob {cid_text} at sequence {sequence}: {err}"
                         ))
                     })
+            },
+        ))
+        .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        events.sort_by_key(|(sequence, _)| *sequence);
+        Ok(events.into_iter().map(|(_, event)| event).collect())
+    }
+
+    /// Read independent event blobs concurrently, preserving missing entries
+    /// and input order.
+    pub async fn try_load_event_blobs<I>(
+        &self,
+        cids: I,
+    ) -> Result<Vec<Option<StoredNostrEvent>>, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = Cid>,
+    {
+        let mut events = stream::iter(cids.into_iter().enumerate().map(
+            |(sequence, cid)| async move {
+                self.try_load_event_blob(&cid)
+                    .await
+                    .map(|event| (sequence, event))
             },
         ))
         .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
