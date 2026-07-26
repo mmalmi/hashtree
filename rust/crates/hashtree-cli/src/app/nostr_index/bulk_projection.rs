@@ -1,12 +1,12 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use hashtree_core::{sha256, Cid, Store};
+use hashtree_core::{sha256, BufferedStore, Cid, Store};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
     compare_nostr_replaceable_events, nostr_event_index_entries, nostr_replaceable_slot,
@@ -32,6 +32,7 @@ const BULK_PROJECTION_MAP_SIZE: usize = 256 * 1024 * 1024 * 1024;
 const ENTRY_CHUNK_SIZE: usize = 400;
 const ENTRY_PREFIX_SIZE: usize = 33;
 const ENTRY_PAGE_SIZE: usize = 4_096;
+const BULK_ROOT_FLUSH_ENTRY_INTERVAL: usize = 100_000;
 const EDGE_HAS_CID: u8 = 1;
 const EDGE_HAS_CHILDREN: u8 = 2;
 
@@ -78,7 +79,31 @@ struct SpoolReplayPlan {
     events: Vec<(StoredNostrEvent, Option<Cid>)>,
     missing_positions: Vec<usize>,
     reused_records: usize,
+    record_proofs: Vec<SpoolRecordProof>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpoolRecordProof {
+    Unknown,
+    Present,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpoolEdgeApplyMode {
+    #[cfg(test)]
+    Immediate,
+    DeferredSorted,
+}
+
+#[derive(Debug)]
+enum SpoolEdgeMutation {
+    EnsureChildren,
+    SetCid(Cid),
+    RemoveCid,
+}
+
+type SpoolEdgeMutations = BTreeMap<Vec<u8>, Vec<SpoolEdgeMutation>>;
 
 impl SpoolReplayPlan {
     async fn reuse_durable_candidates<S: Store>(
@@ -200,32 +225,86 @@ impl BulkProjectionSpool {
         })
     }
 
+    #[cfg(test)]
     fn apply(&self, events: Vec<(StoredNostrEvent, Cid)>) -> Result<SpoolApplyReport> {
+        self.apply_with_record_proofs(
+            events
+                .into_iter()
+                .map(|(event, cid)| (event, cid, SpoolRecordProof::Unknown))
+                .collect(),
+            SpoolEdgeApplyMode::Immediate,
+        )
+    }
+
+    fn apply_verified_plan(
+        &self,
+        events: Vec<(StoredNostrEvent, Cid, SpoolRecordProof)>,
+    ) -> Result<SpoolApplyReport> {
+        self.apply_with_record_proofs(events, SpoolEdgeApplyMode::DeferredSorted)
+    }
+
+    #[cfg(test)]
+    fn apply_verified_plan_immediate(
+        &self,
+        events: Vec<(StoredNostrEvent, Cid, SpoolRecordProof)>,
+    ) -> Result<SpoolApplyReport> {
+        self.apply_with_record_proofs(events, SpoolEdgeApplyMode::Immediate)
+    }
+
+    fn apply_with_record_proofs(
+        &self,
+        events: Vec<(StoredNostrEvent, Cid, SpoolRecordProof)>,
+        edge_apply_mode: SpoolEdgeApplyMode,
+    ) -> Result<SpoolApplyReport> {
         let mut report = SpoolApplyReport::default();
         let write_started = Instant::now();
         let mut wtxn = self.env.write_txn()?;
-        for (event, cid) in events {
-            if let Some(existing) = self.events.get(&wtxn, event.id.as_bytes())? {
-                let existing: SpoolEventRecord =
-                    rmp_serde::from_slice(existing).context("decode duplicate spool event")?;
-                if existing.event != event {
-                    anyhow::bail!(
-                        "bulk replay payload differs from duplicate spool record for event {}",
-                        event.id
-                    );
+        let mut deferred_edge_mutations = match edge_apply_mode {
+            #[cfg(test)]
+            SpoolEdgeApplyMode::Immediate => None,
+            SpoolEdgeApplyMode::DeferredSorted => Some(SpoolEdgeMutations::new()),
+        };
+        for (event, cid, proof) in events {
+            match proof {
+                SpoolRecordProof::Present => {
+                    // `plan_replay_batch` already decoded and compared this
+                    // exact event and CID through one read transaction. The
+                    // spool is private to the crawl-locked bulk projector, so
+                    // no other writer can change the record before this write
+                    // transaction begins.
+                    report.skipped = report.skipped.saturating_add(1);
+                    report.retained_events.push(event);
+                    continue;
                 }
-                if existing.cid_hash != cid.hash || existing.cid_key != cid.key {
-                    anyhow::bail!(
-                        "bulk replay CID differs from duplicate spool record for event {}",
-                        event.id
-                    );
+                SpoolRecordProof::Missing => {
+                    // The same exclusive plan proved this event id absent.
+                    // Avoid a second random lookup in the large event spool.
                 }
-                report.skipped = report.skipped.saturating_add(1);
-                // A crash can occur after the spool commit but before the
-                // profile index and JSON cursor are durable. Returning the
-                // retained event makes replay complete that idempotent work.
-                report.retained_events.push(existing.event);
-                continue;
+                SpoolRecordProof::Unknown => {
+                    if let Some(existing) = self.events.get(&wtxn, event.id.as_bytes())? {
+                        let existing: SpoolEventRecord = rmp_serde::from_slice(existing)
+                            .context("decode duplicate spool event")?;
+                        if existing.event != event {
+                            anyhow::bail!(
+                                "bulk replay payload differs from duplicate spool record for event {}",
+                                event.id
+                            );
+                        }
+                        if existing.cid_hash != cid.hash || existing.cid_key != cid.key {
+                            anyhow::bail!(
+                                "bulk replay CID differs from duplicate spool record for event {}",
+                                event.id
+                            );
+                        }
+                        report.skipped = report.skipped.saturating_add(1);
+                        // A crash can occur after the spool commit but before
+                        // the profile index and JSON cursor are durable.
+                        // Returning the retained event makes replay complete
+                        // that idempotent work.
+                        report.retained_events.push(existing.event);
+                        continue;
+                    }
+                }
             }
 
             let mut replaced = false;
@@ -245,7 +324,7 @@ impl BulkProjectionSpool {
                         report.skipped = report.skipped.saturating_add(1);
                         continue;
                     }
-                    self.remove_event(&mut wtxn, &previous)?;
+                    self.remove_event(&mut wtxn, deferred_edge_mutations.as_mut(), &previous)?;
                     replaced = true;
                 }
             }
@@ -258,7 +337,11 @@ impl BulkProjectionSpool {
             let encoded = rmp_serde::to_vec_named(&record).context("encode spool event")?;
             self.events.put(&mut wtxn, event.id.as_bytes(), &encoded)?;
             for entry in nostr_event_index_entries(&event, &cid) {
-                self.put_entry(&mut wtxn, entry.index, &entry.key, &entry.cid)?;
+                if let Some(mutations) = deferred_edge_mutations.as_mut() {
+                    Self::defer_put_entry(mutations, entry.index, &entry.key, &entry.cid);
+                } else {
+                    self.put_entry(&mut wtxn, entry.index, &entry.key, &entry.cid)?;
+                }
                 report.index_entries = report.index_entries.saturating_add(1);
             }
             if let Some((index, slot_key)) = slot {
@@ -274,6 +357,9 @@ impl BulkProjectionSpool {
                 report.inserted = report.inserted.saturating_add(1);
             }
             report.retained_events.push(event);
+        }
+        if let Some(mutations) = deferred_edge_mutations {
+            self.apply_deferred_edge_mutations(&mut wtxn, mutations)?;
         }
         wtxn.commit()?;
         report.spool_write_ms = write_started.elapsed().as_millis();
@@ -351,23 +437,157 @@ impl BulkProjectionSpool {
             .iter()
             .enumerate()
             .filter_map(|(position, (_, cid))| cid.is_none().then_some(position))
+            .collect::<Vec<_>>();
+        let mut event_id_counts = HashMap::new();
+        for (event, _) in &planned {
+            *event_id_counts.entry(event.id.as_str()).or_insert(0usize) += 1;
+        }
+        let record_proofs = planned
+            .iter()
+            .map(|(event, cid)| {
+                if event_id_counts[event.id.as_str()] != 1 {
+                    // A prior duplicate in this same ordered batch can change
+                    // whether the record is present before this position.
+                    SpoolRecordProof::Unknown
+                } else if cid.is_none() {
+                    SpoolRecordProof::Missing
+                } else if nostr_replaceable_slot(event).is_none() {
+                    // Non-replaceable records cannot be removed by an earlier
+                    // event in the ordered batch.
+                    SpoolRecordProof::Present
+                } else {
+                    // A newer event in the same replaceable slot can remove a
+                    // record that was present when the plan was read.
+                    SpoolRecordProof::Unknown
+                }
+            })
             .collect();
         Ok(SpoolReplayPlan {
             events: planned,
             missing_positions,
             reused_records,
+            record_proofs,
         })
     }
 
-    fn remove_event(&self, wtxn: &mut heed::RwTxn<'_>, record: &SpoolEventRecord) -> Result<()> {
+    fn remove_event(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        deferred_edge_mutations: Option<&mut SpoolEdgeMutations>,
+        record: &SpoolEventRecord,
+    ) -> Result<()> {
         let cid = Cid {
             hash: record.cid_hash,
             key: record.cid_key,
         };
-        for entry in nostr_event_index_entries(&record.event, &cid) {
-            self.remove_entry(wtxn, entry.index, &entry.key)?;
+        if let Some(mutations) = deferred_edge_mutations {
+            for entry in nostr_event_index_entries(&record.event, &cid) {
+                Self::defer_remove_entry(mutations, entry.index, &entry.key);
+            }
+        } else {
+            for entry in nostr_event_index_entries(&record.event, &cid) {
+                self.remove_entry(wtxn, entry.index, &entry.key)?;
+            }
         }
         self.events.delete(wtxn, record.event.id.as_bytes())?;
+        Ok(())
+    }
+
+    fn defer_put_entry(
+        mutations: &mut SpoolEdgeMutations,
+        index: NostrEventIndex,
+        logical_key: &str,
+        cid: &Cid,
+    ) {
+        let bytes = logical_key.as_bytes();
+        let mut parent = [0; 32];
+        let mut offset: usize = 0;
+        loop {
+            let end = offset.saturating_add(ENTRY_CHUNK_SIZE).min(bytes.len());
+            let chunk = &bytes[offset..end];
+            let final_chunk = end == bytes.len();
+            let physical_key = entry_edge_key(index, &parent, chunk);
+            mutations
+                .entry(physical_key.clone())
+                .or_default()
+                .push(if final_chunk {
+                    SpoolEdgeMutation::SetCid(cid.clone())
+                } else {
+                    SpoolEdgeMutation::EnsureChildren
+                });
+            if final_chunk {
+                return;
+            }
+            parent = sha256(&physical_key);
+            offset = end;
+        }
+    }
+
+    fn defer_remove_entry(
+        mutations: &mut SpoolEdgeMutations,
+        index: NostrEventIndex,
+        logical_key: &str,
+    ) {
+        let bytes = logical_key.as_bytes();
+        let mut parent = [0; 32];
+        let mut offset: usize = 0;
+        loop {
+            let end = offset.saturating_add(ENTRY_CHUNK_SIZE).min(bytes.len());
+            let chunk = &bytes[offset..end];
+            let final_chunk = end == bytes.len();
+            let physical_key = entry_edge_key(index, &parent, chunk);
+            if final_chunk {
+                mutations
+                    .entry(physical_key)
+                    .or_default()
+                    .push(SpoolEdgeMutation::RemoveCid);
+                return;
+            }
+            parent = sha256(&physical_key);
+            offset = end;
+        }
+    }
+
+    fn apply_deferred_edge_mutations(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        mutations: SpoolEdgeMutations,
+    ) -> Result<()> {
+        for (physical_key, operations) in mutations {
+            let existing = self.entries.get(wtxn, &physical_key)?;
+            let mut edge = existing.map(decode_edge_value).transpose()?;
+            for operation in operations {
+                match operation {
+                    SpoolEdgeMutation::EnsureChildren => {
+                        edge.get_or_insert_with(EdgeValue::default).has_children = true;
+                    }
+                    SpoolEdgeMutation::SetCid(cid) => {
+                        edge.get_or_insert_with(EdgeValue::default).cid = Some(cid);
+                    }
+                    SpoolEdgeMutation::RemoveCid => {
+                        edge = match edge.take() {
+                            Some(mut edge) if edge.has_children => {
+                                edge.cid = None;
+                                Some(edge)
+                            }
+                            _ => None,
+                        };
+                    }
+                }
+            }
+            match edge {
+                Some(edge) => {
+                    let encoded = encode_edge_value(&edge);
+                    if existing != Some(encoded.as_slice()) {
+                        self.entries.put(wtxn, &physical_key, &encoded)?;
+                    }
+                }
+                None if existing.is_some() => {
+                    self.entries.delete(wtxn, &physical_key)?;
+                }
+                None => {}
+            }
+        }
         Ok(())
     }
 
@@ -476,6 +696,45 @@ impl BulkProjectionSpool {
     }
 
     async fn build_index_root<S: Store>(
+        &self,
+        index: NostrEventIndex,
+        store: Arc<S>,
+        order: usize,
+    ) -> Result<Option<Cid>> {
+        // The sorted builder only needs the CIDs of nodes it emits; it never
+        // reads them back while constructing parent levels. Buffer those
+        // content-addressed nodes and flush them through PoolStore's
+        // optimistic batch path instead of opening one Pool transaction for
+        // every leaf/internal node. Periodic flushes bound memory, and the
+        // caller still force-syncs the durable store before recording a root.
+        let buffered_store = Arc::new(BufferedStore::new_optimistic(store));
+        let btree = BTree::new(
+            Arc::clone(&buffered_store),
+            BTreeOptions { order: Some(order) },
+        );
+        let mut builder = btree.sorted_link_builder();
+        let mut cursor = EntryTrieCursor::new(self, index);
+        let mut entries = 0usize;
+        while let Some((key, cid)) = cursor.next_entry()? {
+            builder.push(key, cid).await?;
+            entries = entries.saturating_add(1);
+            if entries.is_multiple_of(BULK_ROOT_FLUSH_ENTRY_INTERVAL) {
+                buffered_store
+                    .flush()
+                    .await
+                    .context("flush buffered bulk index nodes")?;
+            }
+        }
+        let root = builder.finish().await?;
+        buffered_store
+            .flush()
+            .await
+            .context("flush final buffered bulk index nodes")?;
+        Ok(root)
+    }
+
+    #[cfg(test)]
+    async fn build_index_root_unbuffered<S: Store>(
         &self,
         index: NostrEventIndex,
         store: Arc<S>,
@@ -1022,17 +1281,18 @@ pub(super) async fn project_staged_allowlist_bulk(
             let events = plan
                 .events
                 .into_iter()
-                .map(|(event, existing_cid)| {
+                .zip(plan.record_proofs)
+                .map(|((event, existing_cid), proof)| {
                     let cid = existing_cid
                         .or_else(|| target_cids.next())
                         .context("bulk replay omitted a stored event CID")?;
-                    Ok((event, cid))
+                    Ok((event, cid, proof))
                 })
                 .collect::<Result<Vec<_>>>()?;
             if target_cids.next().is_some() {
                 anyhow::bail!("bulk replay produced excess stored event CIDs");
             }
-            spool.apply(events)?
+            spool.apply_verified_plan(events)?
         };
         apply.reused_records = plan.reused_records;
         apply.durable_reused_candidates = durable_reused_candidates;
