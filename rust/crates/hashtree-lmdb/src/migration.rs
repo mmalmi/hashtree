@@ -76,68 +76,50 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
         });
     }
 
-    let max_buffer_bytes = max_buffer_bytes as u64;
     let mut batch = PoolMigrationBatch {
         scanned: hashes.len(),
         last_hash: hashes.last().copied(),
         ..PoolMigrationBatch::default()
     };
     let committed = target.committed_hashes_in_sorted_candidates(&hashes)?;
-    let mut items = Vec::with_capacity(hashes.len());
-    let mut buffered_bytes = 0u64;
-    for (hash, committed) in hashes.iter().zip(committed) {
-        if committed {
-            batch.already_present = batch.already_present.saturating_add(1);
-            continue;
-        }
-        if !items.is_empty()
-            && source
-                .blob_size_sync(hash)?
-                .is_some_and(|size| buffered_bytes.saturating_add(size) > max_buffer_bytes)
-        {
-            flush_items(target, &mut items, &mut buffered_bytes, &mut batch)?;
-        }
+    let missing = hashes
+        .iter()
+        .zip(committed)
+        .filter_map(|(hash, committed)| {
+            if committed {
+                batch.already_present = batch.already_present.saturating_add(1);
+                None
+            } else {
+                Some(*hash)
+            }
+        })
+        .collect::<Vec<_>>();
 
-        let data = source
-            .get_sync(hash)?
-            .ok_or_else(|| StoreError::Other(format!("source lost blob {hash:?} during scan")))?;
-        if sha256(&data) != *hash {
-            return Err(StoreError::Other(format!(
-                "source returned corrupt bytes for {hash:?}"
-            )));
+    let max_buffer_bytes = max_buffer_bytes as u64;
+    let mut next = 0usize;
+    while next < missing.len() {
+        let items = source.read_hashes_bounded(&missing[next..], max_buffer_bytes)?;
+        if items.is_empty() {
+            return Err(StoreError::Other(
+                "bounded source read made no migration progress".into(),
+            ));
         }
-        batch.verified = batch.verified.saturating_add(1);
-        let data_len = data.len() as u64;
-        batch.peak_buffered_bytes = batch
-            .peak_buffered_bytes
-            .max(buffered_bytes.saturating_add(data_len));
-        if !items.is_empty() && buffered_bytes.saturating_add(data_len) > max_buffer_bytes {
-            flush_items(target, &mut items, &mut buffered_bytes, &mut batch)?;
+        let mut buffered_bytes = 0u64;
+        for (hash, data) in &items {
+            if sha256(data) != *hash {
+                return Err(StoreError::Other(format!(
+                    "source returned corrupt bytes for {hash:?}"
+                )));
+            }
+            buffered_bytes = buffered_bytes.saturating_add(data.len() as u64);
         }
-        buffered_bytes = buffered_bytes.saturating_add(data_len);
-        items.push((*hash, data));
-        if buffered_bytes >= max_buffer_bytes {
-            flush_items(target, &mut items, &mut buffered_bytes, &mut batch)?;
-        }
+        batch.verified = batch.verified.saturating_add(items.len());
+        batch.peak_buffered_bytes = batch.peak_buffered_bytes.max(buffered_bytes);
+        let report = target.put_many_report_sync(&items)?;
+        batch.inserted = batch.inserted.saturating_add(report.inserted);
+        batch.inserted_bytes = batch.inserted_bytes.saturating_add(report.inserted_bytes);
+        batch.write_batches = batch.write_batches.saturating_add(1);
+        next = next.saturating_add(items.len());
     }
-    flush_items(target, &mut items, &mut buffered_bytes, &mut batch)?;
     Ok(batch)
-}
-
-fn flush_items(
-    target: &PoolStore,
-    items: &mut Vec<(Hash, Vec<u8>)>,
-    buffered_bytes: &mut u64,
-    batch: &mut PoolMigrationBatch,
-) -> Result<(), StoreError> {
-    if items.is_empty() {
-        return Ok(());
-    }
-    let report = target.put_many_report_sync(items)?;
-    batch.inserted = batch.inserted.saturating_add(report.inserted);
-    batch.inserted_bytes = batch.inserted_bytes.saturating_add(report.inserted_bytes);
-    batch.write_batches = batch.write_batches.saturating_add(1);
-    items.clear();
-    *buffered_bytes = 0;
-    Ok(())
 }
