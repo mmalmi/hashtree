@@ -20,9 +20,11 @@ that a root does not exist.
 
 Peer identity is a Nostr public key (`npub`).
 [FIPS](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips)
-finds reachable peers through configured addresses, Nostr advertisements, local
-announcements, or mesh introductions, then establishes an authenticated route.
-Public Hashtree nodes share this discovery scope:
+discovery is how a node learns a transport endpoint for another `npub`. The
+endpoint comes from a static peer entry (`npub`, UDP/TCP, and `host:port`) or an
+endpoint advertisement over Nostr or the local network. FIPS authenticates the
+connection against the `npub`; the endpoint is only a connection hint. Public
+Hashtree nodes share this discovery scope:
 
 ```text
 fips-overlay-v1
