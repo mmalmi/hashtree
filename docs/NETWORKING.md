@@ -5,57 +5,58 @@ exchanges content-addressed blobs.
 
 ## Mutable roots
 
-Repository roots are Nostr replaceable events:
+Mutable tree and repository roots are Nostr replaceable events:
 
 - kind `30064` (`30078` is accepted for compatibility)
-- `d` tag: repository name
-- `l` tag: `hashtree`
+- `d` tag: tree or repository name
+- `l` tag: `hashtree` (legacy unlabeled events may be accepted)
 - `hash` tag: current root hash
 
-Clients select the newest valid signed event for the requested author and
-repository. Subscriptions should remain open: a quiet relay interval is not proof
-that a root does not exist.
+Clients accept valid signed events matching the requested author and `d`, then
+select the newest `created_at`; the lowest event ID wins a tie. Subscriptions
+should remain open: a quiet relay interval is not proof that a root does not
+exist.
 
 ## Peer discovery
 
 Peer identity is a Nostr public key (`npub`).
 [FIPS](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips)
-discovery is how a node learns a transport endpoint for another `npub`. The
-endpoint comes from a static peer entry (`npub`, UDP/TCP, and `host:port`) or an
+discovery finds a route to another `npub`. For a direct peer, a contact endpoint
+can come from a static peer entry (`npub`, UDP/TCP, and `host:port`) or an
 endpoint advertisement over Nostr or the local network. FIPS authenticates the
-connection against the `npub`; the endpoint is only a connection hint. Public
-Hashtree nodes share this discovery scope:
+connection against the `npub`; the endpoint is only a connection hint. Hashtree
+labels its Nostr and LAN discovery advertisements with:
 
 ```text
 fips-overlay-v1
 ```
 
-A blob provider is either explicitly configured or advertises the exact service:
-
-```text
-hashtree.blob/1
-```
-
-The default FSP port is `39018`. A connected FIPS peer is not automatically a
-blob provider.
+Eligible blob providers are exact: explicitly configured `npub`s or
+authenticated same-host FIPS instances advertising `hashtree.blob/1` on service
+`39018`. A generic connected FIPS peer is not eligible.
 
 ## Blob protocol v1
 
-To read a tree, the client fetches its root blob, reads the child hashes, and
-repeats for the required nodes and chunks. Each lookup fetches one immutable
-blob by SHA-256, never by filename or path:
+To read a tree, the client fetches its root blob, verifies it, decrypts it when
+needed, and decodes it locally. It then follows child hashes for the required
+nodes and chunks. Each lookup fetches one immutable blob by SHA-256, never by
+filename or path:
 
-1. The client selects an explicitly configured provider or one advertising
-   `hashtree.blob/1`.
-2. It opens an authenticated
+1. The client asks its `BlobRouter` for the hash. The caller does not choose a
+   peer.
+2. The router searches its configured sources, such as local storage, a P2P
+   provider group, and Blossom/HTTP stores. It may hedge several routes.
+3. The P2P route selects and hedges a bounded set of eligible providers. Each
+   peer attempt opens an authenticated
    [fips-tcp](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips-tcp)
    session to service `39018`.
-3. It sends the blob hash and an HTL forwarding budget.
-4. The provider checks its configured blob routes and replies with the raw
+4. The attempt sends the blob hash and an HTL forwarding budget.
+5. The provider checks its configured blob routes and replies with the raw
    stored bytes or `NoResult`.
-5. The client verifies `SHA256(bytes) == requested hash` before returning or
-   caching the blob.
-6. The session closes. A reset may retry the whole session once.
+6. The router accepts the first reply satisfying
+   `SHA256(bytes) == requested hash`, may cache it, and cancels slower attempts.
+7. Each peer session closes after its reply or error. Any retry is client policy
+   and remains bounded by the request deadline.
 
 Bad framing, a wrong hash, timeout, or reset is an error, not a missing blob.
 `fips-tcp` provides ordered delivery, flow control, and retransmission.
@@ -86,7 +87,7 @@ Reply header, 7 bytes:
 `NoResult` has length zero. `Data` is followed by exactly `length` raw blob bytes.
 The maximum payload is 16 MiB.
 
-Reference request:
+Reference request for HTL `0` and hash bytes `00..1f`:
 
 ```text
 48010100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -107,22 +108,19 @@ HTL is `0..10`; clients normally start at `10`.
 - Each Hashtree forwarding hop decrements HTL by one.
 - FIPS transport hops do not change HTL.
 
-`BlobRouter` may query local storage, peer groups, and HTTP stores concurrently.
-The first hash-valid response wins. Writes go only to the configured primary
-store.
-
 | Outcome | Meaning |
 | --- | --- |
 | Data | Verified blob returned |
 | No result | This route completed without the blob |
 | Timeout/error | Result remains unknown |
 
-A route-local miss must not become a global negative cache entry. Slow or failed
-peers are not evidence that the blob is absent elsewhere.
+`NoResult` from one route does not stop or negatively cache the lookup. The
+lookup reports missing only when all routes complete with `NoResult`. If no
+route returns data and any route times out or fails, the lookup returns an error.
 
 ## Serving rules
 
-- Public endpoints serve raw blob or ciphertext bytes only.
+- Public endpoints return stored blob bytes only (public data or ciphertext).
 - Never transmit decryption keys.
 - Never assemble or expose plaintext trees without an explicit allowlist.
 - Authentication identifies a peer; authorization still applies separately.
