@@ -2250,6 +2250,25 @@ impl<S: Store> NostrEventStore<S> {
         normalized: StoredNostrEvent,
         obsolete_event_cids: &mut Vec<Cid>,
     ) -> Result<(), NostrEventStoreError> {
+        // The by-id projection is authoritative for exact-event identity. A
+        // replaceable projection may be absent while it is being repaired (or
+        // after an interrupted repair), but re-ingesting the same signed event
+        // must still be idempotent. Supplying the exact previous item lets the
+        // collection writer rebuild every derived projection without treating
+        // the existing by-id entry as an unsafe blind overwrite.
+        let exact_previous = match self
+            .collection_source_from_manifest(manifest)
+            .get(&normalized.id)
+            .await?
+        {
+            Some(existing_cid) => Some(match self.read_stored_event(&existing_cid).await {
+                Ok(existing) => existing,
+                Err(err) if is_missing_stored_event_error(&err) => normalized.clone(),
+                Err(err) => return Err(err),
+            }),
+            None => None,
+        };
+
         let replaceable = self
             .resolve_replaceable_decision(manifest, &normalized)
             .await?;
@@ -2274,7 +2293,10 @@ impl<S: Store> NostrEventStore<S> {
                 .put(
                     &normalized,
                     &event_cid,
-                    replaced_existing.as_ref().map(|existing| &existing.event),
+                    replaced_existing
+                        .as_ref()
+                        .map(|existing| &existing.event)
+                        .or(exact_previous.as_ref()),
                 )
                 .await?;
         }

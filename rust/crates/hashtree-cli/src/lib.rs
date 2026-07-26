@@ -17,6 +17,7 @@ mod managed_env;
 pub mod nostr_mirror;
 pub mod nostr_relay;
 pub mod pwa;
+pub mod runtime_config;
 pub mod server;
 pub mod storage;
 pub mod sync;

@@ -209,6 +209,38 @@ fn durable_blob_write_rejects_when_owned_blobs_fill_limit() {
 }
 
 #[test]
+fn unindexing_a_tree_preserves_owned_blossom_blob() {
+    let (store, _tmp) = test_store(1024 * 1024);
+    let owner = [0x51; 32];
+    let data = b"owned tree leaf".to_vec();
+    let hash = from_hex(
+        &store
+            .put_owned_blob(&data, &owner)
+            .expect("owned blob write"),
+    )
+    .expect("owned blob hash");
+    store
+        .index_tree(
+            &hash,
+            "tree-owner",
+            Some("owned-leaf"),
+            PRIORITY_OTHER,
+            None,
+        )
+        .expect("tree index");
+
+    assert_eq!(
+        store.unindex_tree(&hash).expect("tree unindex"),
+        0,
+        "owned body must not count as freed"
+    );
+    assert!(store.blob_exists(&hash).expect("owned body remains"));
+    assert!(store
+        .is_blob_owner(&hash, &owner)
+        .expect("ownership remains"));
+}
+
+#[test]
 fn test_eviction_over_limit() {
     let (store, _tmp) = test_store(500); // 500 byte limit
 

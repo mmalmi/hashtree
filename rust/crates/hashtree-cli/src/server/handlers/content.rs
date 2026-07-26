@@ -1,7 +1,7 @@
 use super::*;
 use crate::fips_transport::DaemonBlobResolver;
 use crate::server::blob_read::{
-    acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY,
+    run_blob_metadata_read, run_blob_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY,
 };
 use hashtree_core::{Link, TreeNode};
 use serde::{Deserialize, Serialize};
@@ -352,7 +352,7 @@ async fn fetch_and_cache_blobs_from_upstream_batch(state: &AppState, hashes: &[[
 
     let mut missing = Vec::new();
     for hash in hashes {
-        match state.store.blob_exists(hash) {
+        match blob_exists_without_blocking_runtime(state, *hash).await {
             Ok(false) => missing.push(*hash),
             Ok(true) => {}
             Err(error) => {
@@ -423,11 +423,9 @@ async fn put_cached_blobs_without_blocking_runtime(
         return Ok(0);
     }
 
-    let permit = acquire_blob_write().await.map_err(str::to_string)?;
     let store = state.store.clone();
     let blob_cache = state.blob_cache.clone();
-    match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+    match run_blob_write(move || {
         let result = store
             .put_cached_blobs_report(&items)
             .map_err(|e| e.to_string());
@@ -458,14 +456,9 @@ pub(super) async fn put_cached_blob_without_blocking_runtime(
         return (data, Err(rejection.reason));
     }
 
-    let permit = match acquire_blob_write().await {
-        Ok(permit) => permit,
-        Err(error) => return (data, Err(error.to_string())),
-    };
     let store = state.store.clone();
     let blob_cache = state.blob_cache.clone();
-    match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+    match run_blob_write(move || {
         let result = store.put_cached_blob(&data).map_err(|e| e.to_string());
         if let Ok(hash_hex) = &result {
             blob_cache.put_size(hash_hex.clone(), Some(data.len() as u64));
@@ -528,21 +521,15 @@ pub(super) async fn get_blob_size_without_blocking_runtime(
         return Ok(size);
     }
 
-    let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read =
-        tokio::task::spawn_blocking(move || store.blob_size(&hash).map_err(|e| e.to_string()));
-    let result = tokio::time::timeout(blob_read_timeout(), read).await;
-    drop(permit);
-    match result {
-        Ok(Ok(result)) => {
+    match run_blob_metadata_read(move || store.blob_size(&hash).map_err(|e| e.to_string())).await {
+        Ok(result) => {
             if let Ok(size) = &result {
                 state.blob_cache.put_size(hash_hex, *size);
             }
             result
         }
-        Ok(Err(err)) => Err(format!("blob size task failed: {}", err)),
-        Err(_) => Err("blob size timed out".to_string()),
+        Err(error) => Err(format_blob_read_error("blob size", error)),
     }
 }
 
@@ -552,19 +539,16 @@ pub(super) async fn get_blob_range_without_blocking_runtime(
     start: u64,
     end_inclusive: u64,
 ) -> Result<Option<Vec<u8>>, String> {
-    let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read = tokio::task::spawn_blocking(move || {
+    match run_blob_read(move || {
         store
             .get_blob_range(&hash, start, end_inclusive)
             .map_err(|e| e.to_string())
-    });
-    let result = tokio::time::timeout(blob_read_timeout(), read).await;
-    drop(permit);
-    match result {
-        Ok(Ok(result)) => result,
-        Ok(Err(err)) => Err(format!("blob range read task failed: {}", err)),
-        Err(_) => Err("blob range read timed out".to_string()),
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format_blob_read_error("blob range read", error)),
     }
 }
 
@@ -572,14 +556,9 @@ async fn get_blob_once_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
-    let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let read =
-        tokio::task::spawn_blocking(move || store.get_blob(&hash).map_err(|e| e.to_string()));
-    let result = tokio::time::timeout(blob_read_timeout(), read).await;
-    drop(permit);
-    match result {
-        Ok(Ok(result)) => {
+    match run_blob_read(move || store.get_blob(&hash).map_err(|e| e.to_string())).await {
+        Ok(result) => {
             if let Ok(data) = &result {
                 match data {
                     Some(data) => {
@@ -596,8 +575,29 @@ async fn get_blob_once_without_blocking_runtime(
             }
             result
         }
-        Ok(Err(err)) => Err(format!("blob read task failed: {}", err)),
-        Err(_) => Err("blob read timed out".to_string()),
+        Err(error) => Err(format_blob_read_error("blob read", error)),
+    }
+}
+
+async fn blob_exists_without_blocking_runtime(
+    state: &AppState,
+    hash: [u8; 32],
+) -> Result<bool, String> {
+    let store = state.store.clone();
+    match run_blob_metadata_read(move || store.blob_exists(&hash).map_err(|e| e.to_string())).await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format_blob_read_error("blob existence check", error)),
+    }
+}
+
+fn format_blob_read_error(context: &str, error: BlobIoTaskError) -> String {
+    if error.is_busy() {
+        BLOB_READ_BUSY.to_string()
+    } else if error.is_timeout() {
+        format!("{context} timed out")
+    } else {
+        format!("{context} task failed: {error}")
     }
 }
 
@@ -655,7 +655,7 @@ pub(super) async fn ensure_blob_available(
     state: &AppState,
     hash: &[u8; 32],
 ) -> Result<bool, String> {
-    if state.store.blob_exists(hash).map_err(|e| e.to_string())? {
+    if blob_exists_without_blocking_runtime(state, *hash).await? {
         return Ok(true);
     }
 
@@ -688,7 +688,7 @@ pub(super) async fn ensure_blob_available(
         return Ok(true);
     }
 
-    state.store.blob_exists(hash).map_err(|e| e.to_string())
+    blob_exists_without_blocking_runtime(state, *hash).await
 }
 
 pub(super) async fn fetch_missing_chunk(
@@ -973,11 +973,7 @@ impl RangeLeafCollector<'_> {
             }
 
             if link.link_type == LinkType::File
-                && self
-                    .state
-                    .store
-                    .blob_exists(&link.hash)
-                    .map_err(|err| err.to_string())?
+                && blob_exists_without_blocking_runtime(self.state, link.hash).await?
             {
                 let child_cid = link_to_cid(link);
                 if let Some(child_node) = tree

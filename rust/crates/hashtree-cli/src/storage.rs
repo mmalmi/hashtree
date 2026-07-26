@@ -30,7 +30,10 @@ mod upload;
 pub use upload::{AddProgress, AddProgressSnapshot};
 
 mod maintenance;
+mod quota;
 mod retention;
+
+use quota::CacheQuotaController;
 
 #[cfg(feature = "s3")]
 const DEFAULT_S3_SYNC_TIMEOUT_MS: u64 = 5_000;
@@ -687,6 +690,42 @@ impl LocalStore {
             LocalStore::Pool(store) => store.list(),
         }
     }
+
+    /// Scan the canonical writable store in bounded lexicographic pages.
+    ///
+    /// Quota cleanup must fail closed when the backend cannot distinguish a
+    /// disposable writable cache copy from durable data. In particular,
+    /// `PoolStore::delete_sync` removes every member copy and its catalog
+    /// location, so treating the whole pool catalog as a hot-cache scan would
+    /// be unsafe.
+    pub fn scan_writable_hashes_after(
+        &self,
+        after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<Hash>, StoreError> {
+        match self {
+            // Preserve embedded/filesystem quota behavior. The filesystem
+            // backend has no native cursor yet, so this compatibility path
+            // still enumerates once and only bounds the retention work done by
+            // the caller. LMDB below is the scalable production path.
+            LocalStore::Fs(store) => {
+                let mut hashes = store.list()?;
+                hashes.sort_unstable();
+                let start = after
+                    .map(|after| hashes.partition_point(|hash| *hash <= after))
+                    .unwrap_or(0);
+                hashes.truncate(start.saturating_add(limit).min(hashes.len()));
+                Ok(hashes.drain(start..).collect())
+            }
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.scan_hashes_after(after, limit),
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(_) => Err(StoreError::Other(
+                "bounded orphan cleanup is unsupported for PoolStore without tier-aware deletion"
+                    .into(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -1280,6 +1319,15 @@ impl StorageRouter {
         self.local.list_writable()
     }
 
+    /// Scan hashes from the writable local tier without materializing it.
+    pub fn scan_writable_hashes_after(
+        &self,
+        after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.local.scan_writable_hashes_after(after, limit)
+    }
+
     /// Mark which sorted candidate hashes already exist in local storage.
     pub fn existing_local_hashes_in_sorted_candidates(
         &self,
@@ -1427,6 +1475,23 @@ impl Store for StorageRouter {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OrphanSweep {
+    /// Cursor immediately before this sweep began. A non-`None` sweep wraps at
+    /// the end of the keyspace and finishes once it reaches this boundary.
+    start_after: Option<Hash>,
+    wrapped: bool,
+}
+
+#[derive(Debug, Default)]
+struct OrphanScanState {
+    /// Last candidate examined. It need not still exist after cleanup.
+    cursor: Option<Hash>,
+    sweep: Option<OrphanSweep>,
+    socialgraph_roots: Option<[Option<Hash>; 4]>,
+    socialgraph_protected: Arc<HashSet<Hash>>,
+}
+
 pub struct HashtreeStore {
     base_path: PathBuf,
     env: ManagedEnv,
@@ -1456,6 +1521,10 @@ pub struct HashtreeStore {
     max_size_bytes: u64,
     /// Whether quota enforcement may delete local blobs not tracked by any indexed tree.
     evict_orphans: bool,
+    /// Coalesces retention cleanup, accounts cache writes, and protects durable metadata gaps.
+    cache_quota: CacheQuotaController,
+    /// Resumable bounded orphan scan and its per-sweep socialgraph protection.
+    orphan_scan: Mutex<OrphanScanState>,
     /// Best-effort in-memory throttle for blob access metadata writes.
     blob_access_update_gate: BlobAccessUpdateGate,
     /// Keeps access-time maintenance out of foreground blob reads.
@@ -1653,6 +1722,8 @@ impl HashtreeStore {
             router,
             max_size_bytes,
             evict_orphans,
+            cache_quota: CacheQuotaController::default(),
+            orphan_scan: Mutex::new(OrphanScanState::default()),
             blob_access_update_gate: BlobAccessUpdateGate::default(),
             blob_access_update_inflight: Arc::new(AtomicBool::new(false)),
             file_metadata_cache: Mutex::new(LruCache::new(file_metadata_cache_entries())),
@@ -1773,8 +1844,23 @@ impl HashtreeStore {
         data: &[u8],
         pubkey: &[u8; 32],
     ) -> Result<(String, bool)> {
+        self.put_owned_blob_with_inserted_after_body(data, pubkey, || {})
+    }
+
+    fn put_owned_blob_with_inserted_after_body(
+        &self,
+        data: &[u8],
+        pubkey: &[u8; 32],
+        after_body_write: impl FnOnce(),
+    ) -> Result<(String, bool)> {
         let hash = sha256(data);
         let incoming_bytes = data.len() as u64;
+        let _retention_guard = self
+            .cache_quota
+            .protect_retention_hashes(vec![hash])
+            .map_err(|denial| {
+                anyhow::anyhow!("owned blob write cannot race retention cleanup: {denial}")
+            })?;
         let mut retried_after_cleanup = false;
         let inserted = loop {
             match self.router.put_sync(hash, data) {
@@ -1790,6 +1876,7 @@ impl HashtreeStore {
             }
         };
 
+        after_body_write();
         self.set_blob_owner_with_size(&hash, pubkey, incoming_bytes)?;
         if inserted {
             if let Err(err) = self.enforce_durable_blob_budget_after_insert(incoming_bytes) {
@@ -1873,11 +1960,26 @@ impl HashtreeStore {
         items: &[(Hash, Vec<u8>)],
         pubkey: &[u8; 32],
     ) -> Result<PutManyReport> {
+        self.put_owned_blobs_report_after_bodies(items, pubkey, || {})
+    }
+
+    fn put_owned_blobs_report_after_bodies(
+        &self,
+        items: &[(Hash, Vec<u8>)],
+        pubkey: &[u8; 32],
+        after_body_write: impl FnOnce(),
+    ) -> Result<PutManyReport> {
         let started_at = Instant::now();
         let slow_log_ms = slow_owned_blob_batch_log_ms();
         if items.is_empty() {
             return Ok(PutManyReport::default());
         }
+        let _retention_guard = self
+            .cache_quota
+            .protect_retention_hashes(items.iter().map(|(hash, _)| *hash).collect())
+            .map_err(|denial| {
+                anyhow::anyhow!("owned blob batch cannot race retention cleanup: {denial}")
+            })?;
         let incoming_bytes = items.iter().fold(0u64, |total, (_, data)| {
             total.saturating_add(data.len() as u64)
         });
@@ -1886,6 +1988,7 @@ impl HashtreeStore {
         let report = self.put_many_durable_blob_bodies(items, incoming_bytes)?;
         let raw_write_ms = raw_started.elapsed().as_millis();
 
+        after_body_write();
         let owner_started = Instant::now();
         self.put_blob_owners_for_batch(items, pubkey)?;
         let owner_index_ms = owner_started.elapsed().as_millis();
@@ -1931,36 +2034,34 @@ impl HashtreeStore {
         let hash = sha256(data);
         let incoming_bytes = data.len() as u64;
 
-        // Make room before inserting so the just-fetched cache entry cannot be
-        // selected as the arbitrary disposable orphan during post-write quota
-        // enforcement. This is especially important for the filesystem store,
-        // whose directory iteration order is not an insertion/LRU order.
-        if !self
+        // Existing blobs are a no-op and must remain available even while a
+        // cleanup leader is working or a failed cleanup is backing off.
+        let locally_present = self
             .router
-            .exists(&hash)
-            .map_err(|e| anyhow::anyhow!("Failed to check cached blob: {}", e))?
-        {
-            self.make_room_for_cached_blob(incoming_bytes)?;
+            .existing_local_hashes_in_sorted_candidates(std::slice::from_ref(&hash))
+            .map_err(|error| anyhow::anyhow!("Failed to check cached blob: {error}"))?
+            .first()
+            .copied()
+            .unwrap_or(false);
+        if locally_present {
+            let inserted = self
+                .router
+                .put_sync(hash, data)
+                .map_err(|error| anyhow::anyhow!("Failed to store cached blob: {error}"))?;
+            return Ok((to_hex(&hash), inserted));
         }
 
+        let mut permit = self.prepare_cached_blob_write(incoming_bytes, vec![hash], false)?;
         let mut retried_after_cleanup = false;
         loop {
             match self.router.put_sync(hash, data) {
                 Ok(inserted) => {
-                    if inserted {
-                        if let Err(err) =
-                            self.enforce_cached_blob_budget_after_insert(incoming_bytes)
-                        {
-                            tracing::debug!("Failed to enforce cached blob budget: {}", err);
-                        }
-                    }
+                    permit.commit(if inserted { incoming_bytes } else { 0 });
                     return Ok((to_hex(&hash), inserted));
                 }
                 Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
-                    let freed = self.relieve_cached_blob_write_pressure(incoming_bytes)?;
-                    if freed == 0 {
-                        return Err(anyhow::anyhow!("Failed to store cached blob: {}", err));
-                    }
+                    drop(permit);
+                    permit = self.prepare_cached_blob_write(incoming_bytes, vec![hash], true)?;
                     retried_after_cleanup = true;
                 }
                 Err(err) => return Err(anyhow::anyhow!("Failed to store cached blob: {}", err)),
@@ -1985,21 +2086,46 @@ impl HashtreeStore {
             total.saturating_add(data.len() as u64)
         });
 
+        let mut unique_candidates = HashMap::<Hash, u64>::new();
+        for (hash, data) in items {
+            unique_candidates.entry(*hash).or_insert(data.len() as u64);
+        }
+        let mut sorted_candidates = unique_candidates.into_iter().collect::<Vec<_>>();
+        sorted_candidates.sort_unstable_by_key(|(hash, _)| *hash);
+        let sorted_hashes = sorted_candidates
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<Vec<_>>();
+        let existing = self
+            .router
+            .existing_local_hashes_in_sorted_candidates(&sorted_hashes)
+            .map_err(|error| anyhow::anyhow!("Failed to check cached blob batch: {error}"))?;
+        let mut missing_hashes = Vec::new();
+        let mut missing_bytes = 0u64;
+        for ((hash, size), present) in sorted_candidates.into_iter().zip(existing) {
+            if !present {
+                missing_hashes.push(hash);
+                missing_bytes = missing_bytes.saturating_add(size);
+            }
+        }
+
+        // A duplicate-only batch is a no-op and must not be rejected merely
+        // because an unrelated cleanup attempt is active or backing off.
+        let mut permit = if missing_hashes.is_empty() {
+            None
+        } else {
+            Some(self.prepare_cached_blob_write(missing_bytes, missing_hashes.clone(), false)?)
+        };
         let mut retried_after_cleanup = false;
         loop {
             let raw_started = Instant::now();
             match self.router.put_many_report_sync(items) {
                 Ok(report) => {
                     let raw_write_ms = raw_started.elapsed().as_millis();
-                    let quota_started = Instant::now();
-                    if report.inserted_bytes > 0 {
-                        if let Err(err) =
-                            self.enforce_cached_blob_budget_after_insert(report.inserted_bytes)
-                        {
-                            tracing::debug!("Failed to enforce cached blob budget: {}", err);
-                        }
+                    if let Some(permit) = permit.take() {
+                        permit.commit(report.inserted_bytes);
                     }
-                    let quota_ms = quota_started.elapsed().as_millis();
+                    let quota_ms = 0u128;
                     let total_ms = started_at.elapsed().as_millis();
                     if slow_log_ms.is_some_and(|threshold| total_ms >= threshold) {
                         tracing::warn!(
@@ -2016,13 +2142,18 @@ impl HashtreeStore {
                     return Ok(report);
                 }
                 Err(err) if !retried_after_cleanup && is_map_full_store_error(&err) => {
-                    let freed = self.relieve_cached_blob_write_pressure(candidate_bytes)?;
-                    if freed == 0 {
+                    drop(permit.take());
+                    if missing_hashes.is_empty() {
                         return Err(anyhow::anyhow!(
                             "Failed to store cached blob batch: {}",
                             err
                         ));
                     }
+                    permit = Some(self.prepare_cached_blob_write(
+                        missing_bytes,
+                        missing_hashes.clone(),
+                        true,
+                    )?);
                     retried_after_cleanup = true;
                 }
                 Err(err) => {
@@ -2104,6 +2235,12 @@ impl HashtreeStore {
     /// Add an owner (pubkey) to a blob for Blossom protocol
     /// Multiple users can own the same blob - it's only deleted when all owners remove it
     pub fn set_blob_owner(&self, sha256: &[u8; 32], pubkey: &[u8; 32]) -> Result<()> {
+        let _retention_guard = self
+            .cache_quota
+            .protect_retention_hashes(vec![*sha256])
+            .map_err(|denial| {
+                anyhow::anyhow!("blob ownership update cannot race retention cleanup: {denial}")
+            })?;
         let size = self
             .router
             .blob_size_sync(sha256)
@@ -3357,6 +3494,125 @@ mod tests {
         let owned_blobs = store.list_blobs_by_pubkey(&owner)?;
         assert_eq!(owned_blobs.len(), 3);
 
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn owned_blob_body_survives_concurrent_orphan_cleanup_until_owner_commit() -> Result<()> {
+        let temp = TempDir::new()?;
+        drop(LocalStore::new_unbounded_with_lmdb_map_size(
+            temp.path().join("blobs"),
+            &StorageBackend::Lmdb,
+            Some(LMDB_BLOB_MIN_MAP_SIZE_BYTES),
+        )?);
+        let store = Arc::new(HashtreeStore::with_options_and_backend(
+            temp.path(),
+            None,
+            LMDB_BLOB_MIN_MAP_SIZE_BYTES,
+            true,
+            &StorageBackend::Lmdb,
+        )?);
+        let data = vec![0x5a; 64 * 1024];
+        let hash = sha256(&data);
+        let owner = [0x42; 32];
+        let (body_ready_tx, body_ready_rx) = std::sync::mpsc::channel();
+        let (allow_owner_tx, allow_owner_rx) = std::sync::mpsc::channel();
+
+        let writer_store = Arc::clone(&store);
+        let writer = std::thread::spawn(move || {
+            writer_store.put_owned_blob_with_inserted_after_body(&data, &owner, || {
+                body_ready_tx.send(()).expect("signal body write");
+                allow_owner_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("owner commit release");
+            })
+        });
+
+        body_ready_rx.recv_timeout(std::time::Duration::from_secs(10))?;
+        assert!(store.blob_exists(&hash)?, "body write must be visible");
+        assert!(
+            !store.blob_has_owners(&hash)?,
+            "test must pause before owner metadata commits"
+        );
+
+        assert_eq!(
+            store.relieve_cached_blob_write_pressure(64 * 1024)?,
+            0,
+            "orphan cleanup must skip a body awaiting durable metadata"
+        );
+        assert!(
+            store.blob_exists(&hash)?,
+            "concurrent cleanup deleted an in-flight owned body"
+        );
+
+        allow_owner_tx.send(())?;
+        let (_, inserted) = writer.join().expect("owned writer panicked")?;
+        assert!(inserted);
+        assert!(store.blob_exists(&hash)?);
+        assert!(store.is_blob_owner(&hash, &owner)?);
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn owned_blob_batch_survives_concurrent_orphan_cleanup_until_owner_commit() -> Result<()> {
+        let temp = TempDir::new()?;
+        drop(LocalStore::new_unbounded_with_lmdb_map_size(
+            temp.path().join("blobs"),
+            &StorageBackend::Lmdb,
+            Some(LMDB_BLOB_MIN_MAP_SIZE_BYTES),
+        )?);
+        let store = Arc::new(HashtreeStore::with_options_and_backend(
+            temp.path(),
+            None,
+            LMDB_BLOB_MIN_MAP_SIZE_BYTES,
+            true,
+            &StorageBackend::Lmdb,
+        )?);
+        let first = vec![0x61; 32 * 1024];
+        let second = vec![0x62; 48 * 1024];
+        let first_hash = sha256(&first);
+        let second_hash = sha256(&second);
+        let owner = [0x24; 32];
+        let items = vec![(first_hash, first), (second_hash, second)];
+        let (bodies_ready_tx, bodies_ready_rx) = std::sync::mpsc::channel();
+        let (allow_owner_tx, allow_owner_rx) = std::sync::mpsc::channel();
+
+        let writer_store = Arc::clone(&store);
+        let writer = std::thread::spawn(move || {
+            writer_store.put_owned_blobs_report_after_bodies(&items, &owner, || {
+                bodies_ready_tx.send(()).expect("signal batch body write");
+                allow_owner_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("batch owner commit release");
+            })
+        });
+
+        bodies_ready_rx.recv_timeout(std::time::Duration::from_secs(10))?;
+        for hash in [first_hash, second_hash] {
+            assert!(store.blob_exists(&hash)?, "batch body must be visible");
+            assert!(
+                !store.blob_has_owners(&hash)?,
+                "test must pause before batch owner metadata commits"
+            );
+        }
+
+        assert_eq!(
+            store.relieve_cached_blob_write_pressure(80 * 1024)?,
+            0,
+            "orphan cleanup must skip all bodies awaiting batch metadata"
+        );
+        assert!(store.blob_exists(&first_hash)?);
+        assert!(store.blob_exists(&second_hash)?);
+
+        allow_owner_tx.send(())?;
+        let report = writer.join().expect("owned batch writer panicked")?;
+        assert_eq!(report.inserted, 2);
+        for hash in [first_hash, second_hash] {
+            assert!(store.blob_exists(&hash)?);
+            assert!(store.is_blob_owner(&hash, &owner)?);
+        }
         Ok(())
     }
 

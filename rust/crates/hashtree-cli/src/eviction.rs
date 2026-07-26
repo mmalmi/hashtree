@@ -39,6 +39,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use hashtree_config::StorageBackend;
     use hashtree_core::from_hex;
     use tempfile::TempDir;
 
@@ -49,7 +50,14 @@ mod tests {
     async fn background_eviction_task_evicts_over_limit_tree() {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = Arc::new(
-            HashtreeStore::with_options(temp_dir.path(), None, 512).expect("create store"),
+            HashtreeStore::with_options_and_backend(
+                temp_dir.path(),
+                None,
+                512,
+                true,
+                &StorageBackend::Fs,
+            )
+            .expect("create store"),
         );
 
         let hash_hex = store.put_blob(&vec![7u8; 1024]).expect("put blob");

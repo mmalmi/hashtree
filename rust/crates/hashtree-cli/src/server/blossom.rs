@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 use super::auth::AppState;
 use super::blob_read::{
-    acquire_blob_read, acquire_blob_write, blob_read_timeout, BLOB_READ_BUSY, BLOB_WRITE_BUSY,
+    run_blob_metadata_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY, BLOB_WRITE_BUSY,
 };
 use super::ingest_filter::{
     content_type_base, is_chk_content_type, validate_untrusted_blob, IngestRejection,
@@ -509,11 +509,11 @@ impl From<anyhow::Error> for BlobWriteError {
     }
 }
 
-fn blob_write_queue_error(reason: &'static str) -> BlobWriteError {
-    if reason == BLOB_WRITE_BUSY {
-        BlobWriteError::Busy(reason)
+fn blob_io_write_error(error: BlobIoTaskError) -> BlobWriteError {
+    if error.is_busy() {
+        BlobWriteError::Busy(BLOB_WRITE_BUSY)
     } else {
-        BlobWriteError::Storage(anyhow::anyhow!(reason))
+        BlobWriteError::Storage(anyhow::anyhow!(error))
     }
 }
 
@@ -952,41 +952,37 @@ pub async fn upload_check(
     let existing = if unique.is_empty() {
         Vec::new()
     } else {
-        let permit = match acquire_blob_read().await {
-            Ok(permit) => permit,
-            Err(_) => {
+        let store = state.store.clone();
+        let lookup_hashes = unique.clone();
+        match run_blob_metadata_read(move || {
+            store
+                .router()
+                .existing_local_hashes_in_sorted_candidates(&lookup_hashes)
+        })
+        .await
+        {
+            Ok(Ok(existing)) => existing,
+            Ok(Err(error)) => {
+                tracing::debug!("Blossom upload check failed: {}", error);
+                return blossom_json_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage error");
+            }
+            Err(error) if error.is_busy() => {
                 return blossom_retryable_json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     BLOB_READ_BUSY,
                     1,
                 );
             }
-        };
-        let store = state.store.clone();
-        let lookup_hashes = unique.clone();
-        let lookup = tokio::task::spawn_blocking(move || {
-            store
-                .router()
-                .existing_local_hashes_in_sorted_candidates(&lookup_hashes)
-        });
-        let result = tokio::time::timeout(blob_read_timeout(), lookup).await;
-        drop(permit);
-        match result {
-            Ok(Ok(Ok(existing))) => existing,
-            Ok(Ok(Err(error))) => {
-                tracing::debug!("Blossom upload check failed: {}", error);
-                return blossom_json_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage error");
-            }
-            Ok(Err(error)) => {
-                tracing::debug!("Blossom upload check task failed: {}", error);
-                return blossom_json_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage error");
-            }
-            Err(_) => {
+            Err(error) if error.is_timeout() => {
                 return blossom_retryable_json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Blob check timed out",
                     1,
                 );
+            }
+            Err(error) => {
+                tracing::debug!("Blossom upload check task failed: {}", error);
+                return blossom_json_error(StatusCode::INTERNAL_SERVER_ERROR, "Storage error");
             }
         }
     };
@@ -1053,9 +1049,10 @@ pub async fn head_blob(
     let blob_size = if let Some(cached) = state.blob_cache.get_size(&sha256_hex) {
         Ok(Ok(cached))
     } else {
-        let permit = match acquire_blob_read().await {
-            Ok(permit) => permit,
-            Err(_) => {
+        let store = state.store.clone();
+        let result = match run_blob_metadata_read(move || store.blob_size(&sha256_bytes)).await {
+            Ok(result) => Ok(result),
+            Err(error) if error.is_busy() => {
                 return Response::builder()
                     .status(StatusCode::SERVICE_UNAVAILABLE)
                     .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -1065,13 +1062,6 @@ pub async fn head_blob(
                     .body(Body::empty())
                     .unwrap();
             }
-        };
-        let store = state.store.clone();
-        let size_read = tokio::task::spawn_blocking(move || store.blob_size(&sha256_bytes));
-        let timed = tokio::time::timeout(blob_read_timeout(), size_read).await;
-        drop(permit);
-        let result = match timed {
-            Ok(result) => result.map_err(|_| ()),
             Err(_) => Err(()),
         };
         if let Ok(Ok(size)) = result {
@@ -1123,10 +1113,8 @@ async fn store_blossom_blob_without_blocking_runtime(
     hasher.update(&data);
     let hash_hex = hex::encode(hasher.finalize());
     let data_for_cache = data.clone();
-    let permit = acquire_blob_write().await.map_err(blob_write_queue_error)?;
     let store = state.store.clone();
-    let inserted = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+    let inserted = run_blob_write(move || {
         let inserted = if track_ownership {
             store.put_owned_blob_with_inserted(&data, &pubkey)?.1
         } else {
@@ -1135,7 +1123,7 @@ async fn store_blossom_blob_without_blocking_runtime(
         Ok::<_, anyhow::Error>(inserted)
     })
     .await
-    .map_err(|err| anyhow::anyhow!("blob write task failed: {}", err))??;
+    .map_err(blob_io_write_error)??;
     state
         .blob_cache
         .put_size(hash_hex.clone(), Some(data_for_cache.len() as u64));
@@ -1687,24 +1675,22 @@ async fn uploaded_blob_already_exists(
         return Ok(true);
     }
 
-    let permit = acquire_blob_read().await.map_err(str::to_string)?;
     let store = state.store.clone();
-    let size_read = tokio::task::spawn_blocking(move || {
+    let result = run_blob_metadata_read(move || {
         store
             .blob_size(&sha256_hash)
             .map_err(|error| error.to_string())
-    });
-
-    let result = tokio::time::timeout(blob_read_timeout(), size_read).await;
-    drop(permit);
+    })
+    .await;
     match result {
-        Ok(Ok(Ok(size))) => {
+        Ok(Ok(size)) => {
             state.blob_cache.put_size(sha256_hex.to_string(), size);
             Ok(size.is_some())
         }
-        Ok(Ok(Err(error))) => Err(error),
-        Ok(Err(error)) => Err(format!("blob existence task failed: {}", error)),
-        Err(_) => Err("blob existence check timed out".to_string()),
+        Ok(Err(error)) => Err(error),
+        Err(error) if error.is_busy() => Err(BLOB_READ_BUSY.to_string()),
+        Err(error) if error.is_timeout() => Err("blob existence check timed out".to_string()),
+        Err(error) => Err(format!("blob existence task failed: {}", error)),
     }
 }
 
@@ -1713,7 +1699,7 @@ async fn set_existing_blob_owner_without_body_write(
     sha256_hash: [u8; 32],
     pubkey: [u8; 32],
 ) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || state.store.set_blob_owner(&sha256_hash, &pubkey))
+    run_blob_write(move || state.store.set_blob_owner(&sha256_hash, &pubkey))
         .await
         .map_err(|error| anyhow::anyhow!("blob owner task failed: {}", error))??;
     Ok(())
@@ -2240,14 +2226,9 @@ async fn upload_decoded_blob_batch(
     }
     let prepare_ms = started_at.elapsed().as_millis();
 
-    let permit = match acquire_blob_write().await {
-        Ok(permit) => permit,
-        Err(reason) => return blob_write_error_response(blob_write_queue_error(reason)),
-    };
     let store = state.store.clone();
     let store_started = Instant::now();
-    let stored = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+    let stored = run_blob_write(move || {
         let report = if is_allowed_author {
             store.put_owned_blobs_report(&items, &pubkey_bytes)
         } else {
@@ -2256,7 +2237,7 @@ async fn upload_decoded_blob_batch(
         Ok::<_, anyhow::Error>((report, items))
     })
     .await
-    .map_err(|error| anyhow::anyhow!("blob batch write task failed: {}", error));
+    .map_err(blob_io_write_error);
     let store_ms = store_started.elapsed().as_millis();
     let total_ms = started_at.elapsed().as_millis();
 
@@ -2322,7 +2303,8 @@ async fn upload_decoded_blob_batch(
                 ))
                 .unwrap()
         }
-        Ok(Err(error)) | Err(error) => blob_write_error_response(error.into()),
+        Ok(Err(error)) => blob_write_error_response(error.into()),
+        Err(error) => blob_write_error_response(error),
     }
 }
 
@@ -2429,41 +2411,39 @@ pub async fn delete_blob(
         }
     };
 
-    // Check ownership - user must be one of the owners (O(1) lookup with composite key)
-    match state.store.is_blob_owner(&sha256_bytes, &pubkey_bytes) {
-        Ok(true) => {
-            // User is an owner, proceed with delete
+    // Check ownership off the async runtime. Keep both lookups in one admitted
+    // metadata task so a delete cannot amplify blocking-pool pressure.
+    let store = state.store.clone();
+    let ownership = run_blob_metadata_read(move || {
+        let is_owner = store.is_blob_owner(&sha256_bytes, &pubkey_bytes)?;
+        let has_owners = if is_owner {
+            true
+        } else {
+            store.blob_has_owners(&sha256_bytes)?
+        };
+        Ok::<_, anyhow::Error>((is_owner, has_owners))
+    })
+    .await;
+    match ownership {
+        Ok(Ok((true, _))) => {}
+        Ok(Ok((false, true))) => {
+            return Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header("X-Reason", "Not a blob owner")
+                .body(Body::empty())
+                .unwrap();
         }
-        Ok(false) => {
-            // Check if blob exists at all (for proper error message)
-            match state.store.blob_has_owners(&sha256_bytes) {
-                Ok(true) => {
-                    return Response::builder()
-                        .status(StatusCode::FORBIDDEN)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .header("X-Reason", "Not a blob owner")
-                        .body(Body::empty())
-                        .unwrap();
-                }
-                Ok(false) => {
-                    return Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
-                        .header("X-Reason", "Blob not found")
-                        .body(Body::empty())
-                        .unwrap();
-                }
-                Err(_) => {
-                    return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .body(Body::empty())
-                        .unwrap();
-                }
-            }
+        Ok(Ok((false, false))) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                .header("X-Reason", "Blob not found")
+                .body(Body::empty())
+                .unwrap();
         }
-        Err(_) => {
+        Ok(Err(_)) | Err(_) => {
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -2473,11 +2453,9 @@ pub async fn delete_blob(
     }
 
     // Remove this user's ownership (blob only deleted when no owners remain)
-    match state
-        .store
-        .delete_blossom_blob(&sha256_bytes, &pubkey_bytes)
-    {
-        Ok(fully_deleted) => {
+    let store = state.store.clone();
+    match run_blob_write(move || store.delete_blossom_blob(&sha256_bytes, &pubkey_bytes)).await {
+        Ok(Ok(fully_deleted)) => {
             // Return 200 OK whether blob was fully deleted or just removed from user's list
             // The client doesn't need to know if other owners still exist
             Response::builder()
@@ -2490,7 +2468,7 @@ pub async fn delete_blob(
                 .body(Body::empty())
                 .unwrap()
         }
-        Err(_) => Response::builder()
+        Ok(Err(_)) | Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(Body::empty())
@@ -2553,9 +2531,10 @@ pub async fn list_blobs(
             .unwrap();
     }
 
-    // Get blobs for this pubkey
-    match state.store.list_blobs_by_pubkey(&pubkey_bytes) {
-        Ok(blobs) => {
+    // Get blobs for this pubkey without blocking an async runtime worker.
+    let store = state.store.clone();
+    match run_blob_metadata_read(move || store.list_blobs_by_pubkey(&pubkey_bytes)).await {
+        Ok(Ok(blobs)) => {
             // Apply filters
             let mut filtered: Vec<_> = blobs
                 .into_iter()
@@ -2597,7 +2576,7 @@ pub async fn list_blobs(
                 .body(Body::from(serde_json::to_string(&descriptors).unwrap()))
                 .unwrap()
         }
-        Err(_) => Response::builder()
+        Ok(Err(_)) | Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(header::CONTENT_TYPE, "application/json")
@@ -2665,6 +2644,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::{routing::post, Router};
     use base64::Engine;
+    use hashtree_config::StorageBackend;
     use hashtree_core::sha256;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -3906,8 +3886,16 @@ mod tests {
     #[test]
     fn unowned_public_uploads_use_cache_storage_semantics() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let store =
-            Arc::new(HashtreeStore::with_options(temp_dir.path(), None, 700).expect("store"));
+        let store = Arc::new(
+            HashtreeStore::with_options_and_backend(
+                temp_dir.path(),
+                None,
+                700,
+                true,
+                &StorageBackend::Fs,
+            )
+            .expect("store"),
+        );
         let state = test_app_state(Arc::clone(&store));
 
         let owned = vec![1u8; 280];
@@ -3948,8 +3936,16 @@ mod tests {
     #[test]
     fn owned_blossom_uploads_are_rejected_when_storage_limit_is_full() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let store =
-            Arc::new(HashtreeStore::with_options(temp_dir.path(), None, 500).expect("store"));
+        let store = Arc::new(
+            HashtreeStore::with_options_and_backend(
+                temp_dir.path(),
+                None,
+                500,
+                true,
+                &StorageBackend::Fs,
+            )
+            .expect("store"),
+        );
         let state = test_app_state(Arc::clone(&store));
 
         let first = vec![1u8; 300];

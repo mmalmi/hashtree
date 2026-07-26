@@ -6,12 +6,22 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::quota::{CacheQuotaAdmission, CacheWritePermit};
 use super::{BlobMetadata, HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
 
 const MAX_PINNED_TREE_NODES: usize = 10_000_000;
 const MAX_UNBOUNDED_PINNED_TREE_BYTES: u64 = 1 << 50;
+const ORPHAN_SCAN_PAGE_SIZE: usize = 4_096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrphanCleanupProgress {
+    freed_bytes: u64,
+    scanned: usize,
+    sweep_complete: bool,
+}
 
 /// Resource limits for validating and indexing a complete pinned DAG.
 #[derive(Debug, Clone, Copy)]
@@ -385,73 +395,171 @@ impl HashtreeStore {
         Ok(hashes)
     }
 
-    fn protected_hashes(&self) -> Result<HashSet<Hash>> {
-        let mut protected = HashSet::new();
-
-        let rtxn = self.env.read_txn()?;
-        for (key_bytes, _) in self.blob_trees.iter(&rtxn)?.flatten() {
-            if key_bytes.len() >= 32 {
-                let hash: Hash = key_bytes[..32].try_into().unwrap();
-                protected.insert(hash);
-            }
+    fn socialgraph_root_hashes(&self) -> Result<[Option<Hash>; 4]> {
+        let mut roots = [None; 4];
+        for (index, path) in self.socialgraph_root_files().into_iter().enumerate() {
+            roots[index] = Self::read_stored_cid(&path)?;
         }
-        drop(rtxn);
+        Ok(roots)
+    }
 
+    fn collect_socialgraph_protected(&self, roots: &[Option<Hash>; 4]) -> Result<HashSet<Hash>> {
+        let mut protected = HashSet::new();
         let tree = HashTree::new(HashTreeConfig::new(self.store_arc()).public());
-        for path in self.socialgraph_root_files() {
-            let Some(root_hash) = Self::read_stored_cid(&path)? else {
+        for root_hash in roots {
+            let Some(root_hash) = root_hash else {
                 continue;
             };
-            protected.extend(sync_block_on(self.collect_tree_hashes(&tree, &root_hash))?);
+            protected.extend(sync_block_on(self.collect_tree_hashes(&tree, root_hash))?);
         }
-
         Ok(protected)
     }
 
-    fn evict_disposable_orphans_to_target(&self, target_bytes: u64) -> Result<u64> {
+    /// Return the socialgraph protection snapshot for the active bounded sweep.
+    ///
+    /// Root changes during a sweep are unioned with the existing snapshot.
+    /// This can temporarily over-protect an old DAG, but can never make either
+    /// the old or new root disposable. The union is discarded at the sweep
+    /// boundary and rebuilt from the current roots.
+    fn socialgraph_protected_for_orphan_sweep(&self) -> Result<Arc<HashSet<Hash>>> {
+        let roots = self.socialgraph_root_hashes()?;
+        {
+            let state = self
+                .orphan_scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.socialgraph_roots == Some(roots) {
+                return Ok(Arc::clone(&state.socialgraph_protected));
+            }
+        }
+
+        let newly_protected = self.collect_socialgraph_protected(&roots)?;
+        let mut state = self
+            .orphan_scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.socialgraph_roots == Some(roots) {
+            return Ok(Arc::clone(&state.socialgraph_protected));
+        }
+
+        let protected = if state.sweep.is_some() && state.socialgraph_roots.is_some() {
+            let mut union = (*state.socialgraph_protected).clone();
+            union.extend(newly_protected);
+            union
+        } else {
+            newly_protected
+        };
+        state.socialgraph_roots = Some(roots);
+        state.socialgraph_protected = Arc::new(protected);
+        Ok(Arc::clone(&state.socialgraph_protected))
+    }
+
+    fn metadata_protects_orphan(&self, hash: &Hash) -> Result<bool> {
+        let rtxn = self.env.read_txn()?;
+        if self.pins.get(&rtxn, hash.as_slice())?.is_some() {
+            return Ok(true);
+        }
+        if self
+            .blob_trees
+            .prefix_iter(&rtxn, hash.as_slice())?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let has_owner = self
+            .blob_owners
+            .prefix_iter(&rtxn, hash.as_slice())?
+            .next()
+            .transpose()?
+            .is_some();
+        Ok(has_owner)
+    }
+
+    fn evict_disposable_orphans_page(
+        &self,
+        target_bytes: u64,
+        additional_protected: &HashSet<Hash>,
+        page_size: usize,
+    ) -> Result<OrphanCleanupProgress> {
+        if page_size == 0 {
+            anyhow::bail!("orphan cleanup page size must be greater than zero");
+        }
+
         let stats = self
             .router
             .writable_stats()
             .map_err(|e| anyhow::anyhow!("Failed to get writable stats: {}", e))?;
         let mut current_size = stats.total_bytes;
         if current_size <= target_bytes {
-            return Ok(0);
+            let mut state = self
+                .orphan_scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.sweep = None;
+            state.socialgraph_roots = None;
+            state.socialgraph_protected = Arc::new(HashSet::new());
+            return Ok(OrphanCleanupProgress {
+                freed_bytes: 0,
+                scanned: 0,
+                sweep_complete: false,
+            });
         }
 
-        let rtxn = self.env.read_txn()?;
-        let pinned: HashSet<Hash> = self
-            .pins
-            .iter(&rtxn)?
-            .filter_map(|item| item.ok())
-            .filter_map(|(hash_bytes, _)| {
-                if hash_bytes.len() == 32 {
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(hash_bytes);
-                    Some(hash)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        drop(rtxn);
-
-        let protected_hashes = self.protected_hashes()?;
-        let all_hashes = self
+        let (after, start_after, wrapped) = {
+            let mut state = self
+                .orphan_scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.sweep.is_none() {
+                state.sweep = Some(super::OrphanSweep {
+                    start_after: state.cursor,
+                    wrapped: false,
+                });
+            }
+            let sweep = state.sweep.expect("orphan sweep initialized");
+            (state.cursor, sweep.start_after, sweep.wrapped)
+        };
+        let socialgraph_protected = self.socialgraph_protected_for_orphan_sweep()?;
+        let mut candidates = self
             .router
-            .list_writable()
-            .map_err(|e| anyhow::anyhow!("Failed to list writable hashes: {}", e))?;
+            .scan_writable_hashes_after(after, page_size)
+            .map_err(|e| anyhow::anyhow!("Failed to scan writable hashes: {}", e))?;
+        let backend_page_len = candidates.len();
+        let mut crossed_start = false;
+        if wrapped {
+            let start_after = start_after.expect("only a non-zero cursor sweep wraps");
+            let keep = candidates.partition_point(|hash| *hash <= start_after);
+            crossed_start = keep < candidates.len();
+            candidates.truncate(keep);
+        }
 
         let mut freed = 0u64;
-        for hash in all_hashes {
+        let mut scanned = 0usize;
+        let mut last_examined = None;
+        for hash in &candidates {
             if current_size <= target_bytes {
                 break;
             }
+            let hash = *hash;
+            scanned += 1;
+            last_examined = Some(hash);
 
-            if pinned.contains(&hash) || protected_hashes.contains(&hash) {
+            if socialgraph_protected.contains(&hash)
+                || additional_protected.contains(&hash)
+                || self.metadata_protects_orphan(&hash)?
+            {
                 continue;
             }
 
-            if self.blob_has_owners(&hash)? {
+            let Some(_delete_guard) = self.cache_quota.begin_retention_delete(hash) else {
+                continue;
+            };
+            // Recheck all durable metadata after the deletion claim. Ownership
+            // writers serialize with the claim; the point checks also narrow
+            // the pin/index publication window without materializing either DB.
+            if self.metadata_protects_orphan(&hash)? {
                 continue;
             }
 
@@ -478,7 +586,143 @@ impl HashtreeStore {
             }
         }
 
-        Ok(freed)
+        let target_reached = current_size <= target_bytes;
+        let processed_whole_page = scanned == candidates.len();
+        let backend_exhausted = backend_page_len < page_size;
+        let mut sweep_complete = false;
+        let mut state = self
+            .orphan_scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(last_examined) = last_examined {
+            state.cursor = Some(last_examined);
+        }
+
+        if target_reached {
+            state.sweep = None;
+            state.socialgraph_roots = None;
+            state.socialgraph_protected = Arc::new(HashSet::new());
+        } else if processed_whole_page {
+            let sweep = state.sweep.expect("active orphan sweep");
+            if sweep.wrapped {
+                if crossed_start || backend_exhausted {
+                    state.cursor = sweep.start_after;
+                    state.sweep = None;
+                    sweep_complete = true;
+                }
+            } else if backend_exhausted {
+                if sweep.start_after.is_none() {
+                    state.cursor = None;
+                    state.sweep = None;
+                    sweep_complete = true;
+                } else {
+                    state.cursor = None;
+                    state.sweep = Some(super::OrphanSweep {
+                        wrapped: true,
+                        ..sweep
+                    });
+                }
+            }
+            if sweep_complete {
+                state.socialgraph_roots = None;
+                state.socialgraph_protected = Arc::new(HashSet::new());
+            }
+        }
+
+        Ok(OrphanCleanupProgress {
+            freed_bytes: freed,
+            scanned,
+            sweep_complete,
+        })
+    }
+
+    fn evict_disposable_orphans_to_target_raw(
+        &self,
+        target_bytes: u64,
+        additional_protected: &HashSet<Hash>,
+    ) -> Result<OrphanCleanupProgress> {
+        self.evict_disposable_orphans_page(
+            target_bytes,
+            additional_protected,
+            ORPHAN_SCAN_PAGE_SIZE,
+        )
+    }
+
+    fn evict_disposable_orphans_to_target(&self, target_bytes: u64) -> Result<u64> {
+        let cleanup = self
+            .cache_quota
+            .begin_standalone_cleanup()
+            .map_err(|denial| anyhow::anyhow!(denial.to_string()))?;
+        let result =
+            self.evict_disposable_orphans_to_target_raw(target_bytes, cleanup.inflight_hashes());
+        if result.is_ok() {
+            let after_usage = self
+                .router
+                .writable_stats()
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to get writable stats after cache cleanup: {error}")
+                })?
+                .total_bytes;
+            cleanup.complete(after_usage);
+        }
+        result.map(|progress| progress.freed_bytes)
+    }
+
+    pub(super) fn prepare_cached_blob_write(
+        &self,
+        incoming_bytes: u64,
+        hashes: Vec<Hash>,
+        force_cleanup: bool,
+    ) -> Result<CacheWritePermit<'_>> {
+        if let Some(denial) = self.cache_quota.quick_denial() {
+            anyhow::bail!(denial.to_string());
+        }
+
+        let observed_usage = if self.max_size_bytes == 0 {
+            0
+        } else {
+            self.router
+                .writable_stats()
+                .map_err(|error| anyhow::anyhow!("Failed to get writable stats: {error}"))?
+                .total_bytes
+        };
+        match self
+            .cache_quota
+            .begin_admission(
+                observed_usage,
+                incoming_bytes,
+                hashes,
+                self.max_size_bytes,
+                force_cleanup,
+            )
+            .map_err(|denial| anyhow::anyhow!(denial.to_string()))?
+        {
+            CacheQuotaAdmission::Admitted(permit) => Ok(permit),
+            CacheQuotaAdmission::Cleanup(cleanup) => {
+                let progress = self.evict_disposable_orphans_to_target_raw(
+                    cleanup.target_bytes(),
+                    cleanup.inflight_hashes(),
+                )?;
+                let after_usage = self
+                    .router
+                    .writable_stats()
+                    .map_err(|error| {
+                        anyhow::anyhow!("Failed to get writable stats after cache cleanup: {error}")
+                    })?
+                    .total_bytes;
+                cleanup
+                    .complete(after_usage, progress.freed_bytes, progress.sweep_complete)
+                    .map_err(|denial| anyhow::anyhow!(denial.to_string()))
+            }
+        }
+    }
+
+    /// Number of cache/orphan cleanup leadership epochs started by this store.
+    ///
+    /// This is intentionally a cheap diagnostic so overload tests and operators
+    /// can verify that concurrent cache pressure coalesces into one scanner.
+    pub fn cache_cleanup_epoch_count(&self) -> u64 {
+        self.cache_quota.cleanup_epoch_count()
     }
 
     pub fn make_room_for_cached_blob(&self, incoming_bytes: u64) -> Result<u64> {
@@ -1021,9 +1265,32 @@ impl HashtreeStore {
         })
     }
 
-    /// Unindex a tree - removes blob-tree mappings and deletes orphaned blobs
-    /// Returns the number of bytes freed
+    /// Unindex a tree - removes blob-tree mappings and deletes orphaned blobs.
+    /// Returns the number of bytes freed.
     pub fn unindex_tree(&self, root_hash: &Hash) -> Result<u64> {
+        let cleanup = self
+            .cache_quota
+            .begin_standalone_cleanup()
+            .map_err(|denial| anyhow::anyhow!(denial.to_string()))?;
+        let result = self.unindex_tree_raw(root_hash, cleanup.inflight_hashes());
+        if result.is_ok() {
+            let after_usage = self
+                .router
+                .writable_stats()
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to get writable stats after tree unindex: {error}")
+                })?
+                .total_bytes;
+            cleanup.complete(after_usage);
+        }
+        result
+    }
+
+    fn unindex_tree_raw(
+        &self,
+        root_hash: &Hash,
+        additional_protected: &HashSet<Hash>,
+    ) -> Result<u64> {
         let root_hex = to_hex(root_hash);
 
         let store = self.store_arc();
@@ -1052,8 +1319,20 @@ impl HashtreeStore {
                 }
             }
 
-            // If orphaned, delete the blob
-            if !has_other_tree {
+            let has_owner = self
+                .blob_owners
+                .prefix_iter(&wtxn, tracked_hash.as_slice())?
+                .next()
+                .transpose()?
+                .is_some();
+
+            // Tree retention must not delete committed Blossom data or a body
+            // whose owner/index transaction is still in flight.
+            if !has_other_tree && !has_owner && !additional_protected.contains(tracked_hash) {
+                let Some(_delete_guard) = self.cache_quota.begin_retention_delete(*tracked_hash)
+                else {
+                    continue;
+                };
                 if let Some(size) = self
                     .router
                     .blob_size_sync(tracked_hash)
@@ -1176,17 +1455,42 @@ impl HashtreeStore {
     }
 
     fn evict_with_policy_to_target(&self, current: u64, target: u64) -> Result<u64> {
+        let cleanup = self
+            .cache_quota
+            .begin_standalone_cleanup()
+            .map_err(|denial| anyhow::anyhow!(denial.to_string()))?;
         let mut freed = 0u64;
         let mut current_size = current;
 
         // Phase 1: Evict orphaned blobs (not in any tree and not pinned)
         if self.evict_orphans {
-            let orphan_freed = self.evict_disposable_orphans_to_target(target)?;
-            freed += orphan_freed;
-            current_size = current_size.saturating_sub(orphan_freed);
+            let orphan_progress =
+                self.evict_disposable_orphans_to_target_raw(target, cleanup.inflight_hashes())?;
+            freed += orphan_progress.freed_bytes;
+            current_size = current_size.saturating_sub(orphan_progress.freed_bytes);
 
-            if orphan_freed > 0 {
-                tracing::info!("Evicted orphaned blobs: {} bytes freed", orphan_freed);
+            if orphan_progress.freed_bytes > 0 {
+                tracing::info!(
+                    "Evicted orphaned blobs: {} bytes freed",
+                    orphan_progress.freed_bytes
+                );
+            }
+
+            // Do not evict indexed trees merely because the current bounded
+            // orphan page was protected. Finish one complete orphan sweep
+            // before escalating to durable tree policy.
+            if current_size > target && !orphan_progress.sweep_complete {
+                let after_usage = self
+                    .router
+                    .writable_stats()
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Failed to get writable stats after bounded orphan cleanup: {error}"
+                        )
+                    })?
+                    .total_bytes;
+                cleanup.complete(after_usage);
+                return Ok(freed);
             }
         } else {
             tracing::debug!("Skipping orphan blob eviction; storage.evict_orphans=false");
@@ -1197,6 +1501,14 @@ impl HashtreeStore {
             if freed > 0 {
                 tracing::info!("Eviction complete: {} bytes freed", freed);
             }
+            let after_usage = self
+                .router
+                .writable_stats()
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to get writable stats after retention cleanup: {error}")
+                })?
+                .total_bytes;
+            cleanup.complete(after_usage);
             return Ok(freed);
         }
 
@@ -1216,7 +1528,7 @@ impl HashtreeStore {
                 continue;
             }
 
-            let tree_freed = self.unindex_tree(&root_hash)?;
+            let tree_freed = self.unindex_tree_raw(&root_hash, cleanup.inflight_hashes())?;
             freed += tree_freed;
             current_size = current_size.saturating_sub(tree_freed);
 
@@ -1233,6 +1545,14 @@ impl HashtreeStore {
             tracing::info!("Eviction complete: {} bytes freed", freed);
         }
 
+        let after_usage = self
+            .router
+            .writable_stats()
+            .map_err(|error| {
+                anyhow::anyhow!("Failed to get writable stats after retention cleanup: {error}")
+            })?
+            .total_bytes;
+        cleanup.complete(after_usage);
         Ok(freed)
     }
 
@@ -1290,6 +1610,7 @@ impl HashtreeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashtree_config::StorageBackend;
     use hashtree_core::Cid;
     use hashtree_index::{BTree, BTreeOptions};
     use tempfile::TempDir;
@@ -1333,10 +1654,220 @@ mod tests {
             .expect("non-empty deep root")
     }
 
+    #[cfg(feature = "lmdb")]
+    fn bounded_lmdb_store(path: &Path, max_size_bytes: u64) -> HashtreeStore {
+        // Seed the legacy single-store path so the shared-layout opener does
+        // not create a fresh PoolStore. Bounded orphan deletion is
+        // intentionally LMDB-only until PoolStore has a remove-hot-copy API.
+        drop(
+            super::super::LocalStore::new_unbounded_with_lmdb_map_size(
+                path.join("blobs"),
+                &StorageBackend::Lmdb,
+                Some(16 * 1024 * 1024),
+            )
+            .expect("seed single LMDB"),
+        );
+        HashtreeStore::with_options_and_backend(
+            path,
+            None,
+            max_size_bytes,
+            true,
+            &StorageBackend::Lmdb,
+        )
+        .expect("LMDB store")
+    }
+
+    #[cfg(feature = "lmdb")]
+    fn put_ordered_hashes(store: &HashtreeStore, count: u8) -> Vec<Hash> {
+        let mut hashes = Vec::new();
+        for value in 1..=count {
+            let data = [value];
+            let hash = hashtree_core::sha256(&data);
+            store
+                .router
+                .put_sync(hash, &data)
+                .expect("put ordered test hash");
+            hashes.push(hash);
+        }
+        hashes.sort_unstable();
+        hashes
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn bounded_orphan_sweep_progresses_and_preserves_all_durable_classes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = bounded_lmdb_store(temp_dir.path(), 1024 * 1024);
+        let hashes = put_ordered_hashes(&store, 8);
+
+        store.pin(&hashes[0]).expect("pin first hash");
+        let mut tree_key = [0u8; 64];
+        tree_key[..32].copy_from_slice(&hashes[1]);
+        tree_key[32..].fill(99);
+        let mut wtxn = store.env.write_txn().expect("metadata write");
+        store
+            .blob_trees
+            .put(&mut wtxn, &tree_key, &())
+            .expect("index second hash");
+        wtxn.commit().expect("commit tree index");
+        store
+            .set_blob_owner(&hashes[2], &[77; 32])
+            .expect("own third hash");
+        write_root_file(
+            &temp_dir.path().join("socialgraph/events-root.msgpack"),
+            &Cid::public(hashes[3]),
+        );
+
+        let mut progress = Vec::new();
+        loop {
+            let page = store
+                .evict_disposable_orphans_page(0, &HashSet::new(), 2)
+                .expect("bounded orphan page");
+            assert!(page.scanned <= 2, "page exceeded its candidate bound");
+            progress.push(page);
+            if page.sweep_complete {
+                break;
+            }
+            assert!(progress.len() < 10, "bounded sweep did not converge");
+        }
+
+        assert_eq!(progress[0].scanned, 2);
+        assert_eq!(progress[0].freed_bytes, 0);
+        assert!(!progress[0].sweep_complete);
+        assert_eq!(progress.iter().map(|page| page.freed_bytes).sum::<u64>(), 4);
+        assert!(
+            progress.len() >= 5,
+            "an exact-size final page must require a bounded end probe"
+        );
+        for hash in &hashes[..4] {
+            assert!(store.blob_exists(hash).expect("protected blob lookup"));
+        }
+        for hash in &hashes[4..] {
+            assert!(!store.blob_exists(hash).expect("orphan blob lookup"));
+        }
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn socialgraph_root_change_unions_protection_until_sweep_boundary() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = bounded_lmdb_store(temp_dir.path(), 1024 * 1024);
+        let hashes = put_ordered_hashes(&store, 3);
+        let old_root = hashes[0];
+        let new_root = hashes[1];
+        let orphan = hashes[2];
+        let root_path = temp_dir.path().join("socialgraph/events-root.msgpack");
+        write_root_file(&root_path, &Cid::public(old_root));
+
+        let first = store
+            .evict_disposable_orphans_page(0, &HashSet::new(), 1)
+            .expect("first root page");
+        assert_eq!(first.scanned, 1);
+        assert_eq!(first.freed_bytes, 0);
+        write_root_file(&root_path, &Cid::public(new_root));
+
+        let second = store
+            .evict_disposable_orphans_page(0, &HashSet::new(), 1)
+            .expect("changed root page");
+        assert_eq!(second.scanned, 1);
+        assert_eq!(second.freed_bytes, 0);
+        {
+            let state = store
+                .orphan_scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(state.socialgraph_protected.contains(&old_root));
+            assert!(state.socialgraph_protected.contains(&new_root));
+        }
+
+        let third = store
+            .evict_disposable_orphans_page(0, &HashSet::new(), 1)
+            .expect("orphan page");
+        assert_eq!(third.freed_bytes, 1);
+        assert!(!store.blob_exists(&orphan).expect("orphan lookup"));
+        assert!(store.blob_exists(&old_root).expect("old root lookup"));
+        assert!(store.blob_exists(&new_root).expect("new root lookup"));
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn poolstore_orphan_cleanup_fails_closed_without_deleting_catalog_data() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_options_and_backend(
+            temp_dir.path(),
+            None,
+            1024 * 1024,
+            true,
+            &StorageBackend::Lmdb,
+        )
+        .expect("fresh shared store");
+        assert!(matches!(
+            store.router.local_store().as_ref(),
+            super::super::LocalStore::Pool(_)
+        ));
+        let data = b"durable pool catalog data";
+        let hash = hashtree_core::sha256(data);
+        store.router.put_sync(hash, data).expect("put pool blob");
+
+        let error = store
+            .evict_disposable_orphans_to_target(0)
+            .expect_err("PoolStore orphan deletion must fail closed");
+        assert!(
+            error.to_string().contains("tier-aware deletion"),
+            "unexpected error: {error}"
+        );
+        assert!(store.blob_exists(&hash).expect("pool blob lookup"));
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn hash_inserted_before_cursor_is_seen_after_wrap() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = bounded_lmdb_store(temp_dir.path(), 1024 * 1024);
+        let mut entries = (1u8..=8)
+            .map(|value| {
+                let data = vec![value];
+                (hashtree_core::sha256(&data), data)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(hash, _)| *hash);
+        let (behind_cursor_hash, behind_cursor_data) = entries[0].clone();
+        for (hash, data) in &entries[1..=3] {
+            store
+                .router
+                .put_sync(*hash, data)
+                .expect("put initial cursor fixture");
+        }
+
+        let first = store
+            .evict_disposable_orphans_page(0, &HashSet::new(), 1)
+            .expect("first page");
+        assert_eq!(first.scanned, 1);
+        assert_eq!(first.freed_bytes, 1);
+        store
+            .router
+            .put_sync(behind_cursor_hash, &behind_cursor_data)
+            .expect("insert behind active cursor");
+
+        for _ in 0..8 {
+            store
+                .evict_disposable_orphans_page(0, &HashSet::new(), 1)
+                .expect("continue wrapped sweep");
+            if !store
+                .blob_exists(&behind_cursor_hash)
+                .expect("behind-cursor lookup")
+            {
+                return;
+            }
+        }
+        panic!("hash inserted behind the active cursor was not seen after wrap");
+    }
+
+    #[cfg(feature = "lmdb")]
     #[test]
     fn orphan_cleanup_keeps_indexed_tree_hashes() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024).expect("store");
+        let store = bounded_lmdb_store(temp_dir.path(), 1024);
         let cid = build_test_tree(&store);
 
         store
@@ -1499,10 +2030,11 @@ mod tests {
         assert_eq!(reparsed.4, PRIORITY_OTHER);
     }
 
+    #[cfg(feature = "lmdb")]
     #[test]
     fn eviction_prefers_oldest_tree_within_priority() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let store = HashtreeStore::with_options(temp_dir.path(), None, 500).expect("store");
+        let store = bounded_lmdb_store(temp_dir.path(), 500);
 
         let hash1 = hashtree_core::sha256(&[1u8; 200]);
         let hash2 = hashtree_core::sha256(&[2u8; 200]);
@@ -1529,10 +2061,11 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "lmdb")]
     #[test]
     fn orphan_cleanup_keeps_socialgraph_root_hashes() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let store = HashtreeStore::with_options(temp_dir.path(), None, 1024).expect("store");
+        let store = bounded_lmdb_store(temp_dir.path(), 1024);
         let cid = build_test_tree(&store);
         write_root_file(
             &temp_dir.path().join("socialgraph/events-root.msgpack"),

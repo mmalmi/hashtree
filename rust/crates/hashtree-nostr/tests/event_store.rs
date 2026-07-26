@@ -2030,6 +2030,42 @@ fn kind_41_is_treated_as_replaceable() {
 }
 
 #[test]
+fn adding_an_existing_event_repairs_a_missing_replaceable_projection() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let store = NostrEventStore::new(Arc::clone(&backing));
+        let author = "a".repeat(64);
+        let contact_list = canonical_store_event(&author, 5, 3, Vec::new(), "local contact list");
+
+        let root = store.add(None, contact_list.clone()).await.unwrap();
+        let root_without_replaceable = store
+            .clear_replaceable_indexes(&root)
+            .await
+            .expect("clear replaceable projection");
+
+        let repaired_root = store
+            .add(Some(&root_without_replaceable), contact_list.clone())
+            .await
+            .expect("re-adding an existing event must be idempotent");
+
+        assert_eq!(
+            store
+                .get_by_id(Some(&repaired_root), &contact_list.id)
+                .await
+                .unwrap(),
+            Some(contact_list.clone())
+        );
+        assert_eq!(
+            store
+                .get_replaceable(Some(&repaired_root), &author, 3)
+                .await
+                .unwrap(),
+            Some(contact_list)
+        );
+    });
+}
+
+#[test]
 fn parameterized_replaceable_without_d_tag_uses_empty_identifier() {
     block_on(async {
         let store = NostrEventStore::new(Arc::new(MemoryStore::new()));

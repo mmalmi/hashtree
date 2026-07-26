@@ -101,10 +101,20 @@ pub(super) async fn daemon_status(
     let optimistic_uploads = blossom::optimistic_upload_queue_snapshot(&state);
     let upload_replicas = blossom::blossom_upload_replica_queue_snapshot(&state);
     let queues = json!({
+        "blocking_io": {
+            "runtime_threads": blob_io.blocking_threads,
+            "reserved_runtime_threads": blob_io.reserved_blocking_threads,
+            "limit": blob_io.total_limit,
+            "in_use": blob_io.total_in_use,
+            "available": blob_io.total_available,
+        },
         "blob_reads": {
             "limit": blob_io.read_limit,
             "in_use": blob_io.read_in_use,
             "available": blob_io.read_available,
+            "metadata_limit": blob_io.metadata_read_limit,
+            "metadata_in_use": blob_io.metadata_read_in_use,
+            "metadata_available": blob_io.metadata_read_available,
             "queue_timeout_ms": blob_io.read_queue_timeout_ms,
             "task_timeout_ms": blob_io.read_task_timeout_ms,
         },

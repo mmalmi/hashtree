@@ -27,8 +27,6 @@ mod app;
 use anyhow::Result;
 use std::env;
 
-const DEFAULT_MAX_BLOCKING_THREADS: usize = 64;
-const MAX_BLOCKING_THREADS_ENV: &str = "HTREE_MAX_BLOCKING_THREADS";
 const WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -46,7 +44,7 @@ fn main() -> Result<()> {
         runtime.worker_threads(worker_threads);
     }
     runtime.max_blocking_threads(
-        env_usize(MAX_BLOCKING_THREADS_ENV).unwrap_or(DEFAULT_MAX_BLOCKING_THREADS),
+        hashtree_cli::runtime_config::runtime_capacity().max_blocking_threads,
     );
 
     runtime.build()?.block_on(app::run())
