@@ -18,8 +18,11 @@ that a root does not exist.
 
 ## Peer discovery
 
-Peer identity is a Nostr public key (`npub`). FIPS discovery and authentication
-use the scope:
+Peer identity is a Nostr public key (`npub`).
+[FIPS](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips)
+finds reachable peers through configured addresses, Nostr advertisements, local
+announcements, or mesh introductions, then establishes an authenticated route.
+Public Hashtree nodes share this discovery scope:
 
 ```text
 fips-overlay-v1
@@ -36,12 +39,28 @@ blob provider.
 
 ## Blob protocol v1
 
-Blob transfer uses
-[fips-tcp](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips-tcp)
-service `39018`, which provides ordered delivery, flow control, and
-retransmission. Hashtree may retry a reset session once.
+To read a tree, the client fetches its root blob, reads the child hashes, and
+repeats for the required nodes and chunks. Each lookup fetches one immutable
+blob by SHA-256, never by filename or path:
 
-One request and one reply are exchanged per authenticated TCP/FIPS session.
+1. The client selects an explicitly configured provider or one advertising
+   `hashtree.blob/1`.
+2. It opens an authenticated
+   [fips-tcp](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips-tcp)
+   session to service `39018`.
+3. It sends the blob hash and an HTL forwarding budget.
+4. The provider checks its configured blob routes and replies with the raw
+   stored bytes or `NoResult`.
+5. The client verifies `SHA256(bytes) == requested hash` before returning or
+   caching the blob.
+6. The session closes. A reset may retry the whole session once.
+
+Bad framing, a wrong hash, timeout, or reset is an error, not a missing blob.
+`fips-tcp` provides ordered delivery, flow control, and retransmission.
+
+### Wire format
+
+Each session carries one request and one reply.
 
 Request, 36 bytes:
 
@@ -86,11 +105,9 @@ HTL is `0..10`; clients normally start at `10`.
 - Each Hashtree forwarding hop decrements HTL by one.
 - FIPS transport hops do not change HTL.
 
-`BlobRouter` maps opaque route IDs to transports. A composite router may query
-several peers concurrently; writes use its primary route.
-
-Receivers must hash returned bytes and reject content whose SHA-256 differs from
-the requested hash. The first valid response wins.
+`BlobRouter` may query local storage, peer groups, and HTTP stores concurrently.
+The first hash-valid response wins. Writes go only to the configured primary
+store.
 
 | Outcome | Meaning |
 | --- | --- |
