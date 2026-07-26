@@ -24,6 +24,32 @@ const reader = new HashtreeNostrEventReader({
 });
 ```
 
+Browser workers can inject one asynchronous signature-verification call per
+replica query instead of running the default `nostr-tools` verifier once per
+event:
+
+```ts
+const reader = new HashtreeNostrEventReader({
+  store,
+  roots,
+  verifyEvents: async (events, { signal }) => {
+    return await verifier.verifyEvents([...events], signal);
+  },
+});
+```
+
+The callback receives a frozen batch array containing defensive, throwaway
+event copies. It must validate both the canonical event ID and Schnorr
+signature, then return an actual array with exactly one boolean per event. A
+malformed result or any `false` value marks that replica corrupt and continues
+normal replica failover. Accepted events are separately copied, branded, and
+deeply frozen, so verifier-side mutation cannot alter query results. Abort
+signals and deadlines abort the query-scoped verifier signal while asynchronous
+verification is in flight. Verifier implementations return `false` for invalid
+events and reject only for operational failures; a rejection aborts the query
+instead of mislabeling replica data as corrupt. Omitting `verifyEvents` retains
+strict in-process Nostr ID and Schnorr signature verification.
+
 Distinct `partitionId` values are additive and queried concurrently. Entries
 with the same partition ID are replicas tried in order until one proves a
 complete result, including a valid empty result. Results are signature-checked,

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Let `@hashtree/nostr-pubsub` readers inject one cancellable asynchronous
+  event-ID and signature-verification batch per replica query. Strict local
+  verification remains the default; malformed verdicts and any invalid event
+  retain corrupt replica failover semantics, and accepted events remain
+  defensively copied and deeply frozen.
+
 ## TypeScript runtime 0.5.5 - 2026-07-20
 
 ### Fixed

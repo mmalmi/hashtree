@@ -1,8 +1,11 @@
 import { NostrEventStore, type StoredNostrEvent } from '@hashtree/nostr';
+import { verifyEvent } from 'nostr-tools/pure';
 import {
+  cloneNostrEvent,
   filtersMatchNostrEvents,
-  verifyAndFreezeNostrEvent,
+  markNostrEventVerifiedAndFreeze,
   type NostrEventReaderContract,
+  type NostrEvent,
   type NostrFilter,
   type NostrReaderQueryEvent,
   type NostrVerifiedEvent,
@@ -22,7 +25,9 @@ import {
 import {
   HashtreeNostrReplicaCorruptError,
   HashtreeNostrReplicaUnavailableError,
+  type HashtreeNostrEventBatchVerifier,
   type HashtreeNostrEventReaderOptions,
+  type HashtreeNostrEventVerificationContext,
   type HashtreeNostrPartitionReport,
   type HashtreeNostrQueryOptions,
   type HashtreeNostrQueryReport,
@@ -32,6 +37,11 @@ import {
 interface PartitionResult {
   events: NostrVerifiedEvent[];
   report: HashtreeNostrPartitionReport;
+}
+
+interface VerifierCancellation {
+  signal?: AbortSignal;
+  dispose(): void;
 }
 
 const DEFAULT_LOCAL_INDEX_PRIORITY = 300;
@@ -44,6 +54,7 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
   private readonly source;
   private readonly priority;
   private readonly maxConcurrentPartitions;
+  private readonly verifyEvents;
 
   constructor(options: HashtreeNostrEventReaderOptions) {
     this.store = options.store;
@@ -56,6 +67,7 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
     this.maxConcurrentPartitions = normalizePartitionConcurrency(
       options.maxConcurrentPartitions,
     );
+    this.verifyEvents = options.verifyEvents ?? verifyNostrEventBatch;
   }
 
   async query(
@@ -137,6 +149,7 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
         };
       } catch (error) {
         if (isCancellationError(error) || cancellation.signal?.aborted) throw error;
+        if (error instanceof HashtreeNostrVerifierUnavailableError) throw error;
         const status = error instanceof HashtreeNostrReplicaCorruptError
           ? 'corrupt'
           : 'unavailable';
@@ -190,15 +203,140 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
       );
     }
 
+    cancellation.throwIfCancelled();
+    let candidates: NostrEvent[];
+    let verificationBatch: readonly NostrEvent[];
     try {
-      return storedEvents
-        .map((event) => verifyAndFreezeNostrEvent(event))
+      candidates = storedEvents.map((event) => cloneNostrEvent(event));
+      verificationBatch = Object.freeze(candidates.map((event) => cloneNostrEvent(event)));
+    } catch (error) {
+      throw invalidReplicaEvent(error);
+    }
+
+    const verifierCancellation = createVerifierCancellation(cancellation);
+    let validity: readonly boolean[];
+    try {
+      cancellation.throwIfCancelled();
+      validity = await cancellation.wait(Promise.resolve(this.verifyEvents(
+        verificationBatch,
+        Object.freeze({
+          signal: verifierCancellation.signal,
+          deadline: cancellation.deadline,
+        }),
+      )));
+      cancellation.throwIfCancelled();
+    } catch (error) {
+      cancellation.throwIfCancelled();
+      if (isCancellationError(error) || cancellation.signal?.aborted) throw error;
+      throw new HashtreeNostrVerifierUnavailableError(error);
+    } finally {
+      verifierCancellation.dispose();
+    }
+
+    try {
+      assertValidVerificationResult(validity, candidates.length);
+      return candidates
+        .map((event) => markNostrEventVerifiedAndFreeze(event))
         .filter((event) => filtersMatchNostrEvents(filters, event));
     } catch (error) {
-      throw new HashtreeNostrReplicaCorruptError(
-        'Hashtree Nostr replica contains an event with an invalid id or signature',
-        { cause: error },
+      throw invalidReplicaEvent(error);
+    }
+  }
+}
+
+class HashtreeNostrVerifierUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('Hashtree Nostr event verifier is unavailable', { cause });
+    this.name = 'HashtreeNostrVerifierUnavailableError';
+  }
+}
+
+const verifyNostrEventBatch: HashtreeNostrEventBatchVerifier = (events, context) => {
+  const validity: boolean[] = [];
+  for (const event of events) {
+    throwIfVerifierCancelled(context);
+    validity.push(verifyEvent(event));
+  }
+  return validity;
+};
+
+function createVerifierCancellation(
+  cancellation: QueryCancellation,
+): VerifierCancellation {
+  if (cancellation.deadline === undefined) {
+    return {
+      signal: cancellation.signal,
+      dispose() {},
+    };
+  }
+
+  const controller = new AbortController();
+  const sourceSignal = cancellation.signal;
+  const deadline = cancellation.deadline;
+  const abortFromSource = () => controller.abort(sourceSignal?.reason);
+  sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
+  if (sourceSignal?.aborted) abortFromSource();
+  const timer = setTimeout(
+    () => controller.abort(verifierDeadlineError()),
+    Math.max(0, deadline - Date.now()),
+  );
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      sourceSignal?.removeEventListener('abort', abortFromSource);
+      if (!controller.signal.aborted && Date.now() >= deadline) {
+        controller.abort(verifierDeadlineError());
+      }
+    },
+  };
+}
+
+function invalidReplicaEvent(cause: unknown): HashtreeNostrReplicaCorruptError {
+  return new HashtreeNostrReplicaCorruptError(
+    'Hashtree Nostr replica contains an event with an invalid id or signature',
+    { cause },
+  );
+}
+
+function verifierDeadlineError(): DOMException {
+  return new DOMException('The query deadline elapsed', 'TimeoutError');
+}
+
+function throwIfVerifierCancelled(
+  context: HashtreeNostrEventVerificationContext,
+): void {
+  if (context.signal?.aborted) {
+    throw context.signal.reason
+      ?? new DOMException('The query was aborted', 'AbortError');
+  }
+  if (context.deadline !== undefined && Date.now() >= context.deadline) {
+    throw verifierDeadlineError();
+  }
+}
+
+function assertValidVerificationResult(
+  validity: readonly boolean[],
+  eventCount: number,
+): void {
+  if (
+    !Array.isArray(validity)
+    || validity.length !== eventCount
+  ) {
+    throw new TypeError(
+      'Hashtree Nostr event verifier must return one boolean per event',
+    );
+  }
+  for (let index = 0; index < eventCount; index += 1) {
+    const valid = validity[index];
+    if (typeof valid !== 'boolean') {
+      throw new TypeError(
+        'Hashtree Nostr event verifier must return one boolean per event',
       );
+    }
+    if (!valid) {
+      throw new Error('invalid Nostr event id or signature');
     }
   }
 }

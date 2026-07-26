@@ -1,5 +1,6 @@
 import type { CID, Store } from '@hashtree/core';
 import type {
+  NostrEvent,
   NostrFilter,
   NostrEventSource,
   NostrReaderQueryOptions,
@@ -37,6 +38,18 @@ export type HashtreeNostrRoots =
   | readonly HashtreeNostrRootEntry[]
   | HashtreeNostrRootProvider;
 
+export interface HashtreeNostrEventVerificationContext {
+  /** Aborts with the query signal or when its absolute deadline elapses. */
+  readonly signal?: AbortSignal;
+  /** Absolute Unix epoch deadline in milliseconds. */
+  readonly deadline?: number;
+}
+
+export type HashtreeNostrEventBatchVerifier = (
+  events: readonly NostrEvent[],
+  context: HashtreeNostrEventVerificationContext,
+) => Promise<readonly boolean[]> | readonly boolean[];
+
 export interface HashtreeNostrEventReaderOptions {
   store: Store;
   roots: HashtreeNostrRoots;
@@ -45,6 +58,12 @@ export interface HashtreeNostrEventReaderOptions {
   priority?: number;
   /** Bounds additive partition reads. Clamped to 1...64; defaults to 8. */
   maxConcurrentPartitions?: number;
+  /**
+   * Optional async event verifier. It must validate both canonical IDs and
+   * signatures, and receives one defensive event batch per replica query.
+   * The default strictly verifies every event with nostr-tools.
+   */
+  verifyEvents?: HashtreeNostrEventBatchVerifier;
 }
 
 export type HashtreeNostrReplicaStatus =

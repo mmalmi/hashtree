@@ -2,6 +2,7 @@ export { HashtreeNostrEventReader } from './reader.js';
 
 export type {
   NostrEventReaderContract,
+  NostrEvent,
   NostrEventSource,
   NostrEventSourceKind,
   NostrFilter,
@@ -12,7 +13,9 @@ export type {
 } from './nostrTypes.js';
 
 export type {
+  HashtreeNostrEventBatchVerifier,
   HashtreeNostrEventReaderOptions,
+  HashtreeNostrEventVerificationContext,
   HashtreeNostrPartitionReport,
   HashtreeNostrQueryOptions,
   HashtreeNostrQueryReport,

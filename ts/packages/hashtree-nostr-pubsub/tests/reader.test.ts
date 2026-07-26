@@ -6,7 +6,7 @@ import {
   type Store,
 } from '@hashtree/core';
 import { NostrEventStore, type StoredNostrEvent } from '@hashtree/nostr';
-import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
+import { finalizeEvent, getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import {
   HashtreeNostrEventReader,
   HashtreeNostrFilterError,
@@ -234,6 +234,250 @@ describe('HashtreeNostrEventReader', () => {
       complete: false,
       partitions: [{ status: 'unavailable', attempts: [{ status: 'corrupt' }] }],
     });
+  });
+
+  it('verifies each replica in one defensive batch and freezes accepted events', async () => {
+    const first = event(aliceKey, 10, { tags: [['t', 'first']] });
+    const second = event(bobKey, 20, { tags: [['t', 'second']] });
+    const index = await buildIndex([first, second]);
+    const controller = new AbortController();
+    let calls = 0;
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: index.root,
+      verifyEvents: async (events, context) => {
+        calls += 1;
+        expect(context.signal).toBe(controller.signal);
+        expect(Object.isFrozen(events)).toBe(true);
+        expect(events).toHaveLength(2);
+        events[0]!.content = 'tampered';
+        events[0]!.tags[0]![1] = 'tampered';
+        return events.map(() => true);
+      },
+    });
+
+    const report = await reader.query([
+      { authors: [alice] },
+      { authors: [bob] },
+    ], { signal: controller.signal });
+
+    expect(calls).toBe(1);
+    expect(report.events.map(({ event: candidate }) => candidate.id)).toEqual([
+      second.id,
+      first.id,
+    ]);
+    expect(report.events.every(({ event: candidate }) => (
+      Object.isFrozen(candidate)
+      && Object.isFrozen(candidate.tags)
+      && candidate.tags.every(Object.isFrozen)
+    ))).toBe(true);
+    expect(report.events.some(({ event: candidate }) => (
+      candidate.content === 'tampered'
+      || candidate.tags.some((tag) => tag.includes('tampered'))
+    ))).toBe(false);
+    expect(verifyEvent(report.events[0]!.event)).toBe(true);
+  });
+
+  it('treats malformed verifier result arrays as corrupt replica responses', async () => {
+    const stored = [event(aliceKey, 10), event(bobKey, 20)];
+    const index = await buildIndex(stored);
+    let calls = 0;
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: [
+        { partitionId: 'archive', replicaId: 'non-array', root: index.root },
+        { partitionId: 'archive', replicaId: 'wrong-length', root: index.root },
+        { partitionId: 'archive', replicaId: 'sparse', root: index.root },
+        { partitionId: 'archive', replicaId: 'non-boolean', root: index.root },
+        { partitionId: 'archive', replicaId: 'good', root: index.root },
+      ],
+      verifyEvents: async (events) => {
+        calls += 1;
+        if (calls === 1) return new Uint8Array([1, 1]) as unknown as boolean[];
+        if (calls === 2) return [true];
+        if (calls === 3) {
+          const sparse = new Array<boolean>(events.length);
+          sparse[0] = true;
+          return sparse;
+        }
+        if (calls === 4) return [true, 1] as unknown as boolean[];
+        return events.map(() => true);
+      },
+    });
+
+    const report = await reader.query([{}]);
+
+    expect(calls).toBe(5);
+    expect(report.events).toHaveLength(2);
+    expect(report.partitions[0]).toMatchObject({
+      status: 'complete',
+      selectedReplicaId: 'good',
+      attempts: [
+        { replicaId: 'non-array', status: 'corrupt' },
+        { replicaId: 'wrong-length', status: 'corrupt' },
+        { replicaId: 'sparse', status: 'corrupt' },
+        { replicaId: 'non-boolean', status: 'corrupt' },
+        { replicaId: 'good', status: 'complete' },
+      ],
+    });
+  });
+
+  it('rejects an entire replica batch when any event fails verification', async () => {
+    const stored = [event(aliceKey, 10), event(bobKey, 20)];
+    const index = await buildIndex(stored);
+    let calls = 0;
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: [
+        { partitionId: 'archive', replicaId: 'invalid', root: index.root },
+        { partitionId: 'archive', replicaId: 'good', root: index.root },
+      ],
+      verifyEvents: async (events) => {
+        calls += 1;
+        return calls === 1
+          ? events.map((_, index) => index !== 0)
+          : events.map(() => true);
+      },
+    });
+
+    const report = await reader.query([{}]);
+
+    expect(report.events).toHaveLength(2);
+    expect(report.partitions[0]?.attempts.map(({ status }) => status)).toEqual([
+      'corrupt',
+      'complete',
+    ]);
+  });
+
+  it('rejects malformed stored events before invoking an injected verifier', async () => {
+    const malformed = event(aliceKey, 10, { kind: 65_536 });
+    const index = await buildIndex([malformed]);
+    let calls = 0;
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: index.root,
+      verifyEvents: async (events) => {
+        calls += 1;
+        return events.map(() => true);
+      },
+    });
+
+    const report = await reader.query([{}]);
+
+    expect(calls).toBe(0);
+    expect(report).toMatchObject({
+      events: [],
+      complete: false,
+      partitions: [{ status: 'unavailable', attempts: [{ status: 'corrupt' }] }],
+    });
+  });
+
+  it('cancels an in-flight injected batch verifier through AbortSignal', async () => {
+    const index = await buildIndex([event(aliceKey, 10)]);
+    const controller = new AbortController();
+    let markStarted!: () => void;
+    let markStopped!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const stopped = new Promise<void>((resolve) => {
+      markStopped = resolve;
+    });
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: index.root,
+      verifyEvents: async (_events, context) => {
+        expect(context.signal).toBe(controller.signal);
+        markStarted();
+        return await new Promise<boolean[]>((_resolve, reject) => {
+          context.signal!.addEventListener('abort', () => {
+            markStopped();
+            reject(context.signal!.reason);
+          }, { once: true });
+        });
+      },
+    });
+    const query = reader.query([{}], { signal: controller.signal });
+    await started;
+
+    controller.abort();
+
+    await expect(query).rejects.toMatchObject({ name: 'AbortError' });
+    await stopped;
+  });
+
+  it('aborts an in-flight injected batch verifier at the query deadline', async () => {
+    const index = await buildIndex([event(aliceKey, 10)]);
+    const deadline = Date.now() + 100;
+    let markStarted!: () => void;
+    let markStopped!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const stopped = new Promise<void>((resolve) => {
+      markStopped = resolve;
+    });
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: index.root,
+      verifyEvents: async (_events, context) => {
+        expect(context.deadline).toBe(deadline);
+        expect(context.signal).toBeInstanceOf(AbortSignal);
+        markStarted();
+        return await new Promise<boolean[]>((_resolve, reject) => {
+          context.signal!.addEventListener('abort', () => {
+            markStopped();
+            reject(context.signal!.reason);
+          }, { once: true });
+        });
+      },
+    });
+    const query = reader.query([{}], { deadline });
+    await started;
+
+    await expect(query).rejects.toMatchObject({ name: 'TimeoutError' });
+    await stopped;
+  });
+
+  it('does not invoke the verifier after the query deadline has elapsed', async () => {
+    const index = await buildIndex([event(aliceKey, 10)]);
+    let calls = 0;
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: index.root,
+      verifyEvents: async (events) => {
+        calls += 1;
+        return events.map(() => true);
+      },
+    });
+
+    await expect(reader.query([{}], { deadline: Date.now() - 1 })).rejects.toMatchObject({
+      name: 'TimeoutError',
+    });
+    expect(calls).toBe(0);
+  });
+
+  it('does not misreport verifier infrastructure failures as corrupt replicas', async () => {
+    const index = await buildIndex([event(aliceKey, 10)]);
+    let calls = 0;
+    const reader = new HashtreeNostrEventReader({
+      store: index.store,
+      roots: [
+        { partitionId: 'archive', replicaId: 'first', root: index.root },
+        { partitionId: 'archive', replicaId: 'second', root: index.root },
+      ],
+      verifyEvents: async () => {
+        calls += 1;
+        throw new Error('worker unavailable');
+      },
+    });
+
+    await expect(reader.query([{}])).rejects.toMatchObject({
+      name: 'HashtreeNostrVerifierUnavailableError',
+      message: 'Hashtree Nostr event verifier is unavailable',
+      cause: { message: 'worker unavailable' },
+    });
+    expect(calls).toBe(1);
   });
 
   it('rejects NIP-50 search before consulting the root provider', async () => {

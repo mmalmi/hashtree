@@ -1,7 +1,11 @@
-import type { Event, VerifiedEvent } from 'nostr-tools/core';
+import {
+  verifiedSymbol,
+  type Event,
+  type VerifiedEvent,
+} from 'nostr-tools/pure';
 import { matchFilters, type Filter } from 'nostr-tools/filter';
-import { verifyEvent } from 'nostr-tools/pure';
 
+export type NostrEvent = Event;
 export type NostrFilter = Filter;
 export type NostrVerifiedEvent = VerifiedEvent;
 
@@ -60,29 +64,54 @@ export function filtersMatchNostrEvents(
   return filters.length === 0 || matchFilters([...filters], event);
 }
 
-export function verifyAndFreezeNostrEvent(event: Event): NostrVerifiedEvent {
-  const candidate: Event = {
+export function cloneNostrEvent(event: Event): NostrEvent {
+  if (event === null || typeof event !== 'object') {
+    throw new Error('invalid Nostr event shape');
+  }
+  if (
+    !isLowercaseHex(event.id, 64)
+    || !isLowercaseHex(event.pubkey, 64)
+    || !isLowercaseHex(event.sig, 128)
+    || typeof event.content !== 'string'
+    || !Array.isArray(event.tags)
+  ) {
+    throw new Error('invalid Nostr event shape');
+  }
+  if (
+    !Number.isSafeInteger(event.created_at)
+    || event.created_at < 0
+    || !Number.isSafeInteger(event.kind)
+    || event.kind < 0
+    || event.kind > 65_535
+  ) {
+    throw new Error('invalid Nostr event timestamp or kind');
+  }
+  const tags = event.tags.map((tag) => {
+    if (!Array.isArray(tag) || tag.some((value) => typeof value !== 'string')) {
+      throw new Error('invalid Nostr event tag');
+    }
+    return [...tag];
+  });
+  return {
     id: event.id,
     pubkey: event.pubkey,
     created_at: event.created_at,
     kind: event.kind,
-    tags: event.tags.map((tag) => [...tag]),
+    tags,
     content: event.content,
     sig: event.sig,
   };
-  if (!verifyEvent(candidate)) {
-    throw new Error('invalid Nostr event id or signature');
-  }
-  if (
-    !Number.isSafeInteger(candidate.created_at)
-    || candidate.created_at < 0
-    || !Number.isSafeInteger(candidate.kind)
-    || candidate.kind < 0
-    || candidate.kind > 65_535
-  ) {
-    throw new Error('invalid Nostr event timestamp or kind');
-  }
-  for (const tag of candidate.tags) Object.freeze(tag);
-  Object.freeze(candidate.tags);
-  return Object.freeze(candidate);
+}
+
+export function markNostrEventVerifiedAndFreeze(event: NostrEvent): NostrVerifiedEvent {
+  event[verifiedSymbol] = true;
+  for (const tag of event.tags) Object.freeze(tag);
+  Object.freeze(event.tags);
+  return Object.freeze(event) as NostrVerifiedEvent;
+}
+
+function isLowercaseHex(value: unknown, length: number): value is string {
+  return typeof value === 'string'
+    && value.length === length
+    && /^[0-9a-f]+$/.test(value);
 }
