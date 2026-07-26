@@ -60,6 +60,7 @@ const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_millis(200);
 const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_LISTEN_BACKLOG: i32 = 1_024;
 const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(60);
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -400,6 +401,13 @@ impl HashtreeServer {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        // `tokio::net::TcpListener::bind` inherits the platform's small
+        // default listen backlog (128 on Linux). A daemon restart can attract
+        // more reconnecting CDN/tunnel sockets than that before the first
+        // requests are accepted, leaving otherwise healthy clients stalled.
+        // Re-listening updates the queue limit without replacing the bound
+        // socket; the kernel still applies its configured `somaxconn` cap.
+        SockRef::from(&listener).listen(TCP_LISTEN_BACKLOG)?;
         let local_addr = listener.local_addr()?;
 
         // Public endpoints (no auth required)
