@@ -108,6 +108,9 @@ HTL is `0..10`; clients normally start at `10`.
 - Each Hashtree forwarding hop decrements HTL by one.
 - FIPS transport hops do not change HTL.
 
+An HTL peer replies `NoResult` when its bounded lookup completes with no data.
+Timeouts and forwarding failures produce errors.
+
 | Outcome | Meaning |
 | --- | --- |
 | Data | Verified blob returned |
