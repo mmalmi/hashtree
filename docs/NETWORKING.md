@@ -42,21 +42,17 @@ needed, and decodes it locally. It then follows child hashes for the required
 nodes and chunks. Each lookup fetches one immutable blob by SHA-256, never by
 filename or path:
 
-1. The client submits the hash to `BlobRouter`.
-2. The router selects and searches its configured sources, such as local
-   storage, a P2P provider group, and Blossom/HTTP stores. It may hedge several
-   routes.
-3. The P2P route selects and hedges a bounded set of eligible providers. Each
-   peer attempt opens an authenticated
+1. The requester opens an authenticated
    [fips-tcp](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fips-tcp)
-   session to service `39018`.
-4. The attempt sends the blob hash and an HTL forwarding budget.
-5. The provider checks its configured blob routes and replies with the raw
-   stored bytes or `NoResult`.
-6. The router accepts the first reply satisfying
-   `SHA256(bytes) == requested hash`, may cache it, and cancels slower attempts.
-7. Each peer session closes after its reply or error. Any retry is client policy
-   and remains bounded by the request deadline.
+   session to service `39018` on each eligible peer it queries.
+2. It sends `GET` with the blob hash and an HTL forwarding budget.
+3. The peer searches its local data. With HTL above zero, it may forward the
+   request to other peers with HTL reduced by one.
+4. The peer replies `Data` with the raw stored bytes, or `NoResult` when its
+   bounded search completes with no data.
+5. The requester accepts the first `Data` satisfying
+   `SHA256(bytes) == requested hash`.
+6. Each session closes after its reply or error.
 
 Bad framing, a wrong hash, timeout, or reset is an error, not a missing blob.
 `fips-tcp` provides ordered delivery, flow control, and retransmission.
@@ -108,18 +104,15 @@ HTL is `0..10`; clients normally start at `10`.
 - Each Hashtree forwarding hop decrements HTL by one.
 - FIPS transport hops do not change HTL.
 
-An HTL peer replies `NoResult` when its bounded lookup completes with no data.
-Timeouts and forwarding failures produce errors.
-
 | Outcome | Meaning |
 | --- | --- |
 | Data | Verified blob returned |
-| No result | This route completed without the blob |
-| Timeout/error | Result remains unknown |
+| No result | This peer completed its bounded search without the blob |
+| Timeout/error | This peer provided no conclusion |
 
-`NoResult` from one route does not stop or negatively cache the lookup. The
-lookup reports missing only when all routes complete with `NoResult`. If no
-route returns data and any route times out or fails, the lookup returns an error.
+`NoResult` from one peer does not stop other requests and must not be cached as
+globally absent. A lookup reports missing only when every queried peer returns
+`NoResult`. Without `Data`, any timeout or failure makes the lookup inconclusive.
 
 ## Serving rules
 
