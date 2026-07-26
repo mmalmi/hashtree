@@ -189,12 +189,11 @@ impl PoolStore {
         self.active_move_records(MOVE_CLEANUP_KEY_PREFIX, limit, "move-cleanup")
     }
 
-    pub(super) fn count_move_cleanups_for_source_txn(
+    pub(super) fn has_move_cleanup_for_source_txn(
         &self,
         txn: &heed::RoTxn<'_>,
         source: PoolMemberId,
-    ) -> Result<u64, StoreError> {
-        let mut count = 0u64;
+    ) -> Result<bool, StoreError> {
         for item in self
             .temperature_state
             .prefix_iter(txn, &[MOVE_CLEANUP_KEY_PREFIX])
@@ -208,10 +207,10 @@ impl PoolStore {
                     ..
                 } if actual_source == source
             ) {
-                count = count.saturating_add(1);
+                return Ok(true);
             }
         }
-        Ok(count)
+        Ok(false)
     }
 
     fn active_move_records(

@@ -143,6 +143,30 @@ impl PoolStore {
         self.count_member_locations_txn(&rtxn, id)
     }
 
+    /// Check one exact member prefix without enumerating its location index.
+    ///
+    /// Callers that only need an emptiness proof (not a count) use this while
+    /// holding the catalog write transaction, so a concurrent process cannot
+    /// add a location between the proof and a manifest update.
+    pub(super) fn member_has_locations_txn(
+        &self,
+        txn: &heed::RoTxn<'_>,
+        id: PoolMemberId,
+    ) -> Result<bool, StoreError> {
+        let mut entries = self
+            .by_member
+            .prefix_iter(txn, id.as_bytes())
+            .map_err(map_heed)?;
+        let Some(entry) = entries.next() else {
+            return Ok(false);
+        };
+        let (key, _) = entry.map_err(map_heed)?;
+        if key.len() != 48 || !key.starts_with(id.as_bytes()) {
+            return Err(StoreError::Other("invalid pool member index key".into()));
+        }
+        Ok(true)
+    }
+
     pub(super) fn count_member_locations_txn(
         &self,
         txn: &heed::RoTxn<'_>,

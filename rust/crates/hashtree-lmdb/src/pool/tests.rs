@@ -1,3 +1,4 @@
+use super::move_catalog::move_cleanup_state_key;
 use super::*;
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -207,6 +208,154 @@ fn committed_candidate_lookup_skips_stored_but_retries_pending_locations() {
     assert_eq!(status.get(&stored), Some(&true));
     assert_eq!(status.get(&pending), Some(&false));
     assert_eq!(status.get(&missing), Some(&false));
+}
+
+#[test]
+fn empty_draining_member_removal_uses_an_exact_index_probe() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("target"),
+        1024 * 1024,
+    ))
+    .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+
+    pool.remove_member(source).expect("remove empty member");
+    assert!(pool.member(source).is_err());
+}
+
+#[test]
+fn indexed_member_emptiness_rejects_pending_stored_and_moving_locations() {
+    for state in ["pending", "stored", "moving"] {
+        let temp = TempDir::new().expect("temp dir");
+        let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+            .expect("open pool");
+        let source = pool
+            .add_member(PoolMemberConfig::new(
+                temp.path().join("source"),
+                1024 * 1024,
+            ))
+            .expect("source");
+        let target = pool
+            .add_member(PoolMemberConfig::new(
+                temp.path().join("target"),
+                1024 * 1024,
+            ))
+            .expect("target");
+        pool.begin_drain(source).expect("begin drain");
+        let hash = sha256(state.as_bytes());
+        let location = match state {
+            "pending" => LocationRecord::Pending {
+                member: source,
+                size: 1,
+            },
+            "stored" => LocationRecord::Stored {
+                member: source,
+                size: 1,
+            },
+            "moving" => LocationRecord::Moving {
+                source,
+                target,
+                size: 1,
+            },
+            _ => unreachable!(),
+        };
+        let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+        pool.set_location_txn(&mut wtxn, hash, Some(location))
+            .expect("install location");
+        wtxn.commit().expect("commit location");
+
+        let error = pool
+            .remove_member(source)
+            .expect_err("located member must not be removed");
+        assert!(error.to_string().contains("still owns"), "{state}: {error}");
+        assert_eq!(
+            pool.read_location(&hash).expect("location after rejection"),
+            Some(location)
+        );
+    }
+}
+
+#[test]
+fn member_location_probe_respects_full_uuid_prefix_boundaries() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let mut wanted_bytes = [0x40; 16];
+    wanted_bytes[15] = 0x80;
+    let wanted = PoolMemberId(wanted_bytes);
+    let mut lower_bytes = wanted_bytes;
+    lower_bytes[15] -= 1;
+    let lower = PoolMemberId(lower_bytes);
+    let mut upper_bytes = wanted_bytes;
+    upper_bytes[15] += 1;
+    let upper = PoolMemberId(upper_bytes);
+    let hash = sha256(b"member prefix boundary");
+
+    let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+    pool.by_member
+        .put(&mut wtxn, &member_hash_key(lower, hash), &())
+        .expect("lower index key");
+    pool.by_member
+        .put(&mut wtxn, &member_hash_key(upper, hash), &())
+        .expect("upper index key");
+    assert!(
+        !pool
+            .member_has_locations_txn(&wtxn, wanted)
+            .expect("probe empty exact prefix"),
+        "adjacent UUID prefixes must not alias"
+    );
+    pool.by_member
+        .put(&mut wtxn, &member_hash_key(wanted, hash), &())
+        .expect("wanted index key");
+    assert!(pool
+        .member_has_locations_txn(&wtxn, wanted)
+        .expect("probe occupied exact prefix"));
+    wtxn.commit().expect("commit boundary keys");
+}
+
+#[test]
+fn member_removal_rejects_pending_source_cleanup() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    let target = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("target"),
+            1024 * 1024,
+        ))
+        .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+    let hash = sha256(b"pending source cleanup");
+    let moving = LocationRecord::Moving {
+        source,
+        target,
+        size: 1,
+    };
+    let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+    pool.temperature_state
+        .put(&mut wtxn, &move_cleanup_state_key(hash), &moving.encode())
+        .expect("install cleanup record");
+    wtxn.commit().expect("commit cleanup record");
+
+    let error = pool
+        .remove_member(source)
+        .expect_err("cleanup source must remain configured");
+    assert!(error.to_string().contains("pending source cleanup"));
 }
 
 #[test]

@@ -311,7 +311,7 @@ impl PoolStore {
         if member.state == PoolMemberState::Draining {
             return Ok(());
         }
-        if !has_other_active && self.count_member_locations_txn(&wtxn, id)? > 0 {
+        if !has_other_active && self.member_has_locations_txn(&wtxn, id)? {
             return Err(StoreError::Other(
                 "cannot drain the final member while it still owns blobs".into(),
             ));
@@ -391,16 +391,14 @@ impl PoolStore {
                 "pool member must be draining before removal".into(),
             ));
         }
-        let located = self.count_member_locations_txn(&wtxn, id)?;
-        if located != 0 {
+        if self.member_has_locations_txn(&wtxn, id)? {
             return Err(StoreError::Other(format!(
-                "pool member {id} still owns {located} blob(s)"
+                "pool member {id} still owns blob(s)"
             )));
         }
-        let pending_cleanup = self.count_move_cleanups_for_source_txn(&wtxn, id)?;
-        if pending_cleanup != 0 {
+        if self.has_move_cleanup_for_source_txn(&wtxn, id)? {
             return Err(StoreError::Other(format!(
-                "pool member {id} still has {pending_cleanup} pending source cleanup(s)"
+                "pool member {id} still has pending source cleanup(s)"
             )));
         }
         manifest.members.remove(index);
