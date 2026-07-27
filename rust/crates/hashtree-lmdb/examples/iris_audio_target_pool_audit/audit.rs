@@ -11,9 +11,10 @@ use crate::model::{
 use crate::probe::{verify_pool_manifest_unchanged, ProbeContext};
 use crate::traversal::process_block;
 use hashtree_core::{Hash, LinkType};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -81,6 +82,15 @@ pub fn run(
         )
         .into());
     }
+    let mut ledger_hasher = hash_ledger_prefix(&paths.ledger, checkpoint.ledger_bytes)?;
+    let actual_prefix_sha256 = ledger_hasher_sha256(&ledger_hasher);
+    if actual_prefix_sha256 != checkpoint.ledger_sha256 {
+        return Err(format!(
+            "committed ledger prefix SHA256 mismatch: expected {}, got {actual_prefix_sha256}",
+            checkpoint.ledger_sha256
+        )
+        .into());
+    }
     ledger_file.set_len(checkpoint.ledger_bytes)?;
     ledger_file.seek(SeekFrom::Start(checkpoint.ledger_bytes))?;
     let mut ledger = BufWriter::new(ledger_file);
@@ -114,7 +124,7 @@ pub fn run(
 
         for state in states {
             for row in state.rows {
-                append_json_line(&mut ledger, &row)?;
+                append_json_line(&mut ledger, &mut ledger_hasher, &row)?;
             }
             checkpoint.summary.work_items_processed += 1;
             if state.item.kind == "inventory" {
@@ -133,6 +143,7 @@ pub fn run(
         sync_parent(&paths.ledger)?;
         checkpoint.next_work_item = end;
         checkpoint.ledger_bytes = ledger.get_mut().stream_position()?;
+        checkpoint.ledger_sha256 = ledger_hasher_sha256(&ledger_hasher);
         write_atomic_json(&paths.checkpoint, &checkpoint)?;
         completed_batches += 1;
         eprintln!(
@@ -157,6 +168,9 @@ pub fn run(
         let (ledger_sha256, ledger_bytes) = sha256_file(&paths.ledger)?;
         if ledger_bytes != checkpoint.ledger_bytes {
             return Err("ledger size changed after terminal checkpoint".into());
+        }
+        if ledger_sha256 != checkpoint.ledger_sha256 {
+            return Err("ledger SHA256 changed after terminal checkpoint".into());
         }
         let (unique_block_hashes, ledger_rows) = ledger_hash_stats(&paths.ledger)?;
         if ledger_rows != checkpoint.summary.block_references {
@@ -330,6 +344,7 @@ fn open_checkpoint(
             inventory_identity_sha256: inventory_identity_sha256.into(),
             next_work_item: 0,
             ledger_bytes: 0,
+            ledger_sha256: ledger_hasher_sha256(&Sha256::new()),
             summary: AuditSummary::default(),
         };
         write_atomic_json(&paths.checkpoint, &checkpoint)?;
@@ -355,6 +370,8 @@ fn open_checkpoint(
     if checkpoint.next_work_item > total_work_items {
         return Err("checkpoint cursor is past the work-item set".into());
     }
+    canonical_hash("checkpoint ledgerSha256", &checkpoint.ledger_sha256)
+        .map_err(|error| format!("invalid checkpoint ledger digest: {error}"))?;
     checkpoint
         .summary
         .validate_checkpoint(
@@ -369,6 +386,37 @@ fn open_checkpoint(
         return Err("incomplete checkpoint has a stale terminal manifest".into());
     }
     Ok(checkpoint)
+}
+
+fn hash_ledger_prefix(
+    path: &std::path::Path,
+    prefix_bytes: u64,
+) -> Result<Sha256, Box<dyn std::error::Error>> {
+    let mut hasher = Sha256::new();
+    if prefix_bytes == 0 {
+        return Ok(hasher);
+    }
+    let mut input = File::open(path)?;
+    let mut remaining = prefix_bytes;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    while remaining > 0 {
+        let maximum = remaining.min(buffer.len() as u64) as usize;
+        let read = input.read(&mut buffer[..maximum])?;
+        if read == 0 {
+            return Err(format!(
+                "ledger ended before committed prefix: {} bytes remain",
+                remaining
+            )
+            .into());
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(hasher)
+}
+
+fn ledger_hasher_sha256(hasher: &Sha256) -> String {
+    format!("{:x}", hasher.clone().finalize())
 }
 
 fn audit_work_item_batch(

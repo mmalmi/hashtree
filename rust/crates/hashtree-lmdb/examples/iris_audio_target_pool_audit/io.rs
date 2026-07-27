@@ -155,9 +155,12 @@ pub fn ledger_hash_stats(path: &Path) -> Result<(u64, u64), Box<dyn std::error::
 
 pub fn append_json_line<T: serde::Serialize>(
     output: &mut BufWriter<File>,
+    hasher: &mut Sha256,
     value: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    serde_json::to_writer(&mut *output, value)?;
-    output.write_all(b"\n")?;
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    output.write_all(&line)?;
+    hasher.update(&line);
     Ok(())
 }

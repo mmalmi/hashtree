@@ -74,12 +74,13 @@ bounded while two references that declare incompatible types are both checked;
 at least one incompatible declaration then fails closed.
 
 The checkpoint schema is
-`iris-audio-target-pool-residency-audit-checkpoint/v1`. A checkpoint is
+`iris-audio-target-pool-residency-audit-checkpoint/v2`. A checkpoint is
 published only after the JSONL prefix is flushed and synced, and records the
-exact committed byte offset plus the starting Pool manifest generation and
-SHA-256. That SHA-256 covers the exact stored manifest bytes, including member
-states and every member configuration. Resume truncates any uncommitted suffix
-to the committed offset and rejects a changed manifest.
+exact committed byte offset and SHA-256 plus the starting Pool manifest
+generation and SHA-256. The manifest SHA-256 covers the exact stored manifest
+bytes, including member states and every member configuration. Resume hashes
+and verifies the complete committed JSONL prefix before truncating any
+uncommitted suffix, and rejects either a changed prefix or manifest.
 
 The terminal manifest separately pins `expectedPoolMemberIds` (the complete
 manifest identity) and `targetMemberIds` (the only acceptable residency

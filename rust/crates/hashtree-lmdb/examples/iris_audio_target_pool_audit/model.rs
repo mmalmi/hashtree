@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const CONFIG_SCHEMA: &str = "iris-audio-target-pool-residency-audit-config/v1";
-pub const CHECKPOINT_SCHEMA: &str = "iris-audio-target-pool-residency-audit-checkpoint/v1";
+pub const CHECKPOINT_SCHEMA: &str = "iris-audio-target-pool-residency-audit-checkpoint/v2";
 pub const LEDGER_ROW_SCHEMA: &str = "iris-audio-target-pool-residency-block/v1";
 pub const MANIFEST_SCHEMA: &str = "iris-audio-target-pool-residency-manifest/v1";
 pub const INVENTORY_IDENTITY_SCHEMA: &str = "iris-audio-target-pool-inventory-identity/v1";
@@ -165,6 +165,7 @@ pub struct Checkpoint {
     pub inventory_identity_sha256: String,
     pub next_work_item: usize,
     pub ledger_bytes: u64,
+    pub ledger_sha256: String,
     pub summary: AuditSummary,
 }
 

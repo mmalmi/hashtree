@@ -177,6 +177,50 @@ async fn real_pool_audit_resumes_and_rejects_fallback_only_dag() {
     assert!(!bounded.complete);
     assert_eq!(bounded.next_work_item, 1);
     assert!(!paths.manifest.exists());
+    let committed_ledger = fs::read(&paths.ledger).expect("committed ledger prefix");
+    let checkpoint: serde_json::Value =
+        serde_json::from_slice(&fs::read(&paths.checkpoint).expect("checkpoint bytes"))
+            .expect("checkpoint JSON");
+    assert_eq!(checkpoint["schema"], CHECKPOINT_SCHEMA);
+    assert_eq!(
+        checkpoint["ledgerBytes"],
+        committed_ledger.len() as u64,
+        "checkpoint must bind the exact committed prefix length"
+    );
+    assert_eq!(
+        checkpoint["ledgerSha256"],
+        to_hex(&hashtree_core::sha256(&committed_ledger)),
+        "checkpoint must bind the exact committed prefix bytes"
+    );
+
+    let mut mutated_ledger =
+        String::from_utf8(committed_ledger.clone()).expect("generated ledger is UTF-8");
+    let block_hash_start = mutated_ledger
+        .find("\"blockHash\":\"")
+        .expect("ledger block hash")
+        + "\"blockHash\":\"".len();
+    let replacement = if &mutated_ledger[block_hash_start..block_hash_start + 1] == "0" {
+        "1"
+    } else {
+        "0"
+    };
+    mutated_ledger.replace_range(block_hash_start..block_hash_start + 1, replacement);
+    assert_eq!(
+        mutated_ledger.len(),
+        committed_ledger.len(),
+        "adversarial mutation must preserve the committed byte length"
+    );
+    fs::write(&paths.ledger, mutated_ledger.as_bytes()).expect("mutate committed ledger prefix");
+    let mutation_error =
+        run(&paths, None).expect_err("same-length committed-prefix mutation must fail closed");
+    assert!(
+        mutation_error
+            .to_string()
+            .contains("committed ledger prefix SHA256 mismatch"),
+        "unexpected mutation error: {mutation_error}"
+    );
+    fs::write(&paths.ledger, &committed_ledger).expect("restore committed ledger prefix");
+
     let resumed = run(&paths, None).expect("resumed audit");
     assert!(resumed.complete);
     assert!(!resumed.release_ready);
