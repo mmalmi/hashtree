@@ -1737,7 +1737,11 @@ mod tests {
             live_bytes_selected: 123,
         };
         persist_stage_state(&staging_data_dir, &stage).unwrap();
-        let ranks = BTreeMap::from([(profile.pubkey.to_hex(), 2), (unreplayed_pubkey, 3)]);
+        let ranks = full_author_pubkeys
+            .iter()
+            .enumerate()
+            .map(|(position, pubkey)| (pubkey.clone(), position as u32 + 2))
+            .collect::<BTreeMap<_, _>>();
         let rank = generated_rank_authority(&evidence_dir, &ranks, &policy.author_allowlist_sha256);
         let spool_closing = spool.env.clone().prepare_for_closing();
         drop(spool);

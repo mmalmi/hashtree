@@ -35,6 +35,9 @@ struct TestRelay {
     events: Arc<Mutex<Vec<Event>>>,
     broadcaster: broadcast::Sender<Event>,
     request_count: Arc<std::sync::atomic::AtomicUsize>,
+    request_hold_from: Arc<std::sync::atomic::AtomicUsize>,
+    request_hold_released: Arc<std::sync::atomic::AtomicBool>,
+    request_hold: Arc<Notify>,
 }
 
 impl TestRelay {
@@ -43,6 +46,9 @@ impl TestRelay {
         let (shutdown, _) = broadcast::channel(1);
         let (broadcaster, _) = broadcast::channel(32);
         let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let request_hold_from = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let request_hold_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let request_hold = Arc::new(Notify::new());
 
         let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind relay");
         let port = std_listener.local_addr().expect("relay addr").port();
@@ -54,6 +60,9 @@ impl TestRelay {
         let shutdown_for_thread = shutdown.clone();
         let broadcaster_for_thread = broadcaster.clone();
         let request_count_for_thread = Arc::clone(&request_count);
+        let request_hold_from_for_thread = Arc::clone(&request_hold_from);
+        let request_hold_released_for_thread = Arc::clone(&request_hold_released);
+        let request_hold_for_thread = Arc::clone(&request_hold);
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -73,9 +82,21 @@ impl TestRelay {
                                 let events = Arc::clone(&events_for_thread);
                                 let broadcaster = broadcaster_for_thread.clone();
                                 let request_count = Arc::clone(&request_count_for_thread);
+                                let request_hold_from = Arc::clone(&request_hold_from_for_thread);
+                                let request_hold_released =
+                                    Arc::clone(&request_hold_released_for_thread);
+                                let request_hold = Arc::clone(&request_hold_for_thread);
                                 tokio::spawn(async move {
-                                    handle_connection(stream, events, broadcaster, request_count)
-                                        .await;
+                                    handle_connection(
+                                        stream,
+                                        events,
+                                        broadcaster,
+                                        request_count,
+                                        request_hold_from,
+                                        request_hold_released,
+                                        request_hold,
+                                    )
+                                    .await;
                                 });
                             }
                         }
@@ -92,6 +113,9 @@ impl TestRelay {
             events,
             broadcaster,
             request_count,
+            request_hold_from,
+            request_hold_released,
+            request_hold,
         }
     }
 
@@ -111,10 +135,24 @@ impl TestRelay {
         self.request_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    fn hold_requests_from(&self, request_number: usize) {
+        self.request_hold_released
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.request_hold_from
+            .store(request_number, std::sync::atomic::Ordering::Release);
+    }
+
+    fn release_requests(&self) {
+        self.request_hold_released
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.request_hold.notify_waiters();
+    }
 }
 
 impl Drop for TestRelay {
     fn drop(&mut self) {
+        self.release_requests();
         let _ = self.shutdown.send(());
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -342,6 +380,9 @@ async fn handle_connection(
     events: Arc<Mutex<Vec<Event>>>,
     broadcaster: broadcast::Sender<Event>,
     request_count: Arc<std::sync::atomic::AtomicUsize>,
+    request_hold_from: Arc<std::sync::atomic::AtomicUsize>,
+    request_hold_released: Arc<std::sync::atomic::AtomicBool>,
+    request_hold: Arc<Notify>,
 ) {
     let ws = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -381,8 +422,25 @@ async fn handle_connection(
                             .into_iter()
                             .map(|filter| filter.into_owned())
                             .collect::<Vec<_>>();
-                        request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let request_number = request_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            .saturating_add(1);
                         subscriptions.insert(subscription_id.to_string(), filters.clone());
+                        if request_number
+                            >= request_hold_from.load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            loop {
+                                let notified = request_hold.notified();
+                                tokio::pin!(notified);
+                                notified.as_mut().enable();
+                                if request_hold_released
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                {
+                                    break;
+                                }
+                                notified.await;
+                            }
+                        }
                         let current = events.lock().expect("relay events").clone();
                         for event in current {
                             if filters.iter().any(|filter| filter.match_event(&event, Default::default())) {
@@ -1041,6 +1099,233 @@ async fn detached_profile_upload_drains_before_exclusive_publication_fence() -> 
 }
 
 #[tokio::test]
+async fn publication_thread_quiesces_before_guarded_upload_drains() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock().await;
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+    let tree = hashtree_core::HashTree::new(
+        hashtree_core::HashTreeConfig::new(store.store_arc())
+            .public()
+            .with_chunk_size(32),
+    );
+    let generated_bytes = (0..4096)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (profile_root, _) = tree.put_file(&generated_bytes).await?;
+    let upload_cids =
+        BackgroundNostrMirror::collect_root_upload_cids(store.as_ref(), profile_root.clone(), None)
+            .await?;
+    assert!(
+        upload_cids.len() > MIRROR_ROOT_UPLOAD_CONCURRENCY,
+        "generated DAG must span more than one bounded upload batch"
+    );
+    let deferred_batch_hash = hex::encode(upload_cids[MIRROR_ROOT_UPLOAD_CONCURRENCY].hash);
+
+    let blossom = TestBlossom::new().await;
+    let root_hash = hex::encode(profile_root.hash);
+    blossom.hold_put(&root_hash);
+    let mirror = Arc::new(
+        BackgroundNostrMirror::new(
+            NostrMirrorConfig {
+                blossom_write_servers: vec![blossom.base_url()],
+                history_sync_on_start: false,
+                published_event_tree_name: None,
+                published_profile_search_tree_name: Some("profile-search".to_string()),
+                published_profiles_by_pubkey_tree_name: None,
+                ..NostrMirrorConfig::default()
+            },
+            store,
+            graph_store,
+            None,
+        )
+        .await?,
+    );
+    BackgroundNostrMirror::note_root_change(
+        Some("profile-search"),
+        &mirror.profile_search_publish_state,
+        Some(profile_root.clone()),
+    )?;
+    mirror.spawn_pending_root_publish(false, true, false, true);
+    wait_until("held profile PUT", Duration::from_secs(5), || {
+        blossom.put_started(&root_hash)
+    })
+    .await;
+
+    mirror.shutdown();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        mirror.finish_pending_root_publish_task(),
+    )
+    .await
+    .expect("publication thread must not own or await its upload worker");
+
+    let drain = mirror.finish_root_upload_tasks();
+    tokio::pin!(drain);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut drain)
+            .await
+            .is_err(),
+        "cleanup must retain the shared publication guard through the in-flight PUT"
+    );
+    blossom.release_put(&root_hash);
+    tokio::time::timeout(Duration::from_secs(5), &mut drain)
+        .await
+        .expect("guarded upload drain after completed PUT");
+    assert!(blossom.has_hash(&root_hash));
+    assert!(
+        !blossom.has_hash(&deferred_batch_hash),
+        "shutdown must stop before starting the next DAG batch"
+    );
+    assert!(
+        mirror
+            .profile_search_publish_state
+            .lock()
+            .expect("profile search publish state")
+            .last_uploaded_root
+            .is_none(),
+        "a deliberately partial upload must not write a durable root witness"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_error_after_publication_spawn_drains_all_owned_work() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock().await;
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+    let profile_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &profile_keys.public_key().to_bytes());
+    let profile = event_builder!(Kind::Metadata, r#"{"name":"Failing Run Publication"}"#)
+        .custom_created_at(Timestamp::from(42))
+        .sign_with_keys(&profile_keys)
+        .expect("generated profile");
+    socialgraph::ingest_parsed_event(graph_store.as_ref(), &profile)?;
+    let profile_root = graph_store
+        .profile_search_root()?
+        .expect("generated profile-search root");
+
+    let relay = TestRelay::new(Vec::new());
+    relay.hold_requests_from(2);
+    let blossom = TestBlossom::new().await;
+    let root_hash = hex::encode(profile_root.hash);
+    blossom.hold_put(&root_hash);
+    let publish_keys = nostr_sdk::Keys::parse(&profile_keys.secret_key().to_bech32()?)
+        .context("parse generated publication keys")?;
+    let mirror = Arc::new(
+        BackgroundNostrMirror::new(
+            NostrMirrorConfig {
+                relays: vec![relay.url()],
+                publish_relays: vec![relay.url()],
+                blossom_write_servers: vec![blossom.base_url()],
+                history_sync_on_start: true,
+                history_sync_on_reconnect: false,
+                fetch_timeout: Duration::from_secs(30),
+                published_event_tree_name: None,
+                published_profile_search_tree_name: Some("profile-search".to_string()),
+                published_profiles_by_pubkey_tree_name: None,
+                ..NostrMirrorConfig::default()
+            },
+            Arc::clone(&store),
+            graph_store,
+            Some(publish_keys),
+        )
+        .await?,
+    );
+    let mirror_for_run = Arc::clone(&mirror);
+    let run = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build generated failure mirror runtime");
+        runtime.block_on(mirror_for_run.run())
+    });
+    wait_until(
+        "profile PUT before generated root-state failure",
+        Duration::from_secs(5),
+        || blossom.put_started(&root_hash),
+    )
+    .await;
+    wait_until(
+        "held generated history fetch",
+        Duration::from_secs(5),
+        || {
+            relay.request_count() >= 2
+                && !mirror
+                    .background_tasks
+                    .lock()
+                    .expect("mirror background tasks")
+                    .is_empty()
+        },
+    )
+    .await;
+
+    std::fs::write(
+        tmp.path()
+            .join("socialgraph")
+            .join("profile-search-root.msgpack"),
+        b"generated invalid root state",
+    )?;
+    wait_until("mirror error cleanup", Duration::from_secs(5), || {
+        mirror.shutting_down.load(Ordering::Acquire)
+    })
+    .await;
+    assert!(
+        !run.is_finished(),
+        "run must retain ownership until its guarded PUT has drained"
+    );
+
+    blossom.release_put(&root_hash);
+    let error = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("run cleanup timeout")
+        .expect("mirror task join")
+        .expect_err("generated invalid root state must fail the run");
+    assert!(
+        format!("{error:#}").contains("invalid type"),
+        "unexpected generated failure: {error:#}"
+    );
+    assert!(mirror
+        .root_publish_task
+        .lock()
+        .expect("root publish task")
+        .is_none());
+    assert!(mirror
+        .root_upload_tasks
+        .lock()
+        .expect("root upload tasks")
+        .is_empty());
+    assert!(mirror
+        .background_tasks
+        .lock()
+        .expect("mirror background tasks")
+        .is_empty());
+    assert_eq!(
+        Arc::strong_count(&mirror),
+        1,
+        "no publication or background task may retain the mirror after run failure"
+    );
+    let published_after_cleanup = published_root_event_count(&relay, "profile-search");
+    relay.release_requests();
+    tokio::time::sleep(MIRROR_ROOT_PUBLISH_MAX_STALENESS + Duration::from_millis(50)).await;
+    assert_eq!(
+        published_root_event_count(&relay, "profile-search"),
+        published_after_cleanup,
+        "the cancelled history worker must not publish after run cleanup"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Result<()> {
     let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
@@ -1258,10 +1543,14 @@ async fn uploaded_event_root_state_is_reused_after_restart() -> Result<()> {
     };
     let RootUploadTask {
         cancel: upload_lifetime,
+        finished,
         join,
         ..
     } = upload_task;
-    join.await.context("join event-root upload task")?;
+    finished
+        .await
+        .context("event-root upload completion signal")?;
+    join.join().expect("join event-root upload task");
     drop(upload_lifetime);
     assert!(blossom.has_hash(&hex::encode(root.hash)));
     assert_eq!(

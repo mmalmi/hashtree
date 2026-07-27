@@ -850,11 +850,18 @@ fn parse_profile_rank_decisions(bytes: &[u8]) -> Result<(BTreeMap<String, Option
 }
 
 fn eligible_profile_rank_authors_sha256(decisions: &BTreeMap<String, Option<u32>>) -> String {
-    let mut digest = Sha256::new();
-    for pubkey in decisions
+    // The producer's eligible-author artifact is the crawl census allowlist,
+    // ordered by follow distance and then pubkey. The rank-decision JSONL has a
+    // separate canonical order (pubkey only), so iterating this BTreeMap
+    // directly would hash different bytes for any census spanning distances.
+    let mut eligible = decisions
         .iter()
-        .filter_map(|(pubkey, rank)| rank.is_some().then_some(pubkey))
-    {
+        .filter_map(|(pubkey, rank)| rank.map(|rank| (rank, pubkey)))
+        .collect::<Vec<_>>();
+    eligible.sort_unstable();
+
+    let mut digest = Sha256::new();
+    for (_, pubkey) in eligible {
         digest.update(pubkey.as_bytes());
         digest.update(b"\n");
     }
@@ -1019,7 +1026,7 @@ pub(super) fn load_pinned_profile_rank_decisions(
     if report.eligible_authors_sha256 != eligible_authors_sha256 {
         anyhow::bail!(
             "profile rank-decisions report eligible-author digest {} does not match actual \
-             eligible decision keys {}",
+             eligible decisions in census (rank, pubkey) order {}",
             report.eligible_authors_sha256,
             eligible_authors_sha256
         );
@@ -2927,7 +2934,19 @@ mod tests {
         let decisions_bytes = format!("{}\n", lines.join("\n")).into_bytes();
         let decisions_file_sha256 = bytes_sha256(&decisions_bytes);
         let eligible_count = decisions.values().filter(|rank| rank.is_some()).count();
-        let eligible_authors_sha256 = eligible_profile_rank_authors_sha256(decisions);
+        // Mirror the TypeScript census producer: the allowlist is ordered by
+        // follow distance and then pubkey, independently of the pubkey-sorted
+        // decision JSONL above.
+        let mut eligible_authors = decisions
+            .iter()
+            .filter_map(|(pubkey, rank)| rank.map(|rank| (rank, pubkey)))
+            .collect::<Vec<_>>();
+        eligible_authors.sort_unstable();
+        let eligible_authors_text = eligible_authors
+            .iter()
+            .map(|(_, pubkey)| format!("{pubkey}\n"))
+            .collect::<String>();
+        let eligible_authors_sha256 = bytes_sha256(eligible_authors_text.as_bytes());
         let report = serde_json::json!({
             "format": PROFILE_RANK_DECISION_REPORT_FORMAT,
             "censusFormat": PROFILE_RANK_DECISION_CENSUS_FORMAT,
@@ -2941,10 +2960,10 @@ mod tests {
             "recordCount": decisions.len(),
             "eligibleCount": eligible_count,
             "excludedCount": decisions.len() - eligible_count,
-            "reachableCount": decisions.len(),
+            "reachableCount": eligible_count,
             "reachableOvermutedCount": 0,
             "distanceExcludedCount": 0,
-            "unreachableCount": 0,
+            "unreachableCount": decisions.len() - eligible_count,
             "allGraphOvermutedCount": 0,
             "rankDecisionsSha256": decisions_sha256,
             "rankDecisionsFileSha256": decisions_file_sha256,
@@ -3052,6 +3071,75 @@ mod tests {
     }
 
     #[test]
+    fn pinned_rank_decisions_bind_the_producer_census_order_not_jsonl_key_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut pubkeys = (0..4)
+            .map(|_| Keys::generate().public_key().to_hex())
+            .collect::<Vec<_>>();
+        pubkeys.sort();
+        let decisions = BTreeMap::from([
+            (pubkeys[0].clone(), Some(2)),
+            (pubkeys[1].clone(), None),
+            (pubkeys[2].clone(), Some(0)),
+            (pubkeys[3].clone(), Some(1)),
+        ]);
+        let (decisions_bytes, report_bytes, decisions_sha256, report_sha256) =
+            rank_decision_artifacts(&decisions);
+        let decisions_path = temp.path().join("rank-decisions.jsonl");
+        let report_path = temp.path().join("rank-decisions-report.json");
+        std::fs::write(&decisions_path, decisions_bytes).unwrap();
+        std::fs::write(&report_path, &report_bytes).unwrap();
+
+        let census_order_text = format!("{}\n{}\n{}\n", pubkeys[2], pubkeys[3], pubkeys[0]);
+        let census_order_sha256 = bytes_sha256(census_order_text.as_bytes());
+        let pubkey_order_text = format!("{}\n{}\n{}\n", pubkeys[0], pubkeys[2], pubkeys[3]);
+        let pubkey_order_sha256 = bytes_sha256(pubkey_order_text.as_bytes());
+        assert_ne!(
+            census_order_sha256, pubkey_order_sha256,
+            "generated contract must distinguish census order from decision-key order"
+        );
+
+        let trusted = load_pinned_profile_rank_decisions(
+            &decisions_path,
+            &decisions_sha256,
+            &report_path,
+            &report_sha256,
+        )
+        .expect("accept generated producer-compatible census/report contract");
+        assert_eq!(
+            trusted.evidence.eligible_authors_sha256,
+            census_order_sha256
+        );
+        require_profile_rank_policy_binding(
+            Some(&trusted),
+            &census_order_sha256,
+            trusted.evidence.eligible_count,
+        )
+        .expect("bind the exact distance-ordered crawl allowlist");
+
+        let mut tampered_report: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
+        tampered_report["eligibleAuthorsSha256"] = serde_json::Value::String(pubkey_order_sha256);
+        let tampered_report_bytes = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&tampered_report).unwrap()
+        )
+        .into_bytes();
+        let tampered_report_path = temp.path().join("tampered-rank-decisions-report.json");
+        std::fs::write(&tampered_report_path, &tampered_report_bytes).unwrap();
+        let tampered_report_sha256 = bytes_sha256(&tampered_report_bytes);
+        let error = load_pinned_profile_rank_decisions(
+            &decisions_path,
+            &decisions_sha256,
+            &tampered_report_path,
+            &tampered_report_sha256,
+        )
+        .expect_err("pubkey-order digest must not inherit census authority");
+        assert!(error
+            .to_string()
+            .contains("does not match actual eligible decisions in census"));
+    }
+
+    #[test]
     fn pinned_rank_decisions_reject_same_count_swapped_eligible_pubkey() {
         let temp = tempfile::tempdir().unwrap();
         let expected_pubkey = "d".repeat(64);
@@ -3081,7 +3169,7 @@ mod tests {
         .expect_err("same-count swapped eligible keys must not inherit the policy digest");
         assert!(error
             .to_string()
-            .contains("does not match actual eligible decision keys"));
+            .contains("does not match actual eligible decisions in census"));
     }
 
     #[test]

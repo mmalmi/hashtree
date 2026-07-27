@@ -33,6 +33,10 @@
 
 ### Fixed
 
+- Profile-repair rank authority now reconstructs the frozen crawl allowlist in
+  canonical `(follow distance, pubkey)` order instead of rank-decision JSONL
+  key order. Background profile publication also owns and drains upload
+  workers independently of its temporary Tokio runtime, including error exits.
 - Derived social-graph and profile projections now verify both incoming and
   stored events, then reuse the canonical stored bytes when the same event ID
   has a different valid Schnorr signature. Forced local-list reloads and

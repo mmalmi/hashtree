@@ -20,10 +20,12 @@ use nostr::{
 use nostr_sdk::{
     pool::RelayLimits, prelude::RelayPoolNotification, Client, ClientOptions, Keys, RelayStatus,
 };
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
-use crate::blossom_push::background_blossom_push_incremental_with_store;
+use crate::blossom_push::{collect_cids_for_push, collect_incremental_cids_for_push};
+use crate::config::ensure_keys_string;
+use crate::fetch::{FetchConfig, Fetcher};
 use crate::socialgraph::crawler::SOCIALGRAPH_RELAY_EVENT_MAX_SIZE;
 use crate::socialgraph::{self, SocialGraphBackend, SocialGraphStore};
 use crate::HashtreeStore;
@@ -125,6 +127,12 @@ const MIRROR_ROOT_PUBLISH_PRIMARY_TIMEOUT: Duration = Duration::from_millis(250)
 const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const MIRROR_ROOT_PUBLISH_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(not(test))]
+const MIRROR_ROOT_UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const MIRROR_ROOT_UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const MIRROR_ROOT_UPLOAD_CONCURRENCY: usize = 16;
 
 const MISSING_LOCAL_BLOB_PUSH_ERROR: &str = "missing local blob";
 
@@ -237,8 +245,20 @@ struct RootPublishState {
 
 struct RootUploadTask {
     cancel: watch::Sender<bool>,
-    join: tokio::task::JoinHandle<()>,
+    finished: oneshot::Receiver<()>,
+    join: std::thread::JoinHandle<()>,
     drain_after_start: bool,
+}
+
+struct RootPublishTask {
+    finished: oneshot::Receiver<()>,
+    join: std::thread::JoinHandle<()>,
+}
+
+struct MirrorBackgroundTask {
+    label: &'static str,
+    finished: oneshot::Receiver<()>,
+    join: std::thread::JoinHandle<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +292,8 @@ pub struct BackgroundNostrMirror {
     root_publication_deferrals: AtomicUsize,
     profile_publication_fence_logged: AtomicBool,
     root_upload_tasks: Mutex<Vec<RootUploadTask>>,
-    root_publish_task: Mutex<Option<std::thread::JoinHandle<()>>>,
+    root_publish_task: Mutex<Option<RootPublishTask>>,
+    background_tasks: Mutex<Vec<MirrorBackgroundTask>>,
     shutting_down: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -355,6 +376,7 @@ impl BackgroundNostrMirror {
             profile_publication_fence_logged: AtomicBool::new(false),
             root_upload_tasks: Mutex::new(Vec::new()),
             root_publish_task: Mutex::new(None),
+            background_tasks: Mutex::new(Vec::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_tx,
             shutdown_rx,
@@ -516,10 +538,23 @@ impl BackgroundNostrMirror {
 
     pub fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        // Synchronize with both task-registration critical sections. Once
+        // shutdown returns, no publisher can still be between its final
+        // shutdown check and registering work that cleanup would miss.
+        {
+            let _publication = self.root_publish_task.lock().expect("root publish task");
+        }
+        {
+            let _background = self
+                .background_tasks
+                .lock()
+                .expect("mirror background tasks");
+        }
         let tasks = self.root_upload_tasks.lock().expect("root upload tasks");
         for task in tasks.iter() {
             let _ = task.cancel.send(true);
         }
+        drop(tasks);
         let _ = self.shutdown_tx.send(true);
     }
 
@@ -528,18 +563,48 @@ impl BackgroundNostrMirror {
             let mut tasks = self.root_upload_tasks.lock().expect("root upload tasks");
             tasks.drain(..).collect::<Vec<_>>()
         };
-        for mut task in tasks {
+        for task in &tasks {
             let _ = task.cancel.send(true);
-            if task.drain_after_start {
-                if let Err(error) = task.join.await {
-                    warn!("Nostr mirror guarded root upload task failed during shutdown: {error}");
-                }
-            } else if tokio::time::timeout(Duration::from_secs(3), &mut task.join)
-                .await
-                .is_err()
-            {
-                warn!("Timed out waiting for Nostr mirror root upload shutdown");
-                task.join.abort();
+        }
+        for task in tasks {
+            let RootUploadTask {
+                finished,
+                join,
+                drain_after_start,
+                ..
+            } = task;
+            let completion = finished.await;
+            match join.join() {
+                Ok(()) if completion.is_ok() => {}
+                Ok(()) => warn!(
+                    "Nostr mirror root upload completion channel closed unexpectedly: guarded={drain_after_start}"
+                ),
+                Err(_) => warn!(
+                    "Nostr mirror root upload thread panicked during shutdown: guarded={drain_after_start}"
+                ),
+            }
+        }
+    }
+
+    async fn finish_background_tasks(&self) {
+        let tasks = {
+            let mut tasks = self
+                .background_tasks
+                .lock()
+                .expect("mirror background tasks");
+            tasks.drain(..).collect::<Vec<_>>()
+        };
+        for task in tasks {
+            let MirrorBackgroundTask {
+                label,
+                finished,
+                join,
+            } = task;
+            let completion = finished.await;
+            match join.join() {
+                Ok(()) if completion.is_ok() => {}
+                Ok(()) => warn!("Nostr mirror {label} completion channel closed unexpectedly"),
+                Err(_) => warn!("Nostr mirror {label} thread panicked during shutdown"),
             }
         }
     }
@@ -572,11 +637,21 @@ impl BackgroundNostrMirror {
         priority: bool,
     ) {
         let mut task = self.root_publish_task.lock().expect("root publish task");
-        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+        if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
+        if let Some(previous) = task.take() {
+            if !previous.join.is_finished() {
+                *task = Some(previous);
+                return;
+            }
+            if previous.join.join().is_err() {
+                warn!("Nostr mirror root publication thread panicked");
+            }
+        }
         let mirror = Arc::clone(self);
-        *task = Some(std::thread::spawn(move || {
+        let (finished_tx, finished) = oneshot::channel();
+        let join = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -609,7 +684,9 @@ impl BackgroundNostrMirror {
                     warn!("Nostr mirror profiles-by-pubkey publish failed: {error:#}");
                 }
             });
-        }));
+            let _ = finished_tx.send(());
+        });
+        *task = Some(RootPublishTask { finished, join });
     }
 
     async fn finish_pending_root_publish_task(&self) {
@@ -619,10 +696,14 @@ impl BackgroundNostrMirror {
             .expect("root publish task")
             .take();
         if let Some(task) = task {
-            match tokio::task::spawn_blocking(move || task.join()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => warn!("Nostr mirror root publication thread panicked"),
-                Err(error) => warn!("Nostr mirror root publication join failed: {error}"),
+            let RootPublishTask { finished, join } = task;
+            let completion = finished.await;
+            match join.join() {
+                Ok(()) if completion.is_ok() => {}
+                Ok(()) => {
+                    warn!("Nostr mirror root publication completion channel closed unexpectedly")
+                }
+                Err(_) => warn!("Nostr mirror root publication thread panicked"),
             }
         }
     }
@@ -666,6 +747,12 @@ impl BackgroundNostrMirror {
             return Ok(());
         }
 
+        let result = self.run_active().await;
+        self.finish_run(result.is_ok()).await;
+        result
+    }
+
+    async fn run_active(self: &Arc<Self>) -> Result<()> {
         info!(
             "Nostr mirror starting: relays={} max_follow_distance={} negentropy_only={} kinds={:?} history_sync_author_chunk_size={} history_sync_on_start={} history_sync_on_reconnect={}",
             self.config.relays.len(),
@@ -806,56 +893,95 @@ impl BackgroundNostrMirror {
             }
         }
 
+        Ok(())
+    }
+
+    async fn finish_run(&self, graceful: bool) {
+        // This is intentionally the first cleanup action. It closes both task
+        // registration races and cancels workers that have not entered a
+        // guarded external publication yet.
+        self.shutdown();
         self.finish_pending_root_publish_task().await;
-        if let Err(err) = self.flush_live_events().await {
-            warn!(
-                "Nostr mirror live event flush failed during shutdown: {:#}",
-                err
-            );
-        }
-        if let Err(err) = self.sync_publish_roots_from_store() {
-            warn!(
-                "Nostr mirror root-state refresh failed during shutdown: {:#}",
-                err
-            );
-        }
-        let (event_result, profile_search_result, profiles_by_pubkey_result) =
-            self.publish_pending_roots(true, true, true).await;
-        if let Err(err) = event_result {
-            warn!(
-                "Nostr mirror event-root publish failed during shutdown: {:#}",
-                err
-            );
-        }
-        if let Err(err) = profile_search_result {
-            warn!(
-                "Nostr mirror profile-search publish failed during shutdown: {:#}",
-                err
-            );
-        }
-        if let Err(err) = profiles_by_pubkey_result {
-            warn!(
-                "Nostr mirror profiles-by-pubkey publish failed during shutdown: {:#}",
-                err
-            );
+        self.finish_background_tasks().await;
+
+        if graceful {
+            if let Err(err) = self.flush_live_events().await {
+                warn!(
+                    "Nostr mirror live event flush failed during shutdown: {:#}",
+                    err
+                );
+            }
+            if let Err(err) = self.sync_publish_roots_from_store() {
+                warn!(
+                    "Nostr mirror root-state refresh failed during shutdown: {:#}",
+                    err
+                );
+            }
+            let (event_result, profile_search_result, profiles_by_pubkey_result) =
+                self.publish_pending_roots(true, true, true).await;
+            if let Err(err) = event_result {
+                warn!(
+                    "Nostr mirror event-root publish failed during shutdown: {:#}",
+                    err
+                );
+            }
+            if let Err(err) = profile_search_result {
+                warn!(
+                    "Nostr mirror profile-search publish failed during shutdown: {:#}",
+                    err
+                );
+            }
+            if let Err(err) = profiles_by_pubkey_result {
+                warn!(
+                    "Nostr mirror profiles-by-pubkey publish failed during shutdown: {:#}",
+                    err
+                );
+            }
         }
         self.finish_root_upload_tasks().await;
         let _ = self.client.disconnect().await;
         if let Some(client) = self.publish_client.as_ref() {
             let _ = client.disconnect().await;
         }
-        Ok(())
+    }
+
+    fn spawn_background_task(&self, label: &'static str, task: impl FnOnce() + Send + 'static) {
+        let mut tasks = self
+            .background_tasks
+            .lock()
+            .expect("mirror background tasks");
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        tasks.retain(|task| !task.join.is_finished());
+        let (finished_tx, finished) = oneshot::channel();
+        let join = std::thread::spawn(move || {
+            task();
+            let _ = finished_tx.send(());
+        });
+        tasks.push(MirrorBackgroundTask {
+            label,
+            finished,
+            join,
+        });
     }
 
     fn spawn_startup_history_sync(self: &Arc<Self>, initial_authors: Vec<String>) {
         let mirror = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
+        self.spawn_background_task("startup history sync", move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build nostr mirror startup history sync runtime");
             runtime.block_on(async move {
-                let _guard = mirror.history_sync_lock.lock().await;
+                let mut shutdown_rx = mirror.shutdown_rx.clone();
+                let _guard = tokio::select! {
+                    guard = mirror.history_sync_lock.lock() => guard,
+                    _ = shutdown_rx.changed() => return,
+                };
+                if mirror.shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
                 if let Err(err) = mirror.run_startup_history_sync(initial_authors).await {
                     warn!("Nostr mirror startup history sync failed: {:#}", err);
                 }
@@ -865,7 +991,13 @@ impl BackgroundNostrMirror {
 
     async fn run_startup_history_sync(&self, initial_authors: Vec<String>) -> Result<()> {
         self.history_sync_authors(initial_authors).await?;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.history_sync_archive_for_reachable_authors().await?;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if self.should_backfill_missing_profiles(None) {
             let missing_profile_authors = self
                 .collect_missing_profile_authors(self.config.missing_profile_backfill_batch_size)?;
@@ -892,14 +1024,21 @@ impl BackgroundNostrMirror {
         wait_for_existing_sync: bool,
     ) {
         let mirror = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
+        self.spawn_background_task(label, move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build nostr mirror author history sync runtime");
             runtime.block_on(async move {
                 if wait_for_existing_sync {
-                    let _guard = mirror.history_sync_lock.lock().await;
+                    let mut shutdown_rx = mirror.shutdown_rx.clone();
+                    let _guard = tokio::select! {
+                        guard = mirror.history_sync_lock.lock() => guard,
+                        _ = shutdown_rx.changed() => return,
+                    };
+                    if mirror.shutting_down.load(Ordering::Acquire) {
+                        return;
+                    }
                     if let Err(err) = mirror
                         .run_author_history_sync(authors, include_archive_history)
                         .await
@@ -909,6 +1048,9 @@ impl BackgroundNostrMirror {
                     return;
                 }
 
+                if mirror.shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
                 let Ok(_guard) = mirror.history_sync_lock.try_lock() else {
                     info!("Nostr mirror {label} skipped; another history sync is running");
                     return;
@@ -929,7 +1071,7 @@ impl BackgroundNostrMirror {
         include_archive_history: bool,
     ) -> Result<()> {
         self.history_sync_authors(authors.clone()).await?;
-        if include_archive_history {
+        if include_archive_history && !self.shutting_down.load(Ordering::Acquire) {
             self.history_sync_archive_for_authors(authors).await?;
         }
         Ok(())
@@ -937,12 +1079,15 @@ impl BackgroundNostrMirror {
 
     fn spawn_missing_profile_backfill(self: &Arc<Self>, authors: Vec<String>) {
         let mirror = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
+        self.spawn_background_task("missing-profile backfill", move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build nostr mirror missing profile runtime");
             runtime.block_on(async move {
+                if mirror.shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
                 let Ok(_guard) = mirror.history_sync_lock.try_lock() else {
                     info!(
                         "Nostr mirror missing-profile backfill skipped; another history sync is running"
@@ -1413,6 +1558,9 @@ impl BackgroundNostrMirror {
         if authors.is_empty() {
             return Ok(());
         }
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let _publication_deferral = RootPublicationDeferral::new(&self.root_publication_deferrals);
 
         info!(
@@ -1434,6 +1582,9 @@ impl BackgroundNostrMirror {
         let total_chunks = authors.len().div_ceil(chunk_size);
 
         for (chunk_index, author_chunk) in authors.chunks(chunk_size).enumerate() {
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Ok(());
+            }
             let author_chunk = author_chunk.to_vec();
             let author_count = author_chunk.len();
             info!(
@@ -1442,7 +1593,12 @@ impl BackgroundNostrMirror {
                 total_chunks,
                 author_count
             );
-            let report = match run_chunk(current_root.clone(), author_chunk.clone()).await {
+            let mut shutdown_rx = self.shutdown_rx.clone();
+            let chunk_result = tokio::select! {
+                result = run_chunk(current_root.clone(), author_chunk.clone()) => result,
+                _ = shutdown_rx.changed() => return Ok(()),
+            };
+            let report = match chunk_result {
                 Ok(report) => report,
                 Err(err) => {
                     failed_chunks = failed_chunks.saturating_add(1);
@@ -1459,6 +1615,9 @@ impl BackgroundNostrMirror {
                 }
             };
 
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Ok(());
+            }
             if report.root != current_root {
                 current_root = self
                     .apply_history_root_with_options(
@@ -1717,6 +1876,9 @@ impl BackgroundNostrMirror {
     }
 
     async fn publish_history_roots(&self, update_profile_and_graph: bool) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let (event_result, profile_search_result, profiles_by_pubkey_result) = self
             .publish_priority_roots(true, update_profile_and_graph, update_profile_and_graph)
             .await;
@@ -2215,6 +2377,158 @@ impl BackgroundNostrMirror {
         Ok(())
     }
 
+    async fn collect_root_upload_cids(
+        store: &HashtreeStore,
+        root: hashtree_core::Cid,
+        previous_root: Option<hashtree_core::Cid>,
+    ) -> Result<Vec<hashtree_core::Cid>> {
+        let fetcher = Fetcher::new(FetchConfig::default());
+        if let Some(previous_root) = previous_root {
+            match collect_incremental_cids_for_push(
+                store,
+                root.clone(),
+                previous_root,
+                Some(&fetcher),
+            )
+            .await
+            {
+                Ok(cids) => return Ok(cids),
+                Err(error) => {
+                    warn!(
+                        "Nostr mirror Blossom DAG diff failed; falling back to full push: {error:#}"
+                    );
+                }
+            }
+        }
+        collect_cids_for_push(store, root, Some(&fetcher)).await
+    }
+
+    async fn upload_root_blob_to_any_server(
+        keys: &Keys,
+        servers: &[String],
+        data: &[u8],
+        cancelled: &watch::Receiver<bool>,
+    ) -> Result<bool> {
+        let mut last_error = None;
+        for server in servers {
+            if *cancelled.borrow() {
+                return Ok(false);
+            }
+            // A single-server client makes one bounded PUT attempt. We never
+            // select cancellation against that future: after the request has
+            // begun, its result is awaited before the publication guard can
+            // be released. Cancellation is observed before the next server.
+            let client = hashtree_blossom::BlossomClient::new_empty(keys.clone())
+                .with_write_servers(vec![server.clone()])
+                .with_timeout(MIRROR_ROOT_UPLOAD_REQUEST_TIMEOUT);
+            match client.upload(data).await {
+                Ok(_) => return Ok(true),
+                Err(error) => {
+                    if *cancelled.borrow() {
+                        return Ok(false);
+                    }
+                    last_error = Some(format!("{server}: {error}"));
+                }
+            }
+        }
+        anyhow::bail!(
+            "all configured file servers rejected the blob{}",
+            last_error
+                .as_deref()
+                .map(|error| format!(" (last: {error})"))
+                .unwrap_or_default()
+        )
+    }
+
+    async fn upload_root_cids_until_cancelled(
+        store: &HashtreeStore,
+        cids: &[hashtree_core::Cid],
+        servers: &[String],
+        cancelled: &watch::Receiver<bool>,
+    ) -> Result<bool> {
+        let (nsec, _) = ensure_keys_string()?;
+        let keys = Keys::parse(&nsec).context("parse keys for mirror Blossom publication")?;
+
+        let batch_count = cids.len().div_ceil(MIRROR_ROOT_UPLOAD_CONCURRENCY);
+        for (batch_index, batch) in cids.chunks(MIRROR_ROOT_UPLOAD_CONCURRENCY).enumerate() {
+            if *cancelled.borrow() {
+                return Ok(false);
+            }
+            let mut blobs = Vec::with_capacity(batch.len());
+            for cid in batch {
+                let data = store
+                    .get_blob(&cid.hash)?
+                    .ok_or_else(|| anyhow::anyhow!("missing local blob while uploading {}", cid))?;
+                blobs.push(data);
+            }
+
+            let results =
+                futures::future::join_all(blobs.iter().map(|data| {
+                    Self::upload_root_blob_to_any_server(&keys, servers, data, cancelled)
+                }))
+                .await;
+            let mut first_error = None;
+            let mut fully_uploaded = true;
+            for result in results {
+                match result {
+                    Ok(uploaded) => fully_uploaded &= uploaded,
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            if !fully_uploaded {
+                return Ok(false);
+            }
+            if *cancelled.borrow() && batch_index + 1 < batch_count {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn run_root_upload(
+        store: Arc<HashtreeStore>,
+        root: hashtree_core::Cid,
+        previous_root: Option<hashtree_core::Cid>,
+        servers: Vec<String>,
+        data_dir: PathBuf,
+        profile_publication: bool,
+        cancelled: &mut watch::Receiver<bool>,
+        log_label: &str,
+    ) -> Result<bool> {
+        // DAG discovery and any missing-local-blob hydration happen before
+        // acquiring the external-publication guard and are freely
+        // cancellable: they cannot publish a stale profile root.
+        let collect = Self::collect_root_upload_cids(store.as_ref(), root, previous_root);
+        tokio::pin!(collect);
+        let cids = tokio::select! {
+            result = &mut collect => result?,
+            _ = cancelled.changed() => return Ok(false),
+        };
+        if *cancelled.borrow() {
+            return Ok(false);
+        }
+
+        let _profile_publication = if profile_publication {
+            let publication = tokio::select! {
+                result = socialgraph::acquire_profile_publication_guard(&data_dir) => {
+                    result.with_context(|| {
+                        format!("acquire detached {log_label} Blossom publication guard")
+                    })?
+                }
+                _ = cancelled.changed() => return Ok(false),
+            };
+            Some(publication)
+        } else {
+            None
+        };
+
+        Self::upload_root_cids_until_cancelled(store.as_ref(), &cids, &servers, cancelled).await
+    }
+
     fn maybe_start_background_root_upload(
         &self,
         tree_name: &str,
@@ -2223,12 +2537,17 @@ impl BackgroundNostrMirror {
         log_label: &str,
         profile_publication: bool,
     ) -> bool {
-        if self.config.blossom_write_servers.is_empty()
-            || self.shutting_down.load(Ordering::Acquire)
-        {
+        if self.config.blossom_write_servers.is_empty() {
             return false;
         }
 
+        // Hold the registry lock across the final shutdown check and task
+        // registration. shutdown() takes the same lock after setting the flag,
+        // so cleanup cannot miss a worker that was concurrently being born.
+        let mut tasks = self.root_upload_tasks.lock().expect("root upload tasks");
+        if self.shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
         let previous_uploaded_root = {
             let mut state = publish_state.lock().expect("root publish state");
             if state.last_uploaded_root.as_ref() == Some(pending_root)
@@ -2254,110 +2573,74 @@ impl BackgroundNostrMirror {
         let log_label = log_label.to_string();
         let data_dir = store.base_path().to_path_buf();
         let (cancel, mut cancelled) = watch::channel(false);
-        let task = tokio::task::spawn_blocking(move || {
+        let (finished_tx, finished) = oneshot::channel();
+        let join = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build nostr mirror root upload runtime");
-            let result = runtime.block_on(async {
-                if profile_publication {
-                    // Cancellation may win while this detached task is still
-                    // waiting to enter the publication transaction. Once the
-                    // shared guard is acquired, however, await the real PUT:
-                    // dropping an in-flight HTTP future would release the
-                    // fence while the remote side may still commit it.
-                    let profile_publication = tokio::select! {
-                        result = socialgraph::acquire_profile_publication_guard(&data_dir) => {
-                            match result {
-                                Ok(guard) => guard,
-                                Err(error) => {
-                                    return Some(Err(error).with_context(|| {
-                                        format!(
-                                            "acquire detached {log_label} Blossom publication guard"
-                                        )
-                                    }));
-                                }
-                            }
-                        }
-                        _ = cancelled.changed() => return None,
-                    };
-                    let result = background_blossom_push_incremental_with_store(
-                        store,
-                        root.clone(),
-                        previous_uploaded_root,
-                        &servers,
-                    )
-                    .await;
-                    drop(profile_publication);
-                    Some(result)
-                } else {
-                    let upload = background_blossom_push_incremental_with_store(
-                        store,
-                        root.clone(),
-                        previous_uploaded_root,
-                        &servers,
-                    );
-                    tokio::select! {
-                        result = upload => Some(result),
-                        _ = cancelled.changed() => None,
-                    }
-                }
-            });
+            let result = runtime.block_on(Self::run_root_upload(
+                Arc::clone(&store),
+                root.clone(),
+                previous_uploaded_root,
+                servers,
+                data_dir,
+                profile_publication,
+                &mut cancelled,
+                &log_label,
+            ));
             let mut state = publish_state.lock().expect("root publish state");
             if state.upload_in_progress_root.as_ref() == Some(&root) {
                 state.upload_in_progress_root = None;
             }
-            if let Some(result) = result {
-                match result {
-                    Ok(()) => {
-                        if let Err(err) =
-                            Self::write_uploaded_root_state(&upload_state_path, &root, &log_label)
-                        {
-                            warn!("Nostr mirror failed to persist uploaded root state: {err:#}");
-                        }
-                        state.last_uploaded_root = Some(root.clone());
-                        state.last_uploaded_at = Some(Instant::now());
-                        if state.pending_root.as_ref() == Some(&root) {
-                            state.last_upload_failed_at = None;
-                            state.last_upload_error = None;
-                            state.missing_blob_rebuild_required = false;
-                        }
-                        info!(
-                            "Nostr mirror uploaded {} DAG to Blossom: hash={}",
-                            log_label,
-                            hex::encode(root.hash)
-                        );
+            match result {
+                Ok(true) => {
+                    if let Err(err) =
+                        Self::write_uploaded_root_state(&upload_state_path, &root, &log_label)
+                    {
+                        warn!("Nostr mirror failed to persist uploaded root state: {err:#}");
                     }
-                    Err(err) => {
-                        if state.pending_root.as_ref() == Some(&root) {
-                            state.last_upload_failed_at = Some(Instant::now());
-                            state.last_upload_error = Some(format!("{err:#}"));
-                        }
-                        if is_missing_local_blob_message(&format!("{err:#}")) {
-                            state.missing_blob_rebuild_required = true;
-                        }
-                        warn!(
-                            "Nostr mirror {} DAG upload failed: hash={} error={:#}",
-                            log_label,
-                            hex::encode(root.hash),
-                            err
-                        );
+                    state.last_uploaded_root = Some(root.clone());
+                    state.last_uploaded_at = Some(Instant::now());
+                    if state.pending_root.as_ref() == Some(&root) {
+                        state.last_upload_failed_at = None;
+                        state.last_upload_error = None;
+                        state.missing_blob_rebuild_required = false;
                     }
+                    info!(
+                        "Nostr mirror uploaded {} DAG to Blossom: hash={}",
+                        log_label,
+                        hex::encode(root.hash)
+                    );
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    if state.pending_root.as_ref() == Some(&root) {
+                        state.last_upload_failed_at = Some(Instant::now());
+                        state.last_upload_error = Some(format!("{err:#}"));
+                    }
+                    if is_missing_local_blob_message(&format!("{err:#}")) {
+                        state.missing_blob_rebuild_required = true;
+                    }
+                    warn!(
+                        "Nostr mirror {} DAG upload failed: hash={} error={:#}",
+                        log_label,
+                        hex::encode(root.hash),
+                        err
+                    );
                 }
             }
             drop(state);
             trim_transient_allocations();
+            let _ = finished_tx.send(());
         });
-        let mut tasks = self.root_upload_tasks.lock().expect("root upload tasks");
         tasks.retain(|task| !task.join.is_finished());
         let task = RootUploadTask {
             cancel,
-            join: task,
+            finished,
+            join,
             drain_after_start: profile_publication,
         };
-        if self.shutting_down.load(Ordering::Acquire) {
-            let _ = task.cancel.send(true);
-        }
         tasks.push(task);
 
         true
