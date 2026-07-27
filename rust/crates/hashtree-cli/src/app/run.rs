@@ -2236,16 +2236,22 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
 }
 
 #[cfg(feature = "lmdb")]
-fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+pub(super) fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
     let temporary = path.with_extension("tmp");
     let mut file = std::fs::File::create(&temporary)?;
     file.write_all(value.as_bytes())?;
     file.write_all(b"\n")?;
     file.sync_all()?;
     std::fs::rename(temporary, path)?;
+    // Unix exposes directory handles through the portable File API, allowing
+    // the rename itself—not only the temporary file contents—to be durable.
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

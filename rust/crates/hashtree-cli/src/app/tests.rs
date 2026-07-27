@@ -19,6 +19,8 @@ use super::resolve::{
     parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ResolveOptions,
     ResolvedCid,
 };
+#[cfg(all(feature = "lmdb", unix))]
+use super::run::write_pool_migration_cursor;
 #[cfg(feature = "fuse")]
 use super::run::{
     find_existing_active_mount, is_stale_mount_io_error, should_warn_for_temporary_mountpoint,
@@ -53,6 +55,37 @@ fn args_to_strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
     args.into_iter()
         .map(|arg| arg.to_string_lossy().to_string())
         .collect()
+}
+
+#[cfg(all(feature = "lmdb", unix))]
+#[test]
+fn pool_migration_cursor_replacement_is_synced_and_atomic() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("durable-state");
+    let cursor = parent.join("legacy.cursor");
+    let temporary = cursor.with_extension("tmp");
+    let first = "1111111111111111111111111111111111111111111111111111111111111111";
+    let second = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    write_pool_migration_cursor(&cursor, first).expect("write first durable cursor");
+    assert_eq!(
+        std::fs::read_to_string(&cursor).expect("read first cursor"),
+        format!("{first}\n")
+    );
+    assert!(
+        !temporary.exists(),
+        "temporary cursor must not survive rename"
+    );
+
+    write_pool_migration_cursor(&cursor, second).expect("replace durable cursor");
+    assert_eq!(
+        std::fs::read_to_string(&cursor).expect("read replacement cursor"),
+        format!("{second}\n")
+    );
+    assert!(
+        !temporary.exists(),
+        "temporary cursor must not survive replacement"
+    );
 }
 
 #[test]
