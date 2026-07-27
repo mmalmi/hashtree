@@ -14,9 +14,9 @@ pub use migration::{
     DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
 };
 pub use pool::{
-    PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
-    PoolReadBatchItem, PoolStore, PoolStoreConfig, PoolStoreReader, PoolTemperatureConfig,
-    PoolTemperatureReport,
+    PoolCatalogLocation, PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig,
+    PoolMemberId, PoolMemberState, PoolMemberStatus, PoolReadBatchItem, PoolStore, PoolStoreConfig,
+    PoolStoreReader, PoolTemperatureConfig, PoolTemperatureReport,
 };
 
 use async_trait::async_trait;

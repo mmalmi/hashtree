@@ -21,7 +21,10 @@ use std::path::Path;
 pub struct PoolStoreReader {
     env: ManagedEnv,
     locations: Database<Bytes, Bytes>,
+    manifest_identity: PoolManifestIdentity,
+    member_ids: Vec<PoolMemberId>,
     members: HashMap<PoolMemberId, LmdbBlobReader>,
+    member_errors: HashMap<PoolMemberId, String>,
 }
 
 /// One result from a bounded, strictly read-only Pool batch.
@@ -33,15 +36,88 @@ pub struct PoolReadBatchItem {
     pub error: Option<String>,
 }
 
+/// Exact, read-only Pool catalog state for one blob.
+///
+/// Release auditors must distinguish a terminal `Stored` location from
+/// `Pending` and `Moving`: physical bytes on a destination member are not a
+/// completed residency proof until the catalog commits that destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolCatalogLocation {
+    Missing,
+    Pending {
+        member: PoolMemberId,
+        size: u64,
+    },
+    Stored {
+        member: PoolMemberId,
+        size: u64,
+    },
+    Moving {
+        source: PoolMemberId,
+        target: PoolMemberId,
+        size: u64,
+    },
+}
+
+/// Identity of the complete Pool manifest observed by a read-only reader.
+///
+/// `sha256` covers the exact stored manifest bytes, including generation,
+/// member ordering, member states, and every member configuration field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolManifestIdentity {
+    pub generation: u64,
+    pub sha256: Hash,
+    pub member_ids: Vec<PoolMemberId>,
+}
+
+impl PoolCatalogLocation {
+    fn from_record(record: Option<LocationRecord>) -> Self {
+        match record {
+            None => Self::Missing,
+            Some(LocationRecord::Pending { member, size }) => Self::Pending { member, size },
+            Some(LocationRecord::Stored { member, size }) => Self::Stored { member, size },
+            Some(LocationRecord::Moving {
+                source,
+                target,
+                size,
+            }) => Self::Moving {
+                source,
+                target,
+                size,
+            },
+        }
+    }
+}
+
 impl PoolStoreReader {
     pub fn open<P: AsRef<Path>>(path: P, config: PoolStoreConfig) -> Result<Self, StoreError> {
+        Self::open_inner(path.as_ref(), config, false)
+    }
+
+    /// Open a strict read-only validator while retaining unavailable manifest
+    /// members as explicit per-read errors.
+    ///
+    /// This is intentionally audit-only behavior. Ordinary readers must use
+    /// [`Self::open`], which fails immediately when any configured member
+    /// cannot be opened.
+    pub fn open_with_unavailable_members_for_audit<P: AsRef<Path>>(
+        path: P,
+        config: PoolStoreConfig,
+    ) -> Result<Self, StoreError> {
+        Self::open_inner(path.as_ref(), config, true)
+    }
+
+    fn open_inner(
+        path: &Path,
+        config: PoolStoreConfig,
+        retain_unavailable_members: bool,
+    ) -> Result<Self, StoreError> {
         if config.temperature.enabled {
             return Err(StoreError::Other(
                 "read-only Pool validation requires temperature tracking to be disabled".into(),
             ));
         }
 
-        let path = path.as_ref();
         let mut options = EnvOpenOptions::new();
         options.max_dbs(super::CATALOG_DATABASES);
         unsafe {
@@ -59,17 +135,42 @@ impl PoolStoreReader {
             .open_database(&rtxn, Some("locations"))
             .map_err(map_heed)?
             .ok_or_else(|| StoreError::Other("pool locations database is missing".into()))?;
-        let manifest = read_manifest(&manifest_db, &rtxn)?;
+        let (manifest, manifest_sha256) = read_manifest(&manifest_db, &rtxn)?;
         rtxn.commit().map_err(map_heed)?;
 
+        let mut member_ids = manifest
+            .members
+            .iter()
+            .map(|member| member.id)
+            .collect::<Vec<_>>();
+        member_ids.sort_unstable();
+        let manifest_identity = PoolManifestIdentity {
+            generation: manifest.generation,
+            sha256: manifest_sha256,
+            member_ids: member_ids.clone(),
+        };
         let mut members = HashMap::with_capacity(manifest.members.len());
+        let mut member_errors = HashMap::new();
         for member in manifest.members {
-            members.insert(member.id, open_member_reader(member.id, &member.config)?);
+            match open_member_reader(member.id, &member.config) {
+                Ok(reader) => {
+                    members.insert(member.id, reader);
+                }
+                Err(error) => {
+                    if !retain_unavailable_members {
+                        return Err(error);
+                    }
+                    member_errors.insert(member.id, error.to_string());
+                }
+            }
         }
         Ok(Self {
             env,
             locations,
+            manifest_identity,
+            member_ids,
             members,
+            member_errors,
         })
     }
 
@@ -77,6 +178,50 @@ impl PoolStoreReader {
         Ok(self
             .read_location(hash)?
             .map(LocationRecord::preferred_member))
+    }
+
+    /// Return the exact member identities declared by the Pool manifest.
+    ///
+    /// Validators use this to pin the complete target-member set instead of
+    /// accidentally accepting a newly added or removed member.
+    pub fn member_ids(&self) -> Vec<PoolMemberId> {
+        self.member_ids.clone()
+    }
+
+    /// Return the complete manifest identity captured by this reader.
+    pub fn manifest_identity(&self) -> PoolManifestIdentity {
+        self.manifest_identity.clone()
+    }
+
+    /// Mark which sorted candidate hashes physically exist on one exact Pool
+    /// member. No catalog fallback or mutation is performed.
+    pub fn member_existing_hashes_in_sorted_candidates(
+        &self,
+        member: PoolMemberId,
+        hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        self.members
+            .get(&member)
+            .ok_or_else(|| self.member_unavailable_error(member))?
+            .existing_hashes_in_sorted_candidates(hashes)
+    }
+
+    /// Read a bounded prefix of sorted, physically present hashes from one
+    /// exact Pool member without checking their content hashes.
+    ///
+    /// Callers must pass only hashes reported present by
+    /// [`Self::member_existing_hashes_in_sorted_candidates`] and must verify
+    /// every returned body against its requested hash.
+    pub fn read_member_hashes_bounded_unverified(
+        &self,
+        member: PoolMemberId,
+        hashes: &[Hash],
+        byte_limit: u64,
+    ) -> Result<Vec<(Hash, Vec<u8>)>, StoreError> {
+        self.members
+            .get(&member)
+            .ok_or_else(|| self.member_unavailable_error(member))?
+            .read_hashes_bounded(hashes, byte_limit)
     }
 
     /// Resolve candidate member order for many hashes with one catalog
@@ -108,6 +253,30 @@ impl PoolStoreReader {
             .collect()
     }
 
+    /// Return exact catalog state for many hashes in one read transaction.
+    ///
+    /// This deliberately exposes `Pending` and `Moving` rather than reducing
+    /// them to read candidates, so a release audit cannot mistake an
+    /// in-progress write or relocation for terminal residency.
+    pub fn blob_catalog_locations(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<PoolCatalogLocation>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        hashes
+            .iter()
+            .map(|hash| {
+                let record = self
+                    .locations
+                    .get(&rtxn, hash)
+                    .map_err(map_heed)?
+                    .map(LocationRecord::decode)
+                    .transpose()?;
+                Ok(PoolCatalogLocation::from_record(record))
+            })
+            .collect()
+    }
+
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
         Ok(self.read_location(hash)?.map(LocationRecord::size))
     }
@@ -128,9 +297,7 @@ impl PoolStoreReader {
         let mut first_error = None;
         for id in ids.0.into_iter().take(ids.1) {
             let Some(member) = self.members.get(&id) else {
-                first_error.get_or_insert_with(|| {
-                    StoreError::Other(format!("pool member {id} is unavailable to reader"))
-                });
+                first_error.get_or_insert_with(|| self.member_unavailable_error(id));
                 continue;
             };
             match member.get_sync(hash) {
@@ -210,10 +377,9 @@ impl PoolStoreReader {
             }
             for (member_id, requested) in reads_by_member {
                 let Some(member) = self.members.get(&member_id) else {
+                    let error = self.member_unavailable_error(member_id).to_string();
                     for (item_index, _) in requested {
-                        items[item_index].error.get_or_insert_with(|| {
-                            format!("pool member {member_id} is unavailable to reader")
-                        });
+                        items[item_index].error.get_or_insert_with(|| error.clone());
                     }
                     continue;
                 };
@@ -279,17 +445,29 @@ impl PoolStoreReader {
             .map(LocationRecord::decode)
             .transpose()
     }
+
+    fn member_unavailable_error(&self, member: PoolMemberId) -> StoreError {
+        match self.member_errors.get(&member) {
+            Some(error) => StoreError::Other(format!(
+                "pool member {member} is unavailable to reader: {error}"
+            )),
+            None if self.member_ids.contains(&member) => {
+                StoreError::Other(format!("pool member {member} is unavailable to reader"))
+            }
+            None => StoreError::Other(format!("unknown pool member {member}")),
+        }
+    }
 }
 
 fn read_manifest(
     database: &Database<Bytes, Bytes>,
     txn: &heed::RoTxn<'_>,
-) -> Result<PoolManifest, StoreError> {
+) -> Result<(PoolManifest, Hash), StoreError> {
     let bytes = database
         .get(txn, MANIFEST_KEY)
         .map_err(map_heed)?
         .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
-    decode_manifest(bytes)
+    Ok((decode_manifest(bytes)?, sha256(bytes)))
 }
 
 #[cfg(test)]
@@ -347,6 +525,20 @@ mod tests {
         reader_config.temperature.enabled = false;
         let reader = PoolStoreReader::open(&catalog, reader_config)?;
         assert_eq!(
+            reader.blob_catalog_locations(&[pending_hash, moving_hash])?,
+            vec![
+                PoolCatalogLocation::Pending {
+                    member: first,
+                    size: pending_data.len() as u64,
+                },
+                PoolCatalogLocation::Moving {
+                    source: first,
+                    target: second,
+                    size: moving_data.len() as u64,
+                },
+            ]
+        );
+        assert_eq!(
             reader.get_sync(&pending_hash)?.as_deref(),
             Some(pending_data.as_slice())
         );
@@ -382,6 +574,92 @@ mod tests {
             reopened.read_location(&moving_hash)?,
             Some(LocationRecord::Moving { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn reader_can_probe_one_exact_member_without_catalog_fallback() -> Result<(), StoreError> {
+        let temp = tempfile::tempdir().map_err(StoreError::Io)?;
+        let catalog = temp.path().join("catalog");
+        let first_path = temp.path().join("first");
+        let second_path = temp.path().join("second");
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        let first = pool.add_member(PoolMemberConfig::new(first_path, 1024 * 1024))?;
+        let second = pool.add_member(PoolMemberConfig::new(second_path, 1024 * 1024))?;
+
+        let data = b"exact member validation payload";
+        let hash = sha256(data);
+        pool.get_member(first)?.put_sync(hash, data)?;
+        let mut wtxn = pool.env.write_txn().map_err(map_heed)?;
+        pool.set_location_txn(
+            &mut wtxn,
+            hash,
+            Some(LocationRecord::Stored {
+                member: first,
+                size: data.len() as u64,
+            }),
+        )?;
+        wtxn.commit().map_err(map_heed)?;
+        pool.force_sync()?;
+        drop(pool);
+
+        let reader = PoolStoreReader::open(&catalog, config)?;
+        assert_eq!(
+            reader.blob_catalog_locations(&[hash])?,
+            vec![PoolCatalogLocation::Stored {
+                member: first,
+                size: data.len() as u64,
+            }]
+        );
+        let mut expected_members = vec![first, second];
+        expected_members.sort_unstable();
+        assert_eq!(reader.member_ids(), expected_members);
+        assert_eq!(
+            reader.member_existing_hashes_in_sorted_candidates(first, &[hash])?,
+            vec![true]
+        );
+        assert_eq!(
+            reader.member_existing_hashes_in_sorted_candidates(second, &[hash])?,
+            vec![false]
+        );
+        assert_eq!(
+            reader.read_member_hashes_bounded_unverified(first, &[hash], data.len() as u64)?,
+            vec![(hash, data.to_vec())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reader_preserves_manifest_identity_when_a_member_is_unavailable() -> Result<(), StoreError> {
+        let temp = tempfile::tempdir().map_err(StoreError::Io)?;
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let unavailable_path = temp.path().join("member-unavailable");
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        let member = pool.add_member(PoolMemberConfig::new(member_path.clone(), 1024 * 1024))?;
+        drop(pool);
+        fs::rename(&member_path, &unavailable_path).map_err(StoreError::Io)?;
+
+        let default_error = match PoolStoreReader::open(&catalog, config.clone()) {
+            Ok(_) => {
+                return Err(StoreError::Other(
+                    "default reader accepted unavailable member".into(),
+                ))
+            }
+            Err(error) => error,
+        };
+        assert!(default_error.to_string().contains("member"));
+
+        let reader = PoolStoreReader::open_with_unavailable_members_for_audit(&catalog, config)?;
+        assert_eq!(reader.member_ids(), vec![member]);
+        let error = reader
+            .member_existing_hashes_in_sorted_candidates(member, &[sha256(b"missing")])
+            .expect_err("unavailable member must remain an explicit read error");
+        assert!(error.to_string().contains("unavailable to reader"));
         Ok(())
     }
 }

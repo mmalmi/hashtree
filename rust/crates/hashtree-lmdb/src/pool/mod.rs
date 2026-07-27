@@ -26,7 +26,9 @@ pub use self::model::{
     PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
 use self::move_catalog::rebuild_move_cleanup_member_index_txn;
-pub use self::reader::{PoolReadBatchItem, PoolStoreReader};
+pub use self::reader::{
+    PoolCatalogLocation, PoolManifestIdentity, PoolReadBatchItem, PoolStoreReader,
+};
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
 use crate::{managed_env::ManagedEnv, LmdbBlobStore};
