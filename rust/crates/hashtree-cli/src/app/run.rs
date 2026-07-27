@@ -38,9 +38,11 @@ use super::mount_target::{
 };
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
-    run_nostr_bulk_projection_audit, run_nostr_index_import, run_nostr_index_query,
+    run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append, run_nostr_bulk_tranche_freeze,
+    run_nostr_bulk_tranche_prepare, run_nostr_index_import, run_nostr_index_query,
     run_nostr_replaceable_repair, run_nostr_time_repair_preparation,
-    run_socialgraph_index_from_cli, BulkProjectionAuditOptions, NostrIndexImportOptions,
+    run_socialgraph_index_from_cli, BulkProjectionAuditOptions, BulkTrancheAppendOptions,
+    BulkTrancheFreezeOptions, BulkTranchePrepareOptions, NostrIndexImportOptions,
     NostrIndexQueryOptions, NostrReplaceableRepairOptions, NostrTimeRepairPreparationOptions,
     SocialGraphIndexOptions,
 };
@@ -1060,6 +1062,75 @@ pub(crate) async fn run() -> Result<()> {
                     },
                 )
                 .await?;
+            }
+            NostrIndexCommands::PrepareBulkTranche {
+                staging_data_dir,
+                eligible_authors,
+                expected_v2_state_sha256,
+                expected_stage_state_sha256,
+                audit_evidence,
+                serving_root,
+                serving_event,
+                serving_event_id,
+                serving_publisher_pubkey,
+                serving_tree_name,
+                btree_order,
+                btree_update_concurrency,
+                index_commit_batch_size,
+                out,
+            } => {
+                run_nostr_bulk_tranche_prepare(
+                    data_dir,
+                    BulkTranchePrepareOptions {
+                        staging_data_dir,
+                        eligible_authors,
+                        expected_v2_state_sha256,
+                        expected_stage_state_sha256,
+                        audit_evidence,
+                        serving_root,
+                        serving_event,
+                        serving_event_id,
+                        serving_publisher_pubkey,
+                        serving_tree_name,
+                        btree_order,
+                        btree_update_concurrency,
+                        index_commit_batch_size,
+                        out,
+                    },
+                )?;
+            }
+            NostrIndexCommands::AppendBulkTranche {
+                staging_data_dir,
+                expected_state_sha256,
+                max_segments,
+                out,
+            } => {
+                run_nostr_bulk_tranche_append(
+                    data_dir,
+                    BulkTrancheAppendOptions {
+                        staging_data_dir,
+                        expected_state_sha256,
+                        max_segments,
+                        out,
+                    },
+                )
+                .await?;
+            }
+            NostrIndexCommands::FreezeBulkTranche {
+                staging_data_dir,
+                expected_state_sha256,
+                through_author,
+                out,
+            } => {
+                run_nostr_bulk_tranche_freeze(
+                    data_dir,
+                    BulkTrancheFreezeOptions {
+                        staging_data_dir,
+                        expected_state_sha256,
+                        through_author,
+                        out,
+                    },
+                )?;
             }
             NostrIndexCommands::PrepareTimeRepair { state_file, apply } => {
                 let output = run_nostr_time_repair_preparation(

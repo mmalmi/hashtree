@@ -1097,6 +1097,81 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Pin an audited v2 candidate and rotate into crash-safe v3 append mode
+    PrepareBulkTranche {
+        /// Durable staging directory containing the immutable author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Exact ordered author allowlist used by the pinned crawl policy
+        #[arg(long = "eligible-authors")]
+        eligible_authors: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v2/state.json
+        #[arg(long = "expected-v2-state-sha256")]
+        expected_v2_state_sha256: String,
+        /// Required CAS pin for nostr-stage/crawl-state.json
+        #[arg(long = "expected-stage-state-sha256")]
+        expected_stage_state_sha256: String,
+        /// Exhaustive audit JSON for the exact terminal v2 candidate
+        #[arg(long = "audit-evidence")]
+        audit_evidence: PathBuf,
+        /// Actual root resolved from the externally serving network event
+        #[arg(long = "serving-root")]
+        serving_root: String,
+        /// Exact signed externally resolved serving event JSON
+        #[arg(long = "serving-event")]
+        serving_event: PathBuf,
+        /// Exact event id returned by the external resolver
+        #[arg(long = "serving-event-id")]
+        serving_event_id: String,
+        /// Authoritative publisher pubkey expected to own the serving pointer
+        #[arg(long = "serving-publisher-pubkey")]
+        serving_publisher_pubkey: String,
+        /// Tree name resolved by the serving event
+        #[arg(long = "serving-tree-name")]
+        serving_tree_name: String,
+        /// B-tree order pinned for subsequent tranche builds
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Maximum independent B-tree subtree updates pinned for later builds
+        #[arg(long, default_value_t = 4)]
+        btree_update_concurrency: usize,
+        /// Maximum staged events durably replayed before a cursor checkpoint
+        #[arg(long, default_value_t = 8192)]
+        index_commit_batch_size: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
+    /// Replay immutable staged segments into the v3 working spool and stores
+    AppendBulkTranche {
+        /// Durable staging directory containing the immutable author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v3/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Maximum complete staged segments to append in this invocation
+        #[arg(long = "max-segments", default_value_t = 1024)]
+        max_segments: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
+    /// Freeze the exact durable v3 working prefix before index construction
+    FreezeBulkTranche {
+        /// Durable staging directory containing the immutable author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v3/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Exact durable author boundary to freeze
+        #[arg(long = "through-author")]
+        through_author: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Detach damaged derived indexes before closed-store retention and rebuild
     PrepareTimeRepair {
         /// Durable crawl state whose root will be replaced atomically

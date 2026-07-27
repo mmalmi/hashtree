@@ -992,6 +992,111 @@ async fn exact_spool_replay_reuses_cids_and_preserves_crash_replay_events() {
 }
 
 #[tokio::test]
+async fn production_replay_chunk_is_idempotent_before_cursor_checkpoint() {
+    use hashtree_config::StorageBackend;
+
+    let temp = tempfile::tempdir().unwrap();
+    let projection_dir = temp.path().join("projection");
+    let staging_dir = temp.path().join("staging");
+    let projection_store = hashtree_cli::HashtreeStore::with_options_and_backend(
+        &projection_dir,
+        None,
+        0,
+        false,
+        &StorageBackend::Lmdb,
+    )
+    .unwrap();
+    let staging_store = hashtree_cli::HashtreeStore::with_options_and_backend(
+        &staging_dir,
+        None,
+        0,
+        false,
+        &StorageBackend::Lmdb,
+    )
+    .unwrap();
+    let graph = hashtree_cli::socialgraph::open_social_graph_store_with_storage(
+        &projection_dir,
+        projection_store.store_arc(),
+        Some(128 * 1024 * 1024),
+    )
+    .unwrap();
+    let event_store_options = NostrEventStoreOptions {
+        btree_order: Some(8),
+        btree_update_concurrency: Some(1),
+        index_commit_batch_size: Some(2),
+    };
+    let staging_events =
+        NostrEventStore::with_options(staging_store.store_arc(), event_store_options.clone());
+    let target_events =
+        NostrEventStore::with_options(projection_store.store_arc(), event_store_options);
+
+    let keys = Keys::generate();
+    let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Crash Alice"}"#)
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let note = EventBuilder::new(Kind::TextNote, "durable replay")
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let stored = [&profile, &note]
+        .into_iter()
+        .map(stored_event_from_nostr_sdk_event)
+        .collect::<Vec<_>>();
+    let cids = staging_events
+        .store_event_blobs(stored.clone())
+        .await
+        .unwrap();
+    staging_store.force_sync().unwrap();
+
+    let spool = BulkProjectionSpool::open(&temp.path().join("spool")).unwrap();
+    let stores = ProjectionStores {
+        durable: &projection_store,
+        staging: &staging_store,
+        graph: &graph,
+    };
+    let first = replay_staged_event_chunk(
+        stores,
+        &spool,
+        &target_events,
+        &staging_events,
+        cids.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.apply.inserted, stored.len());
+    assert!(!first.apply.reused_exact_batch);
+
+    // This is the real crash boundary: blobs, spool, and profile indexes are
+    // durable, but no cursor has been advanced. Replaying the exact chunk must
+    // finish idempotently without creating another implementation path.
+    let replay = replay_staged_event_chunk(
+        stores,
+        &spool,
+        &target_events,
+        &staging_events,
+        cids.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.apply.inserted, 0);
+    assert_eq!(replay.apply.skipped, stored.len());
+    assert_eq!(replay.apply.reused_records, stored.len());
+    assert!(replay.apply.reused_exact_batch);
+    assert_eq!(
+        target_events
+            .load_validated_event_blobs(cids)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|blob| blob.event().clone())
+            .collect::<Vec<_>>(),
+        stored
+    );
+    graph.validate_profile_indexes_for_event(&profile).unwrap();
+}
+
+#[tokio::test]
 async fn exact_spool_replay_falls_back_for_missing_events_and_rejects_mismatch() {
     let keys = Keys::generate();
     let profile = stored_event_from_nostr_sdk_event(
@@ -1695,7 +1800,12 @@ async fn benchmark_real_bulk_projection_phase() {
     let stage =
         HashtreeStore::with_options_and_backend(&stage_dir, None, 0, false, &StorageBackend::Lmdb)
             .expect("open real stage");
-    let segment = load_stage_segment(&stage_dir, author).expect("load real staged segment");
+    let stage_policy = load_stage_state(&stage_dir)
+        .expect("load real stage state")
+        .expect("real stage state exists")
+        .policy;
+    let segment =
+        load_stage_segment(&stage_dir, author, &stage_policy).expect("load real staged segment");
     let end = offset.saturating_add(limit).min(segment.event_cids.len());
     let cids = segment.event_cids[offset..end]
         .iter()
