@@ -282,66 +282,83 @@ where
 
 #[test]
 fn read_only_spool_opener_publishes_named_database_handles() {
-    let temp = tempfile::tempdir().unwrap();
     const CHILD_PATH_ENV: &str = "HTREE_TEST_READ_ONLY_SPOOL_CHILD_PATH";
-    if let Some(child_path) = std::env::var_os(CHILD_PATH_ENV) {
-        let spool = BulkProjectionSpool::open(Path::new(&child_path)).unwrap();
-        let mut wtxn = spool.env.write_txn().unwrap();
-        spool
-            .events
-            .put(&mut wtxn, b"event-key", b"event-value")
-            .unwrap();
-        spool
-            .slots
-            .put(&mut wtxn, b"slot-key", b"slot-value")
-            .unwrap();
-        spool
-            .entries
-            .put(&mut wtxn, b"entry-key", b"entry-value")
-            .unwrap();
-        wtxn.commit().unwrap();
+    const CHILD_MODE_ENV: &str = "HTREE_TEST_READ_ONLY_SPOOL_CHILD_MODE";
+    if let (Some(child_path), Some(child_mode)) = (
+        std::env::var_os(CHILD_PATH_ENV),
+        std::env::var_os(CHILD_MODE_ENV),
+    ) {
+        match child_mode.to_str().unwrap() {
+            "write" => {
+                let spool = BulkProjectionSpool::open(Path::new(&child_path)).unwrap();
+                let mut wtxn = spool.env.write_txn().unwrap();
+                spool
+                    .events
+                    .put(&mut wtxn, b"event-key", b"event-value")
+                    .unwrap();
+                spool
+                    .slots
+                    .put(&mut wtxn, b"slot-key", b"slot-value")
+                    .unwrap();
+                spool
+                    .entries
+                    .put(&mut wtxn, b"entry-key", b"entry-value")
+                    .unwrap();
+                wtxn.commit().unwrap();
+            }
+            "read" => {
+                let read_only = open_read_only_spool(Path::new(&child_path), true);
+                let rtxn = read_only.env.read_txn().unwrap();
+                for (database, expected_key, expected_value) in [
+                    (
+                        read_only.events,
+                        b"event-key".as_slice(),
+                        b"event-value".as_slice(),
+                    ),
+                    (
+                        read_only.slots,
+                        b"slot-key".as_slice(),
+                        b"slot-value".as_slice(),
+                    ),
+                    (
+                        read_only.entries,
+                        b"entry-key".as_slice(),
+                        b"entry-value".as_slice(),
+                    ),
+                ] {
+                    assert_eq!(
+                        database.get(&rtxn, expected_key).unwrap(),
+                        Some(expected_value)
+                    );
+                    let mut cursor = database.iter(&rtxn).unwrap();
+                    assert_eq!(
+                        cursor.next().unwrap().unwrap(),
+                        (expected_key, expected_value)
+                    );
+                    assert!(cursor.next().is_none());
+                }
+            }
+            mode => panic!("unknown read-only spool child mode {mode}"),
+        }
         return;
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "app::nostr_index::bulk_projection::tests::read_only_spool_opener_publishes_named_database_handles",
-            "--nocapture",
-        ])
-        .env(CHILD_PATH_ENV, temp.path())
-        .status()
-        .unwrap();
-    assert!(status.success());
 
-    let read_only = open_read_only_spool(temp.path(), true);
-    let rtxn = read_only.env.read_txn().unwrap();
-    for (database, expected_key, expected_value) in [
-        (
-            read_only.events,
-            b"event-key".as_slice(),
-            b"event-value".as_slice(),
-        ),
-        (
-            read_only.slots,
-            b"slot-key".as_slice(),
-            b"slot-value".as_slice(),
-        ),
-        (
-            read_only.entries,
-            b"entry-key".as_slice(),
-            b"entry-value".as_slice(),
-        ),
-    ] {
-        assert_eq!(
-            database.get(&rtxn, expected_key).unwrap(),
-            Some(expected_value)
-        );
-        let mut cursor = database.iter(&rtxn).unwrap();
-        assert_eq!(
-            cursor.next().unwrap().unwrap(),
-            (expected_key, expected_value)
-        );
-        assert!(cursor.next().is_none());
+    // Keep both LMDB open phases in isolated processes. Besides matching the
+    // production multi-process sequence, this avoids introducing another
+    // process-global heed environment into a parallel unit-test process.
+    let temp = tempfile::tempdir().unwrap();
+    for mode in ["write", "read"] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::nostr_index::bulk_projection::tests::read_only_spool_opener_publishes_named_database_handles",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, temp.path())
+            .env(CHILD_MODE_ENV, mode)
+            .status()
+            .unwrap();
+        assert!(status.success(), "read-only spool {mode} child failed");
     }
 }
 
@@ -1572,13 +1589,25 @@ async fn benchmark_real_bulk_projection_phase() {
             let left_root = left
                 .build_index_root(index, Arc::clone(&target), order)
                 .await
-                .expect("build first real index root");
+                .expect("build first real index root")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} first real index unexpectedly produced no root",
+                        index.name()
+                    )
+                });
             let left_ms = left_started.elapsed().as_millis();
             let right_started = Instant::now();
             let right_root = right
                 .build_index_root(index, Arc::clone(&target), order)
                 .await
-                .expect("build second real index root");
+                .expect("build second real index root")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} second real index unexpectedly produced no root",
+                        index.name()
+                    )
+                });
             let right_ms = right_started.elapsed().as_millis();
             assert_eq!(
                 left_root,
@@ -1588,15 +1617,22 @@ async fn benchmark_real_bulk_projection_phase() {
             );
             target.force_sync().expect("sync compared real index root");
             let validation_started = Instant::now();
-            let (nodes, links) = if let Some(root) = left_root.as_ref() {
-                let report = btree
-                    .validate_link_tree(Some(root))
-                    .await
-                    .expect("exhaustively validate compared real index root");
-                (report.nodes, report.links)
-            } else {
-                (0, 0)
-            };
+            let report = btree
+                .validate_link_tree(Some(&left_root))
+                .await
+                .expect("exhaustively validate compared real index root");
+            assert!(
+                report.nodes > 0,
+                "{} compared real index root validated with zero nodes",
+                index.name(),
+            );
+            assert!(
+                report.links > 0,
+                "{} compared real index root validated with zero links",
+                index.name(),
+            );
+            let nodes = report.nodes;
+            let links = report.links;
             let validation_ms = validation_started.elapsed().as_millis();
             eprintln!(
                 "real_bulk_bench mode={mode} index={} root={} left_ms={left_ms} \
@@ -1604,12 +1640,7 @@ async fn benchmark_real_bulk_projection_phase() {
                  target_map_size_bytes={target_map_size_bytes} \
                  target_capacity_bytes={target_capacity_bytes}",
                 index.name(),
-                left_root
-                    .as_ref()
-                    .map(cid_to_nhash)
-                    .transpose()
-                    .expect("encode compared real root")
-                    .unwrap_or_default(),
+                cid_to_nhash(&left_root).expect("encode compared real root"),
             );
         }
         return;
