@@ -501,16 +501,34 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         root: cid_to_nhash(&hashtree_core::Cid::public([240; 32])).expect("encode candidate root"),
         built_roots,
     };
+    let profile_by_pubkey_root =
+        cid_to_nhash(&hashtree_core::Cid::public([241; 32])).expect("encode profile root");
+    let profile_search_root =
+        cid_to_nhash(&hashtree_core::Cid::public([242; 32])).expect("encode search root");
     let evidence = AuditEvidencePin {
         sha256: "1".repeat(64),
+        audit_format_version: 3,
+        subject_kind: AuditSubjectKind::V2,
+        subject_version: BULK_PROJECTION_VERSION,
         candidate_root: candidate.root.clone(),
-        v2_state_sha256: "2".repeat(64),
+        subject_state_sha256: "2".repeat(64),
         stage_state_sha256: stage_state_sha256.clone(),
         trusted_policy_sha256: "3".repeat(64),
+        policy_author_allowlist_sha256: policy.author_allowlist_sha256.clone(),
         trusted_full_author_count: 1,
+        crawl_policy_max_follow_distance: Some(0),
+        audit_mode: "recovery-tranche-internal-non-cutover".to_string(),
+        cutover_eligible: false,
+        authors_processed: 0,
+        authors_total: 1,
+        recovery_tranche_only: true,
+        index_roots: candidate.built_roots.clone(),
         pool_catalog_sha256: "4".repeat(64),
         pool_manifest_sha256: "5".repeat(64),
+        pool_stored_locations: 1,
+        profile_by_pubkey_root,
         profile_by_pubkey_root_file_sha256: "6".repeat(64),
+        profile_search_root,
         profile_search_root_file_sha256: "7".repeat(64),
         profile_follow_distance_seal_sha256: "8".repeat(64),
         profile_distance_provenance: rank_authority.evidence.clone(),
@@ -666,7 +684,7 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     let freeze_output = freeze_bulk_tranche(
         &data_dir,
         BulkTrancheFreezeOptions {
-            staging_data_dir,
+            staging_data_dir: staging_data_dir.clone(),
             expected_state_sha256: output.state_sha256,
             through_author: 1,
             out: None,
@@ -678,6 +696,46 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         .expect("frozen state exists");
     assert_eq!(frozen_state_sha256, freeze_output.state_sha256);
     assert_eq!(frozen_state.phase, TranchePhase::Freeze);
+    let mut candidate_state = frozen_state.clone();
+    candidate_state.phase = TranchePhase::Candidate;
+    candidate_state.working.built_roots = candidate_state.last_validated.built_roots.clone();
+    candidate_state.working.candidate_root = Some(candidate_state.last_validated.root.clone());
+    let candidate_state_sha256 =
+        persist_state_cas(&state_path, &candidate_state, Some(&frozen_state_sha256))
+            .expect("persist generated Candidate state");
+    let authority =
+        load_v3_candidate_audit_authority(&data_dir, &staging_data_dir, &candidate_state_sha256)
+            .expect(
+                "derive v3 audit authority from canonical Candidate state and Freeze seal chain",
+            );
+    assert_eq!(
+        authority.candidate_root,
+        candidate_state
+            .working
+            .candidate_root
+            .clone()
+            .expect("generated candidate root")
+    );
+    assert_eq!(authority.built_roots, candidate_state.working.built_roots);
+    assert_eq!(authority.author_count, candidate_state.policy.author_count);
+    assert_eq!(
+        authority.policy_author_allowlist_sha256,
+        candidate_state.policy.author_allowlist_sha256
+    );
+    assert!(
+        load_v3_candidate_audit_authority(&data_dir, &staging_data_dir, &"f".repeat(64),)
+            .expect_err("v3 audit authority must reject an unrelated state pin")
+            .to_string()
+            .contains("mismatch")
+    );
+    super::super::audit::load_v3_audit_subject(
+        &data_dir,
+        super::super::audit::V3AuditSubjectSpec {
+            expected_state_sha256: candidate_state_sha256,
+            staging_data_dir: staging_data_dir.clone(),
+        },
+    )
+    .expect("load typed v3 audit subject without caller-supplied roots or counts");
     let frozen_seal = load_seal(
         &seals_dir,
         frozen_state.generation,

@@ -22,6 +22,7 @@ use super::super::{
     cid_to_nhash, parse_root_text, StagedNostrCrawlState, STAGE_DIR, STAGE_FORMAT_VERSION,
     STAGE_STATE_FILE,
 };
+use super::tranche::load_v3_candidate_audit_authority;
 use super::{
     bulk_paths, encode_cid, validate_terminal_stage_state, BulkProjectionSpool,
     BulkProjectionState, EntryTrieCursor, SpoolEventRecord, BULK_PROJECTION_VERSION,
@@ -35,6 +36,9 @@ const PROFILE_RANK_POLICY: &str = "follow-distance@1";
 const PROFILE_EXCLUSION_POLICY: &str = "all-nonselected-graph-identities@1";
 const PROFILE_OVERMUTE_THRESHOLD: usize = 1;
 const PROFILE_UNREACHABLE_DISTANCE: u32 = 1_000;
+const BULK_PROJECTION_AUDIT_FORMAT_VERSION: u32 = 3;
+const FULL_POLICY_CUTOVER_AUDIT_MODE: &str = "full-policy-cutover";
+const RECOVERY_TRANCHE_AUDIT_MODE: &str = "recovery-tranche-internal-non-cutover";
 
 #[derive(Debug, Clone)]
 pub(crate) struct BulkProjectionAuditOptions {
@@ -53,6 +57,100 @@ pub(crate) struct BulkProjectionAuditOptions {
     pub(crate) page_size: usize,
     pub(crate) query_limit: usize,
     pub(crate) out: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum AuditSubjectKind {
+    V2,
+    V3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditScope {
+    RecoveryTranche,
+    FullPolicyCutover,
+}
+
+impl AuditScope {
+    fn audit_mode(self) -> &'static str {
+        match self {
+            Self::RecoveryTranche => RECOVERY_TRANCHE_AUDIT_MODE,
+            Self::FullPolicyCutover => FULL_POLICY_CUTOVER_AUDIT_MODE,
+        }
+    }
+
+    fn recovery_tranche_only(self) -> bool {
+        self == Self::RecoveryTranche
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedAuditSnapshot {
+    label: String,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    sha256: String,
+}
+
+impl PinnedAuditSnapshot {
+    fn read(label: impl Into<String>, path: &Path, expected_sha256: &str) -> Result<Self> {
+        let label = label.into();
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("canonicalize {label} {}", path.display()))?;
+        if !path.is_file() {
+            anyhow::bail!("{label} is not a regular file: {}", path.display());
+        }
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("read {label} {}", path.display()))?;
+        let sha256 = bytes_sha256(&bytes);
+        require_expected_sha256(&label, &sha256, expected_sha256)?;
+        Ok(Self {
+            label,
+            path,
+            bytes,
+            sha256,
+        })
+    }
+
+    fn recheck(&self) -> Result<()> {
+        let current = std::fs::read(&self.path)
+            .with_context(|| format!("re-read {} {}", self.label, self.path.display()))?;
+        if current != self.bytes {
+            anyhow::bail!("{} changed during read-only audit", self.label);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct AuditSubject {
+    kind: AuditSubjectKind,
+    version: u32,
+    candidate_root: Cid,
+    built_roots: BTreeMap<u8, String>,
+    state_sha256: String,
+    stage_state_sha256: String,
+    trusted_policy_sha256: String,
+    policy_author_allowlist_sha256: String,
+    expected_profile_distance_seal_sha256: Option<String>,
+    expected_profile_distance_provenance: Option<ProfileDistanceProvenance>,
+    trusted_full_author_count: usize,
+    crawl_policy_max_follow_distance: Option<u32>,
+    authors_processed: usize,
+    authors_total: usize,
+    scope: AuditScope,
+    spool_path: PathBuf,
+    snapshots: Vec<PinnedAuditSnapshot>,
+    v3_recheck: Option<V3AuditSubjectSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) struct V3AuditSubjectSpec {
+    pub(super) expected_state_sha256: String,
+    pub(super) staging_data_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -208,10 +306,13 @@ struct ProfileRankDecisionReport {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct BulkProjectionAuditOutput {
     version: u32,
+    subject_kind: AuditSubjectKind,
+    subject_version: u32,
     candidate_root: String,
     state_sha256: String,
     stage_state_sha256: String,
     trusted_policy_sha256: String,
+    policy_author_allowlist_sha256: String,
     trusted_profile_distance_seal_sha256: Option<String>,
     profile_distance_provenance: Option<ProfileDistanceProvenance>,
     trusted_full_author_count: usize,
@@ -228,6 +329,37 @@ pub(crate) struct BulkProjectionAuditOutput {
     profile: BulkProjectionProfileAudit,
     queries: Vec<BulkProjectionQueryAudit>,
     representative_blocks: Vec<BulkProjectionBlockEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) struct FullCutoverVerified {
+    evidence_sha256: String,
+    subject_kind: AuditSubjectKind,
+    subject_version: u32,
+    candidate_root: String,
+    subject_state_sha256: String,
+    stage_state_sha256: String,
+    trusted_policy_sha256: String,
+    policy_author_allowlist_sha256: String,
+    trusted_full_author_count: usize,
+    crawl_policy_max_follow_distance: Option<u32>,
+    authors_processed: usize,
+    authors_total: usize,
+    index_roots: BTreeMap<u8, String>,
+    pool_catalog_sha256: String,
+    pool_manifest_sha256: String,
+    pool_stored_locations: u64,
+    profile_by_pubkey_root: String,
+    profile_search_root: String,
+    profile_follow_distance_seal_sha256: String,
+    profile_distance_provenance: ProfileDistanceProvenance,
+}
+
+#[derive(Debug)]
+pub(super) struct BulkProjectionAuditCompletion {
+    pub(super) output: BulkProjectionAuditOutput,
+    pub(super) full_cutover: Option<FullCutoverVerified>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -267,7 +399,7 @@ impl EntrySetProof {
 }
 
 impl BulkProjectionSpool {
-    fn open_read_only(path: &Path) -> Result<Self> {
+    pub(super) fn open_read_only(path: &Path) -> Result<Self> {
         if !path.join("data.mdb").is_file() {
             anyhow::bail!("bulk projection spool is missing at {}", path.display());
         }
@@ -369,6 +501,201 @@ fn require_expected_sha256(label: &str, actual: &str, expected: &str) -> Result<
 
 fn require_sha256_text(label: &str, value: &str) -> Result<()> {
     require_expected_sha256(label, value, value)
+}
+
+fn validate_complete_built_roots(label: &str, built_roots: &BTreeMap<u8, String>) -> Result<()> {
+    if built_roots.len() != NostrEventIndex::ALL.len()
+        || NostrEventIndex::ALL
+            .iter()
+            .any(|index| !built_roots.contains_key(&index.stable_id()))
+    {
+        anyhow::bail!("{label} must contain exactly all nine index roots");
+    }
+    for index in NostrEventIndex::ALL {
+        let encoded = built_roots
+            .get(&index.stable_id())
+            .expect("all nine root keys checked");
+        if encoded.is_empty() {
+            anyhow::bail!("{label} has an empty canonical `{}` root", index.name());
+        }
+        let root = parse_root_text(encoded)
+            .with_context(|| format!("parse {label} {} root", index.name()))?;
+        if cid_to_nhash(&root)? != *encoded {
+            anyhow::bail!("{label} {} root is not canonical nhash text", index.name());
+        }
+    }
+    Ok(())
+}
+
+fn load_v2_audit_subject(
+    data_dir: &Path,
+    options: &BulkProjectionAuditOptions,
+) -> Result<AuditSubject> {
+    let (state_path, spool_path) = bulk_paths(data_dir);
+    let stage_state_path = options
+        .staging_data_dir
+        .join(STAGE_DIR)
+        .join(STAGE_STATE_FILE);
+    let state_snapshot = PinnedAuditSnapshot::read(
+        "bulk projection state",
+        &state_path,
+        &options.expected_state_sha256,
+    )?;
+    let stage_snapshot = PinnedAuditSnapshot::read(
+        "staging state",
+        &stage_state_path,
+        &options.expected_stage_state_sha256,
+    )?;
+    let state: BulkProjectionState =
+        serde_json::from_slice(&state_snapshot.bytes).context("parse bulk projection state")?;
+    let stage: StagedNostrCrawlState =
+        serde_json::from_slice(&stage_snapshot.bytes).context("parse staging state")?;
+    if state.version != BULK_PROJECTION_VERSION {
+        anyhow::bail!(
+            "unsupported bulk projection state version {}",
+            state.version
+        );
+    }
+    if stage.version != STAGE_FORMAT_VERSION {
+        anyhow::bail!("unsupported frozen staging state version {}", stage.version);
+    }
+    // `author_allowlist_source` is transport metadata. Staging and projection
+    // may serve the same immutable allowlist from different ephemeral ports.
+    // Exact policy equality below, including digest/count, plus the external
+    // policy SHA-256 pin is the authority boundary.
+    if state.policy.author_count != options.expected_full_author_count {
+        anyhow::bail!(
+            "bulk projection policy author count mismatch: expected trusted full count {}, found {}",
+            options.expected_full_author_count,
+            state.policy.author_count
+        );
+    }
+    let policy_bytes =
+        serde_json::to_vec(&state.policy).context("serialize trusted bulk projection policy")?;
+    let policy_sha256 = bytes_sha256(&policy_bytes);
+    require_expected_sha256(
+        "bulk projection policy",
+        &policy_sha256,
+        &options.expected_policy_sha256,
+    )?;
+    if state.next_author > state.policy.author_count {
+        anyhow::bail!(
+            "terminal bulk projection author watermark {} exceeds policy author count {}",
+            state.next_author,
+            state.policy.author_count
+        );
+    }
+    if state.policy.max_authors != options.expected_full_author_count {
+        anyhow::bail!(
+            "bulk projection policy max_authors {} differs from trusted full count {}",
+            state.policy.max_authors,
+            options.expected_full_author_count
+        );
+    }
+    let scope = if options.allow_recovery_tranche {
+        if state.next_author == 0 || state.next_author >= options.expected_full_author_count {
+            anyhow::bail!(
+                "recovery-tranche audit requires a nonzero partial watermark below trusted full \
+                 count {}; found next_author={}",
+                options.expected_full_author_count,
+                state.next_author
+            );
+        }
+        AuditScope::RecoveryTranche
+    } else {
+        if state.next_author != options.expected_full_author_count {
+            anyhow::bail!(
+                "full-policy audit requires the terminal and frozen-stage author watermark to \
+                 equal trusted full count {}; found next_author={}; use \
+                 --allow-recovery-tranche only for internal non-cutover evidence",
+                options.expected_full_author_count,
+                state.next_author
+            );
+        }
+        if options.expected_profile_distance_seal_sha256.is_none() {
+            anyhow::bail!(
+                "full-policy audit requires the exact independently pinned profile-distance \
+                 seal SHA-256"
+            );
+        }
+        AuditScope::FullPolicyCutover
+    };
+    validate_terminal_stage_state(&state, &stage)?;
+    validate_complete_built_roots("bulk projection state", &state.built_roots)?;
+    let candidate_root = state
+        .complete_root
+        .as_deref()
+        .context("bulk projection has no complete candidate root")
+        .and_then(parse_root_text)?;
+
+    Ok(AuditSubject {
+        kind: AuditSubjectKind::V2,
+        version: state.version,
+        candidate_root,
+        built_roots: state.built_roots,
+        state_sha256: state_snapshot.sha256.clone(),
+        stage_state_sha256: stage_snapshot.sha256.clone(),
+        trusted_policy_sha256: policy_sha256,
+        policy_author_allowlist_sha256: state.policy.author_allowlist_sha256,
+        expected_profile_distance_seal_sha256: options
+            .expected_profile_distance_seal_sha256
+            .clone(),
+        expected_profile_distance_provenance: None,
+        trusted_full_author_count: options.expected_full_author_count,
+        crawl_policy_max_follow_distance: state.policy.max_follow_distance,
+        authors_processed: state.next_author,
+        authors_total: state.policy.author_count,
+        scope,
+        spool_path,
+        snapshots: vec![state_snapshot, stage_snapshot],
+        v3_recheck: None,
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn load_v3_audit_subject(
+    data_dir: &Path,
+    spec: V3AuditSubjectSpec,
+) -> Result<AuditSubject> {
+    let authority = load_v3_candidate_audit_authority(
+        data_dir,
+        &spec.staging_data_dir,
+        &spec.expected_state_sha256,
+    )?;
+    validate_complete_built_roots("v3 audit subject", &authority.built_roots)?;
+    let candidate_root =
+        parse_root_text(&authority.candidate_root).context("parse v3 audit candidate root")?;
+    let state_snapshot = PinnedAuditSnapshot::read(
+        "v3 tranche state",
+        &authority.state_path,
+        &authority.state_sha256,
+    )?;
+    let stage_snapshot = PinnedAuditSnapshot::read(
+        "v3 frozen stage state",
+        &authority.stage_state_path,
+        &authority.stage_state_sha256,
+    )?;
+
+    Ok(AuditSubject {
+        kind: AuditSubjectKind::V3,
+        version: 3,
+        candidate_root,
+        built_roots: authority.built_roots,
+        state_sha256: state_snapshot.sha256.clone(),
+        stage_state_sha256: stage_snapshot.sha256.clone(),
+        trusted_policy_sha256: authority.policy_sha256,
+        policy_author_allowlist_sha256: authority.policy_author_allowlist_sha256,
+        expected_profile_distance_seal_sha256: Some(authority.profile_distance_seal_sha256),
+        expected_profile_distance_provenance: Some(authority.profile_rank_authority),
+        trusted_full_author_count: authority.author_count,
+        crawl_policy_max_follow_distance: authority.max_follow_distance,
+        authors_processed: authority.author_count,
+        authors_total: authority.author_count,
+        scope: AuditScope::FullPolicyCutover,
+        spool_path: authority.spool_path,
+        snapshots: vec![state_snapshot, stage_snapshot],
+        v3_recheck: Some(spec),
+    })
 }
 
 fn parse_profile_rank_decisions(bytes: &[u8]) -> Result<(BTreeMap<String, Option<u32>>, String)> {
@@ -692,6 +1019,23 @@ pub(super) fn require_profile_rank_policy_binding(
             "profile rank-decisions eligible count {} does not match crawl-policy author count {}",
             trusted.evidence.eligible_count,
             policy_author_count
+        );
+    }
+    Ok(())
+}
+
+fn require_subject_profile_rank_authority(
+    expected: Option<&ProfileDistanceProvenance>,
+    trusted: Option<&TrustedProfileRankDecisions>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let trusted = trusted
+        .context("typed v3 audit subject requires its exact sealed profile-rank file and report")?;
+    if &trusted.evidence != expected {
+        anyhow::bail!(
+            "profile-rank evidence differs from the exact authority sealed by the audit subject"
         );
     }
     Ok(())
@@ -1570,14 +1914,248 @@ fn install_audit_evidence_noreplace(bytes: &[u8], prepared: &PreparedAuditOutput
     write_result
 }
 
-fn write_audit_output_noreplace(
-    output: &BulkProjectionAuditOutput,
-    prepared: &PreparedAuditOutput,
-) -> Result<()> {
+fn canonical_audit_output_bytes(output: &BulkProjectionAuditOutput) -> Result<Vec<u8>> {
     let mut bytes =
         serde_json::to_vec_pretty(output).context("serialize bulk projection audit evidence")?;
     bytes.push(b'\n');
-    install_audit_evidence_noreplace(&bytes, prepared)
+    Ok(bytes)
+}
+
+fn audited_index_roots(indexes: &[BulkProjectionIndexAudit]) -> Result<BTreeMap<u8, String>> {
+    if indexes.len() != NostrEventIndex::ALL.len() {
+        anyhow::bail!("full-cutover audit must contain exactly nine indexes");
+    }
+    let mut roots = BTreeMap::new();
+    for audit in indexes {
+        let index = NostrEventIndex::ALL
+            .into_iter()
+            .find(|index| index.name() == audit.index)
+            .with_context(|| format!("full-cutover audit has unknown index `{}`", audit.index))?;
+        let root = audit
+            .root
+            .as_deref()
+            .with_context(|| format!("full-cutover audit has empty {} root", audit.index))?;
+        let parsed = parse_root_text(root)
+            .with_context(|| format!("parse full-cutover {} root", audit.index))?;
+        if cid_to_nhash(&parsed)? != root {
+            anyhow::bail!(
+                "full-cutover {} root is not canonical nhash text",
+                audit.index
+            );
+        }
+        if roots.insert(index.stable_id(), root.to_string()).is_some() {
+            anyhow::bail!("full-cutover audit repeats index `{}`", audit.index);
+        }
+    }
+    validate_complete_built_roots("full-cutover audit", &roots)?;
+    Ok(roots)
+}
+
+fn validate_profile_distance_provenance_for_cutover(
+    provenance: &ProfileDistanceProvenance,
+    authors_total: usize,
+) -> Result<()> {
+    for (label, digest) in [
+        (
+            "full-cutover rank-decisions file SHA-256",
+            provenance.rank_decisions_file_sha256.as_str(),
+        ),
+        (
+            "full-cutover rank-decisions report SHA-256",
+            provenance.rank_decisions_report_sha256.as_str(),
+        ),
+        (
+            "full-cutover rank-decisions semantic SHA-256",
+            provenance.rank_decisions_sha256.as_str(),
+        ),
+        (
+            "full-cutover social graph SHA-256",
+            provenance.social_graph_sha256.as_str(),
+        ),
+        (
+            "full-cutover social graph root",
+            provenance.social_graph_root.as_str(),
+        ),
+        (
+            "full-cutover eligible authors SHA-256",
+            provenance.eligible_authors_sha256.as_str(),
+        ),
+    ] {
+        require_sha256_text(label, digest)?;
+    }
+    if provenance.format != PROFILE_RANK_DECISION_REPORT_FORMAT
+        || provenance.census_format != PROFILE_RANK_DECISION_CENSUS_FORMAT
+        || provenance.rank_policy != PROFILE_RANK_POLICY
+        || provenance.exclusion_policy != PROFILE_EXCLUSION_POLICY
+        || provenance.overmute_threshold != PROFILE_OVERMUTE_THRESHOLD
+        || provenance.eligible_count != authors_total
+        || provenance
+            .eligible_count
+            .checked_add(provenance.excluded_count)
+            != Some(provenance.record_count)
+    {
+        anyhow::bail!(
+            "full-cutover profile rank provenance does not bind the exact trusted author policy"
+        );
+    }
+    Ok(())
+}
+
+fn mint_full_cutover_verified(
+    output: &BulkProjectionAuditOutput,
+    evidence_bytes: &[u8],
+) -> Result<Option<FullCutoverVerified>> {
+    if canonical_audit_output_bytes(output)? != evidence_bytes {
+        anyhow::bail!("full-cutover token input differs from canonical audit evidence bytes");
+    }
+    if output.recovery_tranche_only {
+        if output.audit_mode != RECOVERY_TRANCHE_AUDIT_MODE
+            || output.cutover_eligible
+            || output.authors_processed == 0
+            || output.authors_processed >= output.authors_total
+        {
+            anyhow::bail!("recovery audit evidence has inconsistent non-cutover boundaries");
+        }
+        return Ok(None);
+    }
+    if output.version != BULK_PROJECTION_AUDIT_FORMAT_VERSION
+        || output.audit_mode != FULL_POLICY_CUTOVER_AUDIT_MODE
+        || !output.cutover_eligible
+        || output.trusted_full_author_count == 0
+        || output.authors_processed != output.authors_total
+        || output.authors_total != output.trusted_full_author_count
+    {
+        anyhow::bail!("audit evidence does not satisfy the exact full-cutover boundary");
+    }
+    match (output.subject_kind, output.subject_version) {
+        (AuditSubjectKind::V2, BULK_PROJECTION_VERSION) | (AuditSubjectKind::V3, 3) => {}
+        _ => anyhow::bail!("full-cutover audit subject kind/version is inconsistent"),
+    }
+    for (label, digest) in [
+        (
+            "full-cutover subject state SHA-256",
+            output.state_sha256.as_str(),
+        ),
+        (
+            "full-cutover stage state SHA-256",
+            output.stage_state_sha256.as_str(),
+        ),
+        (
+            "full-cutover policy SHA-256",
+            output.trusted_policy_sha256.as_str(),
+        ),
+        (
+            "full-cutover policy author allowlist SHA-256",
+            output.policy_author_allowlist_sha256.as_str(),
+        ),
+        (
+            "full-cutover PoolStore catalog SHA-256",
+            output.pool_catalog_sha256.as_str(),
+        ),
+        (
+            "full-cutover PoolStore manifest SHA-256",
+            output.pool_manifest_sha256.as_str(),
+        ),
+        (
+            "full-cutover profile-by-pubkey root-file SHA-256",
+            output.profile.by_pubkey_root_file_sha256.as_str(),
+        ),
+        (
+            "full-cutover profile-search root-file SHA-256",
+            output.profile.search_root_file_sha256.as_str(),
+        ),
+        (
+            "full-cutover profile distance seal SHA-256",
+            output.profile.follow_distance_seal_sha256.as_str(),
+        ),
+    ] {
+        require_sha256_text(label, digest)?;
+    }
+    if output.pool_stored_locations == 0 {
+        anyhow::bail!("full-cutover PoolStore evidence contains no stored locations");
+    }
+    let candidate =
+        parse_root_text(&output.candidate_root).context("parse full-cutover candidate root")?;
+    if cid_to_nhash(&candidate)? != output.candidate_root {
+        anyhow::bail!("full-cutover candidate root is not canonical nhash text");
+    }
+    let index_roots = audited_index_roots(&output.indexes)?;
+    for (label, root) in [
+        (
+            "full-cutover profile-by-pubkey root",
+            output.profile.by_pubkey_root.as_str(),
+        ),
+        (
+            "full-cutover profile-search root",
+            output.profile.search_root.as_str(),
+        ),
+    ] {
+        let parsed = parse_root_text(root).with_context(|| format!("parse {label}"))?;
+        if cid_to_nhash(&parsed)? != root {
+            anyhow::bail!("{label} is not canonical nhash text");
+        }
+    }
+    let expected_distance_seal = output
+        .trusted_profile_distance_seal_sha256
+        .as_deref()
+        .context("full-cutover audit lacks an independently pinned profile distance seal")?;
+    if expected_distance_seal != output.profile.follow_distance_seal_sha256 {
+        anyhow::bail!("full-cutover profile distance seal differs from its trusted pin");
+    }
+    let provenance = output
+        .profile_distance_provenance
+        .as_ref()
+        .context("full-cutover audit lacks profile rank provenance")?;
+    validate_profile_distance_provenance_for_cutover(provenance, output.authors_total)?;
+    if provenance.eligible_authors_sha256 != output.policy_author_allowlist_sha256 {
+        anyhow::bail!(
+            "full-cutover rank provenance differs from the policy author-allowlist digest"
+        );
+    }
+    if output.queries.is_empty() || output.representative_blocks.is_empty() {
+        anyhow::bail!("full-cutover audit lacks real query or representative block evidence");
+    }
+    for block in &output.representative_blocks {
+        require_sha256_text(
+            &format!("full-cutover representative block `{}` SHA-256", block.role),
+            &block.sha256,
+        )?;
+        parse_root_text(&block.nhash)
+            .with_context(|| format!("parse full-cutover representative block `{}`", block.role))?;
+    }
+
+    Ok(Some(FullCutoverVerified {
+        evidence_sha256: bytes_sha256(evidence_bytes),
+        subject_kind: output.subject_kind,
+        subject_version: output.subject_version,
+        candidate_root: output.candidate_root.clone(),
+        subject_state_sha256: output.state_sha256.clone(),
+        stage_state_sha256: output.stage_state_sha256.clone(),
+        trusted_policy_sha256: output.trusted_policy_sha256.clone(),
+        policy_author_allowlist_sha256: output.policy_author_allowlist_sha256.clone(),
+        trusted_full_author_count: output.trusted_full_author_count,
+        crawl_policy_max_follow_distance: output.crawl_policy_max_follow_distance,
+        authors_processed: output.authors_processed,
+        authors_total: output.authors_total,
+        index_roots,
+        pool_catalog_sha256: output.pool_catalog_sha256.clone(),
+        pool_manifest_sha256: output.pool_manifest_sha256.clone(),
+        pool_stored_locations: output.pool_stored_locations,
+        profile_by_pubkey_root: output.profile.by_pubkey_root.clone(),
+        profile_search_root: output.profile.search_root.clone(),
+        profile_follow_distance_seal_sha256: output.profile.follow_distance_seal_sha256.clone(),
+        profile_distance_provenance: provenance.clone(),
+    }))
+}
+
+fn write_audit_output_noreplace(
+    output: &BulkProjectionAuditOutput,
+    prepared: &PreparedAuditOutput,
+) -> Result<(Vec<u8>, Option<FullCutoverVerified>)> {
+    let bytes = canonical_audit_output_bytes(output)?;
+    let full_cutover = mint_full_cutover_verified(output, &bytes)?;
+    install_audit_evidence_noreplace(&bytes, prepared)?;
+    Ok((bytes, full_cutover))
 }
 
 pub(crate) async fn audit_bulk_projection(
@@ -1594,113 +2172,35 @@ pub(crate) async fn audit_bulk_projection(
     }
     let prepared_output =
         prepare_audit_output_path(data_dir, &options.staging_data_dir, &options.out)?;
-    let (state_path, spool_path) = bulk_paths(data_dir);
-    let stage_state_path = options
-        .staging_data_dir
-        .join(STAGE_DIR)
-        .join(STAGE_STATE_FILE);
-    let state_bytes = std::fs::read(&state_path)
-        .with_context(|| format!("read bulk projection state {}", state_path.display()))?;
-    let stage_bytes = std::fs::read(&stage_state_path)
-        .with_context(|| format!("read staging state {}", stage_state_path.display()))?;
-    let state_sha256 = bytes_sha256(&state_bytes);
-    let stage_state_sha256 = bytes_sha256(&stage_bytes);
-    require_expected_sha256(
-        "bulk projection state",
-        &state_sha256,
-        &options.expected_state_sha256,
-    )?;
-    require_expected_sha256(
-        "staging state",
-        &stage_state_sha256,
-        &options.expected_stage_state_sha256,
-    )?;
-    let state: BulkProjectionState =
-        serde_json::from_slice(&state_bytes).context("parse bulk projection state")?;
-    let stage: StagedNostrCrawlState =
-        serde_json::from_slice(&stage_bytes).context("parse staging state")?;
-    if state.version != BULK_PROJECTION_VERSION {
-        anyhow::bail!(
-            "unsupported bulk projection state version {}",
-            state.version
-        );
-    }
-    if stage.version != STAGE_FORMAT_VERSION {
-        anyhow::bail!("unsupported frozen staging state version {}", stage.version);
-    }
-    if state.author_allowlist_source != stage.author_allowlist_source {
-        anyhow::bail!(
-            "terminal bulk projection allowlist source differs from frozen staging source"
-        );
-    }
-    if state.policy.author_count != options.expected_full_author_count {
-        anyhow::bail!(
-            "bulk projection policy author count mismatch: expected trusted full count {}, found {}",
-            options.expected_full_author_count,
-            state.policy.author_count
-        );
-    }
-    let policy_bytes =
-        serde_json::to_vec(&state.policy).context("serialize trusted bulk projection policy")?;
-    let policy_sha256 = bytes_sha256(&policy_bytes);
-    require_expected_sha256(
-        "bulk projection policy",
-        &policy_sha256,
-        &options.expected_policy_sha256,
-    )?;
-    if state.next_author > state.policy.author_count {
-        anyhow::bail!(
-            "terminal bulk projection author watermark {} exceeds policy author count {}",
-            state.next_author,
-            state.policy.author_count
-        );
-    }
-    if state.policy.max_authors != options.expected_full_author_count {
-        anyhow::bail!(
-            "bulk projection policy max_authors {} differs from trusted full count {}",
-            state.policy.max_authors,
-            options.expected_full_author_count
-        );
-    }
-    if options.allow_recovery_tranche {
-        if state.next_author == 0 || state.next_author >= options.expected_full_author_count {
-            anyhow::bail!(
-                "recovery-tranche audit requires a nonzero partial watermark below trusted full \
-                 count {}; found next_author={}",
-                options.expected_full_author_count,
-                state.next_author
-            );
-        }
-    } else if state.next_author != options.expected_full_author_count {
-        anyhow::bail!(
-            "full-policy audit requires the terminal and frozen-stage author watermark to equal \
-             trusted full count {}; found next_author={}; use --allow-recovery-tranche only for \
-             internal non-cutover evidence",
-            options.expected_full_author_count,
-            state.next_author
-        );
-    }
-    validate_terminal_stage_state(&state, &stage)?;
-    let trusted_profile_rank_decisions = load_trusted_profile_rank_decisions(&options)?;
+    let subject = load_v2_audit_subject(data_dir, &options)?;
+    let BulkProjectionAuditCompletion {
+        output,
+        full_cutover,
+    } = audit_loaded_subject(data_dir, &options, subject, &prepared_output).await?;
+    // The legacy v2 CLI writes exhaustive evidence but has no publication
+    // operation. The typed token remains available only to the v3 lifecycle.
+    drop(full_cutover);
+    Ok(output)
+}
+
+async fn audit_loaded_subject(
+    data_dir: &Path,
+    options: &BulkProjectionAuditOptions,
+    subject: AuditSubject,
+    prepared_output: &PreparedAuditOutput,
+) -> Result<BulkProjectionAuditCompletion> {
+    let trusted_profile_rank_decisions = load_trusted_profile_rank_decisions(options)?;
     require_profile_rank_policy_binding(
         trusted_profile_rank_decisions.as_ref(),
-        &state.policy.author_allowlist_sha256,
-        state.policy.author_count,
+        &subject.policy_author_allowlist_sha256,
+        subject.authors_total,
     )?;
-    if state.built_roots.len() != NostrEventIndex::ALL.len()
-        || NostrEventIndex::ALL
-            .iter()
-            .any(|index| !state.built_roots.contains_key(&index.stable_id()))
-    {
-        anyhow::bail!("bulk projection state must contain exactly all nine index roots");
-    }
-    let candidate_root = state
-        .complete_root
-        .as_deref()
-        .context("bulk projection has no complete candidate root")
-        .and_then(parse_root_text)?;
+    require_subject_profile_rank_authority(
+        subject.expected_profile_distance_provenance.as_ref(),
+        trusted_profile_rank_decisions.as_ref(),
+    )?;
 
-    let spool = BulkProjectionSpool::open_read_only(&spool_path)?;
+    let spool = BulkProjectionSpool::open_read_only(&subject.spool_path)?;
     let pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
     let store = Arc::new(
         ReadOnlyPoolStore::open(&pool_path)
@@ -1711,7 +2211,7 @@ pub(crate) async fn audit_bulk_projection(
         .context("validate fully committed PoolStore catalog")?;
     let target = NostrEventStore::new(Arc::clone(&store));
     let canonical_manifest = target
-        .get_canonical_manifest(&candidate_root)
+        .get_canonical_manifest(&subject.candidate_root)
         .await
         .context("validate exact canonical bulk projection manifest")?;
     let manifest = canonical_manifest.manifest;
@@ -1725,9 +2225,9 @@ pub(crate) async fn audit_bulk_projection(
 
     let mut indexes = Vec::with_capacity(NostrEventIndex::ALL.len());
     let mut expected_entries = [EntrySetProof::default(); 9];
-    let mut representative_cids = vec![candidate_root.clone(), manifest_metadata];
+    let mut representative_cids = vec![subject.candidate_root.clone(), manifest_metadata];
     for index in NostrEventIndex::ALL {
-        let encoded = state
+        let encoded = subject
             .built_roots
             .get(&index.stable_id())
             .expect("all nine state roots checked");
@@ -1793,14 +2293,19 @@ pub(crate) async fn audit_bulk_projection(
     )
     .await?;
     require_profile_distance_attestation(
-        options.allow_recovery_tranche,
-        options.expected_profile_distance_seal_sha256.as_deref(),
+        subject.scope.recovery_tranche_only(),
+        subject.expected_profile_distance_seal_sha256.as_deref(),
         &profile.follow_distance_seal_sha256,
         trusted_profile_rank_decisions.is_some(),
     )?;
     representative_cids.extend(profile_cids);
-    let (queries, representative_event_cid) =
-        audit_real_queries(&spool, &target, &candidate_root, options.query_limit).await?;
+    let (queries, representative_event_cid) = audit_real_queries(
+        &spool,
+        &target,
+        &subject.candidate_root,
+        options.query_limit,
+    )
+    .await?;
     representative_cids.push(representative_event_cid);
 
     let mut representative_blocks = Vec::new();
@@ -1817,14 +2322,8 @@ pub(crate) async fn audit_bulk_projection(
         }
     }
 
-    let final_state_bytes = std::fs::read(&state_path)
-        .with_context(|| format!("re-read bulk projection state {}", state_path.display()))?;
-    let final_stage_bytes = std::fs::read(&stage_state_path)
-        .with_context(|| format!("re-read staging state {}", stage_state_path.display()))?;
-    if bytes_sha256(&final_state_bytes) != state_sha256
-        || bytes_sha256(&final_stage_bytes) != stage_state_sha256
-    {
-        anyhow::bail!("projection or staging state changed during read-only audit");
+    for snapshot in &subject.snapshots {
+        snapshot.recheck()?;
     }
     let catalog_after = store
         .validate_committed_catalog()
@@ -1837,40 +2336,49 @@ pub(crate) async fn audit_bulk_projection(
         anyhow::bail!("profile index root files changed during read-only audit");
     }
     recheck_trusted_profile_rank_decisions(trusted_profile_rank_decisions.as_ref())?;
+    if let Some(spec) = subject.v3_recheck.clone() {
+        let reloaded = load_v3_audit_subject(data_dir, spec)
+            .context("revalidate typed v3 authority after exhaustive audit")?;
+        if reloaded != subject {
+            anyhow::bail!("typed v3 audit authority changed during exhaustive verification");
+        }
+    }
 
     let output = BulkProjectionAuditOutput {
-        version: 2,
-        candidate_root: cid_to_nhash(&candidate_root)?,
-        state_sha256,
-        stage_state_sha256,
-        trusted_policy_sha256: policy_sha256,
-        trusted_profile_distance_seal_sha256: options.expected_profile_distance_seal_sha256,
+        version: BULK_PROJECTION_AUDIT_FORMAT_VERSION,
+        subject_kind: subject.kind,
+        subject_version: subject.version,
+        candidate_root: cid_to_nhash(&subject.candidate_root)?,
+        state_sha256: subject.state_sha256,
+        stage_state_sha256: subject.stage_state_sha256,
+        trusted_policy_sha256: subject.trusted_policy_sha256,
+        policy_author_allowlist_sha256: subject.policy_author_allowlist_sha256,
+        trusted_profile_distance_seal_sha256: subject.expected_profile_distance_seal_sha256.clone(),
         profile_distance_provenance: trusted_profile_rank_decisions
             .as_ref()
             .map(|trusted| trusted.evidence.clone()),
-        trusted_full_author_count: options.expected_full_author_count,
-        crawl_policy_max_follow_distance: state.policy.max_follow_distance,
-        audit_mode: if options.allow_recovery_tranche {
-            "recovery-tranche-internal-non-cutover"
-        } else {
-            "full-policy-cutover"
-        }
-        .to_string(),
-        cutover_eligible: !options.allow_recovery_tranche
-            && trusted_profile_rank_decisions.is_some(),
+        trusted_full_author_count: subject.trusted_full_author_count,
+        crawl_policy_max_follow_distance: subject.crawl_policy_max_follow_distance,
+        audit_mode: subject.scope.audit_mode().to_string(),
+        cutover_eligible: subject.scope == AuditScope::FullPolicyCutover
+            && trusted_profile_rank_decisions.is_some()
+            && subject.expected_profile_distance_seal_sha256.is_some(),
         pool_catalog_sha256: catalog_before.sha256,
         pool_manifest_sha256: catalog_before.manifest_sha256,
         pool_stored_locations: catalog_before.stored_locations,
-        authors_processed: state.next_author,
-        authors_total: state.policy.author_count,
-        recovery_tranche_only: options.allow_recovery_tranche,
+        authors_processed: subject.authors_processed,
+        authors_total: subject.authors_total,
+        recovery_tranche_only: subject.scope.recovery_tranche_only(),
         indexes,
         profile,
         queries,
         representative_blocks,
     };
-    write_audit_output_noreplace(&output, &prepared_output)?;
-    Ok(output)
+    let (_, full_cutover) = write_audit_output_noreplace(&output, prepared_output)?;
+    Ok(BulkProjectionAuditCompletion {
+        output,
+        full_cutover,
+    })
 }
 
 #[cfg(test)]
@@ -1910,6 +2418,103 @@ mod tests {
             max_relay_pages: 67,
             kinds: Some(vec![0, 1, 30_000]),
         }
+    }
+
+    fn synthetic_root(byte: u8) -> String {
+        cid_to_nhash(&Cid::public([byte; 32])).expect("encode generated audit root")
+    }
+
+    fn full_cutover_output() -> BulkProjectionAuditOutput {
+        let indexes = NostrEventIndex::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(position, index)| BulkProjectionIndexAudit {
+                index: index.name().to_string(),
+                root: Some(synthetic_root(position as u8 + 1)),
+                nodes: 1,
+                links: 1,
+                durable_values_validated: 1,
+                entries_sha256: "1".repeat(64),
+                retained_set_sha256: "2".repeat(64),
+                first_key: Some("first".to_string()),
+                last_key: Some("last".to_string()),
+            })
+            .collect();
+        let distance_seal = "3".repeat(64);
+        BulkProjectionAuditOutput {
+            version: BULK_PROJECTION_AUDIT_FORMAT_VERSION,
+            subject_kind: AuditSubjectKind::V3,
+            subject_version: 3,
+            candidate_root: synthetic_root(20),
+            state_sha256: "4".repeat(64),
+            stage_state_sha256: "5".repeat(64),
+            trusted_policy_sha256: "6".repeat(64),
+            policy_author_allowlist_sha256: "c".repeat(64),
+            trusted_profile_distance_seal_sha256: Some(distance_seal.clone()),
+            profile_distance_provenance: Some(ProfileDistanceProvenance {
+                format: PROFILE_RANK_DECISION_REPORT_FORMAT.to_string(),
+                census_format: PROFILE_RANK_DECISION_CENSUS_FORMAT.to_string(),
+                rank_decisions_file_sha256: "7".repeat(64),
+                rank_decisions_report_sha256: "8".repeat(64),
+                rank_decisions_sha256: "9".repeat(64),
+                social_graph_root: "a".repeat(64),
+                social_graph_sha256: "b".repeat(64),
+                eligible_authors_sha256: "c".repeat(64),
+                record_count: 1,
+                eligible_count: 1,
+                excluded_count: 0,
+                overmute_threshold: PROFILE_OVERMUTE_THRESHOLD,
+                census_max_distance: Some(4),
+                rank_policy: PROFILE_RANK_POLICY.to_string(),
+                exclusion_policy: PROFILE_EXCLUSION_POLICY.to_string(),
+            }),
+            trusted_full_author_count: 1,
+            crawl_policy_max_follow_distance: Some(0),
+            audit_mode: FULL_POLICY_CUTOVER_AUDIT_MODE.to_string(),
+            cutover_eligible: true,
+            pool_catalog_sha256: "d".repeat(64),
+            pool_manifest_sha256: "e".repeat(64),
+            pool_stored_locations: 1,
+            authors_processed: 1,
+            authors_total: 1,
+            recovery_tranche_only: false,
+            indexes,
+            profile: BulkProjectionProfileAudit {
+                by_pubkey_root: synthetic_root(21),
+                by_pubkey_root_file_sha256: "1".repeat(64),
+                by_pubkey_nodes: 1,
+                by_pubkey_links: 1,
+                by_pubkey_entries_sha256: "2".repeat(64),
+                search_root: synthetic_root(22),
+                search_root_file_sha256: "3".repeat(64),
+                search_nodes: 1,
+                search_entries: 1,
+                search_entries_sha256: "4".repeat(64),
+                sample_pubkey: "5".repeat(64),
+                sample_event_id: "6".repeat(64),
+                sample_name: "Generated profile".to_string(),
+                follow_distance_binding: "generated-test-binding".to_string(),
+                follow_distance_seal_sha256: distance_seal,
+            },
+            queries: vec![BulkProjectionQueryAudit {
+                query: "by-id".to_string(),
+                parameters: serde_json::json!({"limit": 1}),
+                event_ids: vec!["7".repeat(64)],
+            }],
+            representative_blocks: vec![BulkProjectionBlockEvidence {
+                role: "manifest".to_string(),
+                nhash: synthetic_root(20),
+                sha256: "8".repeat(64),
+            }],
+        }
+    }
+
+    fn assert_cutover_token_rejected(output: &BulkProjectionAuditOutput) {
+        let bytes = canonical_audit_output_bytes(output).expect("encode mutated audit evidence");
+        assert!(
+            mint_full_cutover_verified(output, &bytes).is_err(),
+            "mutated full-cutover evidence unexpectedly minted a token"
+        );
     }
 
     fn expected_profile_search_entry() -> (
@@ -2024,7 +2629,7 @@ mod tests {
         let decisions_path = temp.path().join("rank-decisions.jsonl");
         let report_path = temp.path().join("rank-decisions-report.json");
         std::fs::write(&decisions_path, decisions_bytes).unwrap();
-        std::fs::write(&report_path, report_bytes).unwrap();
+        std::fs::write(&report_path, &report_bytes).unwrap();
         let options = BulkProjectionAuditOptions {
             staging_data_dir: temp.path().join("unused-staging"),
             expected_state_sha256: "1".repeat(64),
@@ -2071,6 +2676,32 @@ mod tests {
         );
         recheck_trusted_profile_rank_decisions(Some(&trusted)).unwrap();
 
+        let alternate_report_path = temp.path().join("alternate-rank-report.json");
+        let mut alternate_report_bytes = report_bytes;
+        alternate_report_bytes.insert(alternate_report_bytes.len() - 1, b' ');
+        std::fs::write(&alternate_report_path, &alternate_report_bytes).unwrap();
+        let alternate_report_sha256 = bytes_sha256(&alternate_report_bytes);
+        let alternate = load_pinned_profile_rank_decisions(
+            &decisions_path,
+            &trusted.evidence.rank_decisions_file_sha256,
+            &alternate_report_path,
+            &alternate_report_sha256,
+        )
+        .expect("load semantically identical report with distinct exact bytes");
+        assert_eq!(alternate.decisions, trusted.decisions);
+        assert_ne!(
+            alternate.evidence.rank_decisions_report_sha256,
+            trusted.evidence.rank_decisions_report_sha256
+        );
+        assert!(
+            require_subject_profile_rank_authority(Some(&trusted.evidence), Some(&alternate),)
+                .expect_err(
+                    "same decisions with a substituted report must not inherit v3 authority"
+                )
+                .to_string()
+                .contains("differs from the exact authority")
+        );
+
         std::fs::write(&report_path, b"changed").unwrap();
         assert!(recheck_trusted_profile_rank_decisions(Some(&trusted))
             .unwrap_err()
@@ -2109,6 +2740,94 @@ mod tests {
         assert!(error
             .to_string()
             .contains("does not match actual eligible decision keys"));
+    }
+
+    #[test]
+    fn v3_subject_adapter_rejects_unrelated_pinned_bytes_without_raw_authority_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let state_path = data_dir
+            .join("nostr-index")
+            .join("bulk-projection-v3")
+            .join("state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let unrelated = b"{\"phase\":\"candidate\",\"root\":\"caller-chosen\"}\n";
+        std::fs::write(&state_path, unrelated).unwrap();
+        let spec = V3AuditSubjectSpec {
+            expected_state_sha256: bytes_sha256(unrelated),
+            staging_data_dir: temp.path().join("staging"),
+        };
+        let error = load_v3_audit_subject(&data_dir, spec)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("parse v3 state"),
+            "unrelated caller-pinned bytes must not become a v3 audit subject: {error}"
+        );
+    }
+
+    #[test]
+    fn only_complete_full_cutover_evidence_mints_typed_token() {
+        let output = full_cutover_output();
+        let bytes = canonical_audit_output_bytes(&output).unwrap();
+        let token = mint_full_cutover_verified(&output, &bytes)
+            .unwrap()
+            .expect("complete full-cutover evidence must mint a token");
+        assert_eq!(token.evidence_sha256, bytes_sha256(&bytes));
+        assert_eq!(token.subject_kind, AuditSubjectKind::V3);
+        assert_eq!(token.index_roots.len(), NostrEventIndex::ALL.len());
+
+        let mut recovery = output.clone();
+        recovery.audit_mode = RECOVERY_TRANCHE_AUDIT_MODE.to_string();
+        recovery.cutover_eligible = false;
+        recovery.recovery_tranche_only = true;
+        recovery.authors_processed = 1;
+        recovery.authors_total = 2;
+        recovery.trusted_full_author_count = 2;
+        let recovery_bytes = canonical_audit_output_bytes(&recovery).unwrap();
+        assert!(mint_full_cutover_verified(&recovery, &recovery_bytes)
+            .unwrap()
+            .is_none());
+
+        let mut wrong_mode = output.clone();
+        wrong_mode.audit_mode = RECOVERY_TRANCHE_AUDIT_MODE.to_string();
+        assert_cutover_token_rejected(&wrong_mode);
+        let mut not_eligible = output.clone();
+        not_eligible.cutover_eligible = false;
+        assert_cutover_token_rejected(&not_eligible);
+        let mut falsely_recovery = output.clone();
+        falsely_recovery.recovery_tranche_only = true;
+        assert_cutover_token_rejected(&falsely_recovery);
+        let mut partial_count = output.clone();
+        partial_count.authors_processed = 0;
+        assert_cutover_token_rejected(&partial_count);
+        let mut missing_rank = output.clone();
+        missing_rank.profile_distance_provenance = None;
+        assert_cutover_token_rejected(&missing_rank);
+        let mut wrong_allowlist = output.clone();
+        wrong_allowlist.policy_author_allowlist_sha256 = "f".repeat(64);
+        assert_cutover_token_rejected(&wrong_allowlist);
+        let mut unpinned_profile = output.clone();
+        unpinned_profile.trusted_profile_distance_seal_sha256 = None;
+        assert_cutover_token_rejected(&unpinned_profile);
+        let mut missing_index = output.clone();
+        missing_index.indexes.pop();
+        assert_cutover_token_rejected(&missing_index);
+        let mut empty_index = output.clone();
+        empty_index.indexes[0].root = None;
+        assert_cutover_token_rejected(&empty_index);
+        let mut empty_pool = output.clone();
+        empty_pool.pool_stored_locations = 0;
+        assert_cutover_token_rejected(&empty_pool);
+        let mut bad_profile = output.clone();
+        bad_profile.profile.search_root = "not-a-root".to_string();
+        assert_cutover_token_rejected(&bad_profile);
+        let mut no_queries = output.clone();
+        no_queries.queries.clear();
+        assert_cutover_token_rejected(&no_queries);
+        let mut no_blocks = output;
+        no_blocks.representative_blocks.clear();
+        assert_cutover_token_rejected(&no_blocks);
     }
 
     #[test]
@@ -2384,9 +3103,12 @@ mod tests {
         // 101,267-author policy while the frozen terminal stage stops at
         // author 17,177.
         let policy = policy(101_267);
+        let allowlist_sha256 = policy.author_allowlist_sha256.clone();
         let state = BulkProjectionState {
             version: BULK_PROJECTION_VERSION,
-            author_allowlist_source: Some("file:///audit-authors".to_string()),
+            author_allowlist_source: Some(format!(
+                "http://127.0.0.1:45442/eligible/{allowlist_sha256}"
+            )),
             policy: policy.clone(),
             next_author: 17_177,
             segment_event_offset: 0,
@@ -2411,13 +3133,23 @@ mod tests {
         super::super::persist_bulk_state(&state_path, &state).unwrap();
         let stage = StagedNostrCrawlState {
             version: STAGE_FORMAT_VERSION,
-            author_allowlist_source: Some("file:///audit-authors".to_string()),
+            author_allowlist_source: Some(format!(
+                "http://127.0.0.1:45441/eligible/{allowlist_sha256}"
+            )),
             policy,
             next_author: state.next_author,
             events_seen: state.events_seen,
             events_selected: state.events_selected,
             live_bytes_selected: state.live_bytes_selected,
         };
+        assert_ne!(
+            state.author_allowlist_source, stage.author_allowlist_source,
+            "the production-shaped audit must tolerate distinct ephemeral source ports"
+        );
+        assert_eq!(
+            state.policy, stage.policy,
+            "the canonical policy, including allowlist digest/count, remains authoritative"
+        );
         persist_stage_state(&staging_data_dir, &stage).unwrap();
         drop(CrawlStateLock::acquire(&data_dir).unwrap());
         drop(CrawlStateLock::acquire_stage(&staging_data_dir).unwrap());
@@ -2492,8 +3224,8 @@ mod tests {
             "unexpected trusted-count error: {count_error:#}"
         );
 
-        run_nostr_bulk_projection_audit(
-            data_dir,
+        let recovery_output = audit_bulk_projection(
+            &data_dir,
             BulkProjectionAuditOptions {
                 staging_data_dir,
                 expected_state_sha256: state_sha256,
@@ -2515,8 +3247,16 @@ mod tests {
         .await
         .unwrap();
 
-        let output: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(evidence_path).unwrap()).unwrap();
+        let evidence_bytes = std::fs::read(evidence_path).unwrap();
+        assert!(
+            mint_full_cutover_verified(&recovery_output, &evidence_bytes)
+                .unwrap()
+                .is_none()
+        );
+        let output: serde_json::Value = serde_json::from_slice(&evidence_bytes).unwrap();
+        assert_eq!(output["version"], BULK_PROJECTION_AUDIT_FORMAT_VERSION);
+        assert_eq!(output["subject_kind"], "v2");
+        assert_eq!(output["subject_version"], BULK_PROJECTION_VERSION);
         assert_eq!(
             output["candidate_root"],
             cid_to_nhash(&candidate_root).unwrap()
@@ -2528,6 +3268,10 @@ mod tests {
         );
         assert_eq!(output["cutover_eligible"], false);
         assert_eq!(output["trusted_policy_sha256"], policy_sha256);
+        assert_eq!(
+            output["policy_author_allowlist_sha256"],
+            state.policy.author_allowlist_sha256
+        );
         assert_eq!(output["trusted_full_author_count"], 101_267);
         assert_eq!(output["crawl_policy_max_follow_distance"], 0);
         assert_eq!(output["authors_processed"], 17_177);
