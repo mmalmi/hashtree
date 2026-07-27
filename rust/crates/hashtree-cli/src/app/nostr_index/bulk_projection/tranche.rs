@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::super::{
-    cid_to_nhash, load_stage_segment_claim, load_stage_segment_path_with_bytes,
-    load_stage_segment_with_bytes, note_stage_segment_directory_scan, parse_author_allowlist,
-    parse_root_text, persist_immutable_bytes, persist_json_atomic, persist_stage_segment_claim,
-    stage_bytes_sha256, stage_segment_file_parts, validate_stage_state, IndexedNostrCrawlPolicy,
-    ProjectionStores, StagedAuthorSegment, StagedNostrCrawlState, STAGE_DIR, STAGE_SEGMENTS_DIR,
+    cid_to_nhash, create_dir_all_durable, fsync_parent, load_stage_segment_claim,
+    load_stage_segment_path_with_bytes, load_stage_segment_with_bytes,
+    note_stage_segment_directory_scan, parse_author_allowlist, parse_root_text,
+    persist_immutable_bytes, persist_json_atomic, persist_stage_segment_claim, stage_bytes_sha256,
+    stage_segment_file_parts, validate_stage_state, IndexedNostrCrawlPolicy, ProjectionStores,
+    StagedAuthorSegment, StagedNostrCrawlState, STAGE_DIR, STAGE_SEGMENTS_DIR,
     STAGE_SEGMENT_CLAIMS_DIR, STAGE_STATE_FILE,
 };
 use super::audit::{
@@ -99,6 +102,7 @@ enum TrancheSealPurpose {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct StagePrefixSeal {
     next_author: usize,
     events_seen: usize,
@@ -148,6 +152,7 @@ struct StagePrefixTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SpoolIdentity {
     id: String,
     marker_sha256: String,
@@ -157,6 +162,7 @@ struct SpoolIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SpoolIdentityMarker {
     version: u32,
     id: String,
@@ -166,6 +172,7 @@ struct SpoolIdentityMarker {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct ServingRootPin {
     root: String,
     event_id: String,
@@ -176,12 +183,14 @@ struct ServingRootPin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct CandidatePin {
     root: String,
     built_roots: BTreeMap<u8, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct AuditEvidencePin {
     sha256: String,
     candidate_root: String,
@@ -198,18 +207,21 @@ struct AuditEvidencePin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FrozenProfileDistanceSeal {
     sha256: String,
     retained_profile_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct PublicationIntent {
     event_id: String,
     event_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct PublicationReceipt {
     errors: usize,
     relay_event_ids: BTreeMap<String, String>,
@@ -219,6 +231,7 @@ struct PublicationReceipt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct WorkingProjection {
     next_author: usize,
     segment_event_offset: usize,
@@ -234,6 +247,7 @@ struct WorkingProjection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct BulkTrancheState {
     version: u32,
     phase: TranchePhase,
@@ -257,6 +271,7 @@ struct BulkTrancheState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct TrancheSeal {
     version: u32,
     generation: u64,
@@ -1178,6 +1193,9 @@ fn load_seal(seals_dir: &Path, generation: u64, sha256: &str) -> Result<TrancheS
     require_sha256("tranche seal SHA-256", &bytes_sha256(&bytes), sha256)?;
     let seal: TrancheSeal =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    if json_line(&seal, "loaded v3 tranche seal")? != bytes {
+        anyhow::bail!("tranche seal is not canonical JSON at {}", path.display());
+    }
     if seal.version != TRANCHE_STATE_VERSION || seal.generation != generation {
         anyhow::bail!("tranche seal metadata differs from its state reference");
     }
@@ -1398,34 +1416,65 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
     if let Some(sha256) = state.working.active_segment_sha256.as_deref() {
         validate_sha256("v3 active staged segment SHA-256", sha256)?;
     }
+    if state.publication_receipt.is_some() && state.publication_intent.is_none() {
+        anyhow::bail!("v3 publication receipt exists without an exact publication intent");
+    }
     match state.phase {
         TranchePhase::Prepare => {
-            if state.active_seal_sha256.is_some()
+            if state.generation != 0
+                || state.active_seal_sha256.is_some()
                 || state.pending_seal_sha256.is_none()
                 || state.working.frozen_prefix.is_none()
                 || state.working.frozen_profile_distances.is_some()
+                || state.working.segment_event_offset != 0
+                || state.working.active_segment_sha256.is_some()
+                || state.working.built_roots != state.last_validated.built_roots
+                || state.working.candidate_root.as_deref()
+                    != Some(state.last_validated.root.as_str())
+                || state.publication_intent.is_some()
+                || state.publication_receipt.is_some()
             {
-                anyhow::bail!("v3 Prepare state has invalid active/pending seal references");
+                anyhow::bail!("v3 Prepare state violates its exact phase invariants");
             }
         }
         TranchePhase::Appending => {
-            if state.active_seal_sha256.is_none()
+            if state.generation != 0
+                || state.active_seal_sha256.is_none()
                 || state.pending_seal_sha256.is_some()
                 || state.working.frozen_prefix.is_some()
                 || state.working.frozen_profile_distances.is_some()
+                || !state.working.built_roots.is_empty()
+                || state.working.candidate_root.is_some()
+                || state.publication_intent.is_some()
+                || state.publication_receipt.is_some()
             {
-                anyhow::bail!("v3 post-Prepare state has invalid active/pending seal references");
+                anyhow::bail!("v3 Appending state violates its exact phase invariants");
             }
         }
-        _ => {
-            if state.active_seal_sha256.is_none()
+        TranchePhase::Freeze => {
+            if state.generation != 1
+                || state.active_seal_sha256.is_none()
                 || state.pending_seal_sha256.is_some()
                 || state.working.frozen_prefix.is_none()
                 || state.working.frozen_profile_distances.is_none()
+                || state.working.segment_event_offset != 0
+                || state.working.active_segment_sha256.is_some()
+                || !state.working.built_roots.is_empty()
+                || state.working.candidate_root.is_some()
+                || state.publication_intent.is_some()
+                || state.publication_receipt.is_some()
             {
-                anyhow::bail!("v3 frozen-or-later state has invalid seal references");
+                anyhow::bail!("v3 Freeze state violates its exact phase invariants");
             }
         }
+        TranchePhase::Building
+        | TranchePhase::Candidate
+        | TranchePhase::Verified
+        | TranchePhase::Publishing
+        | TranchePhase::Promoted => anyhow::bail!(
+            "v3 {:?} state is not implemented and cannot be loaded or persisted",
+            state.phase
+        ),
     }
     if let Some(sha256) = state.active_seal_sha256.as_deref() {
         validate_sha256("v3 active seal SHA-256", sha256)?;
@@ -1438,6 +1487,24 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
 
 fn validate_active_seal(state: &BulkTrancheState, seal: &TrancheSeal) -> Result<()> {
     validate_stage_prefix_schema("active v3 seal prefix", &seal.prefix, &state.policy)?;
+    if seal.version != TRANCHE_STATE_VERSION || seal.generation != state.generation {
+        anyhow::bail!("active v3 seal version or generation differs from durable tranche state");
+    }
+    match (&state.phase, &seal.purpose) {
+        (TranchePhase::Appending, TrancheSealPurpose::Prepare) => {
+            if seal.generation != 0 || seal.parent_seal_sha256.is_some() {
+                anyhow::bail!("active Prepare seal has an invalid generation or parent");
+            }
+        }
+        (TranchePhase::Freeze, TrancheSealPurpose::Freeze) => {
+            let parent = seal
+                .parent_seal_sha256
+                .as_deref()
+                .context("active Freeze seal has no parent Prepare seal")?;
+            validate_sha256("active Freeze seal parent SHA-256", parent)?;
+        }
+        _ => anyhow::bail!("active v3 seal purpose does not match its exact durable phase"),
+    }
     let purpose_matches = match seal.purpose {
         TrancheSealPurpose::Prepare => {
             seal.internal_candidate.as_ref() == Some(&state.last_validated)
@@ -1482,6 +1549,12 @@ fn load_state(path: &Path) -> Result<Option<(BulkTrancheState, Vec<u8>, String)>
             let sha256 = bytes_sha256(&bytes);
             let state: BulkTrancheState = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse v3 state {}", path.display()))?;
+            if json_line(&state, "loaded v3 tranche state")? != bytes {
+                anyhow::bail!(
+                    "v3 tranche state is not canonical JSON at {}",
+                    path.display()
+                );
+            }
             if state.version != TRANCHE_STATE_VERSION {
                 anyhow::bail!("unsupported bulk tranche state version {}", state.version);
             }
@@ -1504,10 +1577,79 @@ pub(crate) fn load_bulk_tranche_progress(data_dir: &Path) -> Result<Option<(usiz
     )))
 }
 
-fn persist_state(path: &Path, state: &BulkTrancheState) -> Result<String> {
-    persist_json_atomic(path, state, "v3 bulk tranche state")?;
+fn persist_state_cas(
+    path: &Path,
+    state: &BulkTrancheState,
+    expected_old_sha256: Option<&str>,
+) -> Result<String> {
+    validate_state_schema(state)?;
+    let expected_bytes = json_line(state, "v3 bulk tranche state")?;
+    let output_dir = path
+        .parent()
+        .context("v3 bulk tranche state path has no parent directory")?;
+    create_dir_all_durable(output_dir)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("v3 bulk tranche state path has no UTF-8 file name")?;
+    let temp_path = output_dir.join(format!(".{file_name}.cas.tmp"));
+    let mut temp = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temp_path)
+        .with_context(|| format!("open {}", temp_path.display()))?;
+    temp.write_all(&expected_bytes)
+        .with_context(|| format!("write {}", temp_path.display()))?;
+    temp.sync_all()
+        .with_context(|| format!("fsync {}", temp_path.display()))?;
+    drop(temp);
+
+    // The command holds the process-wide crawl writer lock. Re-read the
+    // persisted state only after the replacement inode is fully durable, as
+    // close to the rename commit point as possible, and require the caller's
+    // exact prior digest.
+    match (std::fs::read(path), expected_old_sha256) {
+        (Ok(bytes), Some(expected)) => {
+            require_sha256(
+                "v3 bulk tranche compare-and-swap state SHA-256",
+                &bytes_sha256(&bytes),
+                expected,
+            )?;
+        }
+        (Ok(_), None) => {
+            anyhow::bail!(
+                "v3 bulk tranche initial state already exists at {}",
+                path.display()
+            );
+        }
+        (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => {}
+        (Err(error), Some(_)) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "v3 bulk tranche compare-and-swap state disappeared at {}",
+                path.display()
+            );
+        }
+        (Err(error), _) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "read v3 bulk tranche state immediately before compare-and-swap {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("rename {} to {}", temp_path.display(), path.display()))?;
+    fsync_parent(path)?;
     let bytes = std::fs::read(path)
         .with_context(|| format!("re-read persisted v3 state {}", path.display()))?;
+    if bytes != expected_bytes {
+        anyhow::bail!(
+            "persisted v3 bulk tranche state differs from canonical requested bytes at {}",
+            path.display()
+        );
+    }
     Ok(bytes_sha256(&bytes))
 }
 
@@ -1703,6 +1845,7 @@ pub(crate) fn prepare_bulk_tranche(
         publication_receipt: None,
     };
     let mut existing_appending = None;
+    let prepare_state_sha256;
     if let Some((existing, _, state_sha256)) = existing_state {
         if existing.phase == TranchePhase::Appending {
             let mut expected = prepare_state.clone();
@@ -1716,12 +1859,15 @@ pub(crate) fn prepare_bulk_tranche(
                 anyhow::bail!("existing v3 Appending state differs from exact prepare inputs");
             }
             existing_appending = Some((existing, state_sha256));
+            prepare_state_sha256 = None;
         } else if existing != prepare_state {
             anyhow::bail!("existing v3 state differs from exact resumable Prepare state");
+        } else {
+            prepare_state_sha256 = Some(state_sha256);
         }
     } else {
         recheck_trusted_profile_rank_decisions(Some(&profile_rank_authority))?;
-        persist_state(&state_path, &prepare_state)?;
+        prepare_state_sha256 = Some(persist_state_cas(&state_path, &prepare_state, None)?);
     }
 
     // Prepare is the first mutable v3 write. A crash from this point retains
@@ -1773,7 +1919,13 @@ pub(crate) fn prepare_bulk_tranche(
     appending.working.built_roots.clear();
     appending.working.candidate_root = None;
     appending.working.frozen_prefix = None;
-    let state_sha256 = persist_state(&state_path, &appending)?;
+    let expected_prepare_state_sha256 =
+        prepare_state_sha256.context("resumable Prepare state SHA-256 is missing")?;
+    let state_sha256 = persist_state_cas(
+        &state_path,
+        &appending,
+        Some(&expected_prepare_state_sha256),
+    )?;
     let output = transition_output(&appending, state_sha256);
     write_output(&output, options.out.as_deref())?;
     Ok(output)
@@ -1942,7 +2094,9 @@ pub(crate) async fn append_bulk_tranche(
                 state.working.segment_event_offset = event_end;
                 state.working.active_segment_sha256 = Some(segment_sha256.clone());
             }
-            persisted_state_sha256 = persist_state(&state_path, &state)?;
+            let previous_state_sha256 = persisted_state_sha256;
+            persisted_state_sha256 =
+                persist_state_cas(&state_path, &state, Some(&previous_state_sha256))?;
             eprintln!(
                 "Nostr v3 tranche append checkpoint: authors={}/{} staged_authors={} segment_event_offset={}/{} retained={} replaced={} skipped={} index_entries={} reused_records={} spool_missing_candidates={} durable_reused_candidates={} stored_candidates={} reused_exact_batch={} completed_segment={} completed_segments={} stage_load_ms={} replay_plan_ms={} durable_probe_ms={} target_store_ms={} target_sync_ms={} spool_write_ms={} spool_sync_ms={} profile_sync_ms={} batch_elapsed_ms={}",
                 state.working.next_author,
@@ -2092,7 +2246,7 @@ pub(crate) fn freeze_bulk_tranche(
     state.working.frozen_profile_distances = Some(frozen_profile_distances);
     state.working.built_roots.clear();
     state.working.candidate_root = None;
-    let state_sha256 = persist_state(&state_path, &state)?;
+    let state_sha256 = persist_state_cas(&state_path, &state, Some(&state_sha256))?;
     let output = transition_output(&state, state_sha256);
     write_output(&output, options.out.as_deref())?;
     Ok(output)

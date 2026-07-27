@@ -542,6 +542,29 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         publication_intent: None,
         publication_receipt: None,
     };
+    let mut unknown_seal = serde_json::to_value(&seal).expect("encode test seal value");
+    unknown_seal
+        .as_object_mut()
+        .expect("seal object")
+        .insert("unexpected".to_string(), serde_json::json!(true));
+    serde_json::from_value::<TrancheSeal>(unknown_seal)
+        .expect_err("tranche seals must deny unknown fields");
+    let mut noncanonical_seal_bytes =
+        serde_json::to_vec_pretty(&seal).expect("encode noncanonical test seal");
+    noncanonical_seal_bytes.push(b'\n');
+    let noncanonical_seal_sha256 = bytes_sha256(&noncanonical_seal_bytes);
+    persist_immutable_bytes(
+        &seal_path(&seals_dir, seal.generation, &noncanonical_seal_sha256),
+        &noncanonical_seal_bytes,
+        "noncanonical test seal",
+    )
+    .expect("persist noncanonical test seal");
+    assert!(
+        load_seal(&seals_dir, seal.generation, &noncanonical_seal_sha256)
+            .expect_err("seal loader must reject noncanonical JSON")
+            .to_string()
+            .contains("not canonical JSON")
+    );
     let active_seal_sha256 = persist_seal(&seals_dir, &seal).expect("persist active Prepare seal");
     let state = BulkTrancheState {
         version: TRANCHE_STATE_VERSION,
@@ -576,7 +599,41 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         publication_intent: None,
         publication_receipt: None,
     };
-    let state_sha256 = persist_state(&state_path, &state).expect("persist Appending state");
+    let state_sha256 =
+        persist_state_cas(&state_path, &state, None).expect("persist Appending state");
+    let canonical_state_bytes = std::fs::read(&state_path).expect("read canonical state");
+    let stale_error = persist_state_cas(&state_path, &state, Some(&"f".repeat(64)))
+        .expect_err("stale state compare-and-swap must fail");
+    assert!(stale_error.to_string().contains("mismatch"));
+    assert_eq!(
+        std::fs::read(&state_path).expect("re-read state after rejected CAS"),
+        canonical_state_bytes,
+        "a rejected compare-and-swap must not replace durable state"
+    );
+    let noncanonical_state_path = state_path.with_file_name("noncanonical-state.json");
+    let mut noncanonical_state_bytes =
+        serde_json::to_vec_pretty(&state).expect("encode noncanonical state");
+    noncanonical_state_bytes.push(b'\n');
+    std::fs::write(&noncanonical_state_path, noncanonical_state_bytes)
+        .expect("write noncanonical test state");
+    assert!(load_state(&noncanonical_state_path)
+        .expect_err("state loader must reject noncanonical JSON")
+        .to_string()
+        .contains("not canonical JSON"));
+    let mut unknown_state = serde_json::to_value(&state).expect("encode state value");
+    unknown_state
+        .as_object_mut()
+        .expect("state object")
+        .insert("unexpected".to_string(), serde_json::json!(true));
+    serde_json::from_value::<BulkTrancheState>(unknown_state)
+        .expect_err("tranche state must deny unknown fields");
+    let mut unsupported_phase = state.clone();
+    unsupported_phase.phase = TranchePhase::Building;
+    unsupported_phase.generation = 2;
+    assert!(validate_state_schema(&unsupported_phase)
+        .expect_err("unimplemented phase states must fail closed")
+        .to_string()
+        .contains("not implemented"));
     let stores = ProjectionStores {
         durable: &projection_store,
         staging: &staging_store,
@@ -632,4 +689,10 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     .expect("load frozen seal");
     validate_active_seal(&frozen_state, &frozen_seal)
         .expect("a Freeze seal must validate against the state it created");
+    let mut parentless_frozen_seal = frozen_seal;
+    parentless_frozen_seal.parent_seal_sha256 = None;
+    assert!(validate_active_seal(&frozen_state, &parentless_frozen_seal)
+        .expect_err("Freeze seal must retain its exact parent link")
+        .to_string()
+        .contains("no parent Prepare seal"));
 }
