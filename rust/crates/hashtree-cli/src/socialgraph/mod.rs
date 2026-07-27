@@ -45,6 +45,7 @@ use nostr_social_graph::{
     SocialGraphBackend as NostrSocialGraphBackend,
 };
 use nostr_social_graph_heed::HeedSocialGraph;
+use sha2::{Digest, Sha256};
 
 use crate::managed_env::ManagedEnv;
 use crate::storage::{LocalStore, StorageRouter};
@@ -1951,6 +1952,44 @@ pub fn profile_search_keys_for_event(event: &Event) -> Vec<String> {
         .into_iter()
         .map(|term| format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"))
         .collect()
+}
+
+/// Reconstruct the exact value written by the profile-search index builder.
+///
+/// This is exposed for read-only integrity auditors. Callers must supply the
+/// distance sealed into the index at the time the profile was projected; the
+/// current social graph distance is not an equivalent substitute.
+#[doc(hidden)]
+pub fn stored_profile_search_entry_for_event(
+    event: &Event,
+    mirrored_cid: &Cid,
+    follow_distance: Option<u32>,
+) -> Result<StoredProfileSearchEntry> {
+    index_buckets::build_profile_search_entry(event, mirrored_cid, follow_distance)
+}
+
+/// Seal the historic v2 profile-search distances for one complete retained
+/// profile map.
+///
+/// The map key set must be exactly the retained profile-by-pubkey winner set.
+/// `BTreeMap` supplies the required lexicographic UTF-8 pubkey ordering.
+#[doc(hidden)]
+pub fn profile_follow_distance_seal_v2(distances: &BTreeMap<String, Option<u32>>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"hashtree-profile-follow-distance-seal-v2\0");
+    digest.update((distances.len() as u64).to_be_bytes());
+    for (pubkey, distance) in distances {
+        digest.update((pubkey.len() as u64).to_be_bytes());
+        digest.update(pubkey.as_bytes());
+        match distance {
+            Some(distance) => {
+                digest.update([1]);
+                digest.update(distance.to_be_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    hex::encode(digest.finalize())
 }
 
 fn compare_nostr_events(left: &Event, right: &Event) -> std::cmp::Ordering {

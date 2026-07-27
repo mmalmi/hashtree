@@ -12,9 +12,9 @@ use hashtree_nostr::{
     encode_signed_event_json, encode_stored_event_msgpack, parse_hashtree_root_event,
     parse_verified_hashtree_root_event, read_signed_event_snapshot,
     resolve_self_encrypted_root_cid, store_signed_event_snapshot,
-    stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventStore, NostrEventStoreOptions,
-    StoredNostrEvent, VerifiedEvent, VerifiedStoredNostrEvent, HASHTREE_LEGACY_ROOT_KIND,
-    HASHTREE_ROOT_KIND,
+    stored_event_from_nostr_sdk_event, ListEventsOptions, NostrEventIndex, NostrEventStore,
+    NostrEventStoreOptions, StoredNostrEvent, VerifiedEvent, VerifiedStoredNostrEvent,
+    HASHTREE_LEGACY_ROOT_KIND, HASHTREE_ROOT_KIND,
 };
 use nostr_sdk::{
     Alphabet, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, SingleLetterTag, Tag, Timestamp,
@@ -222,6 +222,73 @@ async fn manifest_index_entries(
         indexes.insert(name.to_string(), entries);
     }
     indexes
+}
+
+async fn canonical_bulk_manifest(backing: Arc<MemoryStore>) -> (NostrEventStore<MemoryStore>, Cid) {
+    let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&backing)));
+    let index_root = tree.put_directory(Vec::new()).await.unwrap();
+    let roots = NostrEventIndex::ALL
+        .into_iter()
+        .map(|index| (index, Some(index_root.clone())))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let store = NostrEventStore::new(backing);
+    let root = store
+        .write_bulk_index_manifest(&roots)
+        .await
+        .unwrap()
+        .expect("canonical bulk manifest");
+    (store, root)
+}
+
+async fn replace_manifest_metadata(backing: Arc<MemoryStore>, root: &Cid, metadata: &[u8]) -> Cid {
+    let tree = HashTree::new(HashTreeConfig::new(backing));
+    let (metadata_cid, metadata_size) = tree.put_file(metadata).await.unwrap();
+    let entries = tree
+        .list_directory_required(root)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| {
+            if entry.name == ".collection-manifest.json" {
+                DirEntry::from_cid(entry.name, &metadata_cid)
+                    .with_size(metadata_size)
+                    .with_link_type(hashtree_core::LinkType::File)
+            } else {
+                DirEntry {
+                    name: entry.name,
+                    hash: entry.hash,
+                    size: entry.size,
+                    key: entry.key,
+                    link_type: entry.link_type,
+                    meta: entry.meta,
+                }
+            }
+        })
+        .collect();
+    tree.put_directory(entries).await.unwrap()
+}
+
+async fn rewrite_manifest_entries<F>(backing: Arc<MemoryStore>, root: &Cid, mutate: F) -> Cid
+where
+    F: FnOnce(&mut Vec<DirEntry>),
+{
+    let tree = HashTree::new(HashTreeConfig::new(backing));
+    let mut entries = tree
+        .list_directory_required(root)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| DirEntry {
+            name: entry.name,
+            hash: entry.hash,
+            size: entry.size,
+            key: entry.key,
+            link_type: entry.link_type,
+            meta: entry.meta,
+        })
+        .collect::<Vec<_>>();
+    mutate(&mut entries);
+    tree.put_directory(entries).await.unwrap()
 }
 
 fn reverse_timestamp(created_at: u64) -> String {
@@ -895,6 +962,166 @@ fn validates_publishable_event_index_roots() {
             .validate_index_root(Some(&root))
             .await
             .expect("event index root should validate");
+    });
+}
+
+#[test]
+fn validates_exact_canonical_bulk_manifest_contract() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let (store, root) = canonical_bulk_manifest(backing).await;
+
+        let canonical = store
+            .get_canonical_manifest(&root)
+            .await
+            .expect("current bulk manifest must be canonical");
+
+        assert!(canonical.manifest.by_id.is_some());
+        assert_ne!(canonical.metadata_cid.hash, [0; 32]);
+    });
+}
+
+#[test]
+fn canonical_manifest_rejects_noncanonical_link_shapes_and_cardinality() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let (store, root) = canonical_bulk_manifest(Arc::clone(&backing)).await;
+        let nonzero_index_size = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.name == "by-id")
+                .unwrap()
+                .size = 1;
+        })
+        .await;
+        let wrong_index_type = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.name == "by-id")
+                .unwrap()
+                .link_type = hashtree_core::LinkType::File;
+        })
+        .await;
+        let index_meta = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.name == "by-id")
+                .unwrap()
+                .meta = Some(std::collections::HashMap::from([(
+                "unexpected".to_string(),
+                serde_json::json!(true),
+            )]));
+        })
+        .await;
+        let metadata_meta = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.name == ".collection-manifest.json")
+                .unwrap()
+                .meta = Some(std::collections::HashMap::from([(
+                "unexpected".to_string(),
+                serde_json::json!(true),
+            )]));
+        })
+        .await;
+        let wrong_metadata_type =
+            rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+                entries
+                    .iter_mut()
+                    .find(|entry| entry.name == ".collection-manifest.json")
+                    .unwrap()
+                    .link_type = hashtree_core::LinkType::Blob;
+            })
+            .await;
+        let wrong_metadata_size =
+            rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+                entries
+                    .iter_mut()
+                    .find(|entry| entry.name == ".collection-manifest.json")
+                    .unwrap()
+                    .size += 1;
+            })
+            .await;
+        let duplicate = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            entries.push(
+                entries
+                    .iter()
+                    .find(|entry| entry.name == "by-id")
+                    .unwrap()
+                    .clone(),
+            );
+        })
+        .await;
+        let extra = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            let mut extra = entries
+                .iter()
+                .find(|entry| entry.name == "by-id")
+                .unwrap()
+                .clone();
+            extra.name = "unexpected-index".to_string();
+            entries.push(extra);
+        })
+        .await;
+        let missing = rewrite_manifest_entries(Arc::clone(&backing), &root, |entries| {
+            entries.retain(|entry| entry.name != "by-tag");
+        })
+        .await;
+
+        for (label, malformed_root) in [
+            ("nonzero index size", nonzero_index_size),
+            ("wrong index type", wrong_index_type),
+            ("index metadata", index_meta),
+            ("metadata metadata", metadata_meta),
+            ("wrong metadata type", wrong_metadata_type),
+            ("wrong metadata size", wrong_metadata_size),
+            ("duplicate link", duplicate),
+            ("extra link", extra),
+            ("missing link", missing),
+        ] {
+            let error = store
+                .get_canonical_manifest(&malformed_root)
+                .await
+                .expect_err(label);
+            assert!(
+                error.to_string().contains("canonical Nostr manifest"),
+                "unexpected {label} error: {error}"
+            );
+        }
+    });
+}
+
+#[test]
+fn canonical_manifest_rejects_unknown_metadata_and_schema_fields() {
+    block_on(async {
+        let backing = Arc::new(MemoryStore::new());
+        let (store, root) = canonical_bulk_manifest(Arc::clone(&backing)).await;
+        let malformed = [
+            br#"{"version":1,"schemaVersion":1,"publishedSchema":{"itemFormat":"nostr/event@1","projectionFormat":"hashtree/nostr-event-index@1"},"unexpected":true}"#
+                .as_slice(),
+            br#"{"version":1,"schemaVersion":1,"publishedSchema":{"itemFormat":"nostr/event@1","projectionFormat":"hashtree/nostr-event-index@1","schemaRef":{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}"#
+                .as_slice(),
+            br#"{"version":1,"schemaVersion":2,"publishedSchema":{"itemFormat":"nostr/event@1","projectionFormat":"hashtree/nostr-event-index@1"}}"#
+                .as_slice(),
+            br#"{"version":2,"schemaVersion":1,"publishedSchema":{"itemFormat":"nostr/event@1","projectionFormat":"hashtree/nostr-event-index@1"}}"#
+                .as_slice(),
+            br#"{"version":1,"schemaVersion":1,"publishedSchema":{"itemFormat":"nostr/event@2","projectionFormat":"hashtree/nostr-event-index@1"}}"#
+                .as_slice(),
+            br#"{"version":1,"schemaVersion":1,"publishedSchema":{"itemFormat":"nostr/event@1","projectionFormat":"hashtree/nostr-event-index@2"}}"#
+                .as_slice(),
+        ];
+
+        for metadata in malformed {
+            let malformed_root =
+                replace_manifest_metadata(Arc::clone(&backing), &root, metadata).await;
+            let error = store
+                .get_canonical_manifest(&malformed_root)
+                .await
+                .expect_err("malformed canonical metadata must fail");
+            assert!(
+                error.to_string().contains("metadata"),
+                "unexpected strict manifest error: {error}"
+            );
+        }
     });
 }
 

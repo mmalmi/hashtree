@@ -1078,12 +1078,48 @@ pub(crate) enum NostrIndexCommands {
         /// Durable staging directory whose exact frozen state produced the candidate
         #[arg(long = "staging-data-dir")]
         staging_data_dir: PathBuf,
-        /// Optional CAS pin for nostr-index/bulk-projection-v2/state.json
+        /// Required CAS pin for nostr-index/bulk-projection-v2/state.json
         #[arg(long = "expected-state-sha256")]
-        expected_state_sha256: Option<String>,
-        /// Optional CAS pin for nostr-stage/crawl-state.json
+        expected_state_sha256: String,
+        /// Required CAS pin for nostr-stage/crawl-state.json
         #[arg(long = "expected-stage-state-sha256")]
-        expected_stage_state_sha256: Option<String>,
+        expected_stage_state_sha256: String,
+        /// Required SHA-256 of canonical JSON for the trusted crawl policy
+        #[arg(long = "expected-policy-sha256")]
+        expected_policy_sha256: String,
+        /// Optional additional pin for the retained v2 profile-distance seal
+        #[arg(long = "expected-profile-distance-seal-sha256")]
+        expected_profile_distance_seal_sha256: Option<String>,
+        /// Canonical profile-search v3 rank-decisions JSONL
+        #[arg(
+            long = "profile-rank-decisions-file",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        profile_rank_decisions_file: Option<PathBuf>,
+        /// Exact SHA-256 of the rank-decisions JSONL bytes
+        #[arg(
+            long = "expected-profile-rank-decisions-file-sha256",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        expected_profile_rank_decisions_file_sha256: Option<String>,
+        /// Profile-search v3 rank-decision provenance report
+        #[arg(
+            long = "profile-rank-decisions-report",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        profile_rank_decisions_report: Option<PathBuf>,
+        /// Exact SHA-256 of the rank-decision report bytes
+        #[arg(
+            long = "expected-profile-rank-decisions-report-sha256",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        expected_profile_rank_decisions_report_sha256: Option<String>,
+        /// Trusted complete allowlist author count
+        #[arg(long = "expected-full-author-count")]
+        expected_full_author_count: usize,
+        /// Permit a non-cutover internal recovery-tranche audit
+        #[arg(long = "allow-recovery-tranche")]
+        allow_recovery_tranche: bool,
         /// B-tree order used by the bulk projection
         #[arg(long, default_value_t = 64)]
         btree_order: usize,
@@ -1093,9 +1129,9 @@ pub(crate) enum NostrIndexCommands {
         /// Number of real events compared for each deterministic list query
         #[arg(long, default_value_t = 32)]
         query_limit: usize,
-        /// Output path for the JSON evidence (default stdout; use "-" for stdout)
+        /// New absolute output path outside both audited data trees
         #[arg(long, short)]
-        out: Option<PathBuf>,
+        out: PathBuf,
     },
     /// Pin an audited v2 candidate and rotate into crash-safe v3 append mode
     PrepareBulkTranche {

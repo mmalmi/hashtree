@@ -24,11 +24,11 @@ use futures::{stream, StreamExt, TryStreamExt};
 use hashtree_collection::{
     load_collection_manifest_metadata, load_collection_state, CollectionDefinition,
     CollectionOptions, CollectionPublishedSchema, CollectionSource, CollectionState,
-    CollectionWriter, MANIFEST_BY_ID,
+    CollectionWriter, COLLECTION_MANIFEST_METADATA_FILE, MANIFEST_BY_ID,
 };
 use hashtree_core::{
     collect_hashes, decrypt_chk, is_tree_node, sha256, BufferedStore, Cid, Hash, HashTree,
-    HashTreeConfig, HashTreeError, Store, TreeVisibility,
+    HashTreeConfig, HashTreeError, LinkType, Store, TreeVisibility,
 };
 use hashtree_index::{BTree, BTreeError, BTreeOptions};
 use nostr_sdk::nips::nip44::{self, Version as Nip44Version};
@@ -207,6 +207,32 @@ pub struct NostrEventManifest {
     pub by_tag: Option<Cid>,
     pub replaceable: Option<Cid>,
     pub parameterized_replaceable: Option<Cid>,
+}
+
+/// A manifest that passed the exact current Nostr publication contract.
+///
+/// [`NostrEventStore::validate_index_root`] intentionally remains permissive
+/// for older published roots. Terminal/cutover tooling should use
+/// [`NostrEventStore::get_canonical_manifest`] instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanonicalNostrEventManifest {
+    pub manifest: NostrEventManifest,
+    pub metadata_cid: Cid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CanonicalNostrManifestMetadata {
+    version: u32,
+    schema_version: u32,
+    published_schema: CanonicalNostrPublishedSchema,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CanonicalNostrPublishedSchema {
+    item_format: String,
+    projection_format: String,
 }
 
 /// One independently buildable projection in a Nostr event collection.
@@ -1201,6 +1227,141 @@ impl<S: Store> NostrEventStore<S> {
         }
 
         Ok(())
+    }
+
+    /// Require the exact canonical ten-link Nostr manifest and schema seal.
+    ///
+    /// This is deliberately stricter than [`Self::validate_index_root`]:
+    /// every current index must be present as a zero-sized directory link,
+    /// metadata must be the one exact file link, and its JSON must use only
+    /// the current version-1 fields and formats.
+    pub async fn get_canonical_manifest(
+        &self,
+        root: &Cid,
+    ) -> Result<CanonicalNostrEventManifest, NostrEventStoreError> {
+        let manifest = self.get_manifest(Some(root)).await?;
+        let mut expected = NostrEventIndex::ALL
+            .into_iter()
+            .map(|index| {
+                let cid = match index {
+                    NostrEventIndex::ById => manifest.by_id.as_ref(),
+                    NostrEventIndex::ByAuthorTime => manifest.by_author_time.as_ref(),
+                    NostrEventIndex::ByAuthorKindTime => manifest.by_author_kind_time.as_ref(),
+                    NostrEventIndex::ByKindTime => manifest.by_kind_time.as_ref(),
+                    NostrEventIndex::ByKindTimeAuthor => manifest.by_kind_time_author.as_ref(),
+                    NostrEventIndex::ByTime => manifest.by_time.as_ref(),
+                    NostrEventIndex::ByTag => manifest.by_tag.as_ref(),
+                    NostrEventIndex::Replaceable => manifest.replaceable.as_ref(),
+                    NostrEventIndex::ParameterizedReplaceable => {
+                        manifest.parameterized_replaceable.as_ref()
+                    }
+                }
+                .cloned()
+                .ok_or_else(|| {
+                    NostrEventStoreError::Validation(format!(
+                        "canonical Nostr manifest omitted required `{}` root",
+                        index.name()
+                    ))
+                })?;
+                Ok::<_, NostrEventStoreError>((index.name().to_string(), cid))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+        let entries = self.tree.list_directory_required(root).await?;
+        if entries.len() != NostrEventIndex::ALL.len() + 1 {
+            return Err(NostrEventStoreError::Validation(format!(
+                "canonical Nostr manifest must contain exactly ten links, found {}",
+                entries.len()
+            )));
+        }
+
+        let mut metadata_entry = None;
+        for entry in entries {
+            if entry.name == COLLECTION_MANIFEST_METADATA_FILE {
+                if metadata_entry.replace(entry).is_some() {
+                    return Err(NostrEventStoreError::Validation(
+                        "canonical Nostr manifest repeats metadata link".to_string(),
+                    ));
+                }
+                continue;
+            }
+            let expected_cid = expected.remove(&entry.name).ok_or_else(|| {
+                NostrEventStoreError::Validation(format!(
+                    "canonical Nostr manifest has unexpected or duplicate `{}` link",
+                    entry.name
+                ))
+            })?;
+            if entry.link_type != LinkType::Dir
+                || entry.size != 0
+                || entry.meta.is_some()
+                || entry.hash != expected_cid.hash
+                || entry.key != expected_cid.key
+            {
+                return Err(NostrEventStoreError::Validation(format!(
+                    "canonical Nostr manifest `{}` link has non-canonical type, size, metadata, or CID",
+                    entry.name
+                )));
+            }
+        }
+        if !expected.is_empty() {
+            return Err(NostrEventStoreError::Validation(format!(
+                "canonical Nostr manifest omitted indexes: {:?}",
+                expected.keys().collect::<Vec<_>>()
+            )));
+        }
+
+        let metadata_entry = metadata_entry.ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "canonical Nostr manifest omitted metadata link".to_string(),
+            )
+        })?;
+        if metadata_entry.link_type != LinkType::File || metadata_entry.meta.is_some() {
+            return Err(NostrEventStoreError::Validation(
+                "canonical Nostr manifest metadata link has non-canonical type or metadata"
+                    .to_string(),
+            ));
+        }
+        let metadata_cid = Cid {
+            hash: metadata_entry.hash,
+            key: metadata_entry.key,
+        };
+        let metadata_bytes = self.tree.get(&metadata_cid, None).await?.ok_or_else(|| {
+            NostrEventStoreError::Validation(
+                "canonical Nostr manifest metadata blob is missing".to_string(),
+            )
+        })?;
+        if metadata_entry.size != metadata_bytes.len() as u64 {
+            return Err(NostrEventStoreError::Validation(format!(
+                "canonical Nostr manifest metadata size mismatch: link={} actual={}",
+                metadata_entry.size,
+                metadata_bytes.len()
+            )));
+        }
+        let metadata: CanonicalNostrManifestMetadata = serde_json::from_slice(&metadata_bytes)
+            .map_err(|error| {
+                NostrEventStoreError::Validation(format!(
+                    "canonical Nostr manifest metadata is malformed: {error}"
+                ))
+            })?;
+        if metadata.version != 1
+            || metadata.schema_version != 1
+            || metadata.published_schema.item_format != NOSTR_EVENT_ITEM_FORMAT
+            || metadata.published_schema.projection_format != NOSTR_EVENT_PROJECTION_FORMAT
+        {
+            return Err(NostrEventStoreError::Validation(format!(
+                "canonical Nostr manifest metadata contract mismatch: \
+                 version={} schemaVersion={} itemFormat={} projectionFormat={}",
+                metadata.version,
+                metadata.schema_version,
+                metadata.published_schema.item_format,
+                metadata.published_schema.projection_format
+            )));
+        }
+
+        Ok(CanonicalNostrEventManifest {
+            manifest,
+            metadata_cid,
+        })
     }
 
     /// Publish independently bulk-built index roots as one ordinary Nostr

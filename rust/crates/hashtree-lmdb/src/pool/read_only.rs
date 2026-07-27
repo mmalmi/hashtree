@@ -18,6 +18,8 @@ struct ReadOnlyPoolStoreInner {
     // Keep the catalog environment alive for the named database handle.
     _env: ManagedEnv,
     manifest: Database<Bytes, Bytes>,
+    opened_manifest_bytes: Vec<u8>,
+    opened_manifest_sha256: String,
     locations: Database<Bytes, Bytes>,
     members: HashMap<PoolMemberId, Arc<LmdbBlobReader>>,
 }
@@ -38,6 +40,21 @@ pub struct ReadOnlyPoolStore {
 pub struct ReadOnlyPoolCatalogAudit {
     pub stored_locations: u64,
     pub sha256: String,
+    pub manifest_sha256: String,
+}
+
+fn require_opened_manifest(
+    current: &[u8],
+    opened: &[u8],
+    opened_sha256: &str,
+) -> Result<(), StoreError> {
+    if current != opened {
+        return Err(StoreError::Other(format!(
+            "pool manifest changed after read-only members were opened: expected {opened_sha256}, found {}",
+            to_hex(&sha256(current))
+        )));
+    }
+    Ok(())
 }
 
 impl ReadOnlyPoolStore {
@@ -76,7 +93,9 @@ impl ReadOnlyPoolStore {
             .get(&rtxn, MANIFEST_KEY)
             .map_err(map_heed)?
             .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
-        let manifest = decode_manifest(manifest_bytes)?;
+        let opened_manifest_bytes = manifest_bytes.to_vec();
+        let opened_manifest_sha256 = to_hex(&sha256(&opened_manifest_bytes));
+        let manifest = decode_manifest(&opened_manifest_bytes)?;
         // Publish DBI handles before later transactions use them.
         rtxn.commit().map_err(map_heed)?;
 
@@ -85,6 +104,8 @@ impl ReadOnlyPoolStore {
             inner: Arc::new(ReadOnlyPoolStoreInner {
                 _env: env,
                 manifest: manifest_db,
+                opened_manifest_bytes,
+                opened_manifest_sha256,
                 locations,
                 members,
             }),
@@ -114,8 +135,12 @@ impl ReadOnlyPoolStore {
             .get(&rtxn, MANIFEST_KEY)
             .map_err(map_heed)?
             .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
-        // Decode again so a concurrent catalog writer cannot replace it with
-        // an unsupported manifest while an audit is in progress.
+        require_opened_manifest(
+            manifest,
+            &self.inner.opened_manifest_bytes,
+            &self.inner.opened_manifest_sha256,
+        )?;
+        // Decode again so corruption cannot be hidden by byte equality alone.
         decode_manifest(manifest)?;
         let mut digest = Sha256::new();
         digest.update(b"hashtree-read-only-pool-catalog-v1\0");
@@ -161,6 +186,7 @@ impl ReadOnlyPoolStore {
         Ok(ReadOnlyPoolCatalogAudit {
             stored_locations: stored,
             sha256: to_hex(&digest),
+            manifest_sha256: self.inner.opened_manifest_sha256.clone(),
         })
     }
 
@@ -198,7 +224,27 @@ impl ReadOnlyPoolStore {
     }
 
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
-        Ok(self.read_location(hash)?.map(LocationRecord::size))
+        let Some(location) = self.read_location(hash)? else {
+            return Ok(None);
+        };
+        match location {
+            LocationRecord::Stored { member, size } => {
+                if !self.inner.members.contains_key(&member) {
+                    return Err(StoreError::Other(format!(
+                        "pool location references unknown member {member}"
+                    )));
+                }
+                Ok(Some(size))
+            }
+            LocationRecord::Pending { .. } => Err(StoreError::Other(format!(
+                "read-only terminal verification rejected pending pool location {}",
+                to_hex(hash)
+            ))),
+            LocationRecord::Moving { .. } => Err(StoreError::Other(format!(
+                "read-only terminal verification rejected moving pool location {}",
+                to_hex(hash)
+            ))),
+        }
     }
 }
 
@@ -313,7 +359,11 @@ mod tests {
     use super::*;
     use crate::{PoolStore, PoolStoreConfig};
     use std::fs;
+    use std::process::Command;
     use tempfile::TempDir;
+
+    const MUTATE_CATALOG_ENV: &str = "HASHTREE_READ_ONLY_MUTATE_CATALOG";
+    const MUTATE_MEMBER_ENV: &str = "HASHTREE_READ_ONLY_MUTATE_MEMBER";
 
     fn file_sha256(path: &Path) -> Hash {
         sha256(&fs::read(path).expect("read LMDB data file"))
@@ -346,6 +396,7 @@ mod tests {
             .validate_committed_catalog()
             .expect("validate catalog");
         assert_eq!(audit.stored_locations, 1);
+        assert_eq!(audit.manifest_sha256.len(), 64);
         assert_eq!(
             reader.get_sync(&hash).expect("get blob"),
             Some(data.to_vec())
@@ -430,6 +481,16 @@ mod tests {
             .expect_err("moving read must fail")
             .to_string()
             .contains("moving"));
+        assert!(reader
+            .blob_size_sync(&pending_hash)
+            .expect_err("pending size must fail")
+            .to_string()
+            .contains("pending"));
+        assert!(reader
+            .blob_size_sync(&moving_hash)
+            .expect_err("moving size must fail")
+            .to_string()
+            .contains("moving"));
     }
 
     #[test]
@@ -469,5 +530,80 @@ mod tests {
             .expect_err("unknown member read must fail")
             .to_string()
             .contains("unknown member"));
+        assert!(reader
+            .blob_size_sync(&hash)
+            .expect_err("unknown member size must fail")
+            .to_string()
+            .contains("unknown member"));
+    }
+
+    #[test]
+    fn rejects_manifest_snapshot_that_differs_from_opened_members() {
+        let opened = br#"{"version":1,"members":[]}"#;
+        let opened_sha256 = to_hex(&sha256(opened));
+        require_opened_manifest(opened, opened, &opened_sha256).unwrap();
+
+        let changed = br#"{"version":1,"members":[{"id":"changed"}]}"#;
+        let error = require_opened_manifest(changed, opened, &opened_sha256)
+            .expect_err("changed manifest snapshot must fail");
+        assert!(error.to_string().contains(&opened_sha256));
+        assert!(error.to_string().contains(&to_hex(&sha256(changed))));
+    }
+
+    #[test]
+    #[ignore = "subprocess entry point for read-only PoolStore manifest mutation"]
+    fn read_only_manifest_mutator_helper() {
+        let Some(catalog) = std::env::var_os(MUTATE_CATALOG_ENV) else {
+            return;
+        };
+        let member = std::env::var_os(MUTATE_MEMBER_ENV).expect("mutator member path");
+        let pool = PoolStore::open(catalog, pool_config()).expect("open catalog writer");
+        pool.add_member(PoolMemberConfig::new(member.into(), 1024 * 1024))
+            .expect("mutate pool manifest");
+        pool.force_sync().expect("sync mutated manifest");
+    }
+
+    #[test]
+    fn live_catalog_audit_rejects_manifest_changed_after_reader_open() {
+        let temp = TempDir::new().expect("temp dir");
+        let catalog = temp.path().join("catalog");
+        let initial_member = temp.path().join("initial-member");
+        let added_member = temp.path().join("added-member");
+        let pool = PoolStore::open(&catalog, pool_config()).expect("open pool");
+        pool.add_member(PoolMemberConfig::new(initial_member, 1024 * 1024))
+            .expect("add initial member");
+        pool.force_sync().expect("sync initial manifest");
+        drop(pool);
+
+        let reader = ReadOnlyPoolStore::open(&catalog).expect("open pinned read-only pool");
+        reader
+            .validate_committed_catalog()
+            .expect("initial catalog matches opened manifest");
+
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--ignored")
+            .arg("--exact")
+            .arg("pool::read_only::tests::read_only_manifest_mutator_helper")
+            .env(MUTATE_CATALOG_ENV, &catalog)
+            .env(MUTATE_MEMBER_ENV, &added_member)
+            .env("RUST_TEST_THREADS", "1")
+            .output()
+            .expect("run manifest mutator helper");
+        assert!(
+            output.status.success(),
+            "manifest mutator failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error = reader
+            .validate_committed_catalog()
+            .expect_err("changed live manifest must differ from opened member snapshot");
+        assert!(
+            error
+                .to_string()
+                .contains("manifest changed after read-only members were opened"),
+            "unexpected live manifest mismatch: {error}"
+        );
     }
 }

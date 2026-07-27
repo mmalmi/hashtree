@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use hashtree_core::{Cid, HashTree, HashTreeConfig, LinkType, Store};
+use hashtree_core::{Cid, HashTree, HashTreeConfig, Store};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_lmdb::{ReadOnlyPoolStore, SHARED_BLOB_POOL_DIR_NAME};
 use hashtree_nostr::{
@@ -13,29 +15,44 @@ use hashtree_nostr::{
 use heed::types::Bytes;
 use heed::{Database, EnvFlags, EnvOpenOptions};
 use nostr::{Event, JsonUtil};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::super::{
-    cid_to_nhash, parse_root_text, persist_json_atomic, StagedNostrCrawlState, STAGE_DIR,
-    STAGE_FORMAT_VERSION, STAGE_STATE_FILE,
+    cid_to_nhash, parse_root_text, StagedNostrCrawlState, STAGE_DIR, STAGE_FORMAT_VERSION,
+    STAGE_STATE_FILE,
 };
 use super::{
     bulk_paths, encode_cid, validate_terminal_stage_state, BulkProjectionSpool,
     BulkProjectionState, EntryTrieCursor, SpoolEventRecord, BULK_PROJECTION_VERSION,
 };
 
-const COLLECTION_MANIFEST_METADATA_FILE: &str = ".collection-manifest.json";
+const PROFILE_RANK_DECISION_FORMAT: &str = "iris-social/profile-search-v3-rank-decisions@1";
+const PROFILE_RANK_DECISION_REPORT_FORMAT: &str =
+    "iris-social/profile-search-v3-rank-decision-artifacts@1";
+const PROFILE_RANK_DECISION_CENSUS_FORMAT: &str = "iris-social/social-graph-crawl-census@2";
+const PROFILE_RANK_POLICY: &str = "follow-distance@1";
+const PROFILE_EXCLUSION_POLICY: &str = "all-nonselected-graph-identities@1";
+const PROFILE_OVERMUTE_THRESHOLD: usize = 1;
+const PROFILE_UNREACHABLE_DISTANCE: u32 = 1_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BulkProjectionAuditOptions {
     pub(crate) staging_data_dir: PathBuf,
-    pub(crate) expected_state_sha256: Option<String>,
-    pub(crate) expected_stage_state_sha256: Option<String>,
+    pub(crate) expected_state_sha256: String,
+    pub(crate) expected_stage_state_sha256: String,
+    pub(crate) expected_policy_sha256: String,
+    pub(crate) expected_profile_distance_seal_sha256: Option<String>,
+    pub(crate) profile_rank_decisions_file: Option<PathBuf>,
+    pub(crate) expected_profile_rank_decisions_file_sha256: Option<String>,
+    pub(crate) profile_rank_decisions_report: Option<PathBuf>,
+    pub(crate) expected_profile_rank_decisions_report_sha256: Option<String>,
+    pub(crate) expected_full_author_count: usize,
+    pub(crate) allow_recovery_tranche: bool,
     pub(crate) btree_order: usize,
     pub(crate) page_size: usize,
     pub(crate) query_limit: usize,
-    pub(crate) out: Option<PathBuf>,
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -80,6 +97,111 @@ struct BulkProjectionProfileAudit {
     sample_pubkey: String,
     sample_event_id: String,
     sample_name: String,
+    follow_distance_binding: String,
+    follow_distance_seal_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictStoredProfileSearchEntry {
+    pubkey: String,
+    name: String,
+    aliases: Vec<String>,
+    nip05: Option<String>,
+    #[serde(default)]
+    follow_distance: Option<u32>,
+    created_at: u64,
+    event_nhash: String,
+}
+
+impl From<StrictStoredProfileSearchEntry> for hashtree_cli::socialgraph::StoredProfileSearchEntry {
+    fn from(value: StrictStoredProfileSearchEntry) -> Self {
+        Self {
+            pubkey: value.pubkey,
+            name: value.name,
+            aliases: value.aliases,
+            nip05: value.nip05,
+            follow_distance: value.follow_distance,
+            created_at: value.created_at,
+            event_nhash: value.event_nhash,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExpectedProfileSearchEntry {
+    pubkey: String,
+    event: Event,
+    mirrored_cid: Cid,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProfileDistanceProvenance {
+    format: String,
+    census_format: String,
+    rank_decisions_file_sha256: String,
+    rank_decisions_report_sha256: String,
+    rank_decisions_sha256: String,
+    social_graph_root: String,
+    social_graph_sha256: String,
+    eligible_authors_sha256: String,
+    record_count: usize,
+    eligible_count: usize,
+    excluded_count: usize,
+    overmute_threshold: usize,
+    census_max_distance: Option<u32>,
+    rank_policy: String,
+    exclusion_policy: String,
+}
+
+#[derive(Debug)]
+struct TrustedProfileRankDecisions {
+    decisions: BTreeMap<String, Option<u32>>,
+    decisions_path: PathBuf,
+    decisions_bytes: Vec<u8>,
+    report_path: PathBuf,
+    report_bytes: Vec<u8>,
+    evidence: ProfileDistanceProvenance,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileRankDecisionHeader {
+    format: String,
+    eligible_ranks_sha256: String,
+    record_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileRankDecisionRecord {
+    pubkey: String,
+    decision: String,
+    rank_hint: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProfileRankDecisionReport {
+    format: String,
+    census_format: String,
+    social_graph_root: String,
+    social_graph_sha256: String,
+    eligible_authors_sha256: String,
+    overmute_threshold: usize,
+    max_distance: Option<u32>,
+    rank_policy: String,
+    exclusion_policy: String,
+    record_count: usize,
+    eligible_count: usize,
+    excluded_count: usize,
+    reachable_count: usize,
+    reachable_overmuted_count: usize,
+    distance_excluded_count: usize,
+    unreachable_count: usize,
+    all_graph_overmuted_count: usize,
+    rank_decisions_sha256: String,
+    rank_decisions_file_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -88,7 +210,15 @@ pub(crate) struct BulkProjectionAuditOutput {
     candidate_root: String,
     state_sha256: String,
     stage_state_sha256: String,
+    trusted_policy_sha256: String,
+    trusted_profile_distance_seal_sha256: Option<String>,
+    profile_distance_provenance: Option<ProfileDistanceProvenance>,
+    trusted_full_author_count: usize,
+    crawl_policy_max_follow_distance: Option<u32>,
+    audit_mode: String,
+    cutover_eligible: bool,
     pool_catalog_sha256: String,
+    pool_manifest_sha256: String,
     pool_stored_locations: u64,
     authors_processed: usize,
     authors_total: usize,
@@ -222,11 +352,311 @@ fn bytes_sha256(bytes: &[u8]) -> String {
     hex::encode(digest.finalize())
 }
 
-fn require_expected_sha256(label: &str, actual: &str, expected: Option<&str>) -> Result<()> {
-    if let Some(expected) = expected {
-        if expected != actual {
-            anyhow::bail!("{label} SHA-256 mismatch: expected {expected}, found {actual}");
+fn require_expected_sha256(label: &str, actual: &str, expected: &str) -> Result<()> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("{label} SHA-256 pin must be 64 lowercase hexadecimal characters");
+    }
+    if expected != actual {
+        anyhow::bail!("{label} SHA-256 mismatch: expected {expected}, found {actual}");
+    }
+    Ok(())
+}
+
+fn require_sha256_text(label: &str, value: &str) -> Result<()> {
+    require_expected_sha256(label, value, value)
+}
+
+fn parse_profile_rank_decisions(bytes: &[u8]) -> Result<(BTreeMap<String, Option<u32>>, String)> {
+    let text = std::str::from_utf8(bytes).context("profile rank-decisions file is not UTF-8")?;
+    if !text.ends_with('\n') || text.contains('\r') {
+        anyhow::bail!("profile rank-decisions file must be canonical LF-terminated JSONL");
+    }
+    let lines = text[..text.len() - 1].split('\n').collect::<Vec<_>>();
+    if lines.len() < 2 || lines.iter().any(|line| line.is_empty()) {
+        anyhow::bail!("profile rank-decisions file requires one header and records");
+    }
+    let header: ProfileRankDecisionHeader =
+        serde_json::from_str(lines[0]).context("strictly decode profile rank-decisions header")?;
+    if serde_json::to_string(&header)? != lines[0]
+        || header.format != PROFILE_RANK_DECISION_FORMAT
+        || header.record_count == 0
+        || header.record_count != lines.len() - 1
+    {
+        anyhow::bail!("profile rank-decisions header is noncanonical or inconsistent");
+    }
+    require_sha256_text(
+        "embedded profile rank-decisions digest",
+        &header.eligible_ranks_sha256,
+    )?;
+
+    let mut decisions = BTreeMap::new();
+    let mut previous = None::<String>;
+    for (position, line) in lines.iter().enumerate().skip(1) {
+        let record: ProfileRankDecisionRecord = serde_json::from_str(line)
+            .with_context(|| format!("strictly decode profile rank decision {position}"))?;
+        if serde_json::to_string(&record)? != *line
+            || record.pubkey.len() != 64
+            || !record
+                .pubkey
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            anyhow::bail!("profile rank decision {position} is noncanonical");
         }
+        if previous
+            .as_deref()
+            .is_some_and(|previous| record.pubkey.as_str() <= previous)
+        {
+            anyhow::bail!("profile rank decisions are duplicate or not strictly pubkey sorted");
+        }
+        let rank = match (record.decision.as_str(), record.rank_hint) {
+            ("eligible", Some(rank)) if rank < PROFILE_UNREACHABLE_DISTANCE => Some(rank),
+            ("excluded", None) => None,
+            _ => anyhow::bail!("profile rank decision {position} has invalid decision/rank"),
+        };
+        previous = Some(record.pubkey.clone());
+        decisions.insert(record.pubkey, rank);
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(PROFILE_RANK_DECISION_FORMAT.as_bytes());
+    digest.update(b"\n");
+    for (pubkey, rank) in &decisions {
+        let row = match rank {
+            Some(rank) => serde_json::json!([pubkey, "eligible", rank]),
+            None => serde_json::json!([pubkey, "excluded", null]),
+        };
+        digest.update(serde_json::to_string(&row)?.as_bytes());
+        digest.update(b"\n");
+    }
+    let decisions_sha256 = hex::encode(digest.finalize());
+    if decisions_sha256 != header.eligible_ranks_sha256 {
+        anyhow::bail!(
+            "profile rank-decisions digest mismatch: embedded {} computed {}",
+            header.eligible_ranks_sha256,
+            decisions_sha256
+        );
+    }
+    Ok((decisions, decisions_sha256))
+}
+
+fn canonical_read_pinned_file(
+    label: &str,
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<(PathBuf, Vec<u8>, String)> {
+    if !path.is_absolute() {
+        anyhow::bail!("{label} path must be absolute");
+    }
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalize {label} {}", path.display()))?;
+    if !path.is_file() {
+        anyhow::bail!("{label} is not a regular file: {}", path.display());
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("read {label} {}", path.display()))?;
+    let sha256 = bytes_sha256(&bytes);
+    require_expected_sha256(label, &sha256, expected_sha256)?;
+    Ok((path, bytes, sha256))
+}
+
+fn load_trusted_profile_rank_decisions(
+    options: &BulkProjectionAuditOptions,
+) -> Result<Option<TrustedProfileRankDecisions>> {
+    let supplied = [
+        options.profile_rank_decisions_file.is_some(),
+        options
+            .expected_profile_rank_decisions_file_sha256
+            .is_some(),
+        options.profile_rank_decisions_report.is_some(),
+        options
+            .expected_profile_rank_decisions_report_sha256
+            .is_some(),
+    ];
+    if supplied.iter().all(|supplied| !supplied) {
+        if options.allow_recovery_tranche {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "full-policy cutover requires the independently derived profile rank-decisions \
+             file/report and both exact SHA-256 pins"
+        );
+    }
+    if supplied.iter().any(|supplied| !supplied) {
+        anyhow::bail!(
+            "profile rank-decisions provenance requires file, report, and both exact SHA-256 pins"
+        );
+    }
+    let (decisions_path, decisions_bytes, decisions_file_sha256) = canonical_read_pinned_file(
+        "profile rank-decisions file",
+        options
+            .profile_rank_decisions_file
+            .as_deref()
+            .expect("all provenance options checked"),
+        options
+            .expected_profile_rank_decisions_file_sha256
+            .as_deref()
+            .expect("all provenance options checked"),
+    )?;
+    let (report_path, report_bytes, report_sha256) = canonical_read_pinned_file(
+        "profile rank-decisions report",
+        options
+            .profile_rank_decisions_report
+            .as_deref()
+            .expect("all provenance options checked"),
+        options
+            .expected_profile_rank_decisions_report_sha256
+            .as_deref()
+            .expect("all provenance options checked"),
+    )?;
+    if decisions_path == report_path {
+        anyhow::bail!("profile rank-decisions file and report must be distinct");
+    }
+
+    let (decisions, rank_decisions_sha256) = parse_profile_rank_decisions(&decisions_bytes)?;
+    let report: ProfileRankDecisionReport = serde_json::from_slice(&report_bytes)
+        .context("strictly decode profile rank-decisions report")?;
+    for (label, value) in [
+        (
+            "report social graph SHA-256",
+            report.social_graph_sha256.as_str(),
+        ),
+        (
+            "report eligible authors SHA-256",
+            report.eligible_authors_sha256.as_str(),
+        ),
+        (
+            "report rank-decisions SHA-256",
+            report.rank_decisions_sha256.as_str(),
+        ),
+        (
+            "report rank-decisions file SHA-256",
+            report.rank_decisions_file_sha256.as_str(),
+        ),
+    ] {
+        require_sha256_text(label, value)?;
+    }
+    if report.format != PROFILE_RANK_DECISION_REPORT_FORMAT
+        || report.census_format != PROFILE_RANK_DECISION_CENSUS_FORMAT
+        || report.rank_policy != PROFILE_RANK_POLICY
+        || report.exclusion_policy != PROFILE_EXCLUSION_POLICY
+        || report.social_graph_root.len() != 64
+        || !report
+            .social_graph_root
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("profile rank-decisions report has the wrong provenance contract");
+    }
+    let eligible_count = decisions.values().filter(|rank| rank.is_some()).count();
+    let excluded_count = decisions.len() - eligible_count;
+    let reachable_partition = report
+        .eligible_count
+        .checked_add(report.reachable_overmuted_count)
+        .and_then(|count| count.checked_add(report.distance_excluded_count));
+    let excluded_partition = report
+        .reachable_overmuted_count
+        .checked_add(report.distance_excluded_count)
+        .and_then(|count| count.checked_add(report.unreachable_count));
+    if report.record_count != decisions.len()
+        || report.eligible_count != eligible_count
+        || report.excluded_count != excluded_count
+        || report.eligible_count.checked_add(report.excluded_count) != Some(report.record_count)
+        || report.reachable_count.checked_add(report.unreachable_count) != Some(report.record_count)
+        || reachable_partition != Some(report.reachable_count)
+        || excluded_partition != Some(report.excluded_count)
+        || report.reachable_overmuted_count > report.reachable_count
+        || report.all_graph_overmuted_count > report.record_count
+        || report.all_graph_overmuted_count < report.reachable_overmuted_count
+        || report.overmute_threshold != PROFILE_OVERMUTE_THRESHOLD
+        || report.max_distance.is_some_and(|max_distance| {
+            decisions
+                .values()
+                .flatten()
+                .any(|rank| *rank > max_distance)
+        })
+        || report.rank_decisions_sha256 != rank_decisions_sha256
+        || report.rank_decisions_file_sha256 != decisions_file_sha256
+    {
+        anyhow::bail!("profile rank-decisions report does not match its exact decisions artifact");
+    }
+
+    Ok(Some(TrustedProfileRankDecisions {
+        decisions,
+        decisions_path,
+        decisions_bytes,
+        report_path,
+        report_bytes,
+        evidence: ProfileDistanceProvenance {
+            format: report.format,
+            census_format: report.census_format,
+            rank_decisions_file_sha256: decisions_file_sha256,
+            rank_decisions_report_sha256: report_sha256,
+            rank_decisions_sha256,
+            social_graph_root: report.social_graph_root,
+            social_graph_sha256: report.social_graph_sha256,
+            eligible_authors_sha256: report.eligible_authors_sha256,
+            record_count: report.record_count,
+            eligible_count: report.eligible_count,
+            excluded_count: report.excluded_count,
+            overmute_threshold: report.overmute_threshold,
+            census_max_distance: report.max_distance,
+            rank_policy: report.rank_policy,
+            exclusion_policy: report.exclusion_policy,
+        },
+    }))
+}
+
+fn recheck_trusted_profile_rank_decisions(
+    trusted: Option<&TrustedProfileRankDecisions>,
+) -> Result<()> {
+    let Some(trusted) = trusted else {
+        return Ok(());
+    };
+    let decisions = std::fs::read(&trusted.decisions_path).with_context(|| {
+        format!(
+            "re-read profile rank-decisions file {}",
+            trusted.decisions_path.display()
+        )
+    })?;
+    let report = std::fs::read(&trusted.report_path).with_context(|| {
+        format!(
+            "re-read profile rank-decisions report {}",
+            trusted.report_path.display()
+        )
+    })?;
+    if decisions != trusted.decisions_bytes || report != trusted.report_bytes {
+        anyhow::bail!("profile rank-decisions provenance changed during read-only audit");
+    }
+    Ok(())
+}
+
+fn require_profile_rank_policy_binding(
+    trusted: Option<&TrustedProfileRankDecisions>,
+    policy_author_allowlist_sha256: &str,
+    policy_author_count: usize,
+) -> Result<()> {
+    let Some(trusted) = trusted else {
+        return Ok(());
+    };
+    if trusted.evidence.eligible_authors_sha256 != policy_author_allowlist_sha256 {
+        anyhow::bail!(
+            "profile rank-decisions eligible-author digest {} does not match crawl-policy \
+             allowlist digest {}",
+            trusted.evidence.eligible_authors_sha256,
+            policy_author_allowlist_sha256
+        );
+    }
+    if trusted.evidence.eligible_count != policy_author_count {
+        anyhow::bail!(
+            "profile rank-decisions eligible count {} does not match crawl-policy author count {}",
+            trusted.evidence.eligible_count,
+            policy_author_count
+        );
     }
     Ok(())
 }
@@ -246,74 +676,6 @@ fn manifest_root_for_index(
         NostrEventIndex::Replaceable => manifest.replaceable.as_ref(),
         NostrEventIndex::ParameterizedReplaceable => manifest.parameterized_replaceable.as_ref(),
     }
-}
-
-async fn validate_exact_manifest_directory(
-    store: Arc<ReadOnlyPoolStore>,
-    target: &NostrEventStore<ReadOnlyPoolStore>,
-    candidate_root: &Cid,
-    manifest: &hashtree_nostr::NostrEventManifest,
-) -> Result<Cid> {
-    let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)));
-    let entries = tree
-        .list_directory_required(candidate_root)
-        .await
-        .context("list exact bulk manifest directory")?;
-    let mut expected = NostrEventIndex::ALL
-        .into_iter()
-        .map(|index| {
-            manifest_root_for_index(manifest, index)
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "bulk manifest omitted required canonical `{}` root",
-                        index.name()
-                    )
-                })
-                .map(|cid| (index.name().to_string(), cid))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    let mut metadata = None;
-    for entry in entries {
-        if entry.name == COLLECTION_MANIFEST_METADATA_FILE {
-            if metadata.is_some() {
-                anyhow::bail!("bulk manifest repeats collection metadata entry");
-            }
-            if entry.link_type != LinkType::File {
-                anyhow::bail!("bulk manifest collection metadata is not a File link");
-            }
-            metadata = Some(Cid {
-                hash: entry.hash,
-                key: entry.key,
-            });
-            continue;
-        }
-        let expected_cid = expected.remove(&entry.name).with_context(|| {
-            format!("bulk manifest has unexpected or duplicate `{}`", entry.name)
-        })?;
-        if entry.link_type != LinkType::Dir {
-            anyhow::bail!("bulk manifest index `{}` is not a Dir link", entry.name);
-        }
-        if (Cid {
-            hash: entry.hash,
-            key: entry.key,
-        }) != expected_cid
-        {
-            anyhow::bail!("bulk manifest index `{}` has the wrong CID", entry.name);
-        }
-    }
-    if !expected.is_empty() {
-        anyhow::bail!(
-            "bulk manifest directory omitted canonical indexes: {:?}",
-            expected.keys().collect::<Vec<_>>()
-        );
-    }
-    let metadata = metadata.context("bulk manifest omitted collection metadata")?;
-    target
-        .validate_index_root(Some(candidate_root))
-        .await
-        .context("validate bulk collection manifest metadata and required indexes")?;
-    Ok(metadata)
 }
 
 async fn audit_index_root(
@@ -754,23 +1116,106 @@ async fn block_evidence(
     })
 }
 
+fn validate_profile_search_value(
+    key: &str,
+    value: &str,
+    expected: &ExpectedProfileSearchEntry,
+    bound_values: &mut BTreeMap<String, hashtree_cli::socialgraph::StoredProfileSearchEntry>,
+) -> Result<hashtree_cli::socialgraph::StoredProfileSearchEntry> {
+    let actual: StrictStoredProfileSearchEntry = serde_json::from_str(value)
+        .with_context(|| format!("strictly decode profile-search entry `{key}`"))?;
+    let actual: hashtree_cli::socialgraph::StoredProfileSearchEntry = actual.into();
+    if actual.pubkey != expected.pubkey {
+        anyhow::bail!(
+            "profile-search entry `{key}` names pubkey `{}` instead of `{}`",
+            actual.pubkey,
+            expected.pubkey
+        );
+    }
+
+    // Version 2 profile indexes sealed a graph-derived distance at projection
+    // time. That historic value cannot be recomputed from today's graph.
+    // Bind the first observed value per pubkey, reconstruct every other field
+    // through the exact builder, and require every derived key to repeat the
+    // same full value. Version 3 must make this distance deterministic or
+    // include it in a separately attested input seal.
+    let bound_distance = bound_values
+        .get(&expected.pubkey)
+        .map(|entry| entry.follow_distance)
+        .unwrap_or(actual.follow_distance);
+    let reconstructed = hashtree_cli::socialgraph::stored_profile_search_entry_for_event(
+        &expected.event,
+        &expected.mirrored_cid,
+        bound_distance,
+    )
+    .with_context(|| format!("reconstruct exact profile-search entry `{key}`"))?;
+    if actual != reconstructed {
+        anyhow::bail!("profile-search entry `{key}` differs from its exact builder reconstruction");
+    }
+    if let Some(bound) = bound_values.get(&expected.pubkey) {
+        if actual != *bound {
+            anyhow::bail!(
+                "profile-search entry `{key}` is not identical across all keys for pubkey `{}`",
+                expected.pubkey
+            );
+        }
+    } else {
+        bound_values.insert(expected.pubkey.clone(), actual.clone());
+    }
+    Ok(actual)
+}
+
+fn require_profile_distance_attestation(
+    allow_recovery_tranche: bool,
+    expected: Option<&str>,
+    actual: &str,
+    has_independent_provenance: bool,
+) -> Result<()> {
+    if let Some(expected) = expected {
+        require_expected_sha256("profile follow-distance seal", actual, expected)?;
+    }
+    if !allow_recovery_tranche && !has_independent_provenance {
+        anyhow::bail!(
+            "full-policy cutover audit requires independently pinned profile rank-decisions \
+             provenance; an opaque v2 distance seal cannot self-attest"
+        );
+    }
+    Ok(())
+}
+
+fn validate_bound_profile_distances(
+    bound_values: &BTreeMap<String, hashtree_cli::socialgraph::StoredProfileSearchEntry>,
+    trusted_decisions: &BTreeMap<String, Option<u32>>,
+) -> Result<()> {
+    for (pubkey, entry) in bound_values {
+        match trusted_decisions.get(pubkey) {
+            Some(Some(distance)) if entry.follow_distance == Some(*distance) => {}
+            Some(Some(distance)) => anyhow::bail!(
+                "profile-search retained pubkey `{pubkey}` with distance {:?}, \
+                 but trusted rank decision requires {distance}",
+                entry.follow_distance
+            ),
+            Some(None) => anyhow::bail!(
+                "profile-search retained pubkey `{pubkey}` despite its trusted exclusion decision"
+            ),
+            None => anyhow::bail!(
+                "profile-search retained pubkey `{pubkey}` without a trusted rank decision"
+            ),
+        }
+    }
+    Ok(())
+}
+
 async fn audit_profile_indexes(
     data_dir: &Path,
     spool: &BulkProjectionSpool,
     store: Arc<ReadOnlyPoolStore>,
+    trusted_rank_decisions: Option<&BTreeMap<String, Option<u32>>>,
 ) -> Result<(
     BulkProjectionProfileAudit,
     Vec<Cid>,
     hashtree_cli::socialgraph::ProfileIndexRoots,
 )> {
-    #[derive(Debug)]
-    struct ExpectedSearchEntry {
-        pubkey: String,
-        created_at: u64,
-        event_nhash: String,
-        event_id: String,
-    }
-
     let roots_before = hashtree_cli::socialgraph::read_profile_index_roots(data_dir)?;
     let by_pubkey_root = roots_before
         .by_pubkey
@@ -811,7 +1256,7 @@ async fn audit_profile_indexes(
     let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)));
     let mut by_pubkey_digest = Sha256::new();
     by_pubkey_digest.update(b"hashtree-profile-by-pubkey-audit-v1\0");
-    let mut expected_search = BTreeMap::<String, ExpectedSearchEntry>::new();
+    let mut expected_search = BTreeMap::<String, ExpectedProfileSearchEntry>::new();
     let mut representative_profile_cid = None;
     for (pubkey, mirrored_cid) in &by_pubkey_entries {
         let record = retained_profiles
@@ -837,13 +1282,11 @@ async fn audit_profile_indexes(
                 record.event.id
             );
         }
-        let event_nhash = cid_to_nhash(mirrored_cid)?;
         for key in hashtree_cli::socialgraph::profile_search_keys_for_event(&mirrored) {
-            let expected = ExpectedSearchEntry {
+            let expected = ExpectedProfileSearchEntry {
                 pubkey: pubkey.clone(),
-                created_at: mirrored.created_at.as_secs(),
-                event_nhash: event_nhash.clone(),
-                event_id: mirrored.id.to_hex(),
+                event: mirrored.clone(),
+                mirrored_cid: mirrored_cid.clone(),
             };
             if expected_search.insert(key.clone(), expected).is_some() {
                 anyhow::bail!("retained profiles produced duplicate search key `{key}`");
@@ -884,26 +1327,17 @@ async fn audit_profile_indexes(
     }
     let mut search_digest = Sha256::new();
     search_digest.update(b"hashtree-profile-search-audit-v1\0");
+    let mut bound_values = BTreeMap::new();
     let mut sample = None;
     for (key, value) in &search_entries {
         let expected = expected_search
             .remove(key)
             .with_context(|| format!("profile-search contains unexpected key `{key}`"))?;
-        let entry: hashtree_cli::socialgraph::StoredProfileSearchEntry =
-            serde_json::from_str(value)
-                .with_context(|| format!("decode profile-search entry `{key}`"))?;
-        if entry.pubkey != expected.pubkey
-            || entry.created_at != expected.created_at
-            || entry.event_nhash != expected.event_nhash
-        {
-            anyhow::bail!(
-                "profile-search entry `{key}` does not match its retained mirrored profile"
-            );
-        }
+        let entry = validate_profile_search_value(key, value, &expected, &mut bound_values)?;
         sample.get_or_insert_with(|| {
             (
                 expected.pubkey.clone(),
-                expected.event_id,
+                expected.event.id.to_hex(),
                 entry.name.clone(),
             )
         });
@@ -922,6 +1356,22 @@ async fn audit_profile_indexes(
                 .0
         );
     }
+    if bound_values.len() != by_pubkey_entries.len() {
+        anyhow::bail!(
+            "profile-search bound {} historic distances for {} retained profiles",
+            bound_values.len(),
+            by_pubkey_entries.len()
+        );
+    }
+    if let Some(trusted_rank_decisions) = trusted_rank_decisions {
+        validate_bound_profile_distances(&bound_values, trusted_rank_decisions)?;
+    }
+    let bound_distances = bound_values
+        .iter()
+        .map(|(pubkey, entry)| (pubkey.clone(), entry.follow_distance))
+        .collect();
+    let follow_distance_seal_sha256 =
+        hashtree_cli::socialgraph::profile_follow_distance_seal_v2(&bound_distances);
     let (sample_pubkey, sample_event_id, sample_name) =
         sample.context("profile-search root contains no entries")?;
     let roots_after = hashtree_cli::socialgraph::read_profile_index_roots(data_dir)?;
@@ -945,24 +1395,153 @@ async fn audit_profile_indexes(
             sample_pubkey,
             sample_event_id,
             sample_name,
+            follow_distance_binding:
+                "opaque-historic-v2-first-observed-per-pubkey; v3-requires-deterministic-or-attested-distance"
+                    .to_string(),
+            follow_distance_seal_sha256,
         },
         vec![by_pubkey_root, search_root, representative_profile_cid],
         roots_before,
     ))
 }
 
-fn write_audit_output(output: &BulkProjectionAuditOutput, out: Option<&Path>) -> Result<()> {
-    match out {
-        None => {
-            println!("{}", serde_json::to_string_pretty(output)?);
-            Ok(())
-        }
-        Some(path) if path == Path::new("-") => {
-            println!("{}", serde_json::to_string_pretty(output)?);
-            Ok(())
-        }
-        Some(path) => persist_json_atomic(path, output, "bulk projection audit evidence"),
+#[derive(Debug)]
+struct PreparedAuditOutput {
+    path: PathBuf,
+    parent: PathBuf,
+}
+
+fn prepare_audit_output_path(
+    data_dir: &Path,
+    staging_data_dir: &Path,
+    out: &Path,
+) -> Result<PreparedAuditOutput> {
+    if !out.is_absolute() {
+        anyhow::bail!("bulk projection audit --out must be an absolute path");
     }
+    let file_name = out
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .context("bulk projection audit --out must name a file")?;
+    let parent = out
+        .parent()
+        .context("bulk projection audit --out has no parent directory")?
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "canonicalize pre-existing audit output parent {}",
+                out.parent().expect("parent checked").display()
+            )
+        })?;
+    let data_tree = data_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalize audited data tree {}", data_dir.display()))?;
+    let staging_tree = staging_data_dir.canonicalize().with_context(|| {
+        format!(
+            "canonicalize audited staging tree {}",
+            staging_data_dir.display()
+        )
+    })?;
+    if parent.starts_with(&data_tree) || parent.starts_with(&staging_tree) {
+        anyhow::bail!(
+            "bulk projection audit evidence parent {} is inside an audited live data tree",
+            parent.display()
+        );
+    }
+    let path = parent.join(file_name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => anyhow::bail!(
+            "bulk projection audit evidence target already exists or is a symlink: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect audit evidence target {}", path.display()));
+        }
+    }
+    Ok(PreparedAuditOutput { path, parent })
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("open directory {} for evidence fsync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("fsync evidence directory {}", path.display()))
+}
+
+fn install_audit_evidence_noreplace(bytes: &[u8], prepared: &PreparedAuditOutput) -> Result<()> {
+    let mut temp_path = None;
+    let mut temp_file = None;
+    for _ in 0..16 {
+        let candidate = prepared.parent.join(format!(
+            ".bulk-projection-audit.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temp_path = Some(candidate);
+                temp_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "create same-directory audit evidence temp file {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+    let temp_path = temp_path.context("could not allocate unique audit evidence temp file")?;
+    let mut temp_file = temp_file.expect("temp path and file are assigned together");
+    let write_result = (|| -> Result<()> {
+        temp_file
+            .write_all(bytes)
+            .context("write complete audit evidence temp file")?;
+        temp_file
+            .sync_all()
+            .context("fsync complete audit evidence temp file")?;
+        drop(temp_file);
+
+        std::fs::hard_link(&temp_path, &prepared.path).with_context(|| {
+            format!(
+                "atomically install no-replace audit evidence {}",
+                prepared.path.display()
+            )
+        })?;
+        sync_directory(&prepared.parent)?;
+        std::fs::remove_file(&temp_path).with_context(|| {
+            format!(
+                "remove linked audit evidence temp file {}",
+                temp_path.display()
+            )
+        })?;
+        sync_directory(&prepared.parent)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        let _ = sync_directory(&prepared.parent);
+    }
+    write_result
+}
+
+fn write_audit_output_noreplace(
+    output: &BulkProjectionAuditOutput,
+    prepared: &PreparedAuditOutput,
+) -> Result<()> {
+    let mut bytes =
+        serde_json::to_vec_pretty(output).context("serialize bulk projection audit evidence")?;
+    bytes.push(b'\n');
+    install_audit_evidence_noreplace(&bytes, prepared)
 }
 
 pub(crate) async fn audit_bulk_projection(
@@ -974,6 +1553,11 @@ pub(crate) async fn audit_bulk_projection(
             "audit B-tree order must be at least 2 and page/query limits must be non-zero"
         );
     }
+    if options.expected_full_author_count == 0 {
+        anyhow::bail!("expected full author count must be non-zero");
+    }
+    let prepared_output =
+        prepare_audit_output_path(data_dir, &options.staging_data_dir, &options.out)?;
     let (state_path, spool_path) = bulk_paths(data_dir);
     let stage_state_path = options
         .staging_data_dir
@@ -988,12 +1572,12 @@ pub(crate) async fn audit_bulk_projection(
     require_expected_sha256(
         "bulk projection state",
         &state_sha256,
-        options.expected_state_sha256.as_deref(),
+        &options.expected_state_sha256,
     )?;
     require_expected_sha256(
         "staging state",
         &stage_state_sha256,
-        options.expected_stage_state_sha256.as_deref(),
+        &options.expected_stage_state_sha256,
     )?;
     let state: BulkProjectionState =
         serde_json::from_slice(&state_bytes).context("parse bulk projection state")?;
@@ -1013,6 +1597,21 @@ pub(crate) async fn audit_bulk_projection(
             "terminal bulk projection allowlist source differs from frozen staging source"
         );
     }
+    if state.policy.author_count != options.expected_full_author_count {
+        anyhow::bail!(
+            "bulk projection policy author count mismatch: expected trusted full count {}, found {}",
+            options.expected_full_author_count,
+            state.policy.author_count
+        );
+    }
+    let policy_bytes =
+        serde_json::to_vec(&state.policy).context("serialize trusted bulk projection policy")?;
+    let policy_sha256 = bytes_sha256(&policy_bytes);
+    require_expected_sha256(
+        "bulk projection policy",
+        &policy_sha256,
+        &options.expected_policy_sha256,
+    )?;
     if state.next_author > state.policy.author_count {
         anyhow::bail!(
             "terminal bulk projection author watermark {} exceeds policy author count {}",
@@ -1020,7 +1619,38 @@ pub(crate) async fn audit_bulk_projection(
             state.policy.author_count
         );
     }
+    if state.policy.max_authors != options.expected_full_author_count {
+        anyhow::bail!(
+            "bulk projection policy max_authors {} differs from trusted full count {}",
+            state.policy.max_authors,
+            options.expected_full_author_count
+        );
+    }
+    if options.allow_recovery_tranche {
+        if state.next_author == 0 || state.next_author >= options.expected_full_author_count {
+            anyhow::bail!(
+                "recovery-tranche audit requires a nonzero partial watermark below trusted full \
+                 count {}; found next_author={}",
+                options.expected_full_author_count,
+                state.next_author
+            );
+        }
+    } else if state.next_author != options.expected_full_author_count {
+        anyhow::bail!(
+            "full-policy audit requires the terminal and frozen-stage author watermark to equal \
+             trusted full count {}; found next_author={}; use --allow-recovery-tranche only for \
+             internal non-cutover evidence",
+            options.expected_full_author_count,
+            state.next_author
+        );
+    }
     validate_terminal_stage_state(&state, &stage)?;
+    let trusted_profile_rank_decisions = load_trusted_profile_rank_decisions(&options)?;
+    require_profile_rank_policy_binding(
+        trusted_profile_rank_decisions.as_ref(),
+        &state.policy.author_allowlist_sha256,
+        state.policy.author_count,
+    )?;
     if state.built_roots.len() != NostrEventIndex::ALL.len()
         || NostrEventIndex::ALL
             .iter()
@@ -1044,13 +1674,12 @@ pub(crate) async fn audit_bulk_projection(
         .validate_committed_catalog()
         .context("validate fully committed PoolStore catalog")?;
     let target = NostrEventStore::new(Arc::clone(&store));
-    let manifest = target
-        .get_manifest(Some(&candidate_root))
+    let canonical_manifest = target
+        .get_canonical_manifest(&candidate_root)
         .await
-        .context("read complete bulk projection manifest")?;
-    let manifest_metadata =
-        validate_exact_manifest_directory(Arc::clone(&store), &target, &candidate_root, &manifest)
-            .await?;
+        .context("validate exact canonical bulk projection manifest")?;
+    let manifest = canonical_manifest.manifest;
+    let manifest_metadata = canonical_manifest.metadata_cid;
     let btree = BTree::new(
         Arc::clone(&store),
         BTreeOptions {
@@ -1118,8 +1747,21 @@ pub(crate) async fn audit_bulk_projection(
         );
     }
 
-    let (profile, profile_cids, profile_roots_before) =
-        audit_profile_indexes(data_dir, &spool, Arc::clone(&store)).await?;
+    let (profile, profile_cids, profile_roots_before) = audit_profile_indexes(
+        data_dir,
+        &spool,
+        Arc::clone(&store),
+        trusted_profile_rank_decisions
+            .as_ref()
+            .map(|trusted| &trusted.decisions),
+    )
+    .await?;
+    require_profile_distance_attestation(
+        options.allow_recovery_tranche,
+        options.expected_profile_distance_seal_sha256.as_deref(),
+        &profile.follow_distance_seal_sha256,
+        trusted_profile_rank_decisions.is_some(),
+    )?;
     representative_cids.extend(profile_cids);
     let (queries, representative_event_cid) =
         audit_real_queries(&spool, &target, &candidate_root, options.query_limit).await?;
@@ -1158,23 +1800,40 @@ pub(crate) async fn audit_bulk_projection(
     if profile_roots_after != profile_roots_before {
         anyhow::bail!("profile index root files changed during read-only audit");
     }
+    recheck_trusted_profile_rank_decisions(trusted_profile_rank_decisions.as_ref())?;
 
     let output = BulkProjectionAuditOutput {
-        version: 1,
+        version: 2,
         candidate_root: cid_to_nhash(&candidate_root)?,
         state_sha256,
         stage_state_sha256,
+        trusted_policy_sha256: policy_sha256,
+        trusted_profile_distance_seal_sha256: options.expected_profile_distance_seal_sha256,
+        profile_distance_provenance: trusted_profile_rank_decisions
+            .as_ref()
+            .map(|trusted| trusted.evidence.clone()),
+        trusted_full_author_count: options.expected_full_author_count,
+        crawl_policy_max_follow_distance: state.policy.max_follow_distance,
+        audit_mode: if options.allow_recovery_tranche {
+            "recovery-tranche-internal-non-cutover"
+        } else {
+            "full-policy-cutover"
+        }
+        .to_string(),
+        cutover_eligible: !options.allow_recovery_tranche
+            && trusted_profile_rank_decisions.is_some(),
         pool_catalog_sha256: catalog_before.sha256,
+        pool_manifest_sha256: catalog_before.manifest_sha256,
         pool_stored_locations: catalog_before.stored_locations,
         authors_processed: state.next_author,
         authors_total: state.policy.author_count,
-        recovery_tranche_only: state.next_author < state.policy.author_count,
+        recovery_tranche_only: options.allow_recovery_tranche,
         indexes,
         profile,
         queries,
         representative_blocks,
     };
-    write_audit_output(&output, options.out.as_deref())?;
+    write_audit_output_noreplace(&output, &prepared_output)?;
     Ok(output)
 }
 
@@ -1215,6 +1874,362 @@ mod tests {
             max_relay_pages: 67,
             kinds: Some(vec![0, 1, 30_000]),
         }
+    }
+
+    fn expected_profile_search_entry() -> (
+        ExpectedProfileSearchEntry,
+        hashtree_cli::socialgraph::StoredProfileSearchEntry,
+    ) {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Metadata,
+            r#"{"name":"Alice","display_name":"Alice Example","nip05":"alice@example.com"}"#,
+        )
+        .custom_created_at(Timestamp::from_secs(10))
+        .sign_with_keys(&keys)
+        .unwrap();
+        let mirrored_cid = Cid {
+            hash: [7; 32],
+            key: None,
+        };
+        let stored = hashtree_cli::socialgraph::stored_profile_search_entry_for_event(
+            &event,
+            &mirrored_cid,
+            Some(1),
+        )
+        .unwrap();
+        (
+            ExpectedProfileSearchEntry {
+                pubkey: event.pubkey.to_hex(),
+                event,
+                mirrored_cid,
+            },
+            stored,
+        )
+    }
+
+    fn rank_decision_artifacts(
+        decisions: &BTreeMap<String, Option<u32>>,
+    ) -> (Vec<u8>, Vec<u8>, String, String) {
+        let mut digest = Sha256::new();
+        digest.update(PROFILE_RANK_DECISION_FORMAT.as_bytes());
+        digest.update(b"\n");
+        for (pubkey, rank) in decisions {
+            let row = match rank {
+                Some(rank) => serde_json::json!([pubkey, "eligible", rank]),
+                None => serde_json::json!([pubkey, "excluded", null]),
+            };
+            digest.update(serde_json::to_string(&row).unwrap().as_bytes());
+            digest.update(b"\n");
+        }
+        let decisions_sha256 = hex::encode(digest.finalize());
+        let mut lines = vec![serde_json::to_string(&ProfileRankDecisionHeader {
+            format: PROFILE_RANK_DECISION_FORMAT.to_string(),
+            eligible_ranks_sha256: decisions_sha256.clone(),
+            record_count: decisions.len(),
+        })
+        .unwrap()];
+        lines.extend(decisions.iter().map(|(pubkey, rank)| {
+            serde_json::to_string(&ProfileRankDecisionRecord {
+                pubkey: pubkey.clone(),
+                decision: if rank.is_some() {
+                    "eligible"
+                } else {
+                    "excluded"
+                }
+                .to_string(),
+                rank_hint: *rank,
+            })
+            .unwrap()
+        }));
+        let decisions_bytes = format!("{}\n", lines.join("\n")).into_bytes();
+        let decisions_file_sha256 = bytes_sha256(&decisions_bytes);
+        let eligible_count = decisions.values().filter(|rank| rank.is_some()).count();
+        let report = serde_json::json!({
+            "format": PROFILE_RANK_DECISION_REPORT_FORMAT,
+            "censusFormat": PROFILE_RANK_DECISION_CENSUS_FORMAT,
+            "socialGraphRoot": "a".repeat(64),
+            "socialGraphSha256": "b".repeat(64),
+            "eligibleAuthorsSha256": "c".repeat(64),
+            "overmuteThreshold": PROFILE_OVERMUTE_THRESHOLD,
+            "maxDistance": 4,
+            "rankPolicy": PROFILE_RANK_POLICY,
+            "exclusionPolicy": PROFILE_EXCLUSION_POLICY,
+            "recordCount": decisions.len(),
+            "eligibleCount": eligible_count,
+            "excludedCount": decisions.len() - eligible_count,
+            "reachableCount": decisions.len(),
+            "reachableOvermutedCount": 0,
+            "distanceExcludedCount": 0,
+            "unreachableCount": 0,
+            "allGraphOvermutedCount": 0,
+            "rankDecisionsSha256": decisions_sha256,
+            "rankDecisionsFileSha256": decisions_file_sha256,
+        });
+        let report_bytes =
+            format!("{}\n", serde_json::to_string_pretty(&report).unwrap()).into_bytes();
+        let report_sha256 = bytes_sha256(&report_bytes);
+        (
+            decisions_bytes,
+            report_bytes,
+            decisions_file_sha256,
+            report_sha256,
+        )
+    }
+
+    #[test]
+    fn loads_pinned_rank_decision_provenance_and_rechecks_exact_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let pubkey = "d".repeat(64);
+        let decisions = BTreeMap::from([(pubkey.clone(), Some(1))]);
+        let (decisions_bytes, report_bytes, decisions_sha256, report_sha256) =
+            rank_decision_artifacts(&decisions);
+        let decisions_path = temp.path().join("rank-decisions.jsonl");
+        let report_path = temp.path().join("rank-decisions-report.json");
+        std::fs::write(&decisions_path, decisions_bytes).unwrap();
+        std::fs::write(&report_path, report_bytes).unwrap();
+        let options = BulkProjectionAuditOptions {
+            staging_data_dir: temp.path().join("unused-staging"),
+            expected_state_sha256: "1".repeat(64),
+            expected_stage_state_sha256: "2".repeat(64),
+            expected_policy_sha256: "3".repeat(64),
+            expected_profile_distance_seal_sha256: None,
+            profile_rank_decisions_file: Some(decisions_path.clone()),
+            expected_profile_rank_decisions_file_sha256: Some(decisions_sha256),
+            profile_rank_decisions_report: Some(report_path.clone()),
+            expected_profile_rank_decisions_report_sha256: Some(report_sha256),
+            expected_full_author_count: 1,
+            allow_recovery_tranche: false,
+            btree_order: 2,
+            page_size: 1,
+            query_limit: 1,
+            out: temp.path().join("unused-evidence.json"),
+        };
+        let trusted = load_trusted_profile_rank_decisions(&options)
+            .unwrap()
+            .expect("full provenance");
+        assert_eq!(trusted.decisions, decisions);
+        assert_eq!(trusted.evidence.eligible_count, 1);
+        assert_eq!(trusted.evidence.census_max_distance, Some(4));
+        // The real wrapper uses policy depth 0 to disable live graph
+        // expansion while the independently frozen census covers distance 4.
+        let crawl_policy_max_follow_distance = Some(0);
+        assert_ne!(
+            trusted.evidence.census_max_distance,
+            crawl_policy_max_follow_distance
+        );
+        require_profile_rank_policy_binding(Some(&trusted), &"c".repeat(64), 1).unwrap();
+        assert!(
+            require_profile_rank_policy_binding(Some(&trusted), &"f".repeat(64), 1)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match crawl-policy allowlist digest")
+        );
+        assert!(
+            require_profile_rank_policy_binding(Some(&trusted), &"c".repeat(64), 2)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match crawl-policy author count")
+        );
+        recheck_trusted_profile_rank_decisions(Some(&trusted)).unwrap();
+
+        std::fs::write(&report_path, b"changed").unwrap();
+        assert!(recheck_trusted_profile_rank_decisions(Some(&trusted))
+            .unwrap_err()
+            .to_string()
+            .contains("changed during read-only audit"));
+    }
+
+    #[test]
+    fn profile_search_audit_rejects_corrupt_known_fields_and_unknown_fields() {
+        let (expected, stored) = expected_profile_search_entry();
+        for field in ["name", "aliases", "nip05"] {
+            let mut value = serde_json::to_value(&stored).unwrap();
+            let object = value.as_object_mut().unwrap();
+            match field {
+                "name" => object.insert(field.to_string(), serde_json::json!("Mallory")),
+                "aliases" => object.insert(field.to_string(), serde_json::json!(["Wrong Alias"])),
+                "nip05" => object.insert(field.to_string(), serde_json::json!("wrong@example.com")),
+                _ => unreachable!(),
+            };
+            let mut bound = BTreeMap::new();
+            assert!(
+                validate_profile_search_value(
+                    "p:test:pubkey",
+                    &serde_json::to_string(&value).unwrap(),
+                    &expected,
+                    &mut bound,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("builder reconstruction"),
+                "corrupt {field} must fail exact reconstruction"
+            );
+        }
+
+        let mut value = serde_json::to_value(&stored).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".to_string(), serde_json::json!(true));
+        let error = validate_profile_search_value(
+            "p:test:pubkey",
+            &serde_json::to_string(&value).unwrap(),
+            &expected,
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("strictly decode"),
+            "unexpected unknown-field error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn profile_search_audit_binds_one_historic_distance_across_all_keys() {
+        let (expected, first) = expected_profile_search_entry();
+        let mut bound = BTreeMap::new();
+        validate_profile_search_value(
+            "p:alice:pubkey",
+            &serde_json::to_string(&first).unwrap(),
+            &expected,
+            &mut bound,
+        )
+        .unwrap();
+
+        let second = hashtree_cli::socialgraph::stored_profile_search_entry_for_event(
+            &expected.event,
+            &expected.mirrored_cid,
+            Some(2),
+        )
+        .unwrap();
+        let error = validate_profile_search_value(
+            "p:example:pubkey",
+            &serde_json::to_string(&second).unwrap(),
+            &expected,
+            &mut bound,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("builder reconstruction"),
+            "unexpected distance mismatch error: {error:#}"
+        );
+
+        let mut consistently_wrong = BTreeMap::new();
+        for key in ["p:alice:pubkey", "p:example:pubkey"] {
+            validate_profile_search_value(
+                key,
+                &serde_json::to_string(&second).unwrap(),
+                &expected,
+                &mut consistently_wrong,
+            )
+            .unwrap();
+        }
+        let wrong_distances = consistently_wrong
+            .iter()
+            .map(|(pubkey, entry)| (pubkey.clone(), entry.follow_distance))
+            .collect();
+        let wrong_seal =
+            hashtree_cli::socialgraph::profile_follow_distance_seal_v2(&wrong_distances);
+        let correct_values = BTreeMap::from([(expected.pubkey.clone(), first)]);
+        let correct_distances = correct_values
+            .iter()
+            .map(|(pubkey, entry)| (pubkey.clone(), entry.follow_distance))
+            .collect();
+        let correct_seal =
+            hashtree_cli::socialgraph::profile_follow_distance_seal_v2(&correct_distances);
+        assert_ne!(wrong_seal, correct_seal);
+        let trusted_decisions = BTreeMap::from([(expected.pubkey.clone(), Some(1))]);
+        let provenance_error =
+            validate_bound_profile_distances(&consistently_wrong, &trusted_decisions)
+                .expect_err("trusted rank decision must reject consistently wrong distance");
+        assert!(
+            provenance_error
+                .to_string()
+                .contains("trusted rank decision requires 1"),
+            "unexpected provenance mismatch: {provenance_error:#}"
+        );
+        let error =
+            require_profile_distance_attestation(false, Some(&correct_seal), &wrong_seal, true)
+                .expect_err("full cutover must reject consistently wrong historic distance");
+        assert!(
+            error.to_string().contains("SHA-256 mismatch"),
+            "unexpected full-cutover distance seal error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn audit_output_refuses_live_trees_existing_targets_and_race_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let staging_dir = temp.path().join("staging");
+        let evidence_dir = temp.path().join("evidence");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+
+        let protected = data_dir.join("audit.json");
+        assert!(
+            prepare_audit_output_path(&data_dir, &staging_dir, &protected)
+                .unwrap_err()
+                .to_string()
+                .contains("inside an audited live data tree")
+        );
+
+        let existing = evidence_dir.join("existing.json");
+        std::fs::write(&existing, b"trusted-existing").unwrap();
+        assert!(
+            prepare_audit_output_path(&data_dir, &staging_dir, &existing)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+
+        #[cfg(unix)]
+        {
+            let symlink = evidence_dir.join("symlink.json");
+            std::os::unix::fs::symlink(&existing, &symlink).unwrap();
+            assert!(prepare_audit_output_path(&data_dir, &staging_dir, &symlink)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists"));
+        }
+
+        let raced = evidence_dir.join("raced.json");
+        let prepared = prepare_audit_output_path(&data_dir, &staging_dir, &raced).unwrap();
+        std::fs::write(&raced, b"racing-writer").unwrap();
+        assert!(install_audit_evidence_noreplace(b"new-evidence", &prepared).is_err());
+        assert_eq!(std::fs::read(&raced).unwrap(), b"racing-writer");
+        assert!(
+            std::fs::read_dir(&evidence_dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".bulk-projection-audit.")),
+            "failed no-replace write left a partial temp file"
+        );
+    }
+
+    #[test]
+    fn audit_output_installs_complete_bytes_once_without_temp_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let staging_dir = temp.path().join("staging");
+        let evidence_dir = temp.path().join("evidence");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let target = evidence_dir.join("audit.json");
+        let prepared = prepare_audit_output_path(&data_dir, &staging_dir, &target).unwrap();
+
+        install_audit_evidence_noreplace(b"complete-evidence", &prepared).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete-evidence");
+        assert_eq!(std::fs::read_dir(&evidence_dir).unwrap().count(), 1);
+        assert!(install_audit_evidence_noreplace(b"replacement", &prepared).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete-evidence");
     }
 
     #[tokio::test]
@@ -1294,12 +2309,15 @@ mod tests {
             .unwrap();
         store.force_sync().unwrap();
 
-        let policy = policy(10);
+        // Match the real recovery shape: the pinned policy remains the full
+        // 101,267-author policy while the frozen terminal stage stops at
+        // author 17,177.
+        let policy = policy(101_267);
         let state = BulkProjectionState {
             version: BULK_PROJECTION_VERSION,
             author_allowlist_source: Some("file:///audit-authors".to_string()),
             policy: policy.clone(),
-            next_author: 3,
+            next_author: 17_177,
             segment_event_offset: 0,
             events_seen: 3,
             events_selected: 3,
@@ -1346,16 +2364,81 @@ mod tests {
         let state_sha256 = bytes_sha256(&std::fs::read(&state_path).unwrap());
         let stage_path = staging_data_dir.join(STAGE_DIR).join(STAGE_STATE_FILE);
         let stage_sha256 = bytes_sha256(&std::fs::read(stage_path).unwrap());
+        let policy_sha256 = bytes_sha256(&serde_json::to_vec(&state.policy).unwrap());
+        let full_mode_error = run_nostr_bulk_projection_audit(
+            data_dir.clone(),
+            BulkProjectionAuditOptions {
+                staging_data_dir: staging_data_dir.clone(),
+                expected_state_sha256: state_sha256.clone(),
+                expected_stage_state_sha256: stage_sha256.clone(),
+                expected_policy_sha256: policy_sha256.clone(),
+                expected_profile_distance_seal_sha256: None,
+                profile_rank_decisions_file: None,
+                expected_profile_rank_decisions_file_sha256: None,
+                profile_rank_decisions_report: None,
+                expected_profile_rank_decisions_report_sha256: None,
+                expected_full_author_count: 101_267,
+                allow_recovery_tranche: false,
+                btree_order: 8,
+                page_size: 2,
+                query_limit: 2,
+                out: temp.path().join("must-not-write-full-evidence.json"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            full_mode_error.to_string().contains("full-policy audit"),
+            "unexpected full-mode error: {full_mode_error:#}"
+        );
+
+        let count_error = run_nostr_bulk_projection_audit(
+            data_dir.clone(),
+            BulkProjectionAuditOptions {
+                staging_data_dir: staging_data_dir.clone(),
+                expected_state_sha256: state_sha256.clone(),
+                expected_stage_state_sha256: stage_sha256.clone(),
+                expected_policy_sha256: policy_sha256.clone(),
+                expected_profile_distance_seal_sha256: None,
+                profile_rank_decisions_file: None,
+                expected_profile_rank_decisions_file_sha256: None,
+                profile_rank_decisions_report: None,
+                expected_profile_rank_decisions_report_sha256: None,
+                expected_full_author_count: 101_268,
+                allow_recovery_tranche: true,
+                btree_order: 8,
+                page_size: 2,
+                query_limit: 2,
+                out: temp.path().join("must-not-write-count-evidence.json"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            count_error
+                .to_string()
+                .contains("policy author count mismatch"),
+            "unexpected trusted-count error: {count_error:#}"
+        );
+
         run_nostr_bulk_projection_audit(
             data_dir,
             BulkProjectionAuditOptions {
                 staging_data_dir,
-                expected_state_sha256: Some(state_sha256),
-                expected_stage_state_sha256: Some(stage_sha256),
+                expected_state_sha256: state_sha256,
+                expected_stage_state_sha256: stage_sha256,
+                expected_policy_sha256: policy_sha256.clone(),
+                expected_profile_distance_seal_sha256: None,
+                profile_rank_decisions_file: None,
+                expected_profile_rank_decisions_file_sha256: None,
+                profile_rank_decisions_report: None,
+                expected_profile_rank_decisions_report_sha256: None,
+                expected_full_author_count: 101_267,
+                allow_recovery_tranche: true,
                 btree_order: 8,
                 page_size: 2,
                 query_limit: 2,
-                out: Some(evidence_path.clone()),
+                out: evidence_path.clone(),
             },
         )
         .await
@@ -1368,6 +2451,16 @@ mod tests {
             cid_to_nhash(&candidate_root).unwrap()
         );
         assert_eq!(output["recovery_tranche_only"], true);
+        assert_eq!(
+            output["audit_mode"],
+            "recovery-tranche-internal-non-cutover"
+        );
+        assert_eq!(output["cutover_eligible"], false);
+        assert_eq!(output["trusted_policy_sha256"], policy_sha256);
+        assert_eq!(output["trusted_full_author_count"], 101_267);
+        assert_eq!(output["crawl_policy_max_follow_distance"], 0);
+        assert_eq!(output["authors_processed"], 17_177);
+        assert_eq!(output["authors_total"], 101_267);
         assert_eq!(output["indexes"].as_array().unwrap().len(), 9);
         assert_eq!(output["indexes"][0]["durable_values_validated"], 3);
         assert_eq!(output["profile"]["by_pubkey_links"], 1);

@@ -679,7 +679,7 @@ fn cid_to_nhash(cid: &Cid) -> Result<String> {
     .context("encode mirrored profile event nhash")
 }
 
-fn build_profile_search_entry(
+pub(super) fn build_profile_search_entry(
     event: &Event,
     mirrored_cid: &Cid,
     follow_distance: Option<u32>,
