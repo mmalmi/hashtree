@@ -925,7 +925,27 @@ mod tests {
         )?);
         assert!(store.is_pool_audit_read_only());
 
-        let (port, handle) = spawn_test_server(Arc::clone(&store)).await?;
+        let owner = Keys::generate();
+        let tree_name = "pool-audit-external";
+        let root_event = EventBuilder::new(Kind::Custom(30064), "")
+            .tags(vec![
+                nostr::Tag::identifier(tree_name),
+                nostr::Tag::custom(nostr::TagKind::custom("l"), vec!["hashtree".to_string()]),
+                nostr::Tag::custom(nostr::TagKind::custom("hash"), vec![hash_hex.clone()]),
+            ])
+            .sign_with_keys(&owner)?;
+        let provider = Arc::new(StaticProvider {
+            event: Some(VerifiedEvent::try_from(root_event.clone())?),
+            queries: AtomicUsize::new(0),
+            publishes: AtomicUsize::new(0),
+            mode: PubsubProviderMode::LocalOnly,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = HashtreeServer::new(Arc::clone(&store), "127.0.0.1:0".to_string())
+            .with_nostr_provider(provider.clone());
+        let handle =
+            tokio::spawn(async move { server.run_with_listener(listener).await.map(|_| ()) });
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{port}");
 
@@ -942,6 +962,32 @@ mod tests {
             .await?;
         assert_eq!(status["pool_audit_read_only"], true);
         assert_eq!(status["capabilities"]["writes"], false);
+
+        let npub = owner.public_key().to_bech32()?;
+        let resolved: serde_json::Value = client
+            .get(format!(
+                "{base}/api/nostr/resolve/{npub}/{tree_name}?refresh=1"
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(resolved["hash"], hash_hex);
+        assert_eq!(resolved["source"], "fips-pubsub");
+        assert_eq!(resolved["event_id"], root_event.id.to_hex());
+        assert_eq!(provider.queries.load(Ordering::Relaxed), 1);
+        assert_eq!(provider.publishes.load(Ordering::Relaxed), 0);
+
+        assert_pool_audit_maintenance_response(
+            client
+                .post(format!("{base}/api/nostr/events"))
+                .json(&root_event)
+                .send()
+                .await?,
+        )
+        .await?;
+        assert_eq!(provider.publishes.load(Ordering::Relaxed), 0);
 
         assert_pool_audit_maintenance_response(
             client
@@ -975,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_audit_read_only_server_preserves_pool_files() -> Result<()> {
+    fn pool_audit_read_only_server_resolves_external_nostr_without_mutation() -> Result<()> {
         let temp = TempDir::new()?;
         let data_dir = temp.path().join("data");
         let store = HashtreeStore::new_with_backend(
