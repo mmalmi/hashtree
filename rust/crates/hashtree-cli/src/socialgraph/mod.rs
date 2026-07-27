@@ -1294,11 +1294,14 @@ impl SocialGraphStore {
             .iter()
             .filter(|event| is_derived_projection_event(event.kind))
         {
+            event
+                .verify()
+                .with_context(|| format!("verify derived event {} before projection", event.id))?;
             match bucket.load_event_by_id(root, &event.id.to_hex())? {
-                Some(stored) if stored == *event => retained.push(event.clone()),
+                Some(stored) if same_unsigned_event(&stored, event) => retained.push(stored),
                 Some(_) => {
                     anyhow::bail!(
-                        "derived event {} resolved to different event bytes in candidate root",
+                        "derived event {} resolved to different unsigned fields in candidate root",
                         event.id
                     )
                 }
@@ -1409,7 +1412,8 @@ impl SocialGraphStore {
                         Event::from_json(json).context("decode pending derived projection event")
                     })
                     .collect::<Result<Vec<_>>>()?;
-                for event in &events {
+                let mut canonical_events = Vec::with_capacity(events.len());
+                for event in events {
                     if !is_derived_projection_event(event.kind) {
                         anyhow::bail!(
                             "pending derived projection {} contains unsupported event kind {}",
@@ -1417,6 +1421,13 @@ impl SocialGraphStore {
                             event.kind.as_u16()
                         );
                     }
+                    event.verify().with_context(|| {
+                        format!(
+                            "verify pending derived event {} from {}",
+                            event.id,
+                            path.display()
+                        )
+                    })?;
                     let stored = bucket
                         .load_event_by_id(&new_root, &event.id.to_hex())?
                         .with_context(|| {
@@ -1425,17 +1436,18 @@ impl SocialGraphStore {
                                 event.id
                             )
                         })?;
-                    if stored != *event {
+                    if !same_unsigned_event(&stored, &event) {
                         anyhow::bail!(
-                            "pending derived event {} resolved to different event bytes in {}",
+                            "pending derived event {} resolved to different unsigned fields in {}",
                             event.id,
                             path.display()
                         );
                     }
+                    canonical_events.push(stored);
                 }
-                self.apply_graph_events_only_locked(&events)?;
-                self.update_profile_index_for_events_locked(&events)?;
-                self.force_sync_graph_projection_for_events(&events)?;
+                self.apply_graph_events_only_locked(&canonical_events)?;
+                self.update_profile_index_for_events_locked(&canonical_events)?;
+                self.force_sync_graph_projection_for_events(&canonical_events)?;
             }
             PendingProfileProjectionMode::RebuildPublicRoot { .. } => {
                 if storage_class != EventStorageClass::Public {
@@ -2515,6 +2527,15 @@ fn is_social_graph_event(kind: Kind) -> bool {
 
 fn is_derived_projection_event(kind: Kind) -> bool {
     kind == Kind::Metadata || is_social_graph_event(kind)
+}
+
+fn same_unsigned_event(left: &Event, right: &Event) -> bool {
+    left.id == right.id
+        && left.pubkey == right.pubkey
+        && left.created_at == right.created_at
+        && left.kind == right.kind
+        && left.tags == right.tags
+        && left.content == right.content
 }
 
 fn graph_event_from_nostr(event: &Event) -> GraphEvent {

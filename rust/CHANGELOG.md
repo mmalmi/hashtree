@@ -16,6 +16,14 @@
   read-only full-policy cutover evidence. Raw v2 authority overrides and
   recovery-tranche mode are rejected for this path.
 
+### Fixed
+
+- Derived social-graph and profile projections now verify both incoming and
+  stored events, then reuse the canonical stored bytes when the same event ID
+  has a different valid Schnorr signature. Forced local-list reloads and
+  pending projection recovery no longer fail on equivalent re-signatures,
+  while invalid signatures and unsigned-field mismatches remain rejected.
+
 ## 0.2.137 - 2026-07-23
 
 ### Fixed

@@ -59,9 +59,11 @@ impl EventIndexBucket {
     }
 
     pub(super) fn load_event_by_id(&self, root: &Cid, event_id: &str) -> Result<Option<Event>> {
-        let stored = block_on(self.event_store.get_by_id(Some(root), event_id))
+        let stored = block_on(self.event_store.get_verified_by_id(Some(root), event_id))
             .map_err(map_event_store_error)?;
-        stored.map(stored_event_to_nostr_event).transpose()
+        stored
+            .map(|event| stored_event_to_nostr_event(event.into_stored()))
+            .transpose()
     }
 
     fn load_events_for_author(

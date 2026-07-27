@@ -707,6 +707,130 @@ fn test_metadata_ingest_builds_profile_search_index_and_replaces_old_terms() {
 }
 
 #[test]
+fn repeated_same_id_derived_event_reuses_verified_canonical_signature() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let canonical = metadata_event(&keys, "canonical signature", 23);
+    let resigned = (0..32)
+        .map(|_| metadata_event(&keys, "canonical signature", 23))
+        .find(|event| event.sig != canonical.sig)
+        .expect("generated Schnorr signatures should use fresh auxiliary randomness");
+    assert_eq!(resigned.id, canonical.id);
+    assert_eq!(resigned.pubkey, canonical.pubkey);
+    assert_eq!(resigned.created_at, canonical.created_at);
+    assert_eq!(resigned.kind, canonical.kind);
+    assert_eq!(resigned.tags, canonical.tags);
+    assert_eq!(resigned.content, canonical.content);
+
+    ingest_parsed_event_with_storage_class(&graph_store, &canonical, EventStorageClass::Public)
+        .unwrap();
+    ingest_parsed_event_with_storage_class(&graph_store, &resigned, EventStorageClass::Public)
+        .expect("a re-signature of the same verified event id must reuse canonical stored bytes");
+
+    let stored = query_events(&graph_store, &Filter::new().id(canonical.id), 2);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0], canonical);
+    assert_eq!(
+        graph_store
+            .latest_profile_event(&canonical.pubkey.to_hex())
+            .unwrap()
+            .expect("canonical metadata projection"),
+        canonical
+    );
+}
+
+#[test]
+fn same_id_derived_projection_rejects_an_invalid_signature() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let canonical = metadata_event(&Keys::generate(), "valid signature", 29);
+    ingest_parsed_event_with_storage_class(&graph_store, &canonical, EventStorageClass::Public)
+        .unwrap();
+    let root_before = graph_store.public_events_root().unwrap();
+
+    let mut invalid_json = serde_json::to_value(&canonical).unwrap();
+    invalid_json["sig"] = serde_json::Value::String("00".repeat(64));
+    let invalid = Event::from_json(invalid_json.to_string()).unwrap();
+    assert_eq!(invalid.id, canonical.id);
+    assert!(invalid.verify().is_err());
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &invalid, EventStorageClass::Public)
+            .expect_err("an invalid same-id signature must not be canonicalized");
+    assert!(
+        format!("{error:#}").contains("verify derived event"),
+        "unexpected validation error: {error:#}"
+    );
+    assert_eq!(graph_store.public_events_root().unwrap(), root_before);
+    assert_eq!(
+        query_events(&graph_store, &Filter::new().id(canonical.id), 2),
+        vec![canonical]
+    );
+}
+
+#[test]
+fn pending_same_id_derived_projection_recovers_with_canonical_signature() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let canonical = metadata_event(&keys, "pending canonical signature", 31);
+    let resigned = (0..32)
+        .map(|_| metadata_event(&keys, "pending canonical signature", 31))
+        .find(|event| event.sig != canonical.sig)
+        .expect("generated Schnorr signatures should use fresh auxiliary randomness");
+    assert_eq!(resigned.id, canonical.id);
+
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction()
+        .unwrap();
+    let old_root = graph_store.public_events.events_root_for_write().unwrap();
+    let new_root = graph_store
+        .public_events
+        .store_event(old_root.as_ref(), &canonical)
+        .unwrap();
+    graph_store
+        .force_sync_event_storage(EventStorageClass::Public)
+        .unwrap();
+    graph_store
+        .persist_pending_profile_projection_locked(&PendingProfileProjection {
+            version: PROFILE_PROJECTION_PENDING_VERSION,
+            storage_class: StoredEventStorageClass::Public,
+            projection: PendingProfileProjectionMode::Incremental {
+                old_root: old_root.as_ref().map(stored_cid),
+                new_root: stored_cid(&new_root),
+                events: vec![resigned.as_json()],
+            },
+        })
+        .unwrap();
+    graph_store
+        .public_events
+        .write_events_root_durable(Some(&new_root))
+        .unwrap();
+    drop(transaction);
+    drop(graph_store);
+
+    let reopened = open_test_social_graph_store(tmp.path())
+        .expect("recovery must canonicalize a verified same-id signature");
+    assert_event_and_profile_visible(&reopened, &canonical, "p:pending");
+    assert_eq!(
+        query_events(&reopened, &Filter::new().id(canonical.id), 2),
+        vec![canonical]
+    );
+    assert!(
+        !tmp.path()
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .exists(),
+        "successful recovery must clear the durable projection obligation"
+    );
+}
+
+#[test]
 fn test_metadata_batch_updates_profile_search_terms_together() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
