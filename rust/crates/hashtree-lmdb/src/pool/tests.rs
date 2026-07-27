@@ -8,6 +8,8 @@ const HELPER_MODE: &str = "HASHTREE_POOL_HELPER_MODE";
 const HELPER_CATALOG: &str = "HASHTREE_POOL_HELPER_CATALOG";
 const HELPER_READY: &str = "HASHTREE_POOL_HELPER_READY";
 const HELPER_HASH: &str = "HASHTREE_POOL_HELPER_HASH";
+const HELPER_SOURCE: &str = "HASHTREE_POOL_HELPER_SOURCE";
+const HELPER_TARGET: &str = "HASHTREE_POOL_HELPER_TARGET";
 const PENDING_DATA: &[u8] = b"pool pending crash recovery bytes";
 
 #[derive(serde::Serialize)]
@@ -107,6 +109,37 @@ fn pool_pending_helper() {
     let hash = hashtree_core::from_hex(&std::env::var(HELPER_HASH).expect("hash hex"))
         .expect("32-byte hash");
     let pool = PoolStore::open(catalog, PoolStoreConfig::default()).expect("open pool");
+    if mode == "cleanup" {
+        let source = std::env::var(HELPER_SOURCE)
+            .expect("source id")
+            .parse()
+            .expect("valid source id");
+        let target = std::env::var(HELPER_TARGET)
+            .expect("target id")
+            .parse()
+            .expect("valid target id");
+        let expected = pool
+            .read_location(&hash)
+            .expect("source location")
+            .expect("present source location");
+        let moving = LocationRecord::Moving {
+            source,
+            target,
+            size: PENDING_DATA.len() as u64,
+        };
+        assert!(pool
+            .begin_move_record(hash, expected, moving)
+            .expect("begin cleanup test move"));
+        let target_store = pool.get_member(target).expect("open move target");
+        pool.write_verified_member(target, &target_store, hash, PENDING_DATA)
+            .expect("write move target");
+        pool.finish_move_record(hash, source, target, PENDING_DATA.len() as u64)
+            .expect("commit target and cleanup ownership");
+        fs::write(ready, b"ready").expect("write ready marker");
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
     let target = pool
         .choose_write_member(PENDING_DATA.len() as u64, None)
         .expect("choose member");
@@ -165,6 +198,54 @@ fn process_death_before_or_after_member_write_recovers_pending_location() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn process_death_after_target_commit_preserves_cleanup_ownership_index() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let mut config = PoolStoreConfig::default();
+    config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, config.clone()).expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    let hash = sha256(PENDING_DATA);
+    pool.put_sync(hash, PENDING_DATA).expect("seed source");
+    let target = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("target"),
+            1024 * 1024,
+        ))
+        .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+    drop(pool);
+
+    let ready = temp.path().join("cleanup-ready");
+    let mut child = spawn_cleanup_helper(&catalog, &ready, hash, source, target);
+    wait_for_file(&ready, &mut child);
+    child.kill().expect("kill cleanup helper");
+    let output = child.wait_with_output().expect("reap cleanup helper");
+    assert!(!output.status.success(), "helper must be killed");
+
+    let recovered = PoolStore::open(&catalog, config).expect("reopen pool");
+    assert!(
+        recovered.remove_member(source).is_err(),
+        "cross-process cleanup ownership must block removal"
+    );
+    let report = recovered.maintain(1).expect("resume source cleanup");
+    assert!(report.failed.is_empty(), "{report:?}");
+    recovered
+        .remove_member(source)
+        .expect("remove after resumed cleanup");
+    assert_eq!(
+        recovered.get_sync(&hash).expect("read moved blob"),
+        Some(PENDING_DATA.to_vec())
+    );
+}
+
 #[test]
 fn committed_candidate_lookup_skips_stored_but_retries_pending_locations() {
     let temp = TempDir::new().expect("temp dir");
@@ -207,6 +288,186 @@ fn committed_candidate_lookup_skips_stored_but_retries_pending_locations() {
     assert_eq!(status.get(&stored), Some(&true));
     assert_eq!(status.get(&pending), Some(&false));
     assert_eq!(status.get(&missing), Some(&false));
+}
+
+#[test]
+fn empty_draining_member_removal_uses_an_exact_index_probe() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("target"),
+        1024 * 1024,
+    ))
+    .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+
+    pool.remove_member(source).expect("remove empty member");
+    assert!(pool.member(source).is_err());
+}
+
+#[test]
+fn indexed_member_emptiness_rejects_pending_stored_and_moving_locations() {
+    for state in ["pending", "stored", "moving"] {
+        let temp = TempDir::new().expect("temp dir");
+        let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+            .expect("open pool");
+        let source = pool
+            .add_member(PoolMemberConfig::new(
+                temp.path().join("source"),
+                1024 * 1024,
+            ))
+            .expect("source");
+        let target = pool
+            .add_member(PoolMemberConfig::new(
+                temp.path().join("target"),
+                1024 * 1024,
+            ))
+            .expect("target");
+        pool.begin_drain(source).expect("begin drain");
+        let hash = sha256(state.as_bytes());
+        let location = match state {
+            "pending" => LocationRecord::Pending {
+                member: source,
+                size: 1,
+            },
+            "stored" => LocationRecord::Stored {
+                member: source,
+                size: 1,
+            },
+            "moving" => LocationRecord::Moving {
+                source,
+                target,
+                size: 1,
+            },
+            _ => unreachable!(),
+        };
+        let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+        pool.set_location_txn(&mut wtxn, hash, Some(location))
+            .expect("install location");
+        wtxn.commit().expect("commit location");
+
+        let error = pool
+            .remove_member(source)
+            .expect_err("located member must not be removed");
+        assert!(error.to_string().contains("still owns"), "{state}: {error}");
+        assert_eq!(
+            pool.read_location(&hash).expect("location after rejection"),
+            Some(location)
+        );
+    }
+}
+
+#[test]
+fn member_location_probe_respects_full_uuid_prefix_boundaries() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let mut wanted_bytes = [0x40; 16];
+    wanted_bytes[15] = 0x80;
+    let wanted = PoolMemberId(wanted_bytes);
+    let mut lower_bytes = wanted_bytes;
+    lower_bytes[15] -= 1;
+    let lower = PoolMemberId(lower_bytes);
+    let mut upper_bytes = wanted_bytes;
+    upper_bytes[15] += 1;
+    let upper = PoolMemberId(upper_bytes);
+    let hash = sha256(b"member prefix boundary");
+
+    let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+    pool.by_member
+        .put(&mut wtxn, &member_hash_key(lower, hash), &())
+        .expect("lower index key");
+    pool.by_member
+        .put(&mut wtxn, &member_hash_key(upper, hash), &())
+        .expect("upper index key");
+    assert!(
+        !pool
+            .member_has_locations_txn(&wtxn, wanted)
+            .expect("probe empty exact prefix"),
+        "adjacent UUID prefixes must not alias"
+    );
+    pool.by_member
+        .put(&mut wtxn, &member_hash_key(wanted, hash), &())
+        .expect("wanted index key");
+    assert!(pool
+        .member_has_locations_txn(&wtxn, wanted)
+        .expect("probe occupied exact prefix"));
+    wtxn.commit().expect("commit boundary keys");
+}
+
+#[test]
+fn pending_cleanup_ownership_rebuilds_after_crash_and_clears_before_removal() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let mut config = PoolStoreConfig::default();
+    config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, config.clone()).expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    let target = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("target"),
+            1024 * 1024,
+        ))
+        .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+    let hash = sha256(b"pending source cleanup");
+    let moving = LocationRecord::Moving {
+        source,
+        target,
+        size: 1,
+    };
+    let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+    pool.set_location_txn(&mut wtxn, hash, Some(moving))
+        .expect("install moving location");
+    wtxn.commit().expect("commit moving location");
+    pool.finish_move_records(&[(hash, source, target, 1)])
+        .expect("finish move and retain cleanup ownership");
+    assert!(matches!(
+        pool.read_location(&hash).expect("stored target location"),
+        Some(LocationRecord::Stored { member, size: 1 }) if member == target
+    ));
+    let rtxn = pool.env.read_txn().expect("catalog read txn");
+    assert!(pool
+        .member_has_locations_txn(&rtxn, source)
+        .expect("cleanup ownership prefix"));
+    drop(rtxn);
+
+    // Simulate a cleanup record committed by the pre-index format, then crash.
+    let mut wtxn = pool.env.write_txn().expect("legacy cleanup write txn");
+    pool.by_member
+        .delete(&mut wtxn, &member_hash_key(source, hash))
+        .expect("remove cleanup ownership index");
+    wtxn.commit().expect("commit legacy cleanup state");
+    drop(pool);
+
+    let reopened = PoolStore::open(&catalog, config).expect("reopen after cleanup crash");
+    let error = reopened
+        .remove_member(source)
+        .expect_err("cleanup source must remain configured");
+    assert!(error.to_string().contains("still owns"));
+    reopened
+        .clear_move_cleanup_records(&[(hash, source, target, 1)])
+        .expect("clear source cleanup");
+    let rtxn = reopened.env.read_txn().expect("catalog read txn");
+    assert!(!reopened
+        .member_has_locations_txn(&rtxn, source)
+        .expect("cleared cleanup ownership prefix"));
+    drop(rtxn);
+    reopened
+        .remove_member(source)
+        .expect("remove after cleanup ownership clears");
 }
 
 #[test]
@@ -294,6 +555,69 @@ fn incremental_temperature_cursor_is_bounded_and_persists_across_reopen() {
             .chain(&second)
             .all(|other| candidate.hash != other.hash)
     }));
+}
+
+#[test]
+fn writable_physical_stats_sum_real_member_totals_without_catalog_enumeration() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open pool");
+    let first = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("first"),
+            1024 * 1024,
+        ))
+        .expect("add first member");
+    let second = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("second"),
+            1024 * 1024,
+        ))
+        .expect("add second member");
+
+    let data = b"physical pool accounting";
+    let hash = sha256(data);
+    pool.put_sync(hash, data).expect("write catalog-owned blob");
+    let duplicate_member = if pool.blob_location(&hash).expect("location") == Some(first) {
+        second
+    } else {
+        first
+    };
+    pool.get_member(duplicate_member)
+        .expect("open duplicate member")
+        .put_sync(hash, data)
+        .expect("write real duplicate");
+
+    let logical = pool.stats().expect("logical stats");
+    assert_eq!(logical.count, 1);
+    assert_eq!(logical.bytes, data.len() as u64);
+
+    let physical = pool
+        .writable_physical_stats()
+        .expect("physical member stats");
+    assert_eq!(physical.count, 2);
+    assert_eq!(physical.bytes, (data.len() * 2) as u64);
+}
+
+#[test]
+fn writable_physical_stats_fail_closed_when_a_member_is_unavailable() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member.clone(), 1024 * 1024))
+        .expect("add member");
+    drop(pool);
+
+    fs::rename(&member, temp.path().join("member-offline")).expect("take member offline");
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("reopen catalog");
+    let error = reopened
+        .writable_physical_stats()
+        .expect_err("quota accounting must fail closed");
+    assert!(
+        error.to_string().contains("unavailable"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -860,6 +1184,28 @@ fn spawn_pending_helper(mode: &str, catalog: &Path, ready: &Path, hash: Hash) ->
         .env("RUST_TEST_THREADS", "1")
         .spawn()
         .expect("spawn pending helper")
+}
+
+fn spawn_cleanup_helper(
+    catalog: &Path,
+    ready: &Path,
+    hash: Hash,
+    source: PoolMemberId,
+    target: PoolMemberId,
+) -> Child {
+    Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("pool::tests::pool_pending_helper")
+        .env(HELPER_MODE, "cleanup")
+        .env(HELPER_CATALOG, catalog)
+        .env(HELPER_READY, ready)
+        .env(HELPER_HASH, hashtree_core::to_hex(&hash))
+        .env(HELPER_SOURCE, source.to_string())
+        .env(HELPER_TARGET, target.to_string())
+        .env("RUST_TEST_THREADS", "1")
+        .spawn()
+        .expect("spawn cleanup helper")
 }
 
 #[cfg(unix)]

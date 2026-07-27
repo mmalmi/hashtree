@@ -8,6 +8,7 @@ use std::time::Instant;
 
 const STATE_VERSION: u64 = 1;
 const FAILURE_SAMPLE_LIMIT: u64 = 100;
+const VALIDATION_READ_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 struct ValidationState {
@@ -277,6 +278,124 @@ fn log_failure(samples: &mut u64, hash: &Hash, message: impl AsRef<str>) {
     }
 }
 
+fn validate_batch_fast(
+    source: &LmdbBlobReader,
+    pool: &PoolStoreReader,
+    hashes: &[Hash],
+    state: &mut ValidationState,
+    failure_samples: &mut u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut offset = 0usize;
+    while offset < hashes.len() {
+        let source_items =
+            source.read_hashes_bounded(&hashes[offset..], VALIDATION_READ_LIMIT_BYTES)?;
+        if source_items.is_empty() {
+            return Err("source bounded reader made no progress".into());
+        }
+        for (expected_hash, (actual_hash, _)) in hashes[offset..].iter().zip(source_items.iter()) {
+            if actual_hash != expected_hash {
+                return Err("source bounded reader returned hashes out of order".into());
+            }
+        }
+        let chunk_hashes = source_items
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<Vec<_>>();
+        let mut pool_items = Vec::with_capacity(chunk_hashes.len());
+        while pool_items.len() < chunk_hashes.len() {
+            let batch = pool.read_hashes_bounded(
+                &chunk_hashes[pool_items.len()..],
+                VALIDATION_READ_LIMIT_BYTES,
+            )?;
+            if batch.is_empty() {
+                return Err("Pool bounded reader made no progress".into());
+            }
+            pool_items.extend(batch);
+        }
+
+        for ((hash, source_data), pool_item) in source_items.into_iter().zip(pool_items) {
+            if pool_item.hash != hash {
+                return Err("Pool bounded reader returned hashes out of order".into());
+            }
+            state.source_keys = state.source_keys.saturating_add(1);
+            state.source_size_known = state.source_size_known.saturating_add(1);
+            state.source_declared_bytes = state
+                .source_declared_bytes
+                .saturating_add(source_data.len() as u64);
+            state.source_readable = state.source_readable.saturating_add(1);
+            state.source_readable_bytes = state
+                .source_readable_bytes
+                .saturating_add(source_data.len() as u64);
+            let source_hash_valid = sha256(&source_data) == hash;
+            if source_hash_valid {
+                state.source_hash_valid = state.source_hash_valid.saturating_add(1);
+            } else {
+                state.source_failure_keys = state.source_failure_keys.saturating_add(1);
+                log_failure(failure_samples, &hash, "source SHA-256 mismatch");
+            }
+
+            let mut pool_failed = false;
+            if pool_item.member_candidates.is_empty() {
+                pool_failed = true;
+                log_failure(failure_samples, &hash, "Pool catalog entry is missing");
+            } else {
+                state.pool_catalog_present = state.pool_catalog_present.saturating_add(1);
+            }
+            if let Some(size) = pool_item.declared_size {
+                state.pool_size_known = state.pool_size_known.saturating_add(1);
+                state.pool_declared_bytes = state.pool_declared_bytes.saturating_add(size);
+            } else {
+                pool_failed = true;
+                log_failure(failure_samples, &hash, "Pool size metadata is missing");
+            }
+            if let Some(pool_data) = pool_item.data {
+                state.pool_readable = state.pool_readable.saturating_add(1);
+                state.pool_readable_bytes = state
+                    .pool_readable_bytes
+                    .saturating_add(pool_data.len() as u64);
+                if sha256(&pool_data) == hash {
+                    state.pool_hash_valid = state.pool_hash_valid.saturating_add(1);
+                } else {
+                    pool_failed = true;
+                    log_failure(failure_samples, &hash, "Pool SHA-256 mismatch");
+                }
+                if pool_item
+                    .declared_size
+                    .is_some_and(|size| size != pool_data.len() as u64)
+                {
+                    pool_failed = true;
+                    log_failure(
+                        failure_samples,
+                        &hash,
+                        "Pool declared/readable size mismatch",
+                    );
+                }
+                if source_data == pool_data {
+                    state.pool_exact_match = state.pool_exact_match.saturating_add(1);
+                } else {
+                    pool_failed = true;
+                    log_failure(failure_samples, &hash, "Pool bytes differ from source");
+                }
+            } else {
+                pool_failed = true;
+                log_failure(
+                    failure_samples,
+                    &hash,
+                    pool_item
+                        .error
+                        .as_deref()
+                        .unwrap_or("Pool payload is missing"),
+                );
+            }
+            if pool_failed {
+                state.pool_failure_keys = state.pool_failure_keys.saturating_add(1);
+            }
+        }
+        offset += chunk_hashes.len();
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().collect::<Vec<_>>();
     if !(args.len() == 6 || args.len() == 7) {
@@ -372,161 +491,172 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
         }
 
-        for hash in &hashes {
-            state.source_keys = state.source_keys.saturating_add(1);
-            let mut source_failed = false;
-            let source_size = match source.blob_size_sync(hash) {
-                Ok(Some(size)) => {
-                    state.source_size_known = state.source_size_known.saturating_add(1);
-                    state.source_declared_bytes = state.source_declared_bytes.saturating_add(size);
-                    Some(size)
-                }
-                Ok(None) => {
-                    source_failed = true;
-                    log_failure(
-                        &mut failure_samples,
-                        hash,
-                        "source size metadata is missing",
-                    );
-                    None
-                }
-                Err(error) => {
-                    source_failed = true;
-                    log_failure(
-                        &mut failure_samples,
-                        hash,
-                        format!("source size read failed: {error}"),
-                    );
-                    None
-                }
-            };
-            let source_data = match source.get_sync(hash) {
-                Ok(Some(data)) => {
-                    state.source_readable = state.source_readable.saturating_add(1);
-                    state.source_readable_bytes = state
-                        .source_readable_bytes
-                        .saturating_add(data.len() as u64);
-                    if sha256(&data) == *hash {
-                        state.source_hash_valid = state.source_hash_valid.saturating_add(1);
-                    } else {
-                        source_failed = true;
-                        log_failure(&mut failure_samples, hash, "source SHA-256 mismatch");
+        let state_before_batch = state.clone();
+        if let Err(error) =
+            validate_batch_fast(&source, &pool, &hashes, &mut state, &mut failure_samples)
+        {
+            eprintln!(
+                "bounded validation fell back to per-hash reads at cursor {}: {error}",
+                state.cursor.as_ref().map(to_hex).unwrap_or_default()
+            );
+            state = state_before_batch;
+            for hash in &hashes {
+                state.source_keys = state.source_keys.saturating_add(1);
+                let mut source_failed = false;
+                let source_size = match source.blob_size_sync(hash) {
+                    Ok(Some(size)) => {
+                        state.source_size_known = state.source_size_known.saturating_add(1);
+                        state.source_declared_bytes =
+                            state.source_declared_bytes.saturating_add(size);
+                        Some(size)
                     }
-                    if source_size.is_some_and(|size| size != data.len() as u64) {
+                    Ok(None) => {
                         source_failed = true;
                         log_failure(
                             &mut failure_samples,
                             hash,
-                            "source declared/readable size mismatch",
+                            "source size metadata is missing",
                         );
+                        None
                     }
-                    Some(data)
-                }
-                Ok(None) => {
-                    source_failed = true;
-                    log_failure(&mut failure_samples, hash, "source payload is missing");
-                    None
-                }
-                Err(error) => {
-                    source_failed = true;
-                    log_failure(
-                        &mut failure_samples,
-                        hash,
-                        format!("source payload read failed: {error}"),
-                    );
-                    None
-                }
-            };
-            if source_failed {
-                state.source_failure_keys = state.source_failure_keys.saturating_add(1);
-            }
-
-            let mut pool_failed = false;
-            match pool.blob_location(hash) {
-                Ok(Some(_)) => {
-                    state.pool_catalog_present = state.pool_catalog_present.saturating_add(1)
-                }
-                Ok(None) => {
-                    pool_failed = true;
-                    log_failure(&mut failure_samples, hash, "Pool catalog entry is missing");
-                }
-                Err(error) => {
-                    pool_failed = true;
-                    log_failure(
-                        &mut failure_samples,
-                        hash,
-                        format!("Pool catalog read failed: {error}"),
-                    );
-                }
-            }
-            let pool_size = match pool.blob_size_sync(hash) {
-                Ok(Some(size)) => {
-                    state.pool_size_known = state.pool_size_known.saturating_add(1);
-                    state.pool_declared_bytes = state.pool_declared_bytes.saturating_add(size);
-                    Some(size)
-                }
-                Ok(None) => {
-                    pool_failed = true;
-                    log_failure(&mut failure_samples, hash, "Pool size metadata is missing");
-                    None
-                }
-                Err(error) => {
-                    pool_failed = true;
-                    log_failure(
-                        &mut failure_samples,
-                        hash,
-                        format!("Pool size read failed: {error}"),
-                    );
-                    None
-                }
-            };
-            match pool.get_sync(hash) {
-                Ok(Some(data)) => {
-                    state.pool_readable = state.pool_readable.saturating_add(1);
-                    state.pool_readable_bytes =
-                        state.pool_readable_bytes.saturating_add(data.len() as u64);
-                    if sha256(&data) == *hash {
-                        state.pool_hash_valid = state.pool_hash_valid.saturating_add(1);
-                    } else {
-                        pool_failed = true;
-                        log_failure(&mut failure_samples, hash, "Pool SHA-256 mismatch");
-                    }
-                    if pool_size.is_some_and(|size| size != data.len() as u64) {
-                        pool_failed = true;
+                    Err(error) => {
+                        source_failed = true;
                         log_failure(
                             &mut failure_samples,
                             hash,
-                            "Pool declared/readable size mismatch",
+                            format!("source size read failed: {error}"),
                         );
+                        None
                     }
-                    if let Some(source_data) = source_data.as_ref() {
-                        if source_data == &data {
-                            state.pool_exact_match = state.pool_exact_match.saturating_add(1);
+                };
+                let source_data = match source.get_sync(hash) {
+                    Ok(Some(data)) => {
+                        state.source_readable = state.source_readable.saturating_add(1);
+                        state.source_readable_bytes = state
+                            .source_readable_bytes
+                            .saturating_add(data.len() as u64);
+                        if sha256(&data) == *hash {
+                            state.source_hash_valid = state.source_hash_valid.saturating_add(1);
                         } else {
+                            source_failed = true;
+                            log_failure(&mut failure_samples, hash, "source SHA-256 mismatch");
+                        }
+                        if source_size.is_some_and(|size| size != data.len() as u64) {
+                            source_failed = true;
+                            log_failure(
+                                &mut failure_samples,
+                                hash,
+                                "source declared/readable size mismatch",
+                            );
+                        }
+                        Some(data)
+                    }
+                    Ok(None) => {
+                        source_failed = true;
+                        log_failure(&mut failure_samples, hash, "source payload is missing");
+                        None
+                    }
+                    Err(error) => {
+                        source_failed = true;
+                        log_failure(
+                            &mut failure_samples,
+                            hash,
+                            format!("source payload read failed: {error}"),
+                        );
+                        None
+                    }
+                };
+                if source_failed {
+                    state.source_failure_keys = state.source_failure_keys.saturating_add(1);
+                }
+
+                let mut pool_failed = false;
+                match pool.blob_location(hash) {
+                    Ok(Some(_)) => {
+                        state.pool_catalog_present = state.pool_catalog_present.saturating_add(1)
+                    }
+                    Ok(None) => {
+                        pool_failed = true;
+                        log_failure(&mut failure_samples, hash, "Pool catalog entry is missing");
+                    }
+                    Err(error) => {
+                        pool_failed = true;
+                        log_failure(
+                            &mut failure_samples,
+                            hash,
+                            format!("Pool catalog read failed: {error}"),
+                        );
+                    }
+                }
+                let pool_size = match pool.blob_size_sync(hash) {
+                    Ok(Some(size)) => {
+                        state.pool_size_known = state.pool_size_known.saturating_add(1);
+                        state.pool_declared_bytes = state.pool_declared_bytes.saturating_add(size);
+                        Some(size)
+                    }
+                    Ok(None) => {
+                        pool_failed = true;
+                        log_failure(&mut failure_samples, hash, "Pool size metadata is missing");
+                        None
+                    }
+                    Err(error) => {
+                        pool_failed = true;
+                        log_failure(
+                            &mut failure_samples,
+                            hash,
+                            format!("Pool size read failed: {error}"),
+                        );
+                        None
+                    }
+                };
+                match pool.get_sync(hash) {
+                    Ok(Some(data)) => {
+                        state.pool_readable = state.pool_readable.saturating_add(1);
+                        state.pool_readable_bytes =
+                            state.pool_readable_bytes.saturating_add(data.len() as u64);
+                        if sha256(&data) == *hash {
+                            state.pool_hash_valid = state.pool_hash_valid.saturating_add(1);
+                        } else {
+                            pool_failed = true;
+                            log_failure(&mut failure_samples, hash, "Pool SHA-256 mismatch");
+                        }
+                        if pool_size.is_some_and(|size| size != data.len() as u64) {
                             pool_failed = true;
                             log_failure(
                                 &mut failure_samples,
                                 hash,
-                                "Pool bytes differ from source",
+                                "Pool declared/readable size mismatch",
                             );
                         }
+                        if let Some(source_data) = source_data.as_ref() {
+                            if source_data == &data {
+                                state.pool_exact_match = state.pool_exact_match.saturating_add(1);
+                            } else {
+                                pool_failed = true;
+                                log_failure(
+                                    &mut failure_samples,
+                                    hash,
+                                    "Pool bytes differ from source",
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        pool_failed = true;
+                        log_failure(&mut failure_samples, hash, "Pool payload is missing");
+                    }
+                    Err(error) => {
+                        pool_failed = true;
+                        log_failure(
+                            &mut failure_samples,
+                            hash,
+                            format!("Pool payload read failed: {error}"),
+                        );
                     }
                 }
-                Ok(None) => {
-                    pool_failed = true;
-                    log_failure(&mut failure_samples, hash, "Pool payload is missing");
+                if pool_failed {
+                    state.pool_failure_keys = state.pool_failure_keys.saturating_add(1);
                 }
-                Err(error) => {
-                    pool_failed = true;
-                    log_failure(
-                        &mut failure_samples,
-                        hash,
-                        format!("Pool payload read failed: {error}"),
-                    );
-                }
-            }
-            if pool_failed {
-                state.pool_failure_keys = state.pool_failure_keys.saturating_add(1);
             }
         }
 

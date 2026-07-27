@@ -26,8 +26,11 @@ pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
+use self::move_catalog::rebuild_move_cleanup_member_index_txn;
 pub use self::read_only::{ReadOnlyPoolCatalogAudit, ReadOnlyPoolStore};
-pub use self::reader::PoolStoreReader;
+pub use self::reader::{
+    PoolCatalogLocation, PoolManifestIdentity, PoolReadBatchItem, PoolStoreReader,
+};
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
 use crate::{managed_env::ManagedEnv, LmdbBlobStore};
@@ -180,7 +183,17 @@ impl PoolStore {
                 .put(&mut wtxn, MANIFEST_KEY, bytes.as_slice())
                 .map_err(map_heed)?;
         }
+        let cleanup_rebuild_started = Instant::now();
+        let cleanup_rebuild_count =
+            rebuild_move_cleanup_member_index_txn(&temperature_state, &by_member, &mut wtxn)?;
+        let cleanup_rebuild_elapsed = cleanup_rebuild_started.elapsed();
         wtxn.commit().map_err(map_heed)?;
+        if cleanup_rebuild_count > 0 || cleanup_rebuild_elapsed >= Duration::from_millis(10) {
+            eprintln!(
+                "Pool cleanup ownership index rebuild: entries {cleanup_rebuild_count}, elapsed {} us",
+                cleanup_rebuild_elapsed.as_micros()
+            );
+        }
 
         let temperature_config = config.temperature.clone();
         let store = Self {
@@ -313,7 +326,7 @@ impl PoolStore {
         if member.state == PoolMemberState::Draining {
             return Ok(());
         }
-        if !has_other_active && self.count_member_locations_txn(&wtxn, id)? > 0 {
+        if !has_other_active && self.member_has_locations_txn(&wtxn, id)? {
             return Err(StoreError::Other(
                 "cannot drain the final member while it still owns blobs".into(),
             ));
@@ -393,16 +406,9 @@ impl PoolStore {
                 "pool member must be draining before removal".into(),
             ));
         }
-        let located = self.count_member_locations_txn(&wtxn, id)?;
-        if located != 0 {
+        if self.member_has_locations_txn(&wtxn, id)? {
             return Err(StoreError::Other(format!(
-                "pool member {id} still owns {located} blob(s)"
-            )));
-        }
-        let pending_cleanup = self.count_move_cleanups_for_source_txn(&wtxn, id)?;
-        if pending_cleanup != 0 {
-            return Err(StoreError::Other(format!(
-                "pool member {id} still has {pending_cleanup} pending source cleanup(s)"
+                "pool member {id} still owns blob(s)"
             )));
         }
         manifest.members.remove(index);
@@ -1006,6 +1012,65 @@ impl PoolStore {
                 .saturating_add(LocationRecord::decode(location)?.size());
         }
         Ok(stats)
+    }
+
+    /// Return conservative physical usage for quota admission without scanning
+    /// the logical Pool catalog.
+    ///
+    /// Every member LMDB maintains its own totals transactionally, so summing
+    /// those counters is constant in the member count and remains accurate
+    /// across processes and mixed binary versions. Blobs temporarily duplicated
+    /// during a move are counted in both members, which is intentionally
+    /// conservative for writable-space admission. Missing member statistics
+    /// fail closed rather than undercounting storage.
+    pub fn writable_physical_stats(&self) -> Result<StoreStats, StoreError> {
+        self.refresh_members()?;
+        let manifest = self.read_manifest()?;
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+        let mut total = StoreStats::default();
+        for member in manifest.members {
+            let store = runtime.stores.get(&member.id).ok_or_else(|| {
+                let detail = runtime
+                    .errors
+                    .get(&member.id)
+                    .map(String::as_str)
+                    .unwrap_or("member store is not open");
+                StoreError::Other(format!(
+                    "pool member {} unavailable for physical quota accounting: {detail}",
+                    member.id
+                ))
+            })?;
+            let stats = store.stats().map_err(|error| {
+                StoreError::Other(format!(
+                    "pool member {} unavailable for physical quota accounting: {error}",
+                    member.id
+                ))
+            })?;
+            let count = u64::try_from(stats.count)
+                .map_err(|_| StoreError::Other("pool physical blob count exceeds u64".into()))?;
+            let pinned_count = u64::try_from(stats.pinned_count)
+                .map_err(|_| StoreError::Other("pool physical pin count exceeds u64".into()))?;
+            total.count = total
+                .count
+                .checked_add(count)
+                .ok_or_else(|| StoreError::Other("pool physical blob count overflow".into()))?;
+            total.bytes = total
+                .bytes
+                .checked_add(stats.total_bytes)
+                .ok_or_else(|| StoreError::Other("pool physical byte count overflow".into()))?;
+            total.pinned_count = total
+                .pinned_count
+                .checked_add(pinned_count)
+                .ok_or_else(|| StoreError::Other("pool physical pin count overflow".into()))?;
+            total.pinned_bytes = total
+                .pinned_bytes
+                .checked_add(stats.pinned_bytes)
+                .ok_or_else(|| StoreError::Other("pool physical pinned bytes overflow".into()))?;
+        }
+        Ok(total)
     }
 
     pub fn force_sync(&self) -> Result<(), StoreError> {

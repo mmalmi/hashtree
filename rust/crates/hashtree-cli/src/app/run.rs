@@ -2212,6 +2212,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 state_file,
                 batch_size,
                 max_buffer_mib,
+                source_read_concurrency,
                 reopen_batches,
                 max_items,
                 resume,
@@ -2222,11 +2223,12 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
 
                 if batch_size == 0
                     || max_buffer_mib == 0
+                    || source_read_concurrency == 0
                     || reopen_batches == 0
                     || max_items == Some(0)
                 {
                     bail!(
-                        "migration batch size, max buffer MiB, reopen batches, and max items must be non-zero"
+                        "migration batch size, max buffer MiB, source read concurrency, reopen batches, and max items must be non-zero"
                     );
                 }
                 let max_buffer_bytes = max_buffer_mib
@@ -2269,7 +2271,11 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             sync: true,
                             pack_target_bytes: None,
                         });
-                    let reader = LmdbBlobReader::open(&source, external)?;
+                    let reader = LmdbBlobReader::open_with_external_read_concurrency(
+                        &source,
+                        external,
+                        source_read_concurrency,
+                    )?;
                     let mut epoch_batches = 0usize;
 
                     loop {
@@ -2304,12 +2310,17 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             &hashtree_core::to_hex(&cursor_hash),
                         )?;
                         println!(
-                            "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes",
+                            "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes, scan {} us, catalog probe {} us, source read {} us, source verify {} us, target write {} us",
                             batch.scanned,
                             batch.already_present,
                             batch.verified,
                             batch.write_batches,
-                            batch.peak_buffered_bytes
+                            batch.peak_buffered_bytes,
+                            batch.scan_micros,
+                            batch.catalog_probe_micros,
+                            batch.source_read_micros,
+                            batch.source_verify_micros,
+                            batch.target_write_micros,
                         );
                         epoch_batches = epoch_batches.saturating_add(1);
                         if epoch_batches >= reopen_batches {
@@ -2344,16 +2355,22 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
 }
 
 #[cfg(feature = "lmdb")]
-fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+pub(super) fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
     let temporary = path.with_extension("tmp");
     let mut file = std::fs::File::create(&temporary)?;
     file.write_all(value.as_bytes())?;
     file.write_all(b"\n")?;
     file.sync_all()?;
     std::fs::rename(temporary, path)?;
+    // Unix exposes directory handles through the portable File API, allowing
+    // the rename itself—not only the temporary file contents—to be durable.
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

@@ -229,7 +229,6 @@ pub enum LocalStore {
 pub struct PoolStoreWithFallbacks {
     primary: PoolStore,
     fallbacks: Vec<LmdbBlobReader>,
-    promotion_gates: Vec<Mutex<()>>,
 }
 
 #[cfg(feature = "lmdb")]
@@ -244,11 +243,7 @@ impl std::ops::Deref for PoolStoreWithFallbacks {
 #[cfg(feature = "lmdb")]
 impl PoolStoreWithFallbacks {
     fn new(primary: PoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
-        Self {
-            primary,
-            fallbacks,
-            promotion_gates: (0..64).map(|_| Mutex::new(())).collect(),
-        }
+        Self { primary, fallbacks }
     }
 
     fn during_migration(primary: PoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
@@ -268,29 +263,14 @@ impl PoolStoreWithFallbacks {
             Err(error) => first_error = Some(error),
         }
 
-        let stripe = usize::from(hash[0]) % self.promotion_gates.len();
-        let _promotion_guard = self.promotion_gates[stripe]
-            .lock()
-            .map_err(|_| StoreError::Other("PoolStore promotion lock poisoned".into()))?;
-
-        // A concurrent request may have completed the same promotion while
-        // this request waited for the stripe.
-        match self.primary.get_sync(hash) {
-            Ok(Some(data)) => return Ok(Some(data)),
-            Ok(None) => {}
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            Err(_) => {}
-        }
         for fallback in &self.fallbacks {
             match fallback.get_sync(hash) {
                 Ok(Some(data)) if sha256(&data) == *hash => {
-                    if let Err(error) = self.primary.put_sync(*hash, &data) {
-                        tracing::warn!(
-                            hash = %to_hex(hash),
-                            %error,
-                            "Serving verified legacy blob after PoolStore promotion failed"
-                        );
-                    }
+                    // Exhaustive migration is the sole authority for moving
+                    // legacy bytes into PoolStore. Returning verified bytes
+                    // directly keeps reads independent of Pool write/fsync
+                    // latency and avoids uncancellable promotion work after an
+                    // HTTP request has timed out.
                     return Ok(Some(data));
                 }
                 Ok(Some(_)) if first_error.is_none() => {
@@ -937,9 +917,11 @@ impl LocalStore {
             }
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => {
-                let stats = store.stats()?;
+                let stats = store.writable_physical_stats()?;
                 Ok(LocalStoreStats {
-                    count: stats.count as usize,
+                    count: usize::try_from(stats.count).map_err(|_| {
+                        StoreError::Other("pool physical blob count exceeds usize".into())
+                    })?,
                     total_bytes: stats.bytes,
                 })
             }
@@ -3564,16 +3546,62 @@ mod tests {
             store.get_range_sync(&legacy_hash, 9, 14)?,
             Some(legacy_data[9..=14].to_vec())
         );
-        assert_eq!(pool.get_sync(&hot_hash)?, Some(hot_data));
-        assert_eq!(pool.get_sync(&legacy_hash)?, Some(legacy_data));
+        assert_eq!(
+            pool.get_sync(&hot_hash)?,
+            None,
+            "verified fallback reads must not synchronously promote into PoolStore"
+        );
+        assert_eq!(
+            pool.get_sync(&legacy_hash)?,
+            None,
+            "range fallback reads must not synchronously promote into PoolStore"
+        );
         let canonical_after_reads = store.existing_hashes_in_sorted_candidates(&candidates)?;
-        assert_eq!(canonical_after_reads, vec![true; candidates.len()]);
+        for (hash, exists) in candidates.iter().zip(canonical_after_reads) {
+            assert_eq!(
+                exists,
+                *hash == new_hash,
+                "fallback reads must leave exhaustive migration as the only PoolStore writer"
+            );
+        }
         let hot_after = std::fs::metadata(hot_data_mdb)?;
         let legacy_after = std::fs::metadata(legacy_data_mdb)?;
         assert_eq!(hot_after.len(), hot_before.len());
         assert_eq!(hot_after.modified()?, hot_before.modified()?);
         assert_eq!(legacy_after.len(), legacy_before.len());
         assert_eq!(legacy_after.modified()?, legacy_before.modified()?);
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn pool_quota_uses_constant_time_physical_member_totals() -> Result<()> {
+        let temp = TempDir::new()?;
+        let member_path = temp.path().join("member");
+        let member_map_size = 64 * 1024 * 1024;
+        let pool = PoolStore::open(temp.path().join("pool"), PoolStoreConfig::default())?;
+        pool.add_member(
+            PoolMemberConfig::new(member_path.clone(), member_map_size)
+                .with_map_size_bytes(member_map_size),
+        )?;
+
+        let catalog_data = b"catalog-owned bytes";
+        pool.put_sync(sha256(catalog_data), catalog_data)?;
+        let direct_data = b"member bytes written by another process";
+        let direct = LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+            &member_path,
+            member_map_size as usize,
+            None,
+        )?;
+        direct.put_sync(sha256(direct_data), direct_data)?;
+
+        assert_eq!(pool.stats()?.count, 1, "logical catalog remains separate");
+        let expected_count = 2;
+        let expected_bytes = (catalog_data.len() + direct_data.len()) as u64;
+        let local = LocalStore::Pool(Box::new(PoolStoreWithFallbacks::new(pool, Vec::new())));
+        let quota = local.writable_stats()?;
+        assert_eq!(quota.count, expected_count);
+        assert_eq!(quota.total_bytes, expected_bytes);
         Ok(())
     }
 

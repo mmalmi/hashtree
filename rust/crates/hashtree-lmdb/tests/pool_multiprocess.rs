@@ -11,6 +11,7 @@ const MODE_ENV: &str = "HASHTREE_POOL_PROCESS_MODE";
 const CATALOG_ENV: &str = "HASHTREE_POOL_PROCESS_CATALOG";
 const CONTROL_ENV: &str = "HASHTREE_POOL_PROCESS_CONTROL";
 const ID_ENV: &str = "HASHTREE_POOL_PROCESS_ID";
+const MEMBER_ENV: &str = "HASHTREE_POOL_PROCESS_MEMBER";
 const SHARED_DATA: &[u8] = b"multiprocess adaptive pool bytes";
 const REFRESH_DATA: &[u8] = b"write after another process adds storage";
 
@@ -77,6 +78,17 @@ fn pool_process_helper() {
             )
             .expect("write result");
         }
+        "remove" => {
+            let member = std::env::var(MEMBER_ENV)
+                .expect("member id")
+                .parse()
+                .expect("valid member id");
+            let result = match pool.remove_member(member) {
+                Ok(()) => "removed".to_string(),
+                Err(error) => format!("error:{error}"),
+            };
+            fs::write(control.join(format!("{id}-result")), result).expect("write result");
+        }
         other => panic!("unknown helper mode {other}"),
     }
 }
@@ -119,6 +131,37 @@ fn concurrent_process_writes_are_pool_wide_idempotent() {
         Some(SHARED_DATA.to_vec())
     );
     assert_eq!(reopened.stats().expect("pool stats").count, 1);
+}
+
+#[test]
+fn physical_stats_observe_another_process_write_without_reopening() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let control = temp.path().join("control");
+    fs::create_dir(&control).expect("control dir");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("member"),
+        1024 * 1024,
+    ))
+    .expect("add member");
+
+    let child = spawn_helper("put", &catalog, &control, "writer".to_string());
+    wait_for(&control.join("writer-ready"));
+    assert_eq!(
+        pool.writable_physical_stats()
+            .expect("stats before child write")
+            .count,
+        0
+    );
+    fs::write(control.join("go"), b"go").expect("release helper");
+    wait_success(child, "writer");
+
+    let stats = pool
+        .writable_physical_stats()
+        .expect("stats after child write");
+    assert_eq!(stats.count, 1);
+    assert_eq!(stats.bytes, SHARED_DATA.len() as u64);
 }
 
 #[test]
@@ -196,6 +239,77 @@ fn concurrent_process_pins_are_catalog_owned_and_exact() {
 }
 
 #[test]
+fn concurrent_member_removers_serialize_one_manifest_update() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let control = temp.path().join("control");
+    fs::create_dir(&control).expect("control dir");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("source"),
+            1024 * 1024,
+        ))
+        .expect("source");
+    let target = pool
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("target"),
+            1024 * 1024,
+        ))
+        .expect("target");
+    pool.begin_drain(source).expect("begin drain");
+    drop(pool);
+
+    let children = (0..2)
+        .map(|id| {
+            spawn_remove_helper(
+                &catalog,
+                &control,
+                format!("remove-{id}"),
+                source.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for id in 0..children.len() {
+        wait_for(&control.join(format!("remove-{id}-ready")));
+    }
+    fs::write(control.join("go"), b"go").expect("release helpers");
+    for (id, child) in children.into_iter().enumerate() {
+        wait_success(child, &format!("member remover {id}"));
+    }
+    let results = (0..2)
+        .map(|id| {
+            fs::read_to_string(control.join(format!("remove-{id}-result"))).expect("remove result")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.as_str() == "removed")
+            .count(),
+        1,
+        "{results:?}"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.contains("unknown pool member"))
+            .count(),
+        1,
+        "{results:?}"
+    );
+
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("reopen pool");
+    assert!(reopened.member(source).is_err());
+    assert_eq!(reopened.members().expect("members").len(), 1);
+    assert_eq!(
+        reopened.members().expect("members")[0].id,
+        target,
+        "the winning manifest update must be visible cross-process"
+    );
+}
+
+#[test]
 fn concurrent_temperature_balancers_move_once_without_location_corruption() {
     let temp = TempDir::new().expect("temp dir");
     let catalog = temp.path().join("catalog");
@@ -263,6 +377,21 @@ fn spawn_helper(mode: &str, catalog: &Path, control: &Path, id: String) -> Child
         .env("RUST_TEST_THREADS", "1")
         .spawn()
         .expect("spawn pool helper")
+}
+
+fn spawn_remove_helper(catalog: &Path, control: &Path, id: String, member: String) -> Child {
+    Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("pool_process_helper")
+        .env(MODE_ENV, "remove")
+        .env(CATALOG_ENV, catalog)
+        .env(CONTROL_ENV, control)
+        .env(ID_ENV, id)
+        .env(MEMBER_ENV, member)
+        .env("RUST_TEST_THREADS", "1")
+        .spawn()
+        .expect("spawn pool remove helper")
 }
 
 fn wait_for(path: &Path) {
