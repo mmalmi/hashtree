@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- `nostr-index build-bulk-tranche` now advances a sealed v3 bulk projection
+  from its exact Freeze boundary through crash-resumable index construction to
+  Candidate. It reattests the frozen stage, spool, profile-distance, and rank
+  authority; CAS-persists each of the nine canonical index roots; validates
+  the reachable event and profile trees; and installs the canonical manifest
+  only after the complete build passes.
+- `nostr-index audit-bulk-projection --v3-candidate` now derives the stage,
+  policy, complete author count, profile-distance seal, and rank evidence
+  exclusively from the sealed Candidate state, then emits exhaustive
+  read-only full-policy cutover evidence. Raw v2 authority overrides and
+  recovery-tranche mode are rejected for this path.
+
 ## 0.2.137 - 2026-07-23
 
 ### Fixed
