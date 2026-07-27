@@ -17,8 +17,12 @@ pub struct ValidatedConfig {
 
 pub fn load_config(path: &Path) -> Result<ValidatedConfig, Box<dyn std::error::Error>> {
     let bytes = fs::read(path)?;
-    let config_sha256 = to_hex(&sha256(&bytes));
-    let config: AuditConfig = serde_json::from_slice(&bytes)?;
+    load_config_bytes(&bytes)
+}
+
+pub fn load_config_bytes(bytes: &[u8]) -> Result<ValidatedConfig, Box<dyn std::error::Error>> {
+    let config_sha256 = to_hex(&sha256(bytes));
+    let config: AuditConfig = serde_json::from_slice(bytes)?;
     validate_config(&config)?;
     let mut expected_pool_members = config
         .expected_pool_members

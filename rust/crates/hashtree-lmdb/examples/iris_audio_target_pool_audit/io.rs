@@ -15,7 +15,15 @@ pub fn load_inventory(
     expected_records: usize,
 ) -> Result<(Vec<InventoryRow>, String), Box<dyn std::error::Error>> {
     let bytes = fs::read(path)?;
-    let actual_sha256 = to_hex(&sha256(&bytes));
+    load_inventory_bytes(&bytes, expected_sha256, expected_records)
+}
+
+pub fn load_inventory_bytes(
+    bytes: &[u8],
+    expected_sha256: &str,
+    expected_records: usize,
+) -> Result<(Vec<InventoryRow>, String), Box<dyn std::error::Error>> {
+    let actual_sha256 = to_hex(&sha256(bytes));
     if actual_sha256 != expected_sha256 {
         return Err(format!(
             "inventory SHA256 mismatch: expected {expected_sha256}, got {actual_sha256}"
@@ -23,7 +31,7 @@ pub fn load_inventory(
         .into());
     }
 
-    let mut lines = BufReader::new(bytes.as_slice()).lines();
+    let mut lines = BufReader::new(bytes).lines();
     let header = lines.next().transpose()?.ok_or("inventory TSV is empty")?;
     if header != "sourceKey\tsongId\thash\tkey" {
         return Err(format!("unexpected inventory header: {header}").into());

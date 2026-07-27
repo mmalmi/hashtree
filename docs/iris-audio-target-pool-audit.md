@@ -110,3 +110,39 @@ config SHA-256, target member IDs, fallback tier names, JSONL SHA-256 and byte
 length, row and unique-block counts, complete classification totals, and
 `releaseReady`. `releaseReady` is true only when every work item completed,
 every row is `target-valid`, and there are no traversal failures.
+
+## Live publication witness
+
+Immediately before a publication decision, re-attest an existing
+release-ready result without creating, replacing, truncating, or removing any
+audit artifact:
+
+```text
+iris_audio_target_pool_audit \
+  --verify-existing CONFIG_JSON INVENTORY_TSV LEDGER_JSONL MANIFEST_JSON \
+  --challenge 64_LOWERHEX
+```
+
+The challenge must be exactly 32 random bytes encoded as 64 canonical
+lowercase hexadecimal characters. The verifier hashes the four raw inputs,
+validates their terminal manifest identities and counts, and requires
+`releaseReady: true`. It opens the live Pool read-only and requires its complete
+manifest SHA-256, generation, and member IDs to equal the terminal manifest;
+the target member IDs must also equal the config and terminal manifest. It then
+derives every unique ledger `blockHash` and runs the same full terminal
+target-residency verifier used by the original audit, including current catalog
+state, catalog-declared size, exact target member, body hash, and Pool manifest
+checks before and after the probe. Finally it rehashes all four raw inputs and
+fails if any changed during verification.
+
+Success writes exactly one compact, LF-terminated JSON object to stdout and
+nothing else. The schema is
+`iris-audio-target-pool-current-state-witness/v1`; it binds the challenge,
+canonical millisecond UTC `startedAt` and `verifiedAt` timestamps, all four raw
+input SHA-256 digests, inventory identity and count, ledger byte/row/unique-hash
+counts, live Pool manifest identity and member IDs, and the number of unique
+block hashes actually verified. `releaseReady` is always `true` in a successful
+witness. Output is capped at 64 KiB. Failure emits no witness. Symlinked and
+non-regular raw inputs are rejected. LMDB may update its normal lock-file
+reader bookkeeping, but the verifier opens catalog and member data read-only
+and writes no application or audit state.
